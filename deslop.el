@@ -11,16 +11,20 @@
 (defvar deslop-running nil
   "Non-nil while a job is being processed.")
 
-(defvar deslop--active-overlay nil
-  "Active visual indicator overlay for the currently processing job.")
+(defvar deslop--current-job nil
+  "The job currently being processed.")
+
+(defvar deslop--current-job-overlay nil
+  "Dynamic reference to the overlay of the active job for stream updates.")
+
+(defvar deslop--managed-overlays nil
+  "List of all active job overlays across queue and execution.")
 
 (defvar deslop--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames for the dynamic overlay spinner animation.")
 
 (defvar deslop--spinner-index 0)
 (defvar deslop--spinner-timer nil)
-(defvar deslop--current-status "Working")
-(defvar deslop--current-tokens 0)
 
 (defface deslop-working-face
   '((t :background "#1e293b" :underline "#38bdf8"))
@@ -78,27 +82,30 @@ string on success, ERR describes the problem on failure.")
 (setq deslop-queue nil)
 (setq deslop-running nil)
 
-(defun deslop--refresh-overlay ()
-  "Refresh the overlay badge string with current spinner frame, status, and tokens."
-  (when (overlayp deslop--active-overlay)
-    (let* ((spinner (aref deslop--spinner-frames deslop--spinner-index))
-           (tok-str (if (> deslop--current-tokens 0)
-                        (format " (%d tok)" deslop--current-tokens)
-                      ""))
-           (badge (format " [%s %s%s] " spinner deslop--current-status tok-str)))
-      (overlay-put deslop--active-overlay 'before-string
-                   (propertize badge 'face '(:foreground "#facc15" :weight bold))))))
+(defun deslop--refresh-all-overlays ()
+  "Refresh all active overlays. Queued items remain static; active items spin."
+  (if (null deslop--managed-overlays)
+      (deslop--stop-spinner)
+    (setq deslop--spinner-index
+          (% (1+ deslop--spinner-index) (length deslop--spinner-frames)))
+    (let ((spinner (aref deslop--spinner-frames deslop--spinner-index)))
+      (dolist (ov deslop--managed-overlays)
+        (when (and (overlayp ov) (buffer-live-p (overlay-buffer ov)))
+          (let* ((status (or (overlay-get ov 'status) "Queued"))
+                 (is-queued (string= status "Queued"))
+                 (icon (if is-queued "⏳" spinner))
+                 (tokens (or (overlay-get ov 'tokens) 0))
+                 (tok-str (if (> tokens 0) (format " (%d tok)" tokens) ""))
+                 (badge (format " [%s %s%s] " icon status tok-str)))
+            (overlay-put ov 'before-string
+                         (propertize badge 'face '(:foreground "#facc15" :weight bold)))))))))
 
 (defun deslop--start-spinner ()
-  "Start the timer animation for the overlay spinner."
-  (deslop--stop-spinner)
-  (setq deslop--spinner-index 0)
-  (setq deslop--spinner-timer
-        (run-with-timer 0 0.1
-                        (lambda ()
-                          (setq deslop--spinner-index
-                                (% (1+ deslop--spinner-index) (length deslop--spinner-frames)))
-                          (deslop--refresh-overlay)))))
+  "Start spinner animation timer if not currently running."
+  (unless (timerp deslop--spinner-timer)
+    (setq deslop--spinner-index 0)
+    (setq deslop--spinner-timer
+          (run-with-timer 0 0.1 #'deslop--refresh-all-overlays))))
 
 (defun deslop--stop-spinner ()
   "Stop the overlay spinner timer."
@@ -107,22 +114,24 @@ string on success, ERR describes the problem on failure.")
     (setq deslop--spinner-timer nil)))
 
 (defun deslop--create-overlay (buf beg end label)
-  "Create indicator overlay in BUF from BEG to END with initial status LABEL."
-  (deslop--clear-overlay)
-  (setq deslop--current-status label)
-  (setq deslop--current-tokens 0)
+  "Create an indicator overlay in BUF from BEG to END with LABEL."
   (with-current-buffer buf
-    (let ((ov-end (if (= beg end) (min (point-max) (1+ beg)) end)))
-      (setq deslop--active-overlay (make-overlay beg ov-end))
-      (overlay-put deslop--active-overlay 'face 'deslop-working-face)
-      (deslop--start-spinner))))
+    (let* ((ov-end (if (= beg end) (min (point-max) (1+ beg)) end))
+           (ov (make-overlay beg ov-end)))
+      (overlay-put ov 'face 'deslop-working-face)
+      (overlay-put ov 'status label)
+      (overlay-put ov 'tokens 0)
+      (push ov deslop--managed-overlays)
+      (deslop--start-spinner)
+      ov)))
 
-(defun deslop--clear-overlay ()
-  "Remove active visual indicator overlay and stop animation."
-  (deslop--stop-spinner)
-  (when (overlayp deslop--active-overlay)
-    (delete-overlay deslop--active-overlay)
-    (setq deslop--active-overlay nil)))
+(defun deslop--delete-overlay (ov)
+  "Delete overlay OV and remove it from managed tracking."
+  (when (overlayp ov)
+    (setq deslop--managed-overlays (delq ov deslop--managed-overlays))
+    (delete-overlay ov)
+    (when (null deslop--managed-overlays)
+      (deslop--stop-spinner))))
 
 (defun deslop--pick-closest (candidates)
   "CANDIDATES is a list of (POS . DIST).
@@ -134,8 +143,7 @@ Return the POS with the smallest DIST, or nil."
     (and best (car best))))
 
 (defun deslop--find-string (text start)
-  "Case-sensitively find TEXT in the current buffer at or after START.
-Return the position where the occurrence starts, or nil."
+  "Case-sensitively find TEXT in the current buffer at or after START."
   (let* ((n (length text))
          (limit (- (point-max) n)))
     (and (> n 0)
@@ -195,32 +203,38 @@ Return the position where the occurrence starts, or nil."
       (setq end (1- end)))
     (substring s 0 end)))
 
-(defun deslop--insert-llm (buf ins-pos region context instruction)
-  "Ask the LLM for insert text and apply it to BUF at INS-POS."
-  (funcall deslop-llm-function
-           (list (cons "system" deslop-insert-system)
-                 (cons "user" (format "Task: %s\n\nDocument:\n%s" instruction context)))
-           (lambda (content err)
-             (if (null content)
-                 (deslop--skip (format "insert: LLM error: %s" err))
-               (let* ((text (deslop--trim-trailing content)))
-                 (with-current-buffer buf
-                   (save-excursion
-                     (goto-char ins-pos)
-                     (cond
-                      ((null region) (insert text))
-                      ((= ins-pos (car region)) (insert text "\n"))
-                      ((= ins-pos (cdr region)) (insert "\n" text))
-                      (t (insert "\n" text "\n")))))
-                 (message "insert: inserted %d chars at %d in %s"
-                          (length text) ins-pos (buffer-name buf))
-                 (deslop--job-done))))))
+(defun deslop--insert-llm (buf ins-pos region context instruction ov)
+  "Ask LLM for insert text and apply it to BUF using OV's live position."
+  (let ((deslop--current-job-overlay ov))
+    (funcall deslop-llm-function
+             (list (cons "system" deslop-insert-system)
+                   (cons "user" (format "Task: %s\n\nDocument:\n%s" instruction context)))
+             (lambda (content err)
+               (if (null content)
+                   (deslop--skip (format "insert: LLM error: %s" err))
+                 (let* ((text (deslop--trim-trailing content)))
+                   (with-current-buffer buf
+                     (save-excursion
+                       ;; Read live overlay position at millisecond of insertion
+                       (let ((target-pos (if (and (overlayp ov) (overlay-buffer ov))
+                                             (overlay-start ov)
+                                           ins-pos)))
+                         (goto-char target-pos)
+                         (cond
+                          ((null region) (insert text))
+                          ((= target-pos (car region)) (insert text "\n"))
+                          ((= target-pos (cdr region)) (insert "\n" text))
+                          (t (insert "\n" text "\n"))))))
+                   (message "insert: inserted %d chars in %s"
+                            (length text) (buffer-name buf))
+                   (deslop--job-done)))))))
 
 (defun deslop-process-next ()
   "Process the next queued job if the queue is not idle."
   (unless (or deslop-running (null deslop-queue))
     (setq deslop-running t)
     (let* ((job (pop deslop-queue)))
+      (setq deslop--current-job job)
       (condition-case err
           (deslop-run-job job)
         (error
@@ -233,8 +247,11 @@ Return the position where the occurrence starts, or nil."
   (deslop-process-next))
 
 (defun deslop--job-done ()
-  "Finish the current job and continue the queue."
-  (deslop--clear-overlay)
+  "Finish current job, clean its overlay, and continue queue."
+  (when deslop--current-job
+    (let ((ov (plist-get (cdr deslop--current-job) :overlay)))
+      (deslop--delete-overlay ov))
+    (setq deslop--current-job nil))
   (setq deslop-running nil)
   (deslop-process-next))
 
@@ -247,7 +264,7 @@ Return the position where the occurrence starts, or nil."
          (deslop--job-done)))))
 
 (defun deslop--skip (msg)
-  "Skip the current job with a logged reason."
+  "Skip current job with logged reason."
   (message "deslop: skipped (%s)" msg)
   (deslop--job-done))
 
@@ -271,55 +288,61 @@ Return the position where the occurrence starts, or nil."
 
 (defun deslop--run-insert (p)
   "Execute an insert job."
-  (let* ((buf (deslop--live-buffer p)))
+  (let* ((buf (deslop--live-buffer p))
+         (ov (plist-get p :overlay)))
     (if (null buf)
         (deslop--skip "insert: buffer no longer exists")
       (with-current-buffer buf
         (let* ((region (plist-get p :region))
                (offset (plist-get p :offset))
                (anchor (plist-get p :anchor))
-               (orig (plist-get p :orig)))
+               (live-orig (if (and (overlayp ov) (overlay-buffer ov))
+                              (overlay-start ov)
+                            (plist-get p :orig))))
           (if (plist-get p :selected)
-              (let* ((pos (deslop--find-text-at anchor orig)))
-                (if (null pos)
-                    (deslop--skip
-                     "insert: highlighted region not found (modified by an earlier job?)")
-                  (let* ((len (length anchor))
-                         (off (max 0 (min len offset)))
-                         ins)
-                    (cond
-                     ((<= offset 0) (setq ins pos))
-                     ((>= offset len) (setq ins (+ pos len)))
-                     (t (setq ins (+ pos off))))
-                    (deslop--create-overlay buf pos (+ pos len) "Thinking")
-                    (deslop--insert-llm
-                     buf ins (cons pos (+ pos len))
-                     (deslop--marker-context anchor off)
-                     deslop-insert-instruction))))
-            (let* ((pos (deslop--find-insert-point (car anchor) (cdr anchor) orig))
+              (let* ((pos (deslop--find-text-at anchor live-orig)))
+                (unless pos (setq pos live-orig))
+                (let* ((len (length anchor))
+                       (off (max 0 (min len offset)))
+                       ins)
+                  (cond
+                   ((<= offset 0) (setq ins pos))
+                   ((>= offset len) (setq ins (+ pos len)))
+                   (t (setq ins (+ pos off))))
+                  (when (overlayp ov)
+                    (move-overlay ov pos (+ pos len))
+                    (overlay-put ov 'status "Thinking"))
+                  (deslop--insert-llm
+                   buf ins (cons pos (+ pos len))
+                   (deslop--marker-context anchor off)
+                   deslop-insert-instruction ov)))
+            (let* ((pos (deslop--find-insert-point (car anchor) (cdr anchor) live-orig))
                    (ctx (buffer-substring-no-properties (point-min) (point-max))))
-              (if (null pos)
-                  (deslop--skip
-                   "insert: cursor anchor not found (modified by an earlier job?)")
-                (deslop--create-overlay buf pos pos "Thinking")
-                (deslop--insert-llm
-                 buf pos nil
-                 (deslop--marker-context ctx (- pos (point-min)))
-                 deslop-insert-instruction)))))))))
+              (unless pos (setq pos live-orig))
+              (when (overlayp ov)
+                (move-overlay ov pos (min (point-max) (1+ pos)))
+                (overlay-put ov 'status "Thinking"))
+              (deslop--insert-llm
+               buf pos nil
+               (deslop--marker-context ctx (- pos (point-min)))
+               deslop-insert-instruction ov))))))))
 
 (defun deslop-insert-at-cursor ()
   "Queue a request to insert LLM text at the cursor."
   (interactive)
   (let* ((buf (current-buffer))
          (region (deslop--current-region))
-         (pt (point)))
+         (pt (point))
+         (ov (if region
+                 (deslop--create-overlay buf (car region) (cdr region) "Queued")
+               (deslop--create-overlay buf pt pt "Queued"))))
     (if region
         (let* ((s (car region)) (e (cdr region)))
           (deslop-enqueue
            (list 'insert :buffer buf :region (cons s e)
                  :offset (- pt s)
                  :anchor (buffer-substring-no-properties s e)
-                 :orig s :selected t)))
+                 :orig s :selected t :overlay ov)))
       (let* ((from (min pt (max (point-min) (- pt deslop-anchor-chars))))
              (to (max pt (min (point-max) (+ pt deslop-anchor-chars)))))
         (deslop-enqueue
@@ -328,7 +351,7 @@ Return the position where the occurrence starts, or nil."
                :offset (- pt (point-min))
                :anchor (cons (buffer-substring-no-properties from pt)
                              (buffer-substring-no-properties pt to))
-               :orig pt :selected nil))))
+               :orig pt :selected nil :overlay ov))))
     (message "deslop: queued insert-at-cursor")))
 
 (defun deslop-llm-default (messages done)
@@ -345,7 +368,8 @@ Return the position where the occurrence starts, or nil."
                  (:stream_options . ((:include_usage . t)))))
          (json-data (encode-coding-string (json-encode body) 'utf-8))
          (accumulated-content "")
-         (proc-buffer (generate-new-buffer " *deslop-curl*")))
+         (proc-buffer (generate-new-buffer " *deslop-curl*"))
+         (target-ov deslop--current-job-overlay))
     (make-process
      :name "deslop-curl"
      :buffer proc-buffer
@@ -374,18 +398,19 @@ Return the position where the occurrence starts, or nil."
                                          (alist-get 'reasoning delta)))
                           (content (alist-get 'content delta)))
                      
-                     (when usage
-                       (let ((total-tok (alist-get 'completion_tokens usage)))
-                         (when total-tok (setq deslop--current-tokens total-tok))))
-                     
-                     (when (and reasoning (> (length reasoning) 0))
-                       (setq deslop--current-status "Thinking")
-                       (setq deslop--current-tokens (1+ deslop--current-tokens)))
-                     
-                     (when (and content (> (length content) 0))
-                       (setq deslop--current-status "Generating")
-                       (setq deslop--current-tokens (1+ deslop--current-tokens))
-                       (setq accumulated-content (concat accumulated-content content)))))))))))
+                     (when (overlayp target-ov)
+                       (when usage
+                         (let ((total-tok (alist-get 'completion_tokens usage)))
+                           (when total-tok (overlay-put target-ov 'tokens total-tok))))
+                       
+                       (when (and reasoning (> (length reasoning) 0))
+                         (overlay-put target-ov 'status "Thinking")
+                         (overlay-put target-ov 'tokens (1+ (or (overlay-get target-ov 'tokens) 0))))
+                       
+                       (when (and content (> (length content) 0))
+                         (overlay-put target-ov 'status "Generating")
+                         (overlay-put target-ov 'tokens (1+ (or (overlay-get target-ov 'tokens) 0)))
+                         (setq accumulated-content (concat accumulated-content content))))))))))))
      :sentinel
      (lambda (_proc event)
        (when (buffer-live-p proc-buffer)
@@ -393,6 +418,17 @@ Return the position where the occurrence starts, or nil."
        (if (string-match-p "finished" event)
            (funcall done accumulated-content nil)
          (funcall done nil (format "Process error: %s" event)))))))
+
+(defun deslop-abort-queue ()
+  "Abort all pending deslop jobs and clear active overlays."
+  (interactive)
+  (dolist (ov deslop--managed-overlays)
+    (when (overlayp ov) (delete-overlay ov)))
+  (setq deslop--managed-overlays nil)
+  (deslop--stop-spinner)
+  (setq deslop-queue nil)
+  (setq deslop--current-job nil)
+  (message "deslop: queue aborted"))
 
 (defconst deslop-insert-system
   "You are an inline code and text completion engine. You will receive a document containing a <CURSOR> marker indicating where your output will be inserted.
@@ -430,6 +466,7 @@ return price * (1 + tax)")
   (let* ((map (make-sparse-keymap))
          (prefix (make-sparse-keymap)))
     (define-key prefix "i" #'deslop-insert-at-cursor)
+    (define-key prefix "a" #'deslop-abort-queue)
     (define-key map (kbd "C-c e") prefix)
     map)
   "Prefix map for deslop-mode.")
@@ -440,3 +477,4 @@ return price * (1 + tax)")
   :keymap deslop-mode-map)
 
 (provide 'deslop)
+
