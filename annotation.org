@@ -1,0 +1,1603 @@
+#+TITLE: enslop.el, annotated
+#+AUTHOR: generated from enslop.el (802 lines)
+
+* How to read this file
+
+Line numbers refer to =enslop.el=. Comment lines (=;; ...) are skipped.
+Each function is shown once in a source block, then explained line by
+line. A short primer of all Elisp constructs used in the file comes
+first, so the per-line notes can stay brief.
+
+* File layout
+
+| Lines | What                          |
+|-------+-------------------------------|
+| 27–30 | option group                  |
+| 34–74 | user options (=defcustom=)    |
+| 78–90 | internal state (=defvar=)     |
+| 94–100| log helper                    |
+| 104–142| system prompts + LLM client  |
+| 146–188| the job queue               |
+| 192–252| anchor resolution           |
+| 256–303| context building            |
+| 307–391| job: insert at cursor       |
+| 395–550| job: improve                |
+| 552–574| response parsing, replacement |
+| 578–671| job: summarize              |
+| 675–753| prompt side window          |
+| 757–777| minor mode + key bindings   |
+| 781–800| utility commands            |
+
+The whole program is one idea: commands put *jobs* on a queue; the queue
+runs them one at a time; each job asks an LLM and applies the answer to
+the buffer. The flow:
+
+#+begin_example
+command -> enqueue -> process-next -> run-job -> LLM call (async)
+                                              | callback
+              job-done <- apply or skip <- parse response
+                 |
+            process-next (next job, or idle)
+#+end_example
+
+* Primer: the Elisp used in this file
+
+** Forms and values
+- Everything is a list. =(f a b)= calls the function =f= with arguments =a=, =b=.
+- A bare word is a *symbol*. Evaluating a symbol looks up its value.
+- ='x= (apostrophe) quotes: evaluates to the symbol =x= itself, no lookup.
+- =#'f= (function-quote) evaluates to the *function* =f=, as a value.
+- =t= is true, =nil= is false. Anything that is not =nil= is true.
+- Strings use double quotes. =\n= is a newline, =\"= a quote character.
+- =;= starts a comment to end of line.
+
+** Definition forms
+- =(defun name (args) "doc" body...)= defines a function. The first
+  string in the body is the docstring.
+- =(defvar name value "doc")= defines a global variable.
+- =(defconst name value "doc")= defines a constant (never reassigned).
+- =(defcustom name value "doc" :type T :group G)= defines a user option
+  that appears in the customize UI. =:type= says what kind of value it
+  holds, =:group= which options menu it lives in.
+- =(defgroup name doc :prefix P :group G)= registers an options group.
+- =(provide 'feature)= marks the file as providing the named feature,
+  so other files can =(require 'feature)=.
+
+** Variables and binding
+- =(setq x v)= assigns =v= to =x=.
+- =(let ((a 1) (b 2)) body)= creates temporary variables =a=, =b= that
+  exist only inside =body=. =let*= is the same but each initializer may
+  refer to the bindings above it; =let= may not. This file uses =let*=
+  throughout.
+- =lambda= builds an anonymous function: =(lambda (x) body)=.
+- =(funcall f a b)= calls the function stored in =f= (needed when the
+  function is a variable, not a literal name).
+- =(apply f list)= calls =f= with the elements of =list= as separate
+  arguments.
+
+** Control flow
+- =(if test then else)=, =(cond (test1 act1) (test2 act2) ...)=.
+- =(when test body)= runs =body= if =test= is true, returns =nil=
+  otherwise. =(unless test body)= is the inverse.
+- =(and a b c)= returns the first =nil= among its args, else the last.
+  =(or a b c)= returns the first non-=nil=, else =nil=. Both stop
+  early.
+- =(progn a b c)= runs =a=, =b=, =c= in order, returns the last.
+- =(while test body)= loops while =test= is true.
+- =(dolist (x list) body)= iterates =x= over each element of =list=.
+
+** Lists and pairs
+- =(list a b c)= makes a list. =(quote (a b))= or ='(a b)= is a list literal.
+- =(cons a b)= makes the pair =a= joined to =b=. If =b= is a list, =a=
+  is prepended. =(cons 1 2)= is the *dotted pair* =(1 . 2)=, shown with
+  a dot because =b= is not a list.
+- =(car x)= first element. =(cdr x)= everything after the first.
+  =(cadr x)= is =(car (cdr x))=, and so on.
+- =(push x list-var)= prepends. =(pop list-var)= removes and returns
+  the first element. =(nreverse l)= reverses a list.
+- =(nconc a b)= appends =b= to =a=, modifying =a= in place.
+- Keywords: symbols starting with :=, e.g. =:buffer=. They evaluate to
+  themselves and are used as labeled slots.
+- A *property list* (plist) is a flat list =(:k1 v1 :k2 v2 ...)=.
+  =(plist-get plist :k2)= returns =v2=. Jobs in this file are plists.
+- =(pcase value (pattern action) ...)= pattern matching. In a pattern,
+  =,x= binds a part to =x=, =_= matches anything, =. = separates the
+  first element from the rest of a list.
+
+** Numbers and strings
+- =+ - * /=, =(1+ x)=, =(1- x)=, =abs=, =max=, =min=.
+- =, <, <=, >, >= compare. =(= a b)= tests equality of any values.
+- =(length x)= length of string or list. =(elt list i)= =i=-th element,
+  counting from 0.
+- =(string= a b)= case-sensitive string equality. =(stringp x)= type test.
+- =(substring s start end)= characters from =start= up to but not
+  including =end= (0-based). =(concat a b c...)= joins strings.
+- =(aref s i)= character (as a number) at 0-based index =i=.
+- =(memq x list)= true if =x= is in =list=.
+- =(format "text %s %d" a b)= fills =%s= (print) and =%d= (decimal)
+  placeholders. =(format-time-string "FORMAT")= formats the current time.
+- =(string-prefix-p prefix s)= true if =s= starts with =prefix=.
+
+** Buffers and point
+Emacs stores text in *buffers*. Each buffer has a *point*: the current
+position, counted from 1. Position 1 is before the first character;
+position =length+1= is after the last.
+- =(current-buffer)= the buffer being edited right now.
+- =(with-current-buffer buf body)= runs =body= as if =buf= were the
+  current buffer, then switches back.
+- =(get-buffer-create name)= return the buffer named =name=, creating it
+  if missing. =(buffer-live-p buf)= true if not killed.
+- =(kill-buffer buf)= delete a buffer. =(erase-buffer)= delete its text.
+- =(point)= current position. =(point-min)= first position (1).
+  =(point-max)= one past the last character.
+- =(goto-char pos)= move point to absolute position =pos=.
+- =(save-excursion body)= remember point, run =body=, restore point.
+- =(insert text...)= insert text at point. =(delete-region a b)= delete
+  the text from =a= up to =b=.
+- =(buffer-string)= whole buffer as a string.
+- =(buffer-substring-no-properties a b)= buffer text from =a= to =b= as
+  a string, without formatting metadata.
+- =(buffer-name buf)=, =(buffer-size buf)=, =(buffer-modified-p)= (true
+  if the user changed it since last save).
+- =(switch-to-buffer buf)= show it in the current window.
+
+** Regions
+A *region* is the text between point and the mark (selected text).
+- =(use-region-p)= true if a region is active.
+- =(region-beginning)= / =(region-end)= the smaller / larger position.
+
+** Windows
+A *window* is a pane showing a buffer.
+- =(selected-window)= the window the user is in.
+- =(window-live-p win)= true if it still exists.
+- =(window-list)= all windows. =(delete-window win)= close one.
+- =(select-window win)= make it the selected window.
+- =(display-buffer buf OPTIONS)= show =buf=, returning the window.
+  Option =display-buffer-in-side-window= with =side-position right= and
+  =window-width 0.35= opens a side window 35% of the frame width.
+
+** Modes and keys
+- =(interactive)= in a function body marks it as a user command
+  (callable by key or =M-x=).
+- =(kbd "C-c e")= converts a key description to the internal key code.
+- =(make-sparse-keymap)= a key table that stores only defined keys.
+- =(define-key map key command)= bind =command= to =key= in =map=.
+  Binding a keymap as the "command" makes a prefix (e.g. =C-c e=).
+- =(define-minor-mode name doc :lighter L :keymap M)= defines a toggle
+  command =name=, a status-line label =L=, and a keymap =M=.
+- =(define-globalized-minor-mode global-name name on-all)= adds a
+  global toggle and an =on-all= function applied to new buffers.
+- =(message "fmt" args)= print one line to the echo area (bottom).
+
+** Errors and callbacks
+- =(condition-case var FORM (error HANDLER))= run =FORM=; if it signals
+  an error, run =HANDLER= with the error data bound to =var=.
+- =(ignore-errors FORM)= run =FORM=; if it errors, return =nil=.
+- =(error-message-string e)= human-readable text for an error object.
+- This file is callback-driven: the LLM call takes a =done= function
+  and calls it later with =(done CONTENT ERR)=. =ERR= is =nil= on
+  success.
+
+** JSON and HTTP (only in the default LLM client)
+- =(json-encode elisp-value)= serialize to a JSON string. Keywords like
+  =:model= become JSON string keys ="model"=.
+- =(json-read)= read one JSON value from point in the current buffer.
+  JSON objects come back as Elisp *hash tables*.
+- =(gethash key table)= look up =key= in a hash table.
+- =(listp x)= true if =x= is a list.
+- =(url-retrieve url callback)= asynchronous HTTP GET. When the response
+  arrives, =callback= is called with the current buffer set to a
+  temporary buffer holding headers then body.
+- =(url-retrieve-start)= position in that buffer where the body starts.
+
+* The code
+
+** Option group (27–30)
+
+#+begin_src elisp
+(defgroup enslop nil
+  "Local-LLM text assistance: insert at cursor, improve, summarize."
+  :prefix "enslop-"
+  :group 'convenience)
+#+end_src
+
+- 27 :: =defgroup= registers an options group named =enslop=. The
+  second argument (=nil=) is the default value slot (unused for groups).
+- 28 :: docstring shown in the customize menu.
+- 29 :: =:prefix= is the variable-name prefix for the group's options.
+- 30 :: =:group 'convenience= files the group under Emacs' built-in
+  =convenience= menu.
+
+** User options (34–74)
+
+Eight =defcustom= options, all in the =enslop= group. Each is a global
+variable the user can change; the code reads them at run time, so
+changes take effect immediately.
+
+#+begin_src elisp
+(defcustom enslop-url "http://localhost:1234/v1/chat/completions"
+  "OpenAI-compatible chat completions endpoint."
+  :type 'string
+  :group 'enslop)
+#+end_src
+
+- 34 :: =defcustom= defines the option =enslop-url= with the default
+  endpoint (LM Studio's default address).
+- 36 :: =:type 'string= tells customize this holds a string.
+
+#+begin_src elisp
+(defcustom enslop-model "local-model"
+  "Model name sent to the LLM server."
+  :type 'string
+  :group 'enslop)
+
+(defcustom enslop-temperature 0.2
+  "Sampling temperature for LLM requests."
+  :type 'number
+  :group 'enslop)
+
+(defcustom enslop-max-context-chars 24000
+  "Maximum number of characters sent to the LLM as context.
+Tokens are estimated as chars/4."
+  :type 'integer
+  :group 'enslop)
+
+(defcustom enslop-window-chars 8000
+  "Characters kept on each side of the cursor when context is elided."
+  :type 'integer
+  :group 'enslop)
+
+(defcustom enslop-anchor-chars 120
+  "Characters captured on each side of the cursor as an insert anchor."
+  :type 'integer
+  :group 'enslop)
+
+(defcustom enslop-summary-chars 4000
+  "Approximate target length in characters for generated summaries."
+  :type 'integer
+  :group 'enslop)
+
+(defcustom enslop-insert-instruction
+  "Write the most natural continuation of the text at the cursor position."
+  "Instruction given to the LLM for enslop-insert-at-cursor."
+  :type 'string
+  :group 'enslop)
+#+end_src
+
+- 39 :: =enslop-model= — the model name sent in every request.
+- 44 :: =enslop-temperature= — sampling randomness; low = deterministic.
+- 49 :: =enslop-max-context-chars= — context budget. Decides which path
+  every job takes: whole buffer, region+surroundings, or chunking.
+- 55 :: =enslop-window-chars= — when an insert context is elided, how
+  many characters to keep on each side of the cursor.
+- 60 :: =enslop-anchor-chars= — how much text around a bare cursor is
+  captured to re-find it later (see anchor resolution).
+- 65 :: =enslop-summary-chars= — target summary length, told to the LLM.
+- 70 :: =enslop-insert-instruction= — the task text for inserts. Note
+  the shape: name, then the *default value* (a long string), then the
+  docstring. =defcustom= takes both.
+
+** Internal state (78–90)
+
+#+begin_src elisp
+(defvar enslop-queue nil
+  "Queue of pending jobs.  Each job is (TYPE . PROPERTIES).")
+
+(defvar enslop-running nil
+  "Non-nil while a job is being processed.")
+
+(defvar enslop-log-buffer-name "*enslop-log*")
+
+(defvar enslop-llm-function #'enslop-llm-default
+  "Function used to talk to the LLM.
+Called as (FN MESSAGES DONE).  MESSAGES is a list of (ROLE . CONTENT)
+pairs.  DONE is called as (DONE CONTENT ERR): CONTENT is the response
+string on success, ERR describes the problem on failure.")
+#+end_src
+
+- 78 :: =enslop-queue= — a list of jobs, oldest first. A job is a list
+  whose first element is the type symbol (=insert=, =improve=,
+  =summarize=) followed by a plist of keyword/value pairs.
+- 81 :: =enslop-running= — the single-flight flag. While non-=nil=,
+  =enslop-process-next= does nothing; this is what serializes the queue.
+- 84 :: name of the log buffer. =*...*= names are Emacs' convention for
+  service buffers.
+- 86 :: =enslop-llm-function= — the pluggable LLM client. Default is
+  =#'enslop-llm-default= (the function value, see the HTTP client
+  below). Tests replace this variable with a fake, which is how the
+  whole module is testable without a server.
+
+** Logging (94–100)
+
+#+begin_src elisp
+(defun enslop-log (format &rest args)
+  "Append a timestamped message to the enslop log buffer."
+  (with-current-buffer (get-buffer-create enslop-log-buffer-name)
+    (goto-char (point-max))
+    (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ")
+            (apply #'format format args)
+            "\n")))
+#+end_src
+
+- 94 :: defines =enslop-log=. =format= is a required argument (the
+  format string); =&rest args= collects all remaining arguments into a
+  list. Note the parameter is *named* =format=: inside this function
+  the variable =format= holds the format string, while =#'format= still
+  refers to the global =format= *function*, because function and
+  variable are separate namespaces.
+- 96 :: make the log buffer current for the body, creating it on first
+  use.
+- 97 :: move point to the end (=point-max=), so the next =insert=
+  appends.
+- 98–100 :: =insert= three strings: a timestamp
+  (=format-time-string= fills =%Y-%m-%d %H:%M:%S=), the formatted
+  message, and a newline. =apply #'format format args= calls the global
+  =format= function with the format string and the collected args as
+  separate arguments.
+
+** System prompts (104–108)
+
+#+begin_src elisp
+(defconst enslop--insert-system
+  "You are an expert writing assistant embedded in a text editor. You receive a document with a <CURSOR> marker indicating where text will be inserted. Respond with ONLY the text to insert at that position. No explanations, no quotes, no markdown code fences, no preamble.")
+
+(defconst enslop--improve-system
+  "You are an expert text improver embedded in a text editor. Apply the user's instructions to the marked region. Respond in EXACTLY one of these two formats, with no other text:\n<<<REGION>>>\n<improved text that replaces the marked region>\n<<<BUFFER>>>\n<improved entire document>\nUse <<<REGION>>> unless the instructions require changes outside the region.")
+#+end_src
+
+- 104 :: =defconst= — fixed text, never reassigned.
+- 105 :: the insert system prompt. It defines the =<CURSOR>= marker
+  contract: the model sees one marker, returns raw text only.
+- 107 :: the improve system prompt. It defines the response protocol:
+  the reply must start with =<<<REGION>>>= (replace the region) or
+  =<<<BUFFER>>>= (rewrite the whole buffer). =\n= are newlines inside
+  the string.
+
+** The default LLM client (110–142)
+
+#+begin_src elisp
+(defun enslop-llm-default (messages done)
+  "Call the LLM asynchronously.
+MESSAGES is a list of (ROLE . CONTENT) pairs.  DONE is called as
+(DONE CONTENT ERR)."
+  (let* ((body (json-encode
+               `((:model . ,enslop-model)
+                 (:messages . ,(mapcar (lambda (m)
+                                         `((:role . ,(car m))
+                                           (:content . ,(cdr m))))
+                                       messages))
+                 (:temperature . ,enslop-temperature)))))
+    (condition-case err
+        (url-retrieve
+         enslop-url
+         (lambda (&optional success)
+           (let* ((buf (current-buffer)))
+             (condition-case e
+                 (let* ((resp (with-current-buffer buf
+                                (goto-char (url-retrieve-start))
+                                (ignore-errors (json-read))))
+                       (choices (and (listp resp) (gethash "choices" resp)))
+                       (msg (and (listp choices) (>= (length choices) 1)
+                                 (gethash "message" (elt choices 0))))
+                       (content (and (listp msg) (gethash "content" msg))))
+                   (if (stringp content)
+                       (funcall done content nil)
+                     (funcall done nil
+                              (format "malformed LLM response: %s"
+                                      (with-current-buffer buf (buffer-string))))))
+               (error (funcall done nil (error-message-string e))))
+             (kill-buffer buf))))
+     (error
+      (funcall done nil (error-message-string err))))))
+#+end_src
+
+This is the only part that touches the network. Everything else calls
+the variable =enslop-llm-function=.
+
+- 110 :: arguments: =messages= (the prompt) and =done= (the callback).
+- 114–120 :: build the JSON request body. The backtick (=`) starts a
+  *quasiquote*: a list literal where any element prefixed with a comma
+  (=',=) is replaced by the value of that expression. So
+  =(:model . ,enslop-model)= builds the pair =(:model . "local-model")=.
+  =json-encode= then turns keyword =:model= into the JSON key
+  ="model"=, and so on. The =:messages= value is built with =mapcar=,
+  which applies its function to every element of =messages=: each
+  =(role . content)= pair becomes =((:role . role) (:content . content))=.
+- 121–122 :: =condition-case err= wraps the request. =url-retrieve=
+  fires an asynchronous GET of =enslop-url= and returns immediately;
+  when the response arrives, the lambda is called. The outer
+  =(error ...)= clause (141–142) catches *synchronous* failures of
+  =url-retrieve= itself (bad URL, no route) and reports them through
+  =done=.
+- 124 :: =&optional success= — the callback's argument is optional;
+  =url-retrieve= passes =t= on HTTP success. The code does not check
+  it; it validates the body instead.
+- 125 :: =url-retrieve= calls the callback with the current buffer set
+  to a *temporary buffer* holding the raw HTTP response. Remember it in
+  =buf= so it can be killed at the end.
+- 126–139 :: inner =condition-case e= guards all response processing;
+  any error here is reported to =done= (139).
+- 127–129 :: =resp= is the decoded response: switch to the temp buffer,
+  =goto-char (url-retrieve-start)= jumps past the HTTP headers to the
+  body, =(ignore-errors (json-read))= reads the JSON object there. If
+  the body is not valid JSON, =json-read= errors and =ignore-errors=
+  yields =nil=.
+- 130 :: =choices= — look up the ="choices"= key in the response hash
+  table. The =and= stops if =resp= is not a list (e.g. =nil= from a bad
+  body), so =gethash= is never called on garbage.
+- 131–132 :: =msg= — take the first choice (=elt choices 0=, lists are
+  0-based) and its ="message"= key. Again guarded by =and=.
+- 133 :: =content= — the ="content"= string of that message.
+- 134–135 :: if =content= survived all guards as a string, the request
+  succeeded: =(funcall done content nil)= runs the callback with the
+  text and =nil= error.
+- 136–138 :: otherwise report failure, including the raw response text
+  (=buffer-string= of the temp buffer) for debugging.
+- 140 :: kill the temporary response buffer. This runs on every callback
+  path, success or failure, because it is after the inner
+  =condition-case=.
+
+** The job queue (146–188)
+
+#+begin_src elisp
+(defun enslop-enqueue (job)
+  "Add JOB to the queue and start processing if idle."
+  (setq enslop-queue (nconc enslop-queue (list job)))
+  (enslop-log "queued: %s" (car job))
+  (enslop-process-next))
+#+end_src
+
+- 148 :: append =job= to the end of the queue: =(list job)= wraps it in
+  a one-element list, =nconc= splices it onto =enslop-queue= (modifying
+  that list in place), =setq= stores the result back.
+- 149 :: log the job type (=car job= is the first list element).
+- 150 :: try to start processing; a no-op if a job is already running.
+
+#+begin_src elisp
+(defun enslop-process-next ()
+  "Process the next queued job if the queue is not idle."
+  (unless (or enslop-running (null enslop-queue))
+    (setq enslop-running t)
+    (let* ((job (pop enslop-queue)))
+      (enslop-log "processing: %s" (car job))
+      (condition-case err
+          (enslop-run-job job)
+        (error
+         (enslop-log "error in job %s: %s" (car job) (error-message-string err))
+         (enslop--job-done))))))
+#+end_src
+
+- 154 :: proceed only when =enslop-running= is =nil= *and* the queue is
+  non-empty. =unless= inverts the whole =or=.
+- 155 :: set the flag *before* running, so re-entrant calls (a job that
+  enqueues another) cannot start a second job in parallel.
+- 156 :: =pop= removes the oldest job from the front of the queue and
+  returns it.
+- 158–162 :: run the job. If it signals an error, log it and call
+  =enslop--job-done= so the queue does not jam. Note the job's own LLM
+  callback also ends with =enslop--job-done=; the =condition-case= here
+  only catches errors in the *setup* phase.
+
+#+begin_src elisp
+(defun enslop--job-done ()
+  "Finish the current job and continue the queue."
+  (setq enslop-running nil)
+  (enslop-process-next))
+#+end_src
+
+- 166 :: clear the flag.
+- 167 :: immediately try the next job. This is how a chain of jobs runs
+  back to back: each completion pulls the next.
+
+#+begin_src elisp
+(defun enslop-run-job (job)
+  "Execute JOB (async) and finish it via enslop--job-done."
+  (pcase job
+    (`(insert . ,p) (enslop--run-insert p))
+    (`(improve . ,p) (enslop--improve p))
+    (`(summarize . ,p) (enslop--run-summarize p))
+    (_ (progn
+         (enslop-log "unknown job: %S" job)
+         (enslop--job-done)))))
+#+end_src
+
+- 171–174 :: =pcase= matches the job list. The pattern
+  =(`(insert . ,p))= means: a list whose first element is the symbol
+  =insert=; =,p= binds the *rest* of the list — the plist
+  =(:buffer ... :region ...)= — to =p=. Each branch calls the matching
+  runner, passing the plist.
+- 175–177 :: =_= matches anything else: log it (=%S= prints the value
+  with syntax, i.e. quoted) and finish the slot.
+
+#+begin_src elisp
+(defun enslop--skip (msg)
+  "Skip the current job with a logged reason."
+  (enslop-log "SKIP: %s" msg)
+  (message "enslop: skipped (%s)" msg)
+  (enslop--job-done))
+#+end_src
+
+- 181 :: log the reason (the log is the audit trail).
+- 182 :: tell the user in the echo area.
+- 183 :: release the queue slot. Every failure path in the file funnels
+  through this one function.
+
+#+begin_src elisp
+(defun enslop--live-buffer (p)
+  "Return the job's buffer if it is still alive, else nil."
+  (let* ((buf (plist-get p :buffer)))
+    (and (buffer-live-p buf) buf)))
+#+end_src
+
+- 187 :: pull the =:buffer= slot out of the job plist.
+- 188 :: =and= returns =buf= only if it has not been killed since the
+  job was queued; otherwise =nil=, which every runner treats as
+  "skip this job".
+
+** Anchor resolution (192–252)
+
+Jobs are async: by the time a job runs, the buffer may have changed.
+Instead of remembering a position, each job remembers *text* (an
+anchor) and re-finds it. This section is the re-finding.
+
+#+begin_src elisp
+(defun enslop--current-region ()
+  "Return (START . END) of the active region, or nil."
+  (when (use-region-p)
+    (cons (region-beginning) (region-end))))
+#+end_src
+
+- 194 :: if a region is active,
+- 195 :: return it as a dotted pair =(start . end)=. Otherwise the
+  =when= yields =nil=.
+
+#+begin_src elisp
+(defun enslop--pick-closest (candidates)
+  "CANDIDATES is a list of (POS . DIST).
+Return the POS with the smallest DIST, or nil."
+  (let* ((best nil))
+    (dolist (c candidates)
+      (when (or (null best) (< (cdr c) (cdr best)))
+        (setq best c)))
+    (and best (car best))))
+#+end_src
+
+- 200 :: =best= accumulates the winning candidate.
+- 201–203 :: walk the candidates; a candidate wins if there is no
+  current best (=null best=) or its distance (=cdr c=) is smaller.
+- 204 :: return the winning *position* (=car best=), or =nil= if the
+  list was empty.
+
+#+begin_src elisp
+(defun enslop--find-string (text start)
+  "Case-sensitively find TEXT in the current buffer at or after START.
+Return the position where the occurrence starts, or nil.
+This Emacs build's search primitives ignore case unconditionally,
+so the comparison is done explicitly."
+  (let* ((n (length text))
+         (limit (- (point-max) n)))
+    (and (> n 0)
+         (let ((pos start) (found nil))
+           (while (and (null found) (<= pos limit))
+             (when (string= text (buffer-substring-no-properties pos (+ pos n)))
+               (setq found pos))
+             (setq pos (1+ pos)))
+           found))))
+#+end_src
+
+- 206 :: the manual search. Built-in Emacs searches (=search-forward=)
+  are case-insensitive in the Emacs build this was developed on, and
+  anchors must match exactly, so the comparison is done by hand with
+  =string=.
+- 211 :: =n= — length of the needle.
+- 212 :: =limit= — the last position at which a string of length =n=
+  still fits in the buffer.
+- 213 :: if the needle is empty there is nothing to find: =and= yields
+  =nil= without entering the loop.
+- 214 :: =pos= scans forward from =start=; =found= holds the answer.
+- 215 :: loop while nothing found and =pos= can still start a full
+  match.
+- 216–217 :: compare the needle to the buffer slice of length =n= at
+  =pos=; on equality record =pos= as the answer.
+- 218 :: advance one character.
+- 219 :: return the answer (or =nil=).
+
+#+begin_src elisp
+(defun enslop--find-text-at (text orig-pos)
+  "Find the occurrence of TEXT closest to ORIG-POS in the current buffer
+(case-sensitively).  Return the start position, or nil if TEXT is not found."
+  (let* ((cands nil)
+         (s (enslop--find-string text (point-min))))
+    (while s
+      (push (cons s (abs (- s orig-pos))) cands)
+      (setq s (enslop--find-string text (1+ s))))
+    (enslop--pick-closest cands)))
+#+end_src
+
+- 221 :: used for region anchors (improve, summarize, selected insert):
+  the anchor text may occur several times; pick the occurrence nearest
+  to where it originally was.
+- 224–225 :: =cands= collects hits; =s= is the first hit, searched from
+  the buffer start.
+- 226–228 :: loop over *all* occurrences (each search resumes one char
+  past the previous hit). For each, push a pair =(position .
+  distance)= where distance is =abs=olute difference from =orig-pos=.
+- 229 :: let =enslop--pick-closest= choose.
+
+#+begin_src elisp
+(defun enslop--find-insert-point (before after orig-pos)
+  "Find the insertion position for a (BEFORE . AFTER) cursor anchor.
+Prefer occurrences of AFTER immediately preceded by BEFORE; otherwise fall
+back to the occurrence of AFTER closest to ORIG-POS.  If AFTER is empty,
+use the buffer end (buffer start if BEFORE is also empty).
+Return the position, or nil if AFTER is non-empty and not found."
+  (if (string= after "")
+      (if (string= before "") (point-min) (point-max))
+    (let* ((exact nil) (any nil)
+           (s (enslop--find-string after (point-min))))
+      (while s
+        (let* ((d (abs (- s orig-pos)))
+               (ok (or (string= before "")
+                       (and (>= s (+ (point-min) (length before)))
+                            (string= before
+                                     (buffer-substring-no-properties
+                                      (- s (length before)) s))))))
+          (push (cons s d) any)
+          (when ok (push (cons s d) exact)))
+        (setq s (enslop--find-string after (1+ s))))
+      (let* ((r (enslop--pick-closest exact)))
+        (or r (enslop--pick-closest any))))))
+#+end_src
+
+- 231 :: the bare-cursor anchor is a pair of text snippets: =(BEFORE .
+  AFTER)=, what was immediately left and right of the cursor. A cursor
+  position is the seam between them.
+- 237–238 :: degenerate cases: =after= empty means the cursor was at
+  the buffer end (or both empty: an empty buffer) — return that end.
+  End positions have no text to search for.
+- 239–240 :: two candidate lists: =exact= (the seam is intact) and
+  =any= (only =after= survives). =s= is the first hit of =after=.
+- 242 :: distance of this hit from the original position.
+- 243–247 :: =ok= tests whether =before= immediately precedes this hit:
+  the hit must start far enough in that =length before= characters
+  exist before it (244, so the next read cannot start before the buffer
+  begins), and those characters must equal =before= (245–247).
+- 248 :: every hit goes into =any=.
+- 249 :: intact seams also go into =exact=.
+- 250–251 :: find the next hit.
+- 251–252 :: prefer the closest *exact* seam; if none survived (the user
+  edited the left side), fall back to the closest =after= hit. Both
+  empty means the cursor anchor was destroyed: =nil=.
+
+** Context building (256–303)
+
+#+begin_src elisp
+(defun enslop--whitespacep (c)
+  "Non-nil if C is a whitespace character (space, tab, newline, ...)."
+  (memq c '(32 9 10 13 11 12)))
+#+end_src
+
+- 258 :: character codes as numbers: 32 space, 9 tab, 10 newline, 13
+  carriage return, 11 vertical tab, 12 form feed. =memq= tests
+  membership in the quoted list. (The built-in =whitespacep= is not
+  available in this Emacs build, hence the local version.)
+
+#+begin_src elisp
+(defun enslop--clean (s)
+  "Trim whitespace at both ends of S."
+  (let* ((start 0) (end (length s)))
+    (while (and (< start end) (enslop--whitespacep (aref s start)))
+      (setq start (1+ start)))
+    (while (and (> end start) (enslop--whitespacep (aref s (1- end))))
+      (setq end (1- end)))
+    (substring s start end)))
+#+end_src
+
+- 262 :: =start= and =end= are 0-based string indices shrinking inward.
+- 263–264 :: walk =start= right while the character at =start= is
+  whitespace.
+- 265–266 :: walk =end= left the same way.
+- 267 :: return the middle slice. (Strings are the trimmed LLM replies
+  or anchors; leading spaces in *inserted* text are meaningful, which
+  is why inserts use =enslop--trim-trailing= instead.)
+
+#+begin_src elisp
+(defun enslop--trim-trailing (s)
+  "Remove trailing whitespace from S, keeping leading whitespace intact."
+  (let* ((end (length s)))
+    (while (and (> end 0) (enslop--whitespacep (aref s (1- end))))
+      (setq end (1- end)))
+    (substring s 0 end)))
+#+end_src
+
+- 269 :: the one-sided variant, used for text that will be inserted: a
+  leading space in the reply is often an intentional continuation of
+  the current line.
+
+#+begin_src elisp
+(defun enslop--marker-context (text offset)
+  "Return TEXT with a <CURSOR> marker at OFFSET.
+If TEXT exceeds enslop-max-context-chars, keep a window of
+enslop-window-chars characters on each side of OFFSET and mark the cut
+points with elision markers."
+  (setq offset (max 0 (min (length text) offset)))
+  (if (<= (length text) enslop-max-context-chars)
+      (concat (substring text 0 offset) "<CURSOR>" (substring text offset))
+     (let* ((w enslop-window-chars)
+            (bs (max 0 (- offset w)))
+            (be (min (length text) (+ offset w)))
+            (win (substring text bs be))
+            (co (- offset bs)))
+       (concat
+        (when (> bs 0) (format "...[%d characters elided]...\n" bs))
+        (substring win 0 co)
+        "<CURSOR>"
+        (substring win co)
+        (when (> (- (length text) be) 0)
+          (format "\n...[%d characters elided]..." (- (length text) be)))))))
+#+end_src
+
+- 276 :: build the document text that goes into an insert prompt.
+  =offset= is 0-based (a string index, not a buffer position).
+- 281 :: clamp =offset= into =[0, length]= so the =substring= calls
+  below can never run past the string ends.
+- 282–283 :: small text: send it all, with =<CURSOR>= spliced in at
+  =offset=.
+- 284–288 :: big text: window it. =bs=/=be= are the window bounds,
+  clamped to the string; =win= is the window; =co= is the cursor offset
+  *inside* the window.
+- 289–295 :: concatenate: a leading elision note (only if something was
+  cut before), the window up to the cursor, =<CURSOR>=, the rest of the
+  window, a trailing elision note. =when= contributes nothing (no
+  =concat= element) when its test fails.
+
+#+begin_src elisp
+(defun enslop--chunk-split (text size)
+  "Split TEXT into consecutive chunks of at most SIZE characters."
+  (let* ((chunks nil) (i 0) (n (length text)))
+    (while (< i n)
+      (push (substring text i (min n (+ i size))) chunks)
+      (setq i (min n (+ i size))))
+    (nreverse chunks)))
+#+end_src
+
+- 299 :: =i= is the running 0-based start index.
+- 300–302 :: cut slices of up to =size=; =min n ...= makes the last
+  slice shorter instead of running past the end. =push= builds the list
+  in reverse order,
+- 303 :: so =nreverse= restores the original chunk order.
+
+** Job: insert at cursor (307–391)
+
+#+begin_src elisp
+(defun enslop-insert-at-cursor ()
+  "Queue a request to insert LLM text at the cursor.
+If a region is active, only that region is sent as context and the text
+is inserted relative to the region (start: TEXT+newline before it, end:
+newline+TEXT after it, middle: newline+TEXT+newline at the point).
+Without a region, the whole buffer is sent as context and the text is
+inserted raw at the cursor.  See refine.org for details."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (region (enslop--current-region))
+         (pt (point)))
+    (if region
+        (let* ((s (car region)) (e (cdr region)))
+          (enslop-enqueue
+           (list 'insert :buffer buf :region (cons s e)
+                 :offset (- pt s)
+                 :anchor (buffer-substring-no-properties s e)
+                 :orig s :selected t)))
+     (let* ((from (min pt (max (point-min) (- pt enslop-anchor-chars))))
+           (to (max pt (min (point-max) (+ pt enslop-anchor-chars)))))
+       (enslop-enqueue
+        (list 'insert :buffer buf
+              :region (cons (point-min) (point-max))
+              :offset (- pt (point-min))
+              :anchor (cons (buffer-substring-no-properties from pt)
+                            (buffer-substring-no-properties pt to))
+              :orig pt :selected nil))))
+    (message "enslop: queued insert-at-cursor")))
+#+end_src
+
+- 314 :: =interactive= makes this a key command (=C-c e i=).
+- 315–317 :: capture everything needed *now*: the buffer, the active
+  region (or =nil=), and the point.
+- 318–324 :: **region selected.** The job remembers the region as text
+  (=anchor=), its start (=orig=), and the cursor's offset inside the
+  region (=pt - s=, 0-based). At run time the text is re-found and the
+  offset reapplied. =:selected t= marks this branch.
+- 325–326 :: **no region.** Capture up to =enslop-anchor-chars= of text
+  on each side of the cursor. The =max=/=min= with =point-min=/=point-max=
+  clamp the range to the buffer when the cursor is near an end.
+- 327–333 :: the job carries the whole buffer as its nominal =:region=
+  (unused for context — the context is rebuilt at run time) and the
+  seam as =(BEFORE . AFTER)= in =:anchor=. =:selected nil= marks this
+  branch.
+- 334 :: echo-area confirmation.
+
+#+begin_src elisp
+(defun enslop--run-insert (p)
+  "Execute an insert job."
+  (let* ((buf (enslop--live-buffer p)))
+    (if (null buf)
+        (enslop--skip "insert: buffer no longer exists")
+      (with-current-buffer buf
+        (let* ((region (plist-get p :region))
+              (offset (plist-get p :offset))
+              (anchor (plist-get p :anchor))
+              (orig (plist-get p :orig)))
+          (if (plist-get p :selected)
+              (let* ((pos (enslop--find-text-at anchor orig)))
+                (if (null pos)
+                    (enslop--skip
+                     "insert: highlighted region not found (modified by an earlier job?)")
+                  (let* ((len (length anchor))
+                        (off (max 0 (min len offset)))
+                        ins)
+                    (cond
+                     ((<= offset 0) (setq ins pos))
+                     ((>= offset len) (setq ins (+ pos len)))
+                     (t (setq ins (+ pos off))))
+                     (enslop--insert-llm
+                      buf ins (cons pos (+ pos len))
+                      (enslop--marker-context anchor off)
+                      enslop-insert-instruction))))
+             (let* ((pos (enslop--find-insert-point (car anchor) (cdr anchor) orig))
+                    (ctx (buffer-substring-no-properties (point-min) (point-max))))
+               (if (null pos)
+                   (enslop--skip
+                    "insert: cursor anchor not found (modified by an earlier job?)")
+                 (enslop--insert-llm
+                  buf pos nil
+                  (enslop--marker-context ctx (- pos (point-min)))
+                  enslop-insert-instruction)))))))))
+#+end_src
+
+- 338 :: if the buffer was killed while the job waited, skip.
+- 342–345 :: unpack the job plist.
+- 346–361 :: **selected-region branch.**
+  - 347 :: re-find the region text near where it was (=orig=).
+  - 348–350 :: not found — the region was edited away. Skip.
+  - 351 :: =len= — region length.
+  - 352 :: =off= — the remembered cursor offset, clamped into the
+    region in case the region text changed length.
+  - 354–357 :: compute =ins=, the insertion position: at the region
+    start (offset 0), at the end (offset = length), or =off= inside.
+  - 358–361 :: ask the LLM. Context is the region text with
+    =<CURSOR>= at =off=. The region, as re-found positions
+    =(cons pos (+ pos len))=, is passed so the apply step can place
+    newlines correctly.
+- 362–370 :: **bare-cursor branch.**
+  - 362 :: re-find the seam; =car anchor= is =before=, =cdr anchor= is
+    =after=.
+  - 363 :: context is the *whole buffer as it is now* (the buffer may
+    have grown since enqueue).
+  - 364–366 :: seam destroyed — skip.
+  - 367–370 :: ask the LLM. The marker offset is =- pos (point-min)=:
+    =pos= is a buffer position (1-based), the marker needs a string
+    index (0-based).
+
+#+begin_src elisp
+(defun enslop--insert-llm (buf ins-pos region context instruction)
+  "Ask the LLM for insert text and apply it to BUF at INS-POS."
+  (funcall enslop-llm-function
+   (list (cons "system" enslop--insert-system)
+         (cons "user" (format "Task: %s\n\nDocument:\n%s" instruction context)))
+   (lambda (content err)
+      (if (null content)
+          (enslop--skip (format "insert: LLM error: %s" err))
+        (let* ((text (enslop--trim-trailing content)))
+          (with-current-buffer buf
+            (save-excursion
+              (goto-char ins-pos)
+             (cond
+              ((null region) (insert text))
+              ((= ins-pos (car region)) (insert text "\n"))
+              ((= ins-pos (cdr region)) (insert "\n" text))
+              (t (insert "\n" text "\n"))))
+          (enslop-log "insert: inserted %d chars at %d in %s"
+                      (length text) ins-pos (buffer-name buf))
+          (enslop--job-done))))))
+#+end_src
+
+- 372 :: shared apply step. =ins-pos= is where the text goes; =region=
+  is the re-found region or =nil=; =context= is the marked document.
+- 374 :: call the pluggable LLM client with the messages
+  (375–376: a =system= and a =user= pair) and the callback.
+- 377 :: the callback runs later, when the reply arrives.
+- 378–379 :: =nil= content means the request failed: skip with the
+  error text.
+- 380 :: keep leading whitespace, drop trailing (see
+  =enslop--trim-trailing=).
+- 382–383 :: go to the insertion point in the target buffer;
+  =save-excursion= restores the user's point afterwards.
+- 384–388 :: newline placement, from the region's edge:
+  - no region: raw insert (the text continues the current line);
+  - at region start: =TEXT= then a newline (new block before the
+    region);
+  - at region end: a newline then =TEXT= (new block after it);
+  - strictly inside: newlines on both sides.
+- 389–390 :: log what was done.
+- 391 :: release the queue slot, which pulls the next job.
+
+** Job: improve (395–550)
+
+#+begin_src elisp
+(defun enslop-improve-at-cursor ()
+  "Queue a request to improve the active region (or the whole buffer).
+The user is asked for instructions in the *enslop-prompt* side window.
+The LLM may either replace the region or rewrite the whole buffer; see
+refine.org for the response protocol."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (region (enslop--current-region))
+         (r (or region (cons (point-min) (point-max))))
+         (region-text (buffer-substring-no-properties (car r) (cdr r))))
+    (enslop-prompt
+     (lambda (instructions)
+       (enslop-enqueue
+        (list 'improve :buffer buf :region r
+              :region-text region-text
+              :instructions instructions
+              :whole (null region)))
+       (message "enslop: queued improve")))))
+#+end_src
+
+- 403 :: no region means "improve the whole buffer": =r= becomes the
+  full extent.
+- 404 :: capture the region text *now* — this is the anchor.
+- 405–406 :: open the prompt window; its =continue= function is the
+  lambda below, run only when the user submits.
+- 407–411 :: on submit, enqueue the job. =:whole= is true exactly when
+  there was no region; whole-buffer jobs skip anchor re-finding (the
+  whole buffer is the anchor by definition).
+
+#+begin_src elisp
+(defun enslop-queue-improve (buf region instructions)
+  "Queue an improve job for REGION (a cons of start and end) in BUF.
+Programmatic entry point (also used by tests); the region is captured
+now, at call time."
+  (enslop-enqueue
+   (list 'improve :buffer buf :region region
+         :region-text (with-current-buffer buf
+                        (buffer-substring-no-properties (car region) (cdr region)))
+         :instructions instructions
+         :whole (and (= (car region) (with-current-buffer buf (point-min)))
+                     (= (cdr region) (with-current-buffer buf (point-max)))))))
+#+end_src
+
+- 414 :: the same job, built without the prompt window (tests and
+  other code call this directly).
+- 420–421 :: anchor = the region text, read from =buf=.
+- 423–424 :: =:whole= when the region covers the entire buffer.
+
+#+begin_src elisp
+(defun enslop--run-improve (p)
+  "Execute an improve job."
+  (let* ((buf (enslop--live-buffer p)))
+    (if (null buf)
+        (enslop--skip "improve: buffer no longer exists")
+      (with-current-buffer buf
+        (let* ((region (plist-get p :region))
+              (s (car region)) (e (cdr region))
+              (anchor (plist-get p :region-text))
+              (instructions (plist-get p :instructions)))
+          (cond
+           ((plist-get p :whole)
+            (enslop--improve-range buf (point-min) (point-max) instructions))
+           ((string= anchor "")
+            (enslop--skip "improve: empty region"))
+           (t
+            (let* ((pos (enslop--find-text-at anchor s)))
+              (if (null pos)
+                  (enslop--skip
+                   "improve: region not found (modified by an earlier job?)")
+                (enslop--improve-range buf pos (+ pos (length anchor))
+                                       instructions))))))))))
+#+end_src
+
+- 436–438 :: whole-buffer job: improve the current full extent. Note it
+  uses *current* =point-min=/=point-max=, not the remembered ones.
+- 439–440 :: an empty region has nothing to improve.
+- 442 :: re-find the region text near its old start (=s=).
+- 443–445 :: edited away — skip.
+- 446 :: improve the re-found range: =pos= to =pos + anchor length=.
+  The remembered =s=/=e= are deliberately not used.
+
+#+begin_src elisp
+(defun enslop--improve-range (buf s e instructions)
+  "Improve BUF's range S..E according to INSTRUCTIONS."
+  (let* ((text (buffer-substring-no-properties s e))
+         (buf-size (buffer-size buf)))
+    (cond
+      ((> (length text) enslop-max-context-chars)
+       (enslop--improve-chunk-loop
+        buf s e (enslop--chunk-split text enslop-max-context-chars)
+        nil instructions))
+      ((<= buf-size enslop-max-context-chars)
+       (funcall enslop-llm-function
+        (enslop--improve-whole-messages buf s e instructions)
+        (lambda (content err)
+          (if (null content)
+              (enslop--skip (format "improve: LLM error: %s" err))
+            (let* ((parsed (enslop-parse-improve (enslop--clean content))))
+              (if (eq (car parsed) 'buffer)
+                  (progn
+                    (enslop--replace-buffer buf (cdr parsed))
+                    (enslop-log "improve: replaced whole buffer of %s"
+                                (buffer-name buf)))
+                (enslop--replace-range buf s e (cdr parsed))
+                (enslop-log "improve: replaced region in %s"
+                            (buffer-name buf)))
+              (enslop--job-done))))))
+      (t
+       (funcall enslop-llm-function
+        (enslop--improve-local-messages buf s e instructions)
+        (lambda (content err)
+          (if (null content)
+              (enslop--skip (format "improve: LLM error: %s" err))
+            (let* ((parsed (enslop-parse-improve (enslop--clean content))))
+              (if (eq (car parsed) 'buffer)
+                  (progn
+                    (enslop--replace-buffer buf (cdr parsed))
+                    (enslop-log "improve: LLM chose full-buffer rewrite (best effort) in %s"
+                                (buffer-name buf)))
+                (enslop--replace-range buf s e (cdr parsed))
+                (enslop-log "improve: replaced region in %s" (buffer-name buf)))
+              (enslop--job-done)))))))))
+#+end_src
+
+- 451 :: the region text as it is now.
+- 452 :: the buffer size, to pick a strategy.
+- 453–457 :: **strategy 1 — the region alone exceeds the budget.**
+  Split it into chunks of at most =enslop-max-context-chars= and run
+  the chunk loop (490).
+- 458–473 :: **strategy 2 — the whole buffer fits.** Send the entire
+  buffer with the region marked by =<region>...</region>= tags
+  (=enslop--improve-whole-messages=), so the model may answer either
+  =<<<REGION>>>= or =<<<BUFFER>>>=.
+  - 464 :: parse the tagged reply into =(type . content)=.
+  - 465–469 :: =type= is =buffer=: the model chose a full rewrite —
+    replace everything.
+  - 470–472 :: otherwise replace only =s..e=.
+  - 473 :: release the slot.
+- 474–488 :: **strategy 3 — the buffer is too big but the region
+  fits.** Send the region plus 500 characters of surrounding context
+  (=enslop--improve-local-messages=). The prompt forbids
+  =<<<BUFFER>>>= replies, but if one arrives it is applied as a best
+  effort (481–485). Same parse/replace structure as strategy 2.
+
+#+begin_src elisp
+(defun enslop--improve-chunk-loop (buf s e chunks results instructions)
+  "Improve CHUNKS sequentially; RESULTS collects improved chunks (last first).
+When all chunks are done, S..E is replaced once with their concatenation,
+so intermediate length changes never shift pending chunk ranges."
+  (if (null chunks)
+      (progn
+        (enslop--replace-range buf s e (apply #'concat (nreverse results)))
+        (enslop-log "improve: all chunks done in %s" (buffer-name buf))
+        (enslop--job-done))
+    (let* ((chunk (car chunks)))
+      (funcall enslop-llm-function
+       (enslop--improve-chunk-messages chunk instructions)
+       (lambda (content err)
+         (if (null content)
+             (enslop--skip
+              (format "improve: chunk failed: %s (remaining chunks aborted)" err))
+           (let* ((parsed (enslop-parse-improve (enslop--clean content))))
+             (if (eq (car parsed) 'buffer)
+                 (progn
+                  (enslop--replace-buffer buf (cdr parsed))
+                  (enslop-log "improve: LLM chose full-buffer rewrite, chunking aborted")
+                  (enslop--job-done))
+               (enslop--improve-chunk-loop
+                buf s e (cdr chunks)
+                (nconc (list (cdr parsed)) results)
+                instructions)))))))))
+#+end_src
+
+- 490 :: recursion over the chunk list. =results= collects the improved
+  chunks, newest first (see 514).
+- 494–498 :: **base case** — no chunks left: replace the *original*
+  =s..e= range exactly once with the concatenation of all improved
+  chunks (=nreverse= restores order, =apply #'concat= joins them).
+  Replacing at the end — not after each chunk — is what keeps later
+  chunk ranges valid: the buffer is untouched while the loop runs.
+- 499–501 :: **step** — send the first remaining chunk.
+- 503–505 :: a failed chunk aborts the rest (a partial improvement
+  would silently drop content).
+- 507–511 :: if the model answered =<<<BUFFER>>>=, take it as a full
+  rewrite and stop chunking.
+- 512–515 :: otherwise recurse: one fewer chunk, and =nconc (list ...)=
+  prepends the improved chunk to =results=.
+
+#+begin_src elisp
+(defun enslop--improve-whole-messages (buf s e instructions)
+  "Messages for improving a region when the whole buffer fits in context."
+  (let* ((whole (buffer-substring-no-properties (point-min) (point-max)))
+         (s0 (- s (point-min)))
+         (e0 (- e (point-min)))
+         (ctx (concat (substring whole 0 s0)
+                      "<region>"
+                      (substring whole s0 e0)
+                      "</region>"
+                      (substring whole e0))))
+    (list (cons "system" enslop--improve-system)
+          (cons "user" (format "Instructions: %s\n\nDocument:\n%s"
+                               instructions ctx)))))
+#+end_src
+
+- 519 :: the buffer as one string.
+- 520–521 :: =s=/=e= are buffer positions (1-based); =substring= needs
+  0-based string indices, so subtract =point-min=.
+- 522–526 :: splice the region tags around the region's slice.
+- 527–529 :: the two messages: the standard improve system prompt, and
+  the instructions plus the marked document.
+
+#+begin_src elisp
+(defun enslop--improve-local-messages (buf s e instructions)
+  "Messages for improving a region when only the region fits in context."
+  (list (cons "system"
+              (concat enslop--improve-system
+                      "\nThe document is too large to send in full, so only the region and a little surrounding context are provided. You MUST respond with <<<REGION>>> only."))
+        (cons "user"
+              (format "Instructions: %s\n\n%s<region>\n%s\n</region>%s"
+                      instructions
+                      (buffer-substring-no-properties (max (point-min) (- s 500)) s)
+                      (buffer-substring-no-properties s e)
+                      (buffer-substring-no-properties e (min (point-max) (+ e 500)))))))
+#+end_src
+
+- 533–535 :: extend the system prompt: only =<<<REGION>>>= replies are
+  allowed here, because the model never saw the rest of the document.
+- 537–541 :: the user message is four pieces: instructions, up to 500
+  characters *before* the region (=max (point-min) ...= stops the read
+  running past the buffer start), the region, and up to 500 characters
+  *after* (=min (point-max) ...=).
+
+#+begin_src elisp
+(defun enslop--improve-chunk-messages (chunk instructions)
+  "Messages for improving one chunk of a too-large region."
+  (list (cons "system"
+              (concat enslop--improve-system
+                      "\nThe region is too large to send in full, so it is processed chunk by chunk. You MUST respond with <<<REGION>>> containing the improved chunk only."))
+        (cons "user"
+              (format "Instructions: %s\n\n<region-chunk>\n%s\n</region-chunk>"
+                      instructions chunk))))
+#+end_src
+
+- 543 :: one chunk at a time; the reply must be the improved chunk only,
+  tagged =<<<REGION>>>=. The chunks are concatenated afterwards (496).
+
+** Response parsing and replacement (552–574)
+
+#+begin_src elisp
+(defun enslop-parse-improve (text)
+  "Parse an improve response into (TYPE . CONTENT).
+TYPE is region or buffer; untagged replies are treated as region."
+  (let* ((str (enslop--clean text)))
+    (cond
+     ((string-prefix-p "<<<BUFFER>>>" str)
+      (cons 'buffer (enslop--clean (substring str (length "<<<BUFFER>>>")))))
+     ((string-prefix-p "<<<REGION>>>" str)
+      (cons 'region (enslop--clean (substring str (length "<<<REGION>>>")))))
+     (t (cons 'region str))))
+#+end_src
+
+- 555 :: trim the reply first so stray leading whitespace cannot hide
+  a tag.
+- 557–558 :: reply starts with =<<<BUFFER>>>=: type =buffer=, content
+  is everything past the tag (=length "<<<BUFFER>>>"= is the tag's
+  length), trimmed again.
+- 559–560 :: same for =<<<REGION>>>=.
+- 561 :: no tag: be lenient, treat the whole reply as the region
+  replacement.
+
+#+begin_src elisp
+(defun enslop--replace-range (buf s e text)
+  "Replace BUF's range S..E with TEXT."
+  (with-current-buffer buf
+    (delete-region s e)
+    (goto-char s)
+    (insert text)))
+#+end_src
+
+- 566 :: delete the old range. This shifts everything after it left,
+- 567 :: so point (and thus the next =insert=) must be moved back to
+  =s= before inserting the replacement.
+
+#+begin_src elisp
+(defun enslop--replace-buffer (buf text)
+  "Replace the entire content of BUF with TEXT."
+  (with-current-buffer buf
+    (delete-region (point-min) (point-max))
+    (insert text)))
+#+end_src
+
+- 573–574 :: the whole-buffer variant: delete everything, insert the
+  new content.
+
+** Job: summarize (578–671)
+
+#+begin_src elisp
+(defun enslop-summarize ()
+  "Queue a request to summarize the active region (or the whole buffer).
+The summary is appended to the *enslop-summary* buffer; the source
+buffer is never modified."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (region (enslop--current-region))
+         (r (or region (cons (point-min) (point-max))))
+         (region-text (buffer-substring-no-properties (car r) (cdr r))))
+    (enslop-enqueue
+     (list 'summarize :buffer buf :region r
+           :region-text region-text
+           :whole (null region)))
+    (message "enslop: queued summarize")))
+#+end_src
+
+- 582–591 :: like =enslop-improve-at-cursor= but with no prompt window:
+  the job is enqueued immediately. =r= falls back to the whole buffer.
+  The source buffer is read-only for this job type.
+
+#+begin_src elisp
+(defun enslop--run-summarize (p)
+  "Execute a summarize job."
+  (let* ((buf (enslop--live-buffer p)))
+    (if (null buf)
+        (enslop--skip "summarize: buffer no longer exists")
+      (with-current-buffer buf
+        (let* ((region (plist-get p :region))
+              (s (car region)) (e (cdr region))
+              (anchor (plist-get p :region-text)))
+          (cond
+           ((plist-get p :whole)
+            (enslop--summarize-range buf (point-min) (point-max) "whole buffer"))
+           ((string= anchor "")
+            (enslop--skip "summarize: empty region"))
+           (t
+            (let* ((pos (enslop--find-text-at anchor s)))
+              (if (null pos)
+                  (enslop--skip
+                   "summarize: region not found (modified by an earlier job?)")
+                (enslop--summarize-range buf pos (+ pos (length anchor))
+                                         "region"))))))))))
+#+end_src
+
+- 593–613 :: the same anchor logic as =enslop--run-improve= (426),
+  feeding =enslop--summarize-range= instead. =label= ("whole buffer" or
+  "region") is only for the summary buffer's header.
+
+#+begin_src elisp
+(defun enslop--summarize-range (buf s e label)
+  "Summarize BUF's range S..E and record the result."
+  (let* ((text (buffer-substring-no-properties s e))
+         (name (buffer-name buf)))
+    (if (<= (length text) enslop-max-context-chars)
+        (funcall enslop-llm-function
+         (enslop--summarize-messages text nil)
+         (lambda (content err)
+           (if (null content)
+               (enslop--skip (format "summarize: LLM error: %s" err))
+             (enslop--record-summary name label (enslop--clean content))
+             (enslop--job-done))))
+     (enslop--summarize-chunk-loop name label
+                                   (enslop--chunk-split text enslop-max-context-chars)
+                                   nil))))
+#+end_src
+
+- 617 :: the text to summarize.
+- 618 :: the buffer name, for the record header.
+- 619–626 :: fits the budget: one LLM call (=running= summary is
+  =nil=), then record the cleaned reply.
+- 627–629 :: too big: split into chunks and run the rolling-summary
+  loop with an initially empty running summary.
+
+#+begin_src elisp
+(defun enslop--summarize-chunk-loop (name label chunks running)
+  "Sequentially summarize CHUNKS, carrying RUNNING as the running summary."
+  (if (null chunks)
+      (progn
+        (enslop--record-summary name label (enslop--clean running))
+        (enslop--job-done))
+    (let* ((chunk (car chunks)))
+      (funcall enslop-llm-function
+       (enslop--summarize-messages chunk running)
+       (lambda (content err)
+         (if (null content)
+             (progn
+               (enslop-log "summarize: chunk failed (%s), continuing with running summary" err)
+               (enslop--summarize-chunk-loop name label (cdr chunks) running))
+           (enslop--summarize-chunk-loop name label (cdr chunks) content))))))
+#+end_src
+
+- 631 :: the *running summary* pattern: each step summarizes the next
+  chunk together with everything summarized so far, producing an
+  updated summary that carries forward.
+- 633–636 :: no chunks left: record the final running summary.
+- 637–639 :: send the first chunk with the current running summary.
+- 641–644 :: a failed chunk is *not* fatal (unlike improve): log it and
+  continue with the old running summary. A partial summary is still
+  useful; a partial improvement would corrupt text.
+- 645 :: on success, the reply becomes the new running summary and the
+  loop recurses.
+
+#+begin_src elisp
+(defun enslop--summarize-messages (chunk running)
+  "Messages for summarizing CHUNK, given the previous RUNNING summary (or nil)."
+  (if (null running)
+      (list (cons "system"
+                  "You are a summarization assistant. Summarize the given content faithfully and concisely. Respond with only the summary, no preamble, no quotes.")
+            (cons "user"
+                  (format "Summarize the following content (target length about %d characters):\n\n%s"
+                          enslop-summary-chars chunk)))
+     (list (cons "system"
+                 "You are a summarization assistant maintaining a running summary over a stream of content chunks. Given the previous summary and the next chunk, produce an updated summary that faithfully covers everything seen so far. Respond with only the updated summary.")
+           (cons "user"
+                 (format "Previous summary:\n%s\n\nNext content:\n%s\n\nUpdated summary:"
+                         running chunk)))))
+#+end_src
+
+- 649 :: first chunk: plain summarization prompt with the target
+  length (=enslop-summary-chars=) as a hint.
+- 655–659 :: later chunks: update prompt — previous summary plus next
+  chunk in, updated summary out.
+
+#+begin_src elisp
+(defun enslop--record-summary (name label summary)
+  "Append SUMMARY for buffer NAME (LABEL) to *enslop-summary* and show it."
+  (with-current-buffer (get-buffer-create "*enslop-summary*")
+    (goto-char (point-max))
+    (insert (format "=== %s (%s) @ %s ===\n%s\n\n"
+                    name label (format-time-string "%Y-%m-%d %H:%M:%S") summary)))
+  (enslop-log "summarize: recorded summary for %s (%s)" name label)
+  (condition-case nil
+      (display-buffer (get-buffer "*enslop-summary*")
+                      '((display-buffer-in-side-window . (side-position right window-width 0.4))))
+    (error nil)))
+#+end_src
+
+- 663–666 :: append a dated, headed entry to the =*enslop-summary*=
+  buffer.
+- 668 :: also to the log.
+- 668–671 :: try to show the summary in a right side window (40% wide).
+  =condition-case nil= with =(error nil)= swallows any failure — in a
+  headless session there are no windows, and that is fine.
+
+** Prompt window (675–753)
+
+#+begin_src elisp
+(defvar enslop-prompt-mode-map
+  (let* ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'enslop-prompt-submit)
+    (define-key map (kbd "C-c C-k") #'enslop-prompt-cancel)
+    map)
+  "Keymap for the *enslop-prompt* buffer.")
+#+end_src
+
+- 676 :: build a keymap.
+- 677–678 :: bind submit and cancel. =kbd= converts the human
+  description to key codes; =#'f= stores the function value.
+- 679 :: the =let*= returns =map=, which becomes the variable's value.
+
+#+begin_src elisp
+(defvar enslop-prompt-continue nil)
+(make-variable-buffer-local 'enslop-prompt-continue)
+
+(defvar enslop-prompt-prev-window nil)
+(make-variable-buffer-local 'enslop-prompt-prev-window)
+
+(defvar enslop-prompt-header-len 0)
+(make-variable-buffer-local 'enslop-prompt-header-len)
+#+end_src
+
+- 682–689 :: three variables, each made *buffer-local*: every buffer
+  gets its own value, so each prompt buffer can carry its own
+  =continue= function, its own "window to return to", and its own
+  header length. =make-variable-buffer-local= takes the *symbol* of the
+  variable.
+
+#+begin_src elisp
+(defun enslop-prompt-mode ()
+  "Major mode for the *enslop-prompt* buffer."
+  (kill-all-local-variables)
+  (use-local-map enslop-prompt-mode-map)
+  (setq major-mode 'enslop-prompt-mode)
+  (setq mode-name "enslop-prompt"))
+#+end_src
+
+- 691 :: a hand-rolled major mode (no =define-major-mode= needed for a
+  one-off service buffer).
+- 693 :: wipe all buffer-local state, so a reused prompt buffer starts
+  clean.
+- 694 :: install the submit/cancel keymap.
+- 695–696 :: =major-mode= and =mode-name= are conventions Emacs reads
+  to label the buffer.
+
+#+begin_src elisp
+(defun enslop-prompt (continue-fn)
+  "Open the prompt window and run CONTINUE-FN with the entered instructions.
+If *enslop-prompt* already holds a draft, it is reused as-is."
+  (let* ((prev (ignore-errors (selected-window)))
+        (header "How should the text be improved?\n(C-c C-c) submit, (C-c C-k) cancel\n\n")
+        (buf (get-buffer-create "*enslop-prompt*")))
+    (with-current-buffer buf
+      (enslop-prompt-mode)
+      (setq-local enslop-prompt-continue continue-fn)
+      (setq-local enslop-prompt-prev-window prev)
+      (unless (buffer-modified-p)
+        (erase-buffer)
+        (insert header)
+        (setq-local enslop-prompt-header-len (length header))
+        (goto-char (point-max))))
+    (when prev
+      (let* ((win (condition-case nil
+                     (display-buffer buf
+                                     '((display-buffer-in-side-window . (side-position right window-width 0.35))))
+                   (error nil))))
+        (when win (select-window win))))))
+#+end_src
+
+- 701 :: remember the window the user is in, in case there is one
+  (=ignore-errors= covers headless sessions, where selecting a window
+  can fail).
+- 702 :: the header shown above the input area.
+- 704–712 :: prepare the prompt buffer.
+  - 706–707 :: store the =continue= function and the return window as
+    buffer-local values (=setq-local= sets the value for the *current*
+    buffer only).
+  - 708–712 :: if the buffer was never modified, it holds no draft:
+    clear it, insert the header, remember the header's length (submit
+    uses it to strip the header off the input), and put point at the
+    end. A modified buffer is reused as-is — the draft survives.
+- 713–718 :: if there is a real window environment, show the prompt in
+  a right side window (35% wide) and select it. =condition-case nil=
+  swallows display failures; =select-window= runs only if a window was
+  actually created.
+
+#+begin_src elisp
+(defun enslop-prompt-submit ()
+  "Submit the prompt: queue the improve job and close the prompt window."
+  (interactive)
+  (let* ((pb (current-buffer))
+         (text (buffer-string))
+         (prev (buffer-local-value 'enslop-prompt-prev-window pb))
+         (cont (buffer-local-value 'enslop-prompt-continue pb))
+         (win (ignore-errors (selected-window)))
+         (instructions (enslop--clean
+                        (if (> (length text) enslop-prompt-header-len)
+                            (substring text enslop-prompt-header-len)
+                          ""))))
+    (if (string= instructions "")
+        (message "enslop: nothing to submit")
+      (when (and prev (window-live-p prev)) (select-window prev))
+      (when (and (window-live-p win) (> (length (window-list)) 1))
+        (delete-window win))
+      (kill-buffer pb)
+      (funcall cont instructions))))
+#+end_src
+
+- 726 :: the local is deliberately named =pb=, not =buf=: this file
+  uses dynamic scoping, and =cont= (user code) may refer to a free
+  =buf= variable. Naming the local =pb= keeps that lookup from landing
+  on a buffer that is about to be killed.
+- 726–734 :: capture *everything* before destroying anything: the
+  buffer, its full text, the return window, the continue function, the
+  prompt window, and the instructions.
+  - 731–734 :: the instructions are the text *after* the header
+    (=enslop-prompt-header-len=), trimmed. No text past the header
+    means an empty submission.
+- 735–736 :: empty: refuse, keep the buffer for editing.
+- 737 :: go back to the user's window if it still exists.
+- 738–739 :: close the prompt window — but only if another window
+  exists. Deleting the sole window is an error in headless sessions.
+- 740 :: kill the prompt buffer.
+- 741 :: run the captured continue function with the instructions. For
+  improve, that function enqueues the job (405–411).
+
+#+begin_src elisp
+(defun enslop-prompt-cancel ()
+  "Cancel the prompt: close the prompt window without queueing anything."
+  (interactive)
+  (let* ((pb (current-buffer))
+         (prev (buffer-local-value 'enslop-prompt-prev-window pb))
+         (win (ignore-errors (selected-window))))
+    (when (and prev (window-live-p prev)) (select-window prev))
+    (when (and (window-live-p win) (> (length (window-list)) 1))
+      (delete-window win))
+    (kill-buffer pb)
+    (message "enslop: cancelled")))
+#+end_src
+
+- 746–753 :: the same teardown as submit (737–740) minus the continue
+  call, plus a confirmation message.
+
+** Minor mode and key bindings (757–777)
+
+#+begin_src elisp
+(defvar enslop-mode-map
+  (let* ((map (make-sparse-keymap))
+        (prefix (make-sparse-keymap)))
+    (define-key prefix "i" #'enslop-insert-at-cursor)
+    (define-key prefix "p" #'enslop-improve-at-cursor)
+    (define-key prefix "s" #'enslop-summarize)
+    (define-key prefix "l" #'enslop-show-log)
+    (define-key prefix "q" #'enslop-show-queue)
+    (define-key prefix "a" #'enslop-abort-queue)
+    (define-key map (kbd "C-c e") prefix)
+    map)
+   "Prefix map for enslop-mode.
+Prefix C-c e: i insert, p improve, s summarize, l log, q queue, a abort.")
+#+end_src
+
+- 758 :: two keymaps: =prefix= holds the single-letter commands,
+  =map= holds the entry to it.
+- 760–765 :: =C-c e i=, =C-c e p=, =C-c e s=, =C-c e l=, =C-c e q=,
+  =C-c e a=.
+- 766 :: bind the =C-c e= prefix to the sub-keymap: pressing =C-c e=
+  waits for one more key.
+- 767–769 :: the value is =map=; the docstring documents the bindings
+  (=\\{...}= docstring expansions are resolved by C-h f).
+
+#+begin_src elisp
+(define-minor-mode enslop-mode
+  "Minor mode for queueing local LLM requests.
+\\{enslop-mode-map}"
+  :lighter " enslop"
+  :keymap enslop-mode-map)
+
+(define-globalized-minor-mode global-enslop-mode enslop-mode enslop-on-all)
+#+end_src
+
+- 771 :: defines the toggle command =enslop-mode= (on with a positive
+  argument, off with a negative one),
+- 774 :: the mode-line label shown while active,
+- 775 :: and installs the keymap in every buffer where the mode is on.
+- 777 :: adds =global-enslop-mode= (turn the mode on for all existing
+  and future buffers) and =enslop-on-all= (the function applied to each
+  new buffer).
+
+** Utility commands (781–800)
+
+#+begin_src elisp
+(defun enslop-show-log ()
+  "Show the enslop request log."
+  (interactive)
+  (let* ((buf (get-buffer-create enslop-log-buffer-name)))
+    (switch-to-buffer buf)))
+#+end_src
+
+- 784–785 :: create the log buffer if needed and show it in the current
+  window.
+
+#+begin_src elisp
+(defun enslop-show-queue ()
+  "Show the current queue status."
+  (interactive)
+  (message "enslop: %d job(s) queued, %s"
+           (length enslop-queue)
+           (if enslop-running "processing" "idle")))
+#+end_src
+
+- 790–792 :: one echo-area line: how many jobs wait, and whether the
+  queue is mid-job.
+
+#+begin_src elisp
+(defun enslop-abort-queue ()
+  "Clear the queue.  A job already in flight finishes and is applied."
+  (interactive)
+  (setq enslop-queue nil)
+  (message "enslop: queue cleared"))
+#+end_src
+
+- 797 :: drop all *pending* jobs. The job currently running was already
+  =pop=ed off the list (156), so it finishes and is applied; only the
+  waiters are discarded.
+
+#+begin_src elisp
+(provide 'enslop)
+#+end_src
+
+- 800 :: declare that this file provides the =enslop= feature, so
+  =(require 'enslop)= in other files works.
