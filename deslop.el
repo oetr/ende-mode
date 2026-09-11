@@ -161,7 +161,10 @@ anchors remain stationary for edits made directly by the user."
           (deslop--advance-queued-anchors
            buffer insertion-start insertion-end)
           (when (and review-start review-end (< review-start review-end))
-            (deslop-ui-create-review-overlay buffer review-start review-end))
+            (deslop-ui-create-review-overlay
+             buffer review-start review-end
+             (plist-get (deslop-job-profile job) :model)
+             (deslop-provider-client-name (deslop-job-profile job))))
           (deslop--job-event
            job (list :type :done :result result
                      :content (deslop--result-content result)))
@@ -322,7 +325,10 @@ anchors remain stationary for edits made directly by the user."
                                   (insert content)
                                   (setq review-end (point))))
                               (deslop-ui-create-review-overlay
-                               buffer review-start review-end)
+                               buffer review-start review-end
+                               (plist-get (deslop-job-profile job) :model)
+                               (deslop-provider-client-name
+                                (deslop-job-profile job)))
                               (deslop--job-event
                                job (list :type :done :result result
                                          :content content))
@@ -392,7 +398,10 @@ anchors remain stationary for edits made directly by the user."
                                 (insert content)
                                 (setq review-end (point)))
                               (deslop-ui-create-review-overlay
-                               review-buffer review-start review-end)
+                               review-buffer review-start review-end
+                               (plist-get (deslop-job-profile job) :model)
+                               (deslop-provider-client-name
+                                (deslop-job-profile job)))
                               (deslop--job-event
                                job (list :type :done :result result
                                          :content content))

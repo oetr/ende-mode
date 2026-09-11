@@ -217,19 +217,44 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" generated"))))
+  (let ((deslop-model "test-model")
+        (deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (let ((review (cl-find-if
+      (let* ((job (deslop-insert-at-cursor))
+             (queued-overlay (deslop-job-overlay job)))
+        (should (string-match-p
+                 "test-model"
+                 (substring-no-properties
+                  (or (overlay-get queued-overlay 'before-string)
+                      (overlay-get queued-overlay 'after-string)
+                      ""))))
+        (should (string-match-p
+                 "localhost"
+                 (substring-no-properties
+                  (or (overlay-get queued-overlay 'before-string)
+                      (overlay-get queued-overlay 'after-string)
+                      ""))))
+        (deslop-test--complete-call (car deslop-test--calls))
+        (let ((review (cl-find-if
                      #'deslop-ui-review-overlay-p
                      (overlays-in (point-min) (point-max)))))
-        (should review)
-        (goto-char (1+ (overlay-start review)))
-        (insert "edited ")
-        (should (deslop-ui-review-overlay-p review))
-        (deslop-approve-output)
-        (should-not (deslop-ui-review-overlay-p review))))))
+          (should review)
+          (should (string= (overlay-get review 'model) "test-model"))
+          (should (string= (overlay-get review 'client) "localhost"))
+          (should (string-match-p
+                   "test-model"
+                   (substring-no-properties
+                    (overlay-get review 'before-string))))
+          (should (string-match-p
+                   "localhost"
+                   (substring-no-properties
+                    (overlay-get review 'before-string))))
+          (goto-char (1+ (overlay-start review)))
+          (insert "edited ")
+          (should (deslop-ui-review-overlay-p review))
+          (deslop-approve-output)
+          (should-not (deslop-ui-review-overlay-p review)))))))
 
 ;;;; Queue lifecycle
 
@@ -601,6 +626,17 @@ Return (RESULT ERROR COMMAND)."
             (should-not (member "body" command))
             (should-not (member "--fail-with-body" command)))
         (when (file-exists-p config) (delete-file config))))))
+
+(ert-deftest deslop-test/provider-client-display-names ()
+  (should (string= (deslop-provider-client-name
+                    '(:url "http://localhost:8080/v1"))
+                   "localhost"))
+  (should (string= (deslop-provider-client-name
+                    '(:url "http://192.168.1.20:8080/v1"))
+                   "192.168.1.20"))
+  (should (string= (deslop-provider-client-name
+                    '(:url "https://api.openai.com/v1/chat/completions"))
+                   "OpenAI")))
 
 (ert-deftest deslop-test/history-retains-terminal-result ()
   (deslop-test--reset)

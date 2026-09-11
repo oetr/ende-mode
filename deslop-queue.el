@@ -152,6 +152,11 @@ HANDLER receives one `deslop-job' object."
 Return the newly created `deslop-job'."
   (let ((job (deslop--job-from-request request)))
     (deslop--queue-push job)
+    (when (deslop-job-overlay job)
+      (deslop-ui-update-overlay
+       (deslop-job-overlay job)
+       :client (deslop-provider-client-name (deslop-job-profile job))
+       :model (plist-get (deslop-job-profile job) :model)))
     (deslop-process-next)
     job))
 

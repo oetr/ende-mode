@@ -34,9 +34,16 @@
   (let* ((status (or (overlay-get ov 'status) "Queued"))
          (is-queued (string= status "Queued"))
          (icon (if is-queued "⏳" spinner))
-          (tokens (or (overlay-get ov 'tokens) 0))
-          (speed (overlay-get ov 'speed))
-          (estimated (overlay-get ov 'estimated))
+         (client (overlay-get ov 'client))
+         (model (overlay-get ov 'model))
+         (provider-str
+          (let ((parts (delq nil (list client model))))
+            (if parts
+                (format " %s" (mapconcat #'identity parts " "))
+              "")))
+         (tokens (or (overlay-get ov 'tokens) 0))
+         (speed (overlay-get ov 'speed))
+         (estimated (overlay-get ov 'estimated))
           (metric-str
            (cond
             ((and speed (> speed 0))
@@ -45,8 +52,8 @@
             ((> tokens 0)
              (format " (%s%d tok)" (if estimated "~" "") tokens))
             (t "")))
-         (badge (format " [%s %s%s] " icon status metric-str)))
-      (propertize badge 'face 'deslop-badge-face)))
+         (badge (format " [%s %s%s%s] " icon status provider-str metric-str)))
+    (propertize badge 'face 'deslop-badge-face)))
 
 (defun deslop-ui--put-badge (ov spinner)
   "Place the SPINNER badge on OV's appropriate side.
@@ -99,16 +106,27 @@ range overlays keep their badge before the covered text."
 
 ;;;; Overlay Lifecycle API
 
-(defun deslop-ui-create-review-overlay (buf beg end)
+(defun deslop-ui--format-review-badge (client model)
+  "Return a display-only review badge for CLIENT and MODEL."
+  (let ((parts (delq nil (list client model))))
+    (when parts
+      (propertize (format " [%s] " (mapconcat #'identity parts " "))
+                'face 'deslop-badge-face))))
+
+(defun deslop-ui-create-review-overlay (buf beg end &optional model client)
   "Mark generated text from BEG to END in BUF for later approval.
 Edits inside the marked range remain marked; text inserted immediately before
 or after the range remains outside the review mark."
   (with-current-buffer buf
     (let ((ov (make-overlay beg end buf t nil)))
       (overlay-put ov 'deslop-review t)
+      (overlay-put ov 'client client)
+      (overlay-put ov 'model model)
       (overlay-put ov 'face 'deslop-review-face)
       (overlay-put ov 'priority 1)
       (overlay-put ov 'evaporate t)
+      (overlay-put ov 'before-string
+                   (deslop-ui--format-review-badge client model))
       ov)))
 
 (defun deslop-ui-review-overlay-p (overlay)
@@ -148,6 +166,8 @@ or after the range remains outside the review mark."
         (setq props (cddr props))
         (pcase key
            (:status (overlay-put ov 'status val))
+           (:client (overlay-put ov 'client val))
+           (:model (overlay-put ov 'model val))
            (:tokens (overlay-put ov 'tokens val))
            (:speed  (overlay-put ov 'speed val))
            (:estimated (overlay-put ov 'estimated val)))))

@@ -12,6 +12,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'url-parse)
 
 (defgroup deslop nil
   "Local-LLM text assistance: insert at cursor, improve, summarize."
@@ -108,7 +109,7 @@ Tokens are estimated as chars/4."
   :group 'deslop)
 
 (defface deslop-review-face
-  '((t :background "#5a4a20"))
+  '((t (:inherit diff-refine-added :extend t)))
   "Face applied to LLM output awaiting user approval."
   :group 'deslop)
 
@@ -172,6 +173,22 @@ entry before it can be dispatched."
     (dolist (key '(:token :api-key :secret :authorization :auth-token))
       (setq snapshot (plist-put snapshot key nil)))
     snapshot))
+
+(defun deslop-provider-client-name (profile)
+  "Return a concise display name for provider PROFILE.
+Known service hosts use friendly names; local hosts and IP addresses retain
+their host spelling, while other providers use their host name."
+  (let* ((url (plist-get profile :url))
+         (parsed (and (stringp url) (url-generic-parse-url url)))
+         (host (and parsed (url-host parsed)))
+         (downcased (and host (downcase host))))
+    (cond
+     ((null host)
+      (format "%s" (or (plist-get profile :name) "provider")))
+     ((string= downcased "openrouter.ai") "OpenRouter")
+     ((string-match-p "\\(?:\\`\\|\\.\\)openai\\.com\\'" downcased)
+      "OpenAI")
+     (t host))))
 
 ;;;; System Prompts
 
