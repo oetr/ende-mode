@@ -56,35 +56,6 @@
              (messages (list (cons "system" deslop-insert-system)
                              (cons "user" (format "Task: %s\n\nDocument:\n%s"
                                                   deslop-insert-instruction context))))
-             (done
-              (lambda (content &optional err)
-                (if (or err (null content))
-                    (deslop--skip (format "insert LLM error: %s" (or err "empty or null content")))
-                  (let ((text (deslop-trim-trailing content)))
-                    (with-current-buffer buf
-                      (save-excursion
-                        (let* ((live-start (if (and (overlayp ov) (overlay-buffer ov))
-                                               (overlay-start ov)
-                                             pos))
-                               (live-end (if (and (overlayp ov) (overlay-buffer ov))
-                                             (overlay-end ov)
-                                           ov-end)))
-                          (cond
-                           ((null selected)
-                            (goto-char live-start)
-                            (insert text))
-                           ((<= offset 0)
-                            (goto-char live-start)
-                            (insert text "\n"))
-                           ((>= offset reg-len)
-                            (goto-char live-end)
-                            (insert "\n" text))
-                           (t
-                            (goto-char (+ live-start clamped-offset))
-                            (insert "\n" text "\n"))))))
-                    (message "deslop: inserted %d chars in %s"
-                             (length text) (buffer-name buf))
-                    (deslop-job-done)))))
              (callbacks
               (list
                :on-start (lambda (proc)
@@ -97,18 +68,38 @@
                            (when ov
                              (deslop-ui-update-overlay ov :tokens tokens :speed speed)))
                :on-done (lambda (content)
-                          (funcall done content nil))
+                          (if (null content)
+                              (deslop--skip "insert: empty or null content")
+                            (let ((text (deslop-trim-trailing content)))
+                              (with-current-buffer buf
+                                (save-excursion
+                                  (let* ((live-start (if (and (overlayp ov) (overlay-buffer ov))
+                                                         (overlay-start ov)
+                                                       pos))
+                                         (live-end (if (and (overlayp ov) (overlay-buffer ov))
+                                                       (overlay-end ov)
+                                                     ov-end)))
+                                    (cond
+                                     ((null selected)
+                                      (goto-char live-start)
+                                      (insert text))
+                                     ((<= offset 0)
+                                      (goto-char live-start)
+                                      (insert text "\n"))
+                                     ((>= offset reg-len)
+                                      (goto-char live-end)
+                                      (insert "\n" text))
+                                     (t
+                                      (goto-char (+ live-start clamped-offset))
+                                      (insert "\n" text "\n"))))))
+                              (message "deslop: inserted %d chars in %s"
+                                       (length text) (buffer-name buf))
+                              (deslop-job-done))))
                :on-error (lambda (err)
-                           (funcall done nil err))))
-             (arity (condition-case nil
-                        (func-arity deslop-llm-function)
-                      (error '(2 . 2))))
-             (max-args (cdr arity)))
+                           (deslop--skip (format "insert LLM error: %s" err))))))
         (when ov
           (deslop-ui-update-overlay ov :status "Thinking"))
-        (if (and (numberp max-args) (<= max-args 2))
-            (funcall deslop-llm-function messages done)
-          (funcall deslop-llm-function messages done callbacks))))))
+        (funcall deslop-llm-function messages callbacks)))))
 
 (deslop-register-job-handler 'insert #'deslop--run-insert)
 

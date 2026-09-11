@@ -19,9 +19,7 @@
 
 (defvar deslop-llm-function #'deslop-llm-default
   "Function used to dispatch requests to the LLM.
-Called with (MESSAGES DONE &optional CALLBACKS OPTIONS) or
-(MESSAGES CALLBACKS &optional OPTIONS).
-DONE is called as (DONE CONTENT ERR).
+Called with (MESSAGES CALLBACKS &optional OPTIONS).
 CALLBACKS is a plist with keys :on-start, :on-status, :on-delta,
 :on-usage, :on-done, and :on-error.")
 
@@ -70,19 +68,17 @@ Returns the updated in-thinking state (t or nil) and the cleaned content string.
 
 ;;;; Client Implementation
 
-(defun deslop-llm-default (messages done-or-callbacks &optional extra-callbacks options)
+(defun deslop-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using curl SSE streaming.
-DONE-OR-CALLBACKS can be either:
-- A callback function (DONE CONTENT &optional ERR) for backward compatibility
-- A callbacks plist with keys :on-start, :on-status, :on-delta,
-  :on-usage, :on-done, :on-error.
-When DONE-OR-CALLBACKS is a function, EXTRA-CALLBACKS can provide
-optional streaming hooks (:on-start, :on-status, :on-usage, :on-delta).
+CALLBACKS is a plist containing:
+  :on-start  (FN PROC)
+  :on-status (FN STATUS-STR)
+  :on-delta  (FN TYPE TEXT)
+  :on-usage  (FN TOKENS SPEED)
+  :on-done   (FN ACCUMULATED-CONTENT)
+  :on-error  (FN ERROR-MSG)
 OPTIONS can override :url, :model, :temperature."
-  (let* ((is-fn (functionp done-or-callbacks))
-         (done-fn (if is-fn done-or-callbacks nil))
-         (callbacks (if is-fn extra-callbacks done-or-callbacks))
-         (url (or (plist-get options :url) deslop-url))
+  (let* ((url (or (plist-get options :url) deslop-url))
          (model (or (plist-get options :model) deslop-model))
          (temp (or (plist-get options :temperature) deslop-temperature))
          (body `((:model . ,model)
@@ -101,16 +97,8 @@ OPTIONS can override :url, :model, :temperature."
          (start-time (float-time))
          (on-start (plist-get callbacks :on-start))
          (on-usage (plist-get callbacks :on-usage))
-         (on-done (lambda (content)
-                    (when (plist-get callbacks :on-done)
-                      (funcall (plist-get callbacks :on-done) content))
-                    (when done-fn
-                      (funcall done-fn content nil))))
-         (on-error (lambda (err)
-                     (when (plist-get callbacks :on-error)
-                       (funcall (plist-get callbacks :on-error) err))
-                     (when done-fn
-                       (funcall done-fn nil err))))
+         (on-done (plist-get callbacks :on-done))
+         (on-error (plist-get callbacks :on-error))
          (proc
           (make-process
            :name "deslop-curl"

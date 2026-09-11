@@ -24,7 +24,7 @@
 (defun deslop-test--fake-llm (responses)
   "Return a mock LLM dispatch function yielding RESPONSES in sequence."
   (setq deslop-test--fake-responses responses)
-  (lambda (messages done &optional callbacks _options)
+  (lambda (messages callbacks &optional _options)
     (push messages deslop-test--prompts)
     (let ((r (if deslop-test--fake-responses
                  (pop deslop-test--fake-responses)
@@ -37,14 +37,10 @@
               (funcall (plist-get callbacks :on-delta) :content r))
             (when (plist-get callbacks :on-usage)
               (funcall (plist-get callbacks :on-usage) 10 50.0))
-            (if (functionp done)
-                (funcall done r nil)
-              (when (plist-get callbacks :on-done)
-                (funcall (plist-get callbacks :on-done) r))))
-        (if (functionp done)
-            (funcall done nil (format "mock error: %S" r))
-          (when (plist-get callbacks :on-error)
-            (funcall (plist-get callbacks :on-error) (format "mock error: %S" r))))))))
+            (when (plist-get callbacks :on-done)
+              (funcall (plist-get callbacks :on-done) r)))
+        (when (plist-get callbacks :on-error)
+          (funcall (plist-get callbacks :on-error) (format "mock error: %S" r)))))))
 
 (defun deslop-test--reset ()
   "Reset all internal state before running tests."
@@ -237,18 +233,6 @@
       (deslop-ui-delete-overlay ov)
       (should (null deslop-ui--managed-overlays))
       (should (null deslop-ui--spinner-timer)))))
-
-(ert-deftest deslop-test/legacy-2arg-llm-function ()
-  "Verify compatibility with legacy 2-argument (messages done) LLM functions."
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (lambda (_messages done)
-           (funcall done "LEGACY" nil))))
-    (with-temp-buffer
-      (insert "hello ")
-      (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (should (string= (buffer-string) "hello LEGACY")))))
 
 (provide 'deslop-test)
 
