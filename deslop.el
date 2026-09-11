@@ -134,13 +134,17 @@ If no region is active, full buffer is sent with a <CURSOR> marker."
 
 ;;;; Keymap and Minor Mode
 
-(defvar deslop-mode-map
+(defun deslop--make-mode-map ()
+  "Build the keymap for `deslop-mode'."
   (let ((map (make-sparse-keymap))
         (prefix (make-sparse-keymap)))
     (define-key prefix "i" #'deslop-insert-at-cursor)
     (define-key prefix "a" #'deslop-abort-queue)
     (define-key map (kbd "C-c e") prefix)
-    map)
+    map))
+
+(defvar deslop-mode-map
+  (deslop--make-mode-map)
   "Keymap for `deslop-mode'.")
 
 ;;;###autoload
@@ -149,7 +153,23 @@ If no region is active, full buffer is sent with a <CURSOR> marker."
   :lighter " deslop"
   :keymap deslop-mode-map)
 
+;;;###autoload
+(defun deslop-reload ()
+  "Abort active jobs and reload all deslop files in dependency order.
+Save all deslop buffers before calling this.
+Note: `defcustom' values you have set (via customize or your init)
+survive reloads by design; reset them to pick up new file defaults."
+  (interactive)
+  (deslop-abort-queue)
+  (let* ((dir (or (file-name-directory (locate-library "deslop.el"))
+                  (user-error "deslop.el not found on load-path")))
+         (files '("deslop-common.el" "deslop-ui.el" "deslop-llm.el"
+                  "deslop-queue.el" "deslop.el")))
+    (dolist (f files)
+      (load (expand-file-name f dir)))
+    (setq deslop-mode-map (deslop--make-mode-map))
+    (message "deslop: reloaded from %s" dir)))
+
 (provide 'deslop)
 
 ;;; deslop.el ends here
-;; Tell me a joke:
