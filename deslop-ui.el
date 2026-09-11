@@ -46,7 +46,19 @@
              (format " (%s%d tok)" (if estimated "~" "") tokens))
             (t "")))
          (badge (format " [%s %s%s] " icon status metric-str)))
-     (propertize badge 'face 'deslop-badge-face)))
+      (propertize badge 'face 'deslop-badge-face)))
+
+(defun deslop-ui--put-badge (ov spinner)
+  "Place the SPINNER badge on OV's appropriate side.
+Zero-width indicators use `after-string' so point can remain before them;
+range overlays keep their badge before the covered text."
+  (let ((badge (deslop-ui--format-badge ov spinner)))
+    (if (= (overlay-start ov) (overlay-end ov))
+        (progn
+          (overlay-put ov 'before-string nil)
+          (overlay-put ov 'after-string badge))
+      (overlay-put ov 'after-string nil)
+      (overlay-put ov 'before-string badge))))
 
 (defun deslop-ui--prune-dead-overlays ()
   "Remove any deleted overlays or overlays on dead buffers."
@@ -70,8 +82,7 @@
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
        (dolist (ov deslop-ui--managed-overlays)
          (unless (string= (or (overlay-get ov 'status) "Queued") "Queued")
-           (overlay-put ov 'before-string
-                        (deslop-ui--format-badge ov spinner)))))))
+           (deslop-ui--put-badge ov spinner))))))
 
 (defun deslop-ui--start-spinner ()
   "Start spinner animation timer if not currently running."
@@ -88,19 +99,42 @@
 
 ;;;; Overlay Lifecycle API
 
+(defun deslop-ui-create-review-overlay (buf beg end)
+  "Mark generated text from BEG to END in BUF for later approval.
+Edits inside the marked range remain marked; text inserted immediately before
+or after the range remains outside the review mark."
+  (with-current-buffer buf
+    (let ((ov (make-overlay beg end buf t nil)))
+      (overlay-put ov 'deslop-review t)
+      (overlay-put ov 'face 'deslop-review-face)
+      (overlay-put ov 'priority 1)
+      (overlay-put ov 'evaporate t)
+      ov)))
+
+(defun deslop-ui-review-overlay-p (overlay)
+  "Return non-nil when OVERLAY marks output awaiting approval."
+  (and (overlayp overlay)
+       (overlay-buffer overlay)
+       (overlay-get overlay 'deslop-review)))
+
+(defun deslop-ui-delete-review-overlay (overlay)
+  "Remove review OVERLAY when it has been approved."
+  (when (deslop-ui-review-overlay-p overlay)
+    (delete-overlay overlay)))
+
 (defun deslop-ui-create-overlay (buf beg end &optional status)
   "Create an indicator overlay in BUF from BEG to END with STATUS."
   (with-current-buffer buf
-    (let* ((empty (= beg end))
-           (ov (make-overlay beg end buf empty empty)))
+    ;; Keep zero-width indicators fixed when text is inserted at their point;
+    ;; Emacs still shifts them when text is inserted before them.
+    (let ((ov (make-overlay beg end buf nil nil)))
       (when (> end beg)
         (overlay-put ov 'face 'deslop-working-face))
       (overlay-put ov 'status (or status "Queued"))
       (overlay-put ov 'tokens 0)
       (overlay-put ov 'speed nil)
       (overlay-put ov 'estimated nil)
-      (overlay-put ov 'before-string
-                   (deslop-ui--format-badge ov (aref deslop-ui--spinner-frames 0)))
+       (deslop-ui--put-badge ov (aref deslop-ui--spinner-frames 0))
       (push ov deslop-ui--managed-overlays)
       (deslop-ui--start-spinner)
       ov)))
@@ -118,7 +152,7 @@
            (:speed  (overlay-put ov 'speed val))
            (:estimated (overlay-put ov 'estimated val)))))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-      (overlay-put ov 'before-string (deslop-ui--format-badge ov spinner)))))
+      (deslop-ui--put-badge ov spinner))))
 
 (defun deslop-ui-delete-overlay (ov)
   "Delete overlay OV and clean up managed tracking."

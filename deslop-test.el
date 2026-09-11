@@ -198,7 +198,9 @@ process for cancellation tests."
       (deslop-test--select 1 9 9)
       (let ((job (deslop-improve-at-cursor "make it better")))
         (should (eq (deslop-job-state job) 'completed))
-        (should (string= (buffer-string) "improved"))))))
+        (should (string= (buffer-string) "improved"))
+        (should (cl-some #'deslop-ui-review-overlay-p
+                         (overlays-in (point-min) (point-max))))))))
 
 (ert-deftest deslop-test/summarize-opens-buffer ()
   (deslop-test--reset)
@@ -208,7 +210,26 @@ process for cancellation tests."
         (should (eq (deslop-job-state job) 'completed))
         (should (string-match-p "short summary"
                                 (with-current-buffer deslop-summary-buffer-name
-                                  (buffer-string))))))))
+                                  (buffer-string))))
+        (with-current-buffer deslop-summary-buffer-name
+          (should (cl-some #'deslop-ui-review-overlay-p
+                           (overlays-in (point-min) (point-max)))))))))
+
+(ert-deftest deslop-test/output-remains-marked-until-approved ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '(" generated"))))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (deslop-insert-at-cursor)
+      (let ((review (cl-find-if
+                     #'deslop-ui-review-overlay-p
+                     (overlays-in (point-min) (point-max)))))
+        (should review)
+        (goto-char (1+ (overlay-start review)))
+        (insert "edited ")
+        (should (deslop-ui-review-overlay-p review))
+        (deslop-approve-output)
+        (should-not (deslop-ui-review-overlay-p review))))))
 
 ;;;; Queue lifecycle
 
@@ -592,6 +613,40 @@ Return (RESULT ERROR COMMAND)."
         (should (string-match-p "result" (buffer-string)))))))
 
 ;;;; Overlay lifecycle
+
+(ert-deftest deslop-test/insert-anchor-does-not-follow-edits-at-point ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let* ((job (deslop-insert-at-cursor))
+             (call (car deslop-test--calls))
+             (overlay (deslop-job-overlay job)))
+        (dotimes (_ 5)
+          (insert "\n"))
+        (should (= (overlay-start overlay) 5))
+        (should (= (deslop--marker-position
+                    (deslop-job-cursor-marker job))
+                   5))
+        (deslop-test--complete-call call)
+        (should (string= (buffer-string) "base X\n\n\n\n\n"))))))
+
+(ert-deftest deslop-test/zero-width-overlay-boundary-behavior ()
+  (deslop-test--reset)
+  (deslop-test--with-buffer "abc"
+    (goto-char (point-max))
+    (let ((ov (deslop-ui-create-overlay (current-buffer) (point) (point)
+                                        "Queued")))
+      (insert "\n")
+      (should (= (overlay-start ov) 4))
+      (should (= (overlay-end ov) 4))
+      (should-not (overlay-get ov 'before-string))
+      (should (overlay-get ov 'after-string))
+      (should (= (point) 5))
+      (goto-char (point-min))
+      (insert "x")
+      (should (= (overlay-start ov) 5))
+      (should (= (overlay-end ov) 5)))))
 
 (ert-deftest deslop-test/overlay-lifecycle ()
   (deslop-test--reset)

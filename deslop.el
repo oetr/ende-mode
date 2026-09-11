@@ -82,12 +82,32 @@
       (signal 'error (list "selected source changed before dispatch")))
     source))
 
+(defun deslop--advance-queued-anchors (buffer position new-position)
+  "Advance pending anchors at POSITION to NEW-POSITION in BUFFER.
+This preserves FIFO ordering for jobs queued at the same location while the
+anchors remain stationary for edits made directly by the user."
+  (dolist (queued-job deslop-queue)
+    (let ((marker (deslop-job-cursor-marker queued-job)))
+      (when (and (markerp marker)
+                 (eq (marker-buffer marker) buffer)
+                 (= (marker-position marker) position))
+        (set-marker marker new-position)
+        (let ((overlay (deslop-job-overlay queued-job)))
+          (when (and (overlayp overlay)
+                     (= (overlay-start overlay) position)
+                     (= (overlay-end overlay) position))
+            (move-overlay overlay new-position new-position buffer)))))))
+
 (defun deslop--apply-insert-result (job result)
   "Apply RESULT for insert JOB atomically and settle JOB."
   (when (deslop-job-current-p job)
     (condition-case failure
         (let ((content (deslop-trim-trailing (or (deslop--result-content result) "")))
-              (buffer (deslop-job-buffer job)))
+              (buffer (deslop-job-buffer job))
+              (insertion-start nil)
+              (insertion-end nil)
+              (review-start nil)
+              (review-end nil))
           (when (string-empty-p content)
             (signal 'error (list "empty completion")))
           (unless (buffer-live-p buffer)
@@ -112,29 +132,44 @@
                 (signal 'error (list "target is outside the current restriction")))
               (when selected
                 (deslop--job-selected-source job start end))
+              (setq insertion-start cursor)
               (atomic-change-group
                 (save-excursion
+                  (goto-char cursor)
                   (pcase (deslop-job-placement job)
                     (:before
-                     (goto-char cursor)
-                     (insert content "\n"))
+                     (setq review-start (point))
+                     (insert content)
+                     (setq review-end (point))
+                     (insert "\n"))
                     (:after
-                     (goto-char cursor)
-                     (insert "\n" content))
+                     (insert "\n")
+                     (setq review-start (point))
+                     (insert content)
+                     (setq review-end (point)))
                     (:inside
-                     (goto-char cursor)
-                     (insert "\n" content "\n"))
+                     (insert "\n")
+                     (setq review-start (point))
+                     (insert content)
+                     (setq review-end (point))
+                     (insert "\n"))
                     (_
-                     (goto-char cursor)
-                     (insert content)))))))
+                     (setq review-start (point))
+                     (insert content)
+                     (setq review-end (point))))
+                  (setq insertion-end (point)))))
+          (deslop--advance-queued-anchors
+           buffer insertion-start insertion-end)
+          (when (and review-start review-end (< review-start review-end))
+            (deslop-ui-create-review-overlay buffer review-start review-end))
           (deslop--job-event
            job (list :type :done :result result
                      :content (deslop--result-content result)))
           (message "deslop: inserted %d chars in %s"
                    (length content) (buffer-name buffer))
-          (deslop-job-finish job result))
+           (deslop-job-finish job result)))
       (error
-         (deslop--job-error job failure)))))
+          (deslop--job-error job failure)))))
 
 (defun deslop--insert-messages (_job context)
   "Build insertion messages for CONTEXT."
@@ -223,7 +258,9 @@
       (let* ((buffer (deslop-job-buffer job))
              (start (deslop--marker-position (deslop-job-start-marker job)))
              (end (deslop--marker-position (deslop-job-end-marker job)))
-             (instruction (deslop-job-get job :instruction)))
+             (instruction (deslop-job-get job :instruction))
+             (review-start nil)
+             (review-end nil))
         (unless (and (buffer-live-p buffer) start end)
           (signal 'error (list "improvement target no longer exists")))
         (with-current-buffer buffer
@@ -281,7 +318,11 @@
                                 (atomic-change-group
                                   (delete-region live-start live-end)
                                   (goto-char live-start)
-                                  (insert content)))
+                                  (setq review-start (point))
+                                  (insert content)
+                                  (setq review-end (point))))
+                              (deslop-ui-create-review-overlay
+                               buffer review-start review-end)
                               (deslop--job-event
                                job (list :type :done :result result
                                          :content content))
@@ -302,7 +343,10 @@
       (let* ((buffer (deslop-job-buffer job))
              (start (deslop--marker-position (deslop-job-start-marker job)))
              (end (deslop--marker-position (deslop-job-end-marker job)))
-             (source nil))
+             (source nil)
+             (review-buffer nil)
+             (review-start nil)
+             (review-end nil))
         (unless (and (buffer-live-p buffer) start end)
           (signal 'error (list "summary target no longer exists")))
         (with-current-buffer buffer
@@ -337,11 +381,18 @@
                               (when (string-empty-p content)
                                 (signal 'error (list "empty summary")))
                               (with-current-buffer
-                                  (get-buffer-create deslop-summary-buffer-name)
+                                  (setq review-buffer
+                                        (get-buffer-create
+                                         deslop-summary-buffer-name))
                                 (goto-char (point-max))
                                 (unless (bobp) (insert "\n\n"))
-                                (insert (format "Summary for %s:\n%s"
-                                                (buffer-name buffer) content)))
+                                (insert (format "Summary for %s:\n"
+                                                (buffer-name buffer)))
+                                (setq review-start (point))
+                                (insert content)
+                                (setq review-end (point)))
+                              (deslop-ui-create-review-overlay
+                               review-buffer review-start review-end)
                               (deslop--job-event
                                job (list :type :done :result result
                                          :content content))
@@ -382,10 +433,10 @@
                      :overlay overlay
                      :start-marker
                      (deslop--make-marker buffer start (and region t))
-                     :end-marker
-                     (deslop--make-marker buffer end nil)
-                     :cursor-marker
-                     (deslop--make-marker buffer point-position t)
+                      :end-marker
+                      (deslop--make-marker buffer end nil)
+                      :cursor-marker
+                      (deslop--make-marker buffer point-position nil)
                      :restriction-beg (point-min)
                      :restriction-end (point-max))))
     (when instruction
@@ -444,6 +495,35 @@ INSTRUCTION describes the desired improvement."
     (let ((job (deslop-enqueue (cons 'summarize data))))
       (message "deslop: queued summarize job %d" (deslop-job-id job))
       job)))
+
+(defun deslop--review-overlays-at-point ()
+  "Return review overlays touching point or the character before it."
+  (let ((positions (delq nil
+                         (list (point)
+                               (and (> (point) (point-min))
+                                    (1- (point)))))))
+    (delete-dups
+     (cl-remove-if-not
+      #'deslop-ui-review-overlay-p
+      (apply #'append (mapcar #'overlays-at positions))))))
+
+(defun deslop-approve-output ()
+  "Approve generated output touching point and remove its review marking.
+With an active region, approve all review overlays intersecting the region."
+  (interactive)
+  (let ((overlays
+         (if (use-region-p)
+             (cl-remove-if-not
+              #'deslop-ui-review-overlay-p
+              (overlays-in (region-beginning) (region-end)))
+           (deslop--review-overlays-at-point))))
+    (unless overlays
+      (user-error "No deslop output awaiting approval here"))
+    (dolist (overlay overlays)
+      (deslop-ui-delete-review-overlay overlay))
+    (message "deslop: approved %d generated region%s"
+             (length overlays)
+             (if (= (length overlays) 1) "" "s"))))
 
 ;;;; Keymap and minor mode
 

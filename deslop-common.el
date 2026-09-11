@@ -107,6 +107,11 @@ Tokens are estimated as chars/4."
   "Face used for deslop progress badges."
   :group 'deslop)
 
+(defface deslop-review-face
+  '((t :background "#5a4a20"))
+  "Face applied to LLM output awaiting user approval."
+  :group 'deslop)
+
 ;;;; Errors and provider profiles
 
 (cl-defstruct (deslop-error (:constructor deslop-error-create))
@@ -263,3 +268,4 @@ points with elision markers."
 (provide 'deslop-common)
 
 ;;; deslop-common.el ends here
+;; 
