@@ -10,6 +10,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'deslop-common)
 
 ;;;; Internal State
@@ -33,17 +34,19 @@
   (let* ((status (or (overlay-get ov 'status) "Queued"))
          (is-queued (string= status "Queued"))
          (icon (if is-queued "⏳" spinner))
-         (tokens (or (overlay-get ov 'tokens) 0))
-         (speed (overlay-get ov 'speed))
-         (metric-str
-          (cond
-           ((and speed (> speed 0))
-            (format " (%d tok, %.1f t/s)" tokens speed))
-           ((> tokens 0)
-            (format " (%d tok)" tokens))
-           (t "")))
+          (tokens (or (overlay-get ov 'tokens) 0))
+          (speed (overlay-get ov 'speed))
+          (estimated (overlay-get ov 'estimated))
+          (metric-str
+           (cond
+            ((and speed (> speed 0))
+             (format " (%s%d tok, %.1f t/s)"
+                     (if estimated "~" "") tokens speed))
+            ((> tokens 0)
+             (format " (%s%d tok)" (if estimated "~" "") tokens))
+            (t "")))
          (badge (format " [%s %s%s] " icon status metric-str)))
-    (propertize badge 'face '(:foreground "#facc15" :weight bold))))
+     (propertize badge 'face 'deslop-badge-face)))
 
 (defun deslop-ui--prune-dead-overlays ()
   "Remove any deleted overlays or overlays on dead buffers."
@@ -57,17 +60,22 @@
 (defun deslop-ui--refresh-all-overlays ()
   "Refresh all active overlays.  Queued items remain static; active items spin."
   (deslop-ui--prune-dead-overlays)
-  (if (null deslop-ui--managed-overlays)
+  (if (null (cl-remove-if-not
+             (lambda (ov)
+               (not (string= (or (overlay-get ov 'status) "Queued") "Queued")))
+             deslop-ui--managed-overlays))
       (deslop-ui--stop-spinner)
     (setq deslop-ui--spinner-index
           (% (1+ deslop-ui--spinner-index) (length deslop-ui--spinner-frames)))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-      (dolist (ov deslop-ui--managed-overlays)
-        (overlay-put ov 'before-string (deslop-ui--format-badge ov spinner))))))
+       (dolist (ov deslop-ui--managed-overlays)
+         (unless (string= (or (overlay-get ov 'status) "Queued") "Queued")
+           (overlay-put ov 'before-string
+                        (deslop-ui--format-badge ov spinner)))))))
 
 (defun deslop-ui--start-spinner ()
   "Start spinner animation timer if not currently running."
-  (unless (timerp deslop-ui--spinner-timer)
+  (unless (or deslop-reduced-motion (timerp deslop-ui--spinner-timer))
     (setq deslop-ui--spinner-index 0)
     (setq deslop-ui--spinner-timer
           (run-with-timer 0 0.1 #'deslop-ui--refresh-all-overlays))))
@@ -90,6 +98,7 @@
       (overlay-put ov 'status (or status "Queued"))
       (overlay-put ov 'tokens 0)
       (overlay-put ov 'speed nil)
+      (overlay-put ov 'estimated nil)
       (overlay-put ov 'before-string
                    (deslop-ui--format-badge ov (aref deslop-ui--spinner-frames 0)))
       (push ov deslop-ui--managed-overlays)
@@ -104,9 +113,10 @@
             (val (cadr props)))
         (setq props (cddr props))
         (pcase key
-          (:status (overlay-put ov 'status val))
-          (:tokens (overlay-put ov 'tokens val))
-          (:speed  (overlay-put ov 'speed val)))))
+           (:status (overlay-put ov 'status val))
+           (:tokens (overlay-put ov 'tokens val))
+           (:speed  (overlay-put ov 'speed val))
+           (:estimated (overlay-put ov 'estimated val)))))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
       (overlay-put ov 'before-string (deslop-ui--format-badge ov spinner)))))
 

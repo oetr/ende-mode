@@ -10,6 +10,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'subr-x)
 
 (defgroup deslop nil
@@ -34,6 +35,29 @@
   :type 'number
   :group 'deslop)
 
+(defcustom deslop-default-provider 'local
+  "Provider profile used for newly queued jobs."
+  :type 'symbol
+  :group 'deslop)
+
+(defcustom deslop-provider-profiles nil
+  "Additional provider profiles keyed by symbol.
+
+Each value is a plist.  Secrets must not be stored here; use auth-source
+fields such as :auth-source-host and :auth-source-user instead."
+  :type 'sexp
+  :group 'deslop)
+
+(defcustom deslop-connect-timeout 10
+  "Maximum seconds to wait while establishing an LLM connection."
+  :type 'number
+  :group 'deslop)
+
+(defcustom deslop-request-timeout 300
+  "Maximum seconds allowed for one LLM request."
+  :type 'number
+  :group 'deslop)
+
 (defcustom deslop-max-context-chars 24000
   "Maximum number of characters sent to the LLM as context.
 Tokens are estimated as chars/4."
@@ -51,12 +75,98 @@ Tokens are estimated as chars/4."
   :type 'string
   :group 'deslop)
 
+(defcustom deslop-history-enabled t
+  "Non-nil when completed jobs are retained in a history buffer."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-buffer-name "*deslop-history*"
+  "Name of the buffer used for retained LLM job history."
+  :type 'string
+  :group 'deslop)
+
+(defcustom deslop-summary-buffer-name "*deslop-summary*"
+  "Name of the buffer used for summaries."
+  :type 'string
+  :group 'deslop)
+
+(defcustom deslop-reduced-motion nil
+  "Non-nil to disable the animated overlay spinner."
+  :type 'boolean
+  :group 'deslop)
+
 ;;;; Faces
 
 (defface deslop-working-face
-  '((t :underline "#38bdf8"))
+  '((t :underline (:color "#38bdf8" :style line)))
   "Face applied to buffer text regions currently being processed by LLM."
   :group 'deslop)
+
+(defface deslop-badge-face
+  '((t :foreground "#facc15" :weight bold))
+  "Face used for deslop progress badges."
+  :group 'deslop)
+
+;;;; Errors and provider profiles
+
+(cl-defstruct (deslop-error (:constructor deslop-error-create))
+  "Structured error passed between the transport and job scheduler."
+  kind message details)
+
+(defun deslop-error-display-message (error)
+  "Return a displayable message for structured or ordinary ERROR."
+  (cond
+   ((deslop-error-p error)
+    (let ((kind (deslop-error-kind error))
+          (message (deslop-error-message error)))
+      (if (and kind (not (string-empty-p message)))
+          (format "%s: %s" kind message)
+        message)))
+   ((stringp error) error)
+   ((and (consp error) (eq (car error) 'error))
+    (error-message-string error))
+   (t (format "%s" error))))
+
+(defun deslop--plist-merge (base overrides)
+  "Return BASE plist with OVERRIDES plist values applied."
+  (let ((result (copy-sequence base))
+        (rest overrides))
+    (while rest
+      (setq result (plist-put result (pop rest) (pop rest))))
+    result))
+
+(defun deslop-provider-profile (&optional name)
+  "Return a non-secret provider profile for NAME.
+
+The legacy URL/model customizations remain the local-provider defaults.
+OpenRouter is available as a profile template and requires an auth-source
+entry before it can be dispatched."
+  (let* ((name (or name deslop-default-provider))
+         (base
+          (pcase name
+            ('openrouter
+             '(:url "https://openrouter.ai/api/v1/chat/completions"
+               :model "openai/gpt-4o-mini"
+               :temperature 0.2
+               :auth-source-host "openrouter.ai"
+               :auth-source-user "deslop"
+               :require-sse t))
+            (_
+             (list :url deslop-url
+                   :model deslop-model
+                   :temperature deslop-temperature
+                   :require-sse t))))
+         (custom (alist-get name deslop-provider-profiles)))
+    (deslop--plist-merge
+     (plist-put (copy-sequence base) :name name)
+     custom)))
+
+(defun deslop-provider-profile-snapshot (&optional name)
+  "Return a detached, non-secret snapshot of provider profile NAME."
+  (let ((snapshot (copy-tree (deslop-provider-profile name))))
+    (dolist (key '(:token :api-key :secret :authorization :auth-token))
+      (setq snapshot (plist-put snapshot key nil)))
+    snapshot))
 
 ;;;; System Prompts
 
@@ -92,6 +202,14 @@ def calculate_total(price, tax):
 Output:
 return price * (1 + tax)"
   "System prompt instructions for cursor completion.")
+
+(defconst deslop-improve-system
+  "You improve text while preserving its intent and useful information. Return ONLY the improved text, without markdown fences or commentary."
+  "System prompt instructions for improving a target region.")
+
+(defconst deslop-summarize-system
+  "You summarize the supplied text accurately and concisely. Return ONLY the summary, without markdown fences or commentary."
+  "System prompt instructions for summarizing a target region.")
 
 ;;;; String & Context Utilities
 
