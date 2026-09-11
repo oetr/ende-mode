@@ -27,8 +27,8 @@
 (defvar deslop--spinner-timer nil)
 
 (defface deslop-working-face
-  '((t :background "#1e293b" :underline "#38bdf8"))
-  "Face applied to buffer text currently being processed by LLM."
+  '((t :underline "#38bdf8"))
+  "Face applied to buffer text regions currently being processed by LLM."
   :group 'deslop)
 
 (defcustom deslop-url "http://localhost:8080/v1/chat/completions"
@@ -116,9 +116,13 @@ string on success, ERR describes the problem on failure.")
 (defun deslop--create-overlay (buf beg end label)
   "Create an indicator overlay in BUF from BEG to END with LABEL."
   (with-current-buffer buf
-    (let* ((ov-end (if (= beg end) (min (point-max) (1+ beg)) end))
-           (ov (make-overlay beg ov-end)))
-      (overlay-put ov 'face 'deslop-working-face)
+    (let ((ov (make-overlay beg end)))
+      ;; Prevent typing from expanding overlay boundaries
+      (overlay-put ov 'insert-in-front-advance nil)
+      (overlay-put ov 'insert-behind-advance nil)
+      ;; Apply text face only if an explicit region is selected
+      (when (> end beg)
+        (overlay-put ov 'face 'deslop-working-face))
       (overlay-put ov 'status label)
       (overlay-put ov 'tokens 0)
       (push ov deslop--managed-overlays)
@@ -132,55 +136,6 @@ string on success, ERR describes the problem on failure.")
     (delete-overlay ov)
     (when (null deslop--managed-overlays)
       (deslop--stop-spinner))))
-
-(defun deslop--pick-closest (candidates)
-  "CANDIDATES is a list of (POS . DIST).
-Return the POS with the smallest DIST, or nil."
-  (let* ((best nil))
-    (dolist (c candidates)
-      (when (or (null best) (< (cdr c) (cdr best)))
-        (setq best c)))
-    (and best (car best))))
-
-(defun deslop--find-string (text start)
-  "Case-sensitively find TEXT in the current buffer at or after START."
-  (let* ((n (length text))
-         (limit (- (point-max) n)))
-    (and (> n 0)
-         (let ((pos start) (found nil))
-           (while (and (null found) (<= pos limit))
-             (when (string= text (buffer-substring-no-properties pos (+ pos n)))
-               (setq found pos))
-             (setq pos (1+ pos)))
-           found))))
-
-(defun deslop--find-text-at (text orig-pos)
-  "Find the occurrence of TEXT closest to ORIG-POS in current buffer."
-  (let* ((cands nil)
-         (s (deslop--find-string text (point-min))))
-    (while s
-      (push (cons s (abs (- s orig-pos))) cands)
-      (setq s (deslop--find-string text (1+ s))))
-    (deslop--pick-closest cands)))
-
-(defun deslop--find-insert-point (before after orig-pos)
-  "Find the insertion position for a (BEFORE . AFTER) cursor anchor."
-  (if (string= after "")
-      (if (string= before "") (point-min) (point-max))
-    (let* ((exact nil) (any nil)
-           (s (deslop--find-string after (point-min))))
-      (while s
-        (let* ((d (abs (- s orig-pos)))
-               (ok (or (string= before "")
-                       (and (>= s (+ (point-min) (length before)))
-                            (string= before
-                                     (buffer-substring-no-properties
-                                      (- s (length before)) s))))))
-          (push (cons s d) any)
-          (when ok (push (cons s d) exact)))
-        (setq s (deslop--find-string after (1+ s))))
-      (let* ((r (deslop--pick-closest exact)))
-        (or r (deslop--pick-closest any))))))
 
 (defun deslop--live-buffer (p)
   "Return the job's buffer if it is still alive, else nil."
@@ -198,10 +153,11 @@ Return the POS with the smallest DIST, or nil."
 
 (defun deslop--trim-trailing (s)
   "Remove trailing whitespace from S, keeping leading whitespace intact."
-  (let* ((end (length s)))
-    (while (and (> end 0) (deslop--whitespacep (aref s (1- end))))
-      (setq end (1- end)))
-    (substring s 0 end)))
+  s)
+  ;; (let* ((end (length s)))
+  ;;   (while (and (> end 0) (deslop--whitespacep (aref s (1- end))))
+  ;;     (setq end (1- end)))
+  ;;   (substring s 0 end)))
 
 (defun deslop--insert-llm (buf ins-pos region context instruction ov)
   "Ask LLM for insert text and apply it to BUF using OV's live position."
@@ -215,7 +171,6 @@ Return the POS with the smallest DIST, or nil."
                  (let* ((text (deslop--trim-trailing content)))
                    (with-current-buffer buf
                      (save-excursion
-                       ;; Read live overlay position at millisecond of insertion
                        (let ((target-pos (if (and (overlayp ov) (overlay-buffer ov))
                                              (overlay-start ov)
                                            ins-pos)))
@@ -287,40 +242,31 @@ Return the POS with the smallest DIST, or nil."
          (format "\n...[%d characters elided]..." (- (length text) be)))))))
 
 (defun deslop--run-insert (p)
-  "Execute an insert job."
+  "Execute an insert job using the overlay's real-time position."
   (let* ((buf (deslop--live-buffer p))
          (ov (plist-get p :overlay)))
     (if (null buf)
         (deslop--skip "insert: buffer no longer exists")
       (with-current-buffer buf
-        (let* ((region (plist-get p :region))
-               (offset (plist-get p :offset))
-               (anchor (plist-get p :anchor))
-               (live-orig (if (and (overlayp ov) (overlay-buffer ov))
-                              (overlay-start ov)
-                            (plist-get p :orig))))
-          (if (plist-get p :selected)
-              (let* ((pos (deslop--find-text-at anchor live-orig)))
-                (unless pos (setq pos live-orig))
-                (let* ((len (length anchor))
-                       (off (max 0 (min len offset)))
-                       ins)
-                  (cond
-                   ((<= offset 0) (setq ins pos))
-                   ((>= offset len) (setq ins (+ pos len)))
-                   (t (setq ins (+ pos off))))
-                  (when (overlayp ov)
-                    (move-overlay ov pos (+ pos len))
-                    (overlay-put ov 'status "Thinking"))
-                  (deslop--insert-llm
-                   buf ins (cons pos (+ pos len))
-                   (deslop--marker-context anchor off)
-                   deslop-insert-instruction ov)))
-            (let* ((pos (deslop--find-insert-point (car anchor) (cdr anchor) live-orig))
-                   (ctx (buffer-substring-no-properties (point-min) (point-max))))
-              (unless pos (setq pos live-orig))
+        (let* ((selected (plist-get p :selected))
+               (pos (if (and (overlayp ov) (overlay-buffer ov))
+                        (overlay-start ov)
+                      (plist-get p :orig))))
+          (if selected
+              (let* ((ov-end (if (and (overlayp ov) (overlay-buffer ov))
+                                 (overlay-end ov)
+                               pos))
+                     (anchor-text (buffer-substring-no-properties pos ov-end))
+                     (off (max 0 (min (length anchor-text) (plist-get p :offset)))))
+                (when (overlayp ov)
+                  (overlay-put ov 'status "Thinking"))
+                (deslop--insert-llm
+                 buf pos (cons pos ov-end)
+                 (deslop--marker-context anchor-text off)
+                 deslop-insert-instruction ov))
+            (let* ((ctx (buffer-substring-no-properties (point-min) (point-max))))
               (when (overlayp ov)
-                (move-overlay ov pos (min (point-max) (1+ pos)))
+                (move-overlay ov pos pos)
                 (overlay-put ov 'status "Thinking"))
               (deslop--insert-llm
                buf pos nil
@@ -368,6 +314,7 @@ Return the POS with the smallest DIST, or nil."
                  (:stream_options . ((:include_usage . t)))))
          (json-data (encode-coding-string (json-encode body) 'utf-8))
          (accumulated-content "")
+         (is-thinking nil)
          (proc-buffer (generate-new-buffer " *deslop-curl*"))
          (target-ov deslop--current-job-overlay))
     (make-process
@@ -408,9 +355,21 @@ Return the POS with the smallest DIST, or nil."
                          (overlay-put target-ov 'tokens (1+ (or (overlay-get target-ov 'tokens) 0))))
                        
                        (when (and content (> (length content) 0))
-                         (overlay-put target-ov 'status "Generating")
-                         (overlay-put target-ov 'tokens (1+ (or (overlay-get target-ov 'tokens) 0)))
-                         (setq accumulated-content (concat accumulated-content content))))))))))))
+                         (cond
+                          ((string-match-p "<think>" content)
+                           (setq is-thinking t)
+                           (overlay-put target-ov 'status "Thinking"))
+                          
+                          ((string-match-p "</think>" content)
+                           (setq is-thinking nil)
+                           (overlay-put target-ov 'status "Generating"))
+                          
+                          (t
+                           (overlay-put target-ov 'tokens (1+ (or (overlay-get target-ov 'tokens) 0)))
+                           (if is-thinking
+                               (overlay-put target-ov 'status "Thinking")
+                             (overlay-put target-ov 'status "Generating")
+                             (setq accumulated-content (concat accumulated-content content)))))))))))))))
      :sentinel
      (lambda (_proc event)
        (when (buffer-live-p proc-buffer)
@@ -461,6 +420,17 @@ def calculate_total(price, tax):
     <CURSOR>
 Output:
 return price * (1 + tax)")
+
+;; What would be a better prompt? Output right here, commented out:
+;; "You are an inline completion engine. Given a document with a <CURSOR>
+;; marker, output only the exact text to insert at the cursor. Output text
+;; verbatim. Do not repeat surrounding text, do not add explanations, do
+;; not use markdown code fences, do not output the <CURSOR> marker, and do
+;; not emit literal backslash-n sequences. Preserve indentation, syntax,
+;; and local style. If the cursor follows a comment marker, continue the
+;; comment without adding another marker. If the cursor is at a natural
+;; boundary, output a single space or the next logical continuation. Never
+;; return an empty string."
 
 (defvar deslop-mode-map
   (let* ((map (make-sparse-keymap))

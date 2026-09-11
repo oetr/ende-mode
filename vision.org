@@ -1,4 +1,4 @@
-#+TITLE: enslop
+#+TITLE: deslop
 
 *Only humans are allowed to modify this file.*
 
@@ -40,6 +40,3 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
 # RAG [Future Work]
 - The final vision for this mode will be such that the agent knows which files it processed and what has it learned
   - We will develop a concept for this, but later, just keep it in mind when developing other parts of this project
-
-
-
