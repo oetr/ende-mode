@@ -1,4 +1,4 @@
-* TODO Refactor everything so that the codebase becomes pleasant to work with
+* DONE Refactor everything so that the codebase becomes pleasant to work with
 
 * Feature: add config files
 Users should be able to easily switch providers
@@ -16,6 +16,12 @@ Users should be able to save a config per API
 
 * How difficult would it be to copy overlays like we copy text?
 - Just answer inline, right here:
+Answer:
+Overlays in Emacs are non-buffer visual annotations stored in an internal interval tree; commands like kill-ring-save (M-w) copy buffer text and text properties, intentionally bypassing overlay before-string and after-string payloads. 
+Copying overlays like text is moderately straightforward using one of two approaches:
+1. Custom Copy Command: A dedicated command (e.g., deslop-copy-with-overlays or advising filter-buffer-substring-function) inspects (overlays-in beg end), extracts their before-string / after-string at their respective positions, and splices them into the string saved to the kill-ring.
+2. Text Properties: If text is converted from an overlay to a propertized text string ('display text property), Emacs can copy it directly, but text properties modify buffer state unlike non-intrusive overlays.
+Recommendation: Approach #1 via filter-buffer-substring advice or a dedicated copy command is the cleanest and preserves overlay non-destructive properties.
 
 
 * Save all LLM outputs in a buffer
