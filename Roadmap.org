@@ -1,5 +1,9 @@
 * DONE Refactor everything so that the codebase becomes pleasant to work with
 
+* Mark the LLM output as such and allow human to approve/revert it
+
+
+
 * Feature: add config files
 Users should be able to easily switch providers
 Supported providers:
