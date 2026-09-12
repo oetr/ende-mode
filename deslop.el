@@ -824,5 +824,3 @@ With an active region, reject all review overlays intersecting the region."
 (provide 'deslop)
 
 ;;; deslop.el ends here
-;; How do transformers work? Briefly explain in 1 sentence
-;; Transformers use self-attention to let each token attend to all other tokens, building context-aware representations that are then processed by feed-forward networks.

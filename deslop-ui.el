@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'deslop-common)
 
 ;;;; Internal State
@@ -58,14 +59,14 @@
          (tokens (or (overlay-get ov 'tokens) 0))
          (speed (overlay-get ov 'speed))
          (estimated (overlay-get ov 'estimated))
-          (metric-str
-           (cond
-            ((and speed (> speed 0))
-             (format " (%s%d tok, %.1f t/s)"
-                     (if estimated "~" "") tokens speed))
-            ((> tokens 0)
-             (format " (%s%d tok)" (if estimated "~" "") tokens))
-            (t "")))
+         (metric-str
+          (cond
+           ((and speed (> speed 0))
+            (format " (%s%d tok, %.1f t/s)"
+                    (if estimated "~" "") tokens speed))
+           ((> tokens 0)
+            (format " (%s%d tok)" (if estimated "~" "") tokens))
+           (t "")))
          (badge (format " [%s %s%s%s] " icon status provider-str metric-str)))
     (propertize badge 'face 'deslop-badge-face)))
 
@@ -82,22 +83,13 @@ range overlays keep their badge before the covered text."
       (overlay-put ov 'before-string badge))))
 
 (defun deslop-ui--prune-dead-overlays ()
-  "Remove any deleted overlays or overlays on dead buffers."
+  "Remove any deleted overlays or overlays on dead buffers from tracking."
   (setq deslop-ui--managed-overlays
         (delq nil (mapcar (lambda (ov)
                             (and (overlayp ov)
                                  (buffer-live-p (overlay-buffer ov))
                                  ov))
-                           deslop-ui--managed-overlays)))
-  (setq deslop-ui--spinning-overlays
-        (delq nil (mapcar (lambda (ov)
-                            (and (overlayp ov)
-                                 (buffer-live-p (overlay-buffer ov))
-                                 ov))
-                          deslop-ui--spinning-overlays))))
-
-(defun deslop-ui--prune-spinning-overlays ()
-  "Remove deleted overlays from the small set that requires animation."
+                          deslop-ui--managed-overlays)))
   (setq deslop-ui--spinning-overlays
         (delq nil (mapcar (lambda (ov)
                             (and (overlayp ov)
@@ -106,15 +98,15 @@ range overlays keep their badge before the covered text."
                           deslop-ui--spinning-overlays))))
 
 (defun deslop-ui--refresh-all-overlays ()
-  "Refresh all active overlays.  Queued items remain static; active items spin."
-  (deslop-ui--prune-spinning-overlays)
+  "Refresh all active overlays. Queued items remain static; active items spin."
+  (deslop-ui--prune-dead-overlays)
   (if (null deslop-ui--spinning-overlays)
       (deslop-ui--stop-spinner)
     (setq deslop-ui--spinner-index
           (% (1+ deslop-ui--spinner-index) (length deslop-ui--spinner-frames)))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-       (dolist (ov deslop-ui--spinning-overlays)
-         (deslop-ui--put-badge ov spinner)))))
+      (dolist (ov deslop-ui--spinning-overlays)
+        (deslop-ui--put-badge ov spinner)))))
 
 (defun deslop-ui--start-spinner ()
   "Start spinner animation timer if not currently running."
@@ -129,50 +121,23 @@ range overlays keep their badge before the covered text."
     (cancel-timer deslop-ui--spinner-timer)
     (setq deslop-ui--spinner-timer nil)))
 
-;;;; Review Highlight
+;;;; Review Highlight & Color Helpers
 
-(defconst deslop-ui--named-colors
-  '(("white" . "#ffffff")
-    ("black" . "#000000")
-    ("gray" . "#bebebe")
-    ("grey" . "#bebebe")
-    ("lightgray" . "#d3d3d3")
-    ("lightgrey" . "#d3d3d3")
-    ("darkgray" . "#a9a9a9")
-    ("darkgrey" . "#a9a9a9")
-    ("red" . "#ff0000")
-    ("green" . "#00ff00")
-    ("blue" . "#0000ff")
-    ("yellow" . "#ffff00")
-    ("cyan" . "#00ffff")
-    ("magenta" . "#ff00ff"))
-  "Common theme color names mapped to approximate hex values.")
-
-(defun deslop-ui--hex-components (color)
-  "Return COLOR, a '#rrggbb' string, as a list of three 0-255 integers.
-Return nil when COLOR is not a six-digit hex color."
-  (when (and (stringp color)
-             (string-match-p "^#[0-9a-fA-F]\\{6\\}$" color))
-    (list (string-to-number (substring color 1 3) 16)
-          (string-to-number (substring color 3 5) 16)
-          (string-to-number (substring color 5 7) 16))))
-
-(defun deslop-ui--hex-join (components)
-  "Return COMPONENTS, a list of three 0-255 integers, as a '#rrggbb' string."
-  (when (and (listp components) (= (length components) 3))
-    (apply #'format "#%02x%02x%02x" components)))
+(defun deslop-ui--color-to-hex (color fallback)
+  "Convert COLOR name or hex string to '#rrggbb', or return FALLBACK."
+  (if (and (stringp color) (color-name-to-rgb color))
+      (let ((rgb (color-name-to-rgb color)))
+        (color-rgb-to-hex (nth 0 rgb) (nth 1 rgb) (nth 2 rgb) 2))
+    fallback))
 
 (defun deslop-ui--blend-color (base fg blend)
-  "Return BASE color shifted BLEND fraction toward FG, as a hex string.
-Returns nil when BASE or FG is not a parseable hex color."
-  (let* ((base-c (deslop-ui--hex-components base))
-         (fg-c (deslop-ui--hex-components fg))
-         (blend (max 0.0 (min 1.0 (float (or blend 0.0))))))
-    (and base-c fg-c
-         (deslop-ui--hex-join
-          (cl-loop for b in base-c
-                   for f in fg-c
-                   collect (max 0 (min 255 (round (+ b (* (- f b) blend))))))))))
+  "Return BASE color shifted BLEND fraction toward FG as a hex string."
+  (let ((base-rgb (and (stringp base) (color-name-to-rgb base)))
+        (fg-rgb (and (stringp fg) (color-name-to-rgb fg)))
+        (ratio (max 0.0 (min 1.0 (float (or blend 0.0))))))
+    (when (and base-rgb fg-rgb)
+      (apply #'color-rgb-to-hex
+             (append (color-blend fg-rgb base-rgb ratio) '(2))))))
 
 (defun deslop-ui--unspecified-p (value)
   "Return non-nil when VALUE is an unresolved `face-attribute' placeholder."
@@ -200,27 +165,6 @@ SPEC may be a face name, a face-spec list, or a list of such specifications."
             (setq found (deslop-ui--face-attr candidate attr))))
         found)))))
 
-(defun deslop-ui--scale-channel (channel)
-  "Normalize a color channel that may span 0-1 or 0-255 to 0-255."
-  (if (> channel 1.0) channel (/ (* channel 255.0) 1.0)))
-
-(defun deslop-ui--named-color-to-hex (name)
-  "Return NAME as an approximate hex color, or nil when unknown.
-Uses the display when available and falls back to a built-in name table."
-  (and (stringp name)
-       (or (let ((rgb
-                  (condition-case nil
-                      (and (display-color-p)
-                           (fboundp 'x-color-to-rgb)
-                           (x-color-to-rgb name))
-                    (error nil))))
-             (and rgb
-                  (deslop-ui--hex-join
-                   (list (round (deslop-ui--scale-channel (nth 0 rgb)))
-                         (round (deslop-ui--scale-channel (nth 1 rgb)))
-                         (round (deslop-ui--scale-channel (nth 2 rgb)))))))
-           (cdr (assoc (downcase name) deslop-ui--named-colors)))))
-
 (defun deslop-ui--light-theme-p ()
   "Return non-nil when the frame background is light."
   (let ((mode (condition-case nil
@@ -233,13 +177,8 @@ Uses the display when available and falls back to a built-in name table."
 (defun deslop-ui--color-or-fallback (color light-fallback dark-fallback)
   "Return COLOR as a hex string, using fallbacks when unresolvable.
 LIGHT-FALLBACK and DARK-FALLBACK are hex strings chosen by `background-mode'."
-  (cond
-   ((and (stringp color) (deslop-ui--hex-components color))
-    (downcase color))
-   ((and (stringp color) (deslop-ui--named-color-to-hex color))
-    (deslop-ui--named-color-to-hex color))
-   ((deslop-ui--light-theme-p) light-fallback)
-   (t dark-fallback)))
+  (let ((fallback (if (deslop-ui--light-theme-p) light-fallback dark-fallback)))
+    (deslop-ui--color-to-hex color fallback)))
 
 (defun deslop-ui--review-style (buf start)
   "Return the (FG . BG) hex pair for highlighting text inserted at START in BUF.
@@ -267,7 +206,7 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
                                (deslop-ui--display-label model)))))
     (when parts
       (propertize (format " [%s] " (mapconcat #'identity parts " "))
-                 'face 'deslop-badge-face))))
+                  'face 'deslop-badge-face))))
 
 (defun deslop-ui--review-overlays-in-buffer ()
   "Return all live review overlays in the current buffer."
@@ -287,10 +226,9 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
     (buf beg end &optional model client original)
   "Mark generated text from BEG to END in BUF for later approval.
 Edits inside the marked range remain marked; text inserted immediately before
-or after the range remains outside the review mark.  ORIGINAL is restored when
-the generated output is rejected.  When `deslop-review-highlight' is non-nil,
-the inserted characters are tinted using the face in effect immediately
-before BEG."
+or after the range remains outside the review mark. ORIGINAL is restored when
+the generated output is rejected. When `deslop-review-highlight' is non-nil,
+the inserted characters are tinted using overlay styling without modifying text."
   (with-current-buffer buf
     (let ((ov (make-overlay beg end buf t nil)))
       (overlay-put ov 'deslop-review t)
@@ -303,9 +241,7 @@ before BEG."
                    (deslop-ui--format-review-badge client model))
       (when deslop-review-highlight
         (let ((style (deslop-ui--review-style buf beg)))
-          (add-text-properties beg end
-                               (list 'foreground-color (car style)
-                                     'background-color (cdr style)))))
+          (overlay-put ov 'face `(:foreground ,(car style) :background ,(cdr style)))))
       (add-hook 'before-save-hook #'deslop-ui--prevent-unreviewed-save nil t)
       (add-hook 'auto-save-hook #'deslop-ui--prevent-unreviewed-save nil t)
       ov)))
@@ -316,21 +252,13 @@ before BEG."
        (overlay-buffer overlay)
        (overlay-get overlay 'deslop-review)))
 
-(defun deslop-ui-delete-review-overlay (overlay &optional clean-highlight)
-  "Remove review OVERLAY when it has been approved.
-When CLEAN-HIGHLIGHT is non-nil, also strip the highlight text properties
-from the marked range.  Approval uses this; rejection does not, because the
-marked range is replaced by the restored original text first."
+(defun deslop-ui-delete-review-overlay (overlay &optional _clean-highlight)
+  "Remove review OVERLAY when it has been approved or rejected."
   (when (deslop-ui-review-overlay-p overlay)
-    (let ((buffer (overlay-buffer overlay))
-          (start (overlay-start overlay))
-          (end (overlay-end overlay)))
+    (let ((buffer (overlay-buffer overlay)))
       (delete-overlay overlay)
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (when clean-highlight
-            (remove-text-properties start end '(foreground-color))
-            (remove-text-properties start end '(background-color)))
           (unless (deslop-ui--review-overlays-in-buffer)
             (remove-hook 'before-save-hook
                          #'deslop-ui--prevent-unreviewed-save t)
@@ -340,8 +268,6 @@ marked range is replaced by the restored original text first."
 (defun deslop-ui-create-overlay (buf beg end &optional status)
   "Create an indicator overlay in BUF from BEG to END with STATUS."
   (with-current-buffer buf
-    ;; Keep zero-width indicators fixed when text is inserted at their point;
-    ;; Emacs still shifts them when text is inserted before them.
     (let ((ov (make-overlay beg end buf nil nil)))
       (when (> end beg)
         (overlay-put ov 'face 'deslop-working-face))
@@ -361,18 +287,18 @@ marked range is replaced by the restored original text first."
             (val (cadr props)))
         (setq props (cddr props))
         (pcase key
-           (:status
-            (overlay-put ov 'status val)
-            (if (string= (or val "Queued") "Queued")
-                (setq deslop-ui--spinning-overlays
-                      (delq ov deslop-ui--spinning-overlays))
-              (cl-pushnew ov deslop-ui--spinning-overlays)
-              (deslop-ui--start-spinner)))
-           (:client (overlay-put ov 'client val))
-           (:model (overlay-put ov 'model val))
-           (:tokens (overlay-put ov 'tokens val))
-           (:speed  (overlay-put ov 'speed val))
-           (:estimated (overlay-put ov 'estimated val)))))
+          (:status
+           (overlay-put ov 'status val)
+           (if (string= (or val "Queued") "Queued")
+               (setq deslop-ui--spinning-overlays
+                     (delq ov deslop-ui--spinning-overlays))
+             (cl-pushnew ov deslop-ui--spinning-overlays)
+             (deslop-ui--start-spinner)))
+          (:client (overlay-put ov 'client val))
+          (:model (overlay-put ov 'model val))
+          (:tokens (overlay-put ov 'tokens val))
+          (:speed  (overlay-put ov 'speed val))
+          (:estimated (overlay-put ov 'estimated val)))))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
       (deslop-ui--put-badge ov spinner))))
 
