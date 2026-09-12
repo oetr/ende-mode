@@ -154,11 +154,13 @@ process for cancellation tests."
         deslop--queue-tail nil
          deslop--queue-suspended nil
          deslop--current-job nil
+         deslop--active-jobs nil
          deslop--aborting nil
          deslop--dispatching nil
          deslop--next-job-id 0)
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
+  (deslop-provider-clear-runtime-settings)
   (clrhash deslop-history--entries)
   (when (buffer-live-p deslop-history--buffer-object)
     (kill-buffer deslop-history--buffer-object))
@@ -772,8 +774,100 @@ process for cancellation tests."
       (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (deslop-test--complete-call (nth 0 deslop-test--calls))
+       (deslop-test--complete-call (nth 1 deslop-test--calls))
+       (should (string= (buffer-string) "alpha\nA\nB")))))
+
+(ert-deftest deslop-test/parallel-same-endpoint-preserves-enqueue-order ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A" "B") t))
+        (profile '(:name remote :model "remote-model"
+                   :max-concurrency 2 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((deslop--queue-suspended t)
+            (target (deslop-target-create
+                     :buffer (current-buffer) :start 5 :end 5 :cursor 5)))
+        (deslop-enqueue (list 'insert :target target :profile profile))
+        (deslop-enqueue
+         (list 'insert
+               :target (deslop-target-create
+                        :buffer (current-buffer) :start 5 :end 5 :cursor 5)
+               :profile profile))
+        (setq deslop--queue-suspended nil)
+        (deslop-process-next))
+      (should (= (length deslop--active-jobs) 2))
       (deslop-test--complete-call (nth 1 deslop-test--calls))
-      (should (string= (buffer-string) "alpha\nA\nB")))))
+      (deslop-test--complete-call (nth 0 deslop-test--calls))
+      (should (string= (buffer-string) "baseAB")))))
+
+(ert-deftest deslop-test/parallel-job-at-provider-limit-becomes-sequential ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A" "B") t))
+        (profile '(:name remote :model "remote-model"
+                   :max-concurrency 1 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((first (deslop-enqueue
+                    (list 'insert
+                          :target (deslop-target-create
+                                   :buffer (current-buffer)
+                                   :start 5 :end 5 :cursor 5)
+                          :profile profile)))
+            (second nil))
+        (setq second
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile profile)))
+        (should (eq (deslop-job-state first) 'running))
+        (should (eq (deslop-job-state second) 'queued))
+        (should-not (plist-get (deslop-job-profile second) :parallel))
+        (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (should (eq (deslop-job-state second) 'running))
+        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (string= (buffer-string) "baseAB"))))))
+
+(ert-deftest deslop-test/parallel-slots-are-scoped-per-provider ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A1" "B1" "A2") t))
+        (first-profile '(:name first :model "first-model"
+                         :max-concurrency 1 :parallel t))
+        (second-profile '(:name second :model "second-model"
+                          :max-concurrency 1 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((first (deslop-enqueue
+                    (list 'insert
+                          :target (deslop-target-create
+                                   :buffer (current-buffer)
+                                   :start 5 :end 5 :cursor 5)
+                          :profile first-profile)))
+            (second nil)
+            (third nil))
+        (setq second
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile first-profile)))
+        (setq third
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile second-profile)))
+        (should (eq (deslop-job-state first) 'running))
+        (should (eq (deslop-job-state second) 'queued))
+        (should (eq (deslop-job-state third) 'running))
+        (should (= (length deslop--active-jobs) 2))
+        (deslop-abort-queue)))))
 
 (ert-deftest deslop-test/changed-selection-is-skipped ()
   (deslop-test--reset)
@@ -1071,6 +1165,19 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     (deslop-provider-profile 'local))
                    '("local-one" "local-two")))))
 
+(ert-deftest deslop-test/provider-runtime-concurrency-and-parallel-settings ()
+  (deslop-provider-clear-runtime-settings)
+  (let ((deslop-provider-profiles
+         '((remote :max-concurrency 3 :parallel nil))))
+    (let ((profile (deslop-provider-profile 'remote)))
+      (should (= (deslop-provider-max-concurrency profile) 3))
+      (should-not (deslop-provider-parallel-enabled-p profile)))
+    (deslop-provider-set-runtime-setting 'remote :max-concurrency 5)
+    (deslop-provider-set-runtime-setting 'remote :parallel t)
+    (let ((profile (deslop-provider-profile 'remote)))
+      (should (= (deslop-provider-max-concurrency profile) 5))
+      (should (deslop-provider-parallel-enabled-p profile)))))
+
 (ert-deftest deslop-test/openai-model-probe-parses-official-slugs ()
   (should (equal
            (deslop-codex--parse-models
@@ -1142,6 +1249,50 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (kill-buffer selector))
       (when (buffer-live-p source)
         (kill-buffer source)))))
+
+(ert-deftest deslop-test/selector-changes-provider-runtime-settings ()
+  (deslop-provider-clear-runtime-settings)
+  (let ((deslop-providers '(remote))
+        (deslop-provider-profiles
+         '((remote :model "remote-model" :max-concurrency 2
+                   :parallel nil))))
+    (with-temp-buffer
+      (deslop-selector-mode)
+      (setq deslop-selector--providers '(remote)
+            deslop-selector--provider-index 0
+            deslop-selector--models '("remote-model")
+            deslop-selector--model-index 0)
+      (cl-letf (((symbol-function 'read-number)
+                 (lambda (&rest _) 4)))
+        (deslop-selector-set-concurrency))
+      (should (= (deslop-provider-max-concurrency
+                  (deslop-provider-profile 'remote))
+                 4))
+      (should-not (deslop-selector--provider-parallel-p))
+       (deslop-selector-toggle-parallel)
+       (should (deslop-selector--provider-parallel-p)))))
+
+(ert-deftest deslop-test/selector-runtime-keybindings-survive-reload ()
+  (let ((original-c (lookup-key deslop-selector-mode-map (kbd "c")))
+        (original-C (lookup-key deslop-selector-mode-map (kbd "C")))
+        (original-P (lookup-key deslop-selector-mode-map (kbd "P"))))
+    (unwind-protect
+        (progn
+          ;; Simulate a keymap retained from before the new bindings existed.
+          (define-key deslop-selector-mode-map (kbd "c") nil)
+          (define-key deslop-selector-mode-map (kbd "C") nil)
+          (define-key deslop-selector-mode-map (kbd "P") nil)
+          (with-temp-buffer
+            (deslop-selector-mode)
+            (should (eq (key-binding (kbd "c"))
+                        #'deslop-selector-set-concurrency))
+            (should (eq (key-binding (kbd "C"))
+                        #'deslop-selector-set-concurrency))
+            (should (eq (key-binding (kbd "P"))
+                        #'deslop-selector-toggle-parallel))))
+      (define-key deslop-selector-mode-map (kbd "c") original-c)
+      (define-key deslop-selector-mode-map (kbd "C") original-C)
+      (define-key deslop-selector-mode-map (kbd "P") original-P))))
 
 (ert-deftest deslop-test/openai-request-body-matches-codex-responses-shape ()
   (let* ((body (deslop-protocol--json-read-string

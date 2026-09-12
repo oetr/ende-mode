@@ -307,18 +307,23 @@ the review overlay it creates."
                      (setq ins-end (point))
                      (deslop--create-review-overlay
                       buffer ins-start ins-end display ""))))))
-        (dolist (queued-job deslop-queue)
-         (deslop--ignore-errors
-          #'deslop-target-advance-queued-anchors
-          (list (deslop-job-target queued-job)) buffer ins-start ins-end
-          (lambda (_target)
-            (let ((overlay (deslop-job-overlay queued-job)))
-              (when (and (overlayp overlay) (overlay-buffer overlay)
-                         (numberp (overlay-start overlay))
-                         (numberp (overlay-end overlay))
-                         (= (overlay-start overlay) ins-start)
-                         (= (overlay-end overlay) ins-start))
-                (move-overlay overlay ins-end ins-end buffer))))))
+         (dolist (other-job (append deslop--active-jobs deslop-queue))
+           (let ((other-target (deslop-job-target other-job)))
+             (when (and (not (eq other-job job))
+                        (> (deslop-job-id other-job) (deslop-job-id job))
+                         (eq (deslop-job-type other-job) 'insert)
+                        (eq (deslop-target-buffer other-target) buffer))
+               (deslop--ignore-errors
+                #'deslop-target-advance-queued-anchors
+                (list other-target) buffer ins-start ins-end
+                (lambda (_target)
+                  (let ((overlay (deslop-job-overlay other-job)))
+                    (when (and (overlayp overlay) (overlay-buffer overlay)
+                               (numberp (overlay-start overlay))
+                               (numberp (overlay-end overlay))
+                               (= (overlay-start overlay) ins-start)
+                               (= (overlay-end overlay) ins-start))
+                      (move-overlay overlay ins-end ins-end buffer))))))))
        (deslop--ignore-errors
         #'message "deslop: inserted %d chars in %s"
         (length content) (buffer-name buffer))

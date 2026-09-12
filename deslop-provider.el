@@ -54,7 +54,8 @@ Each item is a profile symbol understood by `deslop-provider-profile'."
 Each value is a plist.  Secrets must not be stored here; use auth-source
 fields :auth-source-host, :auth-source-user, and :auth-source-port instead.
 An optional :display-name overrides endpoint-reported provider names for the
-UI."
+UI.  :max-concurrency limits parallel jobs for the provider, and :parallel
+enables parallel jobs by default."
   :type 'sexp
   :group 'deslop)
 
@@ -93,19 +94,52 @@ When nil, do not impose a discovery response-size limit."
 
 ;;;; Profiles and display policy
 
+(defvar deslop-provider--runtime-settings (make-hash-table :test #'eq)
+  "Session-level provider settings changed from the selector.")
+
+(defun deslop-provider--runtime-value (name key)
+  "Return runtime setting KEY for provider NAME, or `:unset'."
+  (let ((settings (gethash name deslop-provider--runtime-settings)))
+    (if (plist-member settings key)
+        (plist-get settings key)
+      :unset)))
+
+(defun deslop-provider-set-runtime-setting (name key value)
+  "Set runtime provider setting KEY to VALUE for NAME.
+Supported settings are `:max-concurrency' and `:parallel'."
+  (pcase key
+    (:max-concurrency
+     (unless (and (integerp value) (> value 0))
+       (user-error "Provider concurrency must be a positive integer")))
+    (:parallel
+     (unless (memq value '(nil t))
+       (error "Provider parallel setting must be boolean")))
+    (_ (error "Unsupported provider runtime setting: %s" key)))
+  (let ((settings (copy-sequence
+                   (gethash name deslop-provider--runtime-settings))))
+    (puthash name (plist-put settings key value)
+             deslop-provider--runtime-settings))
+  value)
+
+(defun deslop-provider-clear-runtime-settings ()
+  "Clear all session-level provider settings."
+  (clrhash deslop-provider--runtime-settings))
+
 (defun deslop-provider-profile (&optional name)
   "Return a non-secret provider profile for NAME.
 
 The URL/model customizations remain the local-provider defaults.  OpenRouter
 is available as a profile template and requires an auth-source entry before it
 can be dispatched."
-   (let* ((name (or name (car deslop-providers)
-                    deslop-provider-default-profile))
+  (let* ((name (or name (car deslop-providers)
+                   deslop-provider-default-profile))
          (base
           (pcase name
             ('openai
              (list :url deslop-codex-endpoint
                    :model deslop-codex-model
+                   :max-concurrency 4
+                   :parallel nil
                    :wire-api 'responses
                    :auth-method 'opencode-oauth
                    :require-sse t
@@ -113,6 +147,8 @@ can be dispatched."
             ('openrouter
              '(:url "https://openrouter.ai/api/v1/chat/completions"
                :model "openai/gpt-4o-mini"
+               :max-concurrency 4
+               :parallel nil
                :temperature 0.2
                :auth-source-host "openrouter.ai"
                :auth-source-user "deslop"
@@ -121,12 +157,34 @@ can be dispatched."
             (_
              (list :url deslop-provider-endpoint
                    :model deslop-provider-model
+                   :max-concurrency 1
+                   :parallel nil
                    :temperature deslop-provider-temperature
                    :require-sse t))))
          (custom (alist-get name deslop-provider-profiles)))
-    (deslop--plist-merge
-     (plist-put (copy-sequence base) :name name)
-      custom)))
+    (let ((profile (deslop--plist-merge
+                    (plist-put (copy-sequence base) :name name)
+                    custom)))
+      (dolist (key '(:max-concurrency :parallel))
+        (let ((value (deslop-provider--runtime-value name key)))
+          (unless (eq value :unset)
+            (setq profile (plist-put profile key value)))))
+      profile)))
+
+(defun deslop-provider-max-concurrency (profile)
+  "Return the positive maximum concurrent jobs allowed by PROFILE."
+  (let* ((runtime (deslop-provider--runtime-value
+                   (plist-get profile :name) :max-concurrency))
+         (value (if (eq runtime :unset)
+                    (or (plist-get profile :max-concurrency) 1)
+                  runtime)))
+    (unless (and (integerp value) (> value 0))
+      (error "Provider max concurrency must be a positive integer"))
+    value))
+
+(defun deslop-provider-parallel-enabled-p (profile)
+  "Return non-nil when PROFILE enables parallel jobs by default."
+  (eq (plist-get profile :parallel) t))
 
 (defun deslop-provider-names ()
   "Return configured provider profile names for the selector."

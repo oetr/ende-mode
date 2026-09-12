@@ -75,6 +75,14 @@
   "Return a display name for the selected provider."
   (deslop-provider-client-name (deslop-selector--provider-profile)))
 
+(defun deslop-selector--provider-concurrency ()
+  "Return the selected provider's current concurrency limit."
+  (deslop-provider-max-concurrency (deslop-selector--provider-profile)))
+
+(defun deslop-selector--provider-parallel-p ()
+  "Return whether the selected provider defaults to parallel jobs."
+  (deslop-provider-parallel-enabled-p (deslop-selector--provider-profile)))
+
 (defun deslop-selector--render ()
   "Render the current selector state."
   (let ((provider (deslop-selector--display-provider))
@@ -92,7 +100,12 @@
         (insert (format " (%d/%d)"
                         (1+ deslop-selector--model-index)
                         (length deslop-selector--models))))
-      (insert "\n")
+      (insert (format "\nConcurrency: %d\n"
+                      (deslop-selector--provider-concurrency)))
+      (insert (format "Parallel:    %s\n"
+                      (if (deslop-selector--provider-parallel-p)
+                          "on"
+                        "off")))
       (pcase deslop-selector--model-state
         (:loading (insert "\nLoading official models...\n"))
         (:error (insert "\nModel probe failed; using configured model.\n")))
@@ -100,6 +113,8 @@
               "p     next provider\n"
               "C-n   next model\n"
               "C-p   previous model\n"
+              "c/C   set concurrency\n"
+              "P     toggle parallel jobs\n"
               "i     insert\n"
               "m     improve\n"
               "s     summarize\n"
@@ -185,6 +200,25 @@
   (interactive)
   (deslop-selector--move-model -1))
 
+(defun deslop-selector-set-concurrency ()
+  "Set and save the selected provider's session concurrency limit."
+  (interactive)
+  (let* ((provider (deslop-selector--provider-name))
+         (current (deslop-selector--provider-concurrency))
+         (value (read-number "Max concurrent jobs: " current)))
+    (deslop-provider-set-runtime-setting provider :max-concurrency value)
+    (deslop-selector--render)
+    (deslop-process-next)))
+
+(defun deslop-selector-toggle-parallel ()
+  "Toggle and save the selected provider's default parallel setting."
+  (interactive)
+  (let* ((provider (deslop-selector--provider-name))
+         (enabled (not (deslop-selector--provider-parallel-p))))
+    (deslop-provider-set-runtime-setting provider :parallel enabled)
+    (deslop-selector--render)
+    (deslop-process-next)))
+
 (defun deslop-selector--save-selection ()
   "Save the current provider/model choice."
   (setq deslop-selector--last-selection
@@ -246,20 +280,29 @@
 (defvar deslop-selector-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "p") #'deslop-selector-next-provider)
-    (define-key map (kbd "C-n") #'deslop-selector-next-model)
-    (define-key map (kbd "C-p") #'deslop-selector-previous-model)
-    (define-key map (kbd "i") #'deslop-selector-insert)
-    (define-key map (kbd "m") #'deslop-selector-improve)
-    (define-key map (kbd "s") #'deslop-selector-summarize)
-    (define-key map (kbd "RET") #'deslop-selector-confirm)
-    (define-key map (kbd "q") #'deslop-selector-close)
-    (define-key map (kbd "ESC") #'deslop-selector-close)
     map)
   "Keymap for `deslop-selector-mode'.")
 
+(defun deslop-selector--install-keybindings ()
+  "Install selector bindings, including when this file is reloaded."
+  (define-key deslop-selector-mode-map (kbd "p") #'deslop-selector-next-provider)
+  (define-key deslop-selector-mode-map (kbd "C-n") #'deslop-selector-next-model)
+  (define-key deslop-selector-mode-map (kbd "C-p") #'deslop-selector-previous-model)
+  (define-key deslop-selector-mode-map (kbd "c") #'deslop-selector-set-concurrency)
+  (define-key deslop-selector-mode-map (kbd "C") #'deslop-selector-set-concurrency)
+  (define-key deslop-selector-mode-map (kbd "P") #'deslop-selector-toggle-parallel)
+  (define-key deslop-selector-mode-map (kbd "i") #'deslop-selector-insert)
+  (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
+  (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
+  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
+  (define-key deslop-selector-mode-map (kbd "q") #'deslop-selector-close)
+  (define-key deslop-selector-mode-map (kbd "ESC") #'deslop-selector-close))
+
+(deslop-selector--install-keybindings)
+
 (define-derived-mode deslop-selector-mode special-mode "deslop-selector"
   "Major mode for selecting a deslop provider and model."
+  (deslop-selector--install-keybindings)
   (setq buffer-read-only t))
 
 ;;;###autoload

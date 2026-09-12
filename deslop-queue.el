@@ -34,10 +34,13 @@
   "Next numeric identifier assigned to a job.")
 
 (defvar deslop--current-job nil
-  "The job currently being processed, or nil.
+  "One active job retained for compatibility and status display.
 
 Callbacks must not use this variable to identify their originating job.  It
-is only the scheduler's active slot.")
+is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
+
+(defvar deslop--active-jobs nil
+  "Active jobs, in reverse dispatch order.")
 
 (defvar deslop--aborting nil
   "Non-nil while queue state is being invalidated by an abort.")
@@ -48,7 +51,7 @@ is only the scheduler's active slot.")
 
 (defun deslop-job-current-p (job)
   "Non-nil when JOB is the active, still-settleable job."
-  (and (eq job deslop--current-job)
+  (and (memq job deslop--active-jobs)
        (eq (deslop-job-state job) 'running)
        (not deslop--aborting)))
 
@@ -67,9 +70,9 @@ is only the scheduler's active slot.")
       (deslop--ignore-errors #'deslop-ui-delete-overlay overlay))))
 
 (defun deslop--job-release-current (job)
-  "Release JOB from the active slot and clean its presentation state."
-  (when (eq deslop--current-job job)
-    (setq deslop--current-job nil))
+  "Release JOB from the active set and clean its presentation state."
+  (setq deslop--active-jobs (delq job deslop--active-jobs)
+        deslop--current-job (car deslop--active-jobs))
   (deslop--ignore-errors #'deslop-target-release (deslop-job-target job))
   (deslop--ignore-errors #'deslop--job-delete-overlay job))
 
@@ -122,25 +125,92 @@ HANDLER receives one `deslop-job' object."
       (setq deslop--queue-tail nil))
     job))
 
+(defun deslop--queue-remove-cell (cell)
+  "Remove queue CELL and return its job."
+  (let ((job (car cell)))
+    (if (eq cell deslop-queue)
+        (deslop--queue-pop)
+      (let ((previous deslop-queue))
+        (while (and previous (not (eq (cdr previous) cell)))
+          (setq previous (cdr previous)))
+        (unless previous
+          (error "queue cell is not present"))
+        (setcdr previous (cdr cell))
+        (when (eq cell deslop--queue-tail)
+          (setq deslop--queue-tail previous))
+        job))))
+
+(defun deslop--same-provider-p (left right)
+  "Return non-nil when job profiles LEFT and RIGHT name the same provider."
+  (equal (or (plist-get (deslop-job-profile left) :name)
+             (plist-get (deslop-job-profile left) :url))
+         (or (plist-get (deslop-job-profile right) :name)
+             (plist-get (deslop-job-profile right) :url))))
+
+(defun deslop--active-provider-jobs (job)
+  "Return active jobs using the same provider as JOB."
+  (cl-remove-if-not
+   (lambda (active) (deslop--same-provider-p job active))
+   deslop--active-jobs))
+
+(defun deslop--job-admissible-p (job)
+  "Return non-nil when JOB may start under provider concurrency rules."
+  (let* ((active (deslop--active-provider-jobs job))
+         (parallel (eq (plist-get (deslop-job-profile job) :parallel) t))
+         (limit (deslop-provider-max-concurrency
+                 (deslop-job-profile job))))
+    (if parallel
+        (and (cl-every
+              (lambda (running)
+                (eq (plist-get (deslop-job-profile running) :parallel) t))
+              active)
+             (< (length active) limit))
+      (null active))))
+
+(defun deslop--next-admissible-cell ()
+  "Return the first FIFO queue cell whose provider can accept its job.
+Only the oldest queued job for each provider is considered, so a blocked job
+cannot be bypassed by a later job from that same provider."
+  (let ((seen-providers nil))
+    (catch 'found
+      (cl-loop for cell on deslop-queue do
+        (let* ((job (car cell))
+               (profile (deslop-job-profile job))
+               (provider (or (plist-get profile :name)
+                             (plist-get profile :url))))
+          (unless (memq provider seen-providers)
+            (push provider seen-providers)
+            (when (deslop--job-admissible-p job)
+              (throw 'found cell)))))
+      nil)))
+
 (defun deslop--job-from-request (request)
   "Create a queued job from REQUEST, a (TYPE . PLIST) value."
   (let* ((type (car request))
          (data (cdr request))
          (target (plist-get data :target))
+         (profile (copy-tree
+                   (or (plist-get data :profile)
+                       (deslop-provider-profile-snapshot
+                        (plist-get data :provider)))))
          (now (float-time))
+         (parallel (eq (plist-get profile :parallel) t))
          (job (deslop--make-job
-               :id (cl-incf deslop--next-job-id)
+                :id (cl-incf deslop--next-job-id)
                 :type type
                 :state 'queued
                 :overlay (plist-get data :overlay)
                 :target target
-                :profile (or (plist-get data :profile)
-                             (deslop-provider-profile-snapshot
-                              (plist-get data :provider)))
+                :profile profile
                 :instruction (plist-get data :instruction)
                 :enqueued-at now)))
     (unless (deslop-target-p target)
       (error "deslop request is missing a target"))
+    (when (and parallel
+               (>= (length (deslop--active-provider-jobs job))
+                   (deslop-provider-max-concurrency profile)))
+      (setf (deslop-job-profile job)
+            (plist-put (deslop-job-profile job) :parallel nil)))
     (setf (deslop-job-profile job)
           (plist-put (copy-tree (deslop-job-profile job))
                      :job-id (deslop-job-id job)))
@@ -210,7 +280,8 @@ Return the newly created `deslop-job'."
   (let* ((type (deslop-job-type job))
          (handler (alist-get type deslop--job-handlers))
          (target (deslop-job-target job)))
-    (setq deslop--current-job job)
+    (push job deslop--active-jobs)
+    (setq deslop--current-job (car deslop--active-jobs))
     (setf (deslop-job-state job) 'running
           (deslop-job-started-at job) (float-time))
     (cond
@@ -236,14 +307,17 @@ Return the newly created `deslop-job'."
          (deslop-job-fail job caught)))))))
 
 (defun deslop-process-next ()
-  "Process the next queued job if the engine is idle."
+  "Process all currently admissible queued jobs."
   (unless deslop--dispatching
-    (let ((deslop--dispatching t))
-      (while (and (null deslop--current-job)
-                  (not deslop--queue-suspended)
+    (let ((deslop--dispatching t)
+          (done nil))
+      (while (and (not deslop--queue-suspended)
                   (not deslop--aborting)
-                  deslop-queue)
-        (deslop--dispatch-job (deslop--queue-pop))))))
+                  (not done))
+        (let ((cell (deslop--next-admissible-cell)))
+          (if cell
+              (deslop--dispatch-job (deslop--queue-remove-cell cell))
+            (setq done t)))))))
 
 ;;;; Cancellation and status
 
@@ -260,9 +334,9 @@ Return the newly created `deslop-job'."
 (defun deslop-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
   (interactive)
-  (let* ((active deslop--current-job)
+  (let* ((active deslop--active-jobs)
          (pending deslop-queue)
-         (jobs (append (and active (list active)) pending)))
+         (jobs (append active pending)))
     ;; Invalidate callbacks before invoking transport cancellation because a
     ;; transport may settle reentrantly.
     (setq deslop--aborting t)
@@ -270,6 +344,7 @@ Return the newly created `deslop-job'."
         (progn
           (setq deslop-queue nil)
           (setq deslop--queue-tail nil)
+          (setq deslop--active-jobs nil)
           (setq deslop--current-job nil)
           (dolist (job jobs)
             (deslop--job-cancel job))
@@ -281,9 +356,10 @@ Return the newly created `deslop-job'."
 (defun deslop-queue-status ()
   "Display and return a nonvisual snapshot of queue state."
   (interactive)
-  (let ((status (list :running (and deslop--current-job t)
+  (let ((status (list :running (and deslop--active-jobs t)
                       :active (and deslop--current-job
                                    (deslop-job-id deslop--current-job))
+                      :active-jobs (mapcar #'deslop-job-id deslop--active-jobs)
                       :pending (length deslop-queue))))
     (message "deslop: active=%s pending=%d"
              (or (plist-get status :active) "none")
