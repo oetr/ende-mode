@@ -25,42 +25,42 @@
   :type 'number
   :group 'deslop)
 
-(defcustom deslop-request-timeout 300
+(defcustom deslop-request-timeout 1000
   "Maximum seconds allowed for one LLM request."
   :type 'number
   :group 'deslop)
 
-(defcustom deslop-max-request-chars 32000
+(defcustom deslop-max-request-chars 250000
   "Maximum combined characters in all messages sent for one request."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-output-tokens 4096
+(defcustom deslop-max-output-tokens 50000
   "Maximum completion tokens requested from an LLM provider."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-response-bytes (* 4 1024 1024)
+(defcustom deslop-max-response-bytes (* 4 1024 1024 16)
   "Maximum number of response-body bytes accepted from one LLM request."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-sse-event-bytes (* 512 1024)
+(defcustom deslop-max-sse-event-bytes (* 512 1024 4)
   "Maximum number of bytes accepted in one SSE line or event."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-output-chars (* 512 1024)
+(defcustom deslop-max-output-chars (* 512 1024 4)
   "Maximum combined reasoning and completion characters retained per request."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-response-header-bytes (* 64 1024)
+(defcustom deslop-max-response-header-bytes (* 64 1024 4)
   "Maximum response-header bytes parsed from curl's header output."
   :type 'integer
   :group 'deslop)
 
-(defcustom deslop-max-error-body-bytes 8192
+(defcustom deslop-max-error-body-bytes (* 4 8192)
   "Maximum response bytes retained for provider error diagnostics."
   :type 'integer
   :group 'deslop)

@@ -22,7 +22,7 @@ point and shifts its background slightly toward that foreground."
   :type 'boolean
   :group 'deslop)
 
-(defcustom deslop-review-highlight-blend 0.85
+(defcustom deslop-review-highlight-blend 0.15
   "Fraction of the foreground color blended into the review highlight background."
   :type 'number
   :group 'deslop)
@@ -202,7 +202,7 @@ not including, its end."
 Edits inside the marked range remain marked; text inserted immediately before
 or after the range remains outside the review mark.  ORIGINAL is restored when
 the generated output is rejected.  When `deslop-review-highlight' is non-nil,
-the inserted characters are tinted using overlay styling without modifying text."
+the inserted characters are tinted using the review overlay's face."
   (with-current-buffer buffer
     (when (deslop-review-overlaps-p buffer beg end)
       (error "Generated output overlaps an existing review"))
@@ -223,8 +223,10 @@ the inserted characters are tinted using overlay styling without modifying text.
             (overlay-put overlay 'evaporate nil)
             (overlay-put overlay 'before-string badge)
             (when style
-              (overlay-put overlay 'foreground-color (car style))
-              (overlay-put overlay 'background-color (cdr style)))
+              (overlay-put
+               overlay 'face
+               (list :foreground (car style)
+                     :background (cdr style))))
             (deslop-review--update-save-guards)
             (setq complete t)
             overlay)

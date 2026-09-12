@@ -1380,18 +1380,25 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
   (deslop-test--with-buffer "defun x"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (should (equal (deslop-review--style (current-buffer) 6)
-                    '("#0000ff" . "#8080ff")))))
+                   '("#0000ff" . "#d9d9ff")))))
 
 (ert-deftest deslop-test/review-highlight-style-default-fallback ()
   (set-face-foreground 'default "#111111")
   (set-face-background 'default "#222222")
   (deslop-test--with-buffer "plain x"
     (should (equal (deslop-review--style (current-buffer) 6)
-                   '("#111111" . "#1a1a1a")))
+                   '("#111111" . "#1f1f1f")))
     (should (equal (deslop-review--style (current-buffer) 1)
-                    '("#111111" . "#1a1a1a")))))
+                   '("#111111" . "#1f1f1f")))))
 
-(ert-deftest deslop-test/review-highlight-overlay-sets-char-properties ()
+(ert-deftest deslop-test/review-highlight-dark-background-light-foreground ()
+  (set-face-foreground 'default "#e6e6e6")
+  (set-face-background 'default "#1e1e1e")
+  (deslop-test--with-buffer "plain text"
+    (should (equal (deslop-review--style (current-buffer) 6)
+                   '("#e6e6e6" . "#3c3c3c")))))
+
+(ert-deftest deslop-test/review-highlight-overlay-sets-face ()
   (deslop-test--reset)
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
@@ -1400,15 +1407,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
     (let ((overlay (deslop-review-create-overlay
                     (current-buffer) 6 9 nil nil "")))
       (should (overlayp overlay))
-      (should (not (overlay-get overlay 'face)))
-      (should (string= (get-char-property 6 'foreground-color) "#0000ff"))
-       (should (string= (get-char-property 8 'background-color) "#8080ff"))
+      (should (equal (overlay-get overlay 'face)
+                     '(:foreground "#0000ff" :background "#d9d9ff")))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
       (should (memq #'deslop-review--prevent-save before-save-hook))
       (deslop-review-delete-overlay overlay)
-      (should (null (get-char-property 6 'foreground-color)))
-      (should (null (get-char-property 8 'background-color)))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face)))))
 
 (ert-deftest deslop-test/review-highlight-disabled-sets-no-properties ()
@@ -1416,9 +1420,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
   (deslop-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (let ((deslop-review-highlight nil))
-      (deslop-review-create-overlay (current-buffer) 6 9 nil nil "")
-      (should (null (get-char-property 6 'foreground-color)))
-      (should (null (get-char-property 8 'background-color))))))
+      (let ((overlay (deslop-review-create-overlay
+                      (current-buffer) 6 9 nil nil "")))
+        (should (null (overlay-get overlay 'face)))))))
 
 (ert-deftest deslop-test/review-highlight-approval-cleans-properties ()
   (deslop-test--reset)
@@ -1433,13 +1437,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
       (let ((review (cl-find-if #'deslop-review-overlay-p
                                 (overlays-in (point-min) (point-max)))))
         (should review)
-        (should (string= (get-char-property 3 'foreground-color) "#0000ff"))
-         (should (string= (get-char-property 5 'background-color) "#8080ff"))
+        (should (equal (overlay-get review 'face)
+                       '(:foreground "#0000ff" :background "#d9d9ff")))
         (goto-char 4)
         (deslop-approve-output)
         (should (string= (buffer-string) "kwLLM rest"))
-        (should (null (get-char-property 3 'foreground-color)))
-        (should (null (get-char-property 3 'background-color)))))))
+        (should-not (deslop-review-overlay-p review))))))
 
 (ert-deftest deslop-test/review-highlight-rejection-preserves-original-properties ()
   (deslop-test--reset)
