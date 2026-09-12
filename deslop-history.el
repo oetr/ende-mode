@@ -60,6 +60,9 @@
 (defvar-local deslop-history--internal-write nil
   "Non-nil while deslop is updating the history buffer.")
 
+(defvar-local deslop-history--entry-count 0
+  "Number of top-level job entries currently rendered in the buffer.")
+
 (defun deslop-history--prevent-user-edit (&rest _)
   "Prevent edits to the history buffer outside deslop internals."
   (unless deslop-history--internal-write
@@ -193,19 +196,19 @@
 
 (defun deslop-history--trim-buffer ()
   "Remove oldest complete entries until the entry limit is met."
-  (let ((continue t))
-    (while continue
+  (let ((limit (max 1 deslop-history-max-entries)))
+    (while (> deslop-history--entry-count limit)
       (goto-char (point-min))
-      (let ((count 0)
-            (second nil))
-        (while (re-search-forward "^\\* Job " nil t)
-          (setq count (1+ count))
-          (when (= count 2)
-            (setq second (line-beginning-position))))
-        (if (and second
-                 (> count (max 1 deslop-history-max-entries)))
-            (delete-region (point-min) second)
-          (setq continue nil))))))
+      (when (re-search-forward "^\\* Job " nil t)
+        (let ((start (line-beginning-position))
+              (end (save-excursion
+                     (forward-line 1)
+                     (if (re-search-forward "^\\* Job " nil t)
+                         (line-beginning-position)
+                       (point-max)))))
+          (delete-region start end)
+          (cl-decf deslop-history--entry-count))
+        (setq deslop-history--entry-count 0)))))
 
 (defun deslop-history--value-string (value)
   "Return VALUE as readable JSON when possible, otherwise printed Lisp."
@@ -281,6 +284,7 @@
               (when error
                 (deslop-history--insert-section
                  "Error" (deslop-error-display-message error)))
+              (cl-incf deslop-history--entry-count)
               (deslop-history--trim-buffer))))))))
 
 (defun deslop-history ()
@@ -296,7 +300,8 @@
     (with-current-buffer deslop-history--buffer-object
       (let ((inhibit-read-only t)
             (deslop-history--internal-write t))
-        (erase-buffer))))
+        (erase-buffer)
+        (setq deslop-history--entry-count 0))))
   (message "deslop: history cleared"))
 
 (add-hook 'deslop-job-event-functions #'deslop-history-event)

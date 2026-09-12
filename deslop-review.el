@@ -103,12 +103,7 @@ SPEC may be a face name, a face-spec list, or a list of such specifications."
 
 (defun deslop-review--light-theme-p ()
   "Return non-nil when the frame background is light."
-  (let ((mode (condition-case nil
-                  (funcall (if (fboundp 'frame-background-mode)
-                               'frame-background-mode
-                             'background-mode))
-                (error 'dark))))
-    (eq mode 'light)))
+  (eq (frame-parameter nil 'background-mode) 'light))
 
 (defun deslop-review--color-or-fallback (color light-fallback dark-fallback)
   "Return COLOR as a hex string, using fallbacks when unresolvable.

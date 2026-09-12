@@ -115,7 +115,15 @@ Thinking and content deltas are emitted through CALLBACKS."
 (cl-defstruct (deslop-protocol--sse
                (:constructor deslop-protocol--make-sse))
   "Incremental SSE line/event state."
-  buffer data-lines data-bytes done)
+  buffer buffer-parts buffer-bytes data-lines data-bytes done)
+
+(defun deslop-protocol--sse-pending-buffer (parser)
+  "Return the unparsed SSE text accumulated in PARSER."
+  (let ((buffer (deslop-protocol--sse-buffer parser)))
+    (if (and buffer (> (length buffer) 0))
+      buffer
+      (let ((parts (deslop-protocol--sse-buffer-parts parser)))
+        (or (and parts (apply #'concat (nreverse parts))) "")))))
 
 (defun deslop-protocol--sse-event (parser)
   "Turn the accumulated SSE data lines in PARSER into one event."
@@ -171,33 +179,53 @@ Thinking and content deltas are emitted through CALLBACKS."
 (defun deslop-protocol--sse-feed (parser chunk)
   "Feed raw SSE CHUNK into PARSER and return complete events.
 Errors are signaled so the transport can turn them into protocol failures."
-  (let* ((input (concat (deslop-protocol--sse-buffer parser) chunk))
-         (start 0)
-         (events nil)
-         position line)
-    (setf (deslop-protocol--sse-buffer parser) "")
-    (while (string-match "\n" input start)
-      (setq position (match-beginning 0))
-      (setq line (substring input start position))
-      (setq start (1+ position))
-      (let ((event (deslop-protocol--sse-handle-raw-line parser line)))
-        (when event
-          (push event events))))
-    (setf (deslop-protocol--sse-buffer parser) (substring input start))
-    (when (> (string-bytes (deslop-protocol--sse-buffer parser))
-             deslop-max-sse-event-bytes)
-      (error "SSE line exceeds deslop-max-sse-event-bytes"))
-    (nreverse events)))
+  (let ((parts (deslop-protocol--sse-buffer-parts parser))
+        (buffer (deslop-protocol--sse-buffer parser))
+        (events nil))
+    (when (and buffer (> (length buffer) 0))
+      (push buffer parts))
+    (when (and (stringp chunk) (> (length chunk) 0))
+      (push chunk parts))
+    (setf (deslop-protocol--sse-buffer parser) ""
+          (deslop-protocol--sse-buffer-parts parser) parts
+          (deslop-protocol--sse-buffer-bytes parser)
+          (+ (or (deslop-protocol--sse-buffer-bytes parser) 0)
+             (string-bytes (or chunk ""))))
+    (if (not (string-match-p "\n" (or chunk "")))
+        (when (> (deslop-protocol--sse-buffer-bytes parser)
+                 deslop-max-sse-event-bytes)
+          (error "SSE line exceeds deslop-max-sse-event-bytes"))
+      (let* ((input (apply #'concat (nreverse parts)))
+             (start 0)
+             position line)
+        (while (string-match "\n" input start)
+          (setq position (match-beginning 0))
+          (setq line (substring input start position))
+          (setq start (1+ position))
+          (let ((event (deslop-protocol--sse-handle-raw-line parser line)))
+            (when event
+              (push event events))))
+        (let ((remainder (substring input start)))
+          (setf (deslop-protocol--sse-buffer parser) remainder
+                (deslop-protocol--sse-buffer-parts parser) nil
+                (deslop-protocol--sse-buffer-bytes parser)
+                (string-bytes remainder))
+          (when (> (deslop-protocol--sse-buffer-bytes parser)
+                   deslop-max-sse-event-bytes)
+            (error "SSE line exceeds deslop-max-sse-event-bytes"))))
+      (nreverse events))))
 
 (defun deslop-protocol--sse-finish (parser)
   "Flush a final complete SSE event and validate PARSER state."
-  (let ((events nil))
-    (when (> (length (deslop-protocol--sse-buffer parser)) 0)
-      (let ((line (deslop-protocol--sse-buffer parser)))
-        (setf (deslop-protocol--sse-buffer parser) "")
-        (let ((event (deslop-protocol--sse-handle-raw-line parser line)))
-          (when event
-            (push event events)))))
+  (let ((events nil)
+        (buffer (deslop-protocol--sse-pending-buffer parser)))
+    (when (> (length buffer) 0)
+      (setf (deslop-protocol--sse-buffer parser) buffer
+            (deslop-protocol--sse-buffer-parts parser) nil
+            (deslop-protocol--sse-buffer-bytes parser) (string-bytes buffer))
+      (let ((event (deslop-protocol--sse-handle-raw-line parser buffer)))
+        (when event
+          (push event events))))
     (when (deslop-protocol--sse-data-lines parser)
       (let ((event (deslop-protocol--sse-event parser)))
         (when event
@@ -217,32 +245,14 @@ Errors are signaled so the transport can turn them into protocol failures."
                      :false-object :false))
 
 (defun deslop-protocol--json-get (key object)
-  "Return string KEY from parsed JSON OBJECT without interning symbols."
-  (cond
-   ((hash-table-p object) (gethash key object))
-   ((listp object)
-    (cdr (cl-find-if
-          (lambda (entry)
-            (let ((candidate (car-safe entry)))
-              (string= key (if (symbolp candidate)
-                               (symbol-name candidate)
-                             (format "%s" candidate)))))
-          object)))))
+  "Return string KEY from parsed JSON hash table OBJECT."
+  (and (hash-table-p object)
+       (gethash key object)))
 
 (defun deslop-protocol--json-has-key-p (key object)
-  "Return non-nil when JSON alist OBJECT contains string KEY."
-  (cond
-   ((hash-table-p object)
-    (let ((missing (make-symbol "missing")))
-      (not (eq (gethash key object missing) missing))))
-   ((listp object)
-    (cl-find-if
-     (lambda (entry)
-       (let ((candidate (car-safe entry)))
-         (string= key (if (symbolp candidate)
-                          (symbol-name candidate)
-                        (format "%s" candidate)))))
-     object))))
+  "Return non-nil when parsed JSON hash table OBJECT contains KEY."
+  (and (hash-table-p object)
+       (hash-table-contains-p key object)))
 
 (provide 'deslop-protocol)
 

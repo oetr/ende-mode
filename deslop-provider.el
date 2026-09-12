@@ -156,6 +156,23 @@ hosts and IP addresses otherwise retain their host spelling."
         :model (or (plist-get metadata :model)
                    (plist-get profile :model))))
 
+(defun deslop-provider-result-display-metadata (profile metadata result)
+  "Return display metadata for PROFILE, cached METADATA, and RESULT.
+Provider and model values reported by RESULT take precedence over discovery
+metadata and configured profile values."
+  (let ((metadata (copy-sequence
+                   (or metadata
+                       (deslop-provider-cached-metadata profile))))
+        (reported-model (and (listp result) (plist-get result :model)))
+        (reported-provider (and (listp result)
+                                (plist-get result :provider))))
+    (when (stringp reported-model)
+      (setq metadata (plist-put metadata :model reported-model)))
+    (when (stringp reported-provider)
+      (setq metadata (plist-put metadata :provider reported-provider))
+      (setq metadata (plist-put metadata :client reported-provider)))
+    (deslop-provider-display-metadata profile metadata)))
+
 ;;;; Provider discovery
 
 (defvar deslop-provider--discovery-cache (make-hash-table :test #'equal)
@@ -285,11 +302,13 @@ hosts and IP addresses otherwise retain their host spelling."
             (remhash (car oldest) deslop-provider--discovery-cache)
           (clrhash deslop-provider--discovery-cache))))))
 
-(defun deslop-provider--finish-discovery (key metadata)
-  "Cache METADATA for KEY and notify callbacks waiting on it."
-  (deslop-provider--prune-discovery-cache)
-  (puthash key (list :time (float-time) :metadata metadata)
-           deslop-provider--discovery-cache)
+(defun deslop-provider--finish-discovery (key metadata &optional no-cache)
+  "Notify callbacks waiting on KEY and optionally cache METADATA.
+NO-CACHE is used for cancellation, which must not suppress a later retry."
+  (unless no-cache
+    (deslop-provider--prune-discovery-cache)
+    (puthash key (list :time (float-time) :metadata metadata)
+             deslop-provider--discovery-cache))
   (let ((callbacks (gethash key deslop-provider--discovery-inflight)))
     (remhash key deslop-provider--discovery-inflight)
     (dolist (callback callbacks)
@@ -323,7 +342,7 @@ hosts and IP addresses otherwise retain their host spelling."
         (finished nil)
         (finish nil))
     (setq finish
-          (lambda (metadata)
+          (lambda (metadata &optional no-cache)
             (unless finished
               (setq finished t)
               (setq deslop-provider--discovery-processes
@@ -336,7 +355,7 @@ hosts and IP addresses otherwise retain their host spelling."
               (deslop-curl--cleanup-resources
                (list response-buf stderr-buf)
                (list headers-file config-file))
-              (deslop-provider--finish-discovery key metadata))))
+              (deslop-provider--finish-discovery key metadata no-cache))))
     (condition-case _startup
         (progn
           (deslop-curl--validated-url profile url)
@@ -412,6 +431,7 @@ endpoint does not expose compatible metadata."
 (defun deslop-provider-clear-discovery-cache ()
   "Clear cached provider discovery results."
   (interactive)
+  (deslop-provider-abort-discovery)
   (clrhash deslop-provider--discovery-cache)
   (message "deslop: provider discovery cache cleared"))
 
@@ -421,7 +441,7 @@ endpoint does not expose compatible metadata."
     (let ((finish (and (processp process)
                        (process-get process :deslop-discovery-finish))))
       (if finish
-          (funcall finish nil)
+          (funcall finish nil t)
         (when (and (processp process) (process-live-p process))
           (deslop--ignore-errors #'delete-process process)))))
   (setq deslop-provider--discovery-processes nil))

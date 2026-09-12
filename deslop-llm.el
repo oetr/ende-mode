@@ -39,7 +39,8 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   profile callbacks model json-data process process-buffer stderr-buffer
   headers-file config-file sse reasoning content-parts thinking-parts usage
   provider-error actual-model actual-provider estimated-chars received-bytes
-  response-preview generation-start last-status last-usage-update terminal)
+  response-preview response-preview-parts response-preview-bytes
+  generation-start last-status last-usage-update terminal)
 
 (defun deslop-llm--invoke-callback (session name &rest arguments)
   "Invoke callback NAME for SESSION with ARGUMENTS safely."
@@ -256,7 +257,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Return a provider error detail parsed from SESSION's response preview."
   (condition-case nil
       (let* ((payload (deslop-protocol--json-read-string
-                       (deslop-llm--session-response-preview session)))
+                       (deslop-llm--response-preview-text session)))
              (error (deslop-protocol--json-get "error" payload)))
         (deslop-protocol--json-get "message" error))
     (error nil)))
@@ -358,20 +359,35 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
           (format "curl exited with status %d (%s)"
                   status (string-trim event)))))))
 
+(defun deslop-llm--byte-prefix (string max-bytes)
+  "Return the longest character prefix of STRING within MAX-BYTES."
+  (if (<= (string-bytes string) max-bytes)
+      string
+    (let ((low 0)
+          (high (length string)))
+      (while (< low high)
+        (let ((middle (/ (+ low high 1) 2)))
+          (if (<= (string-bytes (substring string 0 middle)) max-bytes)
+              (setq low middle)
+            (setq high (1- middle)))))
+      (substring string 0 low))))
+
+(defun deslop-llm--response-preview-text (session)
+  "Return SESSION's bounded response preview as a string."
+  (let ((parts (deslop-llm--session-response-preview-parts session)))
+    (if parts
+        (mapconcat #'identity (nreverse parts) "")
+      (or (deslop-llm--session-response-preview session) ""))))
+
 (defun deslop-llm--append-response-preview (session chunk)
-  "Append a bounded prefix of CHUNK to SESSION's response preview."
-  (let ((remaining (- deslop-max-error-body-bytes
-                      (length (deslop-llm--session-response-preview session)))))
+  "Append a bounded, byte-safe prefix of CHUNK to SESSION's preview."
+  (let* ((used (or (deslop-llm--session-response-preview-bytes session) 0))
+         (remaining (- deslop-max-error-body-bytes used)))
     (when (> remaining 0)
-      (setf (deslop-llm--session-response-preview session)
-            (concat (deslop-llm--session-response-preview session)
-                    (substring chunk 0 (min remaining (length chunk)))))
-      (while (> (string-bytes
-                 (deslop-llm--session-response-preview session))
-                deslop-max-error-body-bytes)
-        (setf (deslop-llm--session-response-preview session)
-              (substring (deslop-llm--session-response-preview session)
-                         0 -1))))))
+      (let ((prefix (deslop-llm--byte-prefix chunk remaining)))
+        (push prefix (deslop-llm--session-response-preview-parts session))
+        (setf (deslop-llm--session-response-preview-bytes session)
+              (+ used (string-bytes prefix)))))))
 
 (defun deslop-llm--process-filter (session _process chunk)
   "Consume one curl output CHUNK for SESSION."
@@ -479,9 +495,10 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
            :profile profile :callbacks callbacks :model (plist-get profile :model)
            :sse (deslop-protocol--make-sse
                  :buffer "" :data-lines nil :data-bytes 0 :done nil)
-           :reasoning (deslop-protocol--make-reasoning
-                       :mode 'content :pending "")
-           :estimated-chars 0 :received-bytes 0 :response-preview "")))
+            :reasoning (deslop-protocol--make-reasoning
+                        :mode 'content :pending "")
+            :estimated-chars 0 :received-bytes 0
+            :response-preview-parts nil :response-preview-bytes 0)))
     (condition-case startup-error
         (deslop-llm--start-session session messages)
       ((error quit)
