@@ -25,6 +25,17 @@
 (defvar deslop-history--entries (make-hash-table :test #'eq)
   "In-progress history entries keyed by job object.")
 
+(defvar deslop-history--buffer-object nil
+  "History buffer owned by deslop, when one exists.")
+
+(defvar-local deslop-history--owned-buffer nil
+  "Non-nil in a history buffer created by deslop.")
+
+(define-derived-mode deslop-history-mode outline-mode "deslop-history"
+  "Major mode for retained deslop request history."
+  (setq-local outline-regexp "^\\*+ ")
+  (buffer-disable-undo))
+
 (defun deslop-history--prompt-string (messages)
   "Format MESSAGES for storage in a history entry."
   (mapconcat (lambda (message)
@@ -40,37 +51,43 @@
   (when deslop-history-enabled
     (condition-case nil
         (puthash job
-                 (deslop-history--make-entry
-                  :job job
-                  :type (deslop-job-type job)
-                  :prompt (deslop-history--prompt-string messages)
+                  (deslop-history--make-entry
+                   :job job
+                   :type (deslop-job-type job)
+                   :prompt (and deslop-history-retain-prompts
+                                (deslop-history--prompt-string messages))
                   :status "Queued"
                   :started-at (float-time))
                  deslop-history--entries)
-      (error nil))))
+      ((error quit) nil))))
 
 (defun deslop-history-event (job event)
   "Record normalized EVENT for JOB without propagating sink errors."
-  (when deslop-history-enabled
-    (condition-case nil
-        (let ((entry (deslop-history--entry job)))
-          (when entry
+  (let* ((entry (deslop-history--entry job))
+         (type (plist-get event :type))
+         (terminal (memq type '(:done :error :cancelled))))
+    (when entry
+      (unwind-protect
+          (condition-case nil
+              (when deslop-history-enabled
             (pcase (plist-get event :type)
               (:status
                (setf (deslop-history--entry-status entry)
                      (plist-get event :status)))
               (:delta
                (if (eq (plist-get event :channel) :thinking)
-                   (push (plist-get event :text)
-                         (deslop-history--entry-thinking-parts entry))
-                 (push (plist-get event :text)
-                       (deslop-history--entry-content-parts entry))))
+                   (when deslop-history-retain-thinking
+                     (push (plist-get event :text)
+                           (deslop-history--entry-thinking-parts entry)))
+                  (push (plist-get event :text)
+                        (deslop-history--entry-content-parts entry))))
               (:usage
                (setf (deslop-history--entry-usage entry) event))
               (:done
                (let ((content (plist-get event :content)))
-                 (when (and (stringp content) (> (length content) 0))
-                   (push content (deslop-history--entry-content-parts entry))))
+                  (when (and (stringp content) (> (length content) 0))
+                    (setf (deslop-history--entry-content-parts entry)
+                          (list content))))
                (setf (deslop-history--entry-status entry) "Completed"
                      (deslop-history--entry-result entry)
                      (plist-get event :result)
@@ -84,9 +101,11 @@
                (deslop-history--flush entry))
               (:cancelled
                (setf (deslop-history--entry-status entry) "Cancelled"
-                     (deslop-history--entry-finished-at entry) (float-time))
-               (deslop-history--flush entry)))))
-      (error nil))))
+                      (deslop-history--entry-finished-at entry) (float-time))
+                (deslop-history--flush entry))))
+            ((error quit) nil))
+        (when terminal
+          (remhash job deslop-history--entries))))))
 
 (defun deslop-history-cancel (job)
   "Record JOB as cancelled and flush its retained prompt."
@@ -94,15 +113,52 @@
 
 (defun deslop-history--buffer ()
   "Return the history buffer, configuring outline folding once."
-  (let ((buffer (get-buffer-create deslop-history-buffer-name)))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'outline-mode)
-        (outline-mode))
-      (setq-local outline-regexp "^\*+ "))
-    buffer))
+  (if (buffer-live-p deslop-history--buffer-object)
+      deslop-history--buffer-object
+    (let* ((existing (get-buffer deslop-history-buffer-name))
+           (buffer (if (and existing
+                            (not (buffer-local-value
+                                  'deslop-history--owned-buffer existing)))
+                       (generate-new-buffer deslop-history-buffer-name)
+                     (get-buffer-create deslop-history-buffer-name))))
+      (with-current-buffer buffer
+        (deslop-history-mode)
+        (setq-local deslop-history--owned-buffer t))
+      (setq deslop-history--buffer-object buffer)
+      buffer)))
+
+(defun deslop-history--insert-section (title text)
+  "Insert a history section titled TITLE containing safely indented TEXT."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (insert "** " title "\n")
+    (dolist (line (split-string text "\n" nil))
+      (insert "  " line "\n"))))
+
+(defun deslop-history--trim-buffer ()
+  "Remove oldest complete entries until configured history limits are met."
+  (let ((continue t))
+    (while continue
+      (goto-char (point-min))
+      (let ((count 0)
+            (second nil))
+        (while (re-search-forward "^\\* Job " nil t)
+          (setq count (1+ count))
+          (when (= count 2)
+            (setq second (line-beginning-position))))
+        (cond
+         ((and second
+               (or (> count (max 1 deslop-history-max-entries))
+                   (> (buffer-size) (max 1 deslop-history-max-chars))))
+          (delete-region (point-min) second))
+         ((> (buffer-size) (max 1 deslop-history-max-chars))
+          (delete-region (+ (point-min) (max 1 deslop-history-max-chars))
+                         (point-max))
+          (setq continue nil))
+         (t
+          (setq continue nil)))))))
 
 (defun deslop-history--flush (entry)
-  "Append ENTRY to the history buffer and remove its active state."
+  "Append ENTRY to the bounded history buffer."
   (when deslop-history-enabled
     (let* ((job (deslop-history--entry-job entry))
            (result (deslop-history--entry-result entry))
@@ -119,27 +175,43 @@
            (status (deslop-history--entry-status entry))
            (buffer (deslop-history--buffer)))
       (with-current-buffer buffer
-        (goto-char (point-max))
-        (insert (format "\n* Job %d: %s [%s] %s\n"
-                        (deslop-job-id job)
-                        (deslop-job-type job)
-                        status
-                        (format-time-string "%Y-%m-%d %H:%M:%S")))
-        (insert "** Prompt\n" (deslop-history--entry-prompt entry) "\n")
-        (when (> (length thinking) 0)
-          (insert "** Thinking\n" thinking "\n"))
-        (when (> (length content) 0)
-          (insert "** Output\n" content "\n"))
-        (when (listp result)
-          (insert (format "** Metrics\nTokens: %s\nEstimated: %s\nSpeed: %.2f t/s\n"
-                          (or (plist-get result :tokens) 0)
-                          (if (plist-get result :estimated) "yes" "no")
-                          (or (plist-get result :speed) 0.0))))
-        (when usage
-          (insert (format "Usage: %S\n" usage)))
-        (when error
-          (insert "** Error\n" (deslop-error-display-message error) "\n")))
-      (remhash job deslop-history--entries))))
+        (let ((inhibit-read-only t))
+          (save-restriction
+            (widen)
+            (save-excursion
+              (goto-char (point-max))
+              (insert (format "\n* Job %d: %s [%s] %s\n"
+                              (deslop-job-id job)
+                              (deslop-job-type job)
+                              status
+                              (format-time-string "%Y-%m-%d %H:%M:%S")))
+              (deslop-history--insert-section
+               "Prompt" (deslop-history--entry-prompt entry))
+              (deslop-history--insert-section "Thinking" thinking)
+              (deslop-history--insert-section "Output" content)
+              (when (listp result)
+                (deslop-history--insert-section
+                 "Metrics"
+                 (format "Tokens: %s\nEstimated: %s\nSpeed: %.2f t/s"
+                         (or (plist-get result :tokens) 0)
+                         (if (plist-get result :estimated) "yes" "no")
+                         (or (plist-get result :speed) 0.0))))
+              (when usage
+                (deslop-history--insert-section "Usage" (format "%S" usage)))
+              (when error
+                (deslop-history--insert-section
+                 "Error" (deslop-error-display-message error)))
+              (deslop-history--trim-buffer))))))))
+
+(defun deslop-history-clear ()
+  "Clear all retained and in-progress deslop history."
+  (interactive)
+  (clrhash deslop-history--entries)
+  (when (buffer-live-p deslop-history--buffer-object)
+    (with-current-buffer deslop-history--buffer-object
+      (let ((inhibit-read-only t))
+        (erase-buffer))))
+  (message "deslop: history cleared"))
 
 (provide 'deslop-history)
 

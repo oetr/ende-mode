@@ -17,10 +17,16 @@
 
 ;;;; Job records
 
+(defun deslop--queue-cleanup-call (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS while suppressing cleanup failures and quits."
+  (condition-case nil
+      (apply function arguments)
+    ((error quit) nil)))
+
 (cl-defstruct (deslop-job (:constructor deslop--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type data state process overlay buffer
-  start-marker end-marker cursor-marker placement source-snapshot
+  start-marker end-marker cursor-marker placement source-snapshot source-digest
   restriction-beg restriction-end profile result error
   enqueued-at started-at finished-at)
 
@@ -53,26 +59,95 @@
       (setf (deslop-job-process job) process)
     (when (and (processp process) (process-live-p process))
       (process-put process :deslop-cancelled t)
-      (delete-process process)))
+      (deslop--queue-cleanup-call #'delete-process process)))
   process)
 
 (defun deslop--job-delete-overlay (job)
   "Delete JOB's presentation overlay and release its markers."
-  (when (deslop-job-overlay job)
-    (deslop-ui-delete-overlay (deslop-job-overlay job))
-    (setf (deslop-job-overlay job) nil))
+  (let ((overlay (deslop-job-overlay job)))
+    (setf (deslop-job-overlay job) nil)
+    (when overlay
+      (deslop--queue-cleanup-call #'deslop-ui-delete-overlay overlay)))
   (dolist (marker (list (deslop-job-start-marker job)
                         (deslop-job-end-marker job)
-                        (deslop-job-cursor-marker job)))
+                        (deslop-job-cursor-marker job)
+                        (deslop-job-restriction-beg job)
+                        (deslop-job-restriction-end job)))
     (when (markerp marker)
-      (set-marker marker nil))))
+      (deslop--queue-cleanup-call #'set-marker marker nil))))
+
+(defun deslop--job-remove-buffer-hooks (job)
+  "Remove target lifecycle hooks installed for JOB."
+  (let ((buffer (deslop-job-buffer job))
+        (kill-hook (deslop-job-get job :kill-buffer-hook))
+        (before-hook (deslop-job-get job :before-change-hook))
+        (after-hook (deslop-job-get job :after-change-hook)))
+    (when (buffer-live-p buffer)
+      (deslop--queue-cleanup-call
+       (lambda ()
+         (with-current-buffer buffer
+           (when kill-hook
+             (remove-hook 'kill-buffer-hook kill-hook t))
+           (when before-hook
+             (remove-hook 'before-change-functions before-hook t))
+           (when after-hook
+             (remove-hook 'after-change-functions after-hook t))))))
+    (deslop-job-put job :kill-buffer-hook nil)
+    (deslop-job-put job :before-change-hook nil)
+    (deslop-job-put job :after-change-hook nil)))
+
+(defun deslop--job-change-overlaps-target-p (job beg end)
+  "Return non-nil when the change BEG..END overlaps JOB's selected target."
+  (let ((start (and (markerp (deslop-job-start-marker job))
+                    (marker-position (deslop-job-start-marker job))))
+        (finish (and (markerp (deslop-job-end-marker job))
+                     (marker-position (deslop-job-end-marker job)))))
+    (and (deslop-job-get job :selected)
+         start finish
+         (if (= beg end)
+             (and (> beg start) (< beg finish))
+           (< (max beg start) (min end finish))))))
+
+(defun deslop--job-install-buffer-hooks (job)
+  "Cancel JOB promptly when its immutable target becomes unusable."
+  (let ((buffer (deslop-job-buffer job)))
+    (when (buffer-live-p buffer)
+      (let ((kill-hook
+             (lambda ()
+               (when (deslop-job-current-p job)
+                 (deslop-job-fail
+                  job (deslop-error-create
+                       :kind 'target
+                       :message "target buffer was killed")))))
+            (before-hook
+             (lambda (beg end)
+               (when (and (deslop-job-current-p job)
+                          (not (deslop-job-get job :applying))
+                          (deslop--job-change-overlaps-target-p job beg end))
+                 (deslop-job-put job :target-invalidated t))))
+            (after-hook
+             (lambda (&rest _)
+               (when (and (deslop-job-current-p job)
+                          (deslop-job-get job :target-invalidated))
+                 (deslop-job-fail
+                  job (deslop-error-create
+                       :kind 'target
+                       :message "selected source changed during generation"))))))
+        (deslop-job-put job :kill-buffer-hook kill-hook)
+        (deslop-job-put job :before-change-hook before-hook)
+        (deslop-job-put job :after-change-hook after-hook)
+        (with-current-buffer buffer
+          (add-hook 'kill-buffer-hook kill-hook nil t)
+          (add-hook 'before-change-functions before-hook nil t)
+          (add-hook 'after-change-functions after-hook nil t))))))
 
 (defun deslop--job-release-current (job)
   "Release JOB from the active slot and clean its presentation state."
   (when (eq deslop--current-job job)
     (setq deslop--current-job nil)
     (setq deslop-running nil))
-  (deslop--job-delete-overlay job))
+  (deslop--queue-cleanup-call #'deslop--job-remove-buffer-hooks job)
+  (deslop--queue-cleanup-call #'deslop--job-delete-overlay job))
 
 ;;;; Queue state
 
@@ -93,6 +168,9 @@ is only the scheduler's active slot.")
 
 (defvar deslop--aborting nil
   "Non-nil while queue state is being invalidated by an abort.")
+
+(defvar deslop--dispatching nil
+  "Non-nil while the scheduler is dispatching jobs iteratively.")
 
 (defvar deslop--job-handlers nil
   "Alist mapping job type symbols to execution functions.")
@@ -133,9 +211,10 @@ HANDLER receives one `deslop-job' object."
                :start-marker (plist-get data :start-marker)
                :end-marker (plist-get data :end-marker)
                :cursor-marker (plist-get data :cursor-marker)
-               :placement (plist-get data :placement)
-               :source-snapshot (plist-get data :source-snapshot)
-               :restriction-beg (plist-get data :restriction-beg)
+                :placement (plist-get data :placement)
+                :source-snapshot (plist-get data :source-snapshot)
+                :source-digest (plist-get data :source-digest)
+                :restriction-beg (plist-get data :restriction-beg)
                :restriction-end (plist-get data :restriction-end)
                :profile (or (plist-get data :profile)
                             (deslop-provider-profile-snapshot
@@ -169,34 +248,47 @@ Return the newly created `deslop-job'."
           (deslop-job-result job) result
           (deslop-job-error job) error
           (deslop-job-finished-at job) (float-time))
-    (let ((process (deslop-job-process job)))
-      (when (and (processp process) (process-live-p process))
-        (process-put process :deslop-cancelled t)
-        (delete-process process)))
-    (deslop--job-release-current job)
-    (unless deslop--aborting
-      (deslop-process-next))))
+    (unwind-protect
+        (let ((process (deslop-job-process job)))
+          (when (and (processp process) (process-live-p process))
+            (process-put process :deslop-cancelled t)
+            (deslop--queue-cleanup-call #'delete-process process)))
+      (deslop--job-release-current job)
+      (unless deslop--aborting
+        (deslop-process-next)))))
 
 (defun deslop-job-finish (job &optional result)
   "Complete JOB with RESULT and advance the queue."
+  (when (and (deslop-job-current-p job)
+             (fboundp 'deslop-history-event))
+    (deslop-history-event
+     job (list :type :done :result result
+               :content (if (stringp result)
+                            result
+                          (and (listp result)
+                               (plist-get result :content))))))
   (deslop--job-settle job 'completed result nil))
 
 (defun deslop-job-fail (job error)
   "Fail JOB with ERROR and advance the queue."
   (when (deslop-job-current-p job)
-    (message "deslop: job %d failed: %s"
-             (deslop-job-id job)
-             (deslop-error-display-message error)))
-  (deslop--job-settle job 'failed nil error))
+    (let ((id (deslop-job-id job)))
+      (when (fboundp 'deslop-history-event)
+        (deslop-history-event job (list :type :error :error error)))
+      (deslop--job-settle job 'failed nil error)
+      (condition-case nil
+          (message "deslop: job %d failed: %s"
+                   id (deslop-error-display-message error))
+        ((error quit) nil)))))
 
 (defun deslop-job-skip (job message)
   "Skip active JOB with MESSAGE and advance the queue."
   (when (deslop-job-current-p job)
-    (message "deslop: skipped job %d (%s)"
-             (deslop-job-id job) message))
-  (deslop--job-settle job 'skipped nil
-                      (deslop-error-create :kind 'skipped
-                                           :message message)))
+    (let ((id (deslop-job-id job)))
+      (deslop--job-settle job 'skipped nil
+                          (deslop-error-create :kind 'skipped
+                                               :message message))
+      (message "deslop: skipped job %d (%s)" id message))))
 
 (defun deslop-job-done (&optional job result)
   "Compatibility wrapper completing JOB or the current job."
@@ -208,27 +300,34 @@ Return the newly created `deslop-job'."
 
 (defun deslop-process-next ()
   "Process the next queued job if the engine is idle."
-  (unless (or deslop-running deslop--aborting (null deslop-queue))
-    (let* ((job (deslop--queue-pop))
-           (type (deslop-job-type job))
-           (handler (alist-get type deslop--job-handlers))
-           (buf (deslop-job-buffer job)))
-      (setq deslop-running t)
-      (setq deslop--current-job job)
-      (setf (deslop-job-state job) 'running
-            (deslop-job-started-at job) (float-time))
-      (cond
-       ((or (null buf) (not (buffer-live-p buf)))
-        (deslop-job-skip job (format "%s: target buffer no longer exists" type)))
-       ((null handler)
-        (deslop-job-fail
-         job (deslop-error-create :kind 'scheduler
-                                  :message (format "unknown job handler: %s" type))))
-        (t
-         (condition-case caught
-             (funcall handler job)
-           (error
-            (deslop-job-fail job caught))))))))
+  (unless deslop--dispatching
+    (let ((deslop--dispatching t))
+      (while (and (not deslop-running)
+                  (not deslop--aborting)
+                  deslop-queue)
+        (let* ((job (deslop--queue-pop))
+               (type (deslop-job-type job))
+               (handler (alist-get type deslop--job-handlers))
+               (buf (deslop-job-buffer job)))
+          (setq deslop-running t)
+          (setq deslop--current-job job)
+          (setf (deslop-job-state job) 'running
+                (deslop-job-started-at job) (float-time))
+          (cond
+           ((or (null buf) (not (buffer-live-p buf)))
+            (deslop-job-skip
+             job (format "%s: target buffer no longer exists" type)))
+           ((null handler)
+            (deslop-job-fail
+             job (deslop-error-create
+                  :kind 'scheduler
+                  :message (format "unknown job handler: %s" type))))
+           (t
+            (deslop--job-install-buffer-hooks job)
+            (condition-case caught
+                (funcall handler job)
+              ((error quit)
+               (deslop-job-fail job caught))))))))))
 
 ;;;; Cancellation and status
 
@@ -236,9 +335,10 @@ Return the newly created `deslop-job'."
   "Mark JOB cancelled and clean its local state without dispatching."
   (unless (deslop-job-terminal-p job)
     (setf (deslop-job-state job) 'cancelled)
+    (deslop--queue-cleanup-call #'deslop--job-remove-buffer-hooks job)
     (when (fboundp 'deslop-history-cancel)
       (deslop-history-cancel job))
-    (deslop--job-delete-overlay job)))
+    (deslop--queue-cleanup-call #'deslop--job-delete-overlay job)))
 
 (defun deslop-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
@@ -260,8 +360,10 @@ Return the newly created `deslop-job'."
             (deslop--job-cancel job))
           (when (and (processp process) (process-live-p process))
             (process-put process :deslop-cancelled t)
-            (delete-process process))
-          (deslop-ui-clear-all))
+            (deslop--queue-cleanup-call #'delete-process process))
+          (when (fboundp 'deslop-provider-abort-discovery)
+            (deslop--queue-cleanup-call #'deslop-provider-abort-discovery))
+          (deslop--queue-cleanup-call #'deslop-ui-clear-all))
       (setq deslop--aborting nil)
       (message "deslop: queue aborted"))))
 

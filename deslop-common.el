@@ -45,7 +45,9 @@
   "Additional provider profiles keyed by symbol.
 
 Each value is a plist.  Secrets must not be stored here; use auth-source
-fields such as :auth-source-host and :auth-source-user instead."
+fields :auth-source-host, :auth-source-user, and :auth-source-port instead.
+An optional :display-name overrides endpoint-reported provider names for the
+UI."
   :type 'sexp
   :group 'deslop)
 
@@ -65,9 +67,55 @@ Tokens are estimated as chars/4."
   :type 'integer
   :group 'deslop)
 
+(defcustom deslop-max-request-chars 32000
+  "Maximum combined characters in all messages sent for one request."
+  :type 'integer
+  :group 'deslop)
+
 (defcustom deslop-window-chars 8000
   "Characters kept on each side of the cursor when context is elided."
   :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-output-tokens 4096
+  "Maximum completion tokens requested from an LLM provider."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-response-bytes (* 4 1024 1024)
+  "Maximum number of response-body bytes accepted from one LLM request."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-sse-event-bytes (* 512 1024)
+  "Maximum number of bytes accepted in one SSE line or event."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-output-chars (* 512 1024)
+  "Maximum combined reasoning and completion characters retained per request."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-discovery-bytes (* 512 1024)
+  "Maximum response-body bytes accepted from provider discovery."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-response-header-bytes (* 64 1024)
+  "Maximum response-header bytes parsed from curl's header output."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-error-body-bytes 8192
+  "Maximum response bytes retained for provider error diagnostics."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-allow-environment-proxy nil
+  "Non-nil to allow curl to honor ambient proxy environment variables.
+Loopback requests always bypass proxies."
+  :type 'boolean
   :group 'deslop)
 
 (defcustom deslop-insert-instruction
@@ -79,6 +127,31 @@ Tokens are estimated as chars/4."
 (defcustom deslop-history-enabled t
   "Non-nil when completed jobs are retained in a history buffer."
   :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-retain-prompts nil
+  "Non-nil when history entries retain complete prompts and source context."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-retain-thinking nil
+  "Non-nil when history entries retain provider reasoning traces."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-max-entries 100
+  "Maximum number of completed jobs retained in the history buffer."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-history-max-chars (* 2 1024 1024)
+  "Maximum approximate size of the retained history buffer."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-provider-discovery-cache-size 64
+  "Maximum number of provider discovery results retained in memory."
+  :type 'integer
   :group 'deslop)
 
 (defcustom deslop-history-buffer-name "*deslop-history*"
@@ -96,6 +169,18 @@ Tokens are estimated as chars/4."
   :type 'boolean
   :group 'deslop)
 
+(defcustom deslop-review-highlight t
+  "Non-nil when pending LLM output is tinted with a soft highlight.
+The highlight fixes the foreground to the face in effect at the insertion
+point and shifts its background slightly toward that foreground."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-review-highlight-blend 0.5
+  "Fraction of the foreground color blended into the review highlight background."
+  :type 'number
+  :group 'deslop)
+
 ;;;; Faces
 
 (defface deslop-working-face
@@ -108,30 +193,36 @@ Tokens are estimated as chars/4."
   "Face used for deslop progress badges."
   :group 'deslop)
 
-(defface deslop-review-face
-  '((t (:inherit diff-refine-added :extend t)))
-  "Face applied to LLM output awaiting user approval."
-  :group 'deslop)
-
 ;;;; Errors and provider profiles
 
 (cl-defstruct (deslop-error (:constructor deslop-error-create))
   "Structured error passed between the transport and job scheduler."
   kind message details)
 
+(defun deslop--safe-message-string (value)
+  "Return VALUE as a bounded, single-line diagnostic string."
+  (let ((text (replace-regexp-in-string
+               "[[:cntrl:]]+" " " (format "%s" value))))
+    (if (> (length text) 1000)
+        (concat (substring text 0 997) "...")
+      text)))
+
 (defun deslop-error-display-message (error)
   "Return a displayable message for structured or ordinary ERROR."
   (cond
    ((deslop-error-p error)
     (let ((kind (deslop-error-kind error))
-          (message (deslop-error-message error)))
-      (if (and kind (not (string-empty-p message)))
+          (message (deslop--safe-message-string
+                    (or (deslop-error-message error) "unknown error"))))
+      (if kind
           (format "%s: %s" kind message)
         message)))
-   ((stringp error) error)
+   ((stringp error) (deslop--safe-message-string error))
    ((and (consp error) (eq (car error) 'error))
-    (error-message-string error))
-   (t (format "%s" error))))
+    (condition-case nil
+        (deslop--safe-message-string (error-message-string error))
+      (error (deslop--safe-message-string error))))
+   (t (deslop--safe-message-string error))))
 
 (defun deslop--plist-merge (base overrides)
   "Return BASE plist with OVERRIDES plist values applied."
@@ -153,10 +244,11 @@ entry before it can be dispatched."
             ('openrouter
              '(:url "https://openrouter.ai/api/v1/chat/completions"
                :model "openai/gpt-4o-mini"
-               :temperature 0.2
-               :auth-source-host "openrouter.ai"
-               :auth-source-user "deslop"
-               :require-sse t))
+                :temperature 0.2
+                :auth-source-host "openrouter.ai"
+                :auth-source-user "deslop"
+                :auth-source-port 443
+                :require-sse t))
             (_
              (list :url deslop-url
                    :model deslop-model
@@ -174,21 +266,51 @@ entry before it can be dispatched."
       (setq snapshot (plist-put snapshot key nil)))
     snapshot))
 
-(defun deslop-provider-client-name (profile)
+(defun deslop-provider--friendly-name (name)
+  "Return a friendly display spelling for provider NAME."
+  (if (not (stringp name))
+      (format "%s" name)
+    (let ((downcased (downcase name)))
+      (cond
+       ((member downcased '("openai" "openai.com")) "OpenAI")
+       ((member downcased '("openrouter" "openrouter.ai")) "OpenRouter")
+       ((member downcased '("llama.cpp" "llama-cpp")) "llama.cpp")
+       (t name)))))
+
+(defun deslop-provider-client-name (profile &optional metadata)
   "Return a concise display name for provider PROFILE.
-Known service hosts use friendly names; local hosts and IP addresses retain
-their host spelling, while other providers use their host name."
+METADATA may contain a provider/client reported by the endpoint.  Explicit
+profile names and known service hosts take precedence over that report; local
+hosts and IP addresses otherwise retain their host spelling."
   (let* ((url (plist-get profile :url))
          (parsed (and (stringp url) (url-generic-parse-url url)))
          (host (and parsed (url-host parsed)))
-         (downcased (and host (downcase host))))
+         (downcased (and host (downcase host)))
+         (reported (and metadata
+                        (or (plist-get metadata :client)
+                            (plist-get metadata :provider)
+                            (plist-get metadata :owner))))
+         (explicit (plist-get profile :display-name)))
     (cond
-     ((null host)
-      (format "%s" (or (plist-get profile :name) "provider")))
-     ((string= downcased "openrouter.ai") "OpenRouter")
-     ((string-match-p "\\(?:\\`\\|\\.\\)openai\\.com\\'" downcased)
+     ((and (stringp explicit) (not (string-empty-p explicit)))
+      (deslop-provider--friendly-name explicit))
+     ((and downcased (string= downcased "openrouter.ai")) "OpenRouter")
+     ((and downcased
+           (string-match-p "\\(?:\\`\\|\\.\\)openai\\.com\\'"
+                           downcased))
       "OpenAI")
+     ((and (stringp reported) (not (string-empty-p reported)))
+      (deslop-provider--friendly-name reported))
+     ((null host)
+      (deslop-provider--friendly-name
+       (format "%s" (or (plist-get profile :name) "provider"))))
      (t host))))
+
+(defun deslop-provider-display-metadata (profile &optional metadata)
+  "Return display CLIENT and MODEL values for PROFILE and METADATA."
+  (list :client (deslop-provider-client-name profile metadata)
+        :model (or (plist-get metadata :model)
+                   (plist-get profile :model))))
 
 ;;;; System Prompts
 
@@ -256,26 +378,55 @@ return price * (1 + tax)"
       (setq end (1- end)))
     (substring s start end)))
 
+(defun deslop-context-window (length offset)
+  "Return bounded (START . END) offsets around OFFSET in text of LENGTH.
+The returned source span never exceeds `deslop-max-context-chars', and each
+side is additionally capped by `deslop-window-chars'."
+  (unless (and (integerp deslop-max-context-chars)
+               (> deslop-max-context-chars 0))
+    (error "deslop-max-context-chars must be a positive integer"))
+  (unless (and (integerp deslop-window-chars)
+               (>= deslop-window-chars 0))
+    (error "deslop-window-chars must be a nonnegative integer"))
+  (setq offset (max 0 (min length offset)))
+  (if (<= length deslop-max-context-chars)
+      (cons 0 length)
+    (let* ((left-cap (min offset deslop-window-chars))
+           (right-cap (min (- length offset) deslop-window-chars))
+           (budget deslop-max-context-chars)
+           (left (min left-cap (/ budget 2)))
+           (right (min right-cap (- budget left)))
+           (remaining (- budget left right))
+           (add-left (min remaining (- left-cap left))))
+      (setq left (+ left add-left))
+      (setq remaining (- remaining add-left))
+      (setq right (+ right (min remaining (- right-cap right))))
+      (cons (- offset left) (+ offset right)))))
+
+(defun deslop-format-marker-context
+    (before after omitted-before omitted-after)
+  "Format BEFORE and AFTER around a cursor, marking omitted sides."
+  (concat
+   (when omitted-before "...[characters elided]...\n")
+   before
+   "<CURSOR>"
+   after
+   (when omitted-after "\n...[characters elided]...")))
+
 (defun deslop-marker-context (text offset)
   "Return TEXT with a <CURSOR> marker at OFFSET.
 If TEXT exceeds `deslop-max-context-chars', keep a window of
 `deslop-window-chars' characters on each side of OFFSET and mark the cut
 points with elision markers."
   (setq offset (max 0 (min (length text) offset)))
-  (if (<= (length text) deslop-max-context-chars)
-      (concat (substring text 0 offset) "<CURSOR>" (substring text offset))
-    (let* ((w deslop-window-chars)
-           (bs (max 0 (- offset w)))
-           (be (min (length text) (+ offset w)))
-           (win (substring text bs be))
-           (co (- offset bs)))
-      (concat
-       (when (> bs 0) (format "...[%d characters elided]...\n" bs))
-       (substring win 0 co)
-       "<CURSOR>"
-       (substring win co)
-       (when (> (- (length text) be) 0)
-         (format "\n...[%d characters elided]..." (- (length text) be)))))))
+  (let* ((bounds (deslop-context-window (length text) offset))
+         (start (car bounds))
+         (end (cdr bounds)))
+    (deslop-format-marker-context
+     (substring text start offset)
+     (substring text offset end)
+     (> start 0)
+     (< end (length text)))))
 
 (defun deslop-current-region ()
   "Return (START . END) of the active region, or nil."
