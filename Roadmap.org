@@ -1,9 +1,6 @@
 * DONE Refactor everything so that the codebase becomes pleasant to work with
 
-* Mark the LLM output as such and allow human to approve/revert it
-
-
-
+* DONE Mark the LLM output as such and allow human to approve/revert it
 * Feature: add config files
 Users should be able to easily switch providers
 Supported providers:
@@ -16,8 +13,7 @@ Users should be able to save a config per API
 
 - Here it would be nice to securely save the API tokens so that they are not verbatim present in the 
 
-* Output the number of tokens per second as well in the overlay
-
+* DONE Output the number of tokens per second as well in the overlay
 * How difficult would it be to copy overlays like we copy text?
 - Just answer inline, right here:
 Answer:
@@ -27,8 +23,7 @@ Copying overlays like text is moderately straightforward using one of two approa
 2. Text Properties: If text is converted from an overlay to a propertized text string ('display text property), Emacs can copy it directly, but text properties modify buffer state unlike non-intrusive overlays.
 Recommendation: Approach #1 via filter-buffer-substring advice or a dedicated copy command is the cleanest and preserves overlay non-destructive properties.
 
-
-* Save all LLM outputs in a buffer
+* DONE Save all LLM outputs in a buffer
 - the buffer is not just text, it should be similar to org mode where you can fold and unfold large bodies of text
 E.g. 
 # * <2026-09-11 Fri 13:13> What did the...
@@ -40,7 +35,7 @@ E.g.
 #   The fox said: "Come in, little mouse"!
 
 
-* Bug: thinking trace dumped
+* DONE Bug: thinking trace dumped
 - sometimes llama.cpp seems to return a different format so that everything gets dumped
   - is that llama.cpp's fault or is it ours?
 
