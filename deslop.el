@@ -39,6 +39,7 @@
     (pcase-dolist (`(,key . ,cmd) '(("i" . deslop-insert-at-cursor)
                                   ("m" . deslop-improve-at-cursor)
                                   ("s" . deslop-summarize)
+                                  ("h" . deslop-history)
                                   ("q" . deslop-queue-status)
                                   ("a" . deslop-abort-queue)
                                   ("p" . deslop-approve-output)

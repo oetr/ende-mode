@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'outline)
 (require 'subr-x)
 (require 'deslop-core)
@@ -22,23 +23,18 @@
   :type 'boolean
   :group 'deslop)
 
-(defcustom deslop-history-retain-prompts nil
+(defcustom deslop-history-retain-prompts t
   "Non-nil when history entries retain complete prompts and source context."
   :type 'boolean
   :group 'deslop)
 
-(defcustom deslop-history-retain-thinking nil
+(defcustom deslop-history-retain-thinking t
   "Non-nil when history entries retain provider reasoning traces."
   :type 'boolean
   :group 'deslop)
 
 (defcustom deslop-history-max-entries 100
   "Maximum number of completed jobs retained in the history buffer."
-  :type 'integer
-  :group 'deslop)
-
-(defcustom deslop-history-max-chars (* 2 1024 1024)
-  "Maximum approximate size of the retained history buffer."
   :type 'integer
   :group 'deslop)
 
@@ -61,10 +57,21 @@
 (defvar-local deslop-history--owned-buffer nil
   "Non-nil in a history buffer created by deslop.")
 
+(defvar-local deslop-history--internal-write nil
+  "Non-nil while deslop is updating the history buffer.")
+
+(defun deslop-history--prevent-user-edit (&rest _)
+  "Prevent edits to the history buffer outside deslop internals."
+  (unless deslop-history--internal-write
+    (user-error "deslop history is maintained by deslop")))
+
 (define-derived-mode deslop-history-mode outline-mode "deslop-history"
   "Major mode for retained deslop request history."
   (setq-local outline-regexp "^\\*+ ")
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (add-hook 'before-change-functions
+            #'deslop-history--prevent-user-edit nil t)
+  (setq-local buffer-read-only t))
 
 (defun deslop-history--prompt-string (messages)
   "Format MESSAGES for storage in a history entry."
@@ -128,12 +135,33 @@
                        (setf (deslop-history--entry-metadata entry)
                              (plist-get event :metadata)))
                       (:done
-                       (let ((content (plist-get event :content)))
+                       (let* ((content (plist-get event :content))
+                              (result (plist-get event :result))
+                              (thinking (and deslop-history-retain-thinking
+                                             (listp result)
+                                             (plist-get result :thinking)))
+                              (usage (and (listp result)
+                                           (plist-get result :usage))))
+                         (when (and (stringp thinking)
+                                    (> (length thinking) 0)
+                                    (null
+                                     (deslop-history--entry-thinking-parts
+                                      entry)))
+                           (setf (deslop-history--entry-thinking-parts entry)
+                                 (list thinking)))
                          (when (and (stringp content)
                                     (> (length content) 0))
                            (setf
                             (deslop-history--entry-content-parts entry)
-                            (list content))))
+                            (list content)))
+                         (when usage
+                           (setf (deslop-history--entry-usage entry)
+                                 (list :type :usage
+                                       :usage usage
+                                       :tokens (plist-get result :tokens)
+                                       :speed (plist-get result :speed)
+                                       :estimated
+                                       (plist-get result :estimated)))))
                        (deslop-history--finish-entry
                         entry "Completed" (plist-get event :result)))
                       (:error
@@ -151,7 +179,10 @@
         (deslop--owned-buffer deslop-history--buffer-object
                               deslop-history-buffer-name
                               'deslop-history--owned-buffer
-                              #'deslop-history-mode)))
+                              #'deslop-history-mode))
+  (with-current-buffer deslop-history--buffer-object
+    (setq-local buffer-read-only t))
+  deslop-history--buffer-object)
 
 (defun deslop-history--insert-section (title text)
   "Insert a history section titled TITLE containing safely indented TEXT."
@@ -161,7 +192,7 @@
       (insert "  " line "\n"))))
 
 (defun deslop-history--trim-buffer ()
-  "Remove oldest complete entries until configured history limits are met."
+  "Remove oldest complete entries until the entry limit is met."
   (let ((continue t))
     (while continue
       (goto-char (point-min))
@@ -171,20 +202,32 @@
           (setq count (1+ count))
           (when (= count 2)
             (setq second (line-beginning-position))))
-        (cond
-         ((and second
-               (or (> count (max 1 deslop-history-max-entries))
-                   (> (buffer-size) (max 1 deslop-history-max-chars))))
-          (delete-region (point-min) second))
-         ((> (buffer-size) (max 1 deslop-history-max-chars))
-          (delete-region (+ (point-min) (max 1 deslop-history-max-chars))
-                         (point-max))
-          (setq continue nil))
-         (t
-          (setq continue nil)))))))
+        (if (and second
+                 (> count (max 1 deslop-history-max-entries)))
+            (delete-region (point-min) second)
+          (setq continue nil))))))
+
+(defun deslop-history--value-string (value)
+  "Return VALUE as readable JSON when possible, otherwise printed Lisp."
+  (condition-case nil
+      (if (or (hash-table-p value) (vectorp value) (listp value))
+          (json-encode value)
+        (format "%s" value))
+    (error (format "%S" value))))
+
+(defun deslop-history--usage-string (event)
+  "Return readable usage information from normalized USAGE EVENT."
+  (let ((raw (plist-get event :usage)))
+    (if raw
+        (format "Stream tokens: %s\nEstimated: %s\nSpeed: %.2f t/s\nProvider usage: %s"
+                (or (plist-get event :tokens) 0)
+                (if (plist-get event :estimated) "yes" "no")
+                (or (plist-get event :speed) 0.0)
+                (deslop-history--value-string raw))
+      (format "%S" event))))
 
 (defun deslop-history--flush (entry)
-  "Append ENTRY to the bounded history buffer."
+  "Append ENTRY to the entry-bounded history buffer."
   (when deslop-history-enabled
     (let* ((job (deslop-history--entry-job entry))
            (result (deslop-history--entry-result entry))
@@ -202,7 +245,8 @@
            (status (deslop-history--entry-status entry))
            (buffer (deslop-history--buffer)))
       (with-current-buffer buffer
-        (let ((inhibit-read-only t))
+        (let ((inhibit-read-only t)
+              (deslop-history--internal-write t))
           (save-restriction
             (widen)
             (save-excursion
@@ -232,11 +276,17 @@
                          (if (plist-get result :estimated) "yes" "no")
                          (or (plist-get result :speed) 0.0))))
               (when usage
-                (deslop-history--insert-section "Usage" (format "%S" usage)))
+                (deslop-history--insert-section
+                 "Usage" (deslop-history--usage-string usage)))
               (when error
                 (deslop-history--insert-section
                  "Error" (deslop-error-display-message error)))
               (deslop-history--trim-buffer))))))))
+
+(defun deslop-history ()
+  "Display the retained deslop job history buffer."
+  (interactive)
+  (display-buffer (deslop-history--buffer)))
 
 (defun deslop-history-clear ()
   "Clear all retained and in-progress deslop history."
@@ -244,7 +294,8 @@
   (clrhash deslop-history--entries)
   (when (buffer-live-p deslop-history--buffer-object)
     (with-current-buffer deslop-history--buffer-object
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (deslop-history--internal-write t))
         (erase-buffer))))
   (message "deslop: history cleared"))
 

@@ -52,10 +52,10 @@
                                     :text response))
        (deslop-test--callback call :on-event
                               (list :type :usage :tokens 10 :speed 50.0))
-      (deslop-test--callback call :on-done response))
-     ((listp response)
-      (when (or (plist-get response :reported-model)
-                (plist-get response :reported-provider))
+       (deslop-test--callback call :on-done response))
+      ((listp response)
+       (when (or (plist-get response :reported-model)
+                 (plist-get response :reported-provider))
          (deslop-test--callback
           call :on-event
           (list :type :metadata
@@ -63,7 +63,24 @@
                 (list :source :response
                       :model (plist-get response :reported-model)
                       :provider (plist-get response :reported-provider)))))
-      (deslop-test--callback call :on-done response))
+       (when (stringp (plist-get response :thinking))
+         (deslop-test--callback
+          call :on-event
+          (list :type :delta :channel :thinking
+                :text (plist-get response :thinking))))
+       (when (stringp (plist-get response :content))
+         (deslop-test--callback
+          call :on-event
+          (list :type :delta :channel :content
+                :text (plist-get response :content))))
+       (when (plist-member response :usage)
+         (deslop-test--callback
+          call :on-event
+          (list :type :usage
+                :tokens (plist-get response :tokens)
+                :speed (plist-get response :speed)
+                :usage (plist-get response :usage))))
+       (deslop-test--callback call :on-done response))
      (t
       (deslop-test--callback call :on-error
                              (format "unknown mock response: %S" response))))))
@@ -1231,8 +1248,47 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
         (let ((text (buffer-string)))
           (should (string-match-p "Output" text))
           (should (= (deslop-test--count-matches "result" text) 1))
-          (should-not (string-match-p "base" text))
+          (should (string-match-p "base" text))
           (should (eq buffer-undo-list t)))))))
+
+(ert-deftest deslop-test/history-retains-failed-stream-and-raw-usage ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm
+          '((:thinking "reasoning before failure"
+             :content ""
+             :tokens 4096
+             :speed 58.4
+             :usage (:prompt_tokens 12
+                     :completion_tokens 4096
+                     :reasoning_tokens 4000
+                     :total_tokens 4108))))))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((job (deslop-insert-at-cursor)))
+        (should (eq (deslop-job-state job) 'failed)))
+      (with-current-buffer deslop-history-buffer-name
+        (let ((text (buffer-string)))
+          (should (string-match-p "Prompt" text))
+          (should (string-match-p "base" text))
+          (should (string-match-p "Thinking" text))
+          (should (string-match-p "reasoning before failure" text))
+          (should (string-match-p "reasoning_tokens" text))
+          (should (string-match-p "empty completion" text))
+          (should buffer-read-only)
+          (should-error (insert "user edit") :type 'buffer-read-only)
+          (let ((buffer-read-only nil))
+            (should-error (insert "user edit") :type 'user-error)))))))
+
+(ert-deftest deslop-test/history-command-displays-buffer ()
+  (deslop-test--reset)
+  (let ((displayed nil))
+    (cl-letf (((symbol-function 'display-buffer)
+               (lambda (buffer &rest _) (setq displayed buffer))))
+      (deslop-history)
+      (should (eq displayed (get-buffer deslop-history-buffer-name)))))
+  (should (eq (lookup-key deslop-mode-map (kbd "C-c e h"))
+              #'deslop-history)))
 
 (ert-deftest deslop-test/history-terminal-cleanup-survives-disable-and-write-errors ()
   (deslop-test--reset)

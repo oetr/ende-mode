@@ -201,16 +201,19 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Record and emit provider USAGE for SESSION."
   (when usage
     (setf (deslop-llm--session-usage session) usage)
-    (let ((tokens (deslop-protocol--json-get "completion_tokens" usage)))
-      (when (numberp tokens)
-        (let ((elapsed
-               (max 0.001
-                    (- (float-time)
-                       (or (deslop-llm--session-generation-start session)
-                           (float-time))))))
-          (deslop-llm--emit-event
-           session (list :type :usage :tokens tokens
-                         :speed (/ (float tokens) elapsed))))))))
+    (let* ((reported-tokens
+            (deslop-protocol--json-get "completion_tokens" usage))
+           (tokens (if (numberp reported-tokens) reported-tokens 0))
+           (elapsed (max 0.001
+                         (- (float-time)
+                            (or (deslop-llm--session-generation-start session)
+                                (float-time))))))
+      (deslop-llm--emit-event
+       session (list :type :usage :tokens tokens
+                     :speed (if (numberp reported-tokens)
+                                (/ (float tokens) elapsed)
+                              0.0)
+                      :usage usage)))))
 
 (defun deslop-llm--handle-json (session json)
   "Handle one parsed streaming JSON object for SESSION."
