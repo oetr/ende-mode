@@ -394,9 +394,21 @@ process for cancellation tests."
           (should (string= (overlay-get review 'client) "localhost"))
           (should (string-match-p "test-model"
                                   (deslop-test--overlay-label review)))
-          (should (string-match-p "localhost"
-                                  (deslop-test--overlay-label review)))
-          (goto-char (1+ (overlay-start review)))
+           (should (string-match-p "localhost"
+                                   (deslop-test--overlay-label review)))
+           (should (eq (lookup-key (overlay-get review 'keymap) (kbd "RET"))
+                       #'deslop-approve-output))
+           (should (eq (lookup-key (overlay-get review 'keymap) (kbd "DEL"))
+                       #'deslop-reject-output))
+           (should (eq (lookup-key (overlay-get review 'keymap)
+                                   (kbd "<backspace>"))
+                       #'deslop-reject-output))
+           (should (eq (lookup-key (overlay-get review 'keymap) (kbd "C-d"))
+                       #'deslop-reject-output))
+           (goto-char (overlay-end review))
+           (should (eq (key-binding (kbd "RET"))
+                       #'deslop-approve-output))
+           (goto-char (1+ (overlay-start review)))
           (insert "edited ")
           (should (deslop-review-overlay-p review))
           (deslop-approve-output)
@@ -1095,6 +1107,41 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-uses-bottom-window-and-quits-it-on-close ()
+  (let ((source (generate-new-buffer " *deslop-selector-window-source*"))
+        (display-action nil)
+        (quit-window-call nil)
+        (selector nil))
+    (unwind-protect
+        (with-current-buffer source
+          (cl-letf (((symbol-function 'display-buffer)
+                     (lambda (buffer action)
+                       (setq display-action (list buffer action))
+                       (selected-window)))
+                    ((symbol-function 'quit-window)
+                     (lambda (kill window)
+                       (setq quit-window-call (list kill window)))))
+            (let ((deslop-providers '(local))
+                  (deslop-provider-profiles
+                   '((local :model "local-model"))))
+              (deslop-selector-open)
+              (setq selector (get-buffer deslop-selector-buffer-name))
+              (should (eq (car display-action) selector))
+              (should (eq (car (car (cadr display-action)))
+                          #'display-buffer-at-bottom))
+              (should (equal (cdr (assq 'window-height
+                                        (cdr (cadr display-action))))
+                             deslop-selector-window-height))
+              (with-current-buffer selector
+                (deslop-selector-close))
+              (should (equal (car quit-window-call) t))
+              (should (eq (cadr quit-window-call) (selected-window)))
+              (should-not (buffer-live-p selector)))))
+      (when (buffer-live-p selector)
+        (kill-buffer selector))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
 
 (ert-deftest deslop-test/openai-request-body-matches-codex-responses-shape ()
   (let* ((body (deslop-protocol--json-read-string

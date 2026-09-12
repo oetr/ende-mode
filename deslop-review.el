@@ -27,6 +27,16 @@ point and shifts its background slightly toward that foreground."
   :type 'number
   :group 'deslop)
 
+(defvar deslop-review--keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'deslop-approve-output)
+    (define-key map (kbd "C-m") #'deslop-approve-output)
+    (define-key map (kbd "DEL") #'deslop-reject-output)
+    (define-key map (kbd "<backspace>") #'deslop-reject-output)
+    (define-key map (kbd "C-d") #'deslop-reject-output)
+    map)
+  "Keymap active while point is on generated output awaiting review.")
+
 ;;;; Review Highlight & Color Helpers
 
 (defun deslop-review--color-rgb (color)
@@ -222,17 +232,23 @@ the inserted characters are tinted using the review overlay's face."
     (let ((badge (deslop-review--format-badge client model))
           (style (and deslop-review-highlight
                       (deslop-review--style buffer beg)))
-          (overlay nil)
-          (complete nil))
+           (overlay nil)
+           (boundary-overlay nil)
+           (complete nil))
       (unwind-protect
           (progn
             (setq overlay (make-overlay beg end buffer t nil))
+            (setq boundary-overlay (make-overlay end end buffer nil t))
             (overlay-put overlay 'deslop-review t)
             (overlay-put overlay 'client client)
             (overlay-put overlay 'model model)
             (overlay-put overlay 'deslop-original-text (or original ""))
             (overlay-put overlay 'priority 1)
             (overlay-put overlay 'evaporate nil)
+            (overlay-put overlay 'keymap deslop-review--keymap)
+            (overlay-put boundary-overlay 'keymap deslop-review--keymap)
+            (overlay-put overlay 'deslop-review-boundary
+                         boundary-overlay)
             (overlay-put overlay 'before-string badge)
             (when style
               (overlay-put
@@ -243,14 +259,20 @@ the inserted characters are tinted using the review overlay's face."
             (setq complete t)
             overlay)
         (unless complete
-          (when overlay
-            (delete-overlay overlay))
+           (when overlay
+             (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
+               (when (overlayp boundary)
+                 (delete-overlay boundary)))
+             (delete-overlay overlay))
           (deslop--ignore-errors #'deslop-review--update-save-guards))))))
 
 (defun deslop-review-delete-overlay (overlay)
   "Remove review OVERLAY when it has been approved or rejected."
   (when (deslop-review-overlay-p overlay)
     (let ((buffer (overlay-buffer overlay)))
+      (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
+        (when (overlayp boundary)
+          (delete-overlay boundary)))
       (delete-overlay overlay)
       (when (buffer-live-p buffer)
         (with-current-buffer buffer

@@ -23,6 +23,11 @@
   :type 'string
   :group 'deslop)
 
+(defcustom deslop-selector-window-height 0.25
+  "Fraction of the frame height used by the bottom selector window."
+  :type 'number
+  :group 'deslop)
+
 (defvar deslop-selector--last-selection nil
   "Most recently confirmed selector choice as a provider/model plist.")
 
@@ -46,6 +51,9 @@
 
 (defvar-local deslop-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
+
+(defvar-local deslop-selector--window nil
+  "Window displaying the current selector buffer.")
 
 (defun deslop-selector--provider-name ()
   "Return the selected provider name."
@@ -187,7 +195,13 @@
   "Close the selector without starting a request."
   (interactive)
   (deslop-selector--cancel-probe)
-  (let ((buffer (current-buffer)))
+  (let ((buffer (current-buffer))
+        (window (or (and (window-live-p deslop-selector--window)
+                         deslop-selector--window)
+                    (get-buffer-window (current-buffer) t))))
+    (setq deslop-selector--window nil)
+    (when (window-live-p window)
+      (quit-window t window))
     (when (buffer-live-p buffer)
       (kill-buffer buffer))))
 
@@ -266,7 +280,16 @@
             deslop-selector--model-index 0
             deslop-selector--model-state :ready)
       (deslop-selector--set-provider provider-index))
-    (pop-to-buffer buffer)))
+    (let ((window
+           (display-buffer
+            buffer
+            `((display-buffer-at-bottom)
+              (window-height . ,deslop-selector-window-height)
+              (window-min-height . 5)))))
+      (with-current-buffer buffer
+        (setq deslop-selector--window window))
+      (when (window-live-p window)
+        (select-window window)))))
 
 (provide 'deslop-selector)
 

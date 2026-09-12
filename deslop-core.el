@@ -1,7 +1,7 @@
 ;;; deslop-core.el --- Core definitions and utilities for deslop -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Peter
-;; Author: Peter
+;; Copyright (C) 2026 Peter Samarin
+;; Author: Peter Samarin
 ;; Keywords: convenience, tools
 
 ;;; Commentary:
