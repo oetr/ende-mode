@@ -80,6 +80,10 @@
                 :tokens (plist-get response :tokens)
                 :speed (plist-get response :speed)
                 :usage (plist-get response :usage))))
+       (when (listp (plist-get response :partial))
+         (deslop-test--callback
+          call :on-event
+          (list :type :partial-result :result (plist-get response :partial))))
        (deslop-test--callback call :on-done response))
      (t
       (deslop-test--callback call :on-error
@@ -296,8 +300,18 @@ process for cancellation tests."
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'failed))
-        (should (string= (buffer-string) "base"))))))
+         (should (eq (deslop-job-state job) 'failed))
+         (should (string= (buffer-string) "base"))))))
+
+(ert-deftest deslop-test/custom-transport-output-can-be-unbounded ()
+  (deslop-test--reset)
+  (let ((deslop-max-output-chars nil)
+        (deslop-llm-function (deslop-test--fake-llm '("four"))))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((job (deslop-insert-at-cursor)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "basefour"))))))
 
 (ert-deftest deslop-test/improve-replaces-selection ()
   (deslop-test--reset)
@@ -892,7 +906,7 @@ process for cancellation tests."
 
 (defun deslop-test--run-default-transport (header response)
   "Run the default transport with a mocked process and HEADER/RESPONSE.
-Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
+Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((captured nil)
         (process nil)
         (result nil)
@@ -900,6 +914,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
          (done-count 0)
          (error-count 0)
          (cancel-function nil)
+         (events nil)
         (deslop-provider-discovery-enabled nil)
         (real-make-process (symbol-function 'make-process))
          (profile (list :name 'test
@@ -925,6 +940,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
              (list (cons "user" "body"))
                (list :on-start (lambda (cancel)
                                  (setq cancel-function cancel))
+                     :on-event (lambda (event)
+                                 (push event events))
                      :on-done (lambda (value)
                                (setq done-count (1+ done-count))
                                (setq result value))
@@ -947,7 +964,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
                 (accept-process-output process 0.05))
                (funcall sentinel process "finished\n")
                 (list result failure command done-count error-count
-                      cancel-function)))
+                      cancel-function events)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))))))
 
@@ -964,6 +981,33 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
     (should (functionp (nth 5 out)))
     (should-not (member "hello" (nth 2 out)))
     (should (member "@-" (nth 2 out)))))
+
+(ert-deftest deslop-test/default-transport-accepts-text-completion-deltas ()
+  (let ((out (deslop-test--run-default-transport
+               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+               "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
+    (should-not (nth 1 out))
+    (should (string= (plist-get (nth 0 out) :content) "legacy"))))
+
+(ert-deftest deslop-test/default-transport-retains-joined-partial-result ()
+  (let* ((first
+          "data: {\"choices\":[{\"finish_reason\":null,\"delta\":{\"reasoning_content\":\"Sub\"}}]}\n\n")
+         (second
+          "data: {\"choices\":[{\"finish_reason\":\"length\",\"delta\":{\"reasoning_content\":\"headings\"}}]}\n\n")
+         (out (deslop-test--run-default-transport
+               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+               (concat first second
+                       "data: {\"choices\":[],\"usage\":{\"completion_tokens\":4096}}\n\n"
+                       "data: [DONE]\n\n")))
+         (partial (cl-find-if
+                   (lambda (event)
+                     (eq (plist-get event :type) :partial-result))
+                   (nth 6 out))))
+    (should partial)
+    (should (string= (plist-get (plist-get partial :result) :thinking)
+                     "Subheadings"))
+    (should (string= (plist-get (plist-get partial :result) :finish-reason)
+                     "length"))))
 
 (ert-deftest deslop-test/default-transport-rejects-http-errors ()
   (let ((out (deslop-test--run-default-transport
@@ -1026,7 +1070,15 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
             (should-not (member token command))
             (should-not (member "body" command))
             (should-not (member "--fail-with-body" command)))
-        (when (file-exists-p config) (delete-file config))))))
+         (when (file-exists-p config) (delete-file config))))))
+
+(ert-deftest deslop-test/unbounded-output-omits-provider-token-limit ()
+  (let ((deslop-max-output-tokens nil))
+    (let ((body (deslop-llm--request-body
+                 (list (cons "user" "body"))
+                 '(:model "test-model" :temperature 0.2))))
+      (should-not (alist-get :max_tokens body))
+      (should-not (string-match-p "max_tokens" (json-encode body))))))
 
 (ert-deftest deslop-test/curl-config-escapes-and-rejects-unsafe-headers ()
   (let* ((profile '(:url "https://example.test/v1"
@@ -1067,7 +1119,16 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
     (should (string= (nth 1 command) "--disable"))
     (should (member "--globoff" command))
     (should (member "--noproxy" command))
-    (should (member "--url" command))))
+     (should (member "--url" command))))
+
+(ert-deftest deslop-test/curl-command-uses-idle-not-total-timeout-by-default ()
+  (let ((deslop-request-timeout nil)
+        (deslop-response-idle-timeout 60))
+    (let ((command (deslop-curl--command
+                    '(:url "https://example.test/v1") "/tmp/headers" nil)))
+      (should-not (member "--max-time" command))
+      (should (equal (cadr (member "--speed-time" command)) "60"))
+      (should (equal (cadr (member "--speed-limit" command)) "1")))))
 
 (ert-deftest deslop-test/json-parser-does-not-intern-keys-or-accept-garbage ()
   (let ((key (format "deslop-untrusted-key-%d" (random most-positive-fixnum))))
@@ -1087,6 +1148,23 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
     (should-not (nth 0 out))
     (should (eq (deslop-error-kind (nth 1 out)) 'resource))
     (should (= (nth 4 out) 1))))
+
+(ert-deftest deslop-test/response-byte-limit-retains-safe-prefix ()
+  (let* ((prefix
+          "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}\n\n")
+         (deslop-max-response-bytes (string-bytes prefix))
+         (out (deslop-test--run-default-transport
+               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+               (concat prefix (make-string 100 ?X))))
+         (partial (cl-find-if
+                   (lambda (event)
+                     (eq (plist-get event :type) :partial-result))
+                   (nth 6 out))))
+    (should-not (nth 0 out))
+    (should (eq (deslop-error-kind (nth 1 out)) 'resource))
+    (should partial)
+    (should (string= (plist-get (plist-get partial :result) :content)
+                     "kept"))))
 
 (ert-deftest deslop-test/sse-parser-enforces-line-and-event-limits ()
   (let ((deslop-max-sse-event-bytes 8)
@@ -1280,6 +1358,29 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
           (let ((buffer-read-only nil))
             (should-error (insert "user edit") :type 'user-error)))))))
 
+(ert-deftest deslop-test/history-retains-joined-partial-result-on-failure ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm
+          '((:content ""
+             :partial (:content ""
+                       :thinking "Subheadings: ** TODO"
+                       :tokens 4096
+                       :speed 57.1
+                       :finish-reason "length"))))))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((job (deslop-insert-at-cursor)))
+        (should (eq (deslop-job-state job) 'failed)))
+      (with-current-buffer deslop-history-buffer-name
+        (let ((text (buffer-string)))
+          (should (string-match-p "Thinking" text))
+          (should (string-match-p (regexp-quote "Subheadings: ** TODO")
+                                  text))
+          (should (string-match-p "Tokens: 4096" text))
+          (should (string-match-p "Finish reason: length" text))
+          (should-not (string-match-p "data:" text)))))))
+
 (ert-deftest deslop-test/history-command-displays-buffer ()
   (deslop-test--reset)
   (let ((displayed nil))
@@ -1325,8 +1426,29 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
                      (overlays-in (point-min) (point-max)))))
       (with-current-buffer deslop-history-buffer-name
         (let ((text (buffer-string)))
-          (should (= (deslop-test--count-matches "^\\* Job " text) 2))
-          (should-not (string-match-p "^\\* fake heading" text)))))))
+           (should (= (deslop-test--count-matches "^\\* Job " text) 2))
+           (should-not (string-match-p "^\\* fake heading" text)))))))
+
+(ert-deftest deslop-test/history-replaces-oldest-entries-at-default-limit ()
+  (deslop-test--reset)
+  (let ((deslop-history-max-entries 100)
+        (deslop-llm-function
+         (deslop-test--fake-llm
+          (cl-loop for index from 0 to 102
+                   collect (format " item-%d" index)))))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (dotimes (_ 103)
+        (deslop-insert-at-cursor)
+        (deslop-review-delete-overlay
+         (cl-find-if #'deslop-review-overlay-p
+                     (overlays-in (point-min) (point-max)))))
+      (with-current-buffer deslop-history-buffer-name
+        (let ((text (buffer-string)))
+          (should (= (deslop-test--count-matches "^\\* Job " text) 100))
+          (should-not (string-match-p "^\\* Job 1:" text))
+          (should-not (string-match-p "^\\* Job 3:" text))
+          (should (string-match-p "^\\* Job 103:" text)))))))
 
 ;;;; Overlay lifecycle
 

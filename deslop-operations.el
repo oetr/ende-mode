@@ -132,13 +132,15 @@ return price * (1 + tax)"
 
 (defun deslop--validate-messages (messages)
   "Return MESSAGES after enforcing character limits."
-  (unless (and (integerp deslop-max-request-chars)
-               (> deslop-max-request-chars 0))
-    (error "deslop-max-request-chars must be a positive integer"))
+  (unless (or (null deslop-max-request-chars)
+              (and (integerp deslop-max-request-chars)
+                   (> deslop-max-request-chars 0)))
+    (error "deslop-max-request-chars must be nil or a positive integer"))
   (let ((chars (cl-loop for message in messages
                         sum (+ (length (format "%s" (car message)))
                                (length (format "%s" (cdr message)))))))
-    (when (> chars deslop-max-request-chars)
+    (when (and deslop-max-request-chars
+               (> chars deslop-max-request-chars))
       (error "request is %d characters; deslop-max-request-chars is %d"
              chars deslop-max-request-chars)))
   messages)
@@ -209,8 +211,9 @@ source is captured."
 (defun deslop--result-content (result)
   "Extract and validate completion content from RESULT or a legacy string."
   (let ((content (if (stringp result) result (plist-get result :content))))
-    (when (and (stringp content)
-               (> (length content) deslop-max-output-chars))
+     (when (and deslop-max-output-chars
+                (stringp content)
+                (> (length content) deslop-max-output-chars))
       (error "completion exceeds deslop-max-output-chars"))
     content))
 
@@ -231,8 +234,13 @@ the review overlay it creates."
                          (or (deslop--result-content result) "")))
                (display (deslop--job-display-metadata job result))
                (review-overlay nil))
-          (when (string-empty-p content)
-            (error "empty completion"))
+           (when (string-empty-p content)
+             (let ((finish-reason (and (listp result)
+                                       (plist-get result :finish-reason))))
+               (if finish-reason
+                   (error "empty completion (provider stopped: %s)"
+                          finish-reason)
+                 (error "empty completion"))))
           (setq review-overlay (funcall apply-function content display))
           (unless (deslop-review-overlay-p review-overlay)
             (error "generated output could not be marked for review"))

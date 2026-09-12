@@ -39,7 +39,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   profile callbacks model json-data process process-buffer stderr-buffer
   headers-file config-file sse reasoning content-parts thinking-parts usage
   provider-error actual-model actual-provider estimated-chars received-bytes
-  response-preview response-preview-parts response-preview-bytes
+  response-preview response-preview-parts response-preview-bytes finish-reason
   generation-start last-status last-usage-update terminal)
 
 (defun deslop-llm--invoke-callback (session name &rest arguments)
@@ -79,11 +79,22 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
           (deslop--ignore-errors #'delete-process process))))
     (deslop-llm--cleanup-session session)
     (unwind-protect
-        (if (eq outcome 'success)
-            (deslop-llm--invoke-callback session :on-done value)
-          (deslop-llm--invoke-callback
-           session :on-event (list :type :error :error value))
-          (deslop-llm--invoke-callback session :on-error value))
+        (let ((partial-result
+               (when (or (deslop-llm--session-content-parts session)
+                         (deslop-llm--session-thinking-parts session)
+                         (deslop-llm--session-usage session)
+                         (deslop-llm--session-finish-reason session))
+                 (deslop-llm--result session))))
+          (when partial-result
+            (deslop-llm--invoke-callback
+             session :on-event
+             (list :type :partial-result :result partial-result)))
+          (if (eq outcome 'success)
+              (deslop-llm--invoke-callback session :on-done value)
+            (deslop-llm--invoke-callback
+             session :on-event
+             (list :type :error :error value :result partial-result))
+            (deslop-llm--invoke-callback session :on-error value)))
       (setf (deslop-llm--session-callbacks session) nil))))
 
 (defun deslop-llm--fail (session error)
@@ -110,8 +121,9 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Record and emit nonempty TEXT on CHANNEL for SESSION."
   (when (and (not (deslop-llm--session-terminal session))
              (stringp text) (> (length text) 0))
-    (if (> (+ (deslop-llm--session-estimated-chars session) (length text))
-           deslop-max-output-chars)
+    (if (and deslop-max-output-chars
+             (> (+ (deslop-llm--session-estimated-chars session) (length text))
+                deslop-max-output-chars))
         (deslop-llm--fail
          session
          (deslop-error-create
@@ -228,11 +240,24 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                             (aref choices 0))
                            ((consp choices) (car choices))))
              (delta (deslop-protocol--json-get "delta" choice))
-             (reasoning (or (deslop-protocol--json-get
-                             "reasoning_content" delta)
-                            (deslop-protocol--json-get "reasoning" delta)))
-             (content (deslop-protocol--json-get "content" delta)))
-        (deslop-llm--handle-usage
+             (finish-reason (deslop-protocol--json-get
+                             "finish_reason" choice))
+              (reasoning (or (deslop-protocol--json-get
+                              "reasoning_content" delta)
+                             (deslop-protocol--json-get "reasoning" delta)
+                             (deslop-protocol--json-get "reasoning_content"
+                                                         choice)
+                             (deslop-protocol--json-get "reasoning" choice)))
+              (content (or (deslop-protocol--json-get "content" delta)
+                           (deslop-protocol--json-get "text" delta)
+                           (deslop-protocol--json-get "content" choice)
+                           (deslop-protocol--json-get "text" choice)
+                           (let ((message
+                                  (deslop-protocol--json-get "message" choice)))
+                             (deslop-protocol--json-get "content" message)))))
+         (when (stringp finish-reason)
+           (setf (deslop-llm--session-finish-reason session) finish-reason))
+         (deslop-llm--handle-usage
          session (deslop-protocol--json-get "usage" json))
         (when (and (not (deslop-llm--session-terminal session))
                    (stringp reasoning) (> (length reasoning) 0))
@@ -273,16 +298,17 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                                 4.0)))))
          (started (or (deslop-llm--session-generation-start session)
                       (float-time))))
-    (list :content (mapconcat #'identity
-                              (nreverse
-                               (deslop-llm--session-content-parts session)) "")
-          :thinking (mapconcat #'identity
-                               (nreverse
-                                (deslop-llm--session-thinking-parts session)) "")
+     (list :content (mapconcat #'identity
+                               (reverse
+                                (deslop-llm--session-content-parts session)) "")
+           :thinking (mapconcat #'identity
+                                (reverse
+                                 (deslop-llm--session-thinking-parts session)) "")
           :usage usage :tokens tokens :estimated (null reported)
-          :speed (/ (float tokens)
-                    (max 0.001 (- (float-time) started)))
-          :provider (deslop-llm--session-actual-provider session)
+           :speed (/ (float tokens)
+                     (max 0.001 (- (float-time) started)))
+           :finish-reason (deslop-llm--session-finish-reason session)
+           :provider (deslop-llm--session-actual-provider session)
           :model (or (deslop-llm--session-actual-model session)
                      (deslop-llm--session-model session)))))
 
@@ -350,11 +376,13 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
       :kind (if (= status 28) 'timeout 'transport)
       :message
       (or (and (buffer-live-p stderr-buffer)
-               (with-current-buffer stderr-buffer
-                 (let ((text (string-trim
-                              (substring (buffer-string) 0
-                                         (min (buffer-size)
-                                              deslop-max-error-body-bytes)))))
+                (with-current-buffer stderr-buffer
+                  (let ((text (string-trim
+                               (substring (buffer-string) 0
+                                          (if deslop-max-error-body-bytes
+                                              (min (buffer-size)
+                                                   deslop-max-error-body-bytes)
+                                            (buffer-size))))))
                    (unless (string-empty-p text) text))))
           (format "curl exited with status %d (%s)"
                   status (string-trim event)))))))
@@ -382,37 +410,58 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (defun deslop-llm--append-response-preview (session chunk)
   "Append a bounded, byte-safe prefix of CHUNK to SESSION's preview."
   (let* ((used (or (deslop-llm--session-response-preview-bytes session) 0))
-         (remaining (- deslop-max-error-body-bytes used)))
-    (when (> remaining 0)
-      (let ((prefix (deslop-llm--byte-prefix chunk remaining)))
-        (push prefix (deslop-llm--session-response-preview-parts session))
-        (setf (deslop-llm--session-response-preview-bytes session)
-              (+ used (string-bytes prefix)))))))
+         (remaining (and deslop-max-error-body-bytes
+                         (- deslop-max-error-body-bytes used)))
+         (prefix (if remaining
+                     (and (> remaining 0)
+                          (deslop-llm--byte-prefix chunk remaining))
+                   chunk)))
+    (when prefix
+      (push prefix (deslop-llm--session-response-preview-parts session))
+      (setf (deslop-llm--session-response-preview-bytes session)
+            (+ used (string-bytes prefix))))))
 
 (defun deslop-llm--process-filter (session _process chunk)
   "Consume one curl output CHUNK for SESSION."
   (unless (deslop-llm--session-terminal session)
-    (cl-incf (deslop-llm--session-received-bytes session)
-             (string-bytes chunk))
-    (deslop-llm--append-response-preview session chunk)
-    (if (> (deslop-llm--session-received-bytes session)
-           deslop-max-response-bytes)
-        (deslop-llm--fail
-         session
-         (deslop-error-create
-          :kind 'resource
-          :message "response exceeds deslop-max-response-bytes"))
+    (let* ((received (deslop-llm--session-received-bytes session))
+           (chunk-bytes (string-bytes chunk))
+           (total (+ received chunk-bytes))
+           (remaining (and deslop-max-response-bytes
+                           (- deslop-max-response-bytes received)))
+           (processable (if (and deslop-max-response-bytes
+                                  (> total deslop-max-response-bytes))
+                            (deslop-llm--byte-prefix chunk (max 0 remaining))
+                          chunk)))
+      (setf (deslop-llm--session-received-bytes session) total)
+      (deslop-llm--append-response-preview session chunk)
       (condition-case filter-error
-          (deslop-llm--handle-events
-           session
-           (deslop-protocol--sse-feed
-            (deslop-llm--session-sse session) chunk))
+          (when (> (length processable) 0)
+            (deslop-llm--handle-events
+             session
+             (deslop-protocol--sse-feed
+              (deslop-llm--session-sse session) processable)))
         ((error quit)
-         (deslop-llm--fail
+          (if (and deslop-max-response-bytes
+                   (> total deslop-max-response-bytes))
+             (deslop-llm--fail
+              session
+              (deslop-error-create
+               :kind 'resource
+               :message "response exceeds deslop-max-response-bytes"))
+           (deslop-llm--fail
+            session
+            (deslop-error-create :kind 'protocol
+                                 :message
+                                 (error-message-string filter-error))))))
+       (when (and deslop-max-response-bytes
+                  (> total deslop-max-response-bytes)
+                  (not (deslop-llm--session-terminal session)))
+        (deslop-llm--fail
           session
-          (deslop-error-create :kind 'protocol
-                               :message
-                               (error-message-string filter-error))))))))
+          (deslop-error-create
+           :kind 'resource
+           :message "response exceeds deslop-max-response-bytes"))))))
 
 (defun deslop-llm--process-sentinel (session process event)
   "Handle PROCESS terminal EVENT for SESSION."
@@ -430,22 +479,42 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
-  `((:model . ,(plist-get profile :model))
-    (:messages . ,(mapcar (lambda (message)
-                            `((:role . ,(car message))
-                              (:content . ,(cdr message))))
-                          messages))
-    (:temperature . ,(plist-get profile :temperature))
-    (:max_tokens . ,deslop-max-output-tokens)
-    (:stream . t)
-    (:stream_options . ((:include_usage . t)))))
+  (let ((body `((:model . ,(plist-get profile :model))
+                (:messages . ,(mapcar (lambda (message)
+                                       `((:role . ,(car message))
+                                         (:content . ,(cdr message))))
+                                     messages))
+                (:temperature . ,(plist-get profile :temperature))
+                (:stream . t)
+                (:stream_options . ((:include_usage . t))))))
+    (if (integerp deslop-max-output-tokens)
+        (append body (list (cons :max_tokens deslop-max-output-tokens)))
+      body)))
 
 (defun deslop-llm--start-session (session messages)
   "Allocate and start SESSION for MESSAGES."
-  (dolist (limit (list deslop-max-output-tokens deslop-max-response-bytes
-                       deslop-max-sse-event-bytes deslop-max-output-chars))
-    (unless (and (integerp limit) (> limit 0))
-      (error "deslop transport limits must be positive integers")))
+  (unless (or (null deslop-max-output-tokens)
+              (and (integerp deslop-max-output-tokens)
+                   (> deslop-max-output-tokens 0)))
+    (error "deslop-max-output-tokens must be nil or a positive integer"))
+  (unless (or (null deslop-request-timeout)
+              (and (numberp deslop-request-timeout)
+                   (> deslop-request-timeout 0)))
+    (error "deslop-request-timeout must be nil or a positive number"))
+  (unless (or (null deslop-connect-timeout)
+              (and (numberp deslop-connect-timeout)
+                   (> deslop-connect-timeout 0)))
+    (error "deslop-connect-timeout must be nil or a positive number"))
+  (unless (and (numberp deslop-response-idle-timeout)
+               (> deslop-response-idle-timeout 0))
+    (error "deslop-response-idle-timeout must be a positive number"))
+  (dolist (limit (list deslop-max-response-bytes deslop-max-sse-event-bytes))
+    (unless (or (null limit) (and (integerp limit) (> limit 0)))
+      (error "deslop response limits must be nil or positive integers")))
+  (unless (or (null deslop-max-output-chars)
+              (and (integerp deslop-max-output-chars)
+                   (> deslop-max-output-chars 0)))
+    (error "deslop-max-output-chars must be nil or a positive integer"))
   (let ((profile (deslop-llm--session-profile session)))
     (deslop-curl--validated-url profile)
     (setf (deslop-llm--session-json-data session)

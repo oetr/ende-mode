@@ -15,15 +15,17 @@
 (require 'deslop-core)
 (require 'deslop-review)
 
-(defcustom deslop-target-max-context-chars 24000
+(defcustom deslop-target-max-context-chars nil
   "Maximum number of characters sent to the LLM as target context.
-Tokens are estimated as chars/4."
-  :type 'integer
+  Tokens are estimated as chars/4.  When nil, send the complete target."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum characters"))
   :group 'deslop)
 
-(defcustom deslop-target-window-chars 8000
+(defcustom deslop-target-window-chars nil
   "Characters kept on each side of the cursor when target context is elided."
-  :type 'integer
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum characters"))
   :group 'deslop)
 
 (cl-defstruct (deslop-target (:constructor deslop-target--create))
@@ -101,17 +103,24 @@ fallback for callers that cannot capture a digest."
   "Return bounded (START . END) offsets around OFFSET in text of LENGTH.
 The returned source span never exceeds `deslop-target-max-context-chars', and
 each side is additionally capped by `deslop-target-window-chars'."
-  (unless (and (integerp deslop-target-max-context-chars)
-               (> deslop-target-max-context-chars 0))
-    (error "deslop-target-max-context-chars must be a positive integer"))
-  (unless (and (integerp deslop-target-window-chars)
-               (>= deslop-target-window-chars 0))
-    (error "deslop-target-window-chars must be a nonnegative integer"))
+  (unless (or (null deslop-target-max-context-chars)
+              (and (integerp deslop-target-max-context-chars)
+                   (> deslop-target-max-context-chars 0)))
+    (error "deslop-target-max-context-chars must be nil or a positive integer"))
+  (unless (or (null deslop-target-window-chars)
+              (and (integerp deslop-target-window-chars)
+                   (>= deslop-target-window-chars 0)))
+    (error "deslop-target-window-chars must be nil or a nonnegative integer"))
   (setq offset (max 0 (min length offset)))
-  (if (<= length deslop-target-max-context-chars)
+  (if (or (null deslop-target-max-context-chars)
+          (<= length deslop-target-max-context-chars))
       (cons 0 length)
-    (let* ((left-cap (min offset deslop-target-window-chars))
-           (right-cap (min (- length offset) deslop-target-window-chars))
+    (let* ((left-cap (if deslop-target-window-chars
+                         (min offset deslop-target-window-chars)
+                       offset))
+           (right-cap (if deslop-target-window-chars
+                          (min (- length offset) deslop-target-window-chars)
+                        (- length offset)))
            (budget deslop-target-max-context-chars)
            (left (min left-cap (/ budget 2)))
            (right (min right-cap (- budget left)))
@@ -216,7 +225,8 @@ each side is additionally capped by `deslop-target-window-chars'."
 
 (defun deslop-target-ensure-size (start end operation)
   "Reject an OPERATION target larger than the configured context limit."
-  (when (> (- end start) deslop-target-max-context-chars)
+  (when (and deslop-target-max-context-chars
+             (> (- end start) deslop-target-max-context-chars))
     (user-error "%s target is %d characters; limit is %d"
                 operation (- end start) deslop-target-max-context-chars)))
 

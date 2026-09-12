@@ -20,49 +20,79 @@
 
 ;;;; Transport and request resource options
 
-(defcustom deslop-connect-timeout 10
+(defcustom deslop-connect-timeout nil
   "Maximum seconds to wait while establishing an LLM connection."
+  :type '(choice (const :tag "No connection deadline" nil)
+                 (number :tag "Maximum seconds"))
+  :group 'deslop)
+
+(defcustom deslop-request-timeout nil
+  "Maximum total seconds allowed for one LLM request.
+
+When nil, an active stream has no total wall-clock deadline."
+  :type '(choice (const :tag "No total deadline" nil)
+                 (number :tag "Maximum seconds"))
+  :group 'deslop)
+
+(defcustom deslop-response-idle-timeout 60
+  "Maximum seconds with no response data before an LLM request fails."
   :type 'number
   :group 'deslop)
 
-(defcustom deslop-request-timeout 1000
-  "Maximum seconds allowed for one LLM request."
-  :type 'number
+(defcustom deslop-max-request-chars nil
+  "Maximum combined characters in all messages sent for one request.
+
+When nil, do not impose a request-size limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum characters"))
   :group 'deslop)
 
-(defcustom deslop-max-request-chars 250000
-  "Maximum combined characters in all messages sent for one request."
-  :type 'integer
+(defcustom deslop-max-output-tokens nil
+  "Maximum completion tokens requested from an LLM provider.
+
+When nil, omit the request limit and let the provider use its own maximum."
+  :type '(choice (const :tag "Provider default" nil)
+                 (integer :tag "Maximum tokens"))
   :group 'deslop)
 
-(defcustom deslop-max-output-tokens 50000
-  "Maximum completion tokens requested from an LLM provider."
-  :type 'integer
+(defcustom deslop-max-response-bytes nil
+  "Maximum number of response-body bytes accepted from one LLM request.
+
+When nil, do not impose a response-size limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-response-bytes (* 4 1024 1024 16)
-  "Maximum number of response-body bytes accepted from one LLM request."
-  :type 'integer
+(defcustom deslop-max-sse-event-bytes nil
+  "Maximum number of bytes accepted in one SSE line or event.
+
+When nil, do not impose an SSE event-size limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-sse-event-bytes (* 512 1024 4)
-  "Maximum number of bytes accepted in one SSE line or event."
-  :type 'integer
+(defcustom deslop-max-output-chars nil
+  "Maximum combined reasoning and completion characters retained per request.
+
+When nil, do not impose a parsed-output character limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum characters"))
   :group 'deslop)
 
-(defcustom deslop-max-output-chars (* 512 1024 4)
-  "Maximum combined reasoning and completion characters retained per request."
-  :type 'integer
+(defcustom deslop-max-response-header-bytes nil
+  "Maximum response-header bytes parsed from curl's header output.
+
+When nil, do not impose a response-header size limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-response-header-bytes (* 64 1024 4)
-  "Maximum response-header bytes parsed from curl's header output."
-  :type 'integer
-  :group 'deslop)
+(defcustom deslop-max-error-body-bytes nil
+  "Maximum response bytes retained for provider error diagnostics.
 
-(defcustom deslop-max-error-body-bytes (* 4 8192)
-  "Maximum response bytes retained for provider error diagnostics."
-  :type 'integer
+When nil, retain the complete error response."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum bytes"))
   :group 'deslop)
 
 (defcustom deslop-allow-environment-proxy nil

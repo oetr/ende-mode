@@ -45,8 +45,8 @@
 
 (cl-defstruct (deslop-history--entry
                (:constructor deslop-history--make-entry))
-  job type prompt thinking-parts content-parts status metadata usage result error
-  started-at finished-at)
+  job type prompt thinking-parts content-parts status metadata usage result
+  partial-result finish-reason error started-at finished-at)
 
 (defvar deslop-history--entries (make-hash-table :test #'eq)
   "In-progress history entries keyed by job object.")
@@ -109,6 +109,20 @@
         (deslop-history--entry-finished-at entry) (float-time))
   (deslop-history--flush entry))
 
+(defun deslop-history--record-partial-result (entry result)
+  "Record normalized partial RESULT in ENTRY."
+  (when (and result (listp result))
+    (setf (deslop-history--entry-partial-result entry) result
+          (deslop-history--entry-finish-reason entry)
+          (plist-get result :finish-reason))
+    (let ((content (plist-get result :content))
+          (thinking (plist-get result :thinking)))
+      (when (and (stringp content) (> (length content) 0))
+        (setf (deslop-history--entry-content-parts entry) (list content)))
+      (when (and deslop-history-retain-thinking
+                 (stringp thinking) (> (length thinking) 0))
+        (setf (deslop-history--entry-thinking-parts entry) (list thinking))))))
+
 (defun deslop-history-event (job event)
   "Record normalized EVENT for JOB without propagating sink errors."
   (let ((type (plist-get event :type)))
@@ -130,8 +144,11 @@
                              (push
                               (plist-get event :text)
                               (deslop-history--entry-thinking-parts entry)))
-                         (push (plist-get event :text)
-                               (deslop-history--entry-content-parts entry))))
+                          (push (plist-get event :text)
+                                (deslop-history--entry-content-parts entry))))
+                       (:partial-result
+                        (deslop-history--record-partial-result
+                         entry (plist-get event :result)))
                       (:usage
                        (setf (deslop-history--entry-usage entry) event))
                       (:metadata
@@ -157,19 +174,23 @@
                            (setf
                             (deslop-history--entry-content-parts entry)
                             (list content)))
-                         (when usage
-                           (setf (deslop-history--entry-usage entry)
-                                 (list :type :usage
-                                       :usage usage
-                                       :tokens (plist-get result :tokens)
-                                       :speed (plist-get result :speed)
-                                       :estimated
-                                       (plist-get result :estimated)))))
+                          (when usage
+                            (setf (deslop-history--entry-usage entry)
+                                  (list :type :usage
+                                        :usage usage
+                                        :tokens (plist-get result :tokens)
+                                        :speed (plist-get result :speed)
+                                        :estimated
+                                        (plist-get result :estimated))))
+                          (setf (deslop-history--entry-finish-reason entry)
+                                (plist-get result :finish-reason)))
                        (deslop-history--finish-entry
                         entry "Completed" (plist-get event :result)))
-                      (:error
-                       (deslop-history--finish-entry
-                        entry "Failed" nil (plist-get event :error)))
+                       (:error
+                        (deslop-history--record-partial-result
+                         entry (plist-get event :result))
+                        (deslop-history--finish-entry
+                         entry "Failed" nil (plist-get event :error)))
                       (:cancelled
                        (deslop-history--finish-entry entry "Cancelled"))))
                 ((error quit) nil))
@@ -199,15 +220,15 @@
   (let ((limit (max 1 deslop-history-max-entries)))
     (while (> deslop-history--entry-count limit)
       (goto-char (point-min))
-      (when (re-search-forward "^\\* Job " nil t)
-        (let ((start (line-beginning-position))
-              (end (save-excursion
-                     (forward-line 1)
+      (if (re-search-forward "^\\* Job " nil t)
+          (let ((start (line-beginning-position))
+                (end (save-excursion
+                       (forward-line 1)
                      (if (re-search-forward "^\\* Job " nil t)
                          (line-beginning-position)
-                       (point-max)))))
-          (delete-region start end)
-          (cl-decf deslop-history--entry-count))
+                        (point-max)))))
+            (delete-region start end)
+            (cl-decf deslop-history--entry-count))
         (setq deslop-history--entry-count 0)))))
 
 (defun deslop-history--value-string (value)
@@ -240,11 +261,16 @@
                                  (deslop-history--entry-thinking-parts entry))
                                 ""))
            (content (mapconcat #'identity
-                               (nreverse
-                                (deslop-history--entry-content-parts entry))
-                               ""))
-            (usage (deslop-history--entry-usage entry))
-            (metadata (deslop-history--entry-metadata entry))
+                                (nreverse
+                                 (deslop-history--entry-content-parts entry))
+                                ""))
+           (usage (deslop-history--entry-usage entry))
+           (metrics-result (or result
+                               (deslop-history--entry-partial-result entry)))
+           (finish-reason (or (deslop-history--entry-finish-reason entry)
+                              (and (listp metrics-result)
+                                   (plist-get metrics-result :finish-reason))))
+           (metadata (deslop-history--entry-metadata entry))
            (status (deslop-history--entry-status entry))
            (buffer (deslop-history--buffer)))
       (with-current-buffer buffer
@@ -271,13 +297,22 @@
                              (plist-get metadata :provider)
                              "unknown")
                          (or (plist-get metadata :model) "unknown"))))
-              (when (listp result)
+              (when (or (listp metrics-result) finish-reason)
                 (deslop-history--insert-section
                  "Metrics"
-                 (format "Tokens: %s\nEstimated: %s\nSpeed: %.2f t/s"
-                         (or (plist-get result :tokens) 0)
-                         (if (plist-get result :estimated) "yes" "no")
-                         (or (plist-get result :speed) 0.0))))
+                 (format "Tokens: %s\nEstimated: %s\nSpeed: %.2f t/s%s"
+                         (or (and (listp metrics-result)
+                                  (plist-get metrics-result :tokens))
+                             0)
+                         (if (and (listp metrics-result)
+                                  (plist-get metrics-result :estimated))
+                             "yes" "no")
+                         (or (and (listp metrics-result)
+                                  (plist-get metrics-result :speed))
+                             0.0)
+                         (if finish-reason
+                             (format "\nFinish reason: %s" finish-reason)
+                           ""))))
               (when usage
                 (deslop-history--insert-section
                  "Usage" (deslop-history--usage-string usage)))

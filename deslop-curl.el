@@ -171,24 +171,31 @@ Return nil when PROFILE has no authentication or extra headers."
   "Build curl command for PROFILE without embedding request data or secrets."
   (let ((url (deslop-curl--validated-url profile)))
     (append
-     (list "curl" "--disable")
-     (deslop-curl--network-options url)
-     (list "--silent" "--show-error" "--no-buffer"
-           "--request" "POST"
-           "--connect-timeout" (number-to-string deslop-connect-timeout)
-           "--max-time" (number-to-string deslop-request-timeout)
-           "--max-filesize" (number-to-string deslop-max-response-bytes)
-           "--dump-header" headers-file
-           "--header" "Content-Type: application/json"
-           "--data-binary" "@-")
-     (when config-file (list "--config" config-file))
-     (list "--url" url))))
+      (list "curl" "--disable")
+      (deslop-curl--network-options url)
+      (list "--silent" "--show-error" "--no-buffer"
+            "--request" "POST"
+            "--speed-limit" "1"
+            "--speed-time" (number-to-string deslop-response-idle-timeout)
+            "--dump-header" headers-file
+            "--header" "Content-Type: application/json"
+            "--data-binary" "@-")
+      (when config-file (list "--config" config-file))
+      (append
+       (when deslop-connect-timeout
+         (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
+       (when deslop-max-response-bytes
+         (list "--max-filesize" (number-to-string deslop-max-response-bytes)))
+       (when deslop-request-timeout
+         (list "--max-time" (number-to-string deslop-request-timeout)))
+       (list "--url" url)))))
 
 (defun deslop-curl--response-headers (file)
   "Return (STATUS . CONTENT-TYPE) from curl header FILE."
   (when (file-readable-p file)
     (let ((size (file-attribute-size (file-attributes file))))
-      (when (> size deslop-max-response-header-bytes)
+      (when (and deslop-max-response-header-bytes
+                 (> size deslop-max-response-header-bytes))
         (error "Response headers exceed deslop-max-response-header-bytes")))
     (with-temp-buffer
       (insert-file-contents file)

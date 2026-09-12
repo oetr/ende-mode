@@ -55,24 +55,32 @@ UI."
   :type 'boolean
   :group 'deslop)
 
-(defcustom deslop-provider-discovery-ttl 3600
+(defcustom deslop-provider-discovery-ttl nil
   "Seconds to retain successful or failed provider discovery results."
-  :type 'number
+  :type '(choice (const :tag "Never expire" nil)
+                 (number :tag "Seconds"))
   :group 'deslop)
 
-(defcustom deslop-provider-discovery-timeout 5
-  "Maximum seconds allowed for one provider discovery request."
-  :type 'number
+(defcustom deslop-provider-discovery-timeout nil
+  "Maximum total seconds allowed for one provider discovery request.
+
+When nil, use only the response inactivity timeout."
+  :type '(choice (const :tag "No total deadline" nil)
+                 (number :tag "Maximum seconds"))
   :group 'deslop)
 
-(defcustom deslop-provider-discovery-cache-size 64
+(defcustom deslop-provider-discovery-cache-size nil
   "Maximum number of provider discovery results retained in memory."
-  :type 'integer
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum entries"))
   :group 'deslop)
 
-(defcustom deslop-provider-max-discovery-bytes (* 512 1024)
-  "Maximum response-body bytes accepted from provider discovery."
-  :type 'integer
+(defcustom deslop-provider-max-discovery-bytes nil
+  "Maximum response-body bytes accepted from provider discovery.
+
+When nil, do not impose a discovery response-size limit."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum bytes"))
   :group 'deslop)
 
 ;;;; Profiles and display policy
@@ -260,14 +268,21 @@ metadata and configured profile values."
    (deslop-curl--network-options url)
    (list "--silent" "--show-error" "--no-buffer"
          "--request" "GET"
-         "--connect-timeout" (number-to-string deslop-connect-timeout)
-         "--max-time" (number-to-string deslop-provider-discovery-timeout)
-         "--max-filesize"
-         (number-to-string deslop-provider-max-discovery-bytes)
+         "--speed-limit" "1"
+         "--speed-time" (number-to-string deslop-response-idle-timeout)
          "--dump-header" headers-file
          "--header" "Accept: application/json")
    (when config-file (list "--config" config-file))
-   (list "--url" url)))
+   (append
+    (when deslop-connect-timeout
+      (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
+    (when deslop-provider-discovery-timeout
+      (list "--max-time"
+            (number-to-string deslop-provider-discovery-timeout)))
+    (when deslop-provider-max-discovery-bytes
+      (list "--max-filesize"
+            (number-to-string deslop-provider-max-discovery-bytes)))
+    (list "--url" url))))
 
 (defun deslop-provider--invoke-discovery-callback (callback metadata)
   "Invoke discovery CALLBACK with METADATA without propagating its errors."
@@ -280,27 +295,29 @@ metadata and configured profile values."
   "Remove expired and excess provider discovery cache entries."
   (let ((now (float-time))
         (expired nil))
-    (maphash
-     (lambda (key entry)
-       (when (>= (- now (plist-get entry :time))
-                 deslop-provider-discovery-ttl)
-         (push key expired)))
-     deslop-provider--discovery-cache)
+    (when deslop-provider-discovery-ttl
+      (maphash
+       (lambda (key entry)
+         (when (>= (- now (plist-get entry :time))
+                    deslop-provider-discovery-ttl)
+           (push key expired)))
+       deslop-provider--discovery-cache))
     (dolist (key expired)
       (remhash key deslop-provider--discovery-cache))
-    (while (>= (hash-table-count deslop-provider--discovery-cache)
-               (max 1 deslop-provider-discovery-cache-size))
-      (let ((oldest nil))
-        (maphash
-         (lambda (key entry)
-           (when (or (null oldest)
-                     (< (plist-get entry :time)
-                        (plist-get (cdr oldest) :time)))
-             (setq oldest (cons key entry))))
-         deslop-provider--discovery-cache)
-        (if oldest
-            (remhash (car oldest) deslop-provider--discovery-cache)
-          (clrhash deslop-provider--discovery-cache))))))
+    (when deslop-provider-discovery-cache-size
+      (while (>= (hash-table-count deslop-provider--discovery-cache)
+                 (max 1 deslop-provider-discovery-cache-size))
+        (let ((oldest nil))
+          (maphash
+           (lambda (key entry)
+             (when (or (null oldest)
+                       (< (plist-get entry :time)
+                          (plist-get (cdr oldest) :time)))
+               (setq oldest (cons key entry))))
+           deslop-provider--discovery-cache)
+          (if oldest
+              (remhash (car oldest) deslop-provider--discovery-cache)
+            (clrhash deslop-provider--discovery-cache)))))))
 
 (defun deslop-provider--finish-discovery (key metadata &optional no-cache)
   "Notify callbacks waiting on KEY and optionally cache METADATA.
@@ -324,7 +341,9 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
   "Return the live discovery cache entry for KEY, or nil when expired."
   (let* ((entry (gethash key deslop-provider--discovery-cache))
          (age (and entry (- (float-time) (plist-get entry :time)))))
-    (if (and entry (< age deslop-provider-discovery-ttl))
+    (if (and entry
+             (or (null deslop-provider-discovery-ttl)
+                 (< age deslop-provider-discovery-ttl)))
         entry
       (when entry
         (remhash key deslop-provider--discovery-cache))
@@ -377,8 +396,9 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                    (unless finished
                      (setq received-bytes
                            (+ received-bytes (string-bytes string)))
-                     (if (> received-bytes
-                            deslop-provider-max-discovery-bytes)
+                      (if (and deslop-provider-max-discovery-bytes
+                               (> received-bytes
+                                  deslop-provider-max-discovery-bytes))
                          (funcall finish nil)
                        (when (buffer-live-p response-buf)
                          (with-current-buffer response-buf
@@ -398,9 +418,10 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
           (process-put process :deslop-discovery-finish finish)
           (push process deslop-provider--discovery-processes)
           (unless finished
-            (setq timer
-                  (run-at-time deslop-provider-discovery-timeout nil
-                               (lambda () (funcall finish nil))))))
+           (when deslop-provider-discovery-timeout
+             (setq timer
+                   (run-at-time deslop-provider-discovery-timeout nil
+                                (lambda () (funcall finish nil)))))))
       ((error quit)
        (funcall finish nil)))))
 

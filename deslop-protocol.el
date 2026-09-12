@@ -148,7 +148,8 @@ Thinking and content deltas are emitted through CALLBACKS."
 
 (defun deslop-protocol--sse-handle-line (parser line)
   "Consume one normalized SSE LINE for PARSER and return an event if complete."
-  (when (> (string-bytes line) deslop-max-sse-event-bytes)
+  (when (and deslop-max-sse-event-bytes
+             (> (string-bytes line) deslop-max-sse-event-bytes))
     (error "SSE line exceeds deslop-max-sse-event-bytes"))
   (cond
    ((deslop-protocol--sse-done parser) nil)
@@ -163,7 +164,8 @@ Thinking and content deltas are emitted through CALLBACKS."
       (let ((bytes (+ (or (deslop-protocol--sse-data-bytes parser) 0)
                       (if (deslop-protocol--sse-data-lines parser) 1 0)
                       (string-bytes value))))
-        (when (> bytes deslop-max-sse-event-bytes)
+         (when (and deslop-max-sse-event-bytes
+                    (> bytes deslop-max-sse-event-bytes))
           (error "SSE event exceeds deslop-max-sse-event-bytes"))
         (setf (deslop-protocol--sse-data-bytes parser) bytes))
       (push value (deslop-protocol--sse-data-lines parser)))
@@ -192,8 +194,9 @@ Errors are signaled so the transport can turn them into protocol failures."
           (+ (or (deslop-protocol--sse-buffer-bytes parser) 0)
              (string-bytes (or chunk ""))))
     (if (not (string-match-p "\n" (or chunk "")))
-        (when (> (deslop-protocol--sse-buffer-bytes parser)
-                 deslop-max-sse-event-bytes)
+           (when (and deslop-max-sse-event-bytes
+                      (> (deslop-protocol--sse-buffer-bytes parser)
+                         deslop-max-sse-event-bytes))
           (error "SSE line exceeds deslop-max-sse-event-bytes"))
       (let* ((input (apply #'concat (nreverse parts)))
              (start 0)
@@ -210,8 +213,9 @@ Errors are signaled so the transport can turn them into protocol failures."
                 (deslop-protocol--sse-buffer-parts parser) nil
                 (deslop-protocol--sse-buffer-bytes parser)
                 (string-bytes remainder))
-          (when (> (deslop-protocol--sse-buffer-bytes parser)
-                   deslop-max-sse-event-bytes)
+           (when (and deslop-max-sse-event-bytes
+                      (> (deslop-protocol--sse-buffer-bytes parser)
+                         deslop-max-sse-event-bytes))
             (error "SSE line exceeds deslop-max-sse-event-bytes"))))
       (nreverse events))))
 
