@@ -219,6 +219,12 @@ uses `deslop-llm--reasoning-feed' so delimiters can span chunks."
     nil)
    (t nil)))
 
+(defun deslop-llm--sse-handle-raw-line (parser line)
+  "Normalize raw SSE LINE and pass it to PARSER."
+  (when (string-suffix-p "\r" line)
+    (setq line (substring line 0 -1)))
+  (deslop-llm--sse-handle-line parser line))
+
 (defun deslop-llm--sse-feed (parser chunk)
   "Feed raw SSE CHUNK into PARSER and return complete events.
 Errors are signaled so the transport can turn them into protocol failures."
@@ -231,10 +237,7 @@ Errors are signaled so the transport can turn them into protocol failures."
       (setq position (match-beginning 0))
       (setq line (substring input start position))
       (setq start (1+ position))
-      (when (and (> (length line) 0)
-                 (= (aref line (1- (length line))) ?\r))
-        (setq line (substring line 0 -1)))
-      (let ((event (deslop-llm--sse-handle-line parser line)))
+      (let ((event (deslop-llm--sse-handle-raw-line parser line)))
         (when event
           (push event events))))
     (setf (deslop-llm--sse-buffer parser) (substring input start))
@@ -249,10 +252,7 @@ Errors are signaled so the transport can turn them into protocol failures."
     (when (> (length (deslop-llm--sse-buffer parser)) 0)
       (let ((line (deslop-llm--sse-buffer parser)))
         (setf (deslop-llm--sse-buffer parser) "")
-        (when (and (> (length line) 0)
-                   (= (aref line (1- (length line))) ?\r))
-          (setq line (substring line 0 -1)))
-        (let ((event (deslop-llm--sse-handle-line parser line)))
+        (let ((event (deslop-llm--sse-handle-raw-line parser line)))
           (when event
             (push event events)))))
     (when (deslop-llm--sse-data-lines parser)
@@ -576,18 +576,21 @@ Return nil when PROFILE has no authentication or extra headers."
    (when config-file (list "--config" config-file))
    (list "--url" url)))
 
-(defun deslop-llm--cleanup-call (function &rest arguments)
-  "Call FUNCTION with ARGUMENTS while suppressing cleanup failures and quits."
-  (condition-case nil
-      (apply function arguments)
-    ((error quit) nil)))
-
 (defun deslop-provider--invoke-discovery-callback (callback metadata)
   "Invoke discovery CALLBACK with METADATA without propagating its errors."
   (when callback
     (condition-case nil
         (funcall callback metadata)
       ((error quit) nil))))
+
+(defun deslop-llm--cleanup-resources (buffers files)
+  "Kill BUFFERS and delete FILES, ignoring cleanup failures."
+  (dolist (buffer buffers)
+    (when (buffer-live-p buffer)
+      (deslop--ignore-errors #'kill-buffer buffer)))
+  (dolist (file files)
+    (when (and file (file-exists-p file))
+      (deslop--ignore-errors #'delete-file file))))
 
 (defun deslop-provider--prune-discovery-cache ()
   "Remove expired and excess provider discovery cache entries."
@@ -627,16 +630,19 @@ Return nil when PROFILE has no authentication or extra headers."
 
 (defun deslop-provider-cached-metadata (profile)
   "Return unexpired discovery metadata for PROFILE, or nil."
-  (let* ((key (deslop-provider--discovery-key profile))
-         (entry (gethash key
-                          deslop-provider--discovery-cache))
+  (let ((entry (deslop-provider--cached-entry
+                (deslop-provider--discovery-key profile))))
+    (and entry (plist-get entry :metadata))))
+
+(defun deslop-provider--cached-entry (key)
+  "Return the live discovery cache entry for KEY, or nil when expired."
+  (let* ((entry (gethash key deslop-provider--discovery-cache))
          (age (and entry (- (float-time) (plist-get entry :time)))))
-    (cond
-     ((and entry (< age deslop-provider-discovery-ttl))
-      (plist-get entry :metadata))
-     (entry
-      (remhash key deslop-provider--discovery-cache)
-      nil))))
+    (if (and entry (< age deslop-provider-discovery-ttl))
+        entry
+      (when entry
+        (remhash key deslop-provider--discovery-cache))
+      nil)))
 
 (defun deslop-provider--start-discovery (profile key url)
   "Start an asynchronous discovery request for PROFILE at URL."
@@ -656,16 +662,13 @@ Return nil when PROFILE has no authentication or extra headers."
               (setq deslop-provider--discovery-processes
                     (delq process deslop-provider--discovery-processes))
               (when (timerp timer)
-                (deslop-llm--cleanup-call #'cancel-timer timer))
+                (deslop--ignore-errors #'cancel-timer timer))
               (when (and (processp process) (process-live-p process))
                 (process-put process :deslop-cancelled t)
-                (deslop-llm--cleanup-call #'delete-process process))
-              (dolist (buffer (list response-buf stderr-buf))
-                (when (buffer-live-p buffer)
-                  (deslop-llm--cleanup-call #'kill-buffer buffer)))
-              (dolist (file (list headers-file config-file))
-                (when (and file (file-exists-p file))
-                  (deslop-llm--cleanup-call #'delete-file file)))
+                (deslop--ignore-errors #'delete-process process))
+              (deslop-llm--cleanup-resources
+                (list response-buf stderr-buf)
+                (list headers-file config-file))
               (deslop-provider--finish-discovery key metadata))))
     (condition-case _startup
         (progn
@@ -725,16 +728,10 @@ endpoint does not expose compatible metadata."
      ((not deslop-provider-discovery-enabled)
       (deslop-provider--invoke-discovery-callback callback nil))
      (t
-      (let* ((key (deslop-provider--discovery-key profile))
-             (entry (gethash key deslop-provider--discovery-cache))
-             (now (float-time))
+       (let* ((key (deslop-provider--discovery-key profile))
+             (entry (deslop-provider--cached-entry key))
              (url (deslop-provider--models-url profile)))
-        (when (and entry
-                   (>= (- now (plist-get entry :time))
-                       deslop-provider-discovery-ttl))
-          (remhash key deslop-provider--discovery-cache)
-          (setq entry nil))
-        (if entry
+         (if entry
             (deslop-provider--invoke-discovery-callback
              callback (plist-get entry :metadata))
           (let ((waiting (gethash key deslop-provider--discovery-inflight)))
@@ -761,7 +758,7 @@ endpoint does not expose compatible metadata."
       (if finish
           (funcall finish nil)
         (when (and (processp process) (process-live-p process))
-          (deslop-llm--cleanup-call #'delete-process process)))))
+          (deslop--ignore-errors #'delete-process process)))))
   (setq deslop-provider--discovery-processes nil))
 
 ;;;; Client implementation
@@ -836,7 +833,7 @@ endpoint does not expose compatible metadata."
                   (setq terminal t)
                   (when (and (processp proc) (process-live-p proc))
                     (process-put proc :deslop-settled t)
-                    (deslop-llm--cleanup-call #'delete-process proc))
+                    (deslop--ignore-errors #'delete-process proc))
                   (funcall cleanup-files-function)
                   (funcall event-function :on-event
                            (list :type :error :error error))
@@ -1006,19 +1003,16 @@ endpoint does not expose compatible metadata."
               (lambda ()
                 (unless cleaned
                   (setq cleaned t)
-                  (dolist (buffer (list proc-buf stderr-buf))
-                    (when (and buffer (buffer-live-p buffer))
-                      (deslop-llm--cleanup-call #'kill-buffer buffer)))
-                  (dolist (file (list headers-file config-file))
-                    (when (and file (file-exists-p file))
-                      (deslop-llm--cleanup-call #'delete-file file))))))
+                  (deslop-llm--cleanup-resources
+                    (list proc-buf stderr-buf)
+                    (list headers-file config-file)))))
        (setq complete-function
              (lambda (result)
                (unless terminal
                  (setq terminal t)
                  (when (and (processp proc) (process-live-p proc))
                    (process-put proc :deslop-settled t)
-                   (deslop-llm--cleanup-call #'delete-process proc))
+                   (deslop--ignore-errors #'delete-process proc))
                  (funcall cleanup-files-function)
                  (funcall event-function :on-event
                           (list :type :transport-done :result result))

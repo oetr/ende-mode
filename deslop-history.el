@@ -59,7 +59,15 @@
                   :status "Queued"
                   :started-at (float-time))
                  deslop-history--entries)
-      ((error quit) nil))))
+       ((error quit) nil))))
+
+(defun deslop-history--finish-entry (entry status &optional result error)
+  "Set terminal fields on ENTRY, flush it, and return nil."
+  (setf (deslop-history--entry-status entry) status
+        (deslop-history--entry-result entry) result
+        (deslop-history--entry-error entry) error
+        (deslop-history--entry-finished-at entry) (float-time))
+  (deslop-history--flush entry))
 
 (defun deslop-history-event (job event)
   "Record normalized EVENT for JOB without propagating sink errors."
@@ -70,39 +78,31 @@
       (unwind-protect
           (condition-case nil
               (when deslop-history-enabled
-            (pcase (plist-get event :type)
-              (:status
-               (setf (deslop-history--entry-status entry)
-                     (plist-get event :status)))
-              (:delta
-               (if (eq (plist-get event :channel) :thinking)
-                   (when deslop-history-retain-thinking
+                (pcase type
+                  (:status
+                   (setf (deslop-history--entry-status entry)
+                         (plist-get event :status)))
+                  (:delta
+                   (if (eq (plist-get event :channel) :thinking)
+                       (when deslop-history-retain-thinking
+                         (push (plist-get event :text)
+                               (deslop-history--entry-thinking-parts entry)))
                      (push (plist-get event :text)
-                           (deslop-history--entry-thinking-parts entry)))
-                  (push (plist-get event :text)
-                        (deslop-history--entry-content-parts entry))))
-              (:usage
-               (setf (deslop-history--entry-usage entry) event))
-              (:done
-               (let ((content (plist-get event :content)))
-                  (when (and (stringp content) (> (length content) 0))
-                    (setf (deslop-history--entry-content-parts entry)
-                          (list content))))
-               (setf (deslop-history--entry-status entry) "Completed"
-                     (deslop-history--entry-result entry)
-                     (plist-get event :result)
-                     (deslop-history--entry-finished-at entry) (float-time))
-               (deslop-history--flush entry))
-              (:error
-               (setf (deslop-history--entry-status entry) "Failed"
-                     (deslop-history--entry-error entry)
-                     (plist-get event :error)
-                     (deslop-history--entry-finished-at entry) (float-time))
-               (deslop-history--flush entry))
-              (:cancelled
-               (setf (deslop-history--entry-status entry) "Cancelled"
-                      (deslop-history--entry-finished-at entry) (float-time))
-                (deslop-history--flush entry))))
+                           (deslop-history--entry-content-parts entry))))
+                  (:usage
+                   (setf (deslop-history--entry-usage entry) event))
+                  (:done
+                   (let ((content (plist-get event :content)))
+                     (when (and (stringp content) (> (length content) 0))
+                       (setf (deslop-history--entry-content-parts entry)
+                             (list content))))
+                   (deslop-history--finish-entry
+                    entry "Completed" (plist-get event :result)))
+                  (:error
+                   (deslop-history--finish-entry
+                    entry "Failed" nil (plist-get event :error)))
+                  (:cancelled
+                   (deslop-history--finish-entry entry "Cancelled"))))
             ((error quit) nil))
         (when terminal
           (remhash job deslop-history--entries))))))
@@ -113,19 +113,11 @@
 
 (defun deslop-history--buffer ()
   "Return the history buffer, configuring outline folding once."
-  (if (buffer-live-p deslop-history--buffer-object)
-      deslop-history--buffer-object
-    (let* ((existing (get-buffer deslop-history-buffer-name))
-           (buffer (if (and existing
-                            (not (buffer-local-value
-                                  'deslop-history--owned-buffer existing)))
-                       (generate-new-buffer deslop-history-buffer-name)
-                     (get-buffer-create deslop-history-buffer-name))))
-      (with-current-buffer buffer
-        (deslop-history-mode)
-        (setq-local deslop-history--owned-buffer t))
-      (setq deslop-history--buffer-object buffer)
-      buffer)))
+  (setq deslop-history--buffer-object
+        (deslop--owned-buffer deslop-history--buffer-object
+                              deslop-history-buffer-name
+                              'deslop-history--owned-buffer
+                              #'deslop-history-mode)))
 
 (defun deslop-history--insert-section (title text)
   "Insert a history section titled TITLE containing safely indented TEXT."

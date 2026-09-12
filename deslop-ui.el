@@ -35,14 +35,7 @@
 
 (defun deslop-ui--display-label (value)
   "Return VALUE as a bounded, single-line display label."
-  (when value
-    (let* ((text (replace-regexp-in-string
-                  "[[:cntrl:]]+" " " (format "%s" value)))
-           (trimmed (string-trim text)))
-      (unless (string-empty-p trimmed)
-        (if (> (length trimmed) 80)
-            (concat (substring trimmed 0 77) "...")
-          trimmed)))))
+  (deslop--bounded-single-line value 80 t))
 
 (defun deslop-ui--format-badge (ov spinner)
   "Format the display badge string for overlay OV using SPINNER frame."
@@ -84,18 +77,16 @@ range overlays keep their badge before the covered text."
 
 (defun deslop-ui--prune-dead-overlays ()
   "Remove any deleted overlays or overlays on dead buffers from tracking."
-  (setq deslop-ui--managed-overlays
-        (delq nil (mapcar (lambda (ov)
-                            (and (overlayp ov)
-                                 (buffer-live-p (overlay-buffer ov))
-                                 ov))
-                          deslop-ui--managed-overlays)))
-  (setq deslop-ui--spinning-overlays
-        (delq nil (mapcar (lambda (ov)
-                            (and (overlayp ov)
-                                 (buffer-live-p (overlay-buffer ov))
-                                 ov))
-                          deslop-ui--spinning-overlays))))
+  (let ((live-overlays
+         (lambda (overlays)
+           (cl-remove-if-not
+            (lambda (ov)
+              (and (overlayp ov) (buffer-live-p (overlay-buffer ov))))
+            overlays))))
+    (setq deslop-ui--managed-overlays
+          (funcall live-overlays deslop-ui--managed-overlays)
+          deslop-ui--spinning-overlays
+          (funcall live-overlays deslop-ui--spinning-overlays))))
 
 (defun deslop-ui--refresh-all-overlays ()
   "Refresh all active overlays. Queued items remain static; active items spin."
@@ -123,21 +114,60 @@ range overlays keep their badge before the covered text."
 
 ;;;; Review Highlight & Color Helpers
 
+(defun deslop-ui--hex-components (color)
+  "Return integer RGB components for six-digit hexadecimal COLOR."
+  (when (and (stringp color)
+             (string-match "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'"
+                           color))
+    (mapcar (lambda (component) (string-to-number component 16))
+            (list (match-string 1 color)
+                  (match-string 2 color)
+                  (match-string 3 color)))))
+
+(defun deslop-ui--hex-join (components)
+  "Return COMPONENTS as a hexadecimal RGB string, or nil when invalid."
+  (when (and (= (length components) 3)
+             (cl-every (lambda (component)
+                         (and (integerp component)
+                              (<= 0 component 255)))
+                       components))
+    (apply #'format "#%02x%02x%02x" components)))
+
+(defun deslop-ui--color-rgb (color)
+  "Return COLOR as normalized RGB components, or nil when unresolved."
+  (when (stringp color)
+    (if (string-prefix-p "#" color)
+        (let ((components (deslop-ui--hex-components color)))
+          (and components (mapcar (lambda (component) (/ component 255.0))
+                                  components)))
+      (color-name-to-rgb color))))
+
 (defun deslop-ui--color-to-hex (color fallback)
   "Convert COLOR name or hex string to '#rrggbb', or return FALLBACK."
-  (if (and (stringp color) (color-name-to-rgb color))
-      (let ((rgb (color-name-to-rgb color)))
-        (color-rgb-to-hex (nth 0 rgb) (nth 1 rgb) (nth 2 rgb) 2))
-    fallback))
+  (let ((rgb (deslop-ui--color-rgb color)))
+    (if rgb
+        (deslop-ui--hex-join
+         (mapcar (lambda (component) (round (* 255 component))) rgb))
+      fallback)))
+
+(defun deslop-ui--update-save-guards ()
+  "Keep save hooks enabled exactly while review overlays remain."
+  (if (deslop-ui--review-overlays-in-buffer)
+      (progn
+        (add-hook 'before-save-hook #'deslop-ui--prevent-unreviewed-save nil t)
+        (add-hook 'auto-save-hook #'deslop-ui--prevent-unreviewed-save nil t))
+    (remove-hook 'before-save-hook #'deslop-ui--prevent-unreviewed-save t)
+    (remove-hook 'auto-save-hook #'deslop-ui--prevent-unreviewed-save t)))
 
 (defun deslop-ui--blend-color (base fg blend)
   "Return BASE color shifted BLEND fraction toward FG as a hex string."
-  (let ((base-rgb (and (stringp base) (color-name-to-rgb base)))
-        (fg-rgb (and (stringp fg) (color-name-to-rgb fg)))
+  (let ((base-rgb (deslop-ui--color-rgb base))
+        (fg-rgb (deslop-ui--color-rgb fg))
         (ratio (max 0.0 (min 1.0 (float (or blend 0.0))))))
     (when (and base-rgb fg-rgb)
-      (apply #'color-rgb-to-hex
-             (append (color-blend fg-rgb base-rgb ratio) '(2))))))
+      (deslop-ui--hex-join
+       (mapcar (lambda (component) (round (* 255 component)))
+               (color-blend fg-rgb base-rgb ratio))))))
 
 (defun deslop-ui--unspecified-p (value)
   "Return non-nil when VALUE is an unresolved `face-attribute' placeholder."
@@ -219,8 +249,7 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
   "Prevent saving a buffer that still contains unapproved model output."
   (if (deslop-ui--review-overlays-in-buffer)
       (user-error "Approve or reject deslop output before saving")
-    (remove-hook 'before-save-hook #'deslop-ui--prevent-unreviewed-save t)
-    (remove-hook 'auto-save-hook #'deslop-ui--prevent-unreviewed-save t)))
+    (deslop-ui--update-save-guards)))
 
 (defun deslop-ui-create-review-overlay
     (buf beg end &optional model client original)
@@ -241,10 +270,10 @@ the inserted characters are tinted using overlay styling without modifying text.
                    (deslop-ui--format-review-badge client model))
       (when deslop-review-highlight
         (let ((style (deslop-ui--review-style buf beg)))
-          (overlay-put ov 'face `(:foreground ,(car style) :background ,(cdr style)))))
-      (add-hook 'before-save-hook #'deslop-ui--prevent-unreviewed-save nil t)
-      (add-hook 'auto-save-hook #'deslop-ui--prevent-unreviewed-save nil t)
-      ov)))
+          (overlay-put ov 'foreground-color (car style))
+          (overlay-put ov 'background-color (cdr style))))
+       (deslop-ui--update-save-guards)
+       ov)))
 
 (defun deslop-ui-review-overlay-p (overlay)
   "Return non-nil when OVERLAY marks output awaiting approval."
@@ -259,11 +288,7 @@ the inserted characters are tinted using overlay styling without modifying text.
       (delete-overlay overlay)
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (unless (deslop-ui--review-overlays-in-buffer)
-            (remove-hook 'before-save-hook
-                         #'deslop-ui--prevent-unreviewed-save t)
-            (remove-hook 'auto-save-hook
-                         #'deslop-ui--prevent-unreviewed-save t)))))))
+          (deslop-ui--update-save-guards))))))
 
 (defun deslop-ui-create-overlay (buf beg end &optional status)
   "Create an indicator overlay in BUF from BEG to END with STATUS."

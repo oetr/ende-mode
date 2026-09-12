@@ -27,6 +27,13 @@
     (when callback
       (apply callback args))))
 
+(defun deslop-test--overlay-label (overlay)
+  "Return the display label attached to OVERLAY."
+  (substring-no-properties
+   (or (overlay-get overlay 'before-string)
+       (overlay-get overlay 'after-string)
+       "")))
+
 (defun deslop-test--complete-call (call)
   "Complete asynchronous fake CALL using its queued response."
   (let ((response (plist-get call :response)))
@@ -323,33 +330,21 @@ process for cancellation tests."
       (goto-char (point-max))
       (let* ((job (deslop-insert-at-cursor))
              (queued-overlay (deslop-job-overlay job)))
-        (should (string-match-p
-                 "test-model"
-                 (substring-no-properties
-                  (or (overlay-get queued-overlay 'before-string)
-                      (overlay-get queued-overlay 'after-string)
-                      ""))))
-        (should (string-match-p
-                 "localhost"
-                 (substring-no-properties
-                  (or (overlay-get queued-overlay 'before-string)
-                      (overlay-get queued-overlay 'after-string)
-                      ""))))
+        (should (string-match-p "test-model"
+                                (deslop-test--overlay-label queued-overlay)))
+        (should (string-match-p "localhost"
+                                (deslop-test--overlay-label queued-overlay)))
         (deslop-test--complete-call (car deslop-test--calls))
         (let ((review (cl-find-if
-                     #'deslop-ui-review-overlay-p
-                     (overlays-in (point-min) (point-max)))))
+                       #'deslop-ui-review-overlay-p
+                       (overlays-in (point-min) (point-max)))))
           (should review)
           (should (string= (overlay-get review 'model) "test-model"))
           (should (string= (overlay-get review 'client) "localhost"))
-          (should (string-match-p
-                   "test-model"
-                   (substring-no-properties
-                    (overlay-get review 'before-string))))
-          (should (string-match-p
-                   "localhost"
-                   (substring-no-properties
-                    (overlay-get review 'before-string))))
+          (should (string-match-p "test-model"
+                                  (deslop-test--overlay-label review)))
+          (should (string-match-p "localhost"
+                                  (deslop-test--overlay-label review)))
           (goto-char (1+ (overlay-start review)))
           (insert "edited ")
           (should (deslop-ui-review-overlay-p review))
@@ -375,14 +370,10 @@ process for cancellation tests."
           (should review)
           (should (string= (overlay-get review 'model) "actual-model"))
           (should (string= (overlay-get review 'client) "llama.cpp"))
-          (should (string-match-p
-                   "actual-model"
-                   (substring-no-properties
-                    (overlay-get review 'before-string))))
-          (should-not (string-match-p
-                       "configured-model"
-                       (substring-no-properties
-                        (overlay-get review 'before-string))))
+          (should (string-match-p "actual-model"
+                                  (deslop-test--overlay-label review)))
+          (should-not (string-match-p "configured-model"
+                                      (deslop-test--overlay-label review)))
           (should (eq (deslop-job-state job) 'completed)))))))
 
 (ert-deftest deslop-test/response-metadata-cannot-be-overwritten-by-discovery ()
@@ -1281,16 +1272,16 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
   (deslop-test--with-buffer "defun x"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (should (equal (deslop-ui--review-style (current-buffer) 6)
-                    '("#0000ff" . "#d9d9ff")))))
+                    '("#0000ff" . "#8080ff")))))
 
 (ert-deftest deslop-test/review-highlight-style-default-fallback ()
   (set-face-foreground 'default "#111111")
   (set-face-background 'default "#222222")
   (deslop-test--with-buffer "plain x"
     (should (equal (deslop-ui--review-style (current-buffer) 6)
-                   '("#111111" . "#1f1f1f")))
+                   '("#111111" . "#1a1a1a")))
     (should (equal (deslop-ui--review-style (current-buffer) 1)
-                    '("#111111" . "#1f1f1f")))))
+                    '("#111111" . "#1a1a1a")))))
 
 (ert-deftest deslop-test/review-highlight-overlay-sets-char-properties ()
   (deslop-test--reset)
@@ -1303,7 +1294,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
       (should (overlayp overlay))
       (should (not (overlay-get overlay 'face)))
       (should (string= (get-char-property 6 'foreground-color) "#0000ff"))
-      (should (string= (get-char-property 8 'background-color) "#d9d9ff"))
+       (should (string= (get-char-property 8 'background-color) "#8080ff"))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
       (should (memq #'deslop-ui--prevent-unreviewed-save before-save-hook))
@@ -1336,7 +1327,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
                                 (overlays-in (point-min) (point-max)))))
         (should review)
         (should (string= (get-char-property 3 'foreground-color) "#0000ff"))
-        (should (string= (get-char-property 5 'background-color) "#d9d9ff"))
+         (should (string= (get-char-property 5 'background-color) "#8080ff"))
         (goto-char 4)
         (deslop-approve-output)
         (should (string= (buffer-string) "kwLLM rest"))
