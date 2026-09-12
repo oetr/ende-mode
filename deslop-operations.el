@@ -208,6 +208,28 @@ source is captured."
    (deslop-job-metadata job)
    result))
 
+(defun deslop--create-review-overlay (buffer start end display original)
+  "Mark generated text from START to END in BUFFER for review.
+DISPLAY supplies the provider label and ORIGINAL is restored on rejection."
+  (deslop-review-create-overlay
+   buffer start end
+   (plist-get display :model)
+   (plist-get display :client)
+   original))
+
+(defun deslop--mutate-target (target mutation)
+  "Run MUTATION as one writable, atomic change to TARGET.
+MUTATION runs in TARGET's buffer and returns the generated review overlay."
+  (let ((buffer (deslop-target-buffer target)))
+    (unless (buffer-live-p buffer)
+      (error "target buffer no longer exists"))
+    (with-current-buffer buffer
+      (deslop-target-with-restriction target
+        (barf-if-buffer-read-only)
+        (deslop-target-with-application target
+          (atomic-change-group
+            (funcall mutation)))))))
+
 (defun deslop--result-content (result)
   "Extract and validate completion content from RESULT or a legacy string."
   (let ((content (if (stringp result) result (plist-get result :content))))
@@ -253,44 +275,39 @@ the review overlay it creates."
   (deslop--apply-result
    job result
    (lambda (content display)
-     (let* ((target (deslop-job-target job))
-            (buffer (deslop-target-buffer target))
-            (model (plist-get display :model))
-            (client (plist-get display :client))
-            ins-start ins-end review-overlay)
-       (unless (buffer-live-p buffer)
-         (error "target buffer no longer exists"))
-       (with-current-buffer buffer
-         (deslop-target-with-restriction target
-           (barf-if-buffer-read-only)
-           (let* ((selected (deslop-target-selected target))
-                  (start (deslop-target-start target))
-                  (end (deslop-target-end target))
-                  (cursor (deslop-target-cursor target)))
-             (unless cursor
-               (error "cursor anchor no longer exists"))
-             (when (and selected (or (null start) (null end) (> start end)))
-               (error "selection anchors no longer exist"))
-             (unless (deslop-target-restriction-valid-p
-                      target (or start cursor) (or end cursor))
-               (error "target is outside the original restriction"))
-             (when selected
-               (deslop-target-validate-source target start end))
-             (setq ins-start cursor)
-             (deslop-target-with-application target
-               (atomic-change-group
-                 (save-excursion
-                   (goto-char cursor)
-                   (pcase (deslop-target-placement target)
-                     (:before (insert content "\n"))
-                     (:after  (insert "\n" content))
-                     (:inside (insert "\n" content "\n"))
-                     (_       (insert content)))
-                   (setq ins-end (point)
-                         review-overlay
-                         (deslop-review-create-overlay
-                          buffer ins-start ins-end model client ""))))))))
-       (dolist (queued-job deslop-queue)
+      (let* ((target (deslop-job-target job))
+             (buffer (deslop-target-buffer target))
+             ins-start ins-end review-overlay)
+        (setq review-overlay
+              (deslop--mutate-target
+               target
+               (lambda ()
+                 (let* ((selected (deslop-target-selected target))
+                        (start (deslop-target-start target))
+                        (end (deslop-target-end target))
+                        (cursor (deslop-target-cursor target)))
+                   (unless cursor
+                     (error "cursor anchor no longer exists"))
+                   (when (and selected
+                              (or (null start) (null end) (> start end)))
+                     (error "selection anchors no longer exist"))
+                   (unless (deslop-target-restriction-valid-p
+                            target (or start cursor) (or end cursor))
+                     (error "target is outside the original restriction"))
+                   (when selected
+                     (deslop-target-validate-source target start end))
+                   (setq ins-start cursor)
+                   (save-excursion
+                     (goto-char cursor)
+                     (pcase (deslop-target-placement target)
+                       (:before (insert content "\n"))
+                       (:after  (insert "\n" content))
+                       (:inside (insert "\n" content "\n"))
+                       (_       (insert content)))
+                     (setq ins-end (point))
+                     (deslop--create-review-overlay
+                      buffer ins-start ins-end display ""))))))
+        (dolist (queued-job deslop-queue)
          (deslop--ignore-errors
           #'deslop-target-advance-queued-anchors
           (list (deslop-job-target queued-job)) buffer ins-start ins-end
@@ -362,30 +379,27 @@ the review overlay it creates."
         (lambda (content display)
           (let* ((latest-start (deslop-target-start target))
                  (latest-end (deslop-target-end target))
-                 (model (plist-get display :model))
-                 (client (plist-get display :client))
-                 original-source review-overlay)
-            (unless (and latest-start latest-end)
-              (error "improvement target no longer exists"))
-            (with-current-buffer buffer
-              (deslop-target-with-restriction target
-                (barf-if-buffer-read-only)
-                (deslop-target-validate-source target latest-start latest-end)
-                (setq original-source
-                      (buffer-substring latest-start latest-end))
-                (deslop-target-with-application target
-                  (atomic-change-group
-                    (save-excursion
-                      (delete-region latest-start latest-end)
-                      (goto-char latest-start)
-                      (let ((review-start (point)))
-                        (insert content)
-                        (setq review-overlay
-                              (deslop-review-create-overlay
-                               buffer review-start (point)
-                               model client original-source))))))))
-            review-overlay))))
-     t)))
+                  original-source review-overlay)
+             (setq review-overlay
+                   (deslop--mutate-target
+                    target
+                    (lambda ()
+                      (unless (and latest-start latest-end)
+                        (error "improvement target no longer exists"))
+                      (deslop-target-validate-source
+                       target latest-start latest-end)
+                      (setq original-source
+                            (buffer-substring latest-start latest-end))
+                      (save-excursion
+                        (delete-region latest-start latest-end)
+                        (goto-char latest-start)
+                        (let ((review-start (point)))
+                          (insert content)
+                          (deslop--create-review-overlay
+                           buffer review-start (point)
+                           display original-source))))))
+             review-overlay))))
+      t)))
 
 (defun deslop--run-summarize (job)
   "Execute a summarize JOB and write its result to a separate buffer."
@@ -442,8 +456,8 @@ the review overlay it creates."
 
 ;;;; Interactive commands
 
-(defun deslop--enqueue-job (type &optional instruction)
-  "Enqueue a job of TYPE (insert, improve, summarize) with optional INSTRUCTION."
+(defun deslop--enqueue-job (type &optional instruction profile)
+  "Enqueue a job of TYPE with optional INSTRUCTION and PROFILE."
   (let* ((buffer (current-buffer))
          (region (deslop-current-region))
          (point (point))
@@ -466,7 +480,9 @@ the review overlay it creates."
           (progn
             (setq overlay
                   (deslop-ui-create-overlay buffer start end "Queued"))
-            (let ((data (list :target target :overlay overlay)))
+             (let ((data (list :target target :overlay overlay)))
+               (when profile
+                 (setq data (plist-put data :profile profile)))
               (when instruction
                 (setq data (plist-put data :instruction instruction)))
               (let ((job (deslop-enqueue (cons type data))))

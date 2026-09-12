@@ -29,11 +29,38 @@ point and shifts its background slightly toward that foreground."
 
 ;;;; Review Highlight & Color Helpers
 
+(defun deslop-review--color-rgb (color)
+  "Return COLOR as normalized RGB components, or nil when unresolved."
+  (when (stringp color)
+    (cond
+     ((string-prefix-p "#" color)
+      (when (string-match
+             "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'"
+             color)
+        (mapcar (lambda (component)
+                  (/ (string-to-number component 16) 255.0))
+                (list (match-string 1 color)
+                      (match-string 2 color)
+                      (match-string 3 color)))))
+     (t
+      (condition-case nil
+          (color-name-to-rgb color)
+        (error nil))))))
+
+(defun deslop-review--rgb-to-hex (rgb)
+  "Return normalized RGB values RGB as a two-digit hexadecimal color."
+  (apply #'color-rgb-to-hex
+         (append (mapcar (lambda (component)
+                           (/ (round (* 255 component)) 255.0))
+                         rgb)
+                 '(2))))
+
 (defun deslop-review--hex-components (color)
-  "Return integer RGB components for six-digit hexadecimal COLOR."
+  "Return integer RGB components for COLOR, or nil when unresolved."
   (when (and (stringp color)
-             (string-match "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'"
-                           color))
+             (string-match
+              "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'"
+              color))
     (mapcar (lambda (component) (string-to-number component 16))
             (list (match-string 1 color)
                   (match-string 2 color)
@@ -46,23 +73,14 @@ point and shifts its background slightly toward that foreground."
                          (and (integerp component)
                               (<= 0 component 255)))
                        components))
-    (apply #'format "#%02x%02x%02x" components)))
-
-(defun deslop-review--color-rgb (color)
-  "Return COLOR as normalized RGB components, or nil when unresolved."
-  (when (stringp color)
-    (if (string-prefix-p "#" color)
-        (let ((components (deslop-review--hex-components color)))
-          (and components (mapcar (lambda (component) (/ component 255.0))
-                                  components)))
-      (color-name-to-rgb color))))
+    (deslop-review--rgb-to-hex
+     (mapcar (lambda (component) (/ component 255.0)) components))))
 
 (defun deslop-review--color-to-hex (color fallback)
   "Convert COLOR name or hex string to '#rrggbb', or return FALLBACK."
   (let ((rgb (deslop-review--color-rgb color)))
     (if rgb
-        (deslop-review--hex-join
-         (mapcar (lambda (component) (round (* 255 component))) rgb))
+        (deslop-review--rgb-to-hex rgb)
       fallback)))
 
 (defun deslop-review--blend-color (base fg blend)
@@ -71,9 +89,8 @@ point and shifts its background slightly toward that foreground."
         (fg-rgb (deslop-review--color-rgb fg))
         (ratio (max 0.0 (min 1.0 (float (or blend 0.0))))))
     (when (and base-rgb fg-rgb)
-      (deslop-review--hex-join
-       (mapcar (lambda (component) (round (* 255 component)))
-               (color-blend fg-rgb base-rgb ratio))))))
+      (deslop-review--rgb-to-hex
+       (color-blend fg-rgb base-rgb ratio)))))
 
 (defun deslop-review--unspecified-p (value)
   "Return non-nil when VALUE is an unresolved `face-attribute' placeholder."

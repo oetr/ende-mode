@@ -18,6 +18,7 @@
 (require 'deslop-curl)
 (require 'deslop-protocol)
 (require 'deslop-provider)
+(require 'deslop-codex)
 
 ;;;; Hookable LLM caller
 
@@ -228,6 +229,36 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                               0.0)
                       :usage usage)))))
 
+(defun deslop-llm--first-choice (choices)
+  "Return the first choice from parsed JSON CHOICES."
+  (cond
+   ((and (vectorp choices) (> (length choices) 0))
+    (aref choices 0))
+   ((consp choices) (car choices))))
+
+(defun deslop-llm--first-json-value (objects keys)
+  "Return the first non-nil value for KEYS across JSON OBJECTS."
+  (cl-loop for object in objects
+           thereis (cl-loop for key in keys
+                            for value = (deslop-protocol--json-get key object)
+                            when value return value)))
+
+(defun deslop-llm--response-event (json)
+  "Normalize completion fields from one parsed provider JSON object."
+  (let* ((choice (deslop-llm--first-choice
+                  (deslop-protocol--json-get "choices" json)))
+         (delta (deslop-protocol--json-get "delta" choice))
+         (message (deslop-protocol--json-get "message" choice)))
+    (list
+     :finish-reason (deslop-protocol--json-get "finish_reason" choice)
+     :reasoning (deslop-llm--first-json-value
+                 (list delta choice)
+                 '("reasoning_content" "reasoning"))
+     :content (or (deslop-llm--first-json-value
+                   (list delta choice)
+                   '("content" "text"))
+                  (deslop-protocol--json-get "content" message)))))
+
 (defun deslop-llm--handle-json (session json)
   "Handle one parsed streaming JSON object for SESSION."
   (if (deslop-protocol--json-has-key-p "error" json)
@@ -235,29 +266,13 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
        session (deslop-protocol--json-get "error" json))
     (deslop-llm--handle-metadata session json)
     (unless (deslop-llm--session-terminal session)
-      (let* ((choices (deslop-protocol--json-get "choices" json))
-             (choice (cond ((and (vectorp choices) (> (length choices) 0))
-                            (aref choices 0))
-                           ((consp choices) (car choices))))
-             (delta (deslop-protocol--json-get "delta" choice))
-             (finish-reason (deslop-protocol--json-get
-                             "finish_reason" choice))
-              (reasoning (or (deslop-protocol--json-get
-                              "reasoning_content" delta)
-                             (deslop-protocol--json-get "reasoning" delta)
-                             (deslop-protocol--json-get "reasoning_content"
-                                                         choice)
-                             (deslop-protocol--json-get "reasoning" choice)))
-              (content (or (deslop-protocol--json-get "content" delta)
-                           (deslop-protocol--json-get "text" delta)
-                           (deslop-protocol--json-get "content" choice)
-                           (deslop-protocol--json-get "text" choice)
-                           (let ((message
-                                  (deslop-protocol--json-get "message" choice)))
-                             (deslop-protocol--json-get "content" message)))))
-         (when (stringp finish-reason)
-           (setf (deslop-llm--session-finish-reason session) finish-reason))
-         (deslop-llm--handle-usage
+      (let* ((event (deslop-llm--response-event json))
+             (finish-reason (plist-get event :finish-reason))
+             (reasoning (plist-get event :reasoning))
+             (content (plist-get event :content)))
+        (when (stringp finish-reason)
+          (setf (deslop-llm--session-finish-reason session) finish-reason))
+        (deslop-llm--handle-usage
          session (deslop-protocol--json-get "usage" json))
         (when (and (not (deslop-llm--session-terminal session))
                    (stringp reasoning) (> (length reasoning) 0))
@@ -516,33 +531,30 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                    (> deslop-max-output-chars 0)))
     (error "deslop-max-output-chars must be nil or a positive integer"))
   (let ((profile (deslop-llm--session-profile session)))
-    (deslop-curl--validated-url profile)
     (setf (deslop-llm--session-json-data session)
           (encode-coding-string
-           (json-encode (deslop-llm--request-body messages profile)) 'utf-8)
-          (deslop-llm--session-process-buffer session)
-          (generate-new-buffer " *deslop-curl*")
-          (deslop-llm--session-stderr-buffer session)
-          (generate-new-buffer " *deslop-curl-stderr*")
-          (deslop-llm--session-headers-file session)
-          (make-temp-file "deslop-headers-"))
-    (set-file-modes (deslop-llm--session-headers-file session) #o600)
-    (setf (deslop-llm--session-config-file session)
-          (deslop-curl--config profile))
-    (setf (deslop-llm--session-process session)
-          (make-process
-           :name (format "deslop-curl-%s-%s"
-                         (or (plist-get profile :name) "request")
-                         (or (plist-get profile :job-id) "unknown"))
-           :buffer (deslop-llm--session-process-buffer session)
-           :stderr (deslop-llm--session-stderr-buffer session)
-           :connection-type 'pipe
-           :noquery t
-           :command (deslop-curl--command
-                     profile (deslop-llm--session-headers-file session)
-                     (deslop-llm--session-config-file session))
-           :filter (apply-partially #'deslop-llm--process-filter session)
-           :sentinel (apply-partially #'deslop-llm--process-sentinel session)))
+           (json-encode (deslop-llm--request-body messages profile)) 'utf-8))
+    (let ((request
+           (deslop-curl--start-request
+            :profile profile
+            :name (format "deslop-curl-%s-%s"
+                          (or (plist-get profile :name) "request")
+                          (or (plist-get profile :job-id) "unknown"))
+            :command (lambda (headers-file config-file)
+                       (deslop-curl--command
+                        profile headers-file config-file))
+            :filter (apply-partially #'deslop-llm--process-filter session)
+            :sentinel (apply-partially #'deslop-llm--process-sentinel session))))
+      (setf (deslop-llm--session-process session)
+            (plist-get request :process)
+            (deslop-llm--session-process-buffer session)
+            (plist-get request :response-buffer)
+            (deslop-llm--session-stderr-buffer session)
+            (plist-get request :stderr-buffer)
+            (deslop-llm--session-headers-file session)
+            (plist-get request :headers-file)
+            (deslop-llm--session-config-file session)
+            (plist-get request :config-file)))
     (deslop-llm--invoke-callback
      session :on-start (apply-partially #'deslop-llm--cancel session))
     (when (and (not (deslop-llm--session-terminal session))
@@ -556,26 +568,29 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
+  (if (eq (plist-get options :wire-api) 'responses)
+      (deslop-codex-default messages callbacks options)
   (let* ((profile (if (plist-get options :name)
                       options
                     (deslop--plist-merge (deslop-provider-profile) options)))
          (session
           (deslop-llm--make-session
-           :profile profile :callbacks callbacks :model (plist-get profile :model)
-           :sse (deslop-protocol--make-sse
-                 :buffer "" :data-lines nil :data-bytes 0 :done nil)
+            :profile profile :callbacks callbacks :model (plist-get profile :model)
+            :sse (deslop-protocol--make-sse
+                  :buffer-parts nil :buffer-bytes 0
+                  :data-lines nil :data-bytes 0 :done nil)
             :reasoning (deslop-protocol--make-reasoning
                         :mode 'content :pending "")
             :estimated-chars 0 :received-bytes 0
             :response-preview-parts nil :response-preview-bytes 0)))
     (condition-case startup-error
         (deslop-llm--start-session session messages)
-      ((error quit)
-       (deslop-llm--fail
-        session
-        (deslop-error-create :kind 'startup
-                             :message (error-message-string startup-error)))))
-    (deslop-llm--session-process session)))
+     ((error quit)
+        (deslop-llm--fail
+         session
+         (deslop-error-create :kind 'startup
+                              :message (error-message-string startup-error)))))
+     (deslop-llm--session-process session))))
 
 (provide 'deslop-llm)
 

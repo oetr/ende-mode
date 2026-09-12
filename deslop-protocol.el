@@ -115,15 +115,12 @@ Thinking and content deltas are emitted through CALLBACKS."
 (cl-defstruct (deslop-protocol--sse
                (:constructor deslop-protocol--make-sse))
   "Incremental SSE line/event state."
-  buffer buffer-parts buffer-bytes data-lines data-bytes done)
+  buffer-parts buffer-bytes data-lines data-bytes done)
 
 (defun deslop-protocol--sse-pending-buffer (parser)
   "Return the unparsed SSE text accumulated in PARSER."
-  (let ((buffer (deslop-protocol--sse-buffer parser)))
-    (if (and buffer (> (length buffer) 0))
-      buffer
-      (let ((parts (deslop-protocol--sse-buffer-parts parser)))
-        (or (and parts (apply #'concat (nreverse parts))) "")))))
+  (let ((parts (deslop-protocol--sse-buffer-parts parser)))
+    (if parts (apply #'concat (nreverse parts)) "")))
 
 (defun deslop-protocol--sse-event (parser)
   "Turn the accumulated SSE data lines in PARSER into one event."
@@ -182,14 +179,10 @@ Thinking and content deltas are emitted through CALLBACKS."
   "Feed raw SSE CHUNK into PARSER and return complete events.
 Errors are signaled so the transport can turn them into protocol failures."
   (let ((parts (deslop-protocol--sse-buffer-parts parser))
-        (buffer (deslop-protocol--sse-buffer parser))
         (events nil))
-    (when (and buffer (> (length buffer) 0))
-      (push buffer parts))
     (when (and (stringp chunk) (> (length chunk) 0))
       (push chunk parts))
-    (setf (deslop-protocol--sse-buffer parser) ""
-          (deslop-protocol--sse-buffer-parts parser) parts
+    (setf (deslop-protocol--sse-buffer-parts parser) parts
           (deslop-protocol--sse-buffer-bytes parser)
           (+ (or (deslop-protocol--sse-buffer-bytes parser) 0)
              (string-bytes (or chunk ""))))
@@ -209,13 +202,13 @@ Errors are signaled so the transport can turn them into protocol failures."
             (when event
               (push event events))))
         (let ((remainder (substring input start)))
-          (setf (deslop-protocol--sse-buffer parser) remainder
-                (deslop-protocol--sse-buffer-parts parser) nil
+          (setf (deslop-protocol--sse-buffer-parts parser)
+                (and (> (length remainder) 0) (list remainder))
                 (deslop-protocol--sse-buffer-bytes parser)
                 (string-bytes remainder))
-           (when (and deslop-max-sse-event-bytes
-                      (> (deslop-protocol--sse-buffer-bytes parser)
-                         deslop-max-sse-event-bytes))
+          (when (and deslop-max-sse-event-bytes
+                     (> (deslop-protocol--sse-buffer-bytes parser)
+                        deslop-max-sse-event-bytes))
             (error "SSE line exceeds deslop-max-sse-event-bytes"))))
       (nreverse events))))
 
@@ -224,8 +217,7 @@ Errors are signaled so the transport can turn them into protocol failures."
   (let ((events nil)
         (buffer (deslop-protocol--sse-pending-buffer parser)))
     (when (> (length buffer) 0)
-      (setf (deslop-protocol--sse-buffer parser) buffer
-            (deslop-protocol--sse-buffer-parts parser) nil
+      (setf (deslop-protocol--sse-buffer-parts parser) (list buffer)
             (deslop-protocol--sse-buffer-bytes parser) (string-bytes buffer))
       (let ((event (deslop-protocol--sse-handle-raw-line parser buffer)))
         (when event

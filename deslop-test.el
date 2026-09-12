@@ -832,7 +832,8 @@ process for cancellation tests."
 ;;;; SSE parser
 
 (ert-deftest deslop-test/sse-parser-fragmented-and-done ()
-  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil))
+  (let ((parser (deslop-protocol--make-sse
+                 :buffer-parts nil :data-lines nil :done nil))
         (events nil))
     (setq events
           (append events
@@ -857,17 +858,18 @@ process for cancellation tests."
      (should-not (deslop-protocol--sse-finish parser))))
 
 (ert-deftest deslop-test/sse-parser-rejects-malformed-and-ignores-late-data ()
-  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
+  (let ((parser (deslop-protocol--make-sse
+                 :buffer-parts nil :data-lines nil :done nil)))
     (should-error
      (deslop-protocol--sse-feed parser "data: {bad}\n\n"))
-    (let ((done-parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
+    (let ((done-parser (deslop-protocol--make-sse :buffer-parts nil)))
       (deslop-protocol--sse-feed done-parser "data: [DONE]\n\n")
       (should-not
        (deslop-protocol--sse-feed
         done-parser "data: {\"choices\":[]}\n\n")))))
 
 (ert-deftest deslop-test/sse-parser-requires-done ()
-  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
+  (let ((parser (deslop-protocol--make-sse :buffer-parts nil)))
     (deslop-protocol--sse-feed parser "data: {\"choices\":[]}\n\n")
     (should-error (deslop-protocol--sse-finish parser))))
 
@@ -1034,9 +1036,275 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
                "data: [DONE]\n\n"
                "data: malformed trailing bytes\n\n"))))
-    (should (string= (plist-get (nth 0 out) :content) "ok"))
-    (should-not (nth 1 out))
-    (should (= (nth 3 out) 1))))
+     (should (string= (plist-get (nth 0 out) :content) "ok"))
+     (should-not (nth 1 out))
+     (should (= (nth 3 out) 1))))
+
+(ert-deftest deslop-test/openai-profile-uses-opencode-oauth ()
+  (let ((profile (deslop-provider-profile 'openai)))
+    (should (eq (plist-get profile :wire-api) 'responses))
+    (should (eq (plist-get profile :auth-method) 'opencode-oauth))
+    (should (string= (plist-get profile :model) "gpt-5.6-luna"))
+    (should (string= (plist-get profile :url)
+                     "https://chatgpt.com/backend-api/codex/responses"))
+    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :access))
+    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :refresh))))
+
+(ert-deftest deslop-test/provider-list-and-configured-models-are-selectable ()
+  (let ((deslop-providers '(openai local))
+        (deslop-provider-profiles
+         '((local :models ("local-one" "local-two")))))
+    (should (equal (deslop-provider-names) '(openai local)))
+    (should (equal (deslop-provider-models
+                    (deslop-provider-profile 'local))
+                   '("local-one" "local-two")))))
+
+(ert-deftest deslop-test/openai-model-probe-parses-official-slugs ()
+  (should (equal
+           (deslop-codex--parse-models
+            (concat "{\"models\":[{\"slug\":\"gpt-5.6-luna\"},"
+                    "{\"slug\":\"gpt-5.5\"},{\"title\":\"ignored\"}]}"))
+           '("gpt-5.6-luna" "gpt-5.5"))))
+
+(ert-deftest deslop-test/selector-runs-from-source-with-selected-profile ()
+  (let* ((source (generate-new-buffer " *deslop-selector-source*"))
+         (selector (generate-new-buffer " *deslop-selector-test*"))
+         (deslop-providers '(local))
+         (deslop-provider-profiles '((local :models ("one" "two"))))
+         (queued nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "source"))
+          (with-current-buffer selector
+            (deslop-selector-mode)
+            (setq deslop-selector--source-buffer source
+                  deslop-selector--providers '(local)
+                  deslop-selector--provider-index 0
+                  deslop-selector--models '("one" "two")
+                  deslop-selector--model-index 0)
+            (deslop-selector-next-model)
+            (cl-letf (((symbol-function 'deslop--enqueue-job)
+                       (lambda (type instruction profile)
+                         (setq queued
+                               (list type instruction profile (current-buffer))))))
+               (deslop-selector-insert))))
+          (should (eq (nth 0 queued) 'insert))
+          (should (string= (plist-get (nth 2 queued) :model) "two"))
+          (should (eq (nth 3 queued) source)))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/openai-request-body-matches-codex-responses-shape ()
+  (let* ((body (deslop-protocol--json-read-string
+                (json-encode
+                 (deslop-codex--request-body
+                  (list (cons "system" "rules")
+                        (cons "user" "question")
+                        (cons "assistant" "answer"))
+                  '(:model "gpt-test")))))
+         (input (deslop-protocol--json-get "input" body))
+         (user (aref input 1))
+         (user-content (aref (deslop-protocol--json-get "content" user) 0))
+         (assistant (aref input 2))
+         (assistant-content
+          (aref (deslop-protocol--json-get "content" assistant) 0)))
+    (should (eq (deslop-protocol--json-get "store" body) :false))
+    (should (eq (deslop-protocol--json-get "stream" body) t))
+    (should (string= (deslop-protocol--json-get "text" user-content)
+                     "question"))
+    (should (string= (deslop-protocol--json-get "type" user-content)
+                     "input_text"))
+    (should (string= (deslop-protocol--json-get "text" assistant-content)
+                     "answer"))
+    (should (string= (deslop-protocol--json-get "type" assistant-content)
+                     "output_text"))))
+
+(ert-deftest deslop-test/openai-http-error-keeps-provider-detail ()
+  (let ((headers-file (make-temp-file "deslop-openai-error-")))
+    (unwind-protect
+        (progn
+          (with-temp-file headers-file
+            (insert "HTTP/1.1 400 Bad Request\r\n\r\n"))
+          (let* ((session
+                  (deslop-codex--make-session
+                   :headers-file headers-file
+                   :preview-parts '("{\"detail\":\"invalid request body\"}")))
+                 (error (deslop-codex--http-error session)))
+            (should (string= (deslop-error-message error)
+                             "HTTP status 400: invalid request body"))))
+      (when (file-exists-p headers-file)
+        (delete-file headers-file)))))
+
+(ert-deftest deslop-test/openai-auth-entry-is-read-from-opencode-file ()
+  (let* ((file (make-temp-file "deslop-openai-auth-test-"))
+         (deslop-codex-auth-file file))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"openai\":{\"type\":\"oauth\","
+                    "\"access\":\"access-token\","
+                    "\"refresh\":\"refresh-token\","
+                    "\"expires\":9999999999999,"
+                    "\"accountId\":\"account-id\"}}"))
+          (let ((auth (deslop-codex--auth-entry)))
+            (should (string= (plist-get auth :access) "access-token"))
+            (should (string= (plist-get auth :refresh) "refresh-token"))
+            (should (string= (plist-get auth :account-id) "account-id"))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest deslop-test/openai-transport-keeps-token-out-of-command-arguments ()
+  (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
+         (deslop-codex-auth-file auth-file)
+         (captured nil)
+         (process nil)
+         (result nil)
+         (real-make-process (symbol-function 'make-process)))
+    (unwind-protect
+        (progn
+          (with-temp-file auth-file
+            (insert "{\"openai\":{\"type\":\"oauth\","
+                    "\"access\":\"access-token\","
+                    "\"refresh\":\"refresh-token\","
+                    "\"expires\":9999999999999,"
+                    "\"accountId\":\"account-id\"}}"))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (setq captured args)
+                       (setq process
+                             (funcall real-make-process
+                                      :name (plist-get args :name)
+                                      :buffer (plist-get args :buffer)
+                                      :command (list "cat")
+                                      :connection-type 'pipe)))))
+            (deslop-codex-default
+             (list (cons "user" "body"))
+             (list :on-done (lambda (value) (setq result value))
+                   :on-error (lambda (value) (setq result value)))
+             (deslop-provider-profile 'openai))
+            (let* ((command (plist-get captured :command))
+                   (config (cadr (member "--config" command))))
+              (should (not (member "access-token" command)))
+              (should (file-exists-p config))
+               (with-temp-buffer
+                 (insert-file-contents config)
+                 (should (string-match-p "Authorization: Bearer access-token"
+                                         (buffer-string))))
+               (with-temp-buffer
+                 (insert-file-contents config)
+                 (should (string-match-p "User-Agent: deslop"
+                                         (buffer-string))))
+              (funcall
+               (plist-get captured :filter)
+               process
+               (concat "data: {\"type\":\"response.output_text.delta\","
+                       "\"delta\":\"answer\"}\n\n"
+                       "data: {\"type\":\"response.completed\","
+                       "\"response\":{\"model\":\"gpt-test\"}}\n\n"))
+              (should (string= (plist-get result :content) "answer"))
+              (should-not (file-exists-p config)))))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process))
+      (when (file-exists-p auth-file)
+        (delete-file auth-file)))))
+
+(ert-deftest deslop-test/openai-refresh-rotates-opencode-credentials-safely ()
+  (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
+         (deslop-codex-auth-file auth-file)
+         (deslop-codex-issuer "https://example.test")
+         (captured nil)
+         (process nil)
+         (refreshed nil)
+         (real-make-process (symbol-function 'make-process))
+         (auth '(:access "old-access" :refresh "old-refresh"
+                 :expires 0 :account-id "account-id")))
+    (unwind-protect
+        (progn
+          (with-temp-file auth-file
+            (insert "{\"openai\":{\"type\":\"oauth\","
+                    "\"access\":\"old-access\","
+                    "\"refresh\":\"old-refresh\","
+                    "\"expires\":0,"
+                    "\"accountId\":\"account-id\"}}"))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (setq captured args)
+                       (setq process
+                             (funcall real-make-process
+                                      :name (plist-get args :name)
+                                      :buffer (plist-get args :buffer)
+                                      :stderr (plist-get args :stderr)
+                                      :command (list "cat")
+                                      :connection-type 'pipe
+                                      :noquery t)))))
+            (deslop-codex--refresh-auth auth
+                                        (lambda (value) (setq refreshed value)))
+            (let* ((command (plist-get captured :command))
+                   (headers-file
+                    (cadr (member "--dump-header" command)))
+                   (filter (plist-get captured :filter))
+                   (sentinel (plist-get captured :sentinel)))
+              (should-not (member "old-refresh" command))
+              (with-temp-file headers-file
+                (insert "HTTP/1.1 200 OK\r\n\r\n"))
+              (with-current-buffer (plist-get captured :buffer)
+                (erase-buffer))
+              (when (process-live-p process)
+                (process-send-eof process))
+              (while (process-live-p process)
+                (accept-process-output process 0.05))
+              (with-current-buffer (plist-get captured :buffer)
+                (erase-buffer))
+              (funcall filter process
+                       (concat "{\"access_token\":\"new-access\","
+                               "\"refresh_token\":\"new-refresh\","
+                               "\"expires_in\":3600}"))
+              (funcall sentinel process "finished\n")
+              (should (string= (plist-get refreshed :access) "new-access"))
+              (should (string= (plist-get refreshed :refresh) "new-refresh"))
+              (should (string= (plist-get (deslop-codex--auth-entry) :refresh)
+                               "new-refresh")))))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process))
+      (when (file-exists-p auth-file)
+        (delete-file auth-file)))))
+
+(ert-deftest deslop-test/openai-responses-events-normalize-to-deslop-result ()
+  (let* ((events nil)
+         (result nil)
+         (failure nil)
+         (session
+         (deslop-codex--make-session
+          :profile '(:model "gpt-test")
+          :callbacks (list :on-event (lambda (event) (push event events))
+                           :on-done (lambda (value) (setq result value))
+                           :on-error (lambda (value) (setq failure value)))
+          :sse (deslop-protocol--make-sse :buffer-parts nil :data-lines nil)
+          :estimated-chars 0)))
+    (deslop-codex--handle-event
+     session
+     (deslop-protocol--json-read-string
+      "{\"type\":\"response.created\",\"response\":{\"model\":\"gpt-actual\"}}"))
+    (deslop-codex--handle-event
+     session
+     (deslop-protocol--json-read-string
+      "{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}"))
+    (deslop-codex--handle-event
+     session
+     (deslop-protocol--json-read-string
+      "{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}"))
+    (deslop-codex--handle-event
+     session
+     (deslop-protocol--json-read-string
+      "{\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-actual\",\"usage\":{\"output_tokens\":7}}}"))
+    (should-not failure)
+    (should (string= (plist-get result :content) "answer"))
+    (should (string= (plist-get result :thinking) "thinking"))
+    (should (string= (plist-get result :model) "gpt-actual"))
+    (should (= (plist-get result :tokens) 7))
+    (should (eq (deslop-codex--session-terminal session) 'success))))
 
 ;;;; Profiles, history, and transport command safety
 
@@ -1168,11 +1436,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest deslop-test/sse-parser-enforces-line-and-event-limits ()
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol--make-sse :buffer "" :data-lines nil
+        (parser (deslop-protocol--make-sse :buffer-parts nil :data-lines nil
                                       :data-bytes 0 :done nil)))
     (should-error (deslop-protocol--sse-feed parser "123456789")))
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol--make-sse :buffer "" :data-lines nil
+        (parser (deslop-protocol--make-sse :buffer-parts nil :data-lines nil
                                       :data-bytes 0 :done nil)))
     (should-error
      (deslop-protocol--sse-feed
@@ -1388,8 +1656,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                (lambda (buffer &rest _) (setq displayed buffer))))
       (deslop-history)
       (should (eq displayed (get-buffer deslop-history-buffer-name)))))
-  (should (eq (lookup-key deslop-mode-map (kbd "C-c e h"))
-              #'deslop-history)))
+  (should (eq (lookup-key deslop-mode-map (kbd "C-c e"))
+              #'deslop-selector-open)))
 
 (ert-deftest deslop-test/history-terminal-cleanup-survives-disable-and-write-errors ()
   (deslop-test--reset)

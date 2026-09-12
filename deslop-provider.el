@@ -17,6 +17,7 @@
 (require 'deslop-core)
 (require 'deslop-curl)
 (require 'deslop-protocol)
+(require 'deslop-codex)
 
 ;;;; User options
 
@@ -35,8 +36,15 @@
   :type 'number
   :group 'deslop)
 
+(defcustom deslop-providers '(local)
+  "Provider profiles offered by the interactive selector.
+
+Each item is a profile symbol understood by `deslop-provider-profile'."
+  :type '(repeat symbol)
+  :group 'deslop)
+
 (defcustom deslop-provider-default-profile 'local
-  "Provider profile used for newly queued jobs."
+  "Fallback provider profile used when `deslop-providers' is empty."
   :type 'symbol
   :group 'deslop)
 
@@ -91,9 +99,17 @@ When nil, do not impose a discovery response-size limit."
 The URL/model customizations remain the local-provider defaults.  OpenRouter
 is available as a profile template and requires an auth-source entry before it
 can be dispatched."
-  (let* ((name (or name deslop-provider-default-profile))
+   (let* ((name (or name (car deslop-providers)
+                    deslop-provider-default-profile))
          (base
           (pcase name
+            ('openai
+             (list :url deslop-codex-endpoint
+                   :model deslop-codex-model
+                   :wire-api 'responses
+                   :auth-method 'opencode-oauth
+                   :require-sse t
+                   :display-name "OpenAI"))
             ('openrouter
              '(:url "https://openrouter.ai/api/v1/chat/completions"
                :model "openai/gpt-4o-mini"
@@ -110,7 +126,22 @@ can be dispatched."
          (custom (alist-get name deslop-provider-profiles)))
     (deslop--plist-merge
      (plist-put (copy-sequence base) :name name)
-     custom)))
+      custom)))
+
+(defun deslop-provider-names ()
+  "Return configured provider profile names for the selector."
+  (or (cl-remove-if-not #'symbolp deslop-providers)
+      (list deslop-provider-default-profile)))
+
+(defun deslop-provider-models (profile)
+  "Return configured model names for PROFILE."
+  (let ((models (plist-get profile :models))
+        (model (plist-get profile :model)))
+    (cond
+     ((and (listp models) models)
+      (cl-remove-if-not #'stringp models))
+     ((stringp model) (list model))
+     (t nil))))
 
 (defun deslop-provider-profile-snapshot (&optional name)
   "Return a detached, non-secret snapshot of provider profile NAME."
@@ -351,8 +382,8 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
 
 (defun deslop-provider--start-discovery (profile key url)
   "Start an asynchronous discovery request for PROFILE at URL."
-  (let ((response-buf (generate-new-buffer " *deslop-provider-response*"))
-        (stderr-buf (generate-new-buffer " *deslop-provider-stderr*"))
+  (let ((response-buf nil)
+        (stderr-buf nil)
         (headers-file nil)
         (config-file nil)
         (process nil)
@@ -376,45 +407,47 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                (list headers-file config-file))
               (deslop-provider--finish-discovery key metadata no-cache))))
     (condition-case _startup
-        (progn
-          (deslop-curl--validated-url profile url)
-          (setq headers-file (make-temp-file "deslop-provider-headers-"))
-          (set-file-modes headers-file #o600)
-          (setq config-file (deslop-curl--config profile))
-          (setq process
-                (make-process
-                 :name (format "deslop-provider-discovery-%s"
-                               (or (plist-get profile :name) "request"))
-                 :buffer response-buf
-                 :stderr stderr-buf
-                 :connection-type 'pipe
-                 :noquery t
-                 :command (deslop-provider--curl-discovery-command
-                           url headers-file config-file)
-                 :filter
-                 (lambda (_proc string)
-                   (unless finished
-                     (setq received-bytes
-                           (+ received-bytes (string-bytes string)))
-                      (if (and deslop-provider-max-discovery-bytes
-                               (> received-bytes
-                                  deslop-provider-max-discovery-bytes))
-                         (funcall finish nil)
-                       (when (buffer-live-p response-buf)
-                         (with-current-buffer response-buf
-                           (goto-char (point-max))
-                           (insert string))))))
-                 :sentinel
-                 (lambda (proc _event)
-                   (when (memq (process-status proc) '(exit signal closed))
-                     (if (= (process-exit-status proc) 0)
-                         (condition-case nil
-                             (funcall
-                              finish
-                              (deslop-provider--parse-discovery-response
-                               profile response-buf headers-file))
-                           ((error quit) (funcall finish nil)))
-                       (funcall finish nil))))))
+        (let ((request
+               (deslop-curl--start-request
+                :profile profile
+                :url url
+                :name (format "deslop-provider-discovery-%s"
+                              (or (plist-get profile :name) "request"))
+                :command (lambda (request-headers request-config)
+                           (deslop-provider--curl-discovery-command
+                            url request-headers request-config))
+                :filter
+                (lambda (proc string)
+                  (unless finished
+                    (setq received-bytes
+                          (+ received-bytes (string-bytes string)))
+                    (if (and deslop-provider-max-discovery-bytes
+                             (> received-bytes
+                                deslop-provider-max-discovery-bytes))
+                        (funcall finish nil)
+                      (let ((response (or (process-get
+                                           proc :deslop-response-buffer)
+                                          (process-buffer proc))))
+                        (when (buffer-live-p response)
+                          (with-current-buffer response
+                            (goto-char (point-max))
+                            (insert string)))))))
+                :sentinel
+                (lambda (proc _event)
+                  (when (memq (process-status proc) '(exit signal closed))
+                    (if (= (process-exit-status proc) 0)
+                        (condition-case nil
+                            (funcall
+                             finish
+                             (deslop-provider--parse-discovery-response
+                              profile response-buf headers-file))
+                          ((error quit) (funcall finish nil)))
+                      (funcall finish nil)))))))
+          (setq process (plist-get request :process)
+                response-buf (plist-get request :response-buffer)
+                stderr-buf (plist-get request :stderr-buffer)
+                headers-file (plist-get request :headers-file)
+                config-file (plist-get request :config-file))
           (process-put process :deslop-discovery-finish finish)
           (push process deslop-provider--discovery-processes)
           (unless finished
