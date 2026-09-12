@@ -22,7 +22,7 @@ point and shifts its background slightly toward that foreground."
   :type 'boolean
   :group 'deslop)
 
-(defcustom deslop-review-highlight-blend 0.5
+(defcustom deslop-review-highlight-blend 0.85
   "Fraction of the foreground color blended into the review highlight background."
   :type 'number
   :group 'deslop)

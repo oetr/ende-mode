@@ -113,7 +113,7 @@ range overlays keep their badge before the covered text."
   (unless (or deslop-reduced-motion (timerp deslop-ui--spinner-timer))
     (setq deslop-ui--spinner-index 0)
     (setq deslop-ui--spinner-timer
-          (run-with-timer 0 0.1 #'deslop-ui--refresh-all-overlays))))
+          (run-with-timer 0 0.5 #'deslop-ui--refresh-all-overlays))))
 
 (defun deslop-ui--stop-spinner ()
   "Stop the overlay spinner timer."
