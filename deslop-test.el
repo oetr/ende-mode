@@ -13,6 +13,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'deslop-provider)
 (require 'deslop)
 
 ;;;; Test harness
@@ -44,25 +45,24 @@
        call :on-error
        (deslop-error-create :kind 'mock :message "mock failure")))
      ((stringp response)
-      (deslop-test--callback call :on-status "Generating")
-      (deslop-test--callback call :on-event
-                             (list :type :status :status "Generating"))
-      (deslop-test--callback call :on-delta :content response)
-      (deslop-test--callback call :on-event
-                             (list :type :delta :channel :content
-                                   :text response))
-      (deslop-test--callback call :on-usage 10 50.0 nil)
-      (deslop-test--callback call :on-event
-                             (list :type :usage :tokens 10 :speed 50.0))
+       (deslop-test--callback call :on-event
+                              (list :type :status :status "Generating"))
+       (deslop-test--callback call :on-event
+                              (list :type :delta :channel :content
+                                    :text response))
+       (deslop-test--callback call :on-event
+                              (list :type :usage :tokens 10 :speed 50.0))
       (deslop-test--callback call :on-done response))
      ((listp response)
       (when (or (plist-get response :reported-model)
                 (plist-get response :reported-provider))
-        (deslop-test--callback
-         call :on-metadata
-         (list :source :response
-               :model (plist-get response :reported-model)
-               :provider (plist-get response :reported-provider))))
+         (deslop-test--callback
+          call :on-event
+          (list :type :metadata
+                :metadata
+                (list :source :response
+                      :model (plist-get response :reported-model)
+                      :provider (plist-get response :reported-provider)))))
       (deslop-test--callback call :on-done response))
      (t
       (deslop-test--callback call :on-error
@@ -83,7 +83,13 @@ process for cancellation tests."
       (when process-factory
         (setq call
               (plist-put call :process (funcall process-factory)))
-        (deslop-test--callback call :on-start (plist-get call :process)))
+        (deslop-test--callback
+         call :on-start
+         (lambda ()
+           (let ((process (plist-get call :process)))
+             (when (and (processp process) (process-live-p process))
+               (process-put process :deslop-cancelled t)
+               (delete-process process))))))
       (setq deslop-test--calls
             (append deslop-test--calls (list call)))
       (unless asynchronous
@@ -125,7 +131,7 @@ process for cancellation tests."
         deslop-test--fake-responses nil
         deslop-queue nil
         deslop--queue-tail nil
-         deslop-running nil
+         deslop--queue-suspended nil
          deslop--current-job nil
          deslop--aborting nil
          deslop--dispatching nil
@@ -133,13 +139,9 @@ process for cancellation tests."
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
   (clrhash deslop-history--entries)
-  (when (get-buffer deslop-history-buffer-name)
-    (kill-buffer deslop-history-buffer-name))
   (when (buffer-live-p deslop-history--buffer-object)
     (kill-buffer deslop-history--buffer-object))
   (setq deslop-history--buffer-object nil)
-  (when (get-buffer deslop-summary-buffer-name)
-    (kill-buffer deslop-summary-buffer-name))
   (when (buffer-live-p deslop--summary-buffer-object)
     (kill-buffer deslop--summary-buffer-object))
   (setq deslop--summary-buffer-object nil)
@@ -151,6 +153,23 @@ process for cancellation tests."
   `(with-temp-buffer
      (insert ,contents)
      ,@body))
+
+(ert-deftest deslop-test/reset-does-not-kill-unowned-named-buffers ()
+  (let* ((deslop-history-buffer-name " *deslop-unowned-history*")
+         (deslop-summary-buffer-name " *deslop-unowned-summary*")
+         (history (get-buffer-create deslop-history-buffer-name))
+         (summary (get-buffer-create deslop-summary-buffer-name)))
+    (unwind-protect
+        (progn
+          (setq deslop-history--buffer-object nil
+                deslop--summary-buffer-object nil)
+          (deslop-test--reset)
+          (should (buffer-live-p history))
+          (should (buffer-live-p summary)))
+      (when (buffer-live-p history)
+        (kill-buffer history))
+      (when (buffer-live-p summary)
+        (kill-buffer summary)))))
 
 ;;;; Normal operations
 
@@ -181,11 +200,11 @@ process for cancellation tests."
          (deslop-test--fake-llm '("HEADER" "FOOTER") t)))
     (deslop-test--with-buffer "alpha beta"
       (deslop-test--select 1 11 1)
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (deslop-insert-at-cursor)
       (deslop-test--select 1 11 11)
       (deslop-insert-at-cursor)
-      (setq deslop-running nil)
+      (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (deslop-test--complete-call (nth 0 deslop-test--calls))
       (deslop-test--complete-call (nth 1 deslop-test--calls))
@@ -199,21 +218,20 @@ process for cancellation tests."
       (let ((overlay (deslop-ui-create-overlay (current-buffer) 1 7 "Queued"))
             (request nil))
         (setq request
-              (list 'insert :buffer (current-buffer) :selected t
-                    :placement :inside :offset 3
-                    :source-snapshot "foobar" :overlay overlay
-                    :start-marker (deslop--make-marker (current-buffer) 1 t)
-                    :end-marker (deslop--make-marker (current-buffer) 7 nil)
-                    :cursor-marker (deslop--make-marker (current-buffer) 4 t)
-                    :restriction-beg (point-min)
-                    :restriction-end (point-max)))
+              (list 'insert
+                    :target
+                    (deslop-target-create
+                     :buffer (current-buffer) :start 1 :end 7 :cursor 4
+                     :selected t :placement :inside :offset 3
+                     :source-snapshot "foobar")
+                    :overlay overlay))
       (deslop-enqueue request))
       (should (string= (buffer-string) "foo\nMIDDLE\nbar")))))
 
 (ert-deftest deslop-test/insert-large-context-elision ()
   (deslop-test--reset)
-  (let ((deslop-max-context-chars 30)
-        (deslop-window-chars 10)
+  (let ((deslop-target-max-context-chars 30)
+        (deslop-target-window-chars 10)
         (deslop-llm-function (deslop-test--fake-llm '("X"))))
     (deslop-test--with-buffer
         (concat (make-string 20 ?A) (make-string 20 ?B))
@@ -223,24 +241,24 @@ process for cancellation tests."
         (should (string-match-p "characters elided" user-msg))
         (should (string-match "AAAA<CURSOR>BBBB" user-msg))))))
 
-(ert-deftest deslop-test/context-window-enforces-source-budget ()
-  (let* ((deslop-max-context-chars 30)
-         (deslop-window-chars 100)
-         (context (deslop-marker-context
-                   (concat (make-string 50 ?A) (make-string 50 ?B)) 50))
+(ert-deftest deslop-test/target-context-window-enforces-source-budget ()
+  (let* ((deslop-target-max-context-chars 30)
+         (deslop-target-window-chars 100)
+         (context (deslop-target-string-marker-context
+                    (concat (make-string 50 ?A) (make-string 50 ?B)) 50))
          (source-chars (+ (cl-count ?A context) (cl-count ?B context))))
-    (should (<= source-chars deslop-max-context-chars))
+    (should (<= source-chars deslop-target-max-context-chars))
     (should (string-match-p "<CURSOR>" context))
     (should (string-match-p "characters elided" context))))
 
 (ert-deftest deslop-test/large-replacement-targets-are-rejected-before-queueing ()
   (deslop-test--reset)
-  (let ((deslop-max-context-chars 4))
+  (let ((deslop-target-max-context-chars 4))
     (deslop-test--with-buffer "oversized"
       (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
       (should-error (deslop-summarize) :type 'user-error)
       (should-not deslop-queue)
-      (should-not deslop-running)
+      (should-not deslop--current-job)
       (should-not deslop-ui--managed-overlays))))
 
 (ert-deftest deslop-test/final-request-budget-includes-instructions ()
@@ -272,7 +290,7 @@ process for cancellation tests."
       (let ((job (deslop-improve-at-cursor "make it better")))
         (should (eq (deslop-job-state job) 'completed))
         (should (string= (buffer-string) "improved"))
-        (should (cl-some #'deslop-ui-review-overlay-p
+        (should (cl-some #'deslop-review-overlay-p
                          (overlays-in (point-min) (point-max))))))))
 
 (ert-deftest deslop-test/summarize-opens-buffer ()
@@ -291,7 +309,7 @@ process for cancellation tests."
                    (with-current-buffer deslop-summary-buffer-name
                      (buffer-string))))
           (with-current-buffer deslop-summary-buffer-name
-            (should (cl-some #'deslop-ui-review-overlay-p
+            (should (cl-some #'deslop-review-overlay-p
                              (overlays-in (point-min) (point-max))))))))))
 
 (ert-deftest deslop-test/reject-summary-removes-entire-appended-block ()
@@ -314,8 +332,10 @@ process for cancellation tests."
       (let* ((job (deslop-summarize))
              (call (car deslop-test--calls))
              (overlay (deslop-job-overlay job)))
-        (deslop-test--callback call :on-status "Generating")
-        (deslop-test--callback call :on-usage 12 34.0 nil)
+        (deslop-test--callback
+         call :on-event '(:type :status :status "Generating"))
+        (deslop-test--callback
+         call :on-event '(:type :usage :tokens 12 :speed 34.0))
         (should (string= (overlay-get overlay 'status) "Generating"))
         (should (= (overlay-get overlay 'tokens) 12))
         (deslop-test--complete-call call)))
@@ -324,7 +344,7 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)
-  (let ((deslop-model "test-model")
+  (let ((deslop-provider-model "test-model")
         (deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
@@ -336,7 +356,7 @@ process for cancellation tests."
                                 (deslop-test--overlay-label queued-overlay)))
         (deslop-test--complete-call (car deslop-test--calls))
         (let ((review (cl-find-if
-                       #'deslop-ui-review-overlay-p
+                       #'deslop-review-overlay-p
                        (overlays-in (point-min) (point-max)))))
           (should review)
           (should (string= (overlay-get review 'model) "test-model"))
@@ -347,13 +367,51 @@ process for cancellation tests."
                                   (deslop-test--overlay-label review)))
           (goto-char (1+ (overlay-start review)))
           (insert "edited ")
-          (should (deslop-ui-review-overlay-p review))
+          (should (deslop-review-overlay-p review))
           (deslop-approve-output)
-          (should-not (deslop-ui-review-overlay-p review)))))))
+          (should-not (deslop-review-overlay-p review)))))))
+
+(ert-deftest deslop-test/task-cannot-start-inside-pending-review ()
+  (deslop-test--reset)
+  (deslop-test--with-buffer "generated text"
+    (let ((review (deslop-review-create-overlay
+                   (current-buffer) 1 (point-max) nil nil "")))
+      (goto-char 5)
+      (should-error (deslop-insert-at-cursor) :type 'user-error)
+      (deslop-test--select 2 6 6)
+      (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
+      (should-error (deslop-summarize) :type 'user-error)
+      (should-not deslop-queue)
+      (deslop-review-delete-overlay review))))
+
+(ert-deftest deslop-test/queued-task-cannot-dispatch-into-new-review ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '(" never") t)))
+    (deslop-test--with-buffer "base"
+      (goto-char 3)
+      (setq deslop--queue-suspended t)
+      (let ((job (deslop-insert-at-cursor))
+            (review (deslop-review-create-overlay
+                     (current-buffer) 1 (point-max) nil nil "")))
+        (setq deslop--queue-suspended nil)
+        (deslop-process-next)
+        (should (eq (deslop-job-state job) 'failed))
+        (should-not deslop-test--calls)
+        (deslop-review-delete-overlay review)))))
+
+(ert-deftest deslop-test/review-creation-failure-leaves-no-overlay ()
+  (deslop-test--reset)
+  (deslop-test--with-buffer "text"
+    (let ((deslop-review-highlight-blend 'invalid))
+      (should-error
+       (deslop-review-create-overlay (current-buffer) 1 3 nil nil ""))
+      (should-not (deslop-review--overlays-in-buffer))
+      (should-not (memq #'deslop-review--prevent-save
+                        before-save-hook)))))
 
 (ert-deftest deslop-test/response-metadata-wins-for-review-label ()
   (deslop-test--reset)
-  (let ((deslop-model "configured-model")
+  (let ((deslop-provider-model "configured-model")
         (deslop-llm-function
          (deslop-test--fake-llm
           '((:content " generated"
@@ -365,7 +423,7 @@ process for cancellation tests."
       (let ((job (deslop-insert-at-cursor)))
         (deslop-test--complete-call (car deslop-test--calls))
         (let ((review (cl-find-if
-                       #'deslop-ui-review-overlay-p
+                       #'deslop-review-overlay-p
                        (overlays-in (point-min) (point-max)))))
           (should review)
           (should (string= (overlay-get review 'model) "actual-model"))
@@ -384,11 +442,13 @@ process for cancellation tests."
       (let* ((job (deslop-insert-at-cursor))
              (call (car deslop-test--calls)))
         (deslop-test--callback
-         call :on-metadata
-         '(:source :response :model "response-model" :provider "llama.cpp"))
+         call :on-event
+         '(:type :metadata :metadata
+           (:source :response :model "response-model" :provider "llama.cpp")))
         (deslop-test--callback
-         call :on-metadata
-         '(:source :discovery :model "stale-model" :provider "stale"))
+         call :on-event
+         '(:type :metadata :metadata
+           (:source :discovery :model "stale-model" :provider "stale")))
         (should (string= (overlay-get (deslop-job-overlay job) 'model)
                          "response-model"))
         (should (string= (overlay-get (deslop-job-overlay job) 'client)
@@ -406,8 +466,8 @@ process for cancellation tests."
       (deslop-reject-output)
       (should (string= (buffer-string) "old"))
       (should (eq (get-text-property 1 'deslop-test-property) 'original))
-      (should-not (deslop-ui--review-overlays-in-buffer))
-      (should-not (memq #'deslop-ui--prevent-unreviewed-save
+      (should-not (deslop-review--overlays-in-buffer))
+      (should-not (memq #'deslop-review--prevent-save
                         before-save-hook)))))
 
 ;;;; Queue lifecycle
@@ -418,11 +478,11 @@ process for cancellation tests."
          (deslop-test--fake-llm '(" 1" " 2" " 3") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (deslop-insert-at-cursor)
       (deslop-insert-at-cursor)
       (deslop-insert-at-cursor)
-      (setq deslop-running nil)
+      (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (should (= (length deslop-test--calls) 1))
       (deslop-test--complete-call (nth 0 deslop-test--calls))
@@ -430,7 +490,7 @@ process for cancellation tests."
       (deslop-test--complete-call (nth 2 deslop-test--calls))
       (should (string= (buffer-string) "base 1 2 3"))
       (should (null deslop-queue))
-      (should (null deslop-running)))))
+      (should (null deslop--current-job)))))
 
 (ert-deftest deslop-test/abort-invalidates-before-kill ()
   (deslop-test--reset)
@@ -441,10 +501,10 @@ process for cancellation tests."
       (let ((job (deslop-insert-at-cursor)))
         (deslop-insert-at-cursor)
         (let ((call (car deslop-test--calls)))
-          (should deslop-running)
+          (should deslop--current-job)
           (deslop-abort-queue)
           (should (eq (deslop-job-state job) 'cancelled))
-          (should-not deslop-running)
+          (should-not deslop--current-job)
           (should (null deslop-queue))
           (should-not (process-live-p (plist-get call :process)))
           ;; A late transport callback must be inert.
@@ -457,10 +517,10 @@ process for cancellation tests."
          (deslop-test--fake-llm '(" A" " B") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (deslop-insert-at-cursor)
       (deslop-insert-at-cursor)
-      (setq deslop-running nil)
+      (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (let ((first (nth 0 deslop-test--calls)))
         (deslop-test--complete-call first)
@@ -485,18 +545,18 @@ process for cancellation tests."
         (deslop-test--callback call :on-done " X")
         (should (eq (deslop-job-state job) 'completed))
         (should (string= (buffer-string) "base X"))
-        (should-not deslop-running)))))
+        (should-not deslop--current-job)))))
 
 (ert-deftest deslop-test/deleted-pending-overlay-cannot-fail-committed-insert ()
   (deslop-test--reset)
   (let ((deslop-llm-function (deslop-test--fake-llm '(" A" " B") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (let ((first (deslop-insert-at-cursor))
             (second (deslop-insert-at-cursor)))
         (delete-overlay (deslop-job-overlay second))
-        (setq deslop-running nil)
+        (setq deslop--queue-suspended nil)
         (deslop-process-next)
         (deslop-test--complete-call (nth 0 deslop-test--calls))
         (should (eq (deslop-job-state first) 'completed))
@@ -513,20 +573,23 @@ process for cancellation tests."
     (deslop-test--with-buffer "base"
       (let ((job (deslop-insert-at-cursor)))
         (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-running)
+        (should-not deslop--current-job)
         (should-not deslop--current-job)))))
 
 (ert-deftest deslop-test/synchronous-failure-backlog-is-iterative ()
   (deslop-test--reset)
   (deslop-test--with-buffer "base"
-    (let ((deslop-running t)
+    (let ((deslop--queue-suspended t)
           (max-lisp-eval-depth 100))
       (dotimes (_ 500)
-        (deslop-enqueue (list 'unknown :buffer (current-buffer))))
-      (setq deslop-running nil)
+        (deslop-enqueue
+         (list 'unknown
+               :target (deslop-target-create
+                        :buffer (current-buffer) :start 1 :end 1 :cursor 1))))
+      (setq deslop--queue-suspended nil)
       (cl-letf (((symbol-function 'message) #'ignore))
         (deslop-process-next))
-      (should-not deslop-running)
+      (should-not deslop--current-job)
       (should-not deslop-queue))))
 
 (ert-deftest deslop-test/quit-and-cleanup-errors-still-settle-jobs ()
@@ -536,9 +599,12 @@ process for cancellation tests."
      'quit-test (lambda (_job) (signal 'quit nil)))
     (deslop-test--with-buffer "base"
       (let ((job (deslop-enqueue
-                  (list 'quit-test :buffer (current-buffer)))))
+                  (list 'quit-test
+                        :target (deslop-target-create
+                                 :buffer (current-buffer)
+                                 :start 1 :end 1 :cursor 1)))))
         (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-running))))
+        (should-not deslop--current-job))))
   (deslop-test--reset)
   (let ((deslop--job-handlers (copy-tree deslop--job-handlers)))
     (deslop-register-job-handler
@@ -550,11 +616,14 @@ process for cancellation tests."
         (cl-letf (((symbol-function 'deslop-ui-delete-overlay)
                    (lambda (_) (error "cleanup failed"))))
           (setq job
-                (deslop-enqueue
-                 (list 'cleanup-test :buffer (current-buffer)
-                       :overlay overlay))))
+                 (deslop-enqueue
+                  (list 'cleanup-test
+                        :target (deslop-target-create
+                                 :buffer (current-buffer)
+                                 :start 1 :end 1 :cursor 1)
+                        :overlay overlay))))
         (should (eq (deslop-job-state job) 'completed))
-        (should-not deslop-running)
+        (should-not deslop--current-job)
         (delete-overlay overlay)))))
 
 ;;;; Target failure paths
@@ -572,7 +641,7 @@ process for cancellation tests."
              (setq job (deslop-insert-at-cursor)))
           (kill-buffer buffer)
           (should (eq (deslop-job-state job) 'failed))
-          (should-not deslop-running)
+          (should-not deslop--current-job)
           (deslop-test--complete-call (car deslop-test--calls))
           (should (eq (deslop-job-state job) 'failed)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
@@ -588,7 +657,7 @@ process for cancellation tests."
         (setq buffer-read-only t)
         (deslop-test--complete-call call)
         (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-running)
+        (should-not deslop--current-job)
         (should (string= (buffer-string) "base"))))))
 
 (ert-deftest deslop-test/narrowed-target-settles-job ()
@@ -602,7 +671,7 @@ process for cancellation tests."
         (narrow-to-region (point-min) (1- (point-max)))
         (deslop-test--complete-call call)
          (should (eq (deslop-job-state job) 'failed))
-         (should-not deslop-running)))))
+         (should-not deslop--current-job)))))
 
 (ert-deftest deslop-test/widening-does-not-expand-queued-context ()
   (deslop-test--reset)
@@ -610,10 +679,10 @@ process for cancellation tests."
     (deslop-test--with-buffer "SECRET safe SECRET"
       (narrow-to-region 8 12)
       (goto-char 10)
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (deslop-insert-at-cursor)
       (widen)
-      (setq deslop-running nil)
+      (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (let ((user-message
              (cdr (cadr (plist-get (car deslop-test--calls) :messages)))))
@@ -633,7 +702,7 @@ process for cancellation tests."
         (deslop-test--complete-call call)
         (should (eq (deslop-job-state job) 'failed))
         (should (string= (buffer-string) "base"))
-        (should-not deslop-running)))))
+        (should-not deslop--current-job)))))
 
 (ert-deftest deslop-test/empty-result-does-not-insert-separators ()
   (deslop-test--reset)
@@ -654,10 +723,10 @@ process for cancellation tests."
   (let ((deslop-llm-function (deslop-test--fake-llm '("A" "B") t)))
     (deslop-test--with-buffer "alpha"
       (deslop-test--select 1 6 6)
-      (setq deslop-running t)
+      (setq deslop--queue-suspended t)
       (deslop-insert-at-cursor)
       (deslop-insert-at-cursor)
-      (setq deslop-running nil)
+      (setq deslop--queue-suspended nil)
       (deslop-process-next)
       (deslop-test--complete-call (nth 0 deslop-test--calls))
       (deslop-test--complete-call (nth 1 deslop-test--calls))
@@ -676,7 +745,7 @@ process for cancellation tests."
         (insert "X")
         (deslop-test--complete-call call)
         (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-running)))))
+        (should-not deslop--current-job)))))
 
 ;;;; Incremental reasoning parser
 
@@ -694,92 +763,126 @@ process for cancellation tests."
         (content-symbol (make-symbol "content")))
     (set thinking-symbol "")
     (set content-symbol "")
-    (let* ((parser (deslop-llm--make-reasoning :mode 'content :pending ""))
+    (let* ((parser (deslop-protocol--make-reasoning :mode 'content :pending ""))
            (callbacks (deslop-test--reasoning-callbacks
                        thinking-symbol content-symbol)))
-      (deslop-llm--reasoning-feed
+      (deslop-protocol--reasoning-feed
        parser "Intro <think>Plan here" callbacks)
-      (deslop-llm--reasoning-feed
+      (deslop-protocol--reasoning-feed
        parser "...done</think>Final answer" callbacks)
-      (should-not (deslop-llm--reasoning-finish parser callbacks))
+      (should-not (deslop-protocol--reasoning-finish parser callbacks))
       (should (string= (symbol-value thinking-symbol) "Plan here...done"))
       (should (string= (symbol-value content-symbol) "Intro Final answer")))))
 
 (ert-deftest deslop-test/thinking-parser-all-delimiter-splits ()
   (dolist (split (number-sequence 0 (length "<think>secret</think>answer")))
     (let ((thinking "") (content "")
-          (parser (deslop-llm--make-reasoning :mode 'content :pending "")))
+          (parser (deslop-protocol--make-reasoning :mode 'content :pending "")))
       (let ((callbacks
              (list :on-delta
                    (lambda (type text)
                      (if (eq type :thinking)
                          (setq thinking (concat thinking text))
                        (setq content (concat content text)))))))
-        (deslop-llm--reasoning-feed
+        (deslop-protocol--reasoning-feed
          parser (substring "<think>secret</think>answer" 0 split) callbacks)
-        (deslop-llm--reasoning-feed
+        (deslop-protocol--reasoning-feed
          parser (substring "<think>secret</think>answer" split) callbacks)
-        (should-not (deslop-llm--reasoning-finish parser callbacks))
+        (should-not (deslop-protocol--reasoning-finish parser callbacks))
         (should (string= thinking "secret"))
         (should (string= content "answer"))))))
 
 (ert-deftest deslop-test/thinking-parser-unclosed-is-error ()
-  (let ((parser (deslop-llm--make-reasoning :mode 'content :pending "")))
-    (deslop-llm--reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
+  (let ((parser (deslop-protocol--make-reasoning :mode 'content :pending "")))
+    (deslop-protocol--reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
     (should (deslop-error-p
-             (deslop-llm--reasoning-finish parser (list :on-delta #'ignore))))))
+              (deslop-protocol--reasoning-finish parser (list :on-delta #'ignore))))))
 
 ;;;; SSE parser
 
 (ert-deftest deslop-test/sse-parser-fragmented-and-done ()
-  (let ((parser (deslop-llm--make-sse :buffer "" :data-lines nil :done nil))
+  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil))
         (events nil))
     (setq events
           (append events
-                  (deslop-llm--sse-feed
+                   (deslop-protocol--sse-feed
                    parser "data: {\"choices\":[{\"delta\":{\"content\":\"hi")))
     (setq events
           (append events
-                  (deslop-llm--sse-feed
+                   (deslop-protocol--sse-feed
                    parser " there\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n")))
     (should (= (length events) 2))
     (should (eq (plist-get (nth 0 events) :type) :json))
-    (should (string= (deslop-llm--json-get
+    (should (string= (deslop-protocol--json-get
                       "content"
-                      (deslop-llm--json-get
+                      (deslop-protocol--json-get
                        "delta"
-                       (aref (deslop-llm--json-get
+                       (aref (deslop-protocol--json-get
                               "choices"
                               (plist-get (nth 0 events) :value))
                              0)))
                      "hi there"))
     (should (eq (plist-get (nth 1 events) :type) :done))
-     (should-not (deslop-llm--sse-finish parser))))
+     (should-not (deslop-protocol--sse-finish parser))))
 
 (ert-deftest deslop-test/sse-parser-rejects-malformed-and-ignores-late-data ()
-  (let ((parser (deslop-llm--make-sse :buffer "" :data-lines nil :done nil)))
+  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
     (should-error
-     (deslop-llm--sse-feed parser "data: {bad}\n\n"))
-    (let ((done-parser (deslop-llm--make-sse :buffer "" :data-lines nil :done nil)))
-      (deslop-llm--sse-feed done-parser "data: [DONE]\n\n")
+     (deslop-protocol--sse-feed parser "data: {bad}\n\n"))
+    (let ((done-parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
+      (deslop-protocol--sse-feed done-parser "data: [DONE]\n\n")
       (should-not
-       (deslop-llm--sse-feed
+       (deslop-protocol--sse-feed
         done-parser "data: {\"choices\":[]}\n\n")))))
 
 (ert-deftest deslop-test/sse-parser-requires-done ()
-  (let ((parser (deslop-llm--make-sse :buffer "" :data-lines nil :done nil)))
-    (deslop-llm--sse-feed parser "data: {\"choices\":[]}\n\n")
-    (should-error (deslop-llm--sse-finish parser))))
+  (let ((parser (deslop-protocol--make-sse :buffer "" :data-lines nil :done nil)))
+    (deslop-protocol--sse-feed parser "data: {\"choices\":[]}\n\n")
+    (should-error (deslop-protocol--sse-finish parser))))
+
+(ert-deftest deslop-test/transport-session-settles-once-and-cleans-resources ()
+  (let* ((process-buffer (generate-new-buffer " *deslop-test-process*"))
+         (stderr-buffer (generate-new-buffer " *deslop-test-stderr*"))
+         (headers-file (make-temp-file "deslop-test-headers-"))
+         (config-file (make-temp-file "deslop-test-config-"))
+         (events 0)
+         (done 0)
+         (errors 0)
+         (session
+          (deslop-llm--make-session
+           :callbacks
+           (list :on-event (lambda (_event)
+                             (setq events (1+ events))
+                             (error "callback failed"))
+                 :on-done (lambda (_result) (setq done (1+ done)))
+                 :on-error (lambda (_error) (setq errors (1+ errors))))
+           :process-buffer process-buffer :stderr-buffer stderr-buffer
+           :headers-file headers-file :config-file config-file)))
+    (deslop-llm--fail
+     session (deslop-error-create :kind 'transport :message "failed"))
+    (deslop-llm--fail
+     session (deslop-error-create :kind 'transport :message "late"))
+    (deslop-llm--settle session 'success "late")
+    (should (eq (deslop-llm--session-terminal session) 'failure))
+    (should (= events 1))
+    (should (= done 0))
+    (should (= errors 1))
+    (should-not (deslop-llm--session-callbacks session))
+    (should-not (buffer-live-p process-buffer))
+    (should-not (buffer-live-p stderr-buffer))
+    (should-not (file-exists-p headers-file))
+    (should-not (file-exists-p config-file))))
 
 (defun deslop-test--run-default-transport (header response)
   "Run the default transport with a mocked process and HEADER/RESPONSE.
-Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
+Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION)."
   (let ((captured nil)
         (process nil)
         (result nil)
-        (failure nil)
-        (done-count 0)
-        (error-count 0)
+         (failure nil)
+         (done-count 0)
+         (error-count 0)
+         (cancel-function nil)
         (deslop-provider-discovery-enabled nil)
         (real-make-process (symbol-function 'make-process))
          (profile (list :name 'test
@@ -803,7 +906,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
           (progn
             (deslop-llm-default
              (list (cons "user" "body"))
-              (list :on-done (lambda (value)
+               (list :on-start (lambda (cancel)
+                                 (setq cancel-function cancel))
+                     :on-done (lambda (value)
                                (setq done-count (1+ done-count))
                                (setq result value))
                     :on-error (lambda (value)
@@ -824,7 +929,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
               (while (process-live-p process)
                 (accept-process-output process 0.05))
                (funcall sentinel process "finished\n")
-               (list result failure command done-count error-count)))
+                (list result failure command done-count error-count
+                      cancel-function)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))))))
 
@@ -836,9 +942,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
     (should (string= (plist-get (nth 0 out) :content) "hello"))
     (should (string= (plist-get (nth 0 out) :model) "actual-model"))
     (should (string= (plist-get (nth 0 out) :provider) "llama.cpp"))
-    (should (string= (plist-get (nth 0 out) :client) "llama.cpp"))
     (should (= (nth 3 out) 1))
     (should (= (nth 4 out) 0))
+    (should (functionp (nth 5 out)))
     (should-not (member "hello" (nth 2 out)))
     (should (member "@-" (nth 2 out)))))
 
@@ -876,11 +982,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
 (ert-deftest deslop-test/profile-is-snapshotted-at-enqueue ()
   (deslop-test--reset)
   (let ((deslop-llm-function (deslop-test--fake-llm '(:stall) t))
-        (deslop-url "http://one.example/v1"))
+        (deslop-provider-endpoint "http://one.example/v1"))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (deslop-insert-at-cursor)))
-        (setq deslop-url "http://two.example/v1")
+        (setq deslop-provider-endpoint "http://two.example/v1")
         (should (string= (plist-get (deslop-job-profile job) :url)
                          "http://one.example/v1"))))))
 
@@ -896,9 +1002,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
          (config nil))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _) (list (list :secret token)))))
-      (setq config (deslop-llm--curl-config profile))
+      (setq config (deslop-curl--config profile))
       (unwind-protect
-          (let ((command (deslop-llm--curl-command
+          (let ((command (deslop-curl--command
                           profile "/tmp/headers" config)))
             (should-not (member token command))
             (should-not (member "body" command))
@@ -908,7 +1014,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
 (ert-deftest deslop-test/curl-config-escapes-and-rejects-unsafe-headers ()
   (let* ((profile '(:url "https://example.test/v1"
                     :request-headers ("X-Title: a\"b\\c")))
-         (config (deslop-llm--curl-config profile)))
+         (config (deslop-curl--config profile)))
     (unwind-protect
         (with-temp-buffer
           (should (= (logand (file-modes config) #o777) #o600))
@@ -923,23 +1029,23 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
                     "X-Auth-Token: secret"
                     "Content-Length: 0"))
     (should-error
-     (deslop-llm--curl-config
+      (deslop-curl--config
       (list :url "https://example.test/v1"
             :request-headers (list header))))))
 
 (ert-deftest deslop-test/provider-url-and-curl-command-are-hardened ()
   (should-error
-   (deslop-llm--validated-url '(:url "http://127.attacker.test/v1")))
+    (deslop-curl--validated-url '(:url "http://127.attacker.test/v1")))
   (should-error
-   (deslop-llm--validated-url '(:url "https://example.test/v1?key=secret")))
+    (deslop-curl--validated-url '(:url "https://example.test/v1?key=secret")))
   (should-error
-   (deslop-llm--validated-url
+    (deslop-curl--validated-url
     '(:url "https://other.test/v1"
       :auth-source-host "example.test"
       :auth-source-user "deslop"
       :auth-source-port 443)))
   (let ((command
-         (deslop-llm--curl-command
+         (deslop-curl--command
           '(:url "https://example.test/v1") "/tmp/headers" nil)))
     (should (string= (nth 1 command) "--disable"))
     (should (member "--globoff" command))
@@ -949,12 +1055,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
 (ert-deftest deslop-test/json-parser-does-not-intern-keys-or-accept-garbage ()
   (let ((key (format "deslop-untrusted-key-%d" (random most-positive-fixnum))))
     (should-not (intern-soft key))
-    (let ((payload (deslop-llm--json-read-string
+    (let ((payload (deslop-protocol--json-read-string
                     (format "{\"%s\":1}" key))))
       (should (hash-table-p payload))
-      (should (= (deslop-llm--json-get key payload) 1))
+      (should (= (deslop-protocol--json-get key payload) 1))
       (should-not (intern-soft key))))
-  (should-error (deslop-llm--json-read-string "{\"ok\":1} garbage")))
+  (should-error (deslop-protocol--json-read-string "{\"ok\":1} garbage")))
 
 (ert-deftest deslop-test/default-transport-enforces-response-byte-limit ()
   (let* ((deslop-max-response-bytes 16)
@@ -967,14 +1073,14 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
 
 (ert-deftest deslop-test/sse-parser-enforces-line-and-event-limits ()
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-llm--make-sse :buffer "" :data-lines nil
+        (parser (deslop-protocol--make-sse :buffer "" :data-lines nil
                                       :data-bytes 0 :done nil)))
-    (should-error (deslop-llm--sse-feed parser "123456789")))
+    (should-error (deslop-protocol--sse-feed parser "123456789")))
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-llm--make-sse :buffer "" :data-lines nil
+        (parser (deslop-protocol--make-sse :buffer "" :data-lines nil
                                       :data-bytes 0 :done nil)))
     (should-error
-     (deslop-llm--sse-feed
+     (deslop-protocol--sse-feed
       parser (mapconcat (lambda (_) "data:\n") (number-sequence 1 10) "")))))
 
 (ert-deftest deslop-test/provider-discovery-cache-is-bounded ()
@@ -1002,7 +1108,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
          (metadata
           (deslop-provider--discovery-metadata
            profile
-           (deslop-llm--json-read-string
+           (deslop-protocol--json-read-string
             "{\"object\":\"list\",\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"}]}"))))
     (should (string= (deslop-provider--models-url profile)
                      "http://localhost:8080/v1/models"))
@@ -1017,7 +1123,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
          (metadata
           (deslop-provider--discovery-metadata
            profile
-           (deslop-llm--json-read-string
+           (deslop-protocol--json-read-string
             "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
     (should-not (plist-get metadata :owner))
     (should-not (plist-get metadata :client))))
@@ -1087,7 +1193,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
   (let ((profile '(:name local
                    :url "http://localhost:8080/v1/chat/completions"
                    :model "llama3"))
-        (deslop-max-discovery-bytes 4)
+        (deslop-provider-max-discovery-bytes 4)
         (captured nil)
         (process nil)
         (values nil)
@@ -1157,7 +1263,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
       (dotimes (_ 3)
-        (deslop-insert-at-cursor))
+        (deslop-insert-at-cursor)
+        (deslop-review-delete-overlay
+         (cl-find-if #'deslop-review-overlay-p
+                     (overlays-in (point-min) (point-max)))))
       (with-current-buffer deslop-history-buffer-name
         (let ((text (buffer-string)))
           (should (= (deslop-test--count-matches "^\\* Job " text) 2))
@@ -1176,8 +1285,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
         (dotimes (_ 5)
           (insert "\n"))
         (should (= (overlay-start overlay) 5))
-        (should (= (deslop--marker-position
-                    (deslop-job-cursor-marker job))
+        (should (= (deslop-target-cursor (deslop-job-target job))
                    5))
         (deslop-test--complete-call call)
         (should (string= (buffer-string) "base X\n\n\n\n\n"))))))
@@ -1217,70 +1325,70 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
 (ert-deftest deslop-test/narrowing-cannot-hide-review-from-save-guard ()
   (deslop-test--reset)
   (deslop-test--with-buffer "first second"
-    (let ((first (deslop-ui-create-review-overlay
+    (let ((first (deslop-review-create-overlay
                   (current-buffer) 1 6 nil nil ""))
-          (second (deslop-ui-create-review-overlay
+          (second (deslop-review-create-overlay
                    (current-buffer) 7 13 nil nil "")))
       (narrow-to-region 1 6)
-      (deslop-ui-delete-review-overlay first)
-      (should (memq #'deslop-ui--prevent-unreviewed-save before-save-hook))
+      (deslop-review-delete-overlay first)
+      (should (memq #'deslop-review--prevent-save before-save-hook))
       (should-error (run-hooks 'before-save-hook) :type 'user-error)
       (widen)
-      (deslop-ui-delete-review-overlay second)
-      (should-not (memq #'deslop-ui--prevent-unreviewed-save
+      (deslop-review-delete-overlay second)
+      (should-not (memq #'deslop-review--prevent-save
                         before-save-hook)))))
 
 ;;;; Review highlight
 
 (ert-deftest deslop-test/review-highlight-blend-color-math ()
-  (should (string= (deslop-ui--blend-color "#ffffff" "#0000ff" 0.15) "#d9d9ff"))
-  (should (string= (deslop-ui--blend-color "#000000" "#ffffff" 0.5) "#808080"))
-  (should (string= (deslop-ui--blend-color "#333333" "#ffffff" 0.0) "#333333"))
-  (should (string= (deslop-ui--blend-color "#333333" "#ffffff" 1.0) "#ffffff"))
-  (should (null (deslop-ui--blend-color "#abc" "#ffffff" 0.5)))
-  (should (null (deslop-ui--blend-color "#ffffff" "junk" 0.5))))
+  (should (string= (deslop-review--blend-color "#ffffff" "#0000ff" 0.15) "#d9d9ff"))
+  (should (string= (deslop-review--blend-color "#000000" "#ffffff" 0.5) "#808080"))
+  (should (string= (deslop-review--blend-color "#333333" "#ffffff" 0.0) "#333333"))
+  (should (string= (deslop-review--blend-color "#333333" "#ffffff" 1.0) "#ffffff"))
+  (should (null (deslop-review--blend-color "#abc" "#ffffff" 0.5)))
+  (should (null (deslop-review--blend-color "#ffffff" "junk" 0.5))))
 
 (ert-deftest deslop-test/review-highlight-hex-round-trip ()
-  (should (equal (deslop-ui--hex-components "#a1b2c3") '(161 178 195)))
-  (should (string= (deslop-ui--hex-join '(161 178 195)) "#a1b2c3"))
-  (should (null (deslop-ui--hex-components "red")))
-  (should (null (deslop-ui--hex-components "#12345")))
-  (should (null (deslop-ui--hex-components "#1234567")))
-  (should (null (deslop-ui--hex-join '(1 2)))))
+  (should (equal (deslop-review--hex-components "#a1b2c3") '(161 178 195)))
+  (should (string= (deslop-review--hex-join '(161 178 195)) "#a1b2c3"))
+  (should (null (deslop-review--hex-components "red")))
+  (should (null (deslop-review--hex-components "#12345")))
+  (should (null (deslop-review--hex-components "#1234567")))
+  (should (null (deslop-review--hex-join '(1 2)))))
 
 (ert-deftest deslop-test/review-highlight-face-attr-resolution ()
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (should (string= (deslop-ui--face-attr 'font-lock-keyword-face :foreground)
+  (should (string= (deslop-review--face-attr 'font-lock-keyword-face :foreground)
                    "#0000ff"))
-  (should (string= (deslop-ui--face-attr 'font-lock-keyword-face :background)
+  (should (string= (deslop-review--face-attr 'font-lock-keyword-face :background)
                    "#ffffff"))
-  (should (string= (deslop-ui--face-attr
+  (should (string= (deslop-review--face-attr
                     '(:foreground "red" :background "blue") :foreground)
                    "red"))
-  (should (string= (deslop-ui--face-attr
+  (should (string= (deslop-review--face-attr
                     '((:foreground "cyan") (:weight bold)) :foreground)
                    "cyan"))
-  (should (string= (deslop-ui--face-attr
+  (should (string= (deslop-review--face-attr
                     '((:foreground "cyan") (:background "magenta")) :background)
                    "magenta"))
-  (should (null (deslop-ui--face-attr '(:weight bold) :foreground))))
+  (should (null (deslop-review--face-attr '(:weight bold) :foreground))))
 
 (ert-deftest deslop-test/review-highlight-style-from-adjacent-face ()
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
   (deslop-test--with-buffer "defun x"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (should (equal (deslop-ui--review-style (current-buffer) 6)
+    (should (equal (deslop-review--style (current-buffer) 6)
                     '("#0000ff" . "#8080ff")))))
 
 (ert-deftest deslop-test/review-highlight-style-default-fallback ()
   (set-face-foreground 'default "#111111")
   (set-face-background 'default "#222222")
   (deslop-test--with-buffer "plain x"
-    (should (equal (deslop-ui--review-style (current-buffer) 6)
+    (should (equal (deslop-review--style (current-buffer) 6)
                    '("#111111" . "#1a1a1a")))
-    (should (equal (deslop-ui--review-style (current-buffer) 1)
+    (should (equal (deslop-review--style (current-buffer) 1)
                     '("#111111" . "#1a1a1a")))))
 
 (ert-deftest deslop-test/review-highlight-overlay-sets-char-properties ()
@@ -1289,7 +1397,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
   (set-face-background 'font-lock-keyword-face "#ffffff")
   (deslop-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (let ((overlay (deslop-ui-create-review-overlay
+    (let ((overlay (deslop-review-create-overlay
                     (current-buffer) 6 9 nil nil "")))
       (should (overlayp overlay))
       (should (not (overlay-get overlay 'face)))
@@ -1297,8 +1405,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
        (should (string= (get-char-property 8 'background-color) "#8080ff"))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
-      (should (memq #'deslop-ui--prevent-unreviewed-save before-save-hook))
-      (deslop-ui-delete-review-overlay overlay t)
+      (should (memq #'deslop-review--prevent-save before-save-hook))
+      (deslop-review-delete-overlay overlay)
       (should (null (get-char-property 6 'foreground-color)))
       (should (null (get-char-property 8 'background-color)))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face)))))
@@ -1307,9 +1415,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
   (deslop-test--reset)
   (deslop-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (let* ((deslop-review-highlight nil)
-           (overlay (deslop-ui-create-review-overlay
-                     (current-buffer) 6 9 nil nil "")))
+    (let ((deslop-review-highlight nil))
+      (deslop-review-create-overlay (current-buffer) 6 9 nil nil "")
       (should (null (get-char-property 6 'foreground-color)))
       (should (null (get-char-property 8 'background-color))))))
 
@@ -1323,7 +1430,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
       (goto-char 3)
       (deslop-insert-at-cursor)
       (should (string= (buffer-string) "kwLLM rest"))
-      (let ((review (cl-find-if #'deslop-ui-review-overlay-p
+      (let ((review (cl-find-if #'deslop-review-overlay-p
                                 (overlays-in (point-min) (point-max)))))
         (should review)
         (should (string= (get-char-property 3 'foreground-color) "#0000ff"))
@@ -1343,7 +1450,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT)."
       (deslop-test--select 1 9 1)
       (deslop-improve-at-cursor "rewrite")
       (should (string= (buffer-string) "new"))
-      (let ((review (cl-find-if #'deslop-ui-review-overlay-p
+      (let ((review (cl-find-if #'deslop-review-overlay-p
                                 (overlays-in (point-min) (point-max)))))
         (should review)
         (goto-char 2)

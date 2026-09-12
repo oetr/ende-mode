@@ -1,0 +1,222 @@
+;;; deslop-curl.el --- Curl resource helpers for deslop -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 Peter
+;; Author: Peter
+;; Keywords: convenience, tools
+
+;;; Commentary:
+
+;; URL validation, authentication, headers, commands, and resource cleanup for
+;; curl-based deslop transports.
+
+;;; Code:
+
+(require 'auth-source)
+(require 'cl-lib)
+(require 'subr-x)
+(require 'url-parse)
+(require 'deslop-core)
+
+(defun deslop-curl--loopback-host-p (host)
+  "Return non-nil when HOST names an explicit loopback endpoint."
+  (and (stringp host)
+       (let ((name (downcase host)))
+         (or (string= name "localhost")
+             (string= name "::1")
+             (let ((parts (split-string name "\." nil)))
+               (and (= (length parts) 4)
+                    (cl-every
+                     (lambda (part)
+                       (and (string-match-p "\\`[0-9]+\\'" part)
+                            (<= (string-to-number part) 255)))
+                     parts)
+                    (= (string-to-number (car parts)) 127)))))))
+
+(defun deslop-curl--validated-url (profile &optional url)
+  "Return validated URL for PROFILE, optionally checking URL instead."
+  (let* ((value (or url (plist-get profile :url)))
+         (parsed (and (stringp value) (url-generic-parse-url value)))
+         (scheme (and parsed (downcase (or (url-type parsed) ""))))
+         (host (and parsed (url-host parsed)))
+         (auth-host (plist-get profile :auth-source-host))
+         (auth-user (plist-get profile :auth-source-user))
+         (auth-port (plist-get profile :auth-source-port)))
+    (unless (and (stringp value) (not (string-empty-p value))
+                 (member scheme '("http" "https"))
+                 (stringp host) (not (string-empty-p host)))
+      (error "Provider URL must be an absolute HTTP(S) URL"))
+    (when (or (url-user parsed) (url-password parsed))
+      (error "Provider URL must not contain user information"))
+    (when (string-match-p "[?#]" value)
+      (error "Provider URL must not contain a query or fragment"))
+    (when (and (string= scheme "http")
+               (not (deslop-curl--loopback-host-p host)))
+      (error "Plain HTTP is only allowed for explicit loopback endpoints"))
+    (when (and auth-host
+               (not (string= (downcase (format "%s" auth-host))
+                             (downcase host))))
+      (error "auth-source host %s does not match endpoint host %s"
+             auth-host host))
+    (when auth-host
+      (unless (and (stringp auth-user) (not (string-empty-p auth-user)))
+        (error "Authenticated profiles require an explicit auth-source user"))
+      (unless (and (integerp auth-port)
+                   (= auth-port
+                      (or (url-port parsed)
+                          (if (string= scheme "https") 443 80))))
+        (error "Authenticated profile port does not match endpoint port")))
+    value))
+
+(defun deslop-curl--auth-secret (profile)
+  "Resolve PROFILE's auth-source secret, or nil for unauthenticated hosts."
+  (deslop-curl--validated-url profile)
+  (let ((host (plist-get profile :auth-source-host)))
+    (when host
+      (let* ((user (plist-get profile :auth-source-user))
+             (port (plist-get profile :auth-source-port))
+             (entries (auth-source-search :host host
+                                          :user user
+                                          :port port
+                                          :require '(:secret)
+                                          :max 1))
+             (entry (car entries)))
+        (unless entry
+          (error "No auth-source entry for %s" host))
+        (let ((secret (plist-get entry :secret)))
+          (setq secret (if (functionp secret) (funcall secret) secret))
+          (unless (and (stringp secret)
+                       (not (string-match-p "[[:cntrl:]]" secret)))
+            (error "Invalid auth-source secret"))
+          secret)))))
+
+(defun deslop-curl--valid-header-p (header)
+  "Return non-nil when HEADER is one complete RFC-style header line."
+  (and (stringp header)
+       (not (string-match-p "[[:cntrl:]]" header))
+       (string-match-p
+        "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+:[ \t]*.*\\'" header)))
+
+(defun deslop-curl--unsafe-profile-header-p (header)
+  "Return non-nil when HEADER can affect routing, framing, or credentials."
+  (let* ((name (and (stringp header)
+                    (car (split-string header ":"))))
+         (downcased (and name (downcase name))))
+    (and downcased
+         (or (member downcased
+                     '("host" "content-length" "transfer-encoding"
+                       "content-type" "connection" "trailer" "upgrade"
+                       "expect" "proxy-connection"))
+             (string-match-p
+              "\\(?:auth\\|token\\|key\\|secret\\|cookie\\|credential\\)"
+              downcased)))))
+
+(defun deslop-curl--config-escape (value)
+  "Escape VALUE for a double-quoted curl config argument."
+  (mapconcat (lambda (character)
+               (if (memq character '(?\\ ?\"))
+                   (string ?\\ character)
+                 (char-to-string character)))
+             value ""))
+
+(defun deslop-curl--config (profile)
+  "Create a temporary curl config for PROFILE and return its path.
+Return nil when PROFILE has no authentication or extra headers."
+  (let* ((secret (deslop-curl--auth-secret profile))
+         (headers (plist-get profile :request-headers))
+         (all-headers (append headers
+                              (when secret
+                                (list (concat "Authorization: Bearer " secret))))))
+    (when (or secret headers)
+      (dolist (header all-headers)
+        (unless (deslop-curl--valid-header-p header)
+          (error "Invalid request header"))
+        (when (and (member header headers)
+                   (deslop-curl--unsafe-profile-header-p header))
+          (error "Unsafe request header must not be supplied by a profile")))
+      (let ((contents
+             (mapconcat
+              (lambda (header)
+                (format "header = \"%s\""
+                        (deslop-curl--config-escape header)))
+              all-headers "\n"))
+            (file nil)
+            (complete nil))
+        (unwind-protect
+            (progn
+              (setq file (make-temp-file "deslop-curl-" nil ".conf"))
+              (set-file-modes file #o600)
+              (with-temp-file file
+                (insert contents "\n"))
+              (set-file-modes file #o600)
+              (setq complete t)
+              file)
+          (unless complete
+            (when (and file (file-exists-p file))
+              (condition-case nil
+                  (delete-file file)
+                ((error quit) nil)))))))))
+
+(defun deslop-curl--network-options (url)
+  "Return hardened common curl options for URL."
+  (let* ((parsed (url-generic-parse-url url))
+         (host (url-host parsed)))
+    (append
+     (list "--globoff" "--proto" "=http,https"
+           "--proto-redir" "=http,https")
+     (when (or (not deslop-allow-environment-proxy)
+               (deslop-curl--loopback-host-p host))
+       (list "--noproxy" "*")))))
+
+(defun deslop-curl--command (profile headers-file config-file)
+  "Build curl command for PROFILE without embedding request data or secrets."
+  (let ((url (deslop-curl--validated-url profile)))
+    (append
+     (list "curl" "--disable")
+     (deslop-curl--network-options url)
+     (list "--silent" "--show-error" "--no-buffer"
+           "--request" "POST"
+           "--connect-timeout" (number-to-string deslop-connect-timeout)
+           "--max-time" (number-to-string deslop-request-timeout)
+           "--max-filesize" (number-to-string deslop-max-response-bytes)
+           "--dump-header" headers-file
+           "--header" "Content-Type: application/json"
+           "--data-binary" "@-")
+     (when config-file (list "--config" config-file))
+     (list "--url" url))))
+
+(defun deslop-curl--response-headers (file)
+  "Return (STATUS . CONTENT-TYPE) from curl header FILE."
+  (when (file-readable-p file)
+    (let ((size (file-attribute-size (file-attributes file))))
+      (when (> size deslop-max-response-header-bytes)
+        (error "Response headers exceed deslop-max-response-header-bytes")))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let ((status nil) (content-type nil))
+        (while (re-search-forward "^HTTP/[0-9.]+[ \t]+\\([0-9]+\\)" nil t)
+          (setq status (string-to-number (match-string 1)))
+          (setq content-type nil)
+          (let ((block-end (or (save-excursion
+                                 (when (re-search-forward "^HTTP/" nil t)
+                                   (line-beginning-position)))
+                               (point-max))))
+            (save-excursion
+              (when (re-search-forward
+                     "^[Cc]ontent-[Tt]ype:[ \t]*\\([^\r\n]+\\)"
+                     block-end t)
+                (setq content-type (string-trim (match-string 1)))))))
+        (cons status content-type)))))
+
+(defun deslop-curl--cleanup-resources (buffers files)
+  "Kill BUFFERS and delete FILES, ignoring cleanup failures."
+  (dolist (buffer buffers)
+    (when (buffer-live-p buffer)
+      (deslop--ignore-errors #'kill-buffer buffer)))
+  (dolist (file files)
+    (when (and file (file-exists-p file))
+      (deslop--ignore-errors #'delete-file file))))
+
+(provide 'deslop-curl)
+
+;;; deslop-curl.el ends here

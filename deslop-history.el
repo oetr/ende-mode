@@ -14,12 +14,42 @@
 (require 'cl-lib)
 (require 'outline)
 (require 'subr-x)
-(require 'deslop-common)
+(require 'deslop-core)
 (require 'deslop-queue)
+
+(defcustom deslop-history-enabled t
+  "Non-nil when completed jobs are retained in a history buffer."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-retain-prompts nil
+  "Non-nil when history entries retain complete prompts and source context."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-retain-thinking nil
+  "Non-nil when history entries retain provider reasoning traces."
+  :type 'boolean
+  :group 'deslop)
+
+(defcustom deslop-history-max-entries 100
+  "Maximum number of completed jobs retained in the history buffer."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-history-max-chars (* 2 1024 1024)
+  "Maximum approximate size of the retained history buffer."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-history-buffer-name "*deslop-history*"
+  "Name of the buffer used for retained LLM job history."
+  :type 'string
+  :group 'deslop)
 
 (cl-defstruct (deslop-history--entry
                (:constructor deslop-history--make-entry))
-  job type prompt thinking-parts content-parts status usage result error
+  job type prompt thinking-parts content-parts status metadata usage result error
   started-at finished-at)
 
 (defvar deslop-history--entries (make-hash-table :test #'eq)
@@ -71,45 +101,49 @@
 
 (defun deslop-history-event (job event)
   "Record normalized EVENT for JOB without propagating sink errors."
-  (let* ((entry (deslop-history--entry job))
-         (type (plist-get event :type))
-         (terminal (memq type '(:done :error :cancelled))))
-    (when entry
-      (unwind-protect
-          (condition-case nil
-              (when deslop-history-enabled
-                (pcase type
-                  (:status
-                   (setf (deslop-history--entry-status entry)
-                         (plist-get event :status)))
-                  (:delta
-                   (if (eq (plist-get event :channel) :thinking)
-                       (when deslop-history-retain-thinking
+  (let ((type (plist-get event :type)))
+    (if (eq type :begin)
+        (deslop-history-begin job (plist-get event :messages))
+      (let* ((entry (deslop-history--entry job))
+             (terminal (memq type '(:done :error :cancelled))))
+        (when entry
+          (unwind-protect
+              (condition-case nil
+                  (when deslop-history-enabled
+                    (pcase type
+                      (:status
+                       (setf (deslop-history--entry-status entry)
+                             (plist-get event :status)))
+                      (:delta
+                       (if (eq (plist-get event :channel) :thinking)
+                           (when deslop-history-retain-thinking
+                             (push
+                              (plist-get event :text)
+                              (deslop-history--entry-thinking-parts entry)))
                          (push (plist-get event :text)
-                               (deslop-history--entry-thinking-parts entry)))
-                     (push (plist-get event :text)
-                           (deslop-history--entry-content-parts entry))))
-                  (:usage
-                   (setf (deslop-history--entry-usage entry) event))
-                  (:done
-                   (let ((content (plist-get event :content)))
-                     (when (and (stringp content) (> (length content) 0))
-                       (setf (deslop-history--entry-content-parts entry)
-                             (list content))))
-                   (deslop-history--finish-entry
-                    entry "Completed" (plist-get event :result)))
-                  (:error
-                   (deslop-history--finish-entry
-                    entry "Failed" nil (plist-get event :error)))
-                  (:cancelled
-                   (deslop-history--finish-entry entry "Cancelled"))))
-            ((error quit) nil))
-        (when terminal
-          (remhash job deslop-history--entries))))))
-
-(defun deslop-history-cancel (job)
-  "Record JOB as cancelled and flush its retained prompt."
-  (deslop-history-event job (list :type :cancelled)))
+                               (deslop-history--entry-content-parts entry))))
+                      (:usage
+                       (setf (deslop-history--entry-usage entry) event))
+                      (:metadata
+                       (setf (deslop-history--entry-metadata entry)
+                             (plist-get event :metadata)))
+                      (:done
+                       (let ((content (plist-get event :content)))
+                         (when (and (stringp content)
+                                    (> (length content) 0))
+                           (setf
+                            (deslop-history--entry-content-parts entry)
+                            (list content))))
+                       (deslop-history--finish-entry
+                        entry "Completed" (plist-get event :result)))
+                      (:error
+                       (deslop-history--finish-entry
+                        entry "Failed" nil (plist-get event :error)))
+                      (:cancelled
+                       (deslop-history--finish-entry entry "Cancelled"))))
+                ((error quit) nil))
+            (when terminal
+              (remhash job deslop-history--entries))))))))
 
 (defun deslop-history--buffer ()
   "Return the history buffer, configuring outline folding once."
@@ -163,7 +197,8 @@
                                (nreverse
                                 (deslop-history--entry-content-parts entry))
                                ""))
-           (usage (deslop-history--entry-usage entry))
+            (usage (deslop-history--entry-usage entry))
+            (metadata (deslop-history--entry-metadata entry))
            (status (deslop-history--entry-status entry))
            (buffer (deslop-history--buffer)))
       (with-current-buffer buffer
@@ -181,6 +216,14 @@
                "Prompt" (deslop-history--entry-prompt entry))
               (deslop-history--insert-section "Thinking" thinking)
               (deslop-history--insert-section "Output" content)
+              (when metadata
+                (deslop-history--insert-section
+                 "Provider"
+                 (format "Client: %s\nModel: %s"
+                         (or (plist-get metadata :client)
+                             (plist-get metadata :provider)
+                             "unknown")
+                         (or (plist-get metadata :model) "unknown"))))
               (when (listp result)
                 (deslop-history--insert-section
                  "Metrics"
@@ -204,6 +247,8 @@
       (let ((inhibit-read-only t))
         (erase-buffer))))
   (message "deslop: history cleared"))
+
+(add-hook 'deslop-job-event-functions #'deslop-history-event)
 
 (provide 'deslop-history)
 
