@@ -101,7 +101,10 @@ return price * (1 + tax)"
   "System prompt instructions for summarizing a target region.")
 
 (defconst deslop-write-anywhere-system
-  "You edit a document by returning a strict JSON edit list.
+  "You edit a document by returning a strict JSON edit list. Inspect the entire
+document and make every edit needed to fulfill the user's task. When the task
+applies at multiple positions, return a separate edit for each position rather
+than placing all generated text together in one location.
 
 ### Output Format
 Return ONLY one JSON object with this exact top-level shape:
@@ -115,15 +118,20 @@ Do not use markdown fences, comments, or any keys other than those shown."
   "System prompt instructions for arbitrary document edits.")
 
 (defconst deslop-insert-anywhere-system
-  "You insert text into a document by returning a strict JSON edit list.
+  "You perform an INSERT-ANYWHERE operation by returning a strict JSON edit
+list. Inspect the entire document and find every position where the user's task
+calls for an insertion. Multiple insertions at different positions are
+expected when appropriate; do not put all inserted text at one arbitrary
+location.
 
 ### Output Format
 Return ONLY one JSON object with this exact top-level shape:
 {\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"inserted text\"}]}
 
-`start` and `end` are zero-based character offsets in the supplied document.
-They must be equal, and `expected` must be the empty string. `text` is the text
-to insert and must not be empty. The edits must be at different positions.
+For INSERT-ANYWHERE, `start` and `end` are equal zero-based character offsets
+in the supplied document, so each edit inserts text at one position without
+selecting a span. `expected` is the empty string and `text` is the text to
+insert. The edits must be at different positions.
 Do not use markdown fences, comments, or any keys other than those shown."
   "System prompt instructions for arbitrary document insertions.")
 
@@ -468,30 +476,31 @@ When INSERT-ONLY is non-nil, reject replacements in RESULT."
             (setq edits (deslop--parse-write-anywhere-edits
                          result source insert-only)
                   display (deslop--job-display-metadata job result))
-            (let ((buffer-read-only nil))
-              (deslop--mutate-target
-               target
-               (lambda ()
-                 (deslop-target-validate-source target start end)
-                 (dolist (edit (sort (copy-sequence edits)
-                                     (lambda (left right)
-                                       (> (plist-get left :start)
-                                          (plist-get right :start)))))
-                   (let* ((edit-start (+ start (plist-get edit :start)))
-                          (edit-end (+ start (plist-get edit :end)))
-                          (expected (plist-get edit :expected))
-                          (text (plist-get edit :text)))
-                     (unless (string= expected
-                                      (buffer-substring-no-properties
-                                       edit-start edit-end))
-                       (error "write-anywhere source changed before apply"))
-                     (goto-char edit-start)
-                     (delete-region edit-start edit-end)
-                     (let ((review-start (point)))
-                       (insert text)
-                        (push (deslop--create-review-overlay
-                               buffer review-start (point) display expected)
-                              created-overlays)))))))
+            (with-current-buffer buffer
+              (let ((buffer-read-only nil))
+                (deslop--mutate-target
+                 target
+                 (lambda ()
+                   (deslop-target-validate-source target start end)
+                   (dolist (edit (sort (copy-sequence edits)
+                                       (lambda (left right)
+                                         (> (plist-get left :start)
+                                            (plist-get right :start)))))
+                     (let* ((edit-start (+ start (plist-get edit :start)))
+                            (edit-end (+ start (plist-get edit :end)))
+                            (expected (plist-get edit :expected))
+                            (text (plist-get edit :text)))
+                       (unless (string= expected
+                                        (buffer-substring-no-properties
+                                         edit-start edit-end))
+                         (error "write-anywhere source changed before apply"))
+                       (goto-char edit-start)
+                       (delete-region edit-start edit-end)
+                       (let ((review-start (point)))
+                         (insert text)
+                         (push (deslop--create-review-overlay
+                                buffer review-start (point) display expected)
+                               created-overlays))))))))
             (unless (= (length created-overlays) (length edits))
               (error "not all write-anywhere edits could be reviewed"))
             (deslop-job-finish job result))
@@ -547,6 +556,11 @@ When INSERT-ONLY is non-nil, reject replacements in RESULT."
             (buffer (deslop-target-buffer target))
             (start (deslop-target-start target))
             (end (deslop-target-end target))
+            (insert-only (eq (deslop-job-type job) 'insert-anywhere))
+            (instruction (or (deslop-job-instruction job)
+                             (if insert-only
+                                 deslop-insert-anywhere-instruction
+                               deslop-write-anywhere-instruction)))
             source)
        (unless (and (buffer-live-p buffer) start end)
          (error "write-anywhere target no longer exists"))
@@ -558,18 +572,22 @@ When INSERT-ONLY is non-nil, reject replacements in RESULT."
        (deslop--dispatch-llm
         job
         (list (cons "system"
-                    (if (eq (deslop-job-type job) 'insert-anywhere)
+                    (if insert-only
                         deslop-insert-anywhere-system
                       deslop-write-anywhere-system))
               (cons "user"
-                    (format "Instruction: %s\n\nDocument:\n%s"
-                            (if (eq (deslop-job-type job) 'insert-anywhere)
-                                deslop-insert-anywhere-instruction
-                              deslop-write-anywhere-instruction)
+                    (format "Task: %s\n\nOperation: %s\n%s\nDocument:\n%s"
+                            instruction
+                            (if insert-only
+                                "INSERT-ANYWHERE"
+                              "WRITE-ANYWHERE")
+                            (if insert-only
+                                "Find every appropriate insertion point across the entire document. Multiple separate insertions are expected when the task applies in multiple places."
+                              "Make all appropriate insertions and replacements across the entire document.")
                             source)))
         (lambda (result)
           (deslop--apply-write-anywhere-result
-           job result (eq (deslop-job-type job) 'insert-anywhere))))))))
+           job result insert-only)))))))
 
 (defun deslop--run-improve (job)
   "Execute an improvement JOB that replaces its target atomically."
@@ -715,15 +733,17 @@ When INSERT-ONLY is non-nil, reject replacements in RESULT."
   (interactive)
   (deslop--enqueue-job 'insert))
 
-(defun deslop-write-anywhere ()
+(defun deslop-write-anywhere (&optional instruction)
   "Queue a request for the LLM to write multiple edits anywhere in the buffer."
-  (interactive)
-  (deslop--enqueue-job 'write-anywhere))
+  (interactive (list (read-string "What should be changed? "
+                                  deslop-write-anywhere-instruction)))
+  (deslop--enqueue-job 'write-anywhere instruction))
 
-(defun deslop-insert-anywhere ()
+(defun deslop-insert-anywhere (&optional instruction)
   "Queue a request for the LLM to insert text at multiple buffer positions."
-  (interactive)
-  (deslop--enqueue-job 'insert-anywhere))
+  (interactive (list (read-string "What should be inserted, and where? "
+                                  deslop-insert-anywhere-instruction)))
+  (deslop--enqueue-job 'insert-anywhere instruction))
 
 (defun deslop-improve-at-cursor (instruction)
   "Queue an improvement of the active region or accessible buffer."

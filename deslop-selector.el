@@ -23,7 +23,7 @@
   :type 'string
   :group 'deslop)
 
-(defcustom deslop-selector-window-height 0.25
+(defcustom deslop-selector-window-height 0.35
   "Fraction of the frame height used by the bottom selector window."
   :type 'number
   :group 'deslop)
@@ -89,39 +89,30 @@
         (model (deslop-selector--model-name)))
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert "deslop provider/model selector\n\n"
+      (insert "deslop provider/model selector | "
               (format "Provider: %s (%d/%d)\n"
                       provider
                       (1+ deslop-selector--provider-index)
                       (length deslop-selector--providers)))
-      (insert (format "Model:    %s"
+      (insert (format "Model: %s"
                       (or model "(none available)")))
       (when (> (length deslop-selector--models) 1)
         (insert (format " (%d/%d)"
                         (1+ deslop-selector--model-index)
                         (length deslop-selector--models))))
-      (insert (format "\nConcurrency: %d\n"
-                      (deslop-selector--provider-concurrency)))
-      (insert (format "Parallel:    %s\n"
+      (insert (format " | Concurrency: %d | Parallel: %s\n"
+                      (deslop-selector--provider-concurrency)
                       (if (deslop-selector--provider-parallel-p)
                           "on"
                         "off")))
       (pcase deslop-selector--model-state
-        (:loading (insert "\nLoading official models...\n"))
-        (:error (insert "\nModel probe failed; using configured model.\n")))
-      (insert "\n"
-              "p     next provider\n"
-              "C-n   next model\n"
-              "C-p   previous model\n"
-              "c/C   set concurrency\n"
-              "P     toggle parallel jobs\n"
-              "i     insert\n"
-              "w     write anywhere\n"
-              "I     insert anywhere\n"
-              "m     improve\n"
-              "s     summarize\n"
-              "RET   confirm selection\n"
-              "q/ESC close\n")
+        (:loading (insert "Models: loading...\n"))
+        (:error (insert "Models: probe failed; using configured model.\n")))
+      (insert "Navigation: p provider | C-n/C-p model\n"
+              "Settings:   c/C concurrency | P parallel\n"
+              "Actions:    i insert | w write anywhere | I insert anywhere\n"
+              "            m improve | s summarize\n"
+              "Finish:     RET confirm | q/ESC close\n")
       (goto-char (point-min)))))
 
 (defun deslop-selector--cancel-probe ()
@@ -271,12 +262,18 @@
 (defun deslop-selector-write-anywhere ()
   "Run a structured multi-edit using the current selector choice."
   (interactive)
-  (deslop-selector--run 'write-anywhere))
+  (deslop-selector--run
+   'write-anywhere
+   (read-string "What should be changed? "
+                deslop-write-anywhere-instruction)))
 
 (defun deslop-selector-insert-anywhere ()
   "Run a structured multi-insertion using the current selector choice."
   (interactive)
-  (deslop-selector--run 'insert-anywhere))
+  (deslop-selector--run
+   'insert-anywhere
+   (read-string "What should be inserted, and where? "
+                deslop-insert-anywhere-instruction)))
 
 (defun deslop-selector-improve ()
   "Prompt for an improvement and run it using the current choice."
@@ -317,6 +314,7 @@
 (define-derived-mode deslop-selector-mode special-mode "deslop-selector"
   "Major mode for selecting a deslop provider and model."
   (deslop-selector--install-keybindings)
+  (setq truncate-lines t)
   (setq buffer-read-only t))
 
 ;;;###autoload
@@ -340,9 +338,9 @@
     (let ((window
            (display-buffer
             buffer
-            `((display-buffer-at-bottom)
-              (window-height . ,deslop-selector-window-height)
-              (window-min-height . 5)))))
+              `((display-buffer-at-bottom)
+                (window-height . ,deslop-selector-window-height)
+                (window-min-height . 8)))))
       (with-current-buffer buffer
         (setq deslop-selector--window window))
       (when (window-live-p window)

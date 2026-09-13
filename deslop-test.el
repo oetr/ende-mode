@@ -551,10 +551,19 @@ process for cancellation tests."
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
+      (let ((job (deslop-insert-anywhere
+                  "Add a marker at every appropriate position")))
         (should (eq (deslop-job-state job) 'completed))
         (should (string= (buffer-string) "AtestB"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (let ((messages (car deslop-test--prompts)))
+          (should (string-match-p "INSERT-ANYWHERE"
+                                  (cdr (cadr messages))))
+          (should (string-match-p
+                   "Add a marker at every appropriate position"
+                   (cdr (cadr messages))))
+          (should (string-match-p "Multiple insertions"
+                                  (cdr (car messages)))))))))
 
 (ert-deftest deslop-test/write-anywhere-freezes-buffer-and-blocks-writes ()
   (deslop-test--reset)
@@ -576,6 +585,25 @@ process for cancellation tests."
         (should (= (length deslop-queue) 1))
         (deslop-abort-queue)
         (should-not buffer-read-only)))))
+
+(ert-deftest deslop-test/write-anywhere-applies-from-another-current-buffer ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)) t)))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-write-anywhere))
+            (callback-buffer (generate-new-buffer " *deslop-callback*")))
+        (unwind-protect
+            (with-current-buffer callback-buffer
+              (deslop-test--complete-call (car deslop-test--calls)))
+          (when (buffer-live-p callback-buffer)
+            (kill-buffer callback-buffer)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "Atest"))
+        (should-not buffer-read-only)
+        (should (= (length (deslop-review--overlays-in-buffer)) 1))))))
 
 ;;;; Queue lifecycle
 
@@ -1332,7 +1360,13 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                  4))
       (should-not (deslop-selector--provider-parallel-p))
        (deslop-selector-toggle-parallel)
-       (should (deslop-selector--provider-parallel-p)))))
+       (should (deslop-selector--provider-parallel-p))
+       (deslop-selector--render)
+       (dolist (key '("Navigation:" "Settings:" "Actions:" "Finish:"
+                      "i insert" "w write anywhere" "I insert anywhere"
+                      "m improve" "s summarize"))
+         (should (string-match-p (regexp-quote key) (buffer-string))))
+       (should (<= (count-lines (point-min) (point-max)) 8)))))
 
 (ert-deftest deslop-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key deslop-selector-mode-map (kbd "c")))
