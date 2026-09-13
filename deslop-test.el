@@ -450,9 +450,7 @@ process for cancellation tests."
     (let ((deslop-review-highlight-blend 'invalid))
       (should-error
        (deslop-review-create-overlay (current-buffer) 1 3 nil nil ""))
-      (should-not (deslop-review--overlays-in-buffer))
-      (should-not (memq #'deslop-review--prevent-save
-                        before-save-hook)))))
+      (should-not (deslop-review--overlays-in-buffer)))))
 
 (ert-deftest deslop-test/response-metadata-wins-for-review-label ()
   (deslop-test--reset)
@@ -499,21 +497,85 @@ process for cancellation tests."
         (should (string= (overlay-get (deslop-job-overlay job) 'client)
                          "llama.cpp"))))))
 
-(ert-deftest deslop-test/reject-restores-properties-and-save-is-guarded ()
+(ert-deftest deslop-test/reject-restores-properties-and-saving-remains-allowed ()
   (deslop-test--reset)
   (let ((deslop-llm-function (deslop-test--fake-llm '("new"))))
     (deslop-test--with-buffer "old"
       (add-text-properties 1 4 '(deslop-test-property original))
       (deslop-test--select 1 4 4)
       (deslop-improve-at-cursor "rewrite")
-      (should-error (run-hooks 'before-save-hook) :type 'user-error)
+      (run-hooks 'before-save-hook)
       (goto-char 2)
       (deslop-reject-output)
       (should (string= (buffer-string) "old"))
       (should (eq (get-text-property 1 'deslop-test-property) 'original))
-      (should-not (deslop-review--overlays-in-buffer))
-      (should-not (memq #'deslop-review--prevent-save
-                        before-save-hook)))))
+      (should-not (deslop-review--overlays-in-buffer)))))
+
+(ert-deftest deslop-test/write-anywhere-creates-independent-reviews ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"},{\"start\":4,\"end\":7,\"expected\":\"two\",\"text\":\"TWO\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "one two"
+      (let ((job (deslop-write-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "Aone TWO"))
+        (should-not buffer-read-only)
+        (let ((reviews (deslop-review--overlays-in-buffer)))
+          (should (= (length reviews) 2))
+          (goto-char (overlay-start (car reviews)))
+          (deslop-approve-output)
+          (should (= (length (deslop-review--overlays-in-buffer)) 1))
+          (let ((remaining (car (deslop-review--overlays-in-buffer))))
+            (goto-char (overlay-start remaining))
+            (deslop-reject-output))
+          (should (string= (buffer-string) "Aone two")))))))
+
+(ert-deftest deslop-test/insert-anywhere-rejects-replacements ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"start\":1,\"end\":2,\"expected\":\"e\",\"text\":\"X\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'failed))
+        (should (string= (buffer-string) "test"))
+        (should-not (deslop-review--overlays-in-buffer))))))
+
+(ert-deftest deslop-test/insert-anywhere-creates-independent-insertions ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"},{\"start\":4,\"end\":4,\"expected\":\"\",\"text\":\"B\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "AtestB"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+
+(ert-deftest deslop-test/write-anywhere-freezes-buffer-and-blocks-writes ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response) "later") t)))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-write-anywhere)))
+        (should (eq (deslop-job-state job) 'running))
+        (should buffer-read-only)
+        (run-hooks 'before-save-hook)
+        (should-error (insert "blocked"))
+        (should-error
+         (let ((inhibit-read-only t))
+           (insert "also blocked")))
+        (deslop-insert-at-cursor)
+        (should (= (length deslop-test--calls) 1))
+        (should (= (length deslop-queue) 1))
+        (deslop-abort-queue)
+        (should-not buffer-read-only)))))
 
 ;;;; Queue lifecycle
 
@@ -1289,7 +1351,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             (should (eq (key-binding (kbd "C"))
                         #'deslop-selector-set-concurrency))
             (should (eq (key-binding (kbd "P"))
-                        #'deslop-selector-toggle-parallel))))
+                        #'deslop-selector-toggle-parallel))
+            (should (eq (key-binding (kbd "w"))
+                        #'deslop-selector-write-anywhere))
+            (should (eq (key-binding (kbd "I"))
+                        #'deslop-selector-insert-anywhere))))
       (define-key deslop-selector-mode-map (kbd "c") original-c)
       (define-key deslop-selector-mode-map (kbd "C") original-C)
       (define-key deslop-selector-mode-map (kbd "P") original-P))))
@@ -1966,7 +2032,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (should (null deslop-ui--managed-overlays))
       (should (null deslop-ui--spinner-timer)))))
 
-(ert-deftest deslop-test/narrowing-cannot-hide-review-from-save-guard ()
+(ert-deftest deslop-test/narrowing-does-not-affect-review-discovery ()
   (deslop-test--reset)
   (deslop-test--with-buffer "first second"
     (let ((first (deslop-review-create-overlay
@@ -1975,12 +2041,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                    (current-buffer) 7 13 nil nil "")))
       (narrow-to-region 1 6)
       (deslop-review-delete-overlay first)
-      (should (memq #'deslop-review--prevent-save before-save-hook))
-      (should-error (run-hooks 'before-save-hook) :type 'user-error)
+      (should (= (length (deslop-review--overlays-in-buffer)) 1))
       (widen)
-      (deslop-review-delete-overlay second)
-      (should-not (memq #'deslop-review--prevent-save
-                        before-save-hook)))))
+      (should (= (length (deslop-review--overlays-in-buffer)) 1))
+      (deslop-review-delete-overlay second))))
 
 ;;;; Review highlight
 
@@ -2055,7 +2119,6 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      '(:foreground "#0000ff" :background "#d9d9ff")))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
-      (should (memq #'deslop-review--prevent-save before-save-hook))
       (deslop-review-delete-overlay overlay)
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face)))))
 

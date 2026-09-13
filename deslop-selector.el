@@ -116,6 +116,8 @@
               "c/C   set concurrency\n"
               "P     toggle parallel jobs\n"
               "i     insert\n"
+              "w     write anywhere\n"
+              "I     insert anywhere\n"
               "m     improve\n"
               "s     summarize\n"
               "RET   confirm selection\n"
@@ -266,6 +268,16 @@
   (interactive)
   (deslop-selector--run 'insert))
 
+(defun deslop-selector-write-anywhere ()
+  "Run a structured multi-edit using the current selector choice."
+  (interactive)
+  (deslop-selector--run 'write-anywhere))
+
+(defun deslop-selector-insert-anywhere ()
+  "Run a structured multi-insertion using the current selector choice."
+  (interactive)
+  (deslop-selector--run 'insert-anywhere))
+
 (defun deslop-selector-improve ()
   "Prompt for an improvement and run it using the current choice."
   (interactive)
@@ -292,6 +304,8 @@
   (define-key deslop-selector-mode-map (kbd "C") #'deslop-selector-set-concurrency)
   (define-key deslop-selector-mode-map (kbd "P") #'deslop-selector-toggle-parallel)
   (define-key deslop-selector-mode-map (kbd "i") #'deslop-selector-insert)
+  (define-key deslop-selector-mode-map (kbd "w") #'deslop-selector-write-anywhere)
+  (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
   (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
   (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
   (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)

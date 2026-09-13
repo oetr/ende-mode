@@ -153,19 +153,42 @@ HANDLER receives one `deslop-job' object."
    (lambda (active) (deslop--same-provider-p job active))
    deslop--active-jobs))
 
+(defun deslop--write-job-p (job)
+  "Return non-nil when JOB can modify its target buffer."
+  (memq (deslop-job-type job) '(insert improve write-anywhere insert-anywhere)))
+
+(defun deslop--same-buffer-p (left right)
+  "Return non-nil when jobs LEFT and RIGHT target the same buffer."
+  (eq (deslop-target-buffer (deslop-job-target left))
+      (deslop-target-buffer (deslop-job-target right))))
+
+(defun deslop--buffer-write-locked-p (job)
+  "Return non-nil when JOB conflicts with an active arbitrary write."
+  (and (deslop--write-job-p job)
+       (cl-some
+        (lambda (active)
+          (and (deslop--write-job-p active)
+               (deslop--same-buffer-p job active)
+               (or (memq (deslop-job-type job)
+                         '(write-anywhere insert-anywhere))
+                   (memq (deslop-job-type active)
+                         '(write-anywhere insert-anywhere)))))
+        deslop--active-jobs)))
+
 (defun deslop--job-admissible-p (job)
   "Return non-nil when JOB may start under provider concurrency rules."
-  (let* ((active (deslop--active-provider-jobs job))
-         (parallel (eq (plist-get (deslop-job-profile job) :parallel) t))
-         (limit (deslop-provider-max-concurrency
-                 (deslop-job-profile job))))
-    (if parallel
-        (and (cl-every
-              (lambda (running)
-                (eq (plist-get (deslop-job-profile running) :parallel) t))
-              active)
-             (< (length active) limit))
-      (null active))))
+  (unless (deslop--buffer-write-locked-p job)
+    (let* ((active (deslop--active-provider-jobs job))
+           (parallel (eq (plist-get (deslop-job-profile job) :parallel) t))
+           (limit (deslop-provider-max-concurrency
+                   (deslop-job-profile job))))
+      (if parallel
+          (and (cl-every
+                (lambda (running)
+                  (eq (plist-get (deslop-job-profile running) :parallel) t))
+                active)
+               (< (length active) limit))
+        (null active)))))
 
 (defun deslop--next-admissible-cell ()
   "Return the first FIFO queue cell whose provider can accept its job.

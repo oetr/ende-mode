@@ -6,8 +6,8 @@
 
 ;;; Commentary:
 
-;; Review overlays, highlighting, save guards, and approval/rejection commands
-;; for generated deslop output.
+;; Review overlays, highlighting, and approval/rejection commands for generated
+;; deslop output.
 
 ;;; Code:
 
@@ -203,21 +203,6 @@ not including, its end."
     (user-error
      "Approve or reject existing deslop output before starting another task here")))
 
-(defun deslop-review--update-save-guards ()
-  "Keep save hooks enabled exactly while review overlays remain."
-  (if (deslop-review--overlays-in-buffer)
-      (progn
-        (add-hook 'before-save-hook #'deslop-review--prevent-save nil t)
-        (add-hook 'auto-save-hook #'deslop-review--prevent-save nil t))
-    (remove-hook 'before-save-hook #'deslop-review--prevent-save t)
-    (remove-hook 'auto-save-hook #'deslop-review--prevent-save t)))
-
-(defun deslop-review--prevent-save ()
-  "Prevent saving a buffer that still contains unapproved model output."
-  (if (deslop-review--overlays-in-buffer)
-      (user-error "Approve or reject deslop output before saving")
-    (deslop-review--update-save-guards)))
-
 (defun deslop-review-create-overlay
     (buffer beg end &optional model client original)
   "Mark generated text from BEG to END in BUFFER for later approval.
@@ -232,9 +217,9 @@ the inserted characters are tinted using the review overlay's face."
     (let ((badge (deslop-review--format-badge client model))
           (style (and deslop-review-highlight
                       (deslop-review--style buffer beg)))
-           (overlay nil)
-           (boundary-overlay nil)
-           (complete nil))
+          (overlay nil)
+          (boundary-overlay nil)
+          (complete nil))
       (unwind-protect
           (progn
             (setq overlay (make-overlay beg end buffer t nil))
@@ -255,28 +240,22 @@ the inserted characters are tinted using the review overlay's face."
                overlay 'face
                (list :foreground (car style)
                      :background (cdr style))))
-            (deslop-review--update-save-guards)
             (setq complete t)
             overlay)
         (unless complete
-           (when overlay
-             (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
-               (when (overlayp boundary)
-                 (delete-overlay boundary)))
-             (delete-overlay overlay))
-          (deslop--ignore-errors #'deslop-review--update-save-guards))))))
+          (when overlay
+            (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
+              (when (overlayp boundary)
+                (delete-overlay boundary)))
+            (delete-overlay overlay)))))))
 
 (defun deslop-review-delete-overlay (overlay)
   "Remove review OVERLAY when it has been approved or rejected."
   (when (deslop-review-overlay-p overlay)
-    (let ((buffer (overlay-buffer overlay)))
-      (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
-        (when (overlayp boundary)
-          (delete-overlay boundary)))
-      (delete-overlay overlay)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (deslop-review--update-save-guards))))))
+    (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
+      (when (overlayp boundary)
+        (delete-overlay boundary)))
+    (delete-overlay overlay)))
 
 ;;;; Interactive Commands
 

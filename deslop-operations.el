@@ -19,12 +19,30 @@
 (require 'deslop-target)
 (require 'deslop-ui)
 (require 'deslop-llm)
+(require 'deslop-protocol)
 (require 'deslop-queue)
 
 (defcustom deslop-insert-instruction
   "Write the most natural continuation of the text at the cursor position."
   "Instruction given to the LLM for deslop-insert-at-cursor."
   :type 'string
+  :group 'deslop)
+
+(defcustom deslop-write-anywhere-instruction
+  "Make the requested changes in the document, wherever they belong."
+  "Instruction given to `deslop-write-anywhere'."
+  :type 'string
+  :group 'deslop)
+
+(defcustom deslop-insert-anywhere-instruction
+  "Insert the requested text in the document wherever it belongs."
+  "Instruction given to `deslop-insert-anywhere'."
+  :type 'string
+  :group 'deslop)
+
+(defcustom deslop-max-write-anywhere-edits 100
+  "Maximum number of edits accepted from one `deslop-write-anywhere' result."
+  :type 'integer
   :group 'deslop)
 
 (defcustom deslop-summary-buffer-name "*deslop-summary*"
@@ -81,6 +99,33 @@ return price * (1 + tax)"
 (defconst deslop-summarize-system
   "You summarize the supplied text accurately and concisely. Return ONLY the summary, without markdown fences or commentary."
   "System prompt instructions for summarizing a target region.")
+
+(defconst deslop-write-anywhere-system
+  "You edit a document by returning a strict JSON edit list.
+
+### Output Format
+Return ONLY one JSON object with this exact top-level shape:
+{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"replacement\"}]}
+
+`start` and `end` are zero-based character offsets in the supplied document.
+Use equal offsets for an insertion. `expected` must be the exact current text
+between `start` and `end`; `text` is the replacement text. The edits must be
+non-overlapping, and `text` must not be empty. Return at least one edit.
+Do not use markdown fences, comments, or any keys other than those shown."
+  "System prompt instructions for arbitrary document edits.")
+
+(defconst deslop-insert-anywhere-system
+  "You insert text into a document by returning a strict JSON edit list.
+
+### Output Format
+Return ONLY one JSON object with this exact top-level shape:
+{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"inserted text\"}]}
+
+`start` and `end` are zero-based character offsets in the supplied document.
+They must be equal, and `expected` must be the empty string. `text` is the text
+to insert and must not be empty. The edits must be at different positions.
+Do not use markdown fences, comments, or any keys other than those shown."
+  "System prompt instructions for arbitrary document insertions.")
 
 ;;;; LLM execution
 
@@ -329,6 +374,132 @@ the review overlay it creates."
         (length content) (buffer-name buffer))
        review-overlay))))
 
+(defun deslop--write-anywhere-edits-overlap-p (left right)
+  "Return non-nil when edit LEFT overlaps edit RIGHT in source coordinates."
+  (let ((left-start (plist-get left :start))
+        (left-end (plist-get left :end))
+        (right-start (plist-get right :start))
+        (right-end (plist-get right :end)))
+    (cond
+     ((and (= left-start left-end) (= right-start right-end))
+      (= left-start right-start))
+     ((= left-start left-end)
+      (and (< right-start left-start) (< left-start right-end)))
+     ((= right-start right-end)
+      (and (< left-start right-start) (< right-start left-end)))
+     (t (and (< left-start right-end) (< right-start left-end))))))
+
+(defun deslop--parse-write-anywhere-edits (result source &optional insert-only)
+  "Parse and validate arbitrary edits in RESULT against SOURCE.
+When INSERT-ONLY is non-nil, require every edit to be an insertion.
+Return edits as plists with zero-based offsets relative to SOURCE."
+  (let* ((content (deslop-trim-trailing
+                   (or (deslop--result-content result) "")))
+         (document
+          (condition-case caught
+              (deslop-protocol--json-read-string content)
+            (error
+             (error "write-anywhere result is not valid JSON: %s"
+                    (error-message-string caught)))))
+         (version (deslop-protocol--json-get "version" document))
+         (raw-edits (deslop-protocol--json-get "edits" document)))
+    (unless (and (hash-table-p document) (equal version 1))
+      (error "write-anywhere result has an unsupported protocol version"))
+    (unless (vectorp raw-edits)
+      (error "write-anywhere result must contain an edits array"))
+    (when (zerop (length raw-edits))
+      (error "write-anywhere result contains no edits"))
+    (when (and deslop-max-write-anywhere-edits
+               (> (length raw-edits) deslop-max-write-anywhere-edits))
+      (error "write-anywhere result contains too many edits"))
+    (let ((edits nil)
+          (source-length (length source)))
+      (dotimes (index (length raw-edits))
+        (let* ((raw (aref raw-edits index))
+               (start (and (hash-table-p raw)
+                           (deslop-protocol--json-get "start" raw)))
+               (end (and (hash-table-p raw)
+                         (deslop-protocol--json-get "end" raw)))
+               (expected (and (hash-table-p raw)
+                              (deslop-protocol--json-get "expected" raw)))
+               (text (and (hash-table-p raw)
+                          (deslop-protocol--json-get "text" raw))))
+          (unless (and (integerp start) (integerp end)
+                       (<= 0 start end source-length)
+                       (stringp expected) (stringp text)
+                       (or (not insert-only)
+                           (and (= start end) (string-empty-p expected)))
+                       (not (string-empty-p text)))
+            (error "%s edit %d has invalid fields"
+                   (if insert-only "insert-anywhere" "write-anywhere")
+                   (1+ index)))
+          (unless (string= expected (substring source start end))
+            (error "write-anywhere edit %d does not match its expected text"
+                   (1+ index)))
+          (push (list :index index :start start :end end
+                      :expected expected :text text)
+                edits)))
+      (setq edits (nreverse edits))
+      (cl-loop for tail on edits do
+        (dolist (right (cdr tail))
+          (when (deslop--write-anywhere-edits-overlap-p (car tail) right)
+            (error "write-anywhere edits %d and %d overlap"
+                   (1+ (plist-get (car tail) :index))
+                   (1+ (plist-get right :index))))))
+      edits)))
+
+(defun deslop--apply-write-anywhere-result (job result &optional insert-only)
+  "Apply structured arbitrary edits from RESULT for JOB.
+When INSERT-ONLY is non-nil, reject replacements in RESULT."
+  (when (deslop-job-current-p job)
+    (let ((created-overlays nil))
+      (condition-case failure
+          (let* ((target (deslop-job-target job))
+                 (buffer (deslop-target-buffer target))
+                 (start (deslop-target-start target))
+                 (end (deslop-target-end target))
+                 source edits display)
+            (unless (and (buffer-live-p buffer) start end)
+              (error "write-anywhere target no longer exists"))
+            (with-current-buffer buffer
+              (deslop-target-with-restriction target
+                (deslop-target-validate-source target start end)
+                (setq source (buffer-substring-no-properties start end))))
+            (setq edits (deslop--parse-write-anywhere-edits
+                         result source insert-only)
+                  display (deslop--job-display-metadata job result))
+            (let ((buffer-read-only nil))
+              (deslop--mutate-target
+               target
+               (lambda ()
+                 (deslop-target-validate-source target start end)
+                 (dolist (edit (sort (copy-sequence edits)
+                                     (lambda (left right)
+                                       (> (plist-get left :start)
+                                          (plist-get right :start)))))
+                   (let* ((edit-start (+ start (plist-get edit :start)))
+                          (edit-end (+ start (plist-get edit :end)))
+                          (expected (plist-get edit :expected))
+                          (text (plist-get edit :text)))
+                     (unless (string= expected
+                                      (buffer-substring-no-properties
+                                       edit-start edit-end))
+                       (error "write-anywhere source changed before apply"))
+                     (goto-char edit-start)
+                     (delete-region edit-start edit-end)
+                     (let ((review-start (point)))
+                       (insert text)
+                        (push (deslop--create-review-overlay
+                               buffer review-start (point) display expected)
+                              created-overlays)))))))
+            (unless (= (length created-overlays) (length edits))
+              (error "not all write-anywhere edits could be reviewed"))
+            (deslop-job-finish job result))
+        ((error quit)
+         (dolist (overlay created-overlays)
+           (deslop--ignore-errors #'deslop-review-delete-overlay overlay))
+         (deslop-job-fail job (deslop--application-error failure)))))))
+
 ;;;; Operation handlers
 
 (defun deslop--run-insert (job)
@@ -365,7 +536,40 @@ the review overlay it creates."
               (cons "user"
                     (format "Task: %s\n\nDocument:\n%s"
                             deslop-insert-instruction context)))
-        (lambda (result) (deslop--apply-insert-result job result)))))))
+         (lambda (result) (deslop--apply-insert-result job result)))))))
+
+(defun deslop--run-write-anywhere (job)
+  "Execute an arbitrary-write JOB while freezing its buffer."
+  (deslop--call-with-job-error
+   job
+   (lambda ()
+     (let* ((target (deslop-job-target job))
+            (buffer (deslop-target-buffer target))
+            (start (deslop-target-start target))
+            (end (deslop-target-end target))
+            source)
+       (unless (and (buffer-live-p buffer) start end)
+         (error "write-anywhere target no longer exists"))
+       (deslop-target-freeze-buffer target)
+       (with-current-buffer buffer
+         (deslop-target-with-restriction target
+           (deslop-target-validate-source target start end)
+           (setq source (buffer-substring-no-properties start end))))
+       (deslop--dispatch-llm
+        job
+        (list (cons "system"
+                    (if (eq (deslop-job-type job) 'insert-anywhere)
+                        deslop-insert-anywhere-system
+                      deslop-write-anywhere-system))
+              (cons "user"
+                    (format "Instruction: %s\n\nDocument:\n%s"
+                            (if (eq (deslop-job-type job) 'insert-anywhere)
+                                deslop-insert-anywhere-instruction
+                              deslop-write-anywhere-instruction)
+                            source)))
+        (lambda (result)
+          (deslop--apply-write-anywhere-result
+           job result (eq (deslop-job-type job) 'insert-anywhere))))))))
 
 (defun deslop--run-improve (job)
   "Execute an improvement JOB that replaces its target atomically."
@@ -456,6 +660,8 @@ the review overlay it creates."
                               #'text-mode)))
 
 (deslop-register-job-handler 'insert #'deslop--run-insert)
+(deslop-register-job-handler 'write-anywhere #'deslop--run-write-anywhere)
+(deslop-register-job-handler 'insert-anywhere #'deslop--run-write-anywhere)
 (deslop-register-job-handler 'improve #'deslop--run-improve)
 (deslop-register-job-handler 'summarize #'deslop--run-summarize)
 
@@ -466,9 +672,14 @@ the review overlay it creates."
   (let* ((buffer (current-buffer))
          (region (deslop-current-region))
          (point (point))
-         (selected (if (eq type 'insert) (and region t) t))
-         (start (if region (car region) (if (eq type 'insert) point (point-min))))
-         (end (if region (cdr region) (if (eq type 'insert) point (point-max)))))
+         (anywhere (memq type '(write-anywhere insert-anywhere)))
+         (selected (if anywhere t (if (eq type 'insert) (and region t) t)))
+         (start (if anywhere
+                    (point-min)
+                  (if region (car region) (if (eq type 'insert) point (point-min)))))
+         (end (if anywhere
+                  (point-max)
+                (if region (cdr region) (if (eq type 'insert) point (point-max))))))
     (unless (eq type 'insert)
       (deslop-target-ensure-size start end (capitalize (symbol-name type))))
     (let ((target
@@ -503,6 +714,16 @@ the review overlay it creates."
   "Queue a request to insert LLM text at cursor position."
   (interactive)
   (deslop--enqueue-job 'insert))
+
+(defun deslop-write-anywhere ()
+  "Queue a request for the LLM to write multiple edits anywhere in the buffer."
+  (interactive)
+  (deslop--enqueue-job 'write-anywhere))
+
+(defun deslop-insert-anywhere ()
+  "Queue a request for the LLM to insert text at multiple buffer positions."
+  (interactive)
+  (deslop--enqueue-job 'insert-anywhere))
 
 (defun deslop-improve-at-cursor (instruction)
   "Queue an improvement of the active region or accessible buffer."
