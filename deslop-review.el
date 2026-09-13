@@ -218,12 +218,10 @@ the inserted characters are tinted using the review overlay's face."
           (style (and deslop-review-highlight
                       (deslop-review--style buffer beg)))
           (overlay nil)
-          (boundary-overlay nil)
           (complete nil))
       (unwind-protect
           (progn
             (setq overlay (make-overlay beg end buffer t nil))
-            (setq boundary-overlay (make-overlay end end buffer nil t))
             (overlay-put overlay 'deslop-review t)
             (overlay-put overlay 'client client)
             (overlay-put overlay 'model model)
@@ -231,9 +229,6 @@ the inserted characters are tinted using the review overlay's face."
             (overlay-put overlay 'priority 1)
             (overlay-put overlay 'evaporate nil)
             (overlay-put overlay 'keymap deslop-review--keymap)
-            (overlay-put boundary-overlay 'keymap deslop-review--keymap)
-            (overlay-put overlay 'deslop-review-boundary
-                         boundary-overlay)
             (overlay-put overlay 'before-string badge)
             (when style
               (overlay-put
@@ -244,17 +239,11 @@ the inserted characters are tinted using the review overlay's face."
             overlay)
         (unless complete
           (when overlay
-            (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
-              (when (overlayp boundary)
-                (delete-overlay boundary)))
             (delete-overlay overlay)))))))
 
 (defun deslop-review-delete-overlay (overlay)
   "Remove review OVERLAY when it has been approved or rejected."
   (when (deslop-review-overlay-p overlay)
-    (let ((boundary (overlay-get overlay 'deslop-review-boundary)))
-      (when (overlayp boundary)
-        (delete-overlay boundary)))
     (delete-overlay overlay)))
 
 ;;;; Interactive Commands

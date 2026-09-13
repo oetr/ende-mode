@@ -137,14 +137,14 @@ user's task explicitly requires an inline insertion.
 
 ### Output Format
 Return ONLY one JSON object with this exact top-level shape:
-{\"version\":1,\"edits\":[{\"line\":1,\"column\":0,\"text\":\"inserted text\"}]}
+{\"version\":1,\"edits\":[{\"anchor\":\"exact existing text\",\"position\":\"before\",\"text\":\"inserted text\"}]}
 
-Each edit object must contain `line` and `text`; `column` is optional and
-defaults to zero. `line` is one-based and `column` is zero-based, measured in
-characters from the start of that line. Do not use absolute character offsets.
-The insertion point must be on the selected line, and `text` must not be empty.
-The edits must be at different positions. Never duplicate a JSON key or omit
-the required `line` or `text` keys.
+Each edit object must contain `anchor`, `position`, and `text`. `anchor` must be
+an exact non-empty string copied from the document. `position` must be either
+`before` or `after`; it identifies where the insertion goes relative to the
+anchor. The anchor must match exactly once unless the edit includes an integer
+`occurrence` (one-based), or `all` set to true. `text` must not be empty. Never
+invent an anchor, duplicate a JSON key, or use absolute character offsets.
 Do not use markdown fences, comments, or any keys other than those shown."
   "System prompt instructions for arbitrary document insertions.")
 
@@ -530,23 +530,15 @@ Return edits as plists with zero-based offsets relative to SOURCE."
             (deslop--ignore-errors #'deslop-review-delete-overlay overlay))
           (deslop-job-fail job (deslop--application-error failure)))))))
 
-(defun deslop--insert-anywhere-line-column-offset (source line column)
-  "Return SOURCE offset for one-based LINE and zero-based COLUMN.
-Return nil when the requested character position is outside SOURCE."
-  (when (and (integerp line) (>= line 1)
-             (integerp column) (>= column 0))
-    (let ((line-start 0)
-          (line-number 1)
-          newline)
-      (while (and (< line-number line)
-                  (setq newline (cl-position ?\n source :start line-start)))
-        (setq line-start (1+ newline)
-              line-number (1+ line-number)))
-      (when (= line-number line)
-        (let ((line-end (or (cl-position ?\n source :start line-start)
-                            (length source))))
-          (when (<= column (- line-end line-start))
-            (+ line-start column)))))))
+(defun deslop--insert-anywhere-anchor-offsets (source anchor)
+  "Return all zero-based SOURCE offsets at which ANCHOR occurs."
+  (let ((start 0)
+        (offsets nil))
+    (while (and (< start (length source))
+                (string-match (regexp-quote anchor) source start))
+      (push (match-beginning 0) offsets)
+      (setq start (1+ (match-beginning 0))))
+    (nreverse offsets)))
 
 (defun deslop--parse-insert-anywhere-edits (result source)
   "Parse INSERT-ANYWHERE RESULT into valid edits and individual failures.
@@ -576,31 +568,54 @@ invalidate the other edits in the same result."
       (dotimes (index (length raw-edits))
         (condition-case caught
             (let* ((raw (aref raw-edits index))
-                   (line (and (hash-table-p raw)
-                              (deslop-protocol--json-get "line" raw)))
-                   (column (if (and (hash-table-p raw)
-                                    (deslop-protocol--json-has-key-p
-                                     "column" raw))
-                               (deslop-protocol--json-get "column" raw)
-                             0))
+                   (anchor (and (hash-table-p raw)
+                                (deslop-protocol--json-get "anchor" raw)))
+                   (position (and (hash-table-p raw)
+                                  (deslop-protocol--json-get "position" raw)))
+                   (occurrence (and (hash-table-p raw)
+                                    (deslop-protocol--json-get
+                                     "occurrence" raw)))
+                   (all (and (hash-table-p raw)
+                             (deslop-protocol--json-get "all" raw)))
                    (text (and (hash-table-p raw)
                               (deslop-protocol--json-get "text" raw)))
-                   (offset (and (stringp text)
-                                (deslop--insert-anywhere-line-column-offset
-                                 source line column))))
-              (unless (and (hash-table-p raw)
-                           (deslop-protocol--json-has-key-p "line" raw)
+                   (offsets (and (stringp anchor)
+                                 (deslop--insert-anywhere-anchor-offsets
+                                  source anchor))))
+               (unless (and (hash-table-p raw)
+                           (deslop-protocol--json-has-key-p "anchor" raw)
+                           (deslop-protocol--json-has-key-p "position" raw)
                            (deslop-protocol--json-has-key-p "text" raw))
-                (error "missing required line or text field"))
-              (unless (and (integerp line) (>= line 1)
-                           (integerp column) (>= column 0))
-                (error "line must be a positive integer and column a nonnegative integer"))
-              (unless offset
-                (error "line %d column %d is outside the document"
-                       line column))
+                (error "missing required anchor, position, or text field"))
+              (unless (and (stringp anchor) (not (string-empty-p anchor)))
+                (error "anchor must be a non-empty string"))
+              (unless (member position '("before" "after"))
+                (error "position must be before or after"))
               (unless (and (stringp text) (not (string-empty-p text)))
                 (error "text must be a non-empty string"))
-              (push (list :index index :offset offset :text text) edits))
+              (let ((selected-offsets
+                     (cond
+                      (all
+                       (unless (eq all t)
+                         (error "all must be true when present"))
+                       offsets)
+                      (occurrence
+                       (unless (and (integerp occurrence) (>= occurrence 1))
+                         (error "occurrence must be a positive integer"))
+                       (unless (<= occurrence (length offsets))
+                         (error "occurrence %d is not present" occurrence))
+                       (list (nth (1- occurrence) offsets)))
+                      ((= (length offsets) 1) offsets)
+                      ((zerop (length offsets)) nil)
+                      (t (error "anchor matches %d times; specify occurrence or all"
+                                (length offsets))))))
+                (unless selected-offsets
+                  (error "anchor was not found"))
+                (dolist (offset selected-offsets)
+                  (push (list :index index :offset offset
+                              :anchor-length (length anchor)
+                              :position position :text text)
+                        edits))))
           ((error quit)
            (push (list :index index :message (error-message-string caught))
                  errors))))
@@ -645,7 +660,10 @@ invalidate the other edits in the same result."
                                         (> (plist-get left :index)
                                            (plist-get right :index)))))))
                 (condition-case caught
-                    (let ((offset (+ start (plist-get edit :offset)))
+                    (let ((offset (+ start (plist-get edit :offset)
+                                   (if (equal (plist-get edit :position) "after")
+                                       (plist-get edit :anchor-length)
+                                     0)))
                           (text (plist-get edit :text)))
                       (deslop--mutate-target
                        target

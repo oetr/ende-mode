@@ -408,13 +408,33 @@ process for cancellation tests."
            (should (eq (lookup-key (overlay-get review 'keymap) (kbd "C-d"))
                        #'deslop-reject-output))
            (goto-char (overlay-end review))
-           (should (eq (key-binding (kbd "RET"))
-                       #'deslop-approve-output))
+           (should-not (eq (key-binding (kbd "RET"))
+                           #'deslop-approve-output))
            (goto-char (1+ (overlay-start review)))
-          (insert "edited ")
-          (should (deslop-review-overlay-p review))
-          (deslop-approve-output)
-          (should-not (deslop-review-overlay-p review)))))))
+           (insert "edited ")
+           (should (deslop-review-overlay-p review))
+           (deslop-approve-output)
+           (should-not (deslop-review-overlay-p review)))))))
+
+(ert-deftest deslop-test/enter-works-after-editing-past-review-output ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (deslop-insert-at-cursor)
+      (let ((call (car deslop-test--calls)))
+        (deslop-test--complete-call call)
+        (let ((review (cl-find-if
+                       #'deslop-review-overlay-p
+                       (overlays-in (point-min) (point-max)))))
+          (goto-char (overlay-end review))
+          (newline)
+          (insert "typed")
+          (should-not (eq (key-binding (kbd "RET"))
+                          #'deslop-approve-output))
+          (funcall (key-binding (kbd "RET")))
+          (should (string= (buffer-string) "base generated\ntyped\n"))
+          (should (deslop-review-overlay-p review)))))))
 
 (ert-deftest deslop-test/task-cannot-start-inside-pending-review ()
   (deslop-test--reset)
@@ -567,19 +587,19 @@ process for cancellation tests."
 (ert-deftest deslop-test/insert-anywhere-reports-missing-fields ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"column\":1,\"text\":\"X\"}]}" )
+          "{\"version\":1,\"edits\":[{\"position\":\"before\",\"text\":\"X\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "test"
       (let ((job (deslop-insert-anywhere)))
         (should (eq (deslop-job-state job) 'failed))
-        (should (string-match-p "missing required line or text field"
+        (should (string-match-p "missing required anchor, position, or text field"
                                (deslop-error-message (deslop-job-error job))))))))
 
 (ert-deftest deslop-test/insert-anywhere-creates-independent-insertions ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"line\":1,\"text\":\"A\"},{\"line\":1,\"column\":4,\"text\":\"B\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"B\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "test"
@@ -592,15 +612,15 @@ process for cancellation tests."
           (should (string-match-p "INSERT-ANYWHERE"
                                   (cdr (cadr messages))))
           (should (string-match-p
-                                   "Add a marker at every appropriate position"
-                                   (cdr (cadr messages))))
+                   "Add a marker at every appropriate position"
+                   (cdr (cadr messages))))
            (should (string-match-p "Multiple insertions"
                                    (cdr (car messages)))))))))
 
 (ert-deftest deslop-test/insert-anywhere-applies-valid-edits-around-invalid-ones ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"line\":1,\"text\":\"A\"},{\"line\":99,\"text\":\"bad\"},{\"line\":2,\"column\":2,\"text\":\"B\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"aa\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"},{\"anchor\":\"bb\",\"position\":\"after\",\"text\":\"B\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "aa\nbb"
@@ -608,6 +628,18 @@ process for cancellation tests."
         (should (eq (deslop-job-state job) 'completed))
         (should (string= (buffer-string) "Aaa\nbbB"))
         (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+
+(ert-deftest deslop-test/insert-anywhere-supports-occurrence-and-all-anchors ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"occurrence\":1,\"text\":\"A\"},{\"anchor\":\"one\",\"position\":\"after\",\"all\":true,\"text\":\"B\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "one\none"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "AoneB\noneB"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 3))))))
 
 (ert-deftest deslop-test/write-anywhere-freezes-buffer-and-blocks-writes ()
   (deslop-test--reset)
