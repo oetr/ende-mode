@@ -139,10 +139,11 @@ can be dispatched."
              (list :url deslop-codex-endpoint
                    :model deslop-codex-model
                    :max-concurrency 4
-                   :parallel nil
-                   :wire-api 'responses
-                   :auth-method 'opencode-oauth
-                   :require-sse t
+                    :parallel nil
+                    :wire-api 'responses
+                    :auth-method 'opencode-oauth
+                    :model-discovery-function #'deslop-codex-probe-models
+                    :require-sse t
                    :display-name "OpenAI"))
             ('openrouter
              '(:url "https://openrouter.ai/api/v1/chat/completions"
@@ -353,25 +354,14 @@ metadata and configured profile values."
     (url headers-file config-file)
   "Build a GET command for provider discovery at URL."
   (append
-   (list "curl" "--disable")
-   (deslop-curl--network-options url)
-   (list "--silent" "--show-error" "--no-buffer"
-         "--request" "GET"
-         "--speed-limit" "1"
-         "--speed-time" (number-to-string deslop-response-idle-timeout)
-         "--dump-header" headers-file
+   (deslop-curl--base-command url)
+   (deslop-curl--response-options headers-file)
+   (list "--request" "GET"
          "--header" "Accept: application/json")
    (when config-file (list "--config" config-file))
-   (append
-    (when deslop-connect-timeout
-      (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
-    (when deslop-provider-discovery-timeout
-      (list "--max-time"
-            (number-to-string deslop-provider-discovery-timeout)))
-    (when deslop-provider-max-discovery-bytes
-      (list "--max-filesize"
-            (number-to-string deslop-provider-max-discovery-bytes)))
-    (list "--url" url))))
+   (deslop-curl--timeout-options
+    deslop-provider-discovery-timeout deslop-provider-max-discovery-bytes)
+   (list "--url" url)))
 
 (defun deslop-provider--invoke-discovery-callback (callback metadata)
   "Invoke discovery CALLBACK with METADATA without propagating its errors."

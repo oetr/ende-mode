@@ -165,9 +165,9 @@ process for cancellation tests."
   (when (buffer-live-p deslop-history--buffer-object)
     (kill-buffer deslop-history--buffer-object))
   (setq deslop-history--buffer-object nil)
-  (when (buffer-live-p deslop--summary-buffer-object)
-    (kill-buffer deslop--summary-buffer-object))
-  (setq deslop--summary-buffer-object nil)
+   (when (buffer-live-p deslop-summary--buffer-object)
+     (kill-buffer deslop-summary--buffer-object))
+   (setq deslop-summary--buffer-object nil)
   (deslop-ui-clear-all))
 
 (defmacro deslop-test--with-buffer (contents &rest body)
@@ -184,8 +184,8 @@ process for cancellation tests."
          (summary (get-buffer-create deslop-summary-buffer-name)))
     (unwind-protect
         (progn
-          (setq deslop-history--buffer-object nil
-                deslop--summary-buffer-object nil)
+           (setq deslop-history--buffer-object nil
+                 deslop-summary--buffer-object nil)
           (deslop-test--reset)
           (should (buffer-live-p history))
           (should (buffer-live-p summary)))
@@ -358,7 +358,7 @@ process for cancellation tests."
 (ert-deftest deslop-test/summarize-reports-progress-and-preserves-buffer-point ()
   (deslop-test--reset)
   (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
-    (with-current-buffer (deslop--summary-buffer)
+     (with-current-buffer (deslop-summary-buffer)
       (insert "existing")
       (goto-char (point-min)))
     (deslop-test--with-buffer "source"
@@ -1410,7 +1410,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                   deslop-selector--models '("one" "two")
                   deslop-selector--model-index 0)
             (deslop-selector-next-model)
-            (cl-letf (((symbol-function 'deslop--enqueue-job)
+             (cl-letf (((symbol-function 'deslop-enqueue-operation)
                        (lambda (type instruction profile)
                          (setq queued
                                (list type instruction profile (current-buffer))))))

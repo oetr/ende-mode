@@ -19,6 +19,7 @@
 (require 'deslop-core)
 (require 'deslop-curl)
 (require 'deslop-protocol)
+(require 'deslop-transport)
 
 (defcustom deslop-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -189,19 +190,12 @@ The claims are used only for routing metadata such as account and residency."
 (defun deslop-codex--refresh-command (url headers-file)
   "Build the curl command for an OAuth refresh request to URL."
   (append
-   (list "curl" "--disable")
-   (deslop-curl--network-options url)
-   (list "--silent" "--show-error" "--no-buffer"
-         "--speed-limit" "1"
-         "--speed-time" (number-to-string deslop-response-idle-timeout)
-         "--request" "POST"
-         "--dump-header" headers-file
+   (deslop-curl--base-command url)
+   (deslop-curl--response-options headers-file)
+   (list "--request" "POST"
          "--header" "Content-Type: application/x-www-form-urlencoded"
          "--data-binary" "@-")
-   (when deslop-connect-timeout
-     (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
-   (when deslop-request-timeout
-     (list "--max-time" (number-to-string deslop-request-timeout)))
+   (deslop-curl--timeout-options deslop-request-timeout)
    (list "--url" url)))
 
 (defun deslop-codex--refresh-auth (auth callback)
@@ -336,20 +330,13 @@ Return a cancellation function for an asynchronous refresh, or nil."
 (defun deslop-codex--models-command (url headers-file config-file)
   "Build a curl GET command for the account-scoped model list at URL."
   (append
-   (list "curl" "--disable")
-   (deslop-curl--network-options url)
-   (list "--silent" "--show-error" "--no-buffer"
-         "--speed-limit" "1"
-         "--speed-time" (number-to-string deslop-response-idle-timeout)
-         "--get"
-         "--dump-header" headers-file
+   (deslop-curl--base-command url)
+   (deslop-curl--response-options headers-file)
+   (list "--get"
          "--data-urlencode"
          (concat "client_version=" deslop-codex-client-version))
    (when config-file (list "--config" config-file))
-   (when deslop-connect-timeout
-     (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
-   (when deslop-request-timeout
-     (list "--max-time" (number-to-string deslop-request-timeout)))
+   (deslop-curl--timeout-options deslop-request-timeout)
    (list "--url" url)))
 
 (defun deslop-codex--parse-models (text)
@@ -682,18 +669,6 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                               "ChatGPT request failed"))
            :details error)))))))
 
-(defun deslop-codex--byte-prefix (string max-bytes)
-  "Return the longest character prefix of STRING within MAX-BYTES."
-  (if (<= (string-bytes string) max-bytes)
-      string
-    (let ((low 0) (high (length string)))
-      (while (< low high)
-        (let ((middle (/ (+ low high 1) 2)))
-          (if (<= (string-bytes (substring string 0 middle)) max-bytes)
-              (setq low middle)
-            (setq high (1- middle)))))
-      (substring string 0 low))))
-
 (defun deslop-codex--append-preview (session chunk)
   "Append a bounded prefix of CHUNK to SESSION's error preview."
   (let* ((used (or (deslop-codex--session-preview-bytes session) 0))
@@ -701,7 +676,7 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                          (- deslop-max-error-body-bytes used)))
          (prefix (if remaining
                      (and (> remaining 0)
-                          (deslop-codex--byte-prefix chunk remaining))
+                           (deslop-transport-byte-prefix chunk remaining))
                    chunk)))
     (when prefix
       (push prefix (deslop-codex--session-preview-parts session))
@@ -719,17 +694,8 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                       (car (deslop-curl--response-headers
                             (deslop-codex--session-headers-file session)))
                     (error nil)))
-         (preview (deslop-codex--preview-text session))
-         (detail (condition-case nil
-                     (let* ((payload (deslop-protocol--json-read-string preview))
-                            (error-payload
-                             (deslop-protocol--json-get "error" payload)))
-                       (or (deslop-protocol--json-get "message" error-payload)
-                           (deslop-protocol--json-get "detail" error-payload)
-                           (deslop-protocol--json-get "message" payload)
-                           (deslop-protocol--json-get "detail" payload)
-                           (and (stringp error-payload) error-payload)))
-                   (error nil))))
+          (preview (deslop-codex--preview-text session))
+          (detail (deslop-transport-error-detail preview)))
     (deslop-error-create
      :kind 'http
      :message (format "HTTP status %s: %s"
@@ -749,7 +715,7 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                            (- deslop-max-response-bytes received)))
            (processable (if (and deslop-max-response-bytes
                                   (> total deslop-max-response-bytes))
-                            (deslop-codex--byte-prefix chunk (max 0 remaining))
+                             (deslop-transport-byte-prefix chunk (max 0 remaining))
                           chunk)))
       (setf (deslop-codex--session-received-bytes session) total)
       (deslop-codex--append-preview session chunk)

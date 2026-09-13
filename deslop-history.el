@@ -16,6 +16,7 @@
 (require 'outline)
 (require 'subr-x)
 (require 'deslop-core)
+(require 'deslop-edit)
 (require 'deslop-queue)
 
 (defcustom deslop-history-enabled t
@@ -241,12 +242,7 @@
 
 (defun deslop-history--insert-anywhere-errors-string (errors)
   "Format skipped INSERT-ANYWHERE ERRORS for a history entry."
-  (mapconcat
-   (lambda (failure)
-     (format "Edit %d: %s"
-             (1+ (plist-get failure :index))
-             (plist-get failure :message)))
-   errors "\n"))
+  (deslop-edit-format-insertion-failures errors))
 
 (defun deslop-history--usage-string (event)
   "Return readable usage information from normalized USAGE EVENT."

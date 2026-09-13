@@ -17,6 +17,7 @@
 (require 'deslop-core)
 (require 'deslop-curl)
 (require 'deslop-protocol)
+(require 'deslop-transport)
 (require 'deslop-provider)
 (require 'deslop-codex)
 
@@ -295,12 +296,8 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm--http-error-detail (session)
   "Return a provider error detail parsed from SESSION's response preview."
-  (condition-case nil
-      (let* ((payload (deslop-protocol--json-read-string
-                       (deslop-llm--response-preview-text session)))
-             (error (deslop-protocol--json-get "error" payload)))
-        (deslop-protocol--json-get "message" error))
-    (error nil)))
+  (deslop-transport-error-detail
+   (deslop-llm--response-preview-text session)))
 
 (defun deslop-llm--result (session)
   "Build the normalized result plist for SESSION."
@@ -402,19 +399,6 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
           (format "curl exited with status %d (%s)"
                   status (string-trim event)))))))
 
-(defun deslop-llm--byte-prefix (string max-bytes)
-  "Return the longest character prefix of STRING within MAX-BYTES."
-  (if (<= (string-bytes string) max-bytes)
-      string
-    (let ((low 0)
-          (high (length string)))
-      (while (< low high)
-        (let ((middle (/ (+ low high 1) 2)))
-          (if (<= (string-bytes (substring string 0 middle)) max-bytes)
-              (setq low middle)
-            (setq high (1- middle)))))
-      (substring string 0 low))))
-
 (defun deslop-llm--response-preview-text (session)
   "Return SESSION's bounded response preview as a string."
   (let ((parts (deslop-llm--session-response-preview-parts session)))
@@ -429,7 +413,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                          (- deslop-max-error-body-bytes used)))
          (prefix (if remaining
                      (and (> remaining 0)
-                          (deslop-llm--byte-prefix chunk remaining))
+                           (deslop-transport-byte-prefix chunk remaining))
                    chunk)))
     (when prefix
       (push prefix (deslop-llm--session-response-preview-parts session))
@@ -446,7 +430,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                            (- deslop-max-response-bytes received)))
            (processable (if (and deslop-max-response-bytes
                                   (> total deslop-max-response-bytes))
-                            (deslop-llm--byte-prefix chunk (max 0 remaining))
+                             (deslop-transport-byte-prefix chunk (max 0 remaining))
                           chunk)))
       (setf (deslop-llm--session-received-bytes session) total)
       (deslop-llm--append-response-preview session chunk)

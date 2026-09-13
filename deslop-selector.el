@@ -16,7 +16,7 @@
 (require 'subr-x)
 (require 'deslop-core)
 (require 'deslop-provider)
-(require 'deslop-operations)
+(require 'deslop-commands)
 
 (defcustom deslop-selector-buffer-name "*deslop-selector*"
   "Buffer used by the provider and model selector."
@@ -131,13 +131,15 @@
 
 (defun deslop-selector--probe-current-provider ()
   "Probe the selected provider when it has dynamic model discovery."
-  (when (eq (deslop-selector--provider-name) 'openai)
-    (let ((provider (deslop-selector--provider-name))
-          (selector-buffer (current-buffer)))
+  (let* ((provider (deslop-selector--provider-name))
+         (profile (deslop-selector--provider-profile))
+         (probe (plist-get profile :model-discovery-function))
+         (selector-buffer (current-buffer)))
+    (when (functionp probe)
       (setq deslop-selector--model-state :loading)
       (deslop-selector--render)
       (setq deslop-selector--probe-cancel
-            (deslop-codex-probe-models
+            (funcall probe
              (lambda (models error)
                (when (buffer-live-p selector-buffer)
                  (with-current-buffer selector-buffer
@@ -274,7 +276,7 @@
     (deslop-selector--save-selection)
     (deslop-selector-close)
     (with-current-buffer source
-      (deslop--enqueue-job type instruction profile))))
+       (deslop-enqueue-operation type instruction profile))))
 
 (defun deslop-selector-insert ()
   "Run insert using the current selector choice."

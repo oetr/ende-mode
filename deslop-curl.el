@@ -167,30 +167,44 @@ separate from user-configured profile headers."
            "--proto-redir" "=http,https")
      (when (or (not deslop-allow-environment-proxy)
                (deslop-curl--loopback-host-p host))
-       (list "--noproxy" "*")))))
+        (list "--noproxy" "*")))))
+
+(defun deslop-curl--base-command (url)
+  "Return the common curl command prefix for URL."
+  (append (list "curl" "--disable")
+          (deslop-curl--network-options url)))
+
+(defun deslop-curl--response-options (headers-file)
+  "Return common curl options for a streamed response."
+  (list "--silent" "--show-error" "--no-buffer"
+        "--speed-limit" "1"
+        "--speed-time" (number-to-string deslop-response-idle-timeout)
+        "--dump-header" headers-file))
+
+(defun deslop-curl--timeout-options (&optional total-timeout max-filesize)
+  "Return configured curl timeout and response-size options."
+  (append
+   (when deslop-connect-timeout
+     (list "--connect-timeout"
+           (number-to-string deslop-connect-timeout)))
+   (when total-timeout
+     (list "--max-time" (number-to-string total-timeout)))
+   (when max-filesize
+     (list "--max-filesize" (number-to-string max-filesize)))))
 
 (defun deslop-curl--command (profile headers-file config-file)
   "Build curl command for PROFILE without embedding request data or secrets."
   (let ((url (deslop-curl--validated-url profile)))
     (append
-      (list "curl" "--disable")
-      (deslop-curl--network-options url)
-      (list "--silent" "--show-error" "--no-buffer"
-            "--request" "POST"
-            "--speed-limit" "1"
-            "--speed-time" (number-to-string deslop-response-idle-timeout)
-            "--dump-header" headers-file
-            "--header" "Content-Type: application/json"
-            "--data-binary" "@-")
-      (when config-file (list "--config" config-file))
-      (append
-       (when deslop-connect-timeout
-         (list "--connect-timeout" (number-to-string deslop-connect-timeout)))
-       (when deslop-max-response-bytes
-         (list "--max-filesize" (number-to-string deslop-max-response-bytes)))
-       (when deslop-request-timeout
-         (list "--max-time" (number-to-string deslop-request-timeout)))
-        (list "--url" url)))))
+       (deslop-curl--base-command url)
+       (deslop-curl--response-options headers-file)
+       (list "--request" "POST"
+             "--header" "Content-Type: application/json"
+             "--data-binary" "@-")
+       (when config-file (list "--config" config-file))
+       (deslop-curl--timeout-options
+        deslop-request-timeout deslop-max-response-bytes)
+       (list "--url" url))))
 
 (cl-defun deslop-curl--start-request
     (&key profile url name command filter sentinel

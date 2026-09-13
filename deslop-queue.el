@@ -13,9 +13,9 @@
 
 (require 'cl-lib)
 (require 'deslop-core)
+(require 'deslop-operation)
 (require 'deslop-provider)
 (require 'deslop-target)
-(require 'deslop-ui)
 
 ;;;; Job records
 
@@ -62,19 +62,11 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
     (deslop--invoke-cancellation cancel-function))
   cancel-function)
 
-(defun deslop--job-delete-overlay (job)
-  "Delete JOB's presentation overlay."
-  (let ((overlay (deslop-job-overlay job)))
-    (setf (deslop-job-overlay job) nil)
-    (when overlay
-      (deslop--ignore-errors #'deslop-ui-delete-overlay overlay))))
-
 (defun deslop--job-release-current (job)
-  "Release JOB from the active set and clean its presentation state."
+  "Release JOB from the active set and release its target."
   (setq deslop--active-jobs (delq job deslop--active-jobs)
         deslop--current-job (car deslop--active-jobs))
-  (deslop--ignore-errors #'deslop-target-release (deslop-job-target job))
-  (deslop--ignore-errors #'deslop--job-delete-overlay job))
+  (deslop--ignore-errors #'deslop-target-release (deslop-job-target job)))
 
 ;;;; Queue state
 
@@ -155,7 +147,7 @@ HANDLER receives one `deslop-job' object."
 
 (defun deslop--write-job-p (job)
   "Return non-nil when JOB can modify its target buffer."
-  (memq (deslop-job-type job) '(insert improve write-anywhere insert-anywhere)))
+  (deslop-operation-writes-buffer-p (deslop-job-type job)))
 
 (defun deslop--same-buffer-p (left right)
   "Return non-nil when jobs LEFT and RIGHT target the same buffer."
@@ -169,10 +161,9 @@ HANDLER receives one `deslop-job' object."
         (lambda (active)
           (and (deslop--write-job-p active)
                (deslop--same-buffer-p job active)
-               (or (memq (deslop-job-type job)
-                         '(write-anywhere insert-anywhere))
-                   (memq (deslop-job-type active)
-                         '(write-anywhere insert-anywhere)))))
+                (or (deslop-operation-whole-buffer-p (deslop-job-type job))
+                    (deslop-operation-whole-buffer-p
+                     (deslop-job-type active)))))
         deslop--active-jobs)))
 
 (defun deslop--job-admissible-p (job)
@@ -244,11 +235,11 @@ cannot be bypassed by a later job from that same provider."
 Return the newly created `deslop-job'."
   (let ((job (deslop--job-from-request request)))
     (deslop--queue-push job)
-    (when (deslop-job-overlay job)
-      (deslop-ui-update-overlay
-       (deslop-job-overlay job)
-       :client (deslop-provider-client-name (deslop-job-profile job))
-       :model (plist-get (deslop-job-profile job) :model)))
+    (deslop-job-emit-event
+     job
+     (list :type :queued
+           :client (deslop-provider-client-name (deslop-job-profile job))
+           :model (plist-get (deslop-job-profile job) :model)))
     (deslop-process-next)
     job))
 
@@ -261,6 +252,7 @@ Return the newly created `deslop-job'."
           (deslop-job-result job) result
           (deslop-job-error job) error
           (deslop-job-finished-at job) (float-time))
+    (deslop-job-emit-event job (list :type :settled :state state))
     (unwind-protect
         (deslop--invoke-cancellation (deslop-job-cancel-function job))
       (deslop--job-release-current job)
@@ -322,9 +314,9 @@ Return the newly created `deslop-job'."
             (deslop-target-activate
              target
              (lambda (message)
-               (deslop-job-fail
-                job (deslop-error-create :kind 'target :message message)))
-             (eq type 'insert-anywhere))
+                (deslop-job-fail
+                 job (deslop-error-create :kind 'target :message message)))
+              (deslop-operation-allows-source-changes-p type))
             (deslop-target-assert-available target)
             (funcall handler job))
         ((error quit)
@@ -353,7 +345,7 @@ Return the newly created `deslop-job'."
     (deslop--invoke-cancellation (deslop-job-cancel-function job))
     (deslop--ignore-errors #'deslop-target-release (deslop-job-target job))
     (deslop-job-emit-event job '(:type :cancelled))
-    (deslop--ignore-errors #'deslop--job-delete-overlay job)))
+    (deslop-job-emit-event job '(:type :settled :state cancelled))))
 
 (defun deslop-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."

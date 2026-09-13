@@ -40,6 +40,8 @@
 (defvar deslop-ui--spinner-timer nil
   "Timer instance for driving the overlay spinner animation.")
 
+(declare-function deslop-job-overlay "deslop-queue" (job))
+
 ;;;; Badge Formatting & Animation
 
 (defun deslop-ui--display-label (value)
@@ -156,7 +158,24 @@ range overlays keep their badge before the covered text."
           (:speed  (overlay-put ov 'speed val))
           (:estimated (overlay-put ov 'estimated val)))))
     (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-      (deslop-ui--put-badge ov spinner))))
+       (deslop-ui--put-badge ov spinner))))
+
+(defun deslop-ui-job-event (job event)
+  "Update JOB's indicator in response to lifecycle EVENT.
+Queue ownership stays in `deslop-queue'; this function is the presentation
+adapter for queued and terminal states."
+  (let ((overlay (deslop-job-overlay job)))
+    (pcase (plist-get event :type)
+      (:queued
+       (when overlay
+         (deslop-ui-update-overlay
+          overlay
+          :client (plist-get event :client)
+          :model (plist-get event :model))))
+      (:settled
+       (when overlay
+         (deslop-ui-delete-overlay overlay)
+         (setf (deslop-job-overlay job) nil))))))
 
 (defun deslop-ui-delete-overlay (ov)
   "Delete overlay OV and clean up managed tracking."

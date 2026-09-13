@@ -16,6 +16,7 @@
 
 (require 'cl-lib)
 (require 'deslop-core)
+(require 'deslop-operation)
 (require 'deslop-provider)
 (require 'deslop-review)
 (require 'deslop-target)
@@ -23,6 +24,7 @@
 (require 'deslop-llm)
 (require 'deslop-queue)
 (require 'deslop-operations)
+(require 'deslop-commands)
 (require 'deslop-history)
 (require 'deslop-selector)
 
@@ -38,6 +40,7 @@
 
 (add-hook 'deslop-queue-abort-functions #'deslop-provider-abort-discovery)
 (add-hook 'deslop-queue-abort-functions #'deslop-ui-clear-all)
+(add-hook 'deslop-job-event-functions #'deslop-ui-job-event)
 
 ;;;###autoload
 (define-minor-mode deslop-mode
@@ -52,13 +55,14 @@
   (deslop-abort-queue)
   (let* ((dir (or (file-name-directory (locate-library "deslop.el"))
                   (user-error "deslop.el not found on load-path")))
-          (files '("deslop-core.el" "deslop-protocol.el" "deslop-curl.el"
-                    "deslop-provider.el" "deslop-codex.el" "deslop-review.el" "deslop-target.el"
-                   "deslop-ui.el"
-                    "deslop-llm.el" "deslop-queue.el"
-                    "deslop-operations.el" "deslop-history.el" "deslop-selector.el"
-                    "deslop.el")))
-     (dolist (f files) (load (expand-file-name f dir)))
+         (files '("deslop-core.el" "deslop-operation.el" "deslop-protocol.el"
+                  "deslop-curl.el" "deslop-provider.el" "deslop-codex.el"
+                  "deslop-review.el" "deslop-target.el" "deslop-ui.el"
+                  "deslop-llm.el" "deslop-queue.el" "deslop-edit.el"
+                  "deslop-summary.el" "deslop-operations.el"
+                  "deslop-commands.el" "deslop-history.el"
+                  "deslop-selector.el" "deslop.el")))
+    (dolist (f files) (load (expand-file-name f dir)))
     (setq deslop-mode-map (deslop--make-mode-map))
     (message "deslop: reloaded from %s" dir)))
 
