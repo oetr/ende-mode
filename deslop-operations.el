@@ -727,7 +727,7 @@ invalidate the other edits in the same result."
          (lambda (result) (deslop--apply-insert-result job result)))))))
 
 (defun deslop--run-write-anywhere (job)
-  "Execute an arbitrary-write JOB while freezing its buffer."
+  "Execute an arbitrary-write JOB, freezing replacement targets only."
   (deslop--call-with-job-error
    job
    (lambda ()
@@ -743,7 +743,8 @@ invalidate the other edits in the same result."
             source)
        (unless (and (buffer-live-p buffer) start end)
          (error "write-anywhere target no longer exists"))
-       (deslop-target-freeze-buffer target)
+        (unless insert-only
+          (deslop-target-freeze-buffer target))
        (with-current-buffer buffer
          (deslop-target-with-restriction target
            (deslop-target-validate-source target start end)

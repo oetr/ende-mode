@@ -659,6 +659,19 @@ process for cancellation tests."
         (deslop-insert-at-cursor)
         (should (= (length deslop-test--calls) 1))
         (should (= (length deslop-queue) 1))
+         (deslop-abort-queue)
+         (should-not buffer-read-only)))))
+
+(ert-deftest deslop-test/insert-anywhere-leaves-buffer-writable-while-running ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)) t)))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'running))
+        (should-not buffer-read-only)
         (deslop-abort-queue)
         (should-not buffer-read-only)))))
 
