@@ -627,7 +627,15 @@ process for cancellation tests."
       (let ((job (deslop-insert-anywhere)))
         (should (eq (deslop-job-state job) 'completed))
         (should (string= (buffer-string) "Aaa\nbbB"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (should (string-match-p
+                 "Skipped edits"
+                 (with-current-buffer deslop-history--buffer-object
+                   (buffer-string))))
+        (should (string-match-p
+                 "Edit 2: anchor was not found"
+                 (with-current-buffer deslop-history--buffer-object
+                   (buffer-string))))))))
 
 (ert-deftest deslop-test/insert-anywhere-supports-occurrence-and-all-anchors ()
   (deslop-test--reset)
@@ -674,6 +682,26 @@ process for cancellation tests."
         (should-not buffer-read-only)
         (deslop-abort-queue)
         (should-not buffer-read-only)))))
+
+(ert-deftest deslop-test/insert-anywhere-reconciles-against-current-buffer ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)) t)))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (goto-char (point-min))
+        (insert "user\n")
+        (should (eq (deslop-job-state job) 'running))
+        (deslop-test--complete-call (car deslop-test--calls))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "user\ntest!"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 1))
+        (should (string-match-p
+                 "Skipped edits"
+                 (with-current-buffer deslop-history--buffer-object
+                   (buffer-string))))))))
 
 (ert-deftest deslop-test/write-anywhere-applies-from-another-current-buffer ()
   (deslop-test--reset)

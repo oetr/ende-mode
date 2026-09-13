@@ -323,7 +323,8 @@ Return the newly created `deslop-job'."
              target
              (lambda (message)
                (deslop-job-fail
-                job (deslop-error-create :kind 'target :message message))))
+                job (deslop-error-create :kind 'target :message message)))
+             (eq type 'insert-anywhere))
             (deslop-target-assert-available target)
             (funcall handler job))
         ((error quit)

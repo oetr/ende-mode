@@ -289,8 +289,10 @@ The previous buffer-local read-only value is restored by
              (and (> beg start) (< beg finish))
            (< (max beg start) (min end finish))))))
 
-(defun deslop-target-activate (target on-invalid)
-  "Monitor TARGET and call ON-INVALID with a message if it becomes unusable."
+(defun deslop-target-activate (target on-invalid &optional allow-source-changes)
+  "Monitor TARGET and call ON-INVALID if it becomes unusable.
+When ALLOW-SOURCE-CHANGES is non-nil, changes to TARGET's selected source do
+not invalidate it.  The target buffer being killed remains fatal."
   (let ((buffer (deslop-target-buffer target)))
     (when (buffer-live-p buffer)
       (let ((kill-hook
@@ -302,13 +304,15 @@ The previous buffer-local read-only value is restored by
                   (when (deslop-target-read-only-frozen target)
                     (user-error
                      "deslop: buffer is frozen while a write-anywhere job runs"))
-                  (when (deslop-target--change-overlaps-p target beg end)
-                    (setf (deslop-target-invalidated target) t)))))
-            (after-hook
-             (lambda (&rest _)
-               (when (deslop-target-invalidated target)
-                 (funcall on-invalid
-                          "selected source changed during generation")))))
+                   (when (and (not allow-source-changes)
+                              (deslop-target--change-overlaps-p target beg end))
+                     (setf (deslop-target-invalidated target) t)))))
+             (after-hook
+              (lambda (&rest _)
+                (when (and (not allow-source-changes)
+                           (deslop-target-invalidated target))
+                  (funcall on-invalid
+                           "selected source changed during generation")))))
         (setf (deslop-target-kill-buffer-hook target) kill-hook
               (deslop-target-before-change-hook target) before-hook
               (deslop-target-after-change-hook target) after-hook)

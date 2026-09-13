@@ -312,6 +312,25 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
     (deslop-error-create :kind 'application
                          :message (error-message-string error))))
 
+(defun deslop--insert-anywhere-failures-string (failures)
+  "Format INSERT-ANYWHERE FAILURES for messages and history."
+  (mapconcat
+   (lambda (failure)
+     (format "edit %d: %s"
+             (1+ (plist-get failure :index))
+             (plist-get failure :message)))
+   failures "; "))
+
+(defun deslop--insert-anywhere-result-with-failures (result failures)
+  "Return RESULT annotated with INSERT-ANYWHERE FAILURES."
+  (if (null failures)
+      result
+    (if (listp result)
+        (let ((annotated (copy-sequence result)))
+          (plist-put annotated :insert-anywhere-errors failures))
+      (list :content (deslop--result-content result)
+            :insert-anywhere-errors failures))))
+
 (defun deslop--apply-result (job result apply-function)
   "Apply RESULT for JOB with APPLY-FUNCTION and settle JOB.
 APPLY-FUNCTION receives trimmed content and display metadata and must return
@@ -638,12 +657,13 @@ invalidate the other edits in the same result."
                (start (deslop-target-start target))
                (end (deslop-target-end target))
                source parsed edits failures applied display)
-          (unless (and (buffer-live-p buffer) start end)
+          (unless (buffer-live-p buffer)
             (error "insert-anywhere target no longer exists"))
           (with-current-buffer buffer
             (deslop-target-with-restriction target
-              (deslop-target-validate-source target start end)
-              (setq source (buffer-substring-no-properties start end))))
+              (setq start (point-min)
+                    end (point-max)
+                    source (buffer-substring-no-properties start end))))
           (setq parsed (deslop--parse-insert-anywhere-edits result source)
                 edits (plist-get parsed :edits)
                 failures (plist-get parsed :errors)
@@ -683,8 +703,11 @@ invalidate the other edits in the same result."
                      (1+ (plist-get failure :index))
                      (plist-get failure :message)))
           (if (and applied (> applied 0))
-              (deslop-job-finish job result)
-            (error "insert-anywhere produced no applicable insertions")))
+              (deslop-job-finish
+               job (deslop--insert-anywhere-result-with-failures
+                    result failures))
+            (error "insert-anywhere produced no applicable insertions: %s"
+                   (deslop--insert-anywhere-failures-string failures))))
        ((error quit)
         (deslop-job-fail job (deslop--application-error failure))))))
 
