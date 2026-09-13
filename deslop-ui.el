@@ -123,11 +123,12 @@ range overlays keep their badge before the covered text."
     (cancel-timer deslop-ui--spinner-timer)
     (setq deslop-ui--spinner-timer nil)))
 
-(defun deslop-ui-create-overlay (buf beg end &optional status)
-  "Create an indicator overlay in BUF from BEG to END with STATUS."
+(defun deslop-ui-create-overlay (buf beg end &optional status appearance)
+  "Create an indicator overlay in BUF from BEG to END with STATUS.
+When APPEARANCE is `badge-only', do not apply a face to the covered text."
   (with-current-buffer buf
     (let ((ov (make-overlay beg end buf nil nil)))
-      (when (> end beg)
+      (when (and (> end beg) (not (eq appearance 'badge-only)))
         (overlay-put ov 'face 'deslop-working-face))
       (overlay-put ov 'status (or status "Queued"))
       (overlay-put ov 'tokens 0)

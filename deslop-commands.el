@@ -64,8 +64,10 @@ INSTRUCTION and PROFILE override the operation defaults."
          (committed nil))
     (unwind-protect
         (progn
-          (setq overlay (deslop-ui-create-overlay
-                         buffer start end "Queued"))
+           (setq overlay (deslop-ui-create-overlay
+                          buffer start end "Queued"
+                          (when (eq type 'insert-anywhere)
+                            'badge-only)))
           (let ((data (list :target target :overlay overlay)))
             (when profile
               (setq data (plist-put data :profile profile)))

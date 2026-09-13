@@ -676,12 +676,16 @@ process for cancellation tests."
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'running))
-        (should-not buffer-read-only)
-        (deslop-abort-queue)
-        (should-not buffer-read-only)))))
+     (deslop-test--with-buffer "test"
+       (let ((job (deslop-insert-anywhere)))
+         (should (eq (deslop-job-state job) 'running))
+         (let ((overlay (deslop-job-overlay job)))
+           (should-not (overlay-get overlay 'face))
+           (should (string-match-p "Thinking"
+                                   (overlay-get overlay 'before-string))))
+         (should-not buffer-read-only)
+         (deslop-abort-queue)
+         (should-not buffer-read-only)))))
 
 (ert-deftest deslop-test/insert-anywhere-reconciles-against-current-buffer ()
   (deslop-test--reset)
