@@ -23,7 +23,7 @@
   :type 'string
   :group 'deslop)
 
-(defcustom deslop-selector-window-height 0.35
+(defcustom deslop-selector-window-height 0.5
   "Fraction of the frame height used by the bottom selector window."
   :type 'number
   :group 'deslop)
@@ -363,7 +363,7 @@
             buffer
               `((display-buffer-at-bottom)
                 (window-height . ,deslop-selector-window-height)
-                (window-min-height . 16)))))
+                (window-min-height . 18)))))
       (with-current-buffer buffer
         (setq deslop-selector--window window))
       (when (window-live-p window)

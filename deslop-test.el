@@ -552,22 +552,34 @@ process for cancellation tests."
             (deslop-reject-output))
           (should (string= (buffer-string) "Aone two")))))))
 
-(ert-deftest deslop-test/insert-anywhere-rejects-replacements ()
+(ert-deftest deslop-test/insert-anywhere-rejects-character-offsets ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"start\":1,\"end\":2,\"expected\":\"e\",\"text\":\"X\"}]}" )
+          "{\"version\":1,\"edits\":[{\"start\":1,\"end\":1,\"expected\":\"\",\"text\":\"X\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "test"
       (let ((job (deslop-insert-anywhere)))
         (should (eq (deslop-job-state job) 'failed))
         (should (string= (buffer-string) "test"))
-        (should-not (deslop-review--overlays-in-buffer))))))
+         (should-not (deslop-review--overlays-in-buffer))))))
+
+(ert-deftest deslop-test/insert-anywhere-reports-missing-fields ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"column\":1,\"text\":\"X\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'failed))
+        (should (string-match-p "missing required line or text field"
+                               (deslop-error-message (deslop-job-error job))))))))
 
 (ert-deftest deslop-test/insert-anywhere-creates-independent-insertions ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"},{\"start\":4,\"end\":4,\"expected\":\"\",\"text\":\"B\"}]}" )
+          "{\"version\":1,\"edits\":[{\"line\":1,\"text\":\"A\"},{\"line\":1,\"column\":4,\"text\":\"B\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "test"
@@ -580,10 +592,22 @@ process for cancellation tests."
           (should (string-match-p "INSERT-ANYWHERE"
                                   (cdr (cadr messages))))
           (should (string-match-p
-                   "Add a marker at every appropriate position"
-                   (cdr (cadr messages))))
-          (should (string-match-p "Multiple insertions"
-                                  (cdr (car messages)))))))))
+                                   "Add a marker at every appropriate position"
+                                   (cdr (cadr messages))))
+           (should (string-match-p "Multiple insertions"
+                                   (cdr (car messages)))))))))
+
+(ert-deftest deslop-test/insert-anywhere-applies-valid-edits-around-invalid-ones ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"line\":1,\"text\":\"A\"},{\"line\":99,\"text\":\"bad\"},{\"line\":2,\"column\":2,\"text\":\"B\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "aa\nbb"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "Aaa\nbbB"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
 
 (ert-deftest deslop-test/write-anywhere-freezes-buffer-and-blocks-writes ()
   (deslop-test--reset)
