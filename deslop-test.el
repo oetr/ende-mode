@@ -1430,6 +1430,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((source (generate-new-buffer " *deslop-selector-window-source*"))
         (display-action nil)
         (quit-window-call nil)
+        (probe-profile nil)
         (selector nil))
     (unwind-protect
         (with-current-buffer source
@@ -1437,20 +1438,29 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      (lambda (buffer action)
                        (setq display-action (list buffer action))
                        (selected-window)))
-                    ((symbol-function 'quit-window)
-                     (lambda (kill window)
-                       (setq quit-window-call (list kill window)))))
+                     ((symbol-function 'quit-window)
+                      (lambda (kill window)
+                        (setq quit-window-call (list kill window))))
+                     ((symbol-function 'deslop-provider-probe-models)
+                      (lambda (profile callback)
+                        (setq probe-profile profile)
+                        (funcall callback '("local-model") nil)
+                        (lambda () nil))))
             (let ((deslop-providers '(local))
                   (deslop-provider-profiles
                    '((local :model "local-model"))))
               (deslop-selector-open)
               (setq selector (get-buffer deslop-selector-buffer-name))
+              (should (eq (plist-get probe-profile :name) 'local))
               (should (eq (car display-action) selector))
               (should (eq (car (car (cadr display-action)))
                           #'display-buffer-at-bottom))
-              (should (equal (cdr (assq 'window-height
+              (should (eq (cdr (assq 'window-height
+                                     (cdr (cadr display-action))))
+                          #'deslop-selector--fit-window))
+              (should (equal (cdr (assq 'window-min-height
                                         (cdr (cadr display-action))))
-                             deslop-selector-window-height))
+                             deslop-selector-window-min-height))
               (with-current-buffer selector
                 (deslop-selector-close))
               (should (equal (car quit-window-call) t))
@@ -1901,10 +1911,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (deslop-provider--discovery-metadata
            profile
            (deslop-protocol--json-read-string
-            "{\"object\":\"list\",\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"}]}"))))
+            "{\"object\":\"list\",\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"},{\"id\":\"llama4\"}]}"))))
     (should (string= (deslop-provider--models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
+    (should (equal (plist-get metadata :models) '("llama3" "llama4")))
     (should (string= (plist-get metadata :model) "llama3"))
     (should (string= (plist-get metadata :owner) "llama.cpp"))
     (should (string= (plist-get metadata :client) "llama.cpp"))))
@@ -1915,8 +1926,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (metadata
           (deslop-provider--discovery-metadata
            profile
-           (deslop-protocol--json-read-string
-            "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
+            (deslop-protocol--json-read-string
+             "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
+    (should (equal (plist-get metadata :models) '("other")))
     (should-not (plist-get metadata :owner))
     (should-not (plist-get metadata :client))))
 
@@ -1927,6 +1939,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (captured nil)
         (process nil)
         (values nil)
+        (probe-values nil)
         (make-process-count 0)
         (real-make-process (symbol-function 'make-process)))
     (cl-letf (((symbol-function 'make-process)
@@ -1941,8 +1954,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                 :connection-type 'pipe)))))
       (unwind-protect
           (progn
-            (deslop-provider-discover
-             profile (lambda (metadata) (push metadata values)))
+            (deslop-provider-probe-models
+             profile
+             (lambda (models error)
+               (push (list models error) probe-values)))
             (should (process-live-p process))
             (let* ((command (plist-get captured :command))
                    (header-position
@@ -1955,7 +1970,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         "Content-Type: application/json\r\n\r\n"))
               (funcall
                (plist-get captured :filter) process
-               "{\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"}]}")
+               "{\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"},{\"id\":\"llama4\"}]}")
               (should (string-match-p
                        "llama3"
                        (with-current-buffer (plist-get captured :buffer)
@@ -1969,8 +1984,22 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                 (accept-process-output process 0.05))
               (funcall (plist-get captured :sentinel) process "finished\n"))
             (should (= make-process-count 1))
+            (should (= (length probe-values) 1))
+            (should (equal (car (car probe-values)) '("llama3" "llama4")))
+            (should-not (cadr (car probe-values)))
+            (deslop-provider-discover
+             profile (lambda (metadata) (push metadata values)))
             (should (= (length values) 1))
             (should (string= (plist-get (car values) :model) "llama3"))
+            (let ((models nil)
+                  (probe-error nil))
+              (deslop-provider-probe-models
+               profile
+               (lambda (value error)
+                 (setq models value
+                       probe-error error)))
+              (should (equal models '("llama3" "llama4")))
+              (should-not probe-error))
             (deslop-provider-discover
              profile (lambda (metadata) (push metadata values)))
             (should (= make-process-count 1))

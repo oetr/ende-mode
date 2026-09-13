@@ -316,6 +316,10 @@ metadata and configured profile values."
 (defun deslop-provider--discovery-metadata (profile payload)
   "Extract display metadata for PROFILE from discovery PAYLOAD."
   (let* ((entries (deslop-provider--model-entries payload))
+         (models (cl-loop for entry in entries
+                          for id = (deslop-protocol--json-get "id" entry)
+                          when (and (stringp id) (not (string-empty-p id)))
+                          collect id))
          (requested (plist-get profile :model))
          (match (cl-find-if
                  (lambda (entry)
@@ -327,17 +331,20 @@ metadata and configured profile values."
                        (deslop-protocol--json-get "server" payload)))
          (model (or (and match (deslop-protocol--json-get "id" match))
                     requested))
-         (metadata (list :source :discovery :model model)))
-    (when (stringp provider)
-      (setq metadata (plist-put metadata :provider provider)))
-    (when (and match
-               (stringp (deslop-protocol--json-get "owned_by" match)))
-      (setq metadata
-            (plist-put metadata :owner
-                       (deslop-protocol--json-get "owned_by" match))))
-    (when (or match (stringp provider))
-      (plist-put metadata :client
-                 (deslop-provider-client-name profile metadata)))))
+         (metadata (list :source :discovery :model model :models models)))
+    (when (or match (stringp provider) models)
+      (when (stringp provider)
+        (setq metadata (plist-put metadata :provider provider)))
+      (when (and match
+                 (stringp (deslop-protocol--json-get "owned_by" match)))
+        (setq metadata
+              (plist-put metadata :owner
+                         (deslop-protocol--json-get "owned_by" match))))
+      (when (or match (stringp provider))
+        (setq metadata
+              (plist-put metadata :client
+                         (deslop-provider-client-name profile metadata))))
+      metadata)))
 
 (defun deslop-provider--parse-discovery-response (profile body headers)
   "Parse a discovery response in BODY using response HEADERS."
@@ -528,7 +535,33 @@ endpoint does not expose compatible metadata."
                        deslop-provider--discovery-inflight)
               (if url
                   (deslop-provider--start-discovery profile key url)
-                (deslop-provider--finish-discovery key nil)))))))))
+                 (deslop-provider--finish-discovery key nil)))))))))
+
+(defun deslop-provider-probe-models (profile callback)
+  "Probe PROFILE's model-list endpoint and invoke CALLBACK with its models.
+CALLBACK receives (MODELS ERROR).  Return a cancellation function that
+suppresses the callback without cancelling a shared discovery request."
+  (let ((cancelled nil)
+        (url (deslop-provider--models-url profile)))
+    (if (not url)
+        (deslop-provider--invoke-discovery-callback
+         callback
+         (deslop-error-create
+          :kind 'discovery
+          :message "Provider has no compatible model-list endpoint"))
+      (deslop-provider-discover
+       profile
+       (lambda (metadata)
+         (unless cancelled
+           (let ((models (and metadata (plist-get metadata :models))))
+             (if (and (listp models) models)
+                 (funcall callback models nil)
+               (funcall
+                callback nil
+                (deslop-error-create
+                 :kind 'discovery
+                 :message "Provider returned no models"))))))))
+    (lambda () (setq cancelled t))))
 
 (defun deslop-provider-clear-discovery-cache ()
   "Clear cached provider discovery results."

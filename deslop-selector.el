@@ -23,9 +23,9 @@
   :type 'string
   :group 'deslop)
 
-(defcustom deslop-selector-window-height 0.5
-  "Fraction of the frame height used by the bottom selector window."
-  :type 'number
+(defcustom deslop-selector-window-min-height 4
+  "Minimum total height of the bottom selector window."
+  :type 'integer
   :group 'deslop)
 
 (defvar deslop-selector--last-selection nil
@@ -54,6 +54,10 @@
 
 (defvar-local deslop-selector--window nil
   "Window displaying the current selector buffer.")
+
+(defun deslop-selector--fit-window (window)
+  "Fit WINDOW to the selector contents."
+  (fit-window-to-buffer window nil deslop-selector-window-min-height))
 
 (defun deslop-selector--provider-name ()
   "Return the selected provider name."
@@ -134,12 +138,13 @@
   (let* ((provider (deslop-selector--provider-name))
          (profile (deslop-selector--provider-profile))
          (probe (plist-get profile :model-discovery-function))
+         (generic-probe (and (null probe)
+                             (deslop-provider--models-url profile)))
          (selector-buffer (current-buffer)))
-    (when (functionp probe)
+    (when (or (functionp probe) generic-probe)
       (setq deslop-selector--model-state :loading)
       (deslop-selector--render)
-      (setq deslop-selector--probe-cancel
-            (funcall probe
+      (let ((callback
              (lambda (models error)
                (when (buffer-live-p selector-buffer)
                  (with-current-buffer selector-buffer
@@ -150,7 +155,11 @@
                        (deslop-selector--set-models
                         models (deslop-selector--model-name))
                        (setq deslop-selector--model-state :ready))
-                     (deslop-selector--render))))))))))
+                     (deslop-selector--render)))))))
+        (setq deslop-selector--probe-cancel
+              (if (functionp probe)
+                  (funcall probe callback)
+                (deslop-provider-probe-models profile callback)))))))
 
 (defun deslop-selector--set-provider (index)
   "Select provider at INDEX and start dynamic model discovery if needed."
@@ -364,11 +373,12 @@
            (display-buffer
             buffer
               `((display-buffer-at-bottom)
-                (window-height . ,deslop-selector-window-height)
-                (window-min-height . 18)))))
+                (window-height . deslop-selector--fit-window)
+                (window-min-height . ,deslop-selector-window-min-height)))))
       (with-current-buffer buffer
         (setq deslop-selector--window window))
       (when (window-live-p window)
+        (deslop-selector--fit-window window)
         (select-window window)))))
 
 (provide 'deslop-selector)
