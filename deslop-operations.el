@@ -106,6 +106,11 @@ document and make every edit needed to fulfill the user's task. When the task
 applies at multiple positions, return a separate edit for each position rather
 than placing all generated text together in one location.
 
+Choose semantically appropriate code boundaries, normally line starts, line
+ends, or positions adjacent to complete syntactic forms. Do not place an edit
+inside an identifier, keyword, string, or expression unless the user's task
+explicitly requires an inline change.
+
 ### Output Format
 Return ONLY one JSON object with this exact top-level shape:
 {\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"replacement\"}]}
@@ -123,6 +128,11 @@ list. Inspect the entire document and find every position where the user's task
 calls for an insertion. Multiple insertions at different positions are
 expected when appropriate; do not put all inserted text at one arbitrary
 location.
+
+Choose semantically appropriate code boundaries, normally line starts, line
+ends, or positions adjacent to complete syntactic forms. Do not place an
+insertion inside an identifier, keyword, string, or expression unless the
+user's task explicitly requires an inline insertion.
 
 ### Output Format
 Return ONLY one JSON object with this exact top-level shape:
@@ -735,14 +745,12 @@ When INSERT-ONLY is non-nil, reject replacements in RESULT."
 
 (defun deslop-write-anywhere (&optional instruction)
   "Queue a request for the LLM to write multiple edits anywhere in the buffer."
-  (interactive (list (read-string "What should be changed? "
-                                  deslop-write-anywhere-instruction)))
+  (interactive (list (read-string "Prompt: ")))
   (deslop--enqueue-job 'write-anywhere instruction))
 
 (defun deslop-insert-anywhere (&optional instruction)
   "Queue a request for the LLM to insert text at multiple buffer positions."
-  (interactive (list (read-string "What should be inserted, and where? "
-                                  deslop-insert-anywhere-instruction)))
+  (interactive (list (read-string "Prompt: ")))
   (deslop--enqueue-job 'insert-anywhere instruction))
 
 (defun deslop-improve-at-cursor (instruction)

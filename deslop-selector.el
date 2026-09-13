@@ -85,34 +85,32 @@
 
 (defun deslop-selector--render ()
   "Render the current selector state."
-  (let ((provider (deslop-selector--display-provider))
-        (model (deslop-selector--model-name)))
+  (let* ((provider (deslop-selector--display-provider))
+         (model (deslop-selector--model-name))
+         (model-status
+          (pcase deslop-selector--model-state
+            (:loading " [loading]")
+            (:error " [probe failed]")
+            (_ ""))))
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert "deslop provider/model selector | "
-              (format "Provider: %s (%d/%d)\n"
-                      provider
-                      (1+ deslop-selector--provider-index)
-                      (length deslop-selector--providers)))
-      (insert (format "Model: %s"
-                      (or model "(none available)")))
-      (when (> (length deslop-selector--models) 1)
-        (insert (format " (%d/%d)"
-                        (1+ deslop-selector--model-index)
-                        (length deslop-selector--models))))
-      (insert (format " | Concurrency: %d | Parallel: %s\n"
-                      (deslop-selector--provider-concurrency)
+      (insert (format "Provider:     %-24s(p/n)\n" provider))
+      (insert (format "Model:        %-24s(C-n / C-p)\n"
+                      (concat (or model "(none available)") model-status)))
+      (insert (format "Concurrency:  %-24d(c/C)\n"
+                      (deslop-selector--provider-concurrency)))
+      (insert (format "Parallel:     %-24s(P)\n\n"
                       (if (deslop-selector--provider-parallel-p)
                           "on"
                         "off")))
-      (pcase deslop-selector--model-state
-        (:loading (insert "Models: loading...\n"))
-        (:error (insert "Models: probe failed; using configured model.\n")))
-      (insert "Navigation: p provider | C-n/C-p model\n"
-              "Settings:   c/C concurrency | P parallel\n"
-              "Actions:    i insert | w write anywhere | I insert anywhere\n"
-              "            m improve | s summarize\n"
-              "Finish:     RET confirm | q/ESC close\n")
+      (insert "i  - insert\n"
+              "I  - insert anywhere\n"
+              "w  - write anywhere\n"
+              "m  - improve\n"
+              "s  - summarize\n\n"
+              "RET       - approve all LLM changes\n"
+              "BACKSPACE - reject all LLM changes\n"
+              "q/ESC     - close\n")
       (goto-char (point-min)))))
 
 (defun deslop-selector--cancel-probe ()
@@ -174,6 +172,11 @@
   (interactive)
   (deslop-selector--set-provider (1+ deslop-selector--provider-index)))
 
+(defun deslop-selector-previous-provider ()
+  "Select the previous configured provider."
+  (interactive)
+  (deslop-selector--set-provider (1- deslop-selector--provider-index)))
+
 (defun deslop-selector--move-model (delta)
   "Move the selected model by DELTA."
   (if (null deslop-selector--models)
@@ -209,8 +212,27 @@
   (let* ((provider (deslop-selector--provider-name))
          (enabled (not (deslop-selector--provider-parallel-p))))
     (deslop-provider-set-runtime-setting provider :parallel enabled)
-    (deslop-selector--render)
-    (deslop-process-next)))
+     (deslop-selector--render)
+     (deslop-process-next)))
+
+(defun deslop-selector--review-source (function)
+  "Call review FUNCTION for the selector's source buffer and close selector."
+  (let ((source deslop-selector--source-buffer))
+    (unless (buffer-live-p source)
+      (user-error "Source buffer no longer exists"))
+    (with-current-buffer source
+      (funcall function source))
+    (deslop-selector-close)))
+
+(defun deslop-selector-approve-source-output ()
+  "Approve all generated output in the selector's source buffer."
+  (interactive)
+  (deslop-selector--review-source #'deslop-approve-all-output))
+
+(defun deslop-selector-reject-source-output ()
+  "Reject all generated output in the selector's source buffer."
+  (interactive)
+  (deslop-selector--review-source #'deslop-reject-all-output))
 
 (defun deslop-selector--save-selection ()
   "Save the current provider/model choice."
@@ -264,16 +286,14 @@
   (interactive)
   (deslop-selector--run
    'write-anywhere
-   (read-string "What should be changed? "
-                deslop-write-anywhere-instruction)))
+   (read-string "Prompt: ")))
 
 (defun deslop-selector-insert-anywhere ()
   "Run a structured multi-insertion using the current selector choice."
   (interactive)
   (deslop-selector--run
    'insert-anywhere
-   (read-string "What should be inserted, and where? "
-                deslop-insert-anywhere-instruction)))
+   (read-string "Prompt: ")))
 
 (defun deslop-selector-improve ()
   "Prompt for an improvement and run it using the current choice."
@@ -295,6 +315,7 @@
 (defun deslop-selector--install-keybindings ()
   "Install selector bindings, including when this file is reloaded."
   (define-key deslop-selector-mode-map (kbd "p") #'deslop-selector-next-provider)
+  (define-key deslop-selector-mode-map (kbd "n") #'deslop-selector-previous-provider)
   (define-key deslop-selector-mode-map (kbd "C-n") #'deslop-selector-next-model)
   (define-key deslop-selector-mode-map (kbd "C-p") #'deslop-selector-previous-model)
   (define-key deslop-selector-mode-map (kbd "c") #'deslop-selector-set-concurrency)
@@ -305,7 +326,9 @@
   (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
   (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
   (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
-  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
+  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-approve-source-output)
+  (define-key deslop-selector-mode-map (kbd "DEL") #'deslop-selector-reject-source-output)
+  (define-key deslop-selector-mode-map (kbd "<backspace>") #'deslop-selector-reject-source-output)
   (define-key deslop-selector-mode-map (kbd "q") #'deslop-selector-close)
   (define-key deslop-selector-mode-map (kbd "ESC") #'deslop-selector-close))
 
@@ -340,7 +363,7 @@
             buffer
               `((display-buffer-at-bottom)
                 (window-height . ,deslop-selector-window-height)
-                (window-min-height . 8)))))
+                (window-min-height . 16)))))
       (with-current-buffer buffer
         (setq deslop-selector--window window))
       (when (window-live-p window)

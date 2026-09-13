@@ -283,42 +283,75 @@ the inserted characters are tinted using the review overlay's face."
     (message "deslop: approved %d generated region%s"
              (length overlays) (if (= (length overlays) 1) "" "s"))))
 
+(defun deslop-review--reject-overlays (overlays)
+  "Reject every review overlay in OVERLAYS atomically."
+  (setq overlays
+        (sort overlays
+              (lambda (left right)
+                (> (or (overlay-start left) 0)
+                   (or (overlay-start right) 0)))))
+  (let ((buffer (overlay-buffer (car overlays)))
+        (inhibit-read-only nil))
+    (unless (cl-every (lambda (overlay)
+                        (eq (overlay-buffer overlay) buffer))
+                      overlays)
+      (error "Cannot reject reviews from multiple buffers at once"))
+    (with-current-buffer buffer
+      (barf-if-buffer-read-only)
+      (save-restriction
+        (widen)
+        (atomic-change-group
+          (save-excursion
+            (dolist (overlay overlays)
+              (unless (deslop-review-overlay-p overlay)
+                (error "Review overlay is no longer live"))
+              (let ((start (overlay-start overlay))
+                    (end (overlay-end overlay))
+                    (original
+                     (or (overlay-get overlay 'deslop-original-text) "")))
+                (delete-region start end)
+                (goto-char start)
+                (insert original))))))))
+  (dolist (overlay overlays)
+    (deslop-review-delete-overlay overlay))
+  overlays)
+
 (defun deslop-reject-output ()
   "Reject generated output touching point or active region."
   (interactive)
   (let ((overlays (deslop-review--overlays-in-target)))
     (unless overlays
       (user-error "No deslop output awaiting review here"))
-    (setq overlays
-          (sort overlays
-                (lambda (left right)
-                  (> (or (overlay-start left) 0)
-                     (or (overlay-start right) 0)))))
-    (let ((buffer (overlay-buffer (car overlays))))
-      (unless (cl-every (lambda (overlay)
-                          (eq (overlay-buffer overlay) buffer))
-                        overlays)
-        (error "Cannot reject reviews from multiple buffers at once"))
-      (with-current-buffer buffer
-        (barf-if-buffer-read-only)
-        (save-restriction
-          (widen)
-          (atomic-change-group
-            (save-excursion
-              (dolist (overlay overlays)
-                (unless (deslop-review-overlay-p overlay)
-                  (error "Review overlay is no longer live"))
-                (let ((start (overlay-start overlay))
-                      (end (overlay-end overlay))
-                      (original
-                       (or (overlay-get overlay 'deslop-original-text) "")))
-                  (delete-region start end)
-                  (goto-char start)
-                  (insert original))))))))
-    (dolist (overlay overlays)
-      (deslop-review-delete-overlay overlay))
+    (deslop-review--reject-overlays overlays)
     (message "deslop: rejected %d generated region%s"
              (length overlays) (if (= (length overlays) 1) "" "s"))))
+
+(defun deslop-approve-all-output (&optional buffer)
+  "Approve every generated review overlay in BUFFER."
+  (interactive)
+  (let ((buffer (or buffer (current-buffer))))
+    (unless (buffer-live-p buffer)
+      (user-error "Source buffer no longer exists"))
+    (let ((overlays (with-current-buffer buffer
+                      (deslop-review--overlays-in-buffer))))
+      (unless overlays
+        (user-error "No deslop output awaiting approval in this buffer"))
+      (dolist (overlay overlays)
+        (deslop-review-delete-overlay overlay))
+      (message "deslop: approved all %d generated regions" (length overlays)))))
+
+(defun deslop-reject-all-output (&optional buffer)
+  "Reject every generated review overlay in BUFFER."
+  (interactive)
+  (let ((buffer (or buffer (current-buffer))))
+    (unless (buffer-live-p buffer)
+      (user-error "Source buffer no longer exists"))
+    (let ((overlays (with-current-buffer buffer
+                      (deslop-review--overlays-in-buffer))))
+      (unless overlays
+        (user-error "No deslop output awaiting rejection in this buffer"))
+      (deslop-review--reject-overlays overlays)
+      (message "deslop: rejected all %d generated regions" (length overlays)))))
 
 (provide 'deslop-review)
 

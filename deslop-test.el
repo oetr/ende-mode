@@ -511,6 +511,26 @@ process for cancellation tests."
       (should (eq (get-text-property 1 'deslop-test-property) 'original))
       (should-not (deslop-review--overlays-in-buffer)))))
 
+(ert-deftest deslop-test/mass-review-actions-cover-the-whole-buffer ()
+  (deslop-test--reset)
+  (deslop-test--with-buffer "XY"
+    (let ((first (deslop-review-create-overlay
+                  (current-buffer) 1 2 nil nil "A"))
+          (second (deslop-review-create-overlay
+                   (current-buffer) 2 3 nil nil "B")))
+      (should (= (length (deslop-review--overlays-in-buffer)) 2))
+      (deslop-reject-all-output)
+      (should (string= (buffer-string) "AB"))
+      (should-not (deslop-review--overlays-in-buffer))
+      (should-not (deslop-review-overlay-p first))
+      (should-not (deslop-review-overlay-p second))
+      (deslop-review-create-overlay
+       (current-buffer) 1 2 nil nil "A")
+      (deslop-review-create-overlay
+       (current-buffer) 2 3 nil nil "B")
+      (deslop-approve-all-output)
+      (should-not (deslop-review--overlays-in-buffer)))))
+
 (ert-deftest deslop-test/write-anywhere-creates-independent-reviews ()
   (deslop-test--reset)
   (let* ((response
@@ -1354,19 +1374,21 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             deslop-selector--model-index 0)
       (cl-letf (((symbol-function 'read-number)
                  (lambda (&rest _) 4)))
-        (deslop-selector-set-concurrency))
+       (deslop-selector-set-concurrency))
       (should (= (deslop-provider-max-concurrency
                   (deslop-provider-profile 'remote))
                  4))
       (should-not (deslop-selector--provider-parallel-p))
-       (deslop-selector-toggle-parallel)
-       (should (deslop-selector--provider-parallel-p))
-       (deslop-selector--render)
-       (dolist (key '("Navigation:" "Settings:" "Actions:" "Finish:"
-                      "i insert" "w write anywhere" "I insert anywhere"
-                      "m improve" "s summarize"))
-         (should (string-match-p (regexp-quote key) (buffer-string))))
-       (should (<= (count-lines (point-min) (point-max)) 8)))))
+      (deslop-selector-toggle-parallel)
+      (should (deslop-selector--provider-parallel-p))
+      (deslop-selector--render)
+      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
+                     "i  - insert" "I  - insert anywhere"
+                     "w  - write anywhere" "m  - improve" "s  - summarize"
+                     "RET       - approve all LLM changes"
+                     "BACKSPACE - reject all LLM changes"))
+        (should (string-match-p (regexp-quote key) (buffer-string))))
+      (should (= (count-lines (point-min) (point-max)) 14)))))
 
 (ert-deftest deslop-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key deslop-selector-mode-map (kbd "c")))
@@ -1386,6 +1408,14 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         #'deslop-selector-set-concurrency))
             (should (eq (key-binding (kbd "P"))
                         #'deslop-selector-toggle-parallel))
+            (should (eq (key-binding (kbd "p"))
+                        #'deslop-selector-next-provider))
+            (should (eq (key-binding (kbd "n"))
+                        #'deslop-selector-previous-provider))
+            (should (eq (key-binding (kbd "RET"))
+                        #'deslop-selector-approve-source-output))
+            (should (eq (key-binding (kbd "<backspace>"))
+                        #'deslop-selector-reject-source-output))
             (should (eq (key-binding (kbd "w"))
                         #'deslop-selector-write-anywhere))
             (should (eq (key-binding (kbd "I"))
