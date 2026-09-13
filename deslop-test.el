@@ -161,14 +161,238 @@ process for cancellation tests."
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
   (deslop-provider-clear-runtime-settings)
-  (clrhash deslop-history--entries)
-  (when (buffer-live-p deslop-history--buffer-object)
+   (clrhash deslop-history--entries)
+   (deslop-tools-clear-change-sets)
+   (setq deslop-tools--next-change-set-id 0)
+   (when (buffer-live-p deslop-history--buffer-object)
     (kill-buffer deslop-history--buffer-object))
   (setq deslop-history--buffer-object nil)
    (when (buffer-live-p deslop-summary--buffer-object)
      (kill-buffer deslop-summary--buffer-object))
    (setq deslop-summary--buffer-object nil)
-  (deslop-ui-clear-all))
+   (deslop-ui-clear-all))
+
+(defun deslop-test--tool-result (name arguments root)
+  "Invoke tool NAME and return its successful result in ROOT."
+  (let ((call (deslop-tool-call name arguments root)))
+    (should (plist-get call :ok))
+    (plist-get call :result)))
+
+(ert-deftest deslop-test/project-tools-expose-json-definitions ()
+  (should (= (length (deslop-tool-definitions)) 8))
+  (should-not (deslop-tool-read-only
+               (deslop-tool--find "edit_source")))
+  (should (string-match-p
+           "edit_source"
+           (json-encode (deslop-tool-definitions)))))
+
+(ert-deftest deslop-test/project-tools-enforce-scope-and-report-file-info ()
+  (let* ((root (make-temp-file "deslop-tools-project-" t))
+         (source (expand-file-name "src/main.el" root))
+         (secret (expand-file-name ".env" root))
+         (outside (make-temp-file "deslop-tools-outside-")))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source
+            (insert "one\ntwo\nthree\n"))
+          (with-temp-file secret
+            (insert "TOKEN=secret\n"))
+          (let ((deslop-project-root-directory root))
+            (let* ((info (deslop-test--tool-result
+                          "file_info" '(("path" . "src/main.el")) root))
+                   (files (deslop-test--tool-result
+                           "list_project_files" nil root)))
+              (should (= (plist-get info :line_count) 3))
+              (should (= (length (plist-get files :files)) 1))
+              (should (string= (plist-get
+                                (car (plist-get files :files)) :path)
+                               "src/main.el")))
+            (let ((failure
+                   (deslop-tool-call
+                    "read_file" '(("path" . "../outside")) root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "outside the project"
+                                      (plist-get failure :error))))))
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-exists-p outside)
+        (delete-file outside)))))
+
+(ert-deftest deslop-test/project-tools-prefer-unsaved-visiting-buffers ()
+  (let* ((root (make-temp-file "deslop-tools-buffer-project-" t))
+         (path (expand-file-name "main.el" root))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert "disk\nsecond\n"))
+          (setq buffer (find-file-noselect path))
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (insert "unsaved\n")
+            (set-buffer-modified-p t))
+          (let* ((deslop-project-root-directory root)
+                 (listed (deslop-test--tool-result
+                          "list_project_buffers" nil root))
+                 (record (car (plist-get listed :buffers)))
+                 (buffer-id (plist-get record :buffer_id))
+                 (read (deslop-test--tool-result
+                        "read_buffer"
+                        (list (cons "buffer_id" buffer-id)
+                              (cons "start_line" 1)
+                              (cons "line_count" 1))
+                        root)))
+            (should (string= (plist-get read :source_kind) "buffer"))
+            (should (string= (plist-get read :content) "unsaved\n"))
+            (should (string= (plist-get read :path) "main.el"))))
+      (when (buffer-live-p buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest deslop-test/project-tools-read-search-and-cap-results ()
+  (let* ((root (make-temp-file "deslop-tools-search-project-" t))
+         (first (expand-file-name "first.txt" root))
+         (second (expand-file-name "second.txt" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file first
+            (insert "needle one\nkeep\nneedle two\n"))
+          (with-temp-file second
+            (insert "needle three\n"))
+          (let* ((deslop-project-root-directory root)
+                 (read (deslop-test--tool-result
+                        "read_file"
+                        '(("path" . "first.txt")
+                          ("start_line" . 2)
+                          ("line_count" . 1))
+                        root))
+                 (search (deslop-test--tool-result
+                          "search_project"
+                          '(("regexp" . "needle")
+                            ("max_results" . 2)
+                            ("context_before" . 1))
+                          root)))
+            (should (= (plist-get read :start_line) 2))
+            (should (string= (plist-get read :content) "keep\n"))
+            (should (= (length (plist-get search :matches)) 2))
+            (should (plist-get search :truncated))
+            (should (string-match-p "needle"
+                                    (plist-get
+                                     (car (plist-get search :matches))
+                                     :context)))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest deslop-test/project-tools-edit-requires-digest-and-is-reviewable ()
+  (let* ((root (make-temp-file "deslop-tools-edit-project-" t))
+         (path (expand-file-name "main.el" root))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert "hello world\n"))
+          (let* ((deslop-project-root-directory root)
+                 (info (deslop-test--tool-result
+                        "file_info" '(("path" . "main.el")) root))
+                 (proposal (deslop-test--tool-result
+                            "edit_source"
+                            (list
+                             (cons "path" "main.el")
+                             (cons "base_digest" (plist-get info :digest))
+                             (cons "edits"
+                                   (list
+                                    (list (cons "start" 6)
+                                          (cons "end" 11)
+                                          (cons "expected" "world")
+                                          (cons "replacement" "Emacs")))))
+                            root))
+                 (change-set-id (plist-get proposal :change_set_id)))
+            (should (string= (plist-get proposal :status) "pending"))
+            (should (string= (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "hello world\n"))
+            (deslop-tools-apply-change-set change-set-id)
+            (should (string= (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "hello Emacs\n")))
+          (setq buffer (find-file-noselect path))
+          (let* ((deslop-project-root-directory root)
+                 (listed (deslop-test--tool-result
+                          "list_project_buffers" nil root))
+                 (buffer-id (plist-get
+                             (car (plist-get listed :buffers)) :buffer_id))
+                 (info (deslop-test--tool-result
+                        "file_info" '(("path" . "main.el")) root))
+                 (proposal (deslop-test--tool-result
+                            "edit_source"
+                            (list
+                             (cons "buffer_id" buffer-id)
+                             (cons "base_digest" (plist-get info :digest))
+                             (cons "edits"
+                                   (list
+                                    (list (cons "start" 6)
+                                          (cons "end" 11)
+                                          (cons "expected" "Emacs")
+                                          (cons "replacement" "Lisp")))))
+                            root)))
+            (deslop-tools-apply-change-set
+             (plist-get proposal :change_set_id))
+            (with-current-buffer buffer
+              (should (string= (buffer-string) "hello Lisp\n"))
+              (should (cl-some #'deslop-review-overlay-p
+                               (overlays-in (point-min) (point-max)))))))
+          (let ((failure
+                 (deslop-tool-call
+                  "edit_source"
+                  '(("path" . "main.el")
+                    ("base_digest" . "stale")
+                    ("edits" . ((("start" . 0)
+                                  ("end" . 5)
+                                  ("expected" . "hello")
+                                  ("replacement" . "bye")))))
+                  root)))
+            (should-not (plist-get failure :ok)))
+      (when (buffer-live-p buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest deslop-test/project-tools-can-directly-write-closed-files ()
+  (let* ((root (make-temp-file "deslop-tools-direct-project-" t))
+         (path (expand-file-name "main.el" root)))
+    (unwind-protect
+        (progn
+          (deslop-tools-clear-change-sets)
+          (with-temp-file path
+            (insert "old\n"))
+          (let* ((deslop-tools-direct-write t)
+                 (info (deslop-test--tool-result
+                        "file_info" '(("path" . "main.el")) root))
+                 (result (deslop-test--tool-result
+                          "edit_source"
+                          (list
+                           (cons "path" "main.el")
+                           (cons "base_digest" (plist-get info :digest))
+                           (cons "edits"
+                                 (list
+                                  (list (cons "start" 0)
+                                        (cons "end" 3)
+                                        (cons "expected" "old")
+                                        (cons "replacement" "new")))))
+                          root)))
+            (should (string= (plist-get result :status) "applied"))
+            (should (string= (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "new\n"))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (defmacro deslop-test--with-buffer (contents &rest body)
   "Evaluate BODY in a temporary buffer containing CONTENTS."

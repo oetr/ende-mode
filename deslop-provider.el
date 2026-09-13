@@ -31,7 +31,7 @@
   :type 'string
   :group 'deslop)
 
-(defcustom deslop-provider-temperature 0.2
+(defcustom deslop-provider-temperature 0.8
   "Sampling temperature for LLM requests."
   :type 'number
   :group 'deslop)
