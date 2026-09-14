@@ -4,7 +4,7 @@
 
 I want to write a minor Emacs mode, where I can trigger communication with a local LLM that does following things:
 
-# Insert at cursor, aka: enslop-insert-at-cursor
+# Insert at cursor, aka: deslop-insert-at-cursor
 - user wants LLM output where his cursor currently is.
    - If the cursor does not select any part of the buffer, use the whole buffer as context (before and after the cursor, marking the part in a way that the LLM understands where to add things).
    - If only some of the buffer is selected, only use that part as context.
@@ -13,23 +13,23 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
      - If the cursor is in the beginning, then insert before the highlighted text and add a newline; otherwise insert a newline at the end of it and right after, the LLM text.
    - Highlighted text will not be mutated in this operation.
 
-# enslop-improve-at-cursor
+# deslop-improve-at-cursor
 - Improve the highlighted content. If no content is highlighted, improve the whole buffer.
   - User is prompted to explain how the text should be improved.
   - For that, the user cursor is moved into a new window (if it's not open already), where the user can write his prompt.
   - The highlighted content should be improved by the LLM
   - Here, the LLM decides whether to keep the highlighted region, or even the whole buffer
 
-# enslop-summarize
+# deslop-summarize
 - summarize the user-highlighted region and open the summary in another buffer.
 
 # UX-Look and Feel
 - The requests are queued, so I can make several requests one after another and go to sleep.
   - The interesting part here is to figure out what to do when the same buffers/regions are used multiple times in the queue.
-    - e.g. enslop-insert-at-cursor is queued three times in a file
+    - e.g. deslop-insert-at-cursor is queued three times in a file
       - Here it's easy---each highlighted regions are processed one after the other
-      - If they are disjoint (e.g. user does not highlights anything, and just puts his cursor at three different poitns in the buffer and calls enslop-insert-at-cursor), each cursor is processed one after another, of course accounting for the previous
-      - If the operation enslop-improve-at-cursor is used together with enslop-insert-at-cursor, especially in that order, there is no way to say where the cursor is in enslop-insert-at-cursor when using it on an improved region---should it still run?
+      - If they are disjoint (e.g. user does not highlights anything, and just puts his cursor at three different poitns in the buffer and calls deslop-insert-at-cursor), each cursor is processed one after another, of course accounting for the previous
+      - If the operation deslop-improve-at-cursor is used together with deslop-insert-at-cursor, especially in that order, there is no way to say where the cursor is in deslop-insert-at-cursor when using it on an improved region---should it still run?
       - We could make it nice and best effort, but we should specify what it means
       - Or we could further specify what happens and consider all different scenarios, where future regions happen are inside improved or inserted regions.
 
