@@ -743,7 +743,9 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/reject-restores-properties-and-saving-remains-allowed ()
   (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("new"))))
+  (let ((deslop-llm-function (deslop-test--fake-llm '("new")))
+        (kill-ring nil)
+        (kill-ring-yank-pointer nil))
     (deslop-test--with-buffer "old"
       (add-text-properties 1 4 '(deslop-test-property original))
       (deslop-test--select 1 4 4)
@@ -752,28 +754,32 @@ process for cancellation tests."
       (goto-char 2)
       (deslop-reject-output)
       (should (string= (buffer-string) "old"))
+      (should (equal kill-ring '("new")))
       (should (eq (get-text-property 1 'deslop-test-property) 'original))
       (should-not (deslop-review--overlays-in-buffer)))))
 
 (ert-deftest deslop-test/mass-review-actions-cover-the-whole-buffer ()
   (deslop-test--reset)
-  (deslop-test--with-buffer "XY"
-    (let ((first (deslop-review-create-overlay
-                  (current-buffer) 1 2 nil nil "A"))
-          (second (deslop-review-create-overlay
-                   (current-buffer) 2 3 nil nil "B")))
-      (should (= (length (deslop-review--overlays-in-buffer)) 2))
-      (deslop-reject-all-output)
-      (should (string= (buffer-string) "AB"))
-      (should-not (deslop-review--overlays-in-buffer))
-      (should-not (deslop-review-overlay-p first))
-      (should-not (deslop-review-overlay-p second))
-      (deslop-review-create-overlay
-       (current-buffer) 1 2 nil nil "A")
-      (deslop-review-create-overlay
-       (current-buffer) 2 3 nil nil "B")
-      (deslop-approve-all-output)
-      (should-not (deslop-review--overlays-in-buffer)))))
+  (let ((kill-ring nil)
+        (kill-ring-yank-pointer nil))
+    (deslop-test--with-buffer "XY"
+      (let ((first (deslop-review-create-overlay
+                    (current-buffer) 1 2 nil nil "A"))
+            (second (deslop-review-create-overlay
+                     (current-buffer) 2 3 nil nil "B")))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (deslop-reject-all-output)
+        (should (string= (buffer-string) "AB"))
+        (should (equal kill-ring '("X" "Y")))
+        (should-not (deslop-review--overlays-in-buffer))
+        (should-not (deslop-review-overlay-p first))
+        (should-not (deslop-review-overlay-p second))
+        (deslop-review-create-overlay
+         (current-buffer) 1 2 nil nil "A")
+        (deslop-review-create-overlay
+         (current-buffer) 2 3 nil nil "B")
+        (deslop-approve-all-output)
+        (should-not (deslop-review--overlays-in-buffer))))))
 
 (ert-deftest deslop-test/write-anywhere-creates-independent-reviews ()
   (deslop-test--reset)

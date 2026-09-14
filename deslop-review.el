@@ -273,14 +273,16 @@ the inserted characters are tinted using the review overlay's face."
              (length overlays) (if (= (length overlays) 1) "" "s"))))
 
 (defun deslop-review--reject-overlays (overlays)
-  "Reject every review overlay in OVERLAYS atomically."
+  "Reject every review overlay in OVERLAYS atomically.
+Add each rejected generated region separately to the kill ring."
   (setq overlays
         (sort overlays
               (lambda (left right)
                 (> (or (overlay-start left) 0)
                    (or (overlay-start right) 0)))))
   (let ((buffer (overlay-buffer (car overlays)))
-        (inhibit-read-only nil))
+        (inhibit-read-only nil)
+        (rejected-texts nil))
     (unless (cl-every (lambda (overlay)
                         (eq (overlay-buffer overlay) buffer))
                       overlays)
@@ -296,14 +298,19 @@ the inserted characters are tinted using the review overlay's face."
                 (error "Review overlay is no longer live"))
               (let ((start (overlay-start overlay))
                     (end (overlay-end overlay))
+                    (rejected (filter-buffer-substring
+                               (overlay-start overlay) (overlay-end overlay)))
                     (original
                      (or (overlay-get overlay 'deslop-original-text) "")))
+                (push rejected rejected-texts)
                 (delete-region start end)
                 (goto-char start)
-                (insert original))))))))
-  (dolist (overlay overlays)
-    (deslop-review-delete-overlay overlay))
-  overlays)
+                (insert original)))))))
+    (dolist (overlay overlays)
+      (deslop-review-delete-overlay overlay))
+    (dolist (text (nreverse rejected-texts))
+      (kill-new text))
+    overlays))
 
 (defun deslop-reject-output ()
   "Reject generated output touching point or active region."
