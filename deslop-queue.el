@@ -270,12 +270,15 @@ Return the newly created `deslop-job'."
                                (plist-get result :content))))))
   (deslop--job-settle job 'completed result nil))
 
-(defun deslop-job-fail (job error)
-  "Fail JOB with ERROR and advance the queue."
+(defun deslop-job-fail (job error &optional result)
+  "Fail JOB with ERROR and advance the queue.
+When RESULT is non-nil, retain it for history and job inspection."
   (when (deslop-job-current-p job)
     (let ((id (deslop-job-id job)))
-      (deslop-job-emit-event job (list :type :error :error error))
-      (deslop--job-settle job 'failed nil error)
+      (deslop-job-emit-event
+       job (append (list :type :error :error error)
+                   (when result (list :result result))))
+      (deslop--job-settle job 'failed result error)
       (condition-case nil
           (message "deslop: job %d failed: %s"
                    id (deslop-error-display-message error))

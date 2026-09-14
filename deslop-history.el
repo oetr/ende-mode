@@ -240,9 +240,9 @@
         (format "%s" value))
     (error (format "%S" value))))
 
-(defun deslop-history--insert-anywhere-errors-string (errors)
-  "Format skipped INSERT-ANYWHERE ERRORS for a history entry."
-  (deslop-edit-format-insertion-failures errors))
+(defun deslop-history--skipped-edit-errors-string (errors)
+  "Format skipped structured-edit ERRORS for a history entry."
+  (deslop-edit-format-failures errors))
 
 (defun deslop-history--usage-string (event)
   "Return readable usage information from normalized USAGE EVENT."
@@ -275,9 +275,14 @@
            (finish-reason (or (deslop-history--entry-finish-reason entry)
                               (and (listp metrics-result)
                                    (plist-get metrics-result :finish-reason))))
-           (insert-anywhere-errors
-            (and (listp result)
-                 (plist-get result :insert-anywhere-errors)))
+           (partial-result (deslop-history--entry-partial-result entry))
+           (skipped-edit-errors
+            (or (and (listp result)
+                     (or (plist-get result :write-anywhere-errors)
+                         (plist-get result :insert-anywhere-errors)))
+                (and (listp partial-result)
+                     (or (plist-get partial-result :write-anywhere-errors)
+                         (plist-get partial-result :insert-anywhere-errors)))))
            (metadata (deslop-history--entry-metadata entry))
            (status (deslop-history--entry-status entry))
            (buffer (deslop-history--buffer)))
@@ -297,11 +302,11 @@
                "Prompt" (deslop-history--entry-prompt entry))
               (deslop-history--insert-section "Thinking" thinking)
               (deslop-history--insert-section "Output" content)
-              (when insert-anywhere-errors
+              (when skipped-edit-errors
                 (deslop-history--insert-section
                  "Skipped edits"
-                 (deslop-history--insert-anywhere-errors-string
-                  insert-anywhere-errors)))
+                 (deslop-history--skipped-edit-errors-string
+                  skipped-edit-errors)))
               (when metadata
                 (deslop-history--insert-section
                  "Provider"

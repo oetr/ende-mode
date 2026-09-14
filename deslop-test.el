@@ -784,13 +784,13 @@ process for cancellation tests."
 (ert-deftest deslop-test/write-anywhere-creates-independent-reviews ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"},{\"start\":4,\"end\":7,\"expected\":\"two\",\"text\":\"TWO\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"two\",\"position\":\"replace\",\"text\":\"TWO\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)))))
     (deslop-test--with-buffer "one two"
       (let ((job (deslop-write-anywhere)))
         (should (eq (deslop-job-state job) 'completed))
-        (should (string= (buffer-string) "Aone TWO"))
+         (should (string= (buffer-string) "Aone TWO"))
         (should-not buffer-read-only)
         (let ((reviews (deslop-review--overlays-in-buffer)))
           (should (= (length reviews) 2))
@@ -800,7 +800,57 @@ process for cancellation tests."
           (let ((remaining (car (deslop-review--overlays-in-buffer))))
             (goto-char (overlay-start remaining))
             (deslop-reject-output))
-          (should (string= (buffer-string) "Aone two")))))))
+           (should (string= (buffer-string) "Aone two")))))))
+
+(ert-deftest deslop-test/write-anywhere-applies-valid-edits-around-invalid-ones ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"text\":\"ONE\"},{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"},{\"anchor\":\"two\",\"position\":\"after\",\"text\":\"!\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "one two"
+      (let ((job (deslop-write-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "ONE two!"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (with-current-buffer deslop-history--buffer-object
+          (let ((history (buffer-string)))
+            (should (string-match-p "Skipped edits" history))
+            (should (string-match-p "Edit 2: anchor was not found" history))
+            (should (string-match-p
+                     (regexp-quote "{\"anchor\":\"missing\"")
+                     history))))))))
+
+(ert-deftest deslop-test/write-anywhere-supports-occurrence-and-all-anchors ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"all\":true,\"text\":\"ONE\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "one\none"
+      (let ((job (deslop-write-anywhere)))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "ONE\nONE"))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+
+(ert-deftest deslop-test/write-anywhere-retains-all-skipped-edits-on-failure ()
+  (deslop-test--reset)
+  (let* ((response
+          "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
+         (deslop-llm-function
+          (deslop-test--fake-llm (list (list :content response)))))
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-write-anywhere)))
+        (should (eq (deslop-job-state job) 'failed))
+        (should (string= (buffer-string) "test"))
+        (should-not (deslop-review--overlays-in-buffer))
+        (with-current-buffer deslop-history--buffer-object
+          (let ((history (buffer-string)))
+            (should (string-match-p "Skipped edits" history))
+            (should (string-match-p "Edit 1: anchor was not found" history))
+            (should (string-match-p
+                     (regexp-quote "{\"anchor\":\"missing\"")
+                     history))))))))
 
 (ert-deftest deslop-test/insert-anywhere-rejects-character-offsets ()
   (deslop-test--reset)
@@ -879,26 +929,25 @@ process for cancellation tests."
         (should (string= (buffer-string) "AoneB\noneB"))
         (should (= (length (deslop-review--overlays-in-buffer)) 3))))))
 
-(ert-deftest deslop-test/write-anywhere-freezes-buffer-and-blocks-writes ()
+(ert-deftest deslop-test/write-anywhere-leaves-buffer-writable-while-running ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"}]}" )
+         "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"replace\",\"text\":\"TEST\"}]}" )
          (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response) "later") t)))
+          (deslop-test--fake-llm (list (list :content response)) t)))
     (deslop-test--with-buffer "test"
       (let ((job (deslop-write-anywhere)))
         (should (eq (deslop-job-state job) 'running))
-        (should buffer-read-only)
+        (should-not buffer-read-only)
         (run-hooks 'before-save-hook)
-        (should-error (insert "blocked"))
-        (should-error
-         (let ((inhibit-read-only t))
-           (insert "also blocked")))
-        (deslop-insert-at-cursor)
-        (should (= (length deslop-test--calls) 1))
-        (should (= (length deslop-queue) 1))
-         (deslop-abort-queue)
-         (should-not buffer-read-only)))))
+        (goto-char (point-min))
+        (insert "user\n")
+        (should (string= (buffer-string) "user\ntest"))
+        (deslop-test--complete-call (car deslop-test--calls))
+        (should (eq (deslop-job-state job) 'completed))
+        (should (string= (buffer-string) "user\nTEST"))
+        (deslop-abort-queue)
+        (should-not buffer-read-only)))))
 
 (ert-deftest deslop-test/insert-anywhere-leaves-buffer-writable-while-running ()
   (deslop-test--reset)
@@ -940,7 +989,7 @@ process for cancellation tests."
 (ert-deftest deslop-test/write-anywhere-applies-from-another-current-buffer ()
   (deslop-test--reset)
   (let* ((response
-          "{\"version\":1,\"edits\":[{\"start\":0,\"end\":0,\"expected\":\"\",\"text\":\"A\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"before\",\"text\":\"A\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)) t)))
     (deslop-test--with-buffer "test"
