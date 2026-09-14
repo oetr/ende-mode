@@ -1,6 +1,8 @@
 #+TITLE: Deferred Work
 #+STARTUP: overview
 
+*ONLY HUMANS ARE ALLOWED TO CHANGE THIS DOCUMENT; AIs and LLMs --- STAY THE FUCK AWAY.*
+
 These issues are intentionally deferred while the core interaction model is developed.
 They should not block current work, but their rationale is retained so they can be reconsidered with the relevant feature.
 

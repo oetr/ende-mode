@@ -1,11 +1,9 @@
 #+TITLE: Problems Summary
 #+STARTUP: overview
 
-This repository is generally well engineered for an early-stage Emacs package.
-Its queue, target lifecycle, protocol parsing, cleanup discipline, and failure-oriented tests are notable strengths.
-Near-term work should focus on credential safety, permissive resource circuit breakers, predictable review controls, structured-edit recovery, asynchronous correctness, and accurate status reporting.
-Features that are not connected yet, larger review UX changes, documentation work, and future agent privacy design are tracked separately in =DEFER.org=.
-The existing =C-c e= binding and summary badge placement are accepted for now and require no immediate change.
+- Near-term work should focus on credential safety, permissive resource circuit breakers, predictable review controls, structured-edit recovery, asynchronous correctness, and accurate status reporting.
+- Features that are not connected yet, larger review UX changes, documentation work, and future agent privacy design are tracked separately in =DEFER.org=.
+- The existing =C-c e= binding and summary badge placement are accepted for now and require no immediate change.
 
 * TODO Bind Codex OAuth tokens to official origins
 The OpenCode access token can currently be attached to an overridden Codex profile URL, and the refresh token can be sent to a customized issuer.
