@@ -956,15 +956,31 @@ process for cancellation tests."
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)) t)))
      (deslop-test--with-buffer "test"
-       (let ((job (deslop-insert-anywhere)))
-         (should (eq (deslop-job-state job) 'running))
-         (let ((overlay (deslop-job-overlay job)))
-           (should-not (overlay-get overlay 'face))
-           (should (string-match-p "Thinking"
-                                   (overlay-get overlay 'before-string))))
-         (should-not buffer-read-only)
-         (deslop-abort-queue)
-         (should-not buffer-read-only)))))
+        (let ((job (deslop-insert-anywhere)))
+          (should (eq (deslop-job-state job) 'running))
+          (should-not (deslop-job-overlay job))
+          (should-not buffer-read-only)
+          (deslop-abort-queue)
+          (should-not buffer-read-only)))))
+
+(ert-deftest deslop-test/mode-line-reports-buffer-job-count ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm (list :stall :stall) t)))
+    (deslop-test--with-buffer "test"
+      (deslop-mode 1)
+      (should (string= deslop--mode-line-string " deslop[0]"))
+      (let ((first (deslop-write-anywhere))
+            (second nil))
+        (should (eq (deslop-job-state first) 'running))
+        (should (string= deslop--mode-line-string " deslop[1]"))
+        (setq second (deslop-write-anywhere))
+        (should (eq (deslop-job-state second) 'queued))
+        (should (string= deslop--mode-line-string " deslop[2]"))
+        (should-not (deslop-job-overlay first))
+        (should-not (deslop-job-overlay second))
+        (deslop-abort-queue)
+        (should (string= deslop--mode-line-string " deslop[0]"))))))
 
 (ert-deftest deslop-test/insert-anywhere-reconciles-against-current-buffer ()
   (deslop-test--reset)

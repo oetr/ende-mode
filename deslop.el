@@ -40,15 +40,45 @@
 
 (defvar deslop-mode-map (deslop--make-mode-map) "Keymap for `deslop-mode'.")
 
+(defvar-local deslop--mode-line-string " deslop[0]"
+  "Mode-line lighter showing the number of jobs for the current buffer.")
+
+(defun deslop--job-targets-buffer-p (job buffer)
+  "Return non-nil when active or queued JOB targets BUFFER."
+  (and (memq (deslop-job-state job) '(queued running))
+       (eq (deslop-target-buffer (deslop-job-target job)) buffer)))
+
+(defun deslop--buffer-job-count (buffer)
+  "Return the number of active or queued jobs targeting BUFFER."
+  (cl-count-if
+   (lambda (job) (deslop--job-targets-buffer-p job buffer))
+   (append deslop--active-jobs deslop-queue)))
+
+(defun deslop--update-mode-line (&optional buffer)
+  "Update the deslop lighter for BUFFER, or the current buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq deslop--mode-line-string
+              (format " deslop[%d]" (deslop--buffer-job-count buffer)))
+        (force-mode-line-update)))))
+
+(defun deslop--mode-line-job-event (job _event)
+  "Refresh the mode-line count for JOB's target buffer."
+  (deslop--update-mode-line
+   (deslop-target-buffer (deslop-job-target job))))
+
 (add-hook 'deslop-queue-abort-functions #'deslop-provider-abort-discovery)
 (add-hook 'deslop-queue-abort-functions #'deslop-ui-clear-all)
 (add-hook 'deslop-job-event-functions #'deslop-ui-job-event)
+(add-hook 'deslop-job-event-functions #'deslop--mode-line-job-event)
 
 ;;;###autoload
 (define-minor-mode deslop-mode
   "Minor mode for queueing LLM requests."
-  :lighter " deslop"
-  :keymap deslop-mode-map)
+  :lighter deslop--mode-line-string
+  :keymap deslop-mode-map
+  (deslop--update-mode-line))
 
 ;;;###autoload
 (defun deslop-reload ()
