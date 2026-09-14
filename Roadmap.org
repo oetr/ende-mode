@@ -1,1 +1,4 @@
-* TBD
+* Make buffer origin known to operations
+- It matters if we start from a .lisp or from a .org buffer
+- The agent should know the buffer name at least
+- What else is useful to know?
