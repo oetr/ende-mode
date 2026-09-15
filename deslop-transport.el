@@ -62,13 +62,13 @@
   "Kill BUFFERS, delete FILES, and terminate PROCESSES safely."
   (dolist (process processes)
     (when (processp process)
-      (deslop--ignore-errors #'delete-process process)))
+      (deslop-ignore-errors #'delete-process process)))
   (dolist (buffer buffers)
     (when (buffer-live-p buffer)
-      (deslop--ignore-errors #'kill-buffer buffer)))
+      (deslop-ignore-errors #'kill-buffer buffer)))
   (dolist (file files)
     (when (and file (file-exists-p file))
-      (deslop--ignore-errors #'delete-file file))))
+      (deslop-ignore-errors #'delete-file file))))
 
 (defun deslop-transport-session-cleanup (session)
   "Release all process resources owned by SESSION."
@@ -95,7 +95,7 @@
       (when (processp process)
         (process-put process :deslop-settled t)
         (when (process-live-p process)
-          (deslop--ignore-errors #'delete-process process))))
+          (deslop-ignore-errors #'delete-process process))))
     (deslop-transport-session-cleanup session)
     (unwind-protect
         (progn

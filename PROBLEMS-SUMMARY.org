@@ -158,10 +158,10 @@ This inconsistency makes navigation needlessly surprising to Emacs users.
 Bind =n= to next and =p= to previous and update the displayed key hints.
 See =deslop-selector.el:101-103= and =deslop-selector.el:326-331=.
 
-* TODO Clarify remaining cross-module internal APIs
+* DONE Clarify remaining cross-module internal APIs
 Functions named with feature-private double hyphens are routinely called from sibling modules as if they were supported interfaces.
 This makes module boundaries misleading and makes apparently local refactoring capable of breaking unrelated features.
 Perform this cleanup only after the behavioral, transport, review, and tool architecture has stabilized to avoid unnecessary renaming churn.
 The shared JSON accessors, provider model URL helper, and project root normalizer are now documented public APIs.
-Promote the remaining intentionally shared functions to documented APIs or place them in explicit shared internal modules.
-Remaining examples include =deslop-curl--*= and the SSE/parser helpers in =deslop-protocol.el=.
+The remaining intentionally shared functions are now documented APIs: generic core helpers, curl command/resource primitives, opaque SSE and reasoning parser entry points, project source helpers, and queue snapshots.
+Implementation state and helper functions remain private to their owning modules; tests use private state only when exercising those module internals.

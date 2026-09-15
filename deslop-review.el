@@ -45,7 +45,7 @@ point and shifts its background slightly toward that foreground."
 (defun deslop-review--notify-change (buffer)
   "Notify observers that pending reviews changed in BUFFER."
   (dolist (function deslop-review-change-functions)
-    (deslop--ignore-errors function buffer)))
+    (deslop-ignore-errors function buffer)))
 
 ;;;; Review Highlight & Color Helpers
 
@@ -174,8 +174,8 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
 
 (defun deslop-review--format-badge (client model)
   "Return a display-only review badge for CLIENT and MODEL."
-  (let ((parts (delq nil (list (deslop--bounded-single-line client 80 t)
-                               (deslop--bounded-single-line model 80 t)))))
+  (let ((parts (delq nil (list (deslop-bounded-single-line client 80 t)
+                               (deslop-bounded-single-line model 80 t)))))
     (when parts
       (propertize (format " [%s] " (mapconcat #'identity parts " "))
                   'face 'deslop-badge-face))))

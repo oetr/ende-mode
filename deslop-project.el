@@ -133,7 +133,7 @@ existing project directory."
          (canonical (deslop-project-path path root)))
     (file-relative-name canonical (deslop-project-normalize-root root))))
 
-(defun deslop-project--assert-readable-file (path)
+(defun deslop-project-assert-readable-file (path)
   "Signal when PATH is not a readable regular file or exceeds its limit."
   (unless (file-regular-p path)
     (error "project source is not a regular file: %s" path))
@@ -145,7 +145,7 @@ existing project directory."
     (error "project file is larger than the tool limit: %s" path))
   path)
 
-(defun deslop-project--buffer-path (buffer)
+(defun deslop-project-buffer-path (buffer)
   "Return canonical visiting path for BUFFER, or nil."
   (when (and (buffer-live-p buffer)
              (buffer-file-name buffer))
@@ -156,7 +156,7 @@ existing project directory."
 (defun deslop-project-buffer-allowed-p (buffer &optional root)
   "Return non-nil when BUFFER visits an allowed file below ROOT."
   (let* ((root (or root (deslop-project-root buffer)))
-         (path (deslop-project--buffer-path buffer)))
+         (path (deslop-project-buffer-path buffer)))
     (and path
           (file-in-directory-p path (deslop-project-normalize-root root))
          (not (deslop-project--excluded-p
@@ -167,7 +167,7 @@ existing project directory."
   (let ((canonical (deslop-project-path path root)))
     (cl-find-if
      (lambda (buffer)
-       (let ((buffer-path (deslop-project--buffer-path buffer)))
+       (let ((buffer-path (deslop-project-buffer-path buffer)))
          (and buffer-path (file-equal-p buffer-path canonical))))
      (buffer-list))))
 

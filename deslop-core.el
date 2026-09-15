@@ -165,13 +165,15 @@ Loopback requests always bypass proxies."
   "Structured error passed between the transport and job scheduler."
   kind message details)
 
-(defun deslop--ignore-errors (function &rest arguments)
-  "Call FUNCTION with ARGUMENTS while suppressing cleanup failures and quits."
+(defun deslop-ignore-errors (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS while suppressing cleanup failures and quits.
+
+This is the package-wide boundary for best-effort cleanup callbacks."
   (condition-case nil
       (apply function arguments)
     ((error quit) nil)))
 
-(defun deslop--bounded-single-line (value max-length &optional trim)
+(defun deslop-bounded-single-line (value max-length &optional trim)
   "Return VALUE as a bounded, single-line string of MAX-LENGTH.
 When TRIM is non-nil, remove surrounding whitespace before bounding the
 result.  The returned string uses an ellipsis when it is truncated."
@@ -185,7 +187,7 @@ result.  The returned string uses an ellipsis when it is truncated."
             (concat (substring text 0 (- max-length 3)) "...")
           text)))))
 
-(defun deslop--owned-buffer (current name owner-variable initializer)
+(defun deslop-owned-buffer (current name owner-variable initializer)
   "Return an owned buffer named NAME, initializing it with INITIALIZER.
 CURRENT is the package's existing buffer object, OWNER-VARIABLE is the
 buffer-local ownership marker, and INITIALIZER is called in a new or reused
@@ -204,7 +206,7 @@ owned buffer."
 
 (defun deslop--safe-message-string (value)
   "Return VALUE as a bounded, single-line diagnostic string."
-  (deslop--bounded-single-line value 1000))
+  (deslop-bounded-single-line value 1000))
 
 (defun deslop-error-display-message (error)
   "Return a displayable message for structured or ordinary ERROR."
@@ -223,7 +225,7 @@ owned buffer."
       (error (deslop--safe-message-string error))))
    (t (deslop--safe-message-string error))))
 
-(defun deslop--plist-merge (base overrides)
+(defun deslop-plist-merge (base overrides)
   "Return BASE plist with OVERRIDES plist values applied."
   (let ((result (copy-sequence base))
         (rest overrides))

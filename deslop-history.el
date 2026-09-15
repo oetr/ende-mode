@@ -207,7 +207,7 @@
 (defun deslop-history--buffer ()
   "Return the history buffer, configuring outline folding once."
   (setq deslop-history--buffer-object
-        (deslop--owned-buffer deslop-history--buffer-object
+        (deslop-owned-buffer deslop-history--buffer-object
                               deslop-history-buffer-name
                               'deslop-history--owned-buffer
                               #'deslop-history-mode))

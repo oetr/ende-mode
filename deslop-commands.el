@@ -73,9 +73,9 @@ INSTRUCTION and PROFILE override the operation defaults."
               (message "deslop: queued %s job %d" type (deslop-job-id job))
               job)))
       (unless committed
-        (deslop--ignore-errors #'deslop-target-release target)
+        (deslop-ignore-errors #'deslop-target-release target)
         (when overlay
-          (deslop--ignore-errors #'deslop-ui-delete-overlay overlay))))))
+          (deslop-ignore-errors #'deslop-ui-delete-overlay overlay))))))
 
 (defun deslop-insert-at-cursor ()
   "Queue a request to insert LLM text at cursor position."

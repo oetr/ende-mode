@@ -155,7 +155,7 @@ can be dispatched."
                    :temperature deslop-provider-temperature
                    :require-sse t))))
          (custom (alist-get name deslop-provider-profiles)))
-    (let ((profile (deslop--plist-merge
+    (let ((profile (deslop-plist-merge
                     (plist-put (copy-sequence base) :name name)
                     custom)))
       (dolist (key '(:max-concurrency :parallel))
@@ -360,7 +360,7 @@ metadata and configured profile values."
 
 (defun deslop-provider--parse-discovery-response (profile body headers)
   "Parse a discovery response in BODY using response HEADERS."
-  (let ((status (car (deslop-curl--response-headers headers))))
+  (let ((status (car (deslop-curl-response-headers headers))))
     (when (and status (>= status 200) (< status 300)
                (buffer-live-p body))
       (with-current-buffer body
@@ -373,12 +373,12 @@ metadata and configured profile values."
     (url headers-file config-file)
   "Build a GET command for provider discovery at URL."
   (append
-   (deslop-curl--base-command url)
-   (deslop-curl--response-options headers-file)
+   (deslop-curl-base-command url)
+   (deslop-curl-response-options headers-file)
    (list "--request" "GET"
          "--header" "Accept: application/json")
    (when config-file (list "--config" config-file))
-   (deslop-curl--timeout-options
+   (deslop-curl-timeout-options
     deslop-provider-discovery-timeout deslop-provider-max-discovery-bytes)
    (list "--url" url)))
 
@@ -494,18 +494,18 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
               (setq deslop-provider--discovery-processes
                     (delq process deslop-provider--discovery-processes))
               (when (timerp timer)
-                (deslop--ignore-errors #'cancel-timer timer))
+                (deslop-ignore-errors #'cancel-timer timer))
               (when (and (processp process) (process-live-p process))
                 (process-put process :deslop-cancelled t)
-                (deslop--ignore-errors #'delete-process process))
-              (deslop-curl--cleanup-resources
+                (deslop-ignore-errors #'delete-process process))
+              (deslop-curl-cleanup-resources
                (list response-buf stderr-buf)
                (list headers-file config-file)
                (list stderr-process))
               (deslop-provider--finish-discovery key metadata no-cache))))
     (condition-case _startup
         (let ((request
-               (deslop-curl--start-request
+               (deslop-curl-start-request
                 :profile profile
                 :url url
                 :name (format "deslop-provider-discovery-%s"
@@ -618,7 +618,7 @@ suppresses the callback without cancelling a shared discovery request."
     (lambda ()
       (setq cancelled t)
       (when discovery-cancel
-        (deslop--ignore-errors discovery-cancel)
+        (deslop-ignore-errors discovery-cancel)
         (setq discovery-cancel nil)))))
 
 (defun deslop-provider-clear-discovery-cache ()
@@ -636,7 +636,7 @@ suppresses the callback without cancelling a shared discovery request."
       (if finish
           (funcall finish nil t)
         (when (and (processp process) (process-live-p process))
-          (deslop--ignore-errors #'delete-process process)))))
+          (deslop-ignore-errors #'delete-process process)))))
   (setq deslop-provider--discovery-processes nil))
 
 (provide 'deslop-provider)

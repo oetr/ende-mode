@@ -22,7 +22,7 @@
 (defun deslop--invoke-cancellation (cancel-function)
   "Invoke CANCEL-FUNCTION without allowing cleanup failures to escape."
   (when (functionp cancel-function)
-    (deslop--ignore-errors cancel-function)))
+    (deslop-ignore-errors cancel-function)))
 
 (cl-defstruct (deslop-job (:constructor deslop--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
@@ -82,12 +82,26 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
   (setq deslop--active-jobs (delq job deslop--active-jobs)
         deslop--current-job (car deslop--active-jobs))
   (deslop--unregister-source-job job)
-  (deslop--ignore-errors #'deslop-target-release (deslop-job-target job)))
+  (deslop-ignore-errors #'deslop-target-release (deslop-job-target job)))
 
 ;;;; Queue state
 
 (defvar deslop-queue nil
   "Pending jobs in FIFO order.")
+
+(defun deslop-active-jobs ()
+  "Return a snapshot of currently active jobs.
+
+The returned list may be changed by the caller without changing scheduler
+state."
+  (copy-sequence deslop--active-jobs))
+
+(defun deslop-pending-jobs ()
+  "Return a snapshot of jobs waiting in the FIFO queue.
+
+The returned list may be changed by the caller without changing scheduler
+state."
+  (copy-sequence deslop-queue))
 
 (defvar deslop--queue-tail nil
   "Tail cons cell of `deslop-queue'.")
@@ -110,7 +124,7 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
 (defun deslop-job-emit-event (job event)
   "Send EVENT for JOB to lifecycle observers without propagating failures."
   (dolist (function deslop-job-event-functions)
-    (deslop--ignore-errors function job event)))
+    (deslop-ignore-errors function job event)))
 
 (defun deslop-register-job-handler (type handler)
   "Register HANDLER function for jobs of symbol TYPE.
@@ -363,7 +377,7 @@ When RESULT is non-nil, retain it for history and job inspection."
           (deslop-job-finished-at job) (float-time))
     (deslop--unregister-source-job job)
     (deslop--invoke-cancellation (deslop-job-cancel-function job))
-    (deslop--ignore-errors #'deslop-target-release (deslop-job-target job))
+    (deslop-ignore-errors #'deslop-target-release (deslop-job-target job))
     (deslop-job-emit-event job '(:type :cancelled))
     (deslop-job-emit-event job '(:type :settled :state cancelled))))
 
@@ -410,7 +424,7 @@ When RESULT is non-nil, retain it for history and job inspection."
           (dolist (job jobs)
             (deslop--job-cancel job))
           (dolist (function deslop-queue-abort-functions)
-            (deslop--ignore-errors function)))
+            (deslop-ignore-errors function)))
       (setq deslop--aborting nil)
       (message "deslop: queue aborted"))))
 

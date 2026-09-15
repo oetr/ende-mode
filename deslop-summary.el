@@ -27,7 +27,7 @@
 (defun deslop-summary-buffer ()
   "Return a non-file-visiting summary buffer owned by deslop."
   (setq deslop-summary--buffer-object
-        (deslop--owned-buffer deslop-summary--buffer-object
+        (deslop-owned-buffer deslop-summary--buffer-object
                               deslop-summary-buffer-name
                               'deslop-summary--owned-buffer
                               #'text-mode)))
@@ -54,7 +54,7 @@ DISPLAY supplies the provider label.  Return the review overlay."
                      (plist-get display :model)
                      (plist-get display :client)
                      "")))))))
-    (deslop--ignore-errors #'display-buffer summary-buffer)
+    (deslop-ignore-errors #'display-buffer summary-buffer)
     review-overlay))
 
 (provide 'deslop-summary)

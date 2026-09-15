@@ -165,7 +165,7 @@ unsaved changes take precedence over disk contents."
       (error "provide exactly one of path or buffer_id"))
     (if has-buffer
         (let* ((buffer (deslop-project-buffer-for-id buffer-id root))
-               (buffer-path (deslop-project--buffer-path buffer))
+               (buffer-path (deslop-project-buffer-path buffer))
                (relative (file-relative-name buffer-path root)))
           (list :kind 'buffer :buffer buffer :path buffer-path
                 :relative relative :buffer-id buffer-id))
@@ -188,7 +188,7 @@ FUNCTION receives no arguments and may return any value."
           (save-restriction
             (widen)
             (funcall function)))
-      (deslop-project--assert-readable-file path)
+      (deslop-project-assert-readable-file path)
       (with-temp-buffer
         (insert-file-contents path)
         (funcall function)))))
@@ -296,7 +296,7 @@ FUNCTION receives no arguments and may return any value."
   (let* ((path-value (deslop-tools--required-string arguments "path"))
          (path (deslop-project-path path-value root))
          (attributes (progn
-                       (deslop-project--assert-readable-file path)
+                       (deslop-project-assert-readable-file path)
                        (file-attributes path)))
          (source (deslop-tools--resolve-source
                   (list :path path-value) root))
@@ -323,7 +323,7 @@ FUNCTION receives no arguments and may return any value."
 
 (defun deslop-tools--buffer-record (buffer root)
   "Return metadata for allowed project BUFFER."
-  (let ((path (deslop-project--buffer-path buffer)))
+  (let ((path (deslop-project-buffer-path buffer)))
     (deslop-tools--source-metadata
      (list :kind 'buffer :buffer buffer :path path
            :relative (file-relative-name path root)
@@ -638,7 +638,7 @@ return them."
            (append (deslop-tools--change-set-result change-set) result))
       ((error quit)
        (dolist (overlay created-overlays)
-         (deslop--ignore-errors #'deslop-review-delete-overlay overlay))
+         (deslop-ignore-errors #'deslop-review-delete-overlay overlay))
        (signal (car failure) (cdr failure))))))
 
 (defun deslop-tools-change-set (id)

@@ -355,13 +355,14 @@ the review overlay it creates."
                      (setq ins-end (point))
                      (deslop--create-review-overlay
                       buffer ins-start ins-end display ""))))))
-         (dolist (other-job (append deslop--active-jobs deslop-queue))
+         (dolist (other-job (append (deslop-active-jobs)
+                                    (deslop-pending-jobs)))
            (let ((other-target (deslop-job-target other-job)))
              (when (and (not (eq other-job job))
                         (> (deslop-job-id other-job) (deslop-job-id job))
                          (eq (deslop-job-type other-job) 'insert)
                         (eq (deslop-target-buffer other-target) buffer))
-               (deslop--ignore-errors
+               (deslop-ignore-errors
                 #'deslop-target-advance-queued-anchors
                 (list other-target) buffer ins-start ins-end
                 (lambda (_target)
@@ -372,7 +373,7 @@ the review overlay it creates."
                                (= (overlay-start overlay) ins-start)
                                (= (overlay-end overlay) ins-start))
                       (move-overlay overlay ins-end ins-end buffer))))))))
-       (deslop--ignore-errors
+       (deslop-ignore-errors
         #'message "deslop: inserted %d chars in %s"
         (length content) (buffer-name buffer))
        review-overlay))))

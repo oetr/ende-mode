@@ -87,7 +87,7 @@
 
 (defun deslop-selector--display-label (value width)
   "Return sanitized VALUE padded or truncated to display WIDTH columns."
-  (let* ((text (or (deslop--bounded-single-line value 80 t) ""))
+  (let* ((text (or (deslop-bounded-single-line value 80 t) ""))
          (text (truncate-string-to-width text width 0 nil "...")))
     (concat text (make-string (max 0 (- width (string-width text))) ?\s))))
 
@@ -139,7 +139,7 @@
           deslop-selector--probe-generation
           (cl-incf deslop-selector--next-probe-generation))
     (when (functionp cancel)
-      (deslop--ignore-errors cancel))))
+      (deslop-ignore-errors cancel))))
 
 (defun deslop-selector--set-models (models &optional preferred)
   "Set the current provider's MODELS and select PREFERRED when available."

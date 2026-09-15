@@ -170,19 +170,21 @@ separate from user-configured profile headers."
                (deslop-curl--loopback-host-p host))
         (list "--noproxy" "*")))))
 
-(defun deslop-curl--base-command (url)
+;;;; Shared curl command and resource APIs
+
+(defun deslop-curl-base-command (url)
   "Return the common curl command prefix for URL."
   (append (list "curl" "--disable")
           (deslop-curl--network-options url)))
 
-(defun deslop-curl--response-options (headers-file)
+(defun deslop-curl-response-options (headers-file)
   "Return common curl options for a streamed response."
   (list "--silent" "--show-error" "--no-buffer"
         "--speed-limit" "1"
         "--speed-time" (number-to-string deslop-response-idle-timeout)
          "--dump-header" headers-file))
 
-(defun deslop-curl--stderr-filter (buffer process chunk)
+(defun deslop-curl-stderr-filter (buffer process chunk)
   "Append CHUNK to BUFFER without exceeding the stderr resource ceiling."
   (when (and (buffer-live-p buffer) (stringp chunk))
     (let* ((used (or (and (processp process)
@@ -202,7 +204,7 @@ separate from user-configured profile headers."
           (goto-char (point-max))
           (insert prefix))))))
 
-(defun deslop-curl--timeout-options (&optional total-timeout max-filesize)
+(defun deslop-curl-timeout-options (&optional total-timeout max-filesize)
   "Return configured curl timeout and response-size options."
   (append
    (when deslop-connect-timeout
@@ -213,21 +215,21 @@ separate from user-configured profile headers."
    (when max-filesize
      (list "--max-filesize" (number-to-string max-filesize)))))
 
-(defun deslop-curl--command (profile headers-file config-file)
+(defun deslop-curl-command (profile headers-file config-file)
   "Build curl command for PROFILE without embedding request data or secrets."
   (let ((url (deslop-curl--validated-url profile)))
     (append
-       (deslop-curl--base-command url)
-       (deslop-curl--response-options headers-file)
+       (deslop-curl-base-command url)
+       (deslop-curl-response-options headers-file)
        (list "--request" "POST"
              "--header" "Content-Type: application/json"
              "--data-binary" "@-")
        (when config-file (list "--config" config-file))
-       (deslop-curl--timeout-options
+       (deslop-curl-timeout-options
         deslop-request-timeout deslop-max-response-bytes)
        (list "--url" url))))
 
-(cl-defun deslop-curl--start-request
+(cl-defun deslop-curl-start-request
     (&key profile url name command filter sentinel
           internal-headers
           (buffer-name " *deslop-curl*")
@@ -254,7 +256,7 @@ resources before being re-signaled to the caller."
                  (make-pipe-process
                   :name (generate-new-buffer-name "deslop-curl-stderr")
                   :buffer nil
-                  :filter (apply-partially #'deslop-curl--stderr-filter
+                  :filter (apply-partially #'deslop-curl-stderr-filter
                                            stderr-buffer)
                   :noquery t))
            (setq process
@@ -281,14 +283,14 @@ resources before being re-signaled to the caller."
                  :config-file config-file))
        (unless complete
          (when (and (processp process) (process-live-p process))
-           (deslop--ignore-errors #'delete-process process))
+            (deslop-ignore-errors #'delete-process process))
          (when (processp stderr-process)
-           (deslop--ignore-errors #'delete-process stderr-process))
-         (deslop-curl--cleanup-resources
+           (deslop-ignore-errors #'delete-process stderr-process))
+         (deslop-curl-cleanup-resources
           (list response-buffer stderr-buffer)
           (list headers-file config-file))))))
 
-(defun deslop-curl--response-headers (file)
+(defun deslop-curl-response-headers (file)
   "Return (STATUS . CONTENT-TYPE) from curl header FILE."
   (when (file-readable-p file)
     (let ((size (file-attribute-size (file-attributes file))))
@@ -313,7 +315,7 @@ resources before being re-signaled to the caller."
                 (setq content-type (string-trim (match-string 1)))))))
         (cons status content-type)))))
 
-(defun deslop-curl--cleanup-resources (buffers files &optional processes)
+(defun deslop-curl-cleanup-resources (buffers files &optional processes)
   "Kill BUFFERS and delete FILES, ignoring cleanup failures."
   (deslop-transport-cleanup-resources buffers files processes))
 

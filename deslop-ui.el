@@ -46,7 +46,7 @@
 
 (defun deslop-ui--display-label (value)
   "Return VALUE as a bounded, single-line display label."
-  (deslop--bounded-single-line value 80 t))
+  (deslop-bounded-single-line value 80 t))
 
 (defun deslop-ui--format-badge (ov spinner)
   "Format the display badge string for overlay OV using SPINNER frame."

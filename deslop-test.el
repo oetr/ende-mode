@@ -172,6 +172,16 @@ process for cancellation tests."
    (setq deslop-summary--buffer-object nil)
    (deslop-ui-clear-all))
 
+(ert-deftest deslop-test/queue-snapshots-do-not-expose-list-state ()
+  (let ((deslop--active-jobs (list :active))
+        (deslop-queue (list :pending)))
+    (let ((active (deslop-active-jobs))
+          (pending (deslop-pending-jobs)))
+      (setcar active :changed)
+      (setcar pending :changed)
+      (should (equal deslop--active-jobs '(:active)))
+      (should (equal deslop-queue '(:pending))))))
+
 (defun deslop-test--tool-result (name arguments root)
   "Invoke tool NAME and return its successful result in ROOT."
   (let ((call (deslop-tool-call name arguments root)))
@@ -1685,54 +1695,53 @@ process for cancellation tests."
         (content-symbol (make-symbol "content")))
     (set thinking-symbol "")
     (set content-symbol "")
-    (let* ((parser (deslop-protocol--make-reasoning :mode 'content :pending ""))
+    (let* ((parser (deslop-protocol-make-reasoning))
            (callbacks (deslop-test--reasoning-callbacks
                        thinking-symbol content-symbol)))
-      (deslop-protocol--reasoning-feed
+      (deslop-protocol-reasoning-feed
        parser "Intro <think>Plan here" callbacks)
-      (deslop-protocol--reasoning-feed
+      (deslop-protocol-reasoning-feed
        parser "...done</think>Final answer" callbacks)
-      (should-not (deslop-protocol--reasoning-finish parser callbacks))
+      (should-not (deslop-protocol-reasoning-finish parser callbacks))
       (should (string= (symbol-value thinking-symbol) "Plan here...done"))
       (should (string= (symbol-value content-symbol) "Intro Final answer")))))
 
 (ert-deftest deslop-test/thinking-parser-all-delimiter-splits ()
   (dolist (split (number-sequence 0 (length "<think>secret</think>answer")))
     (let ((thinking "") (content "")
-          (parser (deslop-protocol--make-reasoning :mode 'content :pending "")))
+          (parser (deslop-protocol-make-reasoning)))
       (let ((callbacks
              (list :on-delta
                    (lambda (type text)
                      (if (eq type :thinking)
                          (setq thinking (concat thinking text))
                        (setq content (concat content text)))))))
-        (deslop-protocol--reasoning-feed
+        (deslop-protocol-reasoning-feed
          parser (substring "<think>secret</think>answer" 0 split) callbacks)
-        (deslop-protocol--reasoning-feed
+        (deslop-protocol-reasoning-feed
          parser (substring "<think>secret</think>answer" split) callbacks)
-        (should-not (deslop-protocol--reasoning-finish parser callbacks))
+        (should-not (deslop-protocol-reasoning-finish parser callbacks))
         (should (string= thinking "secret"))
         (should (string= content "answer"))))))
 
 (ert-deftest deslop-test/thinking-parser-unclosed-is-error ()
-  (let ((parser (deslop-protocol--make-reasoning :mode 'content :pending "")))
-    (deslop-protocol--reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
+  (let ((parser (deslop-protocol-make-reasoning)))
+    (deslop-protocol-reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
     (should (deslop-error-p
-              (deslop-protocol--reasoning-finish parser (list :on-delta #'ignore))))))
+              (deslop-protocol-reasoning-finish parser (list :on-delta #'ignore))))))
 
 ;;;; SSE parser
 
 (ert-deftest deslop-test/sse-parser-fragmented-and-done ()
-  (let ((parser (deslop-protocol--make-sse
-                 :buffer-parts nil :data-lines nil :done nil))
+  (let ((parser (deslop-protocol-make-sse))
         (events nil))
     (setq events
           (append events
-                   (deslop-protocol--sse-feed
+                   (deslop-protocol-sse-feed
                    parser "data: {\"choices\":[{\"delta\":{\"content\":\"hi")))
     (setq events
           (append events
-                   (deslop-protocol--sse-feed
+                   (deslop-protocol-sse-feed
                    parser " there\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n")))
     (should (= (length events) 2))
     (should (eq (plist-get (nth 0 events) :type) :json))
@@ -1746,23 +1755,22 @@ process for cancellation tests."
                              0)))
                      "hi there"))
     (should (eq (plist-get (nth 1 events) :type) :done))
-     (should-not (deslop-protocol--sse-finish parser))))
+     (should-not (deslop-protocol-sse-finish parser))))
 
 (ert-deftest deslop-test/sse-parser-rejects-malformed-and-ignores-late-data ()
-  (let ((parser (deslop-protocol--make-sse
-                 :buffer-parts nil :data-lines nil :done nil)))
+  (let ((parser (deslop-protocol-make-sse)))
     (should-error
-     (deslop-protocol--sse-feed parser "data: {bad}\n\n"))
-    (let ((done-parser (deslop-protocol--make-sse :buffer-parts nil)))
-      (deslop-protocol--sse-feed done-parser "data: [DONE]\n\n")
+     (deslop-protocol-sse-feed parser "data: {bad}\n\n"))
+    (let ((done-parser (deslop-protocol-make-sse)))
+      (deslop-protocol-sse-feed done-parser "data: [DONE]\n\n")
       (should-not
-       (deslop-protocol--sse-feed
+       (deslop-protocol-sse-feed
         done-parser "data: {\"choices\":[]}\n\n")))))
 
 (ert-deftest deslop-test/sse-parser-requires-done ()
-  (let ((parser (deslop-protocol--make-sse :buffer-parts nil)))
-    (deslop-protocol--sse-feed parser "data: {\"choices\":[]}\n\n")
-    (should-error (deslop-protocol--sse-finish parser))))
+  (let ((parser (deslop-protocol-make-sse)))
+    (deslop-protocol-sse-feed parser "data: {\"choices\":[]}\n\n")
+    (should-error (deslop-protocol-sse-finish parser))))
 
 (ert-deftest deslop-test/transport-session-settles-once-and-cleans-resources ()
   (let* ((process-buffer (generate-new-buffer " *deslop-test-process*"))
@@ -2474,8 +2482,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (deslop-max-stderr-bytes 4))
     (unwind-protect
         (progn
-          (deslop-curl--stderr-filter buffer process "12345")
-          (deslop-curl--stderr-filter buffer process "6")
+          (deslop-curl-stderr-filter buffer process "12345")
+          (deslop-curl-stderr-filter buffer process "6")
           (with-current-buffer buffer
             (should (string= (buffer-string) "1234"))))
       (delete-process process)
@@ -2521,7 +2529,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           :callbacks (list :on-event (lambda (event) (push event events))
                            :on-done (lambda (value) (setq result value))
                            :on-error (lambda (value) (setq failure value)))
-          :sse (deslop-protocol--make-sse :buffer-parts nil :data-lines nil)
+          :sse (deslop-protocol-make-sse)
           :estimated-chars 0)))
     (deslop-codex--handle-event
      session
@@ -2575,7 +2583,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                (lambda (&rest _) (list (list :secret token)))))
       (setq config (deslop-curl--config profile))
       (unwind-protect
-          (let ((command (deslop-curl--command
+          (let ((command (deslop-curl-command
                           profile "/tmp/headers" config)))
             (should-not (member token command))
             (should-not (member "body" command))
@@ -2624,7 +2632,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       :auth-source-user "deslop"
       :auth-source-port 443)))
   (let ((command
-         (deslop-curl--command
+         (deslop-curl-command
           '(:url "https://example.test/v1") "/tmp/headers" nil)))
     (should (string= (nth 1 command) "--disable"))
     (should (member "--globoff" command))
@@ -2634,7 +2642,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 (ert-deftest deslop-test/curl-command-uses-idle-not-total-timeout-by-default ()
   (let ((deslop-request-timeout nil)
         (deslop-response-idle-timeout 60))
-    (let ((command (deslop-curl--command
+    (let ((command (deslop-curl-command
                     '(:url "https://example.test/v1") "/tmp/headers" nil)))
       (should-not (member "--max-time" command))
       (should (equal (cadr (member "--speed-time" command)) "60"))
@@ -2678,14 +2686,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest deslop-test/sse-parser-enforces-line-and-event-limits ()
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol--make-sse :buffer-parts nil :data-lines nil
-                                      :data-bytes 0 :done nil)))
-    (should-error (deslop-protocol--sse-feed parser "123456789")))
+        (parser (deslop-protocol-make-sse)))
+    (should-error (deslop-protocol-sse-feed parser "123456789")))
   (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol--make-sse :buffer-parts nil :data-lines nil
-                                      :data-bytes 0 :done nil)))
+        (parser (deslop-protocol-make-sse)))
     (should-error
-     (deslop-protocol--sse-feed
+     (deslop-protocol-sse-feed
       parser (mapconcat (lambda (_) "data:\n") (number-sequence 1 10) "")))))
 
 (ert-deftest deslop-test/provider-discovery-cache-is-bounded ()

@@ -22,6 +22,10 @@
   "Incremental state for XML-like reasoning tags."
   mode pending)
 
+(defun deslop-protocol-make-reasoning ()
+  "Create an opaque incremental reasoning parser."
+  (deslop-protocol--make-reasoning :mode 'content :pending ""))
+
 (defun deslop-protocol--emit-delta (callbacks type text)
   "Invoke :on-delta in CALLBACKS with TYPE and nonempty TEXT."
   (let ((cb (plist-get callbacks :on-delta)))
@@ -46,7 +50,7 @@ before this helper is called."
              do (setq found prefix) and return found)
     found))
 
-(defun deslop-protocol--reasoning-feed (parser content callbacks)
+(defun deslop-protocol-reasoning-feed (parser content callbacks)
   "Feed CONTENT into incremental PARSER and return visible answer text.
 Thinking and content deltas are emitted through CALLBACKS."
   (let* ((input (concat (deslop-protocol--reasoning-pending parser)
@@ -97,7 +101,7 @@ Thinking and content deltas are emitted through CALLBACKS."
               (setq position size))))))
     (apply #'concat (nreverse visible))))
 
-(defun deslop-protocol--reasoning-finish (parser callbacks)
+(defun deslop-protocol-reasoning-finish (parser callbacks)
   "Flush PARSER and return a structured error for unclosed thinking."
   (let ((pending (deslop-protocol--reasoning-pending parser)))
     (when (> (length pending) 0)
@@ -116,6 +120,11 @@ Thinking and content deltas are emitted through CALLBACKS."
                (:constructor deslop-protocol--make-sse))
   "Incremental SSE line/event state."
   buffer-parts buffer-bytes data-lines data-bytes done)
+
+(defun deslop-protocol-make-sse ()
+  "Create an opaque incremental SSE parser."
+  (deslop-protocol--make-sse
+   :buffer-parts nil :buffer-bytes 0 :data-lines nil :data-bytes 0 :done nil))
 
 (defun deslop-protocol--sse-pending-buffer (parser)
   "Return the unparsed SSE text accumulated in PARSER."
@@ -175,7 +184,7 @@ Thinking and content deltas are emitted through CALLBACKS."
     (setq line (substring line 0 -1)))
   (deslop-protocol--sse-handle-line parser line))
 
-(defun deslop-protocol--sse-feed (parser chunk)
+(defun deslop-protocol-sse-feed (parser chunk)
   "Feed raw SSE CHUNK into PARSER and return complete events.
 Errors are signaled so the transport can turn them into protocol failures."
   (let ((parts (deslop-protocol--sse-buffer-parts parser))
@@ -212,7 +221,7 @@ Errors are signaled so the transport can turn them into protocol failures."
             (error "SSE line exceeds deslop-max-sse-event-bytes"))))
       (nreverse events))))
 
-(defun deslop-protocol--sse-finish (parser)
+(defun deslop-protocol-sse-finish (parser)
   "Flush a final complete SSE event and validate PARSER state."
   (let ((events nil)
         (buffer (deslop-protocol--sse-pending-buffer parser)))

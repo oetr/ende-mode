@@ -87,7 +87,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
     (let ((cancel (deslop-llm--session-discovery-cancel session)))
       (setf (deslop-llm--session-discovery-cancel session) nil)
       (when cancel
-        (deslop--ignore-errors cancel)))
+        (deslop-ignore-errors cancel)))
     (unwind-protect
         (deslop-transport-session-settle
          (deslop-llm--lifecycle session)
@@ -166,7 +166,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (defun deslop-llm--response-status (session)
   "Return SESSION's HTTP response status, or nil."
   (condition-case nil
-      (car (deslop-curl--response-headers
+      (car (deslop-curl-response-headers
             (deslop-llm--session-headers-file session)))
     (error nil)))
 
@@ -278,12 +278,11 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
          session (deslop-protocol-json-get "usage" json))
         (when (and (not (deslop-llm--session-terminal session))
                    (stringp reasoning) (> (length reasoning) 0))
-          (deslop-protocol--emit-status
-           (deslop-llm--parser-callbacks session) "Thinking")
+          (deslop-llm--emit-status session "Thinking")
           (deslop-llm--emit-delta session :thinking reasoning))
         (when (and (not (deslop-llm--session-terminal session))
                    (stringp content) (> (length content) 0))
-          (deslop-protocol--reasoning-feed
+          (deslop-protocol-reasoning-feed
            (deslop-llm--session-reasoning session) content
            (deslop-llm--parser-callbacks session)))))))
 
@@ -329,7 +328,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Validate and successfully finish SESSION, or settle it with an error."
   (unless (deslop-llm--session-terminal session)
     (condition-case finish-error
-        (let* ((headers (deslop-curl--response-headers
+        (let* ((headers (deslop-curl-response-headers
                          (deslop-llm--session-headers-file session)))
                (status (car headers))
                (content-type (cdr headers)))
@@ -357,11 +356,11 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
            (t
             (deslop-llm--handle-events
              session
-             (deslop-protocol--sse-finish
+             (deslop-protocol-sse-finish
               (deslop-llm--session-sse session)))
             (unless (deslop-llm--session-terminal session)
               (let ((reasoning-error
-                     (deslop-protocol--reasoning-finish
+                     (deslop-protocol-reasoning-finish
                       (deslop-llm--session-reasoning session)
                       (deslop-llm--parser-callbacks session))))
                 (cond
@@ -439,7 +438,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
           (when (> (length processable) 0)
             (deslop-llm--handle-events
              session
-             (deslop-protocol--sse-feed
+             (deslop-protocol-sse-feed
               (deslop-llm--session-sse session) processable)))
         ((error quit)
           (if (and deslop-max-response-bytes
@@ -499,13 +498,13 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
           (encode-coding-string
            (json-encode (deslop-llm--request-body messages profile)) 'utf-8))
     (let ((request
-           (deslop-curl--start-request
+           (deslop-curl-start-request
             :profile profile
             :name (format "deslop-curl-%s-%s"
                           (or (plist-get profile :name) "request")
                           (or (plist-get profile :job-id) "unknown"))
             :command (lambda (headers-file config-file)
-                       (deslop-curl--command
+                       (deslop-curl-command
                         profile headers-file config-file))
             :filter (apply-partially #'deslop-llm--process-filter session)
             :sentinel (apply-partially #'deslop-llm--process-sentinel session))))
@@ -541,15 +540,12 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
       (deslop-codex-default messages callbacks options)
   (let* ((profile (if (plist-get options :name)
                       options
-                    (deslop--plist-merge (deslop-provider-profile) options)))
+                    (deslop-plist-merge (deslop-provider-profile) options)))
          (session
           (deslop-llm--make-session
             :profile profile :callbacks callbacks :model (plist-get profile :model)
-            :sse (deslop-protocol--make-sse
-                  :buffer-parts nil :buffer-bytes 0
-                  :data-lines nil :data-bytes 0 :done nil)
-            :reasoning (deslop-protocol--make-reasoning
-                        :mode 'content :pending "")
+            :sse (deslop-protocol-make-sse)
+            :reasoning (deslop-protocol-make-reasoning)
             :estimated-chars 0 :received-bytes 0
             :response-preview-parts nil :response-preview-bytes 0)))
     (condition-case startup-error

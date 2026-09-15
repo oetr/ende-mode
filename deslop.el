@@ -52,7 +52,7 @@
   "Return the number of active or queued jobs targeting BUFFER."
   (cl-count-if
    (lambda (job) (deslop--job-targets-buffer-p job buffer))
-    (append deslop--active-jobs deslop-queue)))
+    (append (deslop-active-jobs) (deslop-pending-jobs))))
 
 (defun deslop--buffer-review-count (buffer)
   "Return the number of pending reviews in BUFFER."
