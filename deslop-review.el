@@ -27,15 +27,25 @@ point and shifts its background slightly toward that foreground."
   :type 'number
   :group 'deslop)
 
-(defvar deslop-review--keymap
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'deslop-approve-output)
-    (define-key map (kbd "C-m") #'deslop-approve-output)
-    (define-key map (kbd "DEL") #'deslop-reject-output)
-    (define-key map (kbd "<backspace>") #'deslop-reject-output)
-    (define-key map (kbd "C-d") #'deslop-reject-output)
-    map)
+(defvar deslop-review--keymap (make-sparse-keymap)
   "Keymap active while point is on generated output awaiting review.")
+
+(defun deslop-review--install-keybindings ()
+  "Install review bindings without hijacking ordinary editing keys."
+  (dolist (key '("RET" "C-m" "DEL" "<backspace>" "C-d"))
+    (define-key deslop-review--keymap (kbd key) nil))
+  (define-key deslop-review--keymap (kbd "C-c C-c") #'deslop-approve-output)
+  (define-key deslop-review--keymap (kbd "C-c C-k") #'deslop-reject-output))
+
+(deslop-review--install-keybindings)
+
+(defvar deslop-review-change-functions nil
+  "Functions called with a buffer whenever its pending reviews change.")
+
+(defun deslop-review--notify-change (buffer)
+  "Notify observers that pending reviews changed in BUFFER."
+  (dolist (function deslop-review-change-functions)
+    (deslop--ignore-errors function buffer)))
 
 ;;;; Review Highlight & Color Helpers
 
@@ -235,16 +245,21 @@ the inserted characters are tinted using the review overlay's face."
                overlay 'face
                (list :foreground (car style)
                      :background (cdr style))))
-            (setq complete t)
-            overlay)
+             (setq complete t)
+             overlay)
         (unless complete
           (when overlay
-            (delete-overlay overlay)))))))
+            (delete-overlay overlay))))
+      (when complete
+        (deslop-review--notify-change buffer))
+      overlay)))
 
 (defun deslop-review-delete-overlay (overlay)
   "Remove review OVERLAY when it has been approved or rejected."
   (when (deslop-review-overlay-p overlay)
-    (delete-overlay overlay)))
+    (let ((buffer (overlay-buffer overlay)))
+      (delete-overlay overlay)
+      (deslop-review--notify-change buffer))))
 
 ;;;; Interactive Commands
 

@@ -136,7 +136,7 @@ Thinking and content deltas are emitted through CALLBACKS."
             (setf (deslop-protocol--sse-done parser) t)
             '(:type :done))
         (let ((json (condition-case err
-                        (deslop-protocol--json-read-string payload)
+                         (deslop-protocol-json-read-string payload)
                       ((error quit)
                        (signal 'error
                                (list (format "malformed SSE JSON: %s"
@@ -232,7 +232,7 @@ Errors are signaled so the transport can turn them into protocol failures."
 
 ;;;; JSON helpers
 
-(defun deslop-protocol--json-read-string (text)
+(defun deslop-protocol-json-read-string (text)
   "Parse JSON TEXT without interning object keys as Emacs symbols."
   (json-parse-string text
                      :object-type 'hash-table
@@ -240,15 +240,20 @@ Errors are signaled so the transport can turn them into protocol failures."
                      :null-object nil
                      :false-object :false))
 
-(defun deslop-protocol--json-get (key object)
+(defun deslop-protocol-json-get (key object)
   "Return string KEY from parsed JSON hash table OBJECT."
   (and (hash-table-p object)
        (gethash key object)))
 
-(defun deslop-protocol--json-has-key-p (key object)
+(defun deslop-protocol-json-has-key-p (key object)
   "Return non-nil when parsed JSON hash table OBJECT contains KEY."
   (and (hash-table-p object)
        (hash-table-contains-p key object)))
+
+;; Keep the old names for packages that loaded the previous internal helpers.
+(defalias 'deslop-protocol--json-read-string #'deslop-protocol-json-read-string)
+(defalias 'deslop-protocol--json-get #'deslop-protocol-json-get)
+(defalias 'deslop-protocol--json-has-key-p #'deslop-protocol-json-has-key-p)
 
 (provide 'deslop-protocol)
 

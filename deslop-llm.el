@@ -38,68 +38,66 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (cl-defstruct (deslop-llm--session
                (:constructor deslop-llm--make-session))
   "State owned by one asynchronous LLM transport request."
-  profile callbacks model json-data process process-buffer stderr-buffer
+  profile callbacks lifecycle discovery-cancel model json-data process process-buffer stderr-buffer
   stderr-process
   headers-file config-file sse reasoning content-parts thinking-parts usage
   provider-error actual-model actual-provider estimated-chars received-bytes
   response-preview response-preview-parts response-preview-bytes finish-reason
   generation-start last-status last-usage-update terminal)
 
+(defun deslop-llm--lifecycle (session)
+  "Return the shared lifecycle object for SESSION, creating it if needed."
+  (or (deslop-llm--session-lifecycle session)
+      (let ((lifecycle
+             (deslop-transport-session-create
+              (deslop-llm--session-callbacks session)
+              (apply-partially #'deslop-llm--fail session))))
+        (deslop-transport-session-set-resources
+         lifecycle
+         (list :process (deslop-llm--session-process session)
+               :response-buffer (deslop-llm--session-process-buffer session)
+               :stderr-buffer (deslop-llm--session-stderr-buffer session)
+               :stderr-process (deslop-llm--session-stderr-process session)
+               :headers-file (deslop-llm--session-headers-file session)
+               :config-file (deslop-llm--session-config-file session)))
+        (setf (deslop-llm--session-lifecycle session) lifecycle))))
+
 (defun deslop-llm--invoke-callback (session name &rest arguments)
   "Invoke callback NAME for SESSION with ARGUMENTS safely."
-  (let ((callback (plist-get (deslop-llm--session-callbacks session) name)))
-    (when callback
-      (condition-case callback-error
-          (apply callback arguments)
-        ((error quit)
-         (unless (eq name :on-error)
-           (deslop-llm--fail
-            session
-            (deslop-error-create
-             :kind 'callback
-             :message (error-message-string callback-error)))))))))
+  (apply #'deslop-transport-session-invoke
+         (deslop-llm--lifecycle session) name arguments))
 
 (defun deslop-llm--cleanup-session (session)
   "Release all process resources owned by SESSION."
-  (deslop-curl--cleanup-resources
-   (list (deslop-llm--session-process-buffer session)
-          (deslop-llm--session-stderr-buffer session))
-    (list (deslop-llm--session-headers-file session)
-          (deslop-llm--session-config-file session))
-    (list (deslop-llm--session-stderr-process session)))
-  (setf (deslop-llm--session-process-buffer session) nil
-         (deslop-llm--session-stderr-buffer session) nil
-         (deslop-llm--session-stderr-process session) nil
+  (when (deslop-llm--session-lifecycle session)
+    (deslop-transport-session-cleanup
+     (deslop-llm--session-lifecycle session)))
+  (setf (deslop-llm--session-process session) nil
+        (deslop-llm--session-process-buffer session) nil
+        (deslop-llm--session-stderr-buffer session) nil
+        (deslop-llm--session-stderr-process session) nil
         (deslop-llm--session-headers-file session) nil
-        (deslop-llm--session-config-file session) nil))
+        (deslop-llm--session-config-file session) nil
+        (deslop-llm--session-lifecycle session) nil))
 
 (defun deslop-llm--settle (session outcome value)
   "Settle SESSION exactly once with OUTCOME and VALUE."
   (unless (deslop-llm--session-terminal session)
     (setf (deslop-llm--session-terminal session) outcome)
-    (let ((process (deslop-llm--session-process session)))
-      (when (processp process)
-        (process-put process :deslop-settled t)
-        (when (process-live-p process)
-          (deslop--ignore-errors #'delete-process process))))
-    (deslop-llm--cleanup-session session)
+    (let ((cancel (deslop-llm--session-discovery-cancel session)))
+      (setf (deslop-llm--session-discovery-cancel session) nil)
+      (when cancel
+        (deslop--ignore-errors cancel)))
     (unwind-protect
-        (let ((partial-result
-               (when (or (deslop-llm--session-content-parts session)
-                         (deslop-llm--session-thinking-parts session)
-                         (deslop-llm--session-usage session)
-                         (deslop-llm--session-finish-reason session))
-                 (deslop-llm--result session))))
-          (when partial-result
-            (deslop-llm--invoke-callback
-             session :on-event
-             (list :type :partial-result :result partial-result)))
-          (if (eq outcome 'success)
-              (deslop-llm--invoke-callback session :on-done value)
-            (deslop-llm--invoke-callback
-             session :on-event
-             (list :type :error :error value :result partial-result))
-            (deslop-llm--invoke-callback session :on-error value)))
+        (deslop-transport-session-settle
+         (deslop-llm--lifecycle session)
+         outcome value
+         (when (or (deslop-llm--session-content-parts session)
+                   (deslop-llm--session-thinking-parts session)
+                   (deslop-llm--session-usage session)
+                   (deslop-llm--session-finish-reason session))
+           (deslop-llm--result session)))
+      (deslop-llm--cleanup-session session)
       (setf (deslop-llm--session-callbacks session) nil))))
 
 (defun deslop-llm--fail (session error)
@@ -175,7 +173,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (defun deslop-llm--handle-provider-error (session json-error)
   "Settle SESSION from a provider JSON-ERROR value."
   (let* ((reported-message
-          (format "%s" (or (deslop-protocol--json-get "message" json-error)
+          (format "%s" (or (deslop-protocol-json-get "message" json-error)
                            json-error)))
          (status (deslop-llm--response-status session))
          (http-error (and status (or (< status 200) (>= status 300))))
@@ -191,10 +189,10 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm--handle-metadata (session json)
   "Record and emit provider metadata in JSON for SESSION."
-  (let ((model (deslop-protocol--json-get "model" json))
-        (provider (or (deslop-protocol--json-get "provider" json)
-                      (deslop-protocol--json-get "server" json)
-                      (deslop-protocol--json-get "owned_by" json))))
+  (let ((model (deslop-protocol-json-get "model" json))
+        (provider (or (deslop-protocol-json-get "provider" json)
+                      (deslop-protocol-json-get "server" json)
+                      (deslop-protocol-json-get "owned_by" json))))
     (when (or (and (stringp model)
                    (not (string= model
                                  (or (deslop-llm--session-actual-model session)
@@ -220,7 +218,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   (when usage
     (setf (deslop-llm--session-usage session) usage)
     (let* ((reported-tokens
-            (deslop-protocol--json-get "completion_tokens" usage))
+            (deslop-protocol-json-get "completion_tokens" usage))
            (tokens (if (numberp reported-tokens) reported-tokens 0))
            (elapsed (max 0.001
                          (- (float-time)
@@ -244,30 +242,30 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Return the first non-nil value for KEYS across JSON OBJECTS."
   (cl-loop for object in objects
            thereis (cl-loop for key in keys
-                            for value = (deslop-protocol--json-get key object)
+                             for value = (deslop-protocol-json-get key object)
                             when value return value)))
 
 (defun deslop-llm--response-event (json)
   "Normalize completion fields from one parsed provider JSON object."
   (let* ((choice (deslop-llm--first-choice
-                  (deslop-protocol--json-get "choices" json)))
-         (delta (deslop-protocol--json-get "delta" choice))
-         (message (deslop-protocol--json-get "message" choice)))
+                  (deslop-protocol-json-get "choices" json)))
+         (delta (deslop-protocol-json-get "delta" choice))
+         (message (deslop-protocol-json-get "message" choice)))
     (list
-     :finish-reason (deslop-protocol--json-get "finish_reason" choice)
+      :finish-reason (deslop-protocol-json-get "finish_reason" choice)
      :reasoning (deslop-llm--first-json-value
                  (list delta choice)
                  '("reasoning_content" "reasoning"))
      :content (or (deslop-llm--first-json-value
                    (list delta choice)
                    '("content" "text"))
-                  (deslop-protocol--json-get "content" message)))))
+                   (deslop-protocol-json-get "content" message)))))
 
 (defun deslop-llm--handle-json (session json)
   "Handle one parsed streaming JSON object for SESSION."
-  (if (deslop-protocol--json-has-key-p "error" json)
+  (if (deslop-protocol-json-has-key-p "error" json)
       (deslop-llm--handle-provider-error
-       session (deslop-protocol--json-get "error" json))
+        session (deslop-protocol-json-get "error" json))
     (deslop-llm--handle-metadata session json)
     (unless (deslop-llm--session-terminal session)
       (let* ((event (deslop-llm--response-event json))
@@ -277,7 +275,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
         (when (stringp finish-reason)
           (setf (deslop-llm--session-finish-reason session) finish-reason))
         (deslop-llm--handle-usage
-         session (deslop-protocol--json-get "usage" json))
+         session (deslop-protocol-json-get "usage" json))
         (when (and (not (deslop-llm--session-terminal session))
                    (stringp reasoning) (> (length reasoning) 0))
           (deslop-protocol--emit-status
@@ -306,7 +304,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Build the normalized result plist for SESSION."
   (let* ((usage (deslop-llm--session-usage session))
          (reported (and usage
-                        (deslop-protocol--json-get "completion_tokens" usage)))
+                         (deslop-protocol-json-get "completion_tokens" usage)))
          (tokens (or reported
                      (max 0 (floor
                              (/ (deslop-llm--session-estimated-chars session)
@@ -511,7 +509,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                         profile headers-file config-file))
             :filter (apply-partially #'deslop-llm--process-filter session)
             :sentinel (apply-partially #'deslop-llm--process-sentinel session))))
-      (setf (deslop-llm--session-process session)
+     (setf (deslop-llm--session-process session)
             (plist-get request :process)
             (deslop-llm--session-process-buffer session)
             (plist-get request :response-buffer)
@@ -519,16 +517,19 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
              (plist-get request :stderr-buffer)
              (deslop-llm--session-stderr-process session)
              (plist-get request :stderr-process)
-            (deslop-llm--session-headers-file session)
-            (plist-get request :headers-file)
-            (deslop-llm--session-config-file session)
-            (plist-get request :config-file)))
+             (deslop-llm--session-headers-file session)
+             (plist-get request :headers-file)
+             (deslop-llm--session-config-file session)
+             (plist-get request :config-file))
+       (deslop-transport-session-set-resources
+        (deslop-llm--lifecycle session) request))
     (deslop-llm--invoke-callback
      session :on-start (apply-partially #'deslop-llm--cancel session))
     (when (and (not (deslop-llm--session-terminal session))
                deslop-provider-discovery-enabled)
-      (deslop-provider-discover
-       profile (apply-partially #'deslop-llm--discovery-result session)))
+       (setf (deslop-llm--session-discovery-cancel session)
+             (deslop-provider-discover
+              profile (apply-partially #'deslop-llm--discovery-result session))))
     (unless (deslop-llm--session-terminal session)
       (process-send-string (deslop-llm--session-process session)
                            (deslop-llm--session-json-data session))

@@ -315,15 +315,7 @@ resources before being re-signaled to the caller."
 
 (defun deslop-curl--cleanup-resources (buffers files &optional processes)
   "Kill BUFFERS and delete FILES, ignoring cleanup failures."
-  (dolist (process processes)
-    (when (processp process)
-      (deslop--ignore-errors #'delete-process process)))
-  (dolist (buffer buffers)
-    (when (buffer-live-p buffer)
-      (deslop--ignore-errors #'kill-buffer buffer)))
-  (dolist (file files)
-    (when (and file (file-exists-p file))
-      (deslop--ignore-errors #'delete-file file))))
+  (deslop-transport-cleanup-resources buffers files processes))
 
 (provide 'deslop-curl)
 

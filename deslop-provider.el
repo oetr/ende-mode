@@ -305,7 +305,7 @@ metadata and configured profile values."
       (error "%s must be nil or a positive integer" (car option))))
   t)
 
-(defun deslop-provider--models-url (profile)
+(defun deslop-provider-models-url (profile)
   "Return the OpenAI-compatible model-list URL for PROFILE, or nil."
   (let ((url (plist-get profile :url)))
     (cond
@@ -320,7 +320,7 @@ metadata and configured profile values."
 
 (defun deslop-provider--model-entries (payload)
   "Return model entries from discovery PAYLOAD as a list."
-  (let ((data (deslop-protocol--json-get "data" payload)))
+  (let ((data (deslop-protocol-json-get "data" payload)))
     (cond
      ((vectorp data) (append data nil))
      ((listp data) data))))
@@ -329,29 +329,29 @@ metadata and configured profile values."
   "Extract display metadata for PROFILE from discovery PAYLOAD."
   (let* ((entries (deslop-provider--model-entries payload))
          (models (cl-loop for entry in entries
-                          for id = (deslop-protocol--json-get "id" entry)
+                           for id = (deslop-protocol-json-get "id" entry)
                           when (and (stringp id) (not (string-empty-p id)))
                           collect id))
          (requested (plist-get profile :model))
          (match (cl-find-if
                  (lambda (entry)
-                   (or (null requested)
-                       (equal (deslop-protocol--json-get "id" entry)
-                              requested)))
+                    (or (null requested)
+                        (equal (deslop-protocol-json-get "id" entry)
+                               requested)))
                  entries))
-         (provider (or (deslop-protocol--json-get "provider" payload)
-                       (deslop-protocol--json-get "server" payload)))
-         (model (or (and match (deslop-protocol--json-get "id" match))
+          (provider (or (deslop-protocol-json-get "provider" payload)
+                        (deslop-protocol-json-get "server" payload)))
+          (model (or (and match (deslop-protocol-json-get "id" match))
                     requested))
          (metadata (list :source :discovery :model model :models models)))
     (when (or match (stringp provider) models)
       (when (stringp provider)
         (setq metadata (plist-put metadata :provider provider)))
       (when (and match
-                 (stringp (deslop-protocol--json-get "owned_by" match)))
+                  (stringp (deslop-protocol-json-get "owned_by" match)))
         (setq metadata
               (plist-put metadata :owner
-                         (deslop-protocol--json-get "owned_by" match))))
+                          (deslop-protocol-json-get "owned_by" match))))
       (when (or match (stringp provider))
         (setq metadata
               (plist-put metadata :client
@@ -366,7 +366,7 @@ metadata and configured profile values."
       (with-current-buffer body
         (condition-case nil
             (deslop-provider--discovery-metadata
-             profile (deslop-protocol--json-read-string (buffer-string)))
+             profile (deslop-protocol-json-read-string (buffer-string)))
           ((error quit) nil))))))
 
 (defun deslop-provider--curl-discovery-command
@@ -388,6 +388,34 @@ metadata and configured profile values."
     (condition-case nil
         (funcall callback metadata)
       ((error quit) nil))))
+
+(defun deslop-provider--discovery-process (key)
+  "Return the in-flight discovery process for KEY, or nil."
+  (cl-find-if
+   (lambda (process)
+     (and (processp process)
+          (equal (process-get process :deslop-discovery-key) key)))
+   deslop-provider--discovery-processes))
+
+(defun deslop-provider--cancel-discovery-waiter (key callback)
+  "Remove CALLBACK from discovery KEY and cancel an unused request."
+  (let ((callbacks (gethash key deslop-provider--discovery-inflight))
+        (removed nil)
+        (remaining nil))
+    (dolist (waiting callbacks)
+      (if (and (not removed) (eq waiting callback))
+          (setq removed t)
+        (push waiting remaining)))
+    (when removed
+      (setq remaining (nreverse remaining))
+      (if remaining
+          (puthash key remaining deslop-provider--discovery-inflight)
+        (remhash key deslop-provider--discovery-inflight)
+        (let* ((process (deslop-provider--discovery-process key))
+               (finish (and (processp process)
+                            (process-get process :deslop-discovery-finish))))
+          (when finish
+            (funcall finish nil t)))))))
 
 (defun deslop-provider--prune-discovery-cache ()
   "Remove expired and excess provider discovery cache entries."
@@ -512,14 +540,15 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                               profile response-buf headers-file))
                           ((error quit) (funcall finish nil)))
                       (funcall finish nil)))))))
-          (setq process (plist-get request :process)
+           (setq process (plist-get request :process)
                 response-buf (plist-get request :response-buffer)
                  stderr-buf (plist-get request :stderr-buffer)
                  stderr-process (plist-get request :stderr-process)
                  headers-file (plist-get request :headers-file)
-                config-file (plist-get request :config-file))
-          (process-put process :deslop-discovery-finish finish)
-          (push process deslop-provider--discovery-processes)
+                 config-file (plist-get request :config-file))
+           (process-put process :deslop-discovery-finish finish)
+           (process-put process :deslop-discovery-key key)
+           (push process deslop-provider--discovery-processes)
           (unless finished
            (when deslop-provider-discovery-timeout
              (setq timer
@@ -537,13 +566,17 @@ endpoint does not expose compatible metadata."
     (deslop-validate-resource-options)
     (deslop-provider--validate-discovery-options)
     (if (not deslop-provider-discovery-enabled)
-        (deslop-provider--invoke-discovery-callback callback nil)
+        (progn
+          (deslop-provider--invoke-discovery-callback callback nil)
+          nil)
       (let* ((key (deslop-provider--discovery-key profile))
              (entry (deslop-provider--cached-entry key))
-             (url (deslop-provider--models-url profile)))
+             (url (deslop-provider-models-url profile)))
         (if entry
-            (deslop-provider--invoke-discovery-callback
-             callback (plist-get entry :metadata))
+            (progn
+              (deslop-provider--invoke-discovery-callback
+               callback (plist-get entry :metadata))
+              nil)
           (let ((waiting (gethash key deslop-provider--discovery-inflight)))
             (if waiting
                 (puthash key (cons callback waiting)
@@ -552,33 +585,41 @@ endpoint does not expose compatible metadata."
                        deslop-provider--discovery-inflight)
               (if url
                   (deslop-provider--start-discovery profile key url)
-                 (deslop-provider--finish-discovery key nil)))))))))
+                (deslop-provider--finish-discovery key nil)))
+            (apply-partially #'deslop-provider--cancel-discovery-waiter
+                             key callback)))))))
 
 (defun deslop-provider-probe-models (profile callback)
   "Probe PROFILE's model-list endpoint and invoke CALLBACK with its models.
 CALLBACK receives (MODELS ERROR).  Return a cancellation function that
 suppresses the callback without cancelling a shared discovery request."
   (let ((cancelled nil)
-        (url (deslop-provider--models-url profile)))
+        (discovery-cancel nil)
+        (url (deslop-provider-models-url profile)))
     (if (not url)
         (deslop-provider--invoke-discovery-callback
          callback
          (deslop-error-create
           :kind 'discovery
           :message "Provider has no compatible model-list endpoint"))
-      (deslop-provider-discover
-       profile
-       (lambda (metadata)
-         (unless cancelled
-           (let ((models (and metadata (plist-get metadata :models))))
-             (if (and (listp models) models)
-                 (funcall callback models nil)
-               (funcall
-                callback nil
-                (deslop-error-create
-                 :kind 'discovery
-                 :message "Provider returned no models"))))))))
-    (lambda () (setq cancelled t))))
+      (setq discovery-cancel
+            (deslop-provider-discover
+             profile
+             (lambda (metadata)
+               (unless cancelled
+                 (let ((models (and metadata (plist-get metadata :models))))
+                   (if (and (listp models) models)
+                       (funcall callback models nil)
+                     (funcall
+                      callback nil
+                      (deslop-error-create
+                       :kind 'discovery
+                       :message "Provider returned no models")))))))))
+    (lambda ()
+      (setq cancelled t)
+      (when discovery-cancel
+        (deslop--ignore-errors discovery-cancel)
+        (setq discovery-cancel nil)))))
 
 (defun deslop-provider-clear-discovery-cache ()
   "Clear cached provider discovery results."

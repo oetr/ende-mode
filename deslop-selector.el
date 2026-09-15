@@ -52,6 +52,12 @@
 (defvar-local deslop-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
 
+(defvar deslop-selector--next-probe-generation 0
+  "Next generation identifier assigned to a selector model probe.")
+
+(defvar-local deslop-selector--probe-generation 0
+  "Generation identifier for the current selector model probe.")
+
 (defvar-local deslop-selector--window nil
   "Window displaying the current selector buffer.")
 
@@ -79,6 +85,12 @@
   "Return a display name for the selected provider."
   (deslop-provider-client-name (deslop-selector--provider-profile)))
 
+(defun deslop-selector--display-label (value width)
+  "Return sanitized VALUE padded or truncated to display WIDTH columns."
+  (let* ((text (or (deslop--bounded-single-line value 80 t) ""))
+         (text (truncate-string-to-width text width 0 nil "...")))
+    (concat text (make-string (max 0 (- width (string-width text))) ?\s))))
+
 (defun deslop-selector--provider-concurrency ()
   "Return the selected provider's current concurrency limit."
   (deslop-provider-max-concurrency (deslop-selector--provider-profile)))
@@ -89,18 +101,20 @@
 
 (defun deslop-selector--render ()
   "Render the current selector state."
-  (let* ((provider (deslop-selector--display-provider))
-         (model (deslop-selector--model-name))
+  (let* ((provider (deslop-selector--display-label
+                    (deslop-selector--display-provider) 24))
+         (model (deslop-selector--display-label
+                 (or (deslop-selector--model-name) "(none available)") 24))
          (model-status
           (pcase deslop-selector--model-state
             (:loading " [loading]")
             (:error " [probe failed]")
             (_ ""))))
     (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (format "Provider:     %-24s(p/n)\n" provider))
-      (insert (format "Model:        %-24s(C-n / C-p)\n"
-                      (concat (or model "(none available)") model-status)))
+       (erase-buffer)
+       (insert (format "Provider:     %s(n/p)\n" provider))
+       (insert (format "Model:        %s%s(C-n / C-p)\n"
+                       model model-status))
       (insert (format "Concurrency:  %-24d(c/C)\n"
                       (deslop-selector--provider-concurrency)))
       (insert (format "Parallel:     %-24s(P)\n\n"
@@ -112,16 +126,20 @@
               "w  - write anywhere\n"
               "m  - improve\n"
               "s  - summarize\n\n"
-              "RET       - approve all LLM changes\n"
-              "BACKSPACE - reject all LLM changes\n"
-              "q/ESC     - close\n")
+               "RET       - confirm choice\n"
+               "C-c C-c   - approve all LLM changes\n"
+               "C-c C-k   - reject all LLM changes\n"
+               "q/ESC     - close\n")
       (goto-char (point-min)))))
 
 (defun deslop-selector--cancel-probe ()
   "Cancel the current model probe, if any."
-  (when deslop-selector--probe-cancel
-    (funcall deslop-selector--probe-cancel)
-    (setq deslop-selector--probe-cancel nil)))
+  (let ((cancel deslop-selector--probe-cancel))
+    (setq deslop-selector--probe-cancel nil
+          deslop-selector--probe-generation
+          (cl-incf deslop-selector--next-probe-generation))
+    (when (functionp cancel)
+      (deslop--ignore-errors cancel))))
 
 (defun deslop-selector--set-models (models &optional preferred)
   "Set the current provider's MODELS and select PREFERRED when available."
@@ -139,27 +157,35 @@
          (profile (deslop-selector--provider-profile))
          (probe (plist-get profile :model-discovery-function))
          (generic-probe (and (null probe)
-                             (deslop-provider--models-url profile)))
-         (selector-buffer (current-buffer)))
+                              (deslop-provider-models-url profile)))
+         (selector-buffer (current-buffer))
+         (generation (cl-incf deslop-selector--next-probe-generation))
+         (completed nil))
+    (setq deslop-selector--probe-generation generation)
     (when (or (functionp probe) generic-probe)
       (setq deslop-selector--model-state :loading)
       (deslop-selector--render)
       (let ((callback
              (lambda (models error)
-               (when (buffer-live-p selector-buffer)
-                 (with-current-buffer selector-buffer
-                   (when (eq (deslop-selector--provider-name) provider)
-                     (setq deslop-selector--probe-cancel nil)
+                (when (and (buffer-live-p selector-buffer)
+                           (with-current-buffer selector-buffer
+                             (= deslop-selector--probe-generation generation)))
+                  (setq completed t)
+                  (with-current-buffer selector-buffer
+                    (when (eq (deslop-selector--provider-name) provider)
+                      (setq deslop-selector--probe-cancel nil)
                      (if error
                          (setq deslop-selector--model-state :error)
                        (deslop-selector--set-models
                         models (deslop-selector--model-name))
                        (setq deslop-selector--model-state :ready))
-                     (deslop-selector--render)))))))
-        (setq deslop-selector--probe-cancel
-              (if (functionp probe)
-                  (funcall probe callback)
-                (deslop-provider-probe-models profile callback)))))))
+                      (deslop-selector--render)))))))
+        (let ((cancel (if (functionp probe)
+                          (funcall probe callback)
+                        (deslop-provider-probe-models profile callback))))
+          (when (and (not completed)
+                     (= deslop-selector--probe-generation generation))
+            (setq deslop-selector--probe-cancel cancel)))))))
 
 (defun deslop-selector--set-provider (index)
   "Select provider at INDEX and start dynamic model discovery if needed."
@@ -262,8 +288,12 @@
     (setq deslop-selector--window nil)
     (when (window-live-p window)
       (quit-window t window))
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer))))
+     (when (buffer-live-p buffer)
+       (kill-buffer buffer))))
+
+(defun deslop-selector--buffer-killed ()
+  "Cancel a selector probe when its buffer is killed externally."
+  (deslop-selector--cancel-probe))
 
 (defun deslop-selector-confirm ()
   "Confirm the current choice and close the selector."
@@ -325,8 +355,8 @@
 
 (defun deslop-selector--install-keybindings ()
   "Install selector bindings, including when this file is reloaded."
-  (define-key deslop-selector-mode-map (kbd "p") #'deslop-selector-next-provider)
-  (define-key deslop-selector-mode-map (kbd "n") #'deslop-selector-previous-provider)
+  (define-key deslop-selector-mode-map (kbd "n") #'deslop-selector-next-provider)
+  (define-key deslop-selector-mode-map (kbd "p") #'deslop-selector-previous-provider)
   (define-key deslop-selector-mode-map (kbd "C-n") #'deslop-selector-next-model)
   (define-key deslop-selector-mode-map (kbd "C-p") #'deslop-selector-previous-model)
   (define-key deslop-selector-mode-map (kbd "c") #'deslop-selector-set-concurrency)
@@ -337,9 +367,13 @@
   (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
   (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
   (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
-  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-approve-source-output)
-  (define-key deslop-selector-mode-map (kbd "DEL") #'deslop-selector-reject-source-output)
-  (define-key deslop-selector-mode-map (kbd "<backspace>") #'deslop-selector-reject-source-output)
+  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
+  (define-key deslop-selector-mode-map (kbd "C-c C-c")
+              #'deslop-selector-approve-source-output)
+  (define-key deslop-selector-mode-map (kbd "C-c C-k")
+              #'deslop-selector-reject-source-output)
+  (define-key deslop-selector-mode-map (kbd "DEL") nil)
+  (define-key deslop-selector-mode-map (kbd "<backspace>") nil)
   (define-key deslop-selector-mode-map (kbd "q") #'deslop-selector-close)
   (define-key deslop-selector-mode-map (kbd "ESC") #'deslop-selector-close))
 
@@ -348,6 +382,7 @@
 (define-derived-mode deslop-selector-mode special-mode "deslop-selector"
   "Major mode for selecting a deslop provider and model."
   (deslop-selector--install-keybindings)
+  (add-hook 'kill-buffer-hook #'deslop-selector--buffer-killed nil t)
   (setq truncate-lines t)
   (setq buffer-read-only t))
 
@@ -361,6 +396,7 @@
          (provider-index (or (cl-position last-provider providers :test #'eq) 0))
          (buffer (get-buffer-create deslop-selector-buffer-name)))
     (with-current-buffer buffer
+      (deslop-selector--cancel-probe)
       (deslop-selector-mode)
       (setq deslop-selector--source-buffer source
             deslop-selector--providers providers

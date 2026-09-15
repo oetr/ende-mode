@@ -32,7 +32,7 @@
   "A stable, restricted buffer target for a queued operation."
   buffer start-marker end-marker cursor-marker placement
   source-snapshot source-digest restriction-beg restriction-end selected offset
-  applying invalidated read-only-frozen previous-read-only
+   applying invalidated
   kill-buffer-hook before-change-hook after-change-hook)
 
 ;;;; Creation and positions
@@ -246,31 +246,6 @@ each side is additionally capped by `deslop-target-window-chars'."
 
 ;;;; Active mutation monitoring
 
-(defun deslop-target-freeze-buffer (target)
-  "Make TARGET's buffer read-only until TARGET is released.
-The previous buffer-local read-only value is restored by
-`deslop-target-release'."
-  (let ((buffer (deslop-target-buffer target)))
-    (when (and (buffer-live-p buffer)
-               (not (deslop-target-read-only-frozen target)))
-      (with-current-buffer buffer
-        (setf (deslop-target-previous-read-only target) buffer-read-only
-              (deslop-target-read-only-frozen target) t)
-        (setq-local buffer-read-only t))))
-  target)
-
-(defun deslop-target--thaw-buffer (target)
-  "Restore the read-only state saved by `deslop-target-freeze-buffer'."
-  (let ((buffer (deslop-target-buffer target)))
-    (when (and (buffer-live-p buffer)
-               (deslop-target-read-only-frozen target))
-      (with-current-buffer buffer
-        (setq-local buffer-read-only
-                    (deslop-target-previous-read-only target)))
-      (setf (deslop-target-read-only-frozen target) nil
-            (deslop-target-previous-read-only target) nil)))
-  target)
-
 (defun deslop-target--add-local-hook (hook function)
   "Add FUNCTION to buffer-local HOOK in the current buffer."
   (add-hook hook function nil t))
@@ -301,11 +276,8 @@ not invalidate it.  The target buffer being killed remains fatal."
             (before-hook
              (lambda (beg end)
                 (when (not (deslop-target-applying target))
-                  (when (deslop-target-read-only-frozen target)
-                    (user-error
-                     "deslop: buffer is frozen while a write-anywhere job runs"))
-                   (when (and (not allow-source-changes)
-                              (deslop-target--change-overlaps-p target beg end))
+                    (when (and (not allow-source-changes)
+                               (deslop-target--change-overlaps-p target beg end))
                      (setf (deslop-target-invalidated target) t)))))
              (after-hook
               (lambda (&rest _)
@@ -355,7 +327,6 @@ not invalidate it.  The target buffer being killed remains fatal."
 
 (defun deslop-target-release (target)
   "Remove TARGET's hooks and detach all of its markers."
-  (deslop-target--thaw-buffer target)
   (deslop-target--remove-hooks target)
   (dolist (marker (list (deslop-target-start-marker target)
                         (deslop-target-end-marker target)

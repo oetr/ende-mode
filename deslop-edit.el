@@ -21,20 +21,50 @@
   :type 'integer
   :group 'deslop)
 
+(defcustom deslop-max-normalized-edits 10000
+  "Maximum number of expanded structured edits accepted from one result.
+
+This is a generous safety ceiling for edits expanded from `all: true'; it is
+not intended to limit ordinary product usage."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum normalized edits"))
+  :group 'deslop)
+
+(define-error 'deslop-edit-resource-error
+  "Structured edit resource limit exceeded")
+
+(defun deslop-edit--validate-limits ()
+  "Validate raw and normalized structured-edit limits."
+  (dolist (option (list (cons 'deslop-max-write-anywhere-edits
+                              deslop-max-write-anywhere-edits)
+                        (cons 'deslop-max-normalized-edits
+                              deslop-max-normalized-edits)))
+    (unless (or (null (cdr option))
+                (and (integerp (cdr option)) (> (cdr option) 0)))
+      (error "%s must be nil or a positive integer" (car option))))
+  t)
+
+(defun deslop-edit--normalized-limit-error ()
+  "Signal that structured-edit expansion exceeded its safety ceiling."
+  (signal 'deslop-edit-resource-error
+          (list (format "normalized edit count exceeds %s"
+                        deslop-max-normalized-edits))))
+
 (defun deslop-edit--parse-document (content operation)
   "Parse JSON CONTENT for OPERATION and return its document hash table."
   (condition-case caught
-      (deslop-protocol--json-read-string content)
+       (deslop-protocol-json-read-string content)
     (error
      (error "%s result is not valid JSON: %s"
             operation (error-message-string caught)))))
 
 (defun deslop-edit--validate-document (document operation)
   "Validate the common protocol envelope in DOCUMENT for OPERATION."
+  (deslop-edit--validate-limits)
   (unless (and (hash-table-p document)
-               (equal (deslop-protocol--json-get "version" document) 1))
+                (equal (deslop-protocol-json-get "version" document) 1))
     (error "%s result has an unsupported protocol version" operation))
-  (let ((edits (deslop-protocol--json-get "edits" document)))
+  (let ((edits (deslop-protocol-json-get "edits" document)))
     (unless (vectorp edits)
       (error "%s result must contain an edits array" operation))
     (when (zerop (length edits))
@@ -49,7 +79,7 @@
   (and (hash-table-p object)
        (cl-remove-if
         (lambda (field)
-          (deslop-protocol--json-has-key-p field object))
+          (deslop-protocol-json-has-key-p field object))
         fields)))
 
 (defun deslop-edit-replacement-overlaps-p (left right)
@@ -59,43 +89,52 @@
         (right-start (plist-get right :start))
         (right-end (plist-get right :end)))
     (cond
-     ((and (= left-start left-end) (= right-start right-end))
-      (= left-start right-start))
-     ((= left-start left-end)
-      (and (< right-start left-start) (< left-start right-end)))
-     ((= right-start right-end)
-      (and (< left-start right-start) (< right-start left-end)))
+      ((and (= left-start left-end) (= right-start right-end))
+       (= left-start right-start))
+      ((= left-start left-end)
+       (and (<= right-start left-start) (< left-start right-end)))
+      ((= right-start right-end)
+       (and (<= left-start right-start) (< right-start left-end)))
      (t (and (< left-start right-end) (< right-start left-end))))))
 
-(defun deslop-edit--anchor-offsets (source anchor)
-  "Return all zero-based SOURCE offsets at which ANCHOR occurs."
+(defun deslop-edit--anchor-offsets (source anchor &optional limit)
+  "Return zero-based SOURCE offsets at which ANCHOR occurs.
+When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
   (let ((start 0)
         (offsets nil))
     (while (and (< start (length source))
                 (string-match (regexp-quote anchor) source start))
       (push (match-beginning 0) offsets)
+      (when (and limit (> (length offsets) limit))
+        (deslop-edit--normalized-limit-error))
       (setq start (1+ (match-beginning 0))))
     (nreverse offsets)))
 
-(defun deslop-edit--parse-anchor-edits (index raw source positions)
+(defun deslop-edit--parse-anchor-edits
+    (index raw source positions &optional normalized-limit)
   "Parse one anchor-based RAW edit at INDEX against SOURCE.
-POSITIONS lists the accepted values for the edit's position field."
+POSITIONS lists the accepted values for the edit's position field.
+NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
   (let* ((anchor (and (hash-table-p raw)
-                      (deslop-protocol--json-get "anchor" raw)))
+                       (deslop-protocol-json-get "anchor" raw)))
          (position (and (hash-table-p raw)
-                        (deslop-protocol--json-get "position" raw)))
-         (occurrence (and (hash-table-p raw)
-                          (deslop-protocol--json-get "occurrence" raw)))
-         (all (and (hash-table-p raw)
-                   (deslop-protocol--json-get "all" raw)))
-         (text (and (hash-table-p raw)
-                    (deslop-protocol--json-get "text" raw)))
-         (offsets (and (stringp anchor)
-                       (deslop-edit--anchor-offsets source anchor))))
-    (unless (and (hash-table-p raw)
-                 (deslop-protocol--json-has-key-p "anchor" raw)
-                 (deslop-protocol--json-has-key-p "position" raw)
-                 (deslop-protocol--json-has-key-p "text" raw))
+                         (deslop-protocol-json-get "position" raw)))
+           (occurrence-present (and (hash-table-p raw)
+                                   (deslop-protocol-json-has-key-p
+                                    "occurrence" raw)))
+           (occurrence (and occurrence-present
+                            (deslop-protocol-json-get "occurrence" raw)))
+           (all-present (and (hash-table-p raw)
+                             (deslop-protocol-json-has-key-p "all" raw)))
+           (all-value (and all-present
+                           (deslop-protocol-json-get "all" raw)))
+          (all (eq all-value t))
+          (text (and (hash-table-p raw)
+                      (deslop-protocol-json-get "text" raw))))
+     (unless (and (hash-table-p raw)
+                  (deslop-protocol-json-has-key-p "anchor" raw)
+                  (deslop-protocol-json-has-key-p "position" raw)
+                  (deslop-protocol-json-has-key-p "text" raw))
       (error "missing required anchor, position, or text field"))
     (unless (and (stringp anchor) (not (string-empty-p anchor)))
       (error "anchor must be a non-empty string"))
@@ -104,22 +143,34 @@ POSITIONS lists the accepted values for the edit's position field."
              (mapconcat #'identity positions ", ")))
     (unless (and (stringp text) (not (string-empty-p text)))
       (error "text must be a non-empty string"))
-    (let ((selected-offsets
-           (cond
-            (all
-             (unless (eq all t)
-               (error "all must be true when present"))
-             offsets)
-            (occurrence
-             (unless (and (integerp occurrence) (>= occurrence 1))
-               (error "occurrence must be a positive integer"))
-             (unless (<= occurrence (length offsets))
-               (error "occurrence %d is not present" occurrence))
-             (list (nth (1- occurrence) offsets)))
-            ((= (length offsets) 1) offsets)
-            ((zerop (length offsets)) nil)
-            (t (error "anchor matches %d times; specify occurrence or all"
-                      (length offsets))))))
+    (when (and all-present (not (or (eq all-value t)
+                                    (eq all-value :false)
+                                    (null all-value))))
+      (error "all must be true when present"))
+    (when (and occurrence-present
+               (not (and (integerp occurrence) (>= occurrence 1))))
+      (error "occurrence must be a positive integer"))
+    (let* ((offset-limit (and all normalized-limit))
+           (offsets (deslop-edit--anchor-offsets source anchor offset-limit))
+           (selected-offsets
+            (cond
+             (all
+              (when (and normalized-limit
+                         (> (length offsets) normalized-limit))
+                (deslop-edit--normalized-limit-error))
+              offsets)
+             (occurrence
+              (unless (<= occurrence (length offsets))
+                (error "occurrence %d is not present" occurrence))
+              (list (nth (1- occurrence) offsets)))
+             ((= (length offsets) 1) offsets)
+             ((zerop (length offsets)) nil)
+             (t (error "anchor matches %d times; specify occurrence or all"
+                       (length offsets))))))
+      (when (and normalized-limit
+                 (<= normalized-limit 0)
+                 selected-offsets)
+        (deslop-edit--normalized-limit-error))
       (unless selected-offsets
         (error "anchor was not found"))
       (mapcar
@@ -145,11 +196,16 @@ Return a plist containing `:edits' and individual `:errors'."
          (errors nil))
     (dotimes (index (length raw-edits))
       (condition-case caught
-          (setq edits
-                (append edits
-                        (deslop-edit--parse-anchor-edits
-                         index (aref raw-edits index) source
-                         '("before" "after"))))
+          (let ((parsed
+                 (deslop-edit--parse-anchor-edits
+                  index (aref raw-edits index) source
+                  '("before" "after")
+                  (and deslop-max-normalized-edits
+                       (- deslop-max-normalized-edits
+                          (length edits))))))
+            (setq edits (nconc edits parsed)))
+        (deslop-edit-resource-error
+         (signal (car caught) (cdr caught)))
         ((error quit)
          (push (list :index index
                      :message (error-message-string caught)
@@ -167,39 +223,114 @@ Return a plist containing valid `:edits' and individual `:errors'."
          (errors nil))
     (dotimes (index (length raw-edits))
       (condition-case caught
-          (setq edits
-                (append edits
-                        (deslop-edit--parse-anchor-edits
-                         index (aref raw-edits index) source
-                         '("before" "after" "replace"))))
+          (let ((parsed
+                 (deslop-edit--parse-anchor-edits
+                  index (aref raw-edits index) source
+                  '("before" "after" "replace")
+                  (and deslop-max-normalized-edits
+                       (- deslop-max-normalized-edits
+                          (length edits))))))
+            (setq edits (nconc edits parsed)))
+        (deslop-edit-resource-error
+         (signal (car caught) (cdr caught)))
         ((error quit)
          (push (list :index index
                      :message (error-message-string caught)
                      :raw (aref raw-edits index))
                errors))))
     (setq errors (nreverse errors))
-    (let ((conflicting nil)
-          (conflict-messages (make-hash-table :test #'eql)))
-      (cl-loop for tail on edits do
-        (let ((left (car tail)))
-          (dolist (right (cdr tail))
-            (when (and (or (equal (plist-get left :position) "replace")
-                           (equal (plist-get right :position) "replace"))
-                       (deslop-edit-replacement-overlaps-p left right))
-              (push left conflicting)
-              (push right conflicting)
-              (unless (gethash (plist-get left :index) conflict-messages)
-                (puthash (plist-get left :index)
+    (let ((conflict-messages (make-hash-table :test #'eql))
+          (max-end nil)
+          (max-edit nil)
+          (last-zero-start nil)
+          (last-zero-edit nil)
+          (sorted
+           (sort (copy-sequence edits)
+                 (lambda (left right)
+                   (let ((left-start (plist-get left :start))
+                         (right-start (plist-get right :start))
+                         (left-replace
+                          (equal (plist-get left :position) "replace"))
+                         (right-replace
+                          (equal (plist-get right :position) "replace")))
+                     (or (< left-start right-start)
+                         (and (= left-start right-start)
+                              (or (and (not left-replace) right-replace)
+                                  (and (eq left-replace right-replace)
+                                       (< (plist-get left :index)
+                                          (plist-get right :index)))))))))))
+      (dolist (edit sorted)
+        (let* ((start (plist-get edit :start))
+               (end (plist-get edit :end))
+               (replace (equal (plist-get edit :position) "replace")))
+          (when (and (not replace)
+                     last-zero-edit
+                     (= start last-zero-start))
+            (unless (gethash (plist-get edit :index) conflict-messages)
+              (puthash (plist-get edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get last-zero-edit :index)))
+                       conflict-messages))
+            (unless (gethash (plist-get last-zero-edit :index)
+                             conflict-messages)
+              (puthash (plist-get last-zero-edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get edit :index)))
+                       conflict-messages)))
+           (when (and replace
+                      last-zero-edit
+                      (= start last-zero-start)
+                      (equal (plist-get last-zero-edit :position) "before"))
+             (unless (gethash (plist-get edit :index) conflict-messages)
+               (puthash (plist-get edit :index)
+                        (format "overlaps edit %d"
+                                (1+ (plist-get last-zero-edit :index)))
+                        conflict-messages))
+             (unless (gethash (plist-get last-zero-edit :index)
+                              conflict-messages)
+               (puthash (plist-get last-zero-edit :index)
+                        (format "overlaps edit %d"
+                                (1+ (plist-get edit :index)))
+                        conflict-messages)))
+           (when (and (not replace) max-edit
+                     (< (plist-get max-edit :start) start)
+                     (> max-end start))
+            (unless (gethash (plist-get edit :index) conflict-messages)
+              (puthash (plist-get edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get max-edit :index)))
+                       conflict-messages))
+            (unless (gethash (plist-get max-edit :index) conflict-messages)
+              (puthash (plist-get max-edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get edit :index)))
+                       conflict-messages)))
+          (when replace
+            (when (and max-edit (> max-end start))
+              (unless (gethash (plist-get edit :index) conflict-messages)
+                (puthash (plist-get edit :index)
                          (format "overlaps edit %d"
-                                 (1+ (plist-get right :index)))
+                                 (1+ (plist-get max-edit :index)))
                          conflict-messages))
-              (unless (gethash (plist-get right :index) conflict-messages)
-                (puthash (plist-get right :index)
+              (unless (gethash (plist-get max-edit :index)
+                               conflict-messages)
+                (puthash (plist-get max-edit :index)
                          (format "overlaps edit %d"
-                                 (1+ (plist-get left :index)))
-                         conflict-messages))))))
+                                 (1+ (plist-get edit :index)))
+                         conflict-messages)))
+            (when (or (null max-end) (> end max-end))
+              (setq max-end end
+                    max-edit edit)))
+          (if replace
+              (setq last-zero-start nil
+                    last-zero-edit nil)
+            (setq last-zero-start start
+                  last-zero-edit edit))))
       (setq edits
-            (cl-remove-if (lambda (edit) (memq edit conflicting)) edits))
+            (cl-remove-if
+             (lambda (edit) (gethash (plist-get edit :index)
+                                     conflict-messages))
+             edits))
       (dotimes (index (length raw-edits))
         (when-let* ((message (gethash index conflict-messages)))
           (push (list :index index :message message

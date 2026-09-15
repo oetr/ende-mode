@@ -116,20 +116,32 @@ Do not use markdown fences, comments, or any keys other than those shown."
 
 ;;;; LLM execution
 
+(defcustom deslop-structured-edit-repair-attempts 1
+  "Number of model feedback rounds for failed structured edits."
+  :type 'integer
+  :group 'deslop)
+
+(defun deslop--validate-structured-repair-attempts ()
+  "Validate the configured number of structured-edit repair rounds."
+  (unless (and (integerp deslop-structured-edit-repair-attempts)
+               (>= deslop-structured-edit-repair-attempts 0))
+    (error "deslop-structured-edit-repair-attempts must be nonnegative"))
+  deslop-structured-edit-repair-attempts)
+
 (defun deslop--call-with-job-error (job function)
   "Call FUNCTION and settle JOB if it signals an error."
   (condition-case caught
       (funcall function)
     ((error quit) (deslop-job-fail job caught))))
 
-(defun deslop--llm-callbacks (job &optional on-done)
+(defun deslop--llm-callbacks (job &optional on-done on-error)
   "Return standardized LLM callback plist for JOB."
   (list
    :on-start (lambda (cancel-function)
                (deslop-job-cancellation-set job cancel-function))
    :on-event (lambda (event) (deslop--handle-llm-event job event))
    :on-done (or on-done (lambda (res) (deslop-job-finish job res)))
-   :on-error (lambda (err) (deslop-job-fail job err))))
+   :on-error (or on-error (lambda (err) (deslop-job-fail job err)))))
 
 (defun deslop--handle-llm-event (job event)
   "Route normalized transport EVENT for JOB to interested subsystems."
@@ -152,14 +164,16 @@ Do not use markdown fences, comments, or any keys other than those shown."
               :estimated (plist-get event :estimated)))))
         (deslop-job-emit-event job event)))))
 
-(defun deslop--dispatch-llm (job messages &optional on-done)
+(defun deslop--dispatch-llm
+    (job messages &optional on-done on-error no-begin)
   "Validate MESSAGES, record history, and invoke LLM handler for JOB."
   (deslop--validate-messages messages)
-  (deslop-job-emit-event job (list :type :begin :messages messages))
+  (unless no-begin
+    (deslop-job-emit-event job (list :type :begin :messages messages)))
   (deslop--handle-llm-event job '(:type :status :status "Thinking"))
   (funcall deslop-llm-function
            messages
-           (deslop--llm-callbacks job on-done)
+            (deslop--llm-callbacks job on-done on-error)
            (deslop-job-profile job)))
 
 (defun deslop--validate-messages (messages)
@@ -363,68 +377,6 @@ the review overlay it creates."
         (length content) (buffer-name buffer))
        review-overlay))))
 
-(defun deslop--apply-write-anywhere-result (job result)
-  "Apply valid anchor-based edits from RESULT while skipping invalid edits."
-  (when (deslop-job-current-p job)
-    (condition-case failure
-        (let* ((target (deslop-job-target job))
-               (buffer (deslop-target-buffer target))
-               start source parsed edits failures application-failures
-               applied display)
-          (unless (buffer-live-p buffer)
-            (error "write-anywhere target no longer exists"))
-          (with-current-buffer buffer
-            (deslop-target-with-restriction target
-              (setq start (point-min)
-                    source (buffer-substring-no-properties
-                            (point-min) (point-max)))))
-          (setq parsed
-                (deslop-edit-parse-replacements
-                 (deslop-trim-trailing
-                  (or (deslop--result-content result) ""))
-                 source)
-                edits (plist-get parsed :edits)
-                failures (plist-get parsed :errors)
-                display (deslop--job-display-metadata job result))
-          (with-current-buffer buffer
-            (let ((buffer-read-only nil))
-              (dolist (edit
-                       (sort (copy-sequence edits)
-                             (lambda (left right)
-                               (or (> (plist-get left :start)
-                                      (plist-get right :start))
-                                   (and (= (plist-get left :start)
-                                           (plist-get right :start))
-                                        (> (plist-get left :index)
-                                           (plist-get right :index)))))))
-                (condition-case caught
-                    (progn
-                      (deslop--apply-anchor-edit
-                       target buffer start edit display)
-                      (setq applied (1+ (or applied 0))))
-                  ((error quit)
-                   (push (list :index (plist-get edit :index)
-                               :message (error-message-string caught)
-                               :raw (plist-get edit :raw))
-                         application-failures))))))
-          (setq failures (append failures (nreverse application-failures)))
-          (dolist (failure failures)
-            (message "deslop: skipped write-anywhere edit %d: %s"
-                     (1+ (plist-get failure :index))
-                     (plist-get failure :message)))
-          (let ((annotated
-                 (deslop-edit-add-replacement-failures result failures)))
-            (if (and applied (> applied 0))
-                (deslop-job-finish job annotated)
-              (deslop-job-fail
-               job
-               (deslop--application-error
-                (format "write-anywhere produced no applicable edits: %s"
-                        (deslop-edit-format-failures failures "; ")))
-               annotated))))
-      ((error quit)
-       (deslop-job-fail job (deslop--application-error failure))))))
-
 (defun deslop--apply-anchor-edit (target buffer source-start edit display)
   "Apply anchor-based EDIT relative to SOURCE-START in TARGET."
   (let* ((start (+ source-start (plist-get edit :start)))
@@ -449,61 +401,255 @@ the review overlay it creates."
   "Apply one insertion EDIT to TARGET and return its review overlay."
   (deslop--apply-anchor-edit target buffer start edit display))
 
-(defun deslop--apply-insert-anywhere-result (job result)
-  "Apply valid INSERT-ANYWHERE edits while skipping invalid edits."
+(defun deslop--structured-state (job)
+  "Return or initialize the structured-edit state for JOB."
+  (or (deslop-job-structured-state job)
+      (setf (deslop-job-structured-state job)
+            (list :type (deslop-job-type job)
+                  :instruction nil
+                  :system-prompt
+                  (pcase (deslop-job-type job)
+                    ('write-anywhere deslop-write-anywhere-system)
+                    ('insert-anywhere deslop-insert-anywhere-system))
+                  :pass-count 0
+                  :requested nil
+                  :first-pass-applied 0
+                  :repaired 0
+                  :repair-attempts 0
+                  :failures nil
+                  :last-result nil
+                  :source nil))))
+
+(defun deslop--structured-edit-descending-p (left right key)
+  "Return non-nil when LEFT should be applied after RIGHT using KEY."
+  (or (> (plist-get left key) (plist-get right key))
+      (and (= (plist-get left key) (plist-get right key))
+           (let ((left-replace (equal (plist-get left :position) "replace"))
+                 (right-replace (equal (plist-get right :position) "replace")))
+             (or (and left-replace (not right-replace))
+                 (and (eq left-replace right-replace)
+                      (> (plist-get left :index)
+                         (plist-get right :index))))))))
+
+(defun deslop--structured-source (job)
+  "Return the current restricted source data for structured JOB."
+  (let* ((target (deslop-job-target job))
+         (buffer (deslop-target-buffer target)))
+    (unless (buffer-live-p buffer)
+      (error "%s target no longer exists" (deslop-job-type job)))
+    (with-current-buffer buffer
+      (deslop-target-with-restriction target
+        (list :buffer buffer
+              :start (point-min)
+              :source (buffer-substring-no-properties
+                       (point-min) (point-max)))))))
+
+(defun deslop--structured-edit-pass (job result)
+  "Parse and apply one structured RESULT for JOB.
+Return pass data without settling JOB."
+  (let* ((type (deslop-job-type job))
+         (target (deslop-job-target job))
+         (source-data (deslop--structured-source job))
+         (buffer (plist-get source-data :buffer))
+         (source-start (plist-get source-data :start))
+         (source (plist-get source-data :source))
+         (content (deslop-trim-trailing
+                   (or (deslop--result-content result) "")))
+         (parsed (if (eq type 'insert-anywhere)
+                     (deslop-edit-parse-insertions content source)
+                   (deslop-edit-parse-replacements content source)))
+         (edits (plist-get parsed :edits))
+         (failures (plist-get parsed :errors))
+         (application-failures nil)
+         (display (deslop--job-display-metadata job result))
+         (key (if (eq type 'insert-anywhere) :offset :start)))
+    (with-current-buffer buffer
+      (deslop-target-with-restriction target
+        (barf-if-buffer-read-only)
+        (dolist (edit
+                 (sort (copy-sequence edits)
+                       (lambda (left right)
+                         (deslop--structured-edit-descending-p
+                          left right key))))
+          (condition-case caught
+              (deslop--apply-anchor-edit
+               target buffer source-start edit display)
+            ((error quit)
+             (push (list :index (plist-get edit :index)
+                         :message (error-message-string caught)
+                         :raw (plist-get edit :raw))
+                   application-failures))))))
+    (setq failures (append failures (nreverse application-failures)))
+    (list :source source
+          :requested (+ (length edits) (length failures))
+          :applied (- (length edits) (length application-failures))
+          :failures failures)))
+
+(defun deslop--structured-summary (state)
+  "Return durable counters and failures from structured STATE."
+  (let ((failures (plist-get state :failures)))
+    (list :requested (or (plist-get state :requested) 0)
+          :first-pass-applied (or (plist-get state :first-pass-applied) 0)
+          :repaired (or (plist-get state :repaired) 0)
+          :skipped (length failures)
+          :repair-attempts (or (plist-get state :repair-attempts) 0)
+          :final-failures failures)))
+
+(defun deslop--structured-preserve-failure-indices (failures previous)
+  "Keep the original edit indices for repaired FAILURES.
+PREVIOUS contains failures from the preceding structured pass."
+  (let ((remaining (copy-sequence previous)))
+    (mapcar
+     (lambda (failure)
+       (if (null remaining)
+           failure
+         (let ((annotated (copy-sequence failure))
+               (origin (pop remaining)))
+            (plist-put annotated :index (plist-get origin :index)))))
+      failures)))
+
+(defun deslop--structured-annotate-result (result state)
+  "Return RESULT annotated with structured STATE summary and failures."
+  (let* ((annotated (if (listp result)
+                        (copy-sequence result)
+                      (list :content result)))
+         (failures (plist-get state :failures))
+         (type (plist-get state :type)))
+    (when failures
+      (setq annotated
+            (if (eq type 'insert-anywhere)
+                (deslop-edit-add-insertion-failures annotated failures)
+              (deslop-edit-add-replacement-failures annotated failures))))
+    (plist-put annotated :structured-summary
+               (deslop--structured-summary state))))
+
+(defun deslop--structured-report (state)
+  "Report the aggregate outcome represented by structured STATE."
+  (let* ((summary (deslop--structured-summary state))
+         (applied (+ (plist-get summary :first-pass-applied)
+                     (plist-get summary :repaired))))
+    (message "deslop: applied %d of %d edits; %d repaired; %d skipped"
+             applied
+             (plist-get summary :requested)
+             (plist-get summary :repaired)
+             (plist-get summary :skipped))))
+
+(defun deslop--structured-finish (job result)
+  "Settle JOB with the final structured RESULT and its aggregate state."
+  (let* ((state (deslop--structured-state job))
+         (summary (deslop--structured-summary state))
+         (annotated (deslop--structured-annotate-result result state))
+         (applied (+ (plist-get summary :first-pass-applied)
+                     (plist-get summary :repaired))))
+    (deslop--structured-report state)
+    (if (> applied 0)
+        (deslop-job-finish job annotated)
+      (deslop-job-fail
+       job
+       (deslop--application-error
+        (format "%s produced no applicable edits: %s"
+                (if (eq (plist-get state :type) 'insert-anywhere)
+                    "insert-anywhere"
+                  "write-anywhere")
+                (deslop-edit-format-failures
+                 (plist-get state :failures) "; ")))
+       annotated))))
+
+(defun deslop--structured-transport-error (job error)
+  "Finish structured JOB after a transport ERROR during repair."
   (when (deslop-job-current-p job)
-    (condition-case failure
-        (let* ((target (deslop-job-target job))
-               (buffer (deslop-target-buffer target))
-               (start (deslop-target-start target))
-               (end (deslop-target-end target))
-               source parsed edits failures applied display)
-          (unless (buffer-live-p buffer)
-            (error "insert-anywhere target no longer exists"))
-          (with-current-buffer buffer
-            (deslop-target-with-restriction target
-              (setq start (point-min)
-                    end (point-max)
-                    source (buffer-substring-no-properties start end))))
-          (setq parsed
-                (deslop-edit-parse-insertions
-                 (deslop-trim-trailing
-                  (or (deslop--result-content result) ""))
-                 source)
-                edits (plist-get parsed :edits)
-                failures (plist-get parsed :errors)
-                display (deslop--job-display-metadata job result))
-          (with-current-buffer buffer
-            (let ((buffer-read-only nil))
-              (dolist (edit
-                       (sort (copy-sequence edits)
-                             (lambda (left right)
-                               (or (> (plist-get left :offset)
-                                      (plist-get right :offset))
-                                   (and (= (plist-get left :offset)
-                                           (plist-get right :offset))
-                                        (> (plist-get left :index)
-                                           (plist-get right :index)))))))
-                (condition-case caught
-                    (progn
-                      (deslop--apply-insertion-edit
-                       target buffer start edit display)
-                      (setq applied (1+ (or applied 0))))
-                  ((error quit)
-                   (push (list :index (plist-get edit :index)
-                               :message (error-message-string caught))
-                         failures))))))
-          (dolist (failure failures)
-            (message "deslop: skipped insert-anywhere edit %d: %s"
-                     (1+ (plist-get failure :index))
-                     (plist-get failure :message)))
-          (if (and applied (> applied 0))
-              (deslop-job-finish
-               job (deslop-edit-add-insertion-failures result failures))
-            (error "insert-anywhere produced no applicable insertions: %s"
-                   (deslop-edit-format-insertion-failures failures "; "))))
-      ((error quit)
-       (deslop-job-fail job (deslop--application-error failure))))))
+    (let* ((state (deslop--structured-state job))
+           (previous (plist-get state :last-result))
+           (annotated (and previous
+                           (deslop--structured-annotate-result
+                            previous state))))
+      (deslop--structured-report state)
+      (deslop-job-fail job error annotated))))
+
+(defun deslop--structured-repair-prompt (state)
+  "Build a feedback prompt for the remaining failures in STATE."
+  (format
+   "Task: %s\n\nOperation: %s\n\nThe previous response applied %d edits successfully. Return only edits that address the remaining failures below. Do not repeat any successful edit. Use the current document as the source of truth.\n\nFailed edits and exact diagnostics:\n%s\n\nCurrent document:\n%s"
+   (or (plist-get state :instruction) "complete the requested task")
+   (if (eq (plist-get state :type) 'insert-anywhere)
+       "INSERT-ANYWHERE"
+     "WRITE-ANYWHERE")
+   (+ (plist-get state :first-pass-applied)
+      (plist-get state :repaired))
+   (deslop-edit-format-failures (plist-get state :failures) "\n")
+   (or (plist-get state :source) "")))
+
+(defun deslop--dispatch-structured-repair (job)
+  "Dispatch one feedback request for the remaining edits in JOB."
+  (let* ((state (deslop--structured-state job))
+         (attempts (1+ (or (plist-get state :repair-attempts) 0))))
+    (setf (deslop-job-structured-state job)
+          (plist-put state :repair-attempts attempts))
+    (deslop--dispatch-llm
+     job
+     (list (cons "system" (plist-get state :system-prompt))
+           (cons "user" (deslop--structured-repair-prompt state)))
+     (lambda (repair-result)
+       (deslop--handle-structured-result job repair-result))
+     (lambda (error)
+       (deslop--structured-transport-error job error))
+     t)))
+
+(defun deslop--handle-structured-result (job result)
+  "Apply one structured RESULT and repair or settle JOB as appropriate."
+  (when (deslop-job-current-p job)
+    (let ((state (deslop--structured-state job)))
+      (condition-case failure
+          (let* ((repair-p (> (or (plist-get state :pass-count) 0) 0))
+                 (pass (deslop--structured-edit-pass job result))
+                 (failures (plist-get pass :failures))
+                 (failures (if repair-p
+                               (deslop--structured-preserve-failure-indices
+                                failures (plist-get state :failures))
+                             failures))
+                 (applied (plist-get pass :applied)))
+            (setf state (plist-put state :pass-count
+                                   (1+ (or (plist-get state :pass-count) 0))))
+            (when (null (plist-get state :requested))
+              (setf state (plist-put state :requested
+                                     (plist-get pass :requested))))
+            (setf state (plist-put state :failures failures)
+                  state (plist-put state :last-result result))
+            (if repair-p
+                (setf state (plist-put state :repaired
+                                       (+ (or (plist-get state :repaired) 0)
+                                          applied)))
+              (setf state (plist-put state :first-pass-applied applied)))
+            (setf (deslop-job-structured-state job) state)
+            (if (and failures
+                     (< (plist-get state :repair-attempts)
+                        deslop-structured-edit-repair-attempts))
+                (progn
+                  (setf state
+                        (plist-put
+                         state :source
+                         (plist-get (deslop--structured-source job) :source)))
+                  (setf (deslop-job-structured-state job) state)
+                  (deslop--dispatch-structured-repair job))
+              (deslop--structured-finish job result)))
+        (deslop-edit-resource-error
+         (deslop-job-fail
+          job
+          (deslop--application-error failure)
+          (deslop--structured-annotate-result result state)))
+        ((error quit)
+         (deslop-job-fail
+          job
+          (deslop--application-error failure)
+          (deslop--structured-annotate-result result state)))))))
+
+(defun deslop--apply-write-anywhere-result (job result)
+  "Apply a WRITE-ANYWHERE RESULT and repair or settle JOB."
+  (deslop--handle-structured-result job result))
+
+(defun deslop--apply-insert-anywhere-result (job result)
+  "Apply an INSERT-ANYWHERE RESULT and repair or settle JOB."
+  (deslop--handle-structured-result job result))
 
 ;;;; Operation handlers
 
@@ -559,19 +705,31 @@ the review overlay it creates."
                               (pcase type
                                 ('write-anywhere deslop-write-anywhere-instruction)
                                 ('insert-anywhere deslop-insert-anywhere-instruction))))
-             (system-prompt (pcase type
-                               ('write-anywhere deslop-write-anywhere-system)
-                               ('insert-anywhere deslop-insert-anywhere-system)))
-             source)
-        (unless (and (buffer-live-p buffer) start end)
-          (error "write-anywhere target no longer exists"))
-        (when (deslop-operation-freezes-buffer-p type)
-          (deslop-target-freeze-buffer target))
-        (with-current-buffer buffer
-          (deslop-target-with-restriction target
-            (deslop-target-validate-source target start end)
-            (setq source (buffer-substring-no-properties start end))))
-        (deslop--dispatch-llm
+              (system-prompt (pcase type
+                                ('write-anywhere deslop-write-anywhere-system)
+                                ('insert-anywhere deslop-insert-anywhere-system)))
+              source)
+         (deslop--validate-structured-repair-attempts)
+         (unless (and (buffer-live-p buffer) start end)
+           (error "write-anywhere target no longer exists"))
+         (with-current-buffer buffer
+           (deslop-target-with-restriction target
+             (barf-if-buffer-read-only)
+             (deslop-target-validate-source target start end)
+             (setq source (buffer-substring-no-properties start end))))
+         (setf (deslop-job-structured-state job)
+               (list :type type
+                     :instruction instruction
+                     :system-prompt system-prompt
+                     :pass-count 0
+                     :requested nil
+                     :first-pass-applied 0
+                     :repaired 0
+                     :repair-attempts 0
+                     :failures nil
+                     :last-result nil
+                     :source nil))
+         (deslop--dispatch-llm
          job
          (list (cons "system" system-prompt)
                (cons "user"

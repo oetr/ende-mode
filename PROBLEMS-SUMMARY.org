@@ -20,14 +20,14 @@ Very high byte limits should prevent accidental runaway memory or disk use witho
 Suggested ceilings are 256 MiB per response, 16 MiB per SSE event, 128 million parsed output characters, 1 MiB of headers, 1 MiB of error preview, 16 MiB for discovery, 1 MiB for OAuth refresh, and 16 MiB of stderr.
 See =deslop-core.el:23-95=, =deslop-provider.el:67-93=, =deslop-curl.el:177-193=, and =deslop-curl.el:257-265=.
 
-* TODO Bound structured edit expansion efficiently
+* DONE Bound structured edit expansion efficiently
 One structured edit using ="all": true= can expand into an edit for every matching anchor even though the number of raw edits is capped.
 Replacement conflict detection compares every pair and can perform quadratic work on a large buffer.
 Use a generous normalized-edit circuit breaker rather than a restrictive product limit.
 Sort edit intervals and detect conflicts in a linear pass after sorting.
 See =deslop-edit.el:70-78=, =deslop-edit.el:93-137=, and =deslop-edit.el:168-208=.
 
-* TODO Retry failed structured edits with model feedback
+* DONE Retry failed structured edits with model feedback
 Structured operations currently apply valid edits once, retain successful edits, and settle without giving the model a chance to repair failed edits.
 After the first pass, send the updated document, original task, failed edits, and exact diagnostics in a follow-up request.
 The follow-up must request only the remaining work and must tell the model not to repeat successful edits.
@@ -35,7 +35,7 @@ Add a configurable repair-attempt count with one attempt as the proposed default
 Keep the job active across repair rounds and report first-pass applications, repaired edits, final failures, and attempts used.
 See =deslop-operations.el:366-426= and =deslop-operations.el:452-506=.
 
-* TODO Make RET confirm selector choices
+* DONE Make RET confirm selector choices
 The provider and model selector binds =RET= to approving every pending review in the source buffer rather than confirming the current selection.
 Backspace similarly rejects every pending review, making familiar chooser keys perform broad and potentially destructive actions.
 Bind =RET= to =deslop-selector-confirm=.
@@ -43,19 +43,19 @@ Bind =C-c C-c= to approve all source reviews and =C-c C-k= to reject all source 
 Remove the mass-review actions from Backspace and deletion keys.
 See =deslop-selector.el:115-117=, =deslop-selector.el:238-272=, and =deslop-selector.el:340-342=.
 
-* TODO Stop review overlays from hijacking editing keys
+* DONE Stop review overlays from hijacking editing keys
 Review overlays bind =RET= to approval and =DEL=, Backspace, and =C-d= to rejection.
 Trying to insert a newline or delete one character can therefore approve or replace an entire generated region unexpectedly.
 Preserve normal editing keys and bind =C-c C-c= to approval and =C-c C-k= to rejection.
 See =deslop-review.el:30-38= and =deslop-review.el:264-323=.
 
-* TODO Remove obsolete buffer-freezing machinery
+* DONE Remove obsolete buffer-freezing machinery
 The target abstraction still contains fields, functions, and mutation-hook behavior for an abandoned design that made buffers read-only while jobs ran.
 The current operation specifications do not request freezing, so this machinery is dead complexity.
 Remove the freeze capability, target fields, freeze and thaw functions, and freeze-specific hook branch.
 See =deslop-operation.el:33-52=, =deslop-target.el:31-36=, =deslop-target.el:249-271=, and =deslop-operations.el:546-590=.
 
-* TODO Reject read-only write targets before dispatch and application
+* DONE Reject read-only write targets before dispatch and application
 Structured write-anywhere and insert-anywhere operations dynamically bind =buffer-read-only= to nil while applying edits.
 This defeats the writability check in =deslop--mutate-target= and allows model output to alter a deliberately read-only buffer.
 Check writability before dispatch to avoid paying for an unusable completion.
@@ -81,19 +81,19 @@ It can therefore accept output before validating the final HTTP status, content 
 Record completion events but defer success until process finalization performs the same checks as the generic transport.
 See =deslop-codex.el:623-670= and =deslop-codex.el:745-757=.
 
-* TODO Cancel all jobs when their source buffer is killed
+* DONE Cancel all jobs when their source buffer is killed
 An active job currently fails when its target buffer is killed, while queued jobs for that buffer remain queued until they are later skipped.
 Killing a source buffer should immediately cancel every active and queued job targeting that buffer as a predictable panic button.
 This behavior applies only to buffer-backed jobs and does not replace safe handling for future path-based tools.
 See =deslop-target.el:292-325= and =deslop-queue.el:296-326=.
 
-* TODO Prevent stale selector probe callbacks
+* DONE Prevent stale selector probe callbacks
 Reopening the singleton selector resets its buffer-local state before the previous model probe is explicitly cancelled.
 A stale asynchronous callback can consequently update a newly reused selector buffer, and external buffer killing does not cancel the probe.
 Cancel before mode reinitialization, add a generation token, and install a buffer-local kill hook.
 See =deslop-selector.el:136-162=, =deslop-selector.el:254-266=, and =deslop-selector.el:355-371=.
 
-* TODO Report partial structured-edit outcomes concretely
+* DONE Report partial structured-edit outcomes concretely
 Structured operations mark a job completed whenever at least one edit applies even if several other edits fail.
 Individual failures are sent through repeated echo-area messages that overwrite one another and are easy to miss.
 Show an aggregate message such as =deslop: applied 9 of 10 edits; 2 repaired; 1 skipped=.
@@ -101,7 +101,7 @@ Store structured counts for requested edits, first-pass applications, repaired e
 Render the durable history status as =COMPLETED WITH WARNINGS= when any edit remains skipped.
 See =deslop-operations.el:400-424=, =deslop-operations.el:487-504=, and =deslop-history.el=.
 
-* TODO Share transport session and finalization machinery
+* DONE Share transport session and finalization machinery
 The generic and Codex transports duplicate callback safety, settlement, cleanup, resource accounting, partial results, and process lifecycle code.
 The implementations have already diverged in HTTP validation, status reporting, and output-token handling.
 Extract a shared asynchronous session and finalization layer while leaving wire-format parsing in transport adapters.
@@ -113,19 +113,19 @@ Directly requiring the operations feature can therefore fail with a =void-functi
 Move this generic string helper into =deslop-core.el= or declare the architectural dependency explicitly.
 See =deslop-commands.el:21-23= and =deslop-operations.el:14-25=.
 
-* TODO Sanitize and truncate selector labels
+* DONE Sanitize and truncate selector labels
 Provider and remotely discovered model names are inserted directly into a fixed-width selector layout.
 The =%-24s= format specifies a minimum rather than maximum width, so long or multiline labels can distort or visually spoof rows.
 Apply the existing single-line sanitizer and truncate values according to display width.
 See =deslop-selector.el:90-118=, =deslop-selector.el:126-134=, and =deslop-provider.el:316-347=.
 
-* TODO Keep parallel queue policy stable
+* DONE Keep parallel queue policy stable
 A parallel job enqueued while its provider is at capacity is permanently rewritten as a sequential job.
 Equivalent jobs can therefore receive different scheduling semantics based only on transient load, which reduces throughput and overrides user intent.
 Keep the profile snapshot unchanged and let the admission check defer the parallel job until capacity is available.
 See =deslop-queue.el:201-231= and =deslop-test.el:1310-1338=.
 
-* TODO Use equal provider identities in FIFO tracking
+* DONE Use equal provider identities in FIFO tracking
 The queue compares provider identity with =equal= in one place but uses =memq= for the set of providers already considered.
 Two separately constructed profiles can contain equal URL strings that are not the same Lisp object.
 The later job can then bypass an older blocked job for the same endpoint despite the intended per-provider FIFO rule.
@@ -138,29 +138,30 @@ Users who explicitly configure a common output limit can therefore receive unexp
 Map the option to the Responses API =max_output_tokens= field while keeping the default unlimited.
 See =deslop-core.el:50-56= and =deslop-codex.el:768-779=.
 
-* TODO Delete settled change sets from the registry
+* DONE Delete settled change sets from the registry
 The package-wide internal hash table maps change-set identifiers to proposals so they can be applied or rejected after a tool call returns.
 Applied and rejected entries currently remain in the table indefinitely even though history is the appropriate place for settled results.
 Delete entries immediately after successful application or rejection while retaining pending entries until explicitly settled.
 Do not add arbitrary count or age limits at this stage.
 See =deslop-tools.el:463-471=, =deslop-tools.el:635-673=.
 
-* TODO Show active job and review counts in the lighter
+* DONE Show active job and review counts in the lighter
 The minor-mode lighter currently shows only active and queued jobs targeting the current buffer.
 When reviews exist, render =deslop[ACTIVE|REVIEWS]=, such as =deslop[1|2]= or =deslop[0|2]=.
 When no reviews exist, preserve the compact =deslop[ACTIVE]= form.
 Refresh the lighter whenever a review is created, approved, rejected, or removed in bulk.
 See =deslop.el:43-64= and =deslop-review.el:206-350=.
 
-* TODO Correct reversed provider navigation keys
+* DONE Correct reversed provider navigation keys
 The selector binds =p= to the next provider and =n= to the previous provider while model navigation follows the conventional opposite direction.
 This inconsistency makes navigation needlessly surprising to Emacs users.
 Bind =n= to next and =p= to previous and update the displayed key hints.
 See =deslop-selector.el:101-103= and =deslop-selector.el:326-331=.
 
-* TODO Clarify cross-module internal APIs after stabilization
+* TODO Clarify remaining cross-module internal APIs
 Functions named with feature-private double hyphens are routinely called from sibling modules as if they were supported interfaces.
 This makes module boundaries misleading and makes apparently local refactoring capable of breaking unrelated features.
 Perform this cleanup only after the behavioral, transport, review, and tool architecture has stabilized to avoid unnecessary renaming churn.
-Promote intentionally shared functions to documented APIs or place them in explicit shared internal modules.
-Examples include =deslop-protocol--json-*=, =deslop-curl--*=, =deslop-provider--models-url=, and =deslop-project--normalize-root=.
+The shared JSON accessors, provider model URL helper, and project root normalizer are now documented public APIs.
+Promote the remaining intentionally shared functions to documented APIs or place them in explicit shared internal modules.
+Remaining examples include =deslop-curl--*= and the SSE/parser helpers in =deslop-protocol.el=.

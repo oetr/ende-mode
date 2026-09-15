@@ -41,7 +41,7 @@
 (defvar deslop-mode-map (deslop--make-mode-map) "Keymap for `deslop-mode'.")
 
 (defvar-local deslop--mode-line-string " deslop[0]"
-  "Mode-line lighter showing the number of jobs for the current buffer.")
+  "Mode-line lighter showing jobs and pending reviews for the current buffer.")
 
 (defun deslop--job-targets-buffer-p (job buffer)
   "Return non-nil when active or queued JOB targets BUFFER."
@@ -52,15 +52,28 @@
   "Return the number of active or queued jobs targeting BUFFER."
   (cl-count-if
    (lambda (job) (deslop--job-targets-buffer-p job buffer))
-   (append deslop--active-jobs deslop-queue)))
+    (append deslop--active-jobs deslop-queue)))
+
+(defun deslop--buffer-review-count (buffer)
+  "Return the number of pending reviews in BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (save-restriction
+        (widen)
+        (cl-count-if #'deslop-review-overlay-p
+                     (overlays-in (point-min) (point-max)))))))
 
 (defun deslop--update-mode-line (&optional buffer)
   "Update the deslop lighter for BUFFER, or the current buffer."
   (let ((buffer (or buffer (current-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (setq deslop--mode-line-string
-              (format " deslop[%d]" (deslop--buffer-job-count buffer)))
+        (let ((jobs (deslop--buffer-job-count buffer))
+              (reviews (deslop--buffer-review-count buffer)))
+          (setq deslop--mode-line-string
+                (if (> reviews 0)
+                    (format " deslop[%d|%d]" jobs reviews)
+                  (format " deslop[%d]" jobs))))
         (force-mode-line-update)))))
 
 (defun deslop--mode-line-job-event (job _event)
@@ -68,10 +81,15 @@
   (deslop--update-mode-line
    (deslop-target-buffer (deslop-job-target job))))
 
+(defun deslop--mode-line-review-event (buffer)
+  "Refresh the mode-line count for reviews in BUFFER."
+  (deslop--update-mode-line buffer))
+
 (add-hook 'deslop-queue-abort-functions #'deslop-provider-abort-discovery)
 (add-hook 'deslop-queue-abort-functions #'deslop-ui-clear-all)
 (add-hook 'deslop-job-event-functions #'deslop-ui-job-event)
 (add-hook 'deslop-job-event-functions #'deslop--mode-line-job-event)
+(add-hook 'deslop-review-change-functions #'deslop--mode-line-review-event)
 
 ;;;###autoload
 (define-minor-mode deslop-mode
@@ -87,8 +105,9 @@
   (deslop-abort-queue)
   (let* ((dir (or (file-name-directory (locate-library "deslop.el"))
                   (user-error "deslop.el not found on load-path")))
-         (files '("deslop-core.el" "deslop-operation.el" "deslop-protocol.el"
-                  "deslop-curl.el" "deslop-provider.el" "deslop-codex.el"
+          (files '("deslop-core.el" "deslop-operation.el" "deslop-protocol.el"
+                   "deslop-transport.el" "deslop-curl.el" "deslop-provider.el"
+                   "deslop-codex.el"
                   "deslop-review.el" "deslop-project.el" "deslop-target.el"
                   "deslop-ui.el"
                   "deslop-llm.el" "deslop-queue.el" "deslop-edit.el"

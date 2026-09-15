@@ -62,7 +62,7 @@ Nil permits files of any size."
       (remhash id deslop-project--buffers-by-id)
       (remhash (current-buffer) deslop-project--buffer-ids))))
 
-(defun deslop-project--normalize-root (root)
+(defun deslop-project-normalize-root (root)
   "Return canonical directory ROOT, or signal an error."
   (unless (and (stringp root) (file-directory-p root))
     (error "deslop project root is not a directory: %s" root))
@@ -82,7 +82,7 @@ the project from BUFFER or the current buffer."
                        (and project (project-root project))))))))
     (unless project-root
       (user-error "deslop: current buffer is not in a project"))
-    (deslop-project--normalize-root project-root)))
+     (deslop-project-normalize-root project-root)))
 
 (defun deslop-project--excluded-p (relative-path)
   "Return non-nil when RELATIVE-PATH is excluded from tool access."
@@ -99,7 +99,7 @@ not exist, but its existing parent directory must still be inside ROOT."
     (error "project path must be a non-empty string"))
   (when (file-name-absolute-p path)
     (error "absolute paths are not allowed in project tools"))
-  (let* ((root (deslop-project--normalize-root root))
+  (let* ((root (deslop-project-normalize-root root))
          (expanded (expand-file-name path root))
          (canonical
           (if (file-exists-p expanded)
@@ -131,7 +131,7 @@ existing project directory."
   "Return PATH relative to ROOT after validating its project membership."
   (let* ((root (or root (deslop-project-root)))
          (canonical (deslop-project-path path root)))
-    (file-relative-name canonical (deslop-project--normalize-root root))))
+    (file-relative-name canonical (deslop-project-normalize-root root))))
 
 (defun deslop-project--assert-readable-file (path)
   "Signal when PATH is not a readable regular file or exceeds its limit."
@@ -158,9 +158,9 @@ existing project directory."
   (let* ((root (or root (deslop-project-root buffer)))
          (path (deslop-project--buffer-path buffer)))
     (and path
-         (file-in-directory-p path (deslop-project--normalize-root root))
+          (file-in-directory-p path (deslop-project-normalize-root root))
          (not (deslop-project--excluded-p
-               (file-relative-name path (deslop-project--normalize-root root)))))))
+                (file-relative-name path (deslop-project-normalize-root root)))))))
 
 (defun deslop-project-visiting-buffer (path &optional root)
   "Return the live buffer visiting PATH below ROOT, or nil."
@@ -224,11 +224,11 @@ existing project directory."
 (defun deslop-project-files (&optional root)
   "Return all allowed regular project files below ROOT."
   (deslop-project--walk-files
-   (deslop-project--normalize-root (or root (deslop-project-root)))))
+   (deslop-project-normalize-root (or root (deslop-project-root)))))
 
 (defun deslop-project-buffers (&optional root)
   "Return all live visiting buffers allowed below ROOT."
-  (let ((root (deslop-project--normalize-root (or root (deslop-project-root)))))
+  (let ((root (deslop-project-normalize-root (or root (deslop-project-root)))))
     (cl-remove-if-not
      (lambda (buffer)
        (deslop-project-buffer-allowed-p buffer root))

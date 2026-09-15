@@ -133,68 +133,74 @@
              (terminal (memq type '(:done :error :cancelled))))
         (when entry
           (unwind-protect
-              (condition-case nil
+              (condition-case caught
                   (when deslop-history-enabled
-                    (pcase type
-                      (:status
-                       (setf (deslop-history--entry-status entry)
-                             (plist-get event :status)))
-                      (:delta
-                       (if (eq (plist-get event :channel) :thinking)
-                           (when deslop-history-retain-thinking
-                             (push
-                              (plist-get event :text)
-                              (deslop-history--entry-thinking-parts entry)))
-                          (push (plist-get event :text)
-                                (deslop-history--entry-content-parts entry))))
-                       (:partial-result
-                        (deslop-history--record-partial-result
-                         entry (plist-get event :result)))
-                      (:usage
-                       (setf (deslop-history--entry-usage entry) event))
-                      (:metadata
-                       (setf (deslop-history--entry-metadata entry)
-                             (plist-get event :metadata)))
-                      (:done
-                       (let* ((content (plist-get event :content))
-                              (result (plist-get event :result))
-                              (thinking (and deslop-history-retain-thinking
-                                             (listp result)
-                                             (plist-get result :thinking)))
-                              (usage (and (listp result)
-                                           (plist-get result :usage))))
-                         (when (and (stringp thinking)
-                                    (> (length thinking) 0)
-                                    (null
-                                     (deslop-history--entry-thinking-parts
-                                      entry)))
-                           (setf (deslop-history--entry-thinking-parts entry)
-                                 (list thinking)))
-                         (when (and (stringp content)
-                                    (> (length content) 0))
-                           (setf
-                            (deslop-history--entry-content-parts entry)
-                            (list content)))
-                          (when usage
-                            (setf (deslop-history--entry-usage entry)
-                                  (list :type :usage
-                                        :usage usage
-                                        :tokens (plist-get result :tokens)
-                                        :speed (plist-get result :speed)
-                                        :estimated
-                                        (plist-get result :estimated))))
+                    (cond
+                     ((eq type :status)
+                      (setf (deslop-history--entry-status entry)
+                            (plist-get event :status)))
+                     ((eq type :delta)
+                      (if (eq (plist-get event :channel) :thinking)
+                          (when deslop-history-retain-thinking
+                            (push (plist-get event :text)
+                                  (deslop-history--entry-thinking-parts
+                                   entry)))
+                        (push (plist-get event :text)
+                              (deslop-history--entry-content-parts entry))))
+                     ((eq type :partial-result)
+                      (deslop-history--record-partial-result
+                       entry (plist-get event :result)))
+                     ((eq type :usage)
+                      (setf (deslop-history--entry-usage entry) event))
+                     ((eq type :metadata)
+                      (setf (deslop-history--entry-metadata entry)
+                            (plist-get event :metadata)))
+                     ((eq type :done)
+                      (let* ((content (plist-get event :content))
+                             (result (plist-get event :result))
+                             (thinking (and deslop-history-retain-thinking
+                                            (listp result)
+                                            (plist-get result :thinking)))
+                             (usage (and (listp result)
+                                         (plist-get result :usage)))
+                             (summary (deslop-history--structured-summary
+                                       result)))
+                        (when (and (stringp thinking)
+                                   (> (length thinking) 0)
+                                   (null
+                                    (deslop-history--entry-thinking-parts
+                                     entry)))
+                          (setf (deslop-history--entry-thinking-parts entry)
+                                (list thinking)))
+                        (when (and (stringp content)
+                                   (> (length content) 0))
+                          (setf (deslop-history--entry-content-parts entry)
+                                (list content)))
+                        (when usage
+                          (setf (deslop-history--entry-usage entry)
+                                (list :type :usage
+                                      :usage usage
+                                      :tokens (plist-get result :tokens)
+                                      :speed (plist-get result :speed)
+                                      :estimated (plist-get result :estimated))))
+                        (when (listp result)
                           (setf (deslop-history--entry-finish-reason entry)
                                 (plist-get result :finish-reason)))
-                       (deslop-history--finish-entry
-                        entry "Completed" (plist-get event :result)))
-                       (:error
-                        (deslop-history--record-partial-result
-                         entry (plist-get event :result))
                         (deslop-history--finish-entry
-                         entry "Failed" nil (plist-get event :error)))
-                      (:cancelled
-                       (deslop-history--finish-entry entry "Cancelled"))))
-                ((error quit) nil))
+                         entry
+                         (if (> (or (plist-get summary :skipped) 0) 0)
+                             "COMPLETED WITH WARNINGS"
+                           "Completed")
+                         result)))
+                     ((eq type :error)
+                      (deslop-history--record-partial-result
+                       entry (plist-get event :result))
+                      (deslop-history--finish-entry
+                       entry "Failed" nil (plist-get event :error)))
+                     ((eq type :cancelled)
+                      (deslop-history--finish-entry entry "Cancelled"))))
+                (error (ignore caught))
+                (quit (ignore caught)))
             (when terminal
               (remhash job deslop-history--entries))))))))
 
@@ -244,6 +250,21 @@
   "Format skipped structured-edit ERRORS for a history entry."
   (deslop-edit-format-failures errors))
 
+(defun deslop-history--structured-summary (result)
+  "Return structured-edit counters from RESULT, when present."
+  (and (listp result)
+       (listp (plist-get result :structured-summary))
+       (plist-get result :structured-summary)))
+
+(defun deslop-history--structured-summary-string (summary)
+  "Format structured-edit SUMMARY for a history entry."
+  (format "Requested: %d\nFirst-pass applied: %d\nRepaired: %d\nSkipped: %d\nRepair attempts: %d"
+          (or (plist-get summary :requested) 0)
+          (or (plist-get summary :first-pass-applied) 0)
+          (or (plist-get summary :repaired) 0)
+          (or (plist-get summary :skipped) 0)
+          (or (plist-get summary :repair-attempts) 0)))
+
 (defun deslop-history--usage-string (event)
   "Return readable usage information from normalized USAGE EVENT."
   (let ((raw (plist-get event :usage)))
@@ -276,7 +297,10 @@
                               (and (listp metrics-result)
                                    (plist-get metrics-result :finish-reason))))
            (partial-result (deslop-history--entry-partial-result entry))
-           (skipped-edit-errors
+            (structured-summary
+             (or (deslop-history--structured-summary result)
+                 (deslop-history--structured-summary partial-result)))
+            (skipped-edit-errors
             (or (and (listp result)
                      (or (plist-get result :write-anywhere-errors)
                          (plist-get result :insert-anywhere-errors)))
@@ -302,11 +326,16 @@
                "Prompt" (deslop-history--entry-prompt entry))
               (deslop-history--insert-section "Thinking" thinking)
               (deslop-history--insert-section "Output" content)
-              (when skipped-edit-errors
-                (deslop-history--insert-section
-                 "Skipped edits"
-                 (deslop-history--skipped-edit-errors-string
-                  skipped-edit-errors)))
+               (when skipped-edit-errors
+                 (deslop-history--insert-section
+                  "Skipped edits"
+                  (deslop-history--skipped-edit-errors-string
+                   skipped-edit-errors)))
+               (when structured-summary
+                 (deslop-history--insert-section
+                  "Structured edits"
+                  (deslop-history--structured-summary-string
+                   structured-summary)))
               (when metadata
                 (deslop-history--insert-section
                  "Provider"

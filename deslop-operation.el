@@ -33,7 +33,7 @@
 (cl-defstruct (deslop-operation-spec
                (:constructor deslop-operation-spec--create))
   "Static behavior for one deslop operation."
-  type target-kind writes-buffer whole-buffer freezes-buffer
+   type target-kind writes-buffer whole-buffer
   allows-source-changes structured-result)
 
 (defconst deslop-operation-specs
@@ -69,12 +69,6 @@
   (let ((spec (cl-find type deslop-operation-specs
                        :key #'deslop-operation-spec-type :test #'eq)))
     (and spec (deslop-operation-spec-whole-buffer spec))))
-
-(defun deslop-operation-freezes-buffer-p (type)
-  "Return non-nil when TYPE freezes its target buffer while running."
-  (let ((spec (cl-find type deslop-operation-specs
-                       :key #'deslop-operation-spec-type :test #'eq)))
-    (and spec (deslop-operation-spec-freezes-buffer spec))))
 
 (defun deslop-operation-allows-source-changes-p (type)
   "Return non-nil when TYPE tolerates source changes during generation."

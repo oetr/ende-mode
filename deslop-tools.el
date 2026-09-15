@@ -110,7 +110,7 @@ an agent can recover from an invalid path, regexp, or stale source version."
         (list :ok nil :tool (format "%s" name)
               :error (format "unknown deslop tool: %s" name))
       (condition-case caught
-          (let ((root (deslop-project--normalize-root
+          (let ((root (deslop-project-normalize-root
                        (or root (deslop-project-root)))))
             (list :ok t
                   :tool (symbol-name (deslop-tool-name tool))
@@ -632,16 +632,17 @@ return them."
                     (list :new_digest (deslop-tools--source-digest)
                           :applied_edits
                           (length (deslop-change-set-edits change-set))))))))
-          (setf (deslop-change-set-status change-set) "applied"
-                (deslop-change-set-overlays change-set) created-overlays)
-          (append (deslop-tools--change-set-result change-set) result))
+           (setf (deslop-change-set-status change-set) "applied"
+                 (deslop-change-set-overlays change-set) created-overlays)
+           (remhash (deslop-change-set-id change-set) deslop-tools--change-sets)
+           (append (deslop-tools--change-set-result change-set) result))
       ((error quit)
        (dolist (overlay created-overlays)
          (deslop--ignore-errors #'deslop-review-delete-overlay overlay))
        (signal (car failure) (cdr failure))))))
 
 (defun deslop-tools-change-set (id)
-  "Return pending or settled change set ID, or signal an error."
+  "Return pending change set ID, or signal an error."
   (or (and (stringp id) (gethash id deslop-tools--change-sets))
       (error "unknown deslop change set: %s" id)))
 
@@ -660,11 +661,12 @@ return them."
   "Reject pending change set ID."
   (interactive (list (read-string "Reject deslop change set: ")))
   (let ((change-set (deslop-tools-change-set id)))
-    (unless (string= (deslop-change-set-status change-set) "pending")
-      (user-error "change set %s is already %s"
-                  id (deslop-change-set-status change-set)))
-    (setf (deslop-change-set-status change-set) "rejected")
-    (message "deslop: rejected %s" id)
+     (unless (string= (deslop-change-set-status change-set) "pending")
+       (user-error "change set %s is already %s"
+                   id (deslop-change-set-status change-set)))
+     (setf (deslop-change-set-status change-set) "rejected")
+     (remhash id deslop-tools--change-sets)
+     (message "deslop: rejected %s" id)
     (deslop-tools--change-set-result change-set)))
 
 (defun deslop-tools-clear-change-sets ()

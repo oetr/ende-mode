@@ -27,7 +27,7 @@
 (cl-defstruct (deslop-job (:constructor deslop--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile instruction
-  metadata metadata-rank result error
+   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at)
 
 (defvar deslop--next-job-id 0
@@ -44,6 +44,21 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
 
 (defvar deslop--aborting nil
   "Non-nil while queue state is being invalidated by an abort.")
+
+(defvar-local deslop--source-buffer-jobs nil
+  "Jobs queued for or running against the current source buffer.")
+
+(defun deslop--unregister-source-job (job)
+  "Remove JOB from its source buffer's job registry."
+  (let ((buffer (deslop-target-buffer (deslop-job-target job))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq deslop--source-buffer-jobs
+              (delq job deslop--source-buffer-jobs))
+        (when (null deslop--source-buffer-jobs)
+          (remove-hook 'kill-buffer-hook
+                       #'deslop--source-buffer-killed t)))))
+  job)
 
 (defun deslop-job-terminal-p (job)
   "Non-nil when JOB has reached a terminal state."
@@ -66,6 +81,7 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
   "Release JOB from the active set and release its target."
   (setq deslop--active-jobs (delq job deslop--active-jobs)
         deslop--current-job (car deslop--active-jobs))
+  (deslop--unregister-source-job job)
   (deslop--ignore-errors #'deslop-target-release (deslop-job-target job)))
 
 ;;;; Queue state
@@ -192,7 +208,7 @@ cannot be bypassed by a later job from that same provider."
                (profile (deslop-job-profile job))
                (provider (or (plist-get profile :name)
                              (plist-get profile :url))))
-          (unless (memq provider seen-providers)
+           (unless (member provider seen-providers)
             (push provider seen-providers)
             (when (deslop--job-admissible-p job)
               (throw 'found cell)))))
@@ -207,9 +223,8 @@ cannot be bypassed by a later job from that same provider."
                    (or (plist-get data :profile)
                        (deslop-provider-profile-snapshot
                         (plist-get data :provider)))))
-         (now (float-time))
-         (parallel (eq (plist-get profile :parallel) t))
-         (job (deslop--make-job
+          (now (float-time))
+          (job (deslop--make-job
                 :id (cl-incf deslop--next-job-id)
                 :type type
                 :state 'queued
@@ -220,11 +235,6 @@ cannot be bypassed by a later job from that same provider."
                 :enqueued-at now)))
     (unless (deslop-target-p target)
       (error "deslop request is missing a target"))
-    (when (and parallel
-               (>= (length (deslop--active-provider-jobs job))
-                   (deslop-provider-max-concurrency profile)))
-      (setf (deslop-job-profile job)
-            (plist-put (deslop-job-profile job) :parallel nil)))
     (setf (deslop-job-profile job)
           (plist-put (copy-tree (deslop-job-profile job))
                      :job-id (deslop-job-id job)))
@@ -234,6 +244,12 @@ cannot be bypassed by a later job from that same provider."
   "Add REQUEST to the queue and trigger processing if idle.
 Return the newly created `deslop-job'."
   (let ((job (deslop--job-from-request request)))
+    (let ((buffer (deslop-target-buffer (deslop-job-target job))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (cl-pushnew job deslop--source-buffer-jobs :test #'eq)
+          (add-hook 'kill-buffer-hook
+                    #'deslop--source-buffer-killed -50 t))))
     (deslop--queue-push job)
     (deslop-job-emit-event
      job
@@ -345,10 +361,36 @@ When RESULT is non-nil, retain it for history and job inspection."
   (unless (deslop-job-terminal-p job)
     (setf (deslop-job-state job) 'cancelled
           (deslop-job-finished-at job) (float-time))
+    (deslop--unregister-source-job job)
     (deslop--invoke-cancellation (deslop-job-cancel-function job))
     (deslop--ignore-errors #'deslop-target-release (deslop-job-target job))
     (deslop-job-emit-event job '(:type :cancelled))
     (deslop-job-emit-event job '(:type :settled :state cancelled))))
+
+(defun deslop--source-buffer-killed ()
+  "Cancel all queued and active jobs targeting the current source buffer."
+  (let* ((was-aborting deslop--aborting)
+         (jobs (copy-sequence deslop--source-buffer-jobs))
+         (active (cl-intersection jobs deslop--active-jobs :test #'eq))
+         (pending (cl-intersection jobs deslop-queue :test #'eq)))
+    ;; Remove jobs from scheduler state before invoking transport cancellation;
+    ;; cancellation callbacks may run synchronously.
+    (setq deslop--source-buffer-jobs nil
+          deslop--aborting t)
+    (unwind-protect
+        (progn
+          (dolist (job pending)
+            (let ((cell (memq job deslop-queue)))
+              (when cell
+                (deslop--queue-remove-cell cell))))
+          (setq deslop--active-jobs
+                (cl-set-difference deslop--active-jobs active :test #'eq)
+                deslop--current-job (car deslop--active-jobs))
+          (dolist (job (append active pending))
+            (deslop--job-cancel job)))
+      (setq deslop--aborting was-aborting))
+    (unless was-aborting
+      (deslop-process-next))))
 
 (defun deslop-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
