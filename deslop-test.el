@@ -1840,6 +1840,107 @@ process for cancellation tests."
       (should-not (file-exists-p headers-file))
       (should-not (file-exists-p config-file)))))
 
+(ert-deftest deslop-test/provider-processes-from-tramp-stay-local ()
+  (dolist (operation '(generation codex-generation discovery models refresh))
+    (let ((native-comp-enable-subr-trampolines nil)
+          (default-directory "/ssh:deslop-test.invalid:/source/")
+          (deslop-provider-discovery-enabled nil)
+          (deslop-provider--discovery-cache (make-hash-table :test #'equal))
+          (deslop-provider--discovery-inflight (make-hash-table :test #'equal))
+          (deslop-codex--refresh-flights (make-hash-table :test #'equal))
+          (auth '(:access "test-access" :refresh "test-refresh"
+                  :expires 9999999999999))
+          (profile '(:name test :url "https://example.test/v1/chat/completions"
+                     :model "test-model" :temperature 0.2))
+          (cancel nil) (process nil) (failure nil)
+          (process-count 0) (pipe-count 0) (send-count 0) (files nil)
+          (real-process (symbol-function 'make-process))
+          (real-pipe (symbol-function 'make-pipe-process))
+          (real-temp (symbol-function 'make-temp-file)))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (should-not (file-remote-p default-directory))
+                   (should (file-directory-p default-directory))
+                   (cl-incf process-count)
+                   (dolist (option '("--dump-header" "--config"))
+                     (let ((path (cadr (member option (plist-get args :command)))))
+                       (when path
+                         (should (file-name-absolute-p path))
+                         (should-not (file-remote-p path))
+                         (should (file-exists-p path)))))
+                   (setq process
+                         (funcall real-process :name "deslop-test-local"
+                                  :command '("cat") :connection-type 'pipe
+                                  :noquery t))))
+                ((symbol-function 'make-pipe-process)
+                 (lambda (&rest args)
+                   (should-not (file-remote-p default-directory))
+                   (cl-incf pipe-count)
+                   (apply real-pipe args)))
+                ((symbol-function 'make-temp-file)
+                 (lambda (&rest args)
+                   (should-not (file-remote-p default-directory))
+                   (let ((file (apply real-temp args)))
+                     (push file files)
+                     file)))
+                ((symbol-function 'process-send-string)
+                 (lambda (target body)
+                   (should (eq target process))
+                   (should-not (file-remote-p default-directory))
+                   (should (stringp body))
+                   (when (eq operation 'refresh)
+                     (should (string-match-p "refresh_token=test-refresh" body)))
+                   (cl-incf send-count)))
+                ((symbol-function 'deslop-codex--auth-entry) (lambda () auth)))
+        (unwind-protect
+            (let ((callbacks (list :on-start (lambda (value) (setq cancel value))
+                                   :on-error (lambda (value) (setq failure value)))))
+              (pcase operation
+                ('generation
+                 (deslop-llm-default '(("user" . "remote source")) callbacks profile))
+                ('codex-generation
+                 (deslop-codex-default '(("user" . "remote source")) callbacks))
+                ('discovery
+                 (let ((deslop-provider-discovery-enabled t))
+                   (setq cancel (deslop-provider-discover profile #'ignore))))
+                ('models
+                 (setq cancel (deslop-codex-probe-models
+                               (lambda (_models error) (setq failure error)))))
+                ('refresh
+                 (setq cancel (deslop-codex--refresh-auth
+                               auth (lambda (value) (setq failure value))))))
+              (should-not failure)
+              (should (= process-count 1))
+              (should (= pipe-count 1))
+              (should (= send-count (if (memq operation '(discovery models)) 0 1)))
+              (should files)
+              (should (equal default-directory "/ssh:deslop-test.invalid:/source/")))
+          (when cancel (funcall cancel))
+          (when (and process (process-live-p process)) (delete-process process))
+          (when process
+            (deslop-curl-cleanup-resources
+             (list (process-get process :deslop-response-buffer)
+                   (process-get process :deslop-stderr-buffer))
+             files
+             (list (process-get process :deslop-stderr-process)))))))))
+
+(ert-deftest deslop-test/provider-rejects-unsafe-temporary-directory ()
+  (dolist (directory '("/ssh:deslop-test.invalid:/tmp/" "relative-temp/"))
+    (let ((native-comp-enable-subr-trampolines nil)
+          (temporary-file-directory directory))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _) (ert-fail "Started a process")))
+                ((symbol-function 'make-temp-file)
+                 (lambda (&rest _) (ert-fail "Created a temporary file")))
+                ((symbol-function 'deslop-curl--auth-secret)
+                 (lambda (&rest _) (ert-fail "Read credentials"))))
+        (should-error (deslop-curl-local-directory) :type 'user-error)
+        (should-error
+         (deslop-curl-start-request :profile '(:url "https://example.test"))
+         :type 'user-error)
+        (should-error (deslop-curl--config '(:url "https://example.test"))
+                      :type 'user-error)))))
+
 (defun deslop-test--run-default-transport (header response)
   "Run the default transport with a mocked process and HEADER/RESPONSE.
 Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."

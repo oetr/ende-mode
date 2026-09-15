@@ -11,6 +11,14 @@
 ;; deslop is a minor mode that queues requests to an OpenAI-compatible LLM.
 ;;
 ;;   C-c e   - deslop-selector-open
+;;
+;; TRAMP source buffers are supported: constructed request bodies are sent to
+;; local provider processes.  Generation, provider discovery, Codex model
+;; probing, and OAuth refresh always run curl locally, never on the source
+;; buffer's remote host.  Provider processes and their header/config files use
+;; `temporary-file-directory', which must be an existing absolute local
+;; directory; remote or relative values are rejected.  Refreshed Codex
+;; credentials must also be stored in a local file.
 
 ;;; Code:
 

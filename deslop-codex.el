@@ -188,7 +188,8 @@
 
 (defun deslop-codex--auth-entry ()
   "Return OpenCode's OAuth entry for the `openai' provider."
-  (let* ((data (deslop-codex--read-json-file deslop-codex-auth-file))
+  (let* ((default-directory (deslop-curl-local-directory))
+         (data (deslop-codex--read-json-file deslop-codex-auth-file))
          (entry (deslop-protocol-json-get "openai" data)))
     (unless (and (hash-table-p entry)
                  (string= (format "%s"
@@ -266,8 +267,12 @@ The claims are used only for routing metadata such as account and residency."
   "Write refreshed AUTH back to OpenCode's credential file atomically.
 When EXPECTED-VERSION is non-nil, refuse to replace credentials that changed
 since the refresh began."
-  (let* ((file (expand-file-name deslop-codex-auth-file))
-         (data (deslop-codex--read-json-file file))
+  (let* ((default-directory (deslop-curl-local-directory))
+         (file (expand-file-name deslop-codex-auth-file))
+         (data (progn
+                 (when (file-remote-p file)
+                   (user-error "Deslop requires a local Codex credential file"))
+                 (deslop-codex--read-json-file file)))
           (old (deslop-protocol-json-get "openai" data))
          (entry (if (hash-table-p old)
                     (copy-hash-table old)
@@ -459,7 +464,7 @@ since the refresh began."
         (headers-file nil)
         (process nil))
     (condition-case startup-error
-        (progn
+        (let ((default-directory (deslop-curl-local-directory)))
           (deslop-validate-resource-options)
           (setq response-buffer (generate-new-buffer " *deslop-openai-refresh*"))
           (setf (deslop-codex--refresh-flight-response-buffer flight)
@@ -509,7 +514,8 @@ since the refresh began."
 (defun deslop-codex--refresh-auth (auth callback)
   "Coalesce a refresh for AUTH and register CALLBACK as a waiter.
 Return a cancellation function that only removes this callback."
-  (let* ((key (list (expand-file-name deslop-codex-auth-file)
+  (let* ((default-directory (deslop-curl-local-directory))
+         (key (list (expand-file-name deslop-codex-auth-file)
                     deslop-codex-issuer
                     deslop-codex-client-id))
          (flight (gethash key deslop-codex--refresh-flights))
@@ -1053,7 +1059,8 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
 
 (defun deslop-codex--start-generation (session messages auth)
   "Start a Codex generation for SESSION using AUTH."
-  (let* ((profile (deslop-codex--session-profile session))
+  (let* ((default-directory (deslop-curl-local-directory))
+         (profile (deslop-codex--session-profile session))
          (url (deslop-codex--validated-generation-url
                (or (plist-get profile :url) deslop-codex-endpoint)))
          (account-id (deslop-codex--account-id auth))

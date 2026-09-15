@@ -493,7 +493,8 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (defun deslop-llm--start-session (session messages)
   "Allocate and start SESSION for MESSAGES."
   (deslop-validate-resource-options)
-  (let ((profile (deslop-llm--session-profile session)))
+  (let ((default-directory (deslop-curl-local-directory))
+        (profile (deslop-llm--session-profile session)))
     (setf (deslop-llm--session-json-data session)
           (encode-coding-string
            (json-encode (deslop-llm--request-body messages profile)) 'utf-8))
