@@ -84,14 +84,6 @@ When nil, use only the response inactivity timeout."
                  (integer :tag "Maximum entries"))
   :group 'deslop)
 
-(defcustom deslop-provider-max-discovery-bytes nil
-  "Maximum response-body bytes accepted from provider discovery.
-
-When nil, do not impose a discovery response-size limit."
-  :type '(choice (const :tag "Unlimited" nil)
-                 (integer :tag "Maximum bytes"))
-  :group 'deslop)
-
 ;;;; Profiles and display policy
 
 (defvar deslop-provider--runtime-settings (make-hash-table :test #'eq)
@@ -293,6 +285,26 @@ metadata and configured profile values."
         (secure-hash 'sha256
                      (prin1-to-string (plist-get profile :request-headers)))))
 
+(defun deslop-provider--validate-discovery-options ()
+  "Validate provider discovery cache and resource options."
+  (dolist (option
+           (list (cons 'deslop-provider-discovery-ttl
+                       deslop-provider-discovery-ttl)
+                 (cons 'deslop-provider-discovery-timeout
+                       deslop-provider-discovery-timeout)))
+    (unless (or (null (cdr option))
+                (and (numberp (cdr option)) (> (cdr option) 0)))
+      (error "%s must be nil or a positive number" (car option))))
+  (dolist (option
+           (list (cons 'deslop-provider-discovery-cache-size
+                       deslop-provider-discovery-cache-size)
+                 (cons 'deslop-provider-max-discovery-bytes
+                       deslop-provider-max-discovery-bytes)))
+    (unless (or (null (cdr option))
+                (and (integerp (cdr option)) (> (cdr option) 0)))
+      (error "%s must be nil or a positive integer" (car option))))
+  t)
+
 (defun deslop-provider--models-url (profile)
   "Return the OpenAI-compatible model-list URL for PROFILE, or nil."
   (let ((url (plist-get profile :url)))
@@ -439,6 +451,7 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
   "Start an asynchronous discovery request for PROFILE at URL."
   (let ((response-buf nil)
         (stderr-buf nil)
+        (stderr-process nil)
         (headers-file nil)
         (config-file nil)
         (process nil)
@@ -459,7 +472,8 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                 (deslop--ignore-errors #'delete-process process))
               (deslop-curl--cleanup-resources
                (list response-buf stderr-buf)
-               (list headers-file config-file))
+               (list headers-file config-file)
+               (list stderr-process))
               (deslop-provider--finish-discovery key metadata no-cache))))
     (condition-case _startup
         (let ((request
@@ -500,8 +514,9 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                       (funcall finish nil)))))))
           (setq process (plist-get request :process)
                 response-buf (plist-get request :response-buffer)
-                stderr-buf (plist-get request :stderr-buffer)
-                headers-file (plist-get request :headers-file)
+                 stderr-buf (plist-get request :stderr-buffer)
+                 stderr-process (plist-get request :stderr-process)
+                 headers-file (plist-get request :headers-file)
                 config-file (plist-get request :config-file))
           (process-put process :deslop-discovery-finish finish)
           (push process deslop-provider--discovery-processes)
@@ -519,6 +534,8 @@ Results, including failed lookups, are cached for
 `deslop-provider-discovery-ttl' seconds.  CALLBACK receives nil when the
 endpoint does not expose compatible metadata."
   (let ((callback (or callback #'ignore)))
+    (deslop-validate-resource-options)
+    (deslop-provider--validate-discovery-options)
     (if (not deslop-provider-discovery-enabled)
         (deslop-provider--invoke-discovery-callback callback nil)
       (let* ((key (deslop-provider--discovery-key profile))

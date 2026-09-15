@@ -5,14 +5,14 @@
 - Features that are not connected yet, larger review UX changes, documentation work, and future agent privacy design are tracked separately in =DEFER.org=.
 - The existing =C-c e= binding and summary badge placement are accepted for now and require no immediate change.
 
-* TODO Bind Codex OAuth tokens to official origins
+* DONE Bind Codex OAuth tokens to official origins
 The OpenCode access token can currently be attached to an overridden Codex profile URL, and the refresh token can be sent to a customized issuer.
 Generation and model discovery credentials must only be sent to the exact =https://chatgpt.com:443= origin.
 Refresh credentials must only be sent to the exact =https://auth.openai.com:443= origin.
 Official Codex endpoints should be internal constants or validated immediately before adding credentials rather than silently ignoring unsafe overrides.
 See =deslop-codex.el:30=, =deslop-codex.el:45=, =deslop-codex.el:50=, =deslop-codex.el:223=, =deslop-codex.el:396=, =deslop-codex.el:783=, and =deslop-provider.el:138=.
 
-* TODO Add permissive network circuit breakers
+* DONE Add permissive network circuit breakers
 Configured endpoints are trusted, so normal local inference must not fail because it is slow or produces a large response.
 Total request duration and provider output-token limits should remain unlimited by default.
 The existing response idle timeout should remain the primary timeout for stalled requests.
@@ -62,20 +62,20 @@ Check writability before dispatch to avoid paying for an unusable completion.
 Check writability again immediately before applying output because the user can make the buffer read-only while the request runs.
 See =deslop-operations.el:180-213=, =deslop-operations.el:252-263=, =deslop-operations.el:389-409=, and =deslop-operations.el:476-495=.
 
-* TODO Fix atomic OAuth credential replacement
+* DONE Fix atomic OAuth credential replacement
 The OAuth credential writer passes the intended directory as the initial-content argument to =make-temp-file=.
 The temporary file is consequently created in the normal temporary directory and =rename-file= can fail across filesystems.
 The temporary file is necessary because writing it completely and renaming it preserves either the old or new credential file if writing fails.
 Create the temporary file beside the credential file and retain restrictive file permissions.
 See =deslop-codex.el:157-188=.
 
-* TODO Coalesce concurrent OAuth refreshes
+* DONE Coalesce concurrent OAuth refreshes
 Every request that observes an expired token can launch an independent refresh and write to the shared OpenCode credential file.
 Refresh-token rotation and out-of-order completion can cause requests to invalidate one another or overwrite newer credentials.
 Maintain one in-flight refresh with waiting callbacks and verify the stored credential version before replacement.
 See =deslop-codex.el:60-61=, =deslop-codex.el:201-320=, and =deslop-codex.el:825-852=.
 
-* TODO Validate Codex HTTP responses before success
+* DONE Validate Codex HTTP responses before success
 The Codex transport settles successfully as soon as it parses a =response.completed= or =response.done= event.
 It can therefore accept output before validating the final HTTP status, content type, and complete SSE termination state.
 Record completion events but defer success until process finalization performs the same checks as the generic transport.
@@ -107,7 +107,7 @@ The implementations have already diverged in HTTP validation, status reporting, 
 Extract a shared asynchronous session and finalization layer while leaving wire-format parsing in transport adapters.
 See =deslop-llm.el:38-114=, =deslop-codex.el:489-606=, and =deslop-codex.el:768-779=.
 
-* TODO Remove the hidden operations load-order dependency
+* DONE Remove the hidden operations load-order dependency
 =deslop-operations.el= calls =deslop-trim-trailing= from =deslop-commands.el= without requiring that feature.
 Directly requiring the operations feature can therefore fail with a =void-function= error depending on load order.
 Move this generic string helper into =deslop-core.el= or declare the architectural dependency explicitly.
@@ -132,7 +132,7 @@ The later job can then bypass an older blocked job for the same endpoint despite
 Use =member=, =cl-member= with =equal=, or a canonical provider key.
 See =deslop-queue.el:135-146= and =deslop-queue.el:184-199=.
 
-* TODO Apply the output-token limit to Codex requests
+* DONE Apply the output-token limit to Codex requests
 =deslop-max-output-tokens= is included in generic chat-completions requests but omitted from the Codex Responses request body.
 Users who explicitly configure a common output limit can therefore receive unexpectedly long or costly Codex generations.
 Map the option to the Responses API =max_output_tokens= field while keeping the default unlimited.

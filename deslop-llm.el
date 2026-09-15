@@ -39,6 +39,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                (:constructor deslop-llm--make-session))
   "State owned by one asynchronous LLM transport request."
   profile callbacks model json-data process process-buffer stderr-buffer
+  stderr-process
   headers-file config-file sse reasoning content-parts thinking-parts usage
   provider-error actual-model actual-provider estimated-chars received-bytes
   response-preview response-preview-parts response-preview-bytes finish-reason
@@ -62,11 +63,13 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Release all process resources owned by SESSION."
   (deslop-curl--cleanup-resources
    (list (deslop-llm--session-process-buffer session)
-         (deslop-llm--session-stderr-buffer session))
-   (list (deslop-llm--session-headers-file session)
-         (deslop-llm--session-config-file session)))
+          (deslop-llm--session-stderr-buffer session))
+    (list (deslop-llm--session-headers-file session)
+          (deslop-llm--session-config-file session))
+    (list (deslop-llm--session-stderr-process session)))
   (setf (deslop-llm--session-process-buffer session) nil
-        (deslop-llm--session-stderr-buffer session) nil
+         (deslop-llm--session-stderr-buffer session) nil
+         (deslop-llm--session-stderr-process session) nil
         (deslop-llm--session-headers-file session) nil
         (deslop-llm--session-config-file session) nil))
 
@@ -492,28 +495,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm--start-session (session messages)
   "Allocate and start SESSION for MESSAGES."
-  (unless (or (null deslop-max-output-tokens)
-              (and (integerp deslop-max-output-tokens)
-                   (> deslop-max-output-tokens 0)))
-    (error "deslop-max-output-tokens must be nil or a positive integer"))
-  (unless (or (null deslop-request-timeout)
-              (and (numberp deslop-request-timeout)
-                   (> deslop-request-timeout 0)))
-    (error "deslop-request-timeout must be nil or a positive number"))
-  (unless (or (null deslop-connect-timeout)
-              (and (numberp deslop-connect-timeout)
-                   (> deslop-connect-timeout 0)))
-    (error "deslop-connect-timeout must be nil or a positive number"))
-  (unless (and (numberp deslop-response-idle-timeout)
-               (> deslop-response-idle-timeout 0))
-    (error "deslop-response-idle-timeout must be a positive number"))
-  (dolist (limit (list deslop-max-response-bytes deslop-max-sse-event-bytes))
-    (unless (or (null limit) (and (integerp limit) (> limit 0)))
-      (error "deslop response limits must be nil or positive integers")))
-  (unless (or (null deslop-max-output-chars)
-              (and (integerp deslop-max-output-chars)
-                   (> deslop-max-output-chars 0)))
-    (error "deslop-max-output-chars must be nil or a positive integer"))
+  (deslop-validate-resource-options)
   (let ((profile (deslop-llm--session-profile session)))
     (setf (deslop-llm--session-json-data session)
           (encode-coding-string
@@ -533,8 +515,10 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
             (plist-get request :process)
             (deslop-llm--session-process-buffer session)
             (plist-get request :response-buffer)
-            (deslop-llm--session-stderr-buffer session)
-            (plist-get request :stderr-buffer)
+             (deslop-llm--session-stderr-buffer session)
+             (plist-get request :stderr-buffer)
+             (deslop-llm--session-stderr-process session)
+             (plist-get request :stderr-process)
             (deslop-llm--session-headers-file session)
             (plist-get request :headers-file)
             (deslop-llm--session-config-file session)

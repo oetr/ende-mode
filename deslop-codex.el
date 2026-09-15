@@ -57,20 +57,111 @@
   :type 'string
   :group 'deslop)
 
+(defconst deslop-codex--generation-host "chatgpt.com"
+  "Official host allowed for Codex generation and model discovery.")
+
+(defconst deslop-codex--issuer-host "auth.openai.com"
+  "Official host allowed for Codex OAuth refreshes.")
+
+(defconst deslop-codex--generation-path "/backend-api/codex/responses"
+  "Official Codex generation path.")
+
+(defconst deslop-codex--models-path "/backend-api/codex/models"
+  "Official Codex model discovery path.")
+
+(defconst deslop-codex--refresh-path "/oauth/token"
+  "Official Codex OAuth refresh path.")
+
 (defvar deslop-codex--refresh-processes nil
   "In-flight OpenAI OAuth refresh processes.")
+
+(cl-defstruct (deslop-codex--refresh-waiter
+               (:constructor deslop-codex--make-refresh-waiter))
+  "One callback waiting for a shared OAuth refresh flight."
+  callback cancelled)
+
+(cl-defstruct (deslop-codex--refresh-flight
+               (:constructor deslop-codex--make-refresh-flight))
+  "One coalesced OAuth refresh and its waiting callbacks."
+  key auth waiters process response-buffer stderr-buffer stderr-process
+  headers-file
+  received-bytes finished)
+
+(defvar deslop-codex--refresh-flights (make-hash-table :test #'equal)
+  "In-flight OAuth refreshes keyed by credential source and client identity.")
 
 (defvar deslop-codex--model-probe-processes nil
   "In-flight ChatGPT/Codex model discovery processes.")
 
 (cl-defstruct (deslop-codex--session
                (:constructor deslop-codex--make-session))
-  profile callbacks process process-buffer stderr-buffer headers-file
+  profile callbacks process process-buffer stderr-buffer stderr-process
+  headers-file
   config-file auth-cancel sse content-parts thinking-parts usage actual-model
-  actual-provider finish-reason estimated-chars received-bytes preview-parts
-  preview-bytes generation-start terminal cancelled)
+   actual-provider finish-reason estimated-chars received-bytes preview-parts
+   preview-bytes generation-start terminal terminal-event cancelled)
 
 ;;;; Credential handling
+
+(defun deslop-codex--auth-version (auth)
+  "Return the credential version represented by AUTH."
+  (list (plist-get auth :access)
+        (plist-get auth :refresh)
+        (plist-get auth :expires)
+        (plist-get auth :account-id)))
+
+(defun deslop-codex--entry-version (entry)
+  "Return the credential version represented by JSON ENTRY."
+  (list (deslop-protocol--json-get "access" entry)
+        (deslop-protocol--json-get "refresh" entry)
+        (deslop-protocol--json-get "expires" entry)
+        (deslop-protocol--json-get "accountId" entry)))
+
+(defun deslop-codex--validated-official-url (url host path)
+  "Return URL when it has the exact official HTTPS origin and PATH."
+  (let* ((parsed (and (stringp url) (url-generic-parse-url url)))
+         (scheme (and parsed (url-type parsed)))
+         (actual-host (and parsed (url-host parsed)))
+         (port (and parsed (url-port parsed)))
+         (actual-path (and parsed (url-filename parsed))))
+    (unless (and (stringp url)
+                 (string= (downcase (or scheme "")) "https")
+                 (string= (downcase (or actual-host "")) host)
+                 (= (or port 443) 443)
+                 (null (and parsed (url-user parsed)))
+                 (null (and parsed (url-password parsed)))
+                 (not (string-match-p "[?#]" url))
+                 (string= (or actual-path "/") path))
+      (error "Codex credentials may only be sent to the official %s endpoint"
+             host))
+    url))
+
+(defun deslop-codex--validated-generation-url (url)
+  "Validate the credential-bearing Codex generation URL URL."
+  (deslop-codex--validated-official-url
+   url deslop-codex--generation-host deslop-codex--generation-path))
+
+(defun deslop-codex--validated-models-url ()
+  "Validate and return the credential-bearing Codex models URL."
+  (deslop-codex--validated-official-url
+   deslop-codex-models-endpoint
+   deslop-codex--generation-host
+   deslop-codex--models-path))
+
+(defun deslop-codex--validated-refresh-url ()
+  "Validate and return the official Codex OAuth refresh URL."
+  (deslop-codex--validated-official-url
+   (concat (string-remove-suffix "/" deslop-codex-issuer)
+           deslop-codex--refresh-path)
+   deslop-codex--issuer-host
+   deslop-codex--refresh-path))
+
+(defun deslop-codex--auth-fresh-p (auth)
+  "Return non-nil when AUTH has enough lifetime for a new request."
+  (and (stringp (plist-get auth :access))
+       (numberp (plist-get auth :expires))
+       (> (plist-get auth :expires)
+          (+ (* 1000 (floor (float-time))) 30000))))
 
 (defun deslop-codex--read-json-file (file)
   "Read FILE as a JSON hash table without interning its keys."
@@ -154,16 +245,22 @@ The claims are used only for routing metadata such as account and residency."
           (deslop-codex--form-field refresh-token)
           (deslop-codex--form-field deslop-codex-client-id)))
 
-(defun deslop-codex--store-auth (auth)
-  "Write refreshed AUTH back to OpenCode's credential file atomically."
-  (let* ((file deslop-codex-auth-file)
+(defun deslop-codex--store-auth (auth &optional expected-version)
+  "Write refreshed AUTH back to OpenCode's credential file atomically.
+When EXPECTED-VERSION is non-nil, refuse to replace credentials that changed
+since the refresh began."
+  (let* ((file (expand-file-name deslop-codex-auth-file))
          (data (deslop-codex--read-json-file file))
          (old (deslop-protocol--json-get "openai" data))
          (entry (if (hash-table-p old)
                     (copy-hash-table old)
-                  (make-hash-table :test #'equal)))
-         (temporary nil)
-         (complete nil))
+          (make-hash-table :test #'equal)))
+          (temporary nil)
+          (complete nil))
+    (when (and expected-version
+               (not (equal expected-version
+                           (deslop-codex--entry-version old))))
+      (error "OpenCode credentials changed during refresh"))
     (puthash "type" "oauth" entry)
     (puthash "access" (plist-get auth :access) entry)
     (puthash "refresh" (plist-get auth :refresh) entry)
@@ -173,10 +270,11 @@ The claims are used only for routing metadata such as account and residency."
     (puthash "openai" entry data)
     (unwind-protect
         (progn
-          (setq temporary
-                (make-temp-file "deslop-openai-auth-"
-                                nil nil (or (file-name-directory file)
-                                            default-directory)))
+           (setq temporary
+                 (make-temp-file
+                  (expand-file-name ".deslop-openai-auth-"
+                                    (or (file-name-directory file)
+                                        default-directory))))
           (set-file-modes temporary #o600)
           (with-temp-file temporary
             (insert (json-encode data) "\n"))
@@ -192,130 +290,225 @@ The claims are used only for routing metadata such as account and residency."
   (append
    (deslop-curl--base-command url)
    (deslop-curl--response-options headers-file)
-   (list "--request" "POST"
-         "--header" "Content-Type: application/x-www-form-urlencoded"
-         "--data-binary" "@-")
-   (deslop-curl--timeout-options deslop-request-timeout)
-   (list "--url" url)))
+    (list "--request" "POST"
+          "--header" "Content-Type: application/x-www-form-urlencoded"
+          "--data-binary" "@-")
+    (deslop-curl--timeout-options deslop-request-timeout
+                                  deslop-max-oauth-refresh-bytes)
+    (list "--url" url)))
 
-(defun deslop-codex--refresh-auth (auth callback)
-  "Refresh AUTH asynchronously and call CALLBACK with AUTH or an error.
-Return a cancellation function."
+(defun deslop-codex--refresh-finish (flight result &optional cancelled)
+  "Finish FLIGHT and notify its remaining waiters with RESULT."
+  (unless (deslop-codex--refresh-flight-finished flight)
+    (setf (deslop-codex--refresh-flight-finished flight) t)
+    (when (eq (gethash (deslop-codex--refresh-flight-key flight)
+                       deslop-codex--refresh-flights)
+              flight)
+      (remhash (deslop-codex--refresh-flight-key flight)
+               deslop-codex--refresh-flights))
+    (let ((process (deslop-codex--refresh-flight-process flight))
+          (waiters (deslop-codex--refresh-flight-waiters flight)))
+      (setf (deslop-codex--refresh-flight-waiters flight) nil
+            deslop-codex--refresh-processes
+            (delq process deslop-codex--refresh-processes))
+      (when (and (processp process) (process-live-p process))
+        (deslop--ignore-errors #'delete-process process))
+      (deslop-curl--cleanup-resources
+       (list (deslop-codex--refresh-flight-response-buffer flight)
+             (deslop-codex--refresh-flight-stderr-buffer flight))
+        (list (deslop-codex--refresh-flight-headers-file flight))
+        (list (deslop-codex--refresh-flight-stderr-process flight)))
+      (unless cancelled
+        (dolist (waiter waiters)
+          (unless (deslop-codex--refresh-waiter-cancelled waiter)
+            (condition-case nil
+                (funcall (deslop-codex--refresh-waiter-callback waiter)
+                         result)
+              ((error quit) nil))))))))
+
+(defun deslop-codex--refresh-cancel-waiter (flight waiter)
+  "Cancel WAITER from FLIGHT without disturbing other waiters."
+  (unless (deslop-codex--refresh-waiter-cancelled waiter)
+    (setf (deslop-codex--refresh-waiter-cancelled waiter) t)
+    (when (and (not (deslop-codex--refresh-flight-finished flight))
+               (eq (gethash (deslop-codex--refresh-flight-key flight)
+                            deslop-codex--refresh-flights)
+                   flight))
+      (setf (deslop-codex--refresh-flight-waiters flight)
+            (delq waiter (deslop-codex--refresh-flight-waiters flight)))
+      (when (null (deslop-codex--refresh-flight-waiters flight))
+        (deslop-codex--refresh-finish flight nil t)))))
+
+(defun deslop-codex--refresh-filter (flight _process chunk)
+  "Consume refresh response CHUNK for FLIGHT within its byte budget."
+  (unless (deslop-codex--refresh-flight-finished flight)
+    (let* ((received (deslop-codex--refresh-flight-received-bytes flight))
+           (total (+ received (string-bytes chunk))))
+      (setf (deslop-codex--refresh-flight-received-bytes flight) total)
+      (if (and deslop-max-oauth-refresh-bytes
+               (> total deslop-max-oauth-refresh-bytes))
+          (deslop-codex--refresh-finish
+           flight
+           (deslop-error-create
+            :kind 'resource
+            :message
+            "OAuth refresh response exceeds deslop-max-oauth-refresh-bytes"))
+        (let ((buffer (deslop-codex--refresh-flight-response-buffer flight)))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (insert chunk))))))))
+
+(defun deslop-codex--refresh-sentinel (flight process event)
+  "Handle terminal PROCESS EVENT for refresh FLIGHT."
+  (when (and (not (deslop-codex--refresh-flight-finished flight))
+             (memq (process-status process) '(exit signal closed)))
+    (if (/= (process-exit-status process) 0)
+        (deslop-codex--refresh-finish
+         flight
+         (deslop-error-create
+          :kind 'auth
+          :message
+          (format "OpenAI token refresh failed: %s" (string-trim event))))
+      (condition-case parse-error
+          (let* ((headers
+                  (deslop-curl--response-headers
+                   (deslop-codex--refresh-flight-headers-file flight)))
+                 (status (car headers))
+                 (buffer (deslop-codex--refresh-flight-response-buffer flight))
+                 (payload
+                  (with-current-buffer buffer
+                    (deslop-protocol--json-read-string (buffer-string))))
+                 (access (deslop-protocol--json-get "access_token" payload))
+                 (refresh (deslop-protocol--json-get "refresh_token" payload))
+                 (expires-in (deslop-protocol--json-get "expires_in" payload)))
+            (if (or (null status) (< status 200) (>= status 300))
+                (deslop-codex--refresh-finish
+                 flight
+                 (deslop-error-create
+                  :kind 'auth
+                  :message
+                  (format "OpenAI token refresh returned HTTP %s"
+                          (or status "unknown"))))
+              (unless (and (stringp access) (stringp refresh)
+                           (numberp expires-in))
+                (error "token refresh response is incomplete"))
+              (let ((refreshed
+                     (list :access access
+                           :refresh refresh
+                           :expires (+ (* 1000 (floor (float-time)))
+                                       (* 1000 expires-in))
+                           :account-id
+                           (or (plist-get (deslop-codex--refresh-flight-auth flight)
+                                          :account-id)
+                               (deslop-codex--claim
+                                (deslop-codex--jwt-claims access)
+                                "chatgpt_account_id")))))
+                (condition-case store-error
+                    (progn
+                      (deslop-codex--store-auth
+                       refreshed
+                       (deslop-codex--auth-version
+                        (deslop-codex--refresh-flight-auth flight)))
+                      (deslop-codex--refresh-finish flight refreshed))
+                  ((error quit)
+                   (let ((current
+                          (condition-case nil
+                              (deslop-codex--auth-entry)
+                            ((error quit) nil))))
+                     (if (and (string-match-p
+                               "credentials changed during refresh"
+                               (error-message-string store-error))
+                              (deslop-codex--auth-fresh-p current))
+                         (deslop-codex--refresh-finish flight current)
+                       (deslop-codex--refresh-finish
+                        flight
+                        (deslop-error-create
+                         :kind 'auth
+                         :message (error-message-string store-error))))))))))
+        ((error quit)
+         (deslop-codex--refresh-finish
+          flight
+          (deslop-error-create
+            :kind 'auth
+            :message (error-message-string parse-error)))))))
+  )
+
+(defun deslop-codex--start-refresh-flight (flight)
+  "Start the process belonging to refresh FLIGHT."
   (let ((response-buffer (generate-new-buffer " *deslop-openai-refresh*"))
         (stderr-buffer (generate-new-buffer " *deslop-openai-refresh-stderr*"))
-        (headers-file (make-temp-file "deslop-openai-headers-"))
-        process finished)
+        (stderr-process nil)
+        (headers-file (make-temp-file "deslop-openai-headers-")))
     (set-file-modes headers-file #o600)
-    (cl-labels
-        ((finish (result &optional cancelled)
-           (unless finished
-             (setq finished t)
-             (setq deslop-codex--refresh-processes
-                   (delq process deslop-codex--refresh-processes))
-             (when (and (processp process) (process-live-p process))
-               (delete-process process))
-             (deslop-curl--cleanup-resources
-              (list response-buffer stderr-buffer) (list headers-file))
-             (unless cancelled
-               (funcall callback result)))))
-      (condition-case startup-error
-          (progn
-            (deslop-curl--validated-url
-             nil (concat deslop-codex-issuer "/oauth/token"))
-            (setq process
+    (setf (deslop-codex--refresh-flight-response-buffer flight) response-buffer
+          (deslop-codex--refresh-flight-stderr-buffer flight) stderr-buffer
+          (deslop-codex--refresh-flight-headers-file flight) headers-file)
+    (condition-case startup-error
+        (progn
+           (deslop-validate-resource-options)
+           (setq stderr-process
+                 (make-pipe-process
+                  :name (generate-new-buffer-name
+                         "deslop-openai-refresh-stderr")
+                  :filter (apply-partially #'deslop-curl--stderr-filter
+                                           stderr-buffer)
+                  :noquery t))
+           (setf (deslop-codex--refresh-flight-stderr-process flight)
+                 stderr-process)
+           (let ((url (deslop-codex--validated-refresh-url)))
+            (setf (deslop-codex--refresh-flight-process flight)
                   (make-process
                    :name "deslop-openai-refresh"
                    :buffer response-buffer
-                   :stderr stderr-buffer
+                    :stderr stderr-process
                    :connection-type 'pipe
                    :noquery t
-                   :command (deslop-codex--refresh-command
-                             (concat deslop-codex-issuer "/oauth/token")
-                             headers-file)
-                   :filter
-                   (lambda (_process chunk)
-                     (when (buffer-live-p response-buffer)
-                       (with-current-buffer response-buffer
-                         (goto-char (point-max))
-                         (insert chunk))))
-                   :sentinel
-                   (lambda (refresh-process event)
-                     (when (memq (process-status refresh-process)
-                                 '(exit signal closed))
-                       (if (/= (process-exit-status refresh-process) 0)
-                           (finish
-                            (deslop-error-create
-                             :kind 'auth
-                             :message
-                             (format "OpenAI token refresh failed: %s"
-                                     (string-trim event))))
-                         (condition-case parse-error
-                             (let* ((status
-                                     (car (deslop-curl--response-headers
-                                           headers-file)))
-                                    (payload
-                                     (with-current-buffer response-buffer
-                                       (deslop-protocol--json-read-string
-                                        (buffer-string))))
-                                    (access
-                                     (deslop-protocol--json-get
-                                      "access_token" payload))
-                                    (refresh
-                                     (deslop-protocol--json-get
-                                      "refresh_token" payload))
-                                    (expires-in
-                                     (deslop-protocol--json-get
-                                      "expires_in" payload)))
-                               (if (or (null status) (< status 200)
-                                       (>= status 300))
-                                   (finish
-                                    (deslop-error-create
-                                     :kind 'auth
-                                     :message
-                                     (format "OpenAI token refresh returned HTTP %s"
-                                             (or status "unknown"))))
-                                 (unless (and (stringp access)
-                                              (stringp refresh)
-                                              (numberp expires-in))
-                                   (error "token refresh response is incomplete"))
-                                 (let ((refreshed
-                                        (list :access access
-                                              :refresh refresh
-                                              :expires
-                                              (+ (* 1000 (floor (float-time)))
-                                                 (* 1000 expires-in))
-                                              :account-id
-                                              (or (plist-get auth :account-id)
-                                                  (deslop-codex--claim
-                                                   (deslop-codex--jwt-claims access)
-                                                   "chatgpt_account_id")))))
-                                   (deslop-codex--store-auth refreshed)
-                                   (finish refreshed))))
-                           ((error quit)
-                            (finish
-                             (deslop-error-create
-                              :kind 'auth
-                              :message (error-message-string parse-error))))))))))
-            (push process deslop-codex--refresh-processes)
-            (process-send-string process
-                                 (deslop-codex--refresh-body
-                                  (plist-get auth :refresh)))
-            (process-send-eof process))
-        ((error quit)
-         (finish
-          (deslop-error-create
-           :kind 'auth
-           :message (error-message-string startup-error)))))
-      (lambda () (finish nil t)))))
+                   :command (deslop-codex--refresh-command url headers-file)
+                   :filter (apply-partially
+                            #'deslop-codex--refresh-filter flight)
+                   :sentinel (apply-partially
+                              #'deslop-codex--refresh-sentinel flight)))
+            (push (deslop-codex--refresh-flight-process flight)
+                  deslop-codex--refresh-processes)
+            (process-send-string
+             (deslop-codex--refresh-flight-process flight)
+             (deslop-codex--refresh-body
+              (plist-get (deslop-codex--refresh-flight-auth flight) :refresh)))
+            (process-send-eof (deslop-codex--refresh-flight-process flight))))
+      ((error quit)
+       (deslop-codex--refresh-finish
+        flight
+        (deslop-error-create
+         :kind 'auth
+         :message (error-message-string startup-error)))))))
+
+(defun deslop-codex--refresh-auth (auth callback)
+  "Coalesce a refresh for AUTH and register CALLBACK as a waiter.
+Return a cancellation function that only removes this callback."
+  (let* ((key (list (expand-file-name deslop-codex-auth-file)
+                    deslop-codex-issuer
+                    deslop-codex-client-id))
+         (flight (gethash key deslop-codex--refresh-flights))
+         (new-flight (null flight))
+         (waiter (deslop-codex--make-refresh-waiter :callback callback)))
+    (when new-flight
+      (setq flight
+            (deslop-codex--make-refresh-flight
+             :key key :auth auth :waiters nil :received-bytes 0))
+      (puthash key flight deslop-codex--refresh-flights))
+    (setf (deslop-codex--refresh-flight-waiters flight)
+          (cons waiter (deslop-codex--refresh-flight-waiters flight)))
+    (when new-flight
+      (deslop-codex--start-refresh-flight flight))
+    (apply-partially #'deslop-codex--refresh-cancel-waiter flight waiter)))
 
 (defun deslop-codex--resolve-auth (callback)
   "Load OpenCode's credentials and call CALLBACK with AUTH or an error.
 Return a cancellation function for an asynchronous refresh, or nil."
   (condition-case load-error
       (let ((auth (deslop-codex--auth-entry)))
-        (if (and (stringp (plist-get auth :access))
-                 (> (plist-get auth :expires)
-                    (+ (* 1000 (floor (float-time))) 30000)))
+        (if (deslop-codex--auth-fresh-p auth)
             (progn (funcall callback auth) nil)
           (deslop-codex--refresh-auth auth callback)))
     ((error quit)
@@ -335,9 +528,10 @@ Return a cancellation function for an asynchronous refresh, or nil."
    (list "--get"
          "--data-urlencode"
          (concat "client_version=" deslop-codex-client-version))
-   (when config-file (list "--config" config-file))
-   (deslop-curl--timeout-options deslop-request-timeout)
-   (list "--url" url)))
+    (when config-file (list "--config" config-file))
+    (deslop-curl--timeout-options deslop-request-timeout
+                                  deslop-provider-max-discovery-bytes)
+    (list "--url" url)))
 
 (defun deslop-codex--parse-models (text)
   "Return model slugs parsed from a Codex model-list response TEXT."
@@ -367,11 +561,13 @@ Return a cancellation function for an asynchronous refresh, or nil."
 CALLBACK receives (MODELS ERROR).  Return a cancellation function."
   (let ((response-buffer nil)
         (stderr-buffer nil)
+        (stderr-process nil)
         (headers-file nil)
-        (config-file nil)
-        (process nil)
-        (auth-cancel nil)
-        (finished nil))
+         (config-file nil)
+         (process nil)
+         (auth-cancel nil)
+         (models-url nil)
+         (finished nil))
     (cl-labels
         ((finish (models &optional error cancelled)
            (unless finished
@@ -382,21 +578,25 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                (delete-process process))
               (deslop-curl--cleanup-resources
                (list response-buffer stderr-buffer)
-               (list headers-file config-file))
+               (list headers-file config-file)
+               (list stderr-process))
              (unless cancelled
                (funcall callback models error)))))
-      (condition-case startup-error
-          (setq auth-cancel
-                (deslop-codex--resolve-auth
-                 (lambda (auth-or-error)
-                   (unless finished
-                     (if (deslop-error-p auth-or-error)
-                         (finish nil auth-or-error)
-                       (condition-case request-error
-                           (let* ((account-id
-                                   (deslop-codex--account-id auth-or-error))
-                                  (headers
-                                   (append
+       (condition-case startup-error
+           (progn
+             (deslop-validate-resource-options)
+             (setq models-url (deslop-codex--validated-models-url))
+             (setq auth-cancel
+                   (deslop-codex--resolve-auth
+                    (lambda (auth-or-error)
+                      (unless finished
+                        (if (deslop-error-p auth-or-error)
+                            (finish nil auth-or-error)
+                          (condition-case request-error
+                              (let* ((account-id
+                                      (deslop-codex--account-id auth-or-error))
+                                   (headers
+                                    (append
                                     (list
                                      (concat "Authorization: Bearer "
                                              (plist-get auth-or-error :access))
@@ -406,15 +606,15 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                                       (list (concat "ChatGPT-Account-Id: "
                                                     account-id)))))
                                   (request
-                                   (deslop-curl--start-request
-                                    :profile (list :url deslop-codex-models-endpoint)
-                                    :name "deslop-codex-model-probe"
+                                     (deslop-curl--start-request
+                                     :profile (list :url models-url)
+                                     :name "deslop-codex-model-probe"
                                     :internal-headers headers
                                     :command
                                     (lambda (url-headers url-config)
-                                      (deslop-codex--models-command
-                                       deslop-codex-models-endpoint
-                                       url-headers url-config))
+                                       (deslop-codex--models-command
+                                        models-url
+                                        url-headers url-config))
                                      :filter nil
                                     :sentinel
                                     (lambda (probe-process event)
@@ -463,18 +663,21 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                                        (plist-get request :response-buffer)
                                        stderr-buffer
                                        (plist-get request :stderr-buffer)
+                                       stderr-process
+                                       (plist-get request :stderr-process)
                                        headers-file
                                        (plist-get request :headers-file)
                                        config-file
                                        (plist-get request :config-file))
                                  (push process deslop-codex--model-probe-processes))
-                         ((error quit)
-                          (finish
-                           nil
-                           (deslop-error-create
-                            :kind 'startup
-                            :message (error-message-string request-error))))))))))
-        ((error quit)
+                             ((error quit)
+                              (finish
+                               nil
+                               (deslop-error-create
+                                :kind 'startup
+                                :message (error-message-string request-error))))))))))
+            )
+         ((error quit)
          (finish
           nil
           (deslop-error-create
@@ -506,9 +709,11 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
    (list (deslop-codex--session-process-buffer session)
          (deslop-codex--session-stderr-buffer session))
    (list (deslop-codex--session-headers-file session)
-         (deslop-codex--session-config-file session)))
+         (deslop-codex--session-config-file session))
+   (list (deslop-codex--session-stderr-process session)))
   (setf (deslop-codex--session-process-buffer session) nil
         (deslop-codex--session-stderr-buffer session) nil
+        (deslop-codex--session-stderr-process session) nil
         (deslop-codex--session-headers-file session) nil
         (deslop-codex--session-config-file session) nil))
 
@@ -647,16 +852,16 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
        session '(:type :status :status "Thinking"))
       (deslop-codex--emit-delta
        session :thinking (deslop-protocol--json-get "delta" json)))
-     ((member type '("response.completed" "response.done"))
-      (deslop-codex--handle-usage
-       session (deslop-protocol--json-get "usage" response))
-      (setf (deslop-codex--session-finish-reason session) "stop")
-      (deslop-codex--settle session 'success (deslop-codex--result session)))
-     ((string= type "response.incomplete")
-      (deslop-codex--handle-usage
-       session (deslop-protocol--json-get "usage" response))
-      (setf (deslop-codex--session-finish-reason session) "incomplete")
-      (deslop-codex--settle session 'success (deslop-codex--result session)))
+      ((member type '("response.completed" "response.done"))
+       (deslop-codex--handle-usage
+        session (deslop-protocol--json-get "usage" response))
+       (setf (deslop-codex--session-finish-reason session) "stop")
+       (setf (deslop-codex--session-terminal-event session) json))
+      ((string= type "response.incomplete")
+       (deslop-codex--handle-usage
+        session (deslop-protocol--json-get "usage" response))
+       (setf (deslop-codex--session-finish-reason session) "incomplete")
+       (setf (deslop-codex--session-terminal-event session) json))
      ((member type '("response.failed" "error"))
       (let ((error (or (deslop-protocol--json-get "error" json) json)))
         (deslop-codex--fail
@@ -746,7 +951,7 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
   "Handle terminal PROCESS EVENT for SESSION."
   (when (and (not (deslop-codex--session-terminal session))
              (memq (process-status process) '(exit signal closed)))
-    (if (/= (process-exit-status process) 0)
+     (if (/= (process-exit-status process) 0)
         (deslop-codex--fail
          session
          (deslop-error-create
@@ -754,7 +959,47 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
           :message (format "curl exited with status %d (%s)"
                            (process-exit-status process)
                            (string-trim event))))
-      (deslop-codex--fail session (deslop-codex--http-error session)))))
+       (condition-case finish-error
+           (let* ((headers
+                   (deslop-curl--response-headers
+                    (deslop-codex--session-headers-file session)))
+                  (status (car headers))
+                  (content-type (cdr headers)))
+             (cond
+              ((or (null status) (< status 200) (>= status 300))
+               (deslop-codex--fail session (deslop-codex--http-error session)))
+              ((or (null content-type)
+                   (let ((case-fold-search t))
+                     (not (string-match-p "text/event-stream" content-type))))
+               (deslop-codex--fail
+                session
+                (deslop-error-create
+                 :kind 'protocol
+                 :message (format "expected text/event-stream, got %s"
+                                  (or content-type "unknown")))))
+              (t
+               (dolist (event
+                        (deslop-protocol--sse-finish
+                         (deslop-codex--session-sse session)))
+                 (when (and (not (deslop-codex--session-terminal session))
+                            (eq (plist-get event :type) :json))
+                   (deslop-codex--handle-event
+                    session (plist-get event :value))))
+               (unless (deslop-codex--session-terminal session)
+                 (if (deslop-codex--session-terminal-event session)
+                     (deslop-codex--settle
+                      session 'success (deslop-codex--result session))
+                   (deslop-codex--fail
+                    session
+                    (deslop-error-create
+                     :kind 'protocol
+                     :message "Codex stream ended without a terminal response event")))))))
+         ((error quit)
+          (deslop-codex--fail
+           session
+           (deslop-error-create
+            :kind 'protocol
+            :message (error-message-string finish-error))))))))
 
 (defun deslop-codex--message-content (role content)
   "Return CONTENT in the Responses shape required for ROLE."
@@ -767,20 +1012,27 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
 
 (defun deslop-codex--request-body (messages profile)
   "Build a Responses API request body for MESSAGES and PROFILE."
-  (list (cons :model (plist-get profile :model))
-        (cons :input
-              (mapcar (lambda (message)
-                        (list (cons :role (car message))
-                              (cons :content
-                                    (deslop-codex--message-content
-                                     (car message) (cdr message)))))
-                      messages))
-        (cons :store json-false)
-        (cons :stream t)))
+  (let ((body
+         (list (cons :model (plist-get profile :model))
+               (cons :input
+                     (mapcar (lambda (message)
+                               (list (cons :role (car message))
+                                     (cons :content
+                                           (deslop-codex--message-content
+                                            (car message) (cdr message)))))
+                             messages))
+               (cons :store json-false)
+               (cons :stream t))))
+    (if deslop-max-output-tokens
+        (append body (list (cons :max_output_tokens
+                                 deslop-max-output-tokens)))
+      body)))
 
 (defun deslop-codex--start-generation (session messages auth)
   "Start a Codex generation for SESSION using AUTH."
   (let* ((profile (deslop-codex--session-profile session))
+         (url (deslop-codex--validated-generation-url
+               (or (plist-get profile :url) deslop-codex-endpoint)))
          (account-id (deslop-codex--account-id auth))
          (residency (deslop-codex--residency auth))
           (headers (append
@@ -802,7 +1054,8 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                 'utf-8))
          (request
           (deslop-curl--start-request
-           :profile profile
+            :profile profile
+            :url url
            :internal-headers headers
            :name (format "deslop-codex-%s"
                          (or (plist-get profile :job-id) "request"))
@@ -822,34 +1075,52 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
     (process-send-string (deslop-codex--session-process session) body)
     (process-send-eof (deslop-codex--session-process session))))
 
+(defun deslop-codex--auth-ready (session messages auth)
+  "Start generation for SESSION when AUTH is valid, or fail it."
+  (unless (deslop-codex--session-terminal session)
+    (if (deslop-error-p auth)
+        (deslop-codex--fail session auth)
+      (condition-case startup-error
+          (deslop-codex--start-generation session messages auth)
+        ((error quit)
+         (deslop-codex--fail
+          session
+          (deslop-error-create
+           :kind 'startup
+           :message (error-message-string startup-error))))))))
+
 (defun deslop-codex-default (messages callbacks &optional options)
   "Send MESSAGES through the ChatGPT/Codex endpoint using OpenCode auth."
-  (let ((session
-         (deslop-codex--make-session
-          :profile options :callbacks callbacks
-          :sse (deslop-protocol--make-sse
-                :buffer-parts nil :buffer-bytes 0 :data-lines nil
-                :data-bytes 0 :done nil)
-          :estimated-chars 0 :received-bytes 0 :preview-parts nil
-          :preview-bytes 0)))
-    (deslop-codex--invoke-callback
-     session :on-start (apply-partially #'deslop-codex--cancel session))
-    (unless (deslop-codex--session-terminal session)
-      (setf (deslop-codex--session-auth-cancel session)
-            (deslop-codex--resolve-auth
-             (lambda (auth-or-error)
-               (unless (deslop-codex--session-terminal session)
-                 (if (deslop-error-p auth-or-error)
-                     (deslop-codex--fail session auth-or-error)
-                   (condition-case startup-error
-                       (deslop-codex--start-generation
-                        session messages auth-or-error)
-                     ((error quit)
-                      (deslop-codex--fail
-                       session
-                       (deslop-error-create
-                        :kind 'startup
-                        :message (error-message-string startup-error)))))))))))
+  (let* ((profile
+          (deslop--plist-merge
+           (list :url deslop-codex-endpoint :model deslop-codex-model)
+           options))
+         (session
+          (deslop-codex--make-session
+           :profile profile :callbacks callbacks
+           :sse (deslop-protocol--make-sse
+                 :buffer-parts nil :buffer-bytes 0 :data-lines nil
+                 :data-bytes 0 :done nil)
+           :estimated-chars 0 :received-bytes 0 :preview-parts nil
+           :preview-bytes 0)))
+    (condition-case startup-error
+        (progn
+           (deslop-validate-resource-options)
+           (deslop-codex--validated-generation-url
+            (plist-get profile :url))
+          (deslop-codex--invoke-callback
+           session :on-start (apply-partially #'deslop-codex--cancel session))
+          (unless (deslop-codex--session-terminal session)
+            (setf (deslop-codex--session-auth-cancel session)
+                  (deslop-codex--resolve-auth
+                   (apply-partially #'deslop-codex--auth-ready
+                                    session messages)))))
+      ((error quit)
+       (deslop-codex--fail
+        session
+        (deslop-error-create
+         :kind 'startup
+         :message (error-message-string startup-error)))))
     (deslop-codex--session-process session)))
 
 (provide 'deslop-codex)

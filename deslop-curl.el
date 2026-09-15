@@ -16,6 +16,7 @@
 (require 'subr-x)
 (require 'url-parse)
 (require 'deslop-core)
+(require 'deslop-transport)
 
 (defun deslop-curl--loopback-host-p (host)
   "Return non-nil when HOST names an explicit loopback endpoint."
@@ -179,7 +180,27 @@ separate from user-configured profile headers."
   (list "--silent" "--show-error" "--no-buffer"
         "--speed-limit" "1"
         "--speed-time" (number-to-string deslop-response-idle-timeout)
-        "--dump-header" headers-file))
+         "--dump-header" headers-file))
+
+(defun deslop-curl--stderr-filter (buffer process chunk)
+  "Append CHUNK to BUFFER without exceeding the stderr resource ceiling."
+  (when (and (buffer-live-p buffer) (stringp chunk))
+    (let* ((used (or (and (processp process)
+                          (process-get process :deslop-stderr-bytes))
+                     0))
+           (total (+ used (string-bytes chunk)))
+           (limit deslop-max-stderr-bytes)
+           (remaining (and limit (- limit used)))
+           (prefix (if remaining
+                       (and (> remaining 0)
+                            (deslop-transport-byte-prefix chunk remaining))
+                     chunk)))
+      (when (processp process)
+        (process-put process :deslop-stderr-bytes total))
+      (when prefix
+        (with-current-buffer buffer
+          (goto-char (point-max))
+          (insert prefix))))))
 
 (defun deslop-curl--timeout-options (&optional total-timeout max-filesize)
   "Return configured curl timeout and response-size options."
@@ -215,23 +236,32 @@ separate from user-configured profile headers."
 COMMAND receives the generated headers and config file paths.  FILTER and
 SENTINEL are installed on the process.  Startup failures clean up all
 resources before being re-signaled to the caller."
-  (let ((response-buffer (generate-new-buffer buffer-name))
+   (let ((response-buffer (generate-new-buffer buffer-name))
         (stderr-buffer (generate-new-buffer stderr-name))
+        (stderr-process nil)
         (headers-file nil)
         (config-file nil)
         (process nil)
         (complete nil))
-    (unwind-protect
-        (progn
-          (deslop-curl--validated-url profile url)
-          (setq headers-file (make-temp-file "deslop-headers-"))
-          (set-file-modes headers-file #o600)
-          (setq config-file (deslop-curl--config profile internal-headers))
-          (setq process
-                (make-process
+     (unwind-protect
+         (progn
+          (deslop-validate-resource-options)
+           (deslop-curl--validated-url profile url)
+           (setq headers-file (make-temp-file "deslop-headers-"))
+           (set-file-modes headers-file #o600)
+           (setq config-file (deslop-curl--config profile internal-headers))
+           (setq stderr-process
+                 (make-pipe-process
+                  :name (generate-new-buffer-name "deslop-curl-stderr")
+                  :buffer nil
+                  :filter (apply-partially #'deslop-curl--stderr-filter
+                                           stderr-buffer)
+                  :noquery t))
+           (setq process
+                 (make-process
                  :name name
-                 :buffer response-buffer
-                 :stderr stderr-buffer
+                  :buffer response-buffer
+                  :stderr stderr-process
                  :connection-type 'pipe
                  :noquery t
                  :command (funcall command headers-file config-file)
@@ -240,19 +270,23 @@ resources before being re-signaled to the caller."
           (process-put process :deslop-response-buffer response-buffer)
           (process-put process :deslop-stderr-buffer stderr-buffer)
           (process-put process :deslop-headers-file headers-file)
-          (process-put process :deslop-config-file config-file)
-          (setq complete t)
-          (list :process process
-                :response-buffer response-buffer
-                :stderr-buffer stderr-buffer
-                :headers-file headers-file
-                :config-file config-file))
-      (unless complete
-        (when (and (processp process) (process-live-p process))
-          (deslop--ignore-errors #'delete-process process))
-        (deslop-curl--cleanup-resources
-         (list response-buffer stderr-buffer)
-         (list headers-file config-file))))))
+           (process-put process :deslop-config-file config-file)
+           (process-put process :deslop-stderr-process stderr-process)
+           (setq complete t)
+           (list :process process
+                 :response-buffer response-buffer
+                 :stderr-buffer stderr-buffer
+                 :stderr-process stderr-process
+                 :headers-file headers-file
+                 :config-file config-file))
+       (unless complete
+         (when (and (processp process) (process-live-p process))
+           (deslop--ignore-errors #'delete-process process))
+         (when (processp stderr-process)
+           (deslop--ignore-errors #'delete-process stderr-process))
+         (deslop-curl--cleanup-resources
+          (list response-buffer stderr-buffer)
+          (list headers-file config-file))))))
 
 (defun deslop-curl--response-headers (file)
   "Return (STATUS . CONTENT-TYPE) from curl header FILE."
@@ -279,8 +313,11 @@ resources before being re-signaled to the caller."
                 (setq content-type (string-trim (match-string 1)))))))
         (cons status content-type)))))
 
-(defun deslop-curl--cleanup-resources (buffers files)
+(defun deslop-curl--cleanup-resources (buffers files &optional processes)
   "Kill BUFFERS and delete FILES, ignoring cleanup failures."
+  (dolist (process processes)
+    (when (processp process)
+      (deslop--ignore-errors #'delete-process process)))
   (dolist (buffer buffers)
     (when (buffer-live-p buffer)
       (deslop--ignore-errors #'kill-buffer buffer)))

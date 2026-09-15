@@ -55,44 +55,62 @@ When nil, omit the request limit and let the provider use its own maximum."
                  (integer :tag "Maximum tokens"))
   :group 'deslop)
 
-(defcustom deslop-max-response-bytes nil
+(defcustom deslop-max-response-bytes (* 256 1024 1024)
   "Maximum number of response-body bytes accepted from one LLM request.
 
-When nil, do not impose a response-size limit."
+The default is deliberately generous so slow or verbose local inference is not
+treated as an ordinary product limit.  Set it to nil to disable the breaker."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-sse-event-bytes nil
+(defcustom deslop-max-sse-event-bytes (* 16 1024 1024)
   "Maximum number of bytes accepted in one SSE line or event.
 
-When nil, do not impose an SSE event-size limit."
+The default is deliberately generous.  Set it to nil to disable the breaker."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-output-chars nil
+(defcustom deslop-max-output-chars 128000000
   "Maximum combined reasoning and completion characters retained per request.
 
-When nil, do not impose a parsed-output character limit."
+The default is deliberately generous.  Set it to nil to disable the breaker."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum characters"))
   :group 'deslop)
 
-(defcustom deslop-max-response-header-bytes nil
+(defcustom deslop-max-response-header-bytes (* 1 1024 1024)
   "Maximum response-header bytes parsed from curl's header output.
 
-When nil, do not impose a response-header size limit."
+The default is a safety breaker rather than an ordinary response limit.  Set it
+to nil to disable the breaker."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum bytes"))
   :group 'deslop)
 
-(defcustom deslop-max-error-body-bytes nil
+(defcustom deslop-max-error-body-bytes (* 1 1024 1024)
   "Maximum response bytes retained for provider error diagnostics.
 
-When nil, retain the complete error response."
+The default limits only diagnostic previews, not successful response content.
+Set it to nil to retain complete error responses."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum bytes"))
+  :group 'deslop)
+
+(defcustom deslop-max-oauth-refresh-bytes (* 1 1024 1024)
+  "Maximum response-body bytes accepted from an OAuth refresh request."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-max-stderr-bytes (* 16 1024 1024)
+  "Maximum stderr bytes retained from one curl process."
+  :type 'integer
+  :group 'deslop)
+
+(defcustom deslop-provider-max-discovery-bytes (* 16 1024 1024)
+  "Maximum response-body bytes accepted from provider model discovery."
+  :type 'integer
   :group 'deslop)
 
 (defcustom deslop-allow-environment-proxy nil
@@ -109,6 +127,39 @@ Loopback requests always bypass proxies."
   :group 'deslop)
 
 ;;;; Errors and generic utilities
+
+(defun deslop-trim-trailing (text)
+  "Remove trailing newlines from TEXT, preserving inline trailing spaces."
+  (string-trim-right text "[\n\r]+"))
+
+(defun deslop-validate-resource-options ()
+  "Validate transport resource options before starting external processes."
+  (dolist (option (list (cons 'deslop-connect-timeout deslop-connect-timeout)
+                        (cons 'deslop-request-timeout deslop-request-timeout)))
+    (unless (or (null (cdr option))
+                (and (numberp (cdr option)) (> (cdr option) 0)))
+      (error "%s must be nil or a positive number" (car option))))
+  (unless (and (numberp deslop-response-idle-timeout)
+               (> deslop-response-idle-timeout 0))
+    (error "deslop-response-idle-timeout must be a positive number"))
+  (dolist (option
+           (list (cons 'deslop-max-output-tokens deslop-max-output-tokens)
+                 (cons 'deslop-max-response-bytes deslop-max-response-bytes)
+                 (cons 'deslop-max-sse-event-bytes deslop-max-sse-event-bytes)
+                 (cons 'deslop-max-output-chars deslop-max-output-chars)
+                 (cons 'deslop-max-response-header-bytes
+                       deslop-max-response-header-bytes)
+                 (cons 'deslop-max-error-body-bytes
+                       deslop-max-error-body-bytes)
+                 (cons 'deslop-max-oauth-refresh-bytes
+                       deslop-max-oauth-refresh-bytes)
+                 (cons 'deslop-max-stderr-bytes deslop-max-stderr-bytes)
+                 (cons 'deslop-provider-max-discovery-bytes
+                       deslop-provider-max-discovery-bytes)))
+    (unless (or (null (cdr option))
+                (and (integerp (cdr option)) (> (cdr option) 0)))
+      (error "%s must be nil or a positive integer" (car option))))
+  t)
 
 (cl-defstruct (deslop-error (:constructor deslop-error-create))
   "Structured error passed between the transport and job scheduler."

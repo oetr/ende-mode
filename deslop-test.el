@@ -1918,27 +1918,37 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
              (list :on-done (lambda (value) (setq result value))
                    :on-error (lambda (value) (setq result value)))
              (deslop-provider-profile 'openai))
-            (let* ((command (plist-get captured :command))
-                   (config (cadr (member "--config" command))))
-              (should (not (member "access-token" command)))
-              (should (file-exists-p config))
-               (with-temp-buffer
-                 (insert-file-contents config)
-                 (should (string-match-p "Authorization: Bearer access-token"
+             (let* ((command (plist-get captured :command))
+                    (config (cadr (member "--config" command)))
+                    (headers-file (cadr (member "--dump-header" command)))
+                    (filter (plist-get captured :filter))
+                    (sentinel (plist-get captured :sentinel)))
+               (should (not (member "access-token" command)))
+               (should (file-exists-p config))
+               (with-temp-file headers-file
+                 (insert "HTTP/1.1 200 OK\r\n"
+                         "Content-Type: text/event-stream\r\n\r\n"))
+                (with-temp-buffer
+                  (insert-file-contents config)
+                  (should (string-match-p "Authorization: Bearer access-token"
                                          (buffer-string))))
                (with-temp-buffer
                  (insert-file-contents config)
                  (should (string-match-p "User-Agent: deslop"
                                          (buffer-string))))
-              (funcall
-               (plist-get captured :filter)
-               process
-               (concat "data: {\"type\":\"response.output_text.delta\","
-                       "\"delta\":\"answer\"}\n\n"
-                       "data: {\"type\":\"response.completed\","
-                       "\"response\":{\"model\":\"gpt-test\"}}\n\n"))
-              (should (string= (plist-get result :content) "answer"))
-              (should-not (file-exists-p config)))))
+               (funcall
+                filter
+                process
+                (concat "data: {\"type\":\"response.output_text.delta\","
+                        "\"delta\":\"answer\"}\n\n"
+                        "data: {\"type\":\"response.completed\","
+                        "\"response\":{\"model\":\"gpt-test\"}}\n\n"
+                        "data: [DONE]\n\n"))
+               (while (process-live-p process)
+                 (accept-process-output process 0.05))
+               (funcall sentinel process "finished\n")
+               (should (string= (plist-get result :content) "answer"))
+               (should-not (file-exists-p config)))))
       (when (and (processp process) (process-live-p process))
         (delete-process process))
       (when (file-exists-p auth-file)
@@ -1947,10 +1957,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 (ert-deftest deslop-test/openai-refresh-rotates-opencode-credentials-safely ()
   (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
          (deslop-codex-auth-file auth-file)
-         (deslop-codex-issuer "https://example.test")
+         (deslop-codex-issuer "https://auth.openai.com:443")
          (captured nil)
          (process nil)
          (refreshed nil)
+         (refreshed-again nil)
+         (make-process-count 0)
          (real-make-process (symbol-function 'make-process))
          (auth '(:access "old-access" :refresh "old-refresh"
                  :expires 0 :account-id "account-id")))
@@ -1964,7 +1976,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "\"accountId\":\"account-id\"}}"))
           (cl-letf (((symbol-function 'make-process)
                      (lambda (&rest args)
-                       (setq captured args)
+                        (setq make-process-count (1+ make-process-count))
+                        (setq captured args)
                        (setq process
                              (funcall real-make-process
                                       :name (plist-get args :name)
@@ -1973,15 +1986,18 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                       :command (list "cat")
                                       :connection-type 'pipe
                                       :noquery t)))))
-            (deslop-codex--refresh-auth auth
-                                        (lambda (value) (setq refreshed value)))
-            (let* ((command (plist-get captured :command))
+             (deslop-codex--refresh-auth auth
+                                         (lambda (value) (setq refreshed value)))
+             (deslop-codex--refresh-auth
+              auth (lambda (value) (setq refreshed-again value)))
+             (should (= make-process-count 1))
+             (let* ((command (plist-get captured :command))
                    (headers-file
                     (cadr (member "--dump-header" command)))
                    (filter (plist-get captured :filter))
                    (sentinel (plist-get captured :sentinel)))
               (should-not (member "old-refresh" command))
-              (with-temp-file headers-file
+             (with-temp-file headers-file
                 (insert "HTTP/1.1 200 OK\r\n\r\n"))
               (with-current-buffer (plist-get captured :buffer)
                 (erase-buffer))
@@ -1996,18 +2012,83 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                "\"refresh_token\":\"new-refresh\","
                                "\"expires_in\":3600}"))
               (funcall sentinel process "finished\n")
-              (should (string= (plist-get refreshed :access) "new-access"))
-              (should (string= (plist-get refreshed :refresh) "new-refresh"))
-              (should (string= (plist-get (deslop-codex--auth-entry) :refresh)
-                               "new-refresh")))))
+               (should (string= (plist-get refreshed :access) "new-access"))
+               (should (string= (plist-get refreshed :refresh) "new-refresh"))
+               (should (equal refreshed-again refreshed))
+               (should (string= (plist-get (deslop-codex--auth-entry) :refresh)
+                                "new-refresh")))))
       (when (and (processp process) (process-live-p process))
         (delete-process process))
-      (when (file-exists-p auth-file)
-        (delete-file auth-file)))))
+       (when (file-exists-p auth-file)
+         (delete-file auth-file)))))
+
+(ert-deftest deslop-test/openai-credentials-use-only-official-endpoints ()
+  (should (string= (deslop-codex--validated-generation-url
+                    "https://chatgpt.com:443/backend-api/codex/responses")
+                   "https://chatgpt.com:443/backend-api/codex/responses"))
+  (should-error
+   (deslop-codex--validated-generation-url
+    "https://chatgpt.com.attacker.test/backend-api/codex/responses"))
+  (should-error
+   (deslop-codex--validated-generation-url
+    "https://chatgpt.com/backend-api/codex/responses?redirect=attacker"))
+  (let ((deslop-codex-issuer "https://auth.openai.com.attacker.test"))
+    (should-error (deslop-codex--validated-refresh-url))))
+
+(ert-deftest deslop-test/openai-request-body-applies-output-token-limit ()
+  (let ((deslop-max-output-tokens 123))
+    (let ((body (deslop-codex--request-body
+                 (list (cons "user" "body"))
+                 '(:model "test-model"))))
+      (should (= (alist-get :max_output_tokens body) 123)))))
+
+(ert-deftest deslop-test/curl-stderr-is-byte-bounded ()
+  (let ((buffer (generate-new-buffer " *deslop-test-stderr*"))
+        (process (make-pipe-process :name "deslop-test-stderr-process"
+                                    :buffer nil :noquery t))
+        (deslop-max-stderr-bytes 4))
+    (unwind-protect
+        (progn
+          (deslop-curl--stderr-filter buffer process "12345")
+          (deslop-curl--stderr-filter buffer process "6")
+          (with-current-buffer buffer
+            (should (string= (buffer-string) "1234"))))
+      (delete-process process)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/openai-credential-replacement-is-side-by-side ()
+  (let* ((directory (make-temp-file "deslop-openai-auth-dir-" t))
+         (file (expand-file-name "auth.json" directory))
+         (deslop-codex-auth-file file)
+         (old '(:access "old-access" :refresh "old-refresh"
+                :expires 0 :account-id "account-id"))
+         (new '(:access "new-access" :refresh "new-refresh"
+                :expires 9999999999999 :account-id "account-id")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"openai\":{\"type\":\"oauth\","
+                    "\"access\":\"old-access\","
+                    "\"refresh\":\"old-refresh\","
+                    "\"expires\":0,\"accountId\":\"account-id\"}}"))
+          (deslop-codex--store-auth new (deslop-codex--auth-version old))
+          (should (string= (plist-get (deslop-codex--auth-entry) :access)
+                           "new-access"))
+          (should (= (logand (file-modes file) #o777) #o600))
+          (should-not
+           (directory-files directory nil "\\`\\.deslop-openai-auth-" t))
+          (should-error
+           (deslop-codex--store-auth
+            old (deslop-codex--auth-version
+                 '(:access "other" :refresh "other" :expires 0
+                   :account-id "account-id")))))
+      (when (file-directory-p directory)
+        (delete-directory directory t)))))
 
 (ert-deftest deslop-test/openai-responses-events-normalize-to-deslop-result ()
-  (let* ((events nil)
-         (result nil)
+          (let* ((events nil)
+          (result nil)
          (failure nil)
          (session
          (deslop-codex--make-session
@@ -2033,12 +2114,14 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
      session
      (deslop-protocol--json-read-string
       "{\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-actual\",\"usage\":{\"output_tokens\":7}}}"))
+    (setq result (deslop-codex--result session))
     (should-not failure)
     (should (string= (plist-get result :content) "answer"))
     (should (string= (plist-get result :thinking) "thinking"))
     (should (string= (plist-get result :model) "gpt-actual"))
     (should (= (plist-get result :tokens) 7))
-    (should (eq (deslop-codex--session-terminal session) 'success))))
+    (should (deslop-codex--session-terminal-event session))
+    (should-not (deslop-codex--session-terminal session))))
 
 ;;;; Profiles, history, and transport command safety
 

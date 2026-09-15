@@ -18,10 +18,6 @@
 (require 'deslop-ui)
 (require 'deslop-queue)
 
-(defun deslop-trim-trailing (text)
-  "Remove trailing newlines from TEXT, preserving inline trailing spaces."
-  (string-trim-right text "[\n\r]+"))
-
 (defun deslop-current-region ()
   "Return active region bounds as a cons cell, or nil."
   (when (use-region-p)
