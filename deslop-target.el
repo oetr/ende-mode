@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'deslop-core)
 (require 'deslop-review)
 
@@ -97,6 +98,48 @@ fallback for callers that cannot capture a digest."
   "Return non-nil when TARGET's buffer is live."
   (and (deslop-target-p target)
        (buffer-live-p (deslop-target-buffer target))))
+
+(defconst deslop-target--source-metadata-field-max-length 256
+  "Maximum length of a source metadata field sent to an LLM.")
+
+(defun deslop-target--safe-buffer-name (name)
+  "Return NAME without an absolute or remote path component."
+  (if (and (stringp name)
+           (or (file-name-absolute-p name)
+               (file-remote-p name)))
+      (file-name-nondirectory name)
+    name))
+
+(defun deslop-target-source-metadata (target)
+  "Return bounded source metadata for TARGET's buffer, or nil.
+
+Visiting files contribute only their basename.  Other buffers contribute their
+buffer name unless it looks like an absolute or remote path."
+  (let ((buffer (and (deslop-target-p target)
+                     (deslop-target-buffer target))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let* ((file-name (and (stringp buffer-file-name)
+                               (not (string-empty-p buffer-file-name))
+                               buffer-file-name))
+               (raw-name (if file-name
+                             (file-name-nondirectory file-name)
+                           (deslop-target--safe-buffer-name
+                            (buffer-name))))
+               (mode (if (symbolp major-mode)
+                         (symbol-name major-mode)
+                       (format "%s" major-mode))))
+          (list :name (or (deslop-bounded-single-line
+                           raw-name
+                           deslop-target--source-metadata-field-max-length
+                           t)
+                          "unnamed-buffer")
+                :type (if file-name "file" "buffer")
+                :major-mode (or (deslop-bounded-single-line
+                                 mode
+                                 deslop-target--source-metadata-field-max-length
+                                 t)
+                                "unknown")))))))
 
 ;;;; Restrictions, source, context, and conflicts
 

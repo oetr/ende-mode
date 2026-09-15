@@ -1,0 +1,1546 @@
+#+TITLE: deslop Issues
+#+STARTUP: overview
+
+This file turns the repository review into an actionable engineering backlog.
+Items are ordered by severity and then by recommended implementation order.
+
+Severity meanings:
+
+- Critical: credential exposure, data loss, or severe resource exhaustion is possible.
+- High: concrete correctness bug or major lifecycle/design defect.
+- Medium: important robustness, privacy, usability, or maintainability problem.
+- Low: code quality, packaging, naming, or documentation improvement.
+
+Unless an item explicitly says otherwise, preserve existing behavior outside the
+described defect and add focused ERT coverage for the changed behavior.
+
+* Security and data integrity
+
+** DONE [Critical] Force credential-bearing and provider processes to run locally
+:PROPERTIES:
+:FILES: deslop-curl.el, deslop-codex.el, deslop-operations.el, deslop-project.el, deslop-test.el
+:END:
+
+*** Problem
+
+=make-process= and =make-pipe-process= inherit =default-directory=.  When a
+deslop command starts from a TRAMP buffer, Emacs file handlers may therefore run
+=curl= on the remote machine rather than the user's local machine.
+
+The generic curl entry point at =deslop-curl.el:232-271= does not bind
+=default-directory= to a known local directory.  The direct OAuth refresh
+process at =deslop-codex.el:454-501= has the same problem.  Codex generation at
+=deslop-codex.el:1054-1101= ultimately uses the generic curl entry point.
+
+This crosses an important trust boundary:
+
+- The remote machine may receive source prompts intended for a local process.
+- The OAuth refresh path sends the OpenCode refresh token through process stdin.
+- The remote machine controls =PATH=, the =curl= executable, DNS, proxies, and
+  certificate storage.
+- Temporary curl configuration and response-header files are normally created
+  locally.  A remote =curl= process may not be able to access those paths, or it
+  may write to a different path with the same spelling.
+
+*** Required implementation
+
+1. Add one shared helper that returns a trusted local process directory.  It
+   should be an existing local directory and must satisfy
+   =(not (file-remote-p directory))=.
+2. Bind =default-directory= to that directory around all provider-related
+   temporary-file creation, =make-pipe-process= calls, =make-process= calls, and
+   initial =process-send-string= calls where necessary.
+3. Reject a remote =temporary-file-directory= or explicitly select a safe local
+   temporary directory.
+4. Decide and document the policy for source buffers whose
+   =default-directory= is remote:
+   - Supported policy: copy only the already constructed request body to a local
+     process and never execute commands remotely.
+   - Unsupported policy: signal a clear =user-error= before reading credentials
+     or starting a process.
+5. Apply the same policy to generic generation, provider discovery, Codex model
+   probing, and Codex OAuth refresh.
+
+Do not solve this by shell quoting.  The existing argument-list process API is
+correct; the defect is process locality.
+
+*** Acceptance criteria
+
+- Starting any provider operation while =default-directory= is a TRAMP path
+  never runs =curl= through a remote file handler.
+- OAuth access and refresh tokens are never sent to a process executing on a
+  remote host.
+- Header and config files passed to =curl= exist on the same host as the process.
+- ERT tests stub or instrument =make-process= and verify that its effective
+  =default-directory= is local for generation, discovery, model probing, and
+  refresh.
+- The chosen remote-buffer policy is documented in the package documentation.
+
+** TODO [Critical] Bound aggregate structured-edit growth before mutation
+:PROPERTIES:
+:FILES: deslop-edit.el, deslop-operations.el, deslop-core.el, deslop-test.el
+:END:
+
+*** Problem
+
+Raw and normalized edit counts are bounded by
+=deslop-max-write-anywhere-edits= and =deslop-max-normalized-edits=, but the
+aggregate number of inserted characters is not bounded.  In particular,
+=all: true= can expand one replacement string to thousands of applications.
+
+A provider can return a moderately large =text= value and request that it be
+inserted at up to 10,000 anchors.  The response remains within network limits,
+but applying it may allocate an enormous buffer, block Emacs, or exhaust memory.
+Because edits are currently committed one by one, interruption can leave a
+partially modified source buffer.
+
+Relevant code:
+
+- Limits: =deslop-edit.el:19-31=
+- =all: true= expansion: =deslop-edit.el:100-188=
+- Application loop: =deslop-operations.el:448-487=
+
+*** Required implementation
+
+1. Add configurable positive limits for at least:
+   - Aggregate replacement characters across all normalized edits.
+   - Maximum projected buffer growth.
+   - Maximum final buffer size after the pass.
+2. After parsing and expansion, calculate all projected sizes before changing
+   the target buffer.
+3. Signal =deslop-edit-resource-error= if any limit would be exceeded.
+4. Do not apply even the first edit when preflight validation fails.
+5. Keep the existing count limits as separate defense-in-depth controls.
+6. Prefer applying a complete validated pass in one =atomic-change-group=; see
+   the separate transaction-semantics issue below.
+
+Be careful with replacements: projected growth is the sum of
+=(length text) - (end - start)=, while final size must not become negative and
+must account for every normalized edit exactly once.
+
+*** Acceptance criteria
+
+- A small response expanded by =all: true= cannot exceed configured aggregate
+  insertion, growth, or final-size limits.
+- Limit failures leave buffer text and review overlays unchanged.
+- Boundary values equal to the configured limit are accepted.
+- Tests cover insertion-only edits, replacements that grow text, replacements
+  that shrink text, and =all: true= expansion.
+
+** TODO [High] Make closed-file change-set writes atomic and race resistant
+:PROPERTIES:
+:FILES: deslop-tools.el, deslop-project.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-tools--apply-change-set-object= validates a digest and then overwrites a
+closed file directly with =write-region= at =deslop-tools.el:601-642=.  There is
+a time-of-check/time-of-use window between validation and writing.
+
+Possible failures include:
+
+- Another editor or process changes the file after digest validation and its
+  work is overwritten.
+- Emacs or the operating system stops during =write-region= and leaves a
+  partially written file.
+- The path is replaced with another filesystem object after validation.
+- Existing file modes or other important attributes are lost by an incorrect
+  temporary-file strategy.
+
+*** Required implementation
+
+1. Record file identity information before preparing the new content.  Include
+   at least modification time, size, and a digest; use inode/device information
+   where meaningful and available.
+2. Write the complete new content to a temporary file in the target file's
+   directory so the final rename is on the same filesystem.
+3. Preserve the original file's mode.  Decide whether ownership, ACLs, extended
+   attributes, and backups are in scope and document that decision.
+4. Immediately before replacement, re-read or re-stat the original and reject
+   the operation if its identity or content changed.
+5. Atomically rename the temporary file over the original.
+6. Delete the temporary file on every failure path.
+7. Define explicit behavior for TRAMP files.  Do not assume local rename
+   semantics apply to remote handlers.
+
+*** Acceptance criteria
+
+- Successful local writes replace the file atomically and preserve its mode.
+- A simulated concurrent modification causes a clear failure and preserves the
+  concurrent writer's contents.
+- A failure before rename leaves the original file unchanged and removes the
+  temporary file.
+- Tests cover changed content, changed identity, mode preservation, and cleanup.
+
+** TODO [High] Fix structured-repair accounting so unresolved edits cannot disappear
+:PROPERTIES:
+:FILES: deslop-operations.el, deslop-edit.el, deslop-history.el, deslop-test.el
+:END:
+
+*** Problem
+
+Repair handling at =deslop-operations.el:599-635= replaces the complete prior
+=:failures= list with the failures returned by the latest model response.
+=deslop--structured-preserve-failure-indices= at
+=deslop-operations.el:499-510= associates new and old failures by list position.
+
+This is incorrect when a repair response omits or reorders edits.  For example:
+
+1. The first pass has two failed edits, A and B.
+2. The repair response contains only a successful repair for A.
+3. The second pass reports no failures.
+4. B disappears from state and is counted as neither repaired nor skipped.
+
+Reordering two failed repairs can also assign their original indices to the
+wrong edits.
+
+*** Required implementation
+
+1. Assign a durable identity to every failed edit from the original response.
+   A numeric original edit index is sufficient if the repair protocol requires
+   the model to return it explicitly and validates it.
+2. Include each durable identity in the repair prompt and schema.
+3. Require repair responses to identify which original failure they address.
+4. Maintain a map or equivalent state keyed by durable identity.
+5. Remove a failure only after its identified repair applies successfully.
+6. Retain failures omitted by a repair response.
+7. Reject duplicate, unknown, or already-resolved repair identities without
+   corrupting counters.
+8. Ensure =:requested=, =:first-pass-applied=, =:repaired=, =:skipped=, and
+   =:final-failures= remain mathematically consistent.
+
+*** Acceptance criteria
+
+- An omitted repair remains in =:final-failures= and counts as skipped.
+- Reordered repairs retain correct original indices.
+- A partial repair updates only the addressed failure.
+- Duplicate and unknown repair IDs produce explicit diagnostics.
+- History reports every unresolved original edit exactly once.
+
+** TODO [Medium] Stop copying rejected provider output to the kill ring by default
+:PROPERTIES:
+:FILES: deslop-review.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-review--reject-overlays= calls =kill-new= for every rejected generated
+region at =deslop-review.el:290-328=.  Depending on Emacs configuration, this
+also exports the text to the desktop clipboard and persistent clipboard history.
+Generated output can contain reflected proprietary source or secrets.
+
+*** Required implementation
+
+1. Remove automatic kill-ring insertion from the normal reject command, or
+   guard it behind a =defcustom= that defaults to nil.
+2. If retaining rejected text is useful, provide a separate explicit command
+   such as "reject and copy".
+3. Explain the clipboard behavior in the command docstring and privacy docs.
+
+*** Acceptance criteria
+
+- Ordinary rejection restores original content without changing =kill-ring=.
+- An explicit opt-in path can preserve rejected text if that feature is kept.
+- Tests bind a known =kill-ring= and verify both default and opt-in behavior.
+
+** TODO [Medium] Validate and bound the OpenCode credential file and JWT payload
+:PROPERTIES:
+:FILES: deslop-codex.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-codex--read-json-file= reads the complete credential file without a
+size limit at =deslop-codex.el:183-205=.  JWT claims are also decoded without a
+payload-size limit at =deslop-codex.el:207-223=.  Local credential ownership,
+symlink status, and permissions are not checked before use.
+
+*** Required implementation
+
+1. Add a small explicit maximum byte size for the credential file and decoded
+   JWT claims.
+2. For local files, verify that the credential file is owned by the current user
+   and warn or reject if group/other permissions permit reading.
+3. Decide whether symlinks are accepted.  If accepted, validate the resolved
+   target; if rejected, report a clear error.
+4. Define separate behavior for remote auth files, preferably rejecting them.
+5. Never include token contents in an error message.
+
+*** Acceptance criteria
+
+- Oversized files and JWT payloads fail before complete parsing.
+- Insecure local permissions produce the documented warning or rejection.
+- Errors do not contain access or refresh token text.
+
+** TODO [Medium] Prevent stale credential snapshots from overwriting concurrent OpenCode updates
+:PROPERTIES:
+:FILES: deslop-codex.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-codex--store-auth= checks the OpenAI entry as read near the start of the
+function, then writes a complete JSON snapshot later at
+=deslop-codex.el:265-303=.  Another OpenCode process can update the credential
+file between those operations.  A concurrent update to another provider can be
+lost even though the OpenAI entry itself appears unchanged.
+
+*** Required implementation
+
+1. Coordinate with OpenCode through an official API or lock if one exists.
+2. Otherwise, capture complete file identity before modification.
+3. Immediately before rename, verify that the credential file is unchanged.
+4. If it changed, re-read it, merge only the refreshed OpenAI record, and retry
+   with a small bounded retry count.
+5. Never replace unrelated provider records from a stale snapshot.
+
+*** Acceptance criteria
+
+- A concurrent update to another provider survives an OpenAI token refresh.
+- A concurrent OpenAI refresh is detected and does not get overwritten.
+- Retry exhaustion fails safely without damaging the credential file.
+
+** TODO [Low] Report and retry failed cleanup of secret-bearing temporary files
+:PROPERTIES:
+:FILES: deslop-curl.el, deslop-transport.el, deslop-test.el
+:END:
+
+*** Problem
+
+Curl config files correctly use mode 0600, but deletion errors are suppressed
+and references are immediately cleared at =deslop-curl.el:122-160= and
+=deslop-transport.el:61-87=.  A failed deletion can leave a bearer token in a
+temporary file indefinitely.
+
+*** Required implementation
+
+1. Distinguish ordinary non-secret temporary files from secret-bearing config
+   files.
+2. Retain failed secret cleanup paths in a bounded retry registry.
+3. Retry cleanup at a safe lifecycle point and report persistent failure without
+   displaying file contents.
+4. Consider a transport mechanism that avoids writing bearer tokens to disk.
+
+*** Acceptance criteria
+
+- A simulated first deletion failure is retried.
+- Persistent failure is visible to the user without exposing credentials.
+- Cleanup registries cannot grow without bound.
+
+* Correctness and lifecycle
+
+** TODO [High] Make terminal callback failures observable
+:PROPERTIES:
+:FILES: deslop-transport.el, deslop-llm.el, deslop-codex.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-transport-session-settle= marks the transport session terminal before
+invoking =:on-done= at =deslop-transport.el:89-112=.  Both concrete transports
+also mark their own session terminal first:
+
+- =deslop-llm.el:83-105=
+- =deslop-codex.el:780-797=
+
+If =:on-done= signals, =deslop-transport-session-invoke= calls the configured
+callback-error handler.  That handler attempts to fail an already-terminal
+session, so nothing happens.  The exception is swallowed and =:on-error= is not
+notified.
+
+*** Required implementation
+
+1. Separate transport settlement from callback dispatch.  A callback exception
+   must not attempt to settle the transport a second time.
+2. Define one explicit callback-error contract.  Reasonable choices include:
+   - Invoke a separate =:on-callback-error= callback.
+   - Report through a package error hook and =display-warning=.
+   - Let terminal callback errors propagate after resource cleanup.
+3. Ensure resource cleanup and single transport settlement remain guaranteed.
+4. Apply identical behavior to generic and Codex transports.
+
+*** Acceptance criteria
+
+- An =:on-done= callback that signals produces an observable callback error.
+- Resources are cleaned exactly once.
+- =:on-done= and transport settlement are not repeated.
+- An =:on-error= callback that itself signals cannot recurse indefinitely.
+
+** TODO [High] Introduce one package lifecycle and teardown boundary
+:PROPERTIES:
+:FILES: deslop.el, deslop-queue.el, deslop-provider.el, deslop-codex.el, deslop-selector.el, deslop-ui.el, deslop-test.el
+:END:
+
+*** Problem
+
+Asynchronous ownership is fragmented across unrelated globals:
+
+- Queue jobs and cancellation: =deslop-queue.el=
+- Generic provider discovery: =deslop-provider.el:268-275=
+- Codex OAuth refresh flights: =deslop-codex.el:75-91=
+- Codex model probes: =deslop-codex.el:93-94=
+- Selector probe generation: =deslop-selector.el:52-59=
+- Overlay timer and managed overlays: =deslop-ui.el:28-41=
+
+=deslop-reload= at =deslop.el:102-120= aborts queued jobs and generic provider
+discovery through hooks, but it does not explicitly own or cancel every Codex
+refresh, Codex probe, selector probe, timer, and retained closure.  Old function
+closures can survive a reload and execute against newly loaded definitions.
+
+*** Required implementation
+
+1. Create one lifecycle registry or service object for package-owned
+   cancellables and teardown callbacks.
+2. Register every process, timer, probe, refresh flight, and asynchronous waiter
+   when it is created.
+3. Unregister resources on normal completion.
+4. Implement one idempotent teardown operation that invalidates callbacks before
+   invoking cancellation functions.
+5. Use this teardown for reload and any future package unload function.
+6. Keep buffer-local target cleanup, but register its higher-level job with the
+   central lifecycle.
+
+*** Acceptance criteria
+
+- Reload cancels jobs, generic discovery, Codex refreshes, Codex probes,
+  selector probes, and spinner timers.
+- A callback retained from before reload cannot mutate buffers or settle a new
+  job after reload.
+- Teardown can be called twice without errors or duplicate notifications.
+
+** TODO [High] Define transaction and partial-success semantics for structured edits
+:PROPERTIES:
+:FILES: deslop-operations.el, deslop-queue.el, deslop-history.el, deslop-review.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop--structured-edit-pass= applies each valid edit independently at
+=deslop-operations.el:448-487=.  Each individual edit is atomic, but the pass and
+overall operation are not.  Successful edits remain in the buffer if a later
+edit fails or the repair transport fails.  The job may end in =failed= even
+though it changed the source buffer.
+
+The current states =completed= and =failed= do not communicate whether changes
+were applied.  History has a "COMPLETED WITH WARNINGS" display string, but that
+is not represented in the scheduler state model.
+
+*** Required implementation
+
+1. Decide the product behavior explicitly:
+   - Transactional: preflight every edit and apply the complete pass atomically.
+   - Partial success: retain applicable edits and represent that outcome in job
+     state and user-visible status.
+2. If transactional, validate current anchors, overlap, review availability,
+   growth limits, and writability before entering one =atomic-change-group=.
+3. If partial success, add a terminal state such as =completed-with-warnings= or
+   a separate structured outcome field.  Do not label a buffer-changing result
+   as an undifferentiated failure.
+4. Ensure queue status, history, mode-line counts, and event consumers understand
+   the chosen state.
+5. Document whether repair-network failure rolls back already applied edits.
+
+*** Acceptance criteria
+
+- The chosen semantics are documented and consistent across queue state,
+  history, messages, and review overlays.
+- A failure in edit N cannot produce an undocumented partial mutation.
+- Tests cover first-pass partial failure, repair failure, user quit, read-only
+  buffers, and review-overlay creation failure.
+
+** TODO [High] Protect selector buffer ownership
+:PROPERTIES:
+:FILES: deslop-selector.el, deslop-core.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-selector-open= uses =get-buffer-create= with the customizable public
+name at =deslop-selector.el:390-418=.  It unconditionally changes that buffer's
+major mode and contents.  =deslop-selector-close= later kills it at
+=deslop-selector.el:280-292=.
+
+If the user already owns a buffer with that name, opening the selector destroys
+its state and closing the selector kills it.  History and summary avoid this by
+using =deslop-owned-buffer=.
+
+*** Required implementation
+
+1. Add a buffer-local selector ownership marker.
+2. Use =deslop-owned-buffer= or equivalent ownership logic.
+3. If a same-named buffer exists and is not owned by deslop, create a generated
+   alternative buffer name.
+4. Kill only a selector buffer proven to be owned by deslop.
+5. Preserve existing probe cancellation on buffer kill.
+
+*** Acceptance criteria
+
+- A pre-existing user buffer named like the selector remains unchanged and live.
+- Reopening reuses the package-owned selector buffer when appropriate.
+- Closing cancels its probe and kills only the package-owned buffer.
+
+** TODO [High] Fix the model-probe callback arity contract
+:PROPERTIES:
+:FILES: deslop-provider.el, deslop-selector.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-provider-probe-models= documents CALLBACK as =(MODELS ERROR)= at
+=deslop-provider.el:592-595=.  When the profile has no compatible models URL,
+the branch at =deslop-provider.el:599-604= routes only one argument through
+=deslop-provider--invoke-discovery-callback=.  The resulting wrong-arity error
+is swallowed, so callers receive no completion notification.
+
+*** Required implementation
+
+1. Invoke the callback as =(funcall callback nil error)= in the no-URL branch.
+2. Do not use the one-argument discovery callback wrapper for a two-argument
+   model-probe callback.
+3. Consider adding a dedicated callback-safe helper whose name and docstring
+   specify the two-argument contract.
+4. Keep cancellation behavior consistent for synchronous and asynchronous
+   completion.
+
+*** Acceptance criteria
+
+- Profiles without model-list URLs receive exactly one callback with nil models
+  and a =deslop-error=.
+- Callback arity errors are not silently converted into no completion.
+- Cancellation suppresses only callbacks that have not already run.
+
+** TODO [Medium] Design usable deletion reviews
+:PROPERTIES:
+:FILES: deslop-tools.el, deslop-review.el, deslop-test.el
+:END:
+
+*** Problem
+
+A replacement with an empty string creates a zero-width review overlay in
+=deslop-tools--apply-edits-in-buffer= at =deslop-tools.el:563-588=.  Point-based
+review discovery at =deslop-review.el:266-277= relies primarily on
+=overlays-at=.  Overlap logic at =deslop-review.el:196-208= also treats a
+zero-width review poorly.
+
+The deleted text is absent from the visible buffer, so the user cannot see what
+was removed.  The review may be hard or impossible to select and reject.
+
+*** Required implementation
+
+1. Represent deletion reviews explicitly instead of relying on a zero-width
+   ordinary replacement overlay.
+2. Show removed content using a safe display mechanism such as an =after-string=
+   with a dedicated semantic face, or use a separate diff/review buffer.
+3. Store stable restoration anchors and the complete original text.
+4. Ensure approve, reject, approve-all, reject-all, overlap checks, and review
+   counts all include deletions.
+5. Define behavior when the user edits around the deletion anchor before
+   approval.
+
+*** Acceptance criteria
+
+- Deleted text is visibly reviewable.
+- A deletion can be reached and approved or rejected from point-based commands.
+- Rejection restores the original text at the correct location.
+- Review counts and conflict checks include deletion reviews.
+
+** TODO [Medium] Add finite wall-clock deadlines
+:PROPERTIES:
+:FILES: deslop-core.el, deslop-provider.el, deslop-curl.el, deslop-codex.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-request-timeout= and =deslop-provider-discovery-timeout= default to nil
+at =deslop-core.el:29-35= and =deslop-provider.el:73-79=.  Curl's low-speed rule
+only aborts when transfer speed remains below one byte per second.  A server can
+send occasional bytes indefinitely and retain queue slots, buffers, processes,
+hooks, overlays, and credentials-related state.
+
+*** Required implementation
+
+1. Choose finite default total deadlines for generation, discovery, and OAuth
+   refresh.
+2. Keep these as separate options because their expected durations differ.
+3. Allow users of slow local models to raise or disable the generation deadline.
+4. Validate every timeout as nil or a positive number before process startup.
+5. Produce errors that distinguish connection, idle, and total timeout failures.
+
+*** Acceptance criteria
+
+- Default requests eventually terminate even when an endpoint drips data.
+- Local-model users can explicitly opt into a longer or unlimited generation.
+- Timeout errors identify which deadline was exceeded.
+
+** TODO [Medium] Bound project traversal and model-supplied search work
+:PROPERTIES:
+:FILES: deslop-project.el, deslop-tools.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-project-files= recursively walks and sorts the entire project at
+=deslop-project.el:194-227=.  Callers apply =max_results= and
+=deslop-tools-max-search-files= only after enumeration at
+=deslop-tools.el:271-292= and =deslop-tools.el:409-459=.
+
+The search tool also accepts an arbitrary Emacs regexp and evaluates it
+synchronously across project files.  Large repositories, slow filesystems,
+TRAMP projects, and expensive regexps can block Emacs despite small result
+limits.  Visiting buffers can bypass the disk file-size check because their
+complete contents are hashed and searched.
+
+*** Required implementation
+
+1. Add traversal budgets for entries, depth, elapsed time, and optionally total
+   bytes inspected.
+2. Make traversal incremental and allow callers to stop after their result or
+   file budget is satisfied.
+3. Apply source-size limits to visiting buffers as well as closed files.
+4. Prefer literal search by default for model-facing tools.  If regex search is
+   retained, make it an explicit capability and add time/size limits.
+5. Consider asynchronous search or a bounded external search process for large
+   projects.
+6. Return structured truncation information explaining which budget was hit.
+
+*** Acceptance criteria
+
+- =max_results= does not require unbounded full-tree traversal.
+- Oversized visiting buffers are rejected or bounded consistently with files.
+- Search terminates under configured entry, byte, and time budgets.
+- Truncated results clearly identify the limiting budget.
+
+* Privacy and review model
+
+** TODO [High] Clarify or redesign review-before-application semantics
+:PROPERTIES:
+:FILES: deslop-operations.el, deslop-review.el, deslop.el, deslop-test.el
+:END:
+
+*** Problem
+
+Ordinary insert, improve, and structured operations mutate the live source
+buffer before the user approves them:
+
+- Plain result application: =deslop-operations.el:297-379=
+- Structured result application: =deslop-operations.el:448-487=
+- Review overlays: =deslop-review.el:216-255=
+
+The overlay is rollback metadata, not a security approval gate.  The user can
+save the buffer while reviews are pending.  A compromised provider can insert
+arbitrary source or file-local-variable text that is present immediately and
+may be saved accidentally.
+
+*** Required implementation
+
+Choose and document one model:
+
+1. Staged review: render a diff or indirect buffer and apply changes only after
+   explicit approval.  This is the safer default for remote providers and
+   whole-buffer edits.
+2. Immediate application: preserve current behavior, but call it out clearly in
+   the UI and documentation.  Add an optional save warning when pending reviews
+   exist and consider confirmation for remote or whole-buffer operations.
+
+If staged review is selected, preserve source markers/digests so approval fails
+cleanly when the source changes before application.
+
+*** Acceptance criteria
+
+- The UI and docs accurately state whether generated text has already changed
+  the source buffer.
+- The user cannot unknowingly save pending generated output under the chosen
+  default workflow.
+- Remote and whole-buffer operations receive an appropriately strong review
+  boundary.
+
+** TODO [High] Use privacy-preserving history defaults and a byte budget
+:PROPERTIES:
+:FILES: deslop-history.el, deslop-core.el, deslop-test.el, README.md or docs/privacy.org
+:END:
+
+*** Problem
+
+History is enabled by default and retains complete prompts/source context and
+provider reasoning at =deslop-history.el:22-40=.  Entries are limited by count,
+not total bytes, and are rendered in a memory-only buffer at
+=deslop-history.el:279-370=.
+
+This can retain credentials, proprietary source, and large reasoning traces
+after the source buffer is closed.  Read-only buffer state prevents editing but
+is not an access-control boundary.
+
+*** Required implementation
+
+1. Default complete prompt retention to nil.
+2. Default reasoning retention to nil unless there is a strong documented use
+   case for enabling it.
+3. Add a total byte budget covering active and rendered history entries.
+4. Truncate or evict oldest entries before exceeding the budget.
+5. Provide obvious commands to inspect settings and clear history.
+6. Consider optional clearing on project change, idle timeout, or Emacs exit.
+7. Document exactly what is retained and that it remains accessible to Lisp in
+   the Emacs process.
+
+*** Acceptance criteria
+
+- Default history does not retain complete source prompts or reasoning.
+- History memory remains under a configured aggregate byte budget.
+- Clearing history removes both rendered and in-progress entries.
+- Privacy behavior is documented next to remote-provider setup.
+
+** TODO [Low] Replace filename denylisting with explicit future tool capabilities
+:PROPERTIES:
+:FILES: deslop-project.el, deslop-tools.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-project-excluded-path-patterns= at =deslop-project.el:28-39= excludes a
+few common secret names but cannot reliably identify secrets.  It misses common
+examples such as =.authinfo=, =.netrc=, =.npmrc=, =.pypirc=, private keys, and
+arbitrarily named credential files.
+
+Change sets at =deslop-tools.el:463-471= are globally keyed by predictable IDs
+and have no project/session ownership, expiry, or aggregate storage limit.
+These tools are not yet connected to model transport, which reduces immediate
+risk, but the current boundaries are unsafe for future agents.
+
+*** Required implementation
+
+1. Do not treat a filename denylist as a security boundary.
+2. Introduce explicit project/session capabilities defining which paths or
+   buffers a model may read and write.
+3. Require separate read, search, and write permissions.
+4. Bind every change set to its provider, project, agent session, and capability.
+5. Use opaque IDs and add count, byte, and age limits.
+6. Require explicit authorization before each write unless the user has enabled
+   a clearly scoped trusted mode.
+
+*** Acceptance criteria
+
+- A tool session can access only explicitly granted paths or buffers.
+- A change set cannot be applied from another project/session without a valid
+  capability.
+- Expired and excess change sets are removed safely.
+
+* User interface and accessibility
+
+** TODO [High] Make faces semantic, theme-aware, and terminal-friendly
+:PROPERTIES:
+:FILES: deslop-core.el, deslop-ui.el, deslop-review.el, deslop-test.el
+:END:
+
+*** Problem
+
+The badge and working faces use fixed bright colors at =deslop-core.el:124-127=
+and =deslop-ui.el:21-24=.  Review highlighting computes and fixes both foreground
+and background colors at =deslop-review.el:153-171= and
+=deslop-review.el:227-247=, potentially overriding font-lock and theme contrast.
+
+The status UI also relies on Braille spinner glyphs and an hourglass at
+=deslop-ui.el:34-35= and =deslop-ui.el:51-75=.  These may render poorly in TTY
+frames or fonts without the glyphs.
+
+*** Required implementation
+
+1. Make custom faces inherit semantic Emacs faces such as =success=, =warning=,
+   =shadow=, or suitable diff faces rather than fixing RGB values globally.
+2. Preserve font-lock foreground where practical.  Prefer inherited background,
+   box, stipple, or another theme-compatible distinction.
+3. Add ASCII status fallbacks selected for terminal or unavailable glyphs.
+4. Add =help-echo= or equivalent textual detail to badges.
+5. Ensure all state is available through textual commands, not color or overlay
+   placement alone.
+6. Test light, dark, high-contrast, and TTY-like display behavior.
+
+*** Acceptance criteria
+
+- Pending and active states remain distinguishable without relying only on hue.
+- Review highlighting does not erase syntax-color meaning.
+- Status text remains readable when Unicode spinner glyphs are unavailable.
+- Reduced-motion mode uses a stable non-animated indicator.
+
+** TODO [High] Replace model cycling as the only scalable selection mechanism
+:PROPERTIES:
+:FILES: deslop-selector.el, deslop-provider.el, deslop-test.el
+:END:
+
+*** Problem
+
+The selector supports only next/previous cycling for providers and models at
+=deslop-selector.el:207-234=.  Model labels are truncated to 24 display columns
+at =deslop-selector.el:88-107=.  Endpoints can expose dozens or hundreds of
+models, many with identical long prefixes.
+
+*** Required implementation
+
+1. Add completion-backed provider and model selection using =completing-read= or
+   an equivalent standard Emacs completion API.
+2. Preserve cycling keys as shortcuts for small lists if desired.
+3. Show the full selected model and provider in a details line or =help-echo=.
+4. Preserve the currently selected value across asynchronous probe refreshes.
+5. Handle an empty model list and a model disappearing during refresh.
+
+*** Acceptance criteria
+
+- A user can search directly among hundreds of models.
+- Models with identical prefixes remain distinguishable.
+- Completion works with standard Emacs completion front ends.
+
+** TODO [High] Expose provider discovery errors and an explicit retry action
+:PROPERTIES:
+:FILES: deslop-provider.el, deslop-selector.el, deslop-test.el
+:END:
+
+*** Problem
+
+Discovery failures are cached, and the default TTL is "never expire" at
+=deslop-provider.el:67-85= and =deslop-provider.el:420-476=.  The selector
+reduces the error to =[probe failed]= at =deslop-selector.el:102-112= and drops
+the diagnostic.  The cache-clear command is not visible in the selector.
+
+A temporary server startup or network failure can therefore persist for the
+entire Emacs session without a discoverable recovery path.
+
+*** Required implementation
+
+1. Store the structured discovery error separately from successful metadata.
+2. Do not cache failures indefinitely by default.  Use a short failure TTL or
+   no failure caching.
+3. Display a bounded, sanitized error summary and make full details available
+   through help or a diagnostic command.
+4. Add a selector key for retrying the current provider.
+5. Retry only the selected provider rather than clearing unrelated cache entries.
+
+*** Acceptance criteria
+
+- A transient failure can be retried directly from the selector.
+- The user can see why probing failed.
+- Successful metadata may use a longer TTL than failures.
+
+** TODO [Medium] Add a complete review-navigation workflow
+:PROPERTIES:
+:FILES: deslop-review.el, deslop.el, deslop-selector.el, deslop-test.el
+:END:
+
+*** Problem
+
+Review output is marked visually and can be approved/rejected at point, but
+there are no next/previous review commands, no focused review mode, and no list
+of outstanding reviews.  The mode-line format =deslop[jobs|reviews]= at
+=deslop.el:66-77= is not self-explanatory.
+
+*** Required implementation
+
+1. Add next and previous pending-review commands that work across zero-width and
+   nonzero-width reviews.
+2. Add a command that reports pending review count and locations in the current
+   buffer.
+3. Optionally add a temporary review-navigation minor mode without intercepting
+   normal editing keys.
+4. Add explanatory =help-echo= to the mode-line lighter.
+5. Define and document save behavior while reviews are pending.
+
+*** Acceptance criteria
+
+- Every pending review can be reached by keyboard.
+- Navigation wraps or reports boundaries consistently.
+- Normal text editing remains available inside generated output.
+
+** TODO [Medium] Correct selector terminology and operation flow
+:PROPERTIES:
+:FILES: deslop-selector.el, deslop-test.el
+:END:
+
+*** Problem
+
+=RET - confirm choice= only stores the selection in memory and closes the
+selector at =deslop-selector.el:274-302=.  Concurrency commands say "Set and
+save" but update only session-level hash-table state at
+=deslop-selector.el:236-253=.  This wording implies persistence or execution
+that does not occur.
+
+The selector also closes before target creation and enqueueing complete at
+=deslop-selector.el:304-318=.  A validation error can discard the visible
+selection workflow before reporting failure.
+
+*** Required implementation
+
+1. Rename UI text and docstrings to say "remember for this Emacs session" and
+   "close" where appropriate.
+2. Decide whether RET should merely close or should invoke a default operation;
+   make the label match the behavior.
+3. Validate target creation and enqueue prerequisites before closing the
+   selector, or reopen/preserve selector state after failure.
+4. Give prompt input dedicated minibuffer history variables.
+
+*** Acceptance criteria
+
+- Labels never imply disk persistence when settings are session-only.
+- A queueing validation failure leaves the user able to correct and retry the
+  same selection and prompt.
+
+** TODO [Medium] Improve summary identity and management
+:PROPERTIES:
+:FILES: deslop-summary.el, deslop-review.el, deslop-test.el
+:END:
+
+*** Problem
+
+Summaries are appended to one =text-mode= buffer and identified only by source
+buffer name at =deslop-summary.el:35-58=.  Buffers with identical names are
+ambiguous.  Entries have no timestamp, file path, source region, navigation, or
+clear command.
+
+*** Required implementation
+
+1. Add a dedicated summary mode.
+2. Include timestamp and a bounded source identity.  Prefer project-relative
+   paths where available and avoid leaking unnecessary absolute paths.
+3. Include source region information when a region was summarized.
+4. Add navigation and clear commands.
+5. Ensure repeated unreviewed summaries have unambiguous badge placement.
+
+*** Acceptance criteria
+
+- Two same-named buffers produce distinguishable summary entries.
+- Users can navigate and clear summaries without manually editing the buffer.
+
+** TODO [Medium] Reconsider the default minor-mode key binding
+:PROPERTIES:
+:FILES: deslop.el, README.md, deslop-test.el
+:END:
+
+*** Problem
+
+=C-c e= at =deslop.el:35-41= is in key space reserved by Emacs convention for
+users.  Package defaults should not claim =C-c LETTER=.  The binding is also not
+customizable through a supported option.
+
+*** Required implementation
+
+1. Prefer shipping the minor mode unbound and document an example user binding,
+   or choose a convention-compliant prefix based on the package's supported
+   Emacs versions.
+2. Expose a prefix command containing selector, direct operations, queue,
+   history, and review commands.
+3. Avoid dynamically rebuilding a user-customized keymap during reload.
+
+*** Acceptance criteria
+
+- Enabling =deslop-mode= does not overwrite user-reserved key space by default.
+- All primary commands are reachable through a documented prefix or menu.
+
+* Architecture and module boundaries
+
+** TODO [High] Make project-agent tools optional instead of eagerly loading them
+:PROPERTIES:
+:FILES: deslop.el, deslop-project.el, deslop-tools.el, deslop-llm.el
+:END:
+
+*** Problem
+
+=deslop.el:17-31= eagerly requires every subsystem, including the substantial
+project-agent and disk-edit implementation in =deslop-project.el= and
+=deslop-tools.el=.  Those tools are not connected to the current model transport
+path.  Eager loading adds startup work, globals, registrations, and filesystem
+attack surface without providing an active user feature.
+
+Codex support is also large and service-specific but is eagerly pulled through
+provider and transport dependencies.
+
+*** Required implementation
+
+1. Define a small default facade containing core commands, queue, target, review,
+   and the selected transport abstraction.
+2. Load project tools only when an agent/tool-calling feature is explicitly
+   enabled.
+3. Consider autoloading Codex support only when the =openai= profile is selected.
+4. Keep optional module registration idempotent.
+5. Document optional dependencies and security implications.
+
+*** Acceptance criteria
+
+- Loading =deslop= does not register unused project write tools.
+- Selecting a feature that needs tools or Codex loads it transparently.
+- Byte compilation has no unresolved function warnings after the dependency
+  boundaries are adjusted.
+
+** TODO [Medium] Decouple UI event handling from mutation of queue structs
+:PROPERTIES:
+:FILES: deslop-ui.el, deslop-queue.el, deslop-operations.el, deslop.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-ui.el= deliberately avoids requiring the queue module, but calls the
+=deslop-job-overlay= accessor and mutates the job with =setf= at
+=deslop-ui.el:43-44= and =deslop-ui.el:164-179=.  This relies on facade load order
+and couples presentation to queue representation.
+
+*** Required implementation
+
+1. Prefer lifecycle events that contain the overlay or a presentation identity
+   needed by the UI.
+2. Let the queue or operation owner clear its own =job.overlay= field after the
+   UI reports deletion, rather than letting UI mutate queue state.
+3. If direct struct access remains intentional, require =deslop-queue= explicitly
+   and accept the dependency rather than relying on implicit load order.
+4. Ensure each file can be loaded and byte-compiled with its declared requires.
+
+*** Acceptance criteria
+
+- =deslop-ui.el= has no undeclared dependency on queue-generated accessors.
+- Queue state remains authoritative and presentation remains replaceable.
+
+** TODO [Medium] Simplify duplicated transport lifecycle state
+:PROPERTIES:
+:FILES: deslop-transport.el, deslop-llm.el, deslop-codex.el, deslop-test.el
+:END:
+
+*** Problem
+
+Generic and Codex session structs duplicate process, buffer, header, config,
+callback, and terminal fields already stored by =deslop-transport-session=.
+Both transports copy handles into the shared lifecycle and then clear two sets
+of fields during cleanup.  This creates synchronization risk and contributed to
+the callback-settlement problem.
+
+*** Required implementation
+
+1. Make =deslop-transport-session= the single owner of callbacks, terminal
+   settlement, process handles, buffers, and temporary files.
+2. Keep only protocol-specific parsing and result fields in concrete sessions.
+3. Expose narrow shared APIs for resource registration, event delivery,
+   settlement, cancellation, and cleanup.
+4. Remove duplicate terminal checks where one authoritative check is sufficient.
+
+*** Acceptance criteria
+
+- Resource handles have one owner and one cleanup path.
+- Generic and Codex transports follow the same settlement contract.
+- Existing cancellation and stale-callback tests continue to pass.
+
+** TODO [Medium] Make every module independently loadable and compilable
+:PROPERTIES:
+:FILES: deslop-operation.el, deslop-ui.el, all runtime Elisp files
+:END:
+
+*** Problem
+
+=deslop-operation.el= declares customizations in the =deslop= group but does not
+require the file that defines that group at =deslop-operation.el:13-19=.
+=deslop-ui.el= uses queue accessors without requiring their defining file.  This
+works through the current facade load order but is fragile for direct loading,
+autoloading, and byte compilation.
+
+*** Required implementation
+
+1. Audit every runtime file's referenced external functions, macros, variables,
+   struct accessors, custom groups, and faces.
+2. Add explicit =require= forms for runtime dependencies.
+3. Use =declare-function= only for genuine optional dependencies and guard those
+   calls with =featurep= or autoloading.
+4. Remove dependency cycles by extracting small shared definitions when needed.
+5. Add independent byte-compilation to CI.
+
+*** Acceptance criteria
+
+- Every runtime file byte-compiles from a clean Emacs process with no unresolved
+  function or free-variable warnings attributable to missing dependencies.
+- Directly loading a leaf module either works or reports a documented optional
+  dependency.
+
+** TODO [Low] Consolidate operation lookup and unknown-operation behavior
+:PROPERTIES:
+:FILES: deslop-operation.el, deslop-queue.el, deslop-commands.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-operation.el:55-83= repeats the same =cl-find= expression in four
+functions.  =deslop-operation-for= signals for unknown operations, while the
+predicate/accessor helpers silently return nil.  A configuration typo can be
+misread as a legitimate false capability.
+
+*** Required implementation
+
+1. Make =deslop-operation-for= the single lookup implementation.
+2. Decide whether every capability accessor should signal on unknown operation
+   types or whether explicitly named tolerant variants are needed.
+3. Update callers and tests to use one consistent contract.
+
+*** Acceptance criteria
+
+- Unknown operation behavior is consistent and tested.
+- Lookup logic exists in one place.
+
+** TODO [Low] Correct structured-edit prompt schema contradictions
+:PROPERTIES:
+:FILES: deslop-operations.el, deslop-edit.el, deslop-test.el
+:END:
+
+*** Problem
+
+The prompts at =deslop-operations.el:79-114= permit optional =occurrence= and
+=all= fields, then say not to use any keys other than those shown in an example
+that includes neither optional field.  This discourages the model from using the
+fields needed to disambiguate repeated anchors.
+
+*** Required implementation
+
+1. Show all allowed fields in the schema or provide separate valid examples.
+2. State that =occurrence= and =all= are mutually exclusive if that is the
+   intended parser contract; otherwise define their combined meaning.
+3. Keep insertion and replacement schemas synchronized with parser validation.
+4. Include the durable repair identity required by the repair-accounting issue.
+
+*** Acceptance criteria
+
+- Every parser-accepted field is documented as allowed.
+- Every documented field is accepted and validated by the parser.
+- Prompt examples cover repeated anchors.
+
+** DONE [Low] Add bounded source metadata to operation prompts
+:PROPERTIES:
+:FILES: deslop-core.el, deslop-operations.el, deslop-provider.el, deslop-target.el, deslop-history.el, deslop-test.el
+:END:
+
+*** Problem
+
+Operation requests include document text but not major mode, buffer name, or
+source type at =deslop-operations.el:671-690= and
+=deslop-operations.el:733-745=.  The model cannot reliably distinguish Emacs
+Lisp, Org, Markdown, or similarly shaped text.  =Roadmap.org= already identifies
+this gap.
+
+*** Required implementation
+
+1. Add bounded metadata such as major-mode symbol and a sanitized buffer or
+   project-relative file name.
+2. Do not send absolute paths by default; they can expose usernames and local
+   directory structure.
+3. Make file identity disclosure configurable for remote providers.
+4. Keep metadata outside the document body so it cannot be confused with source
+   content.
+5. Include new metadata in request-size accounting and history privacy policy.
+
+*** Acceptance criteria
+
+- The model receives enough information to distinguish common source formats.
+- Metadata cannot bypass =deslop-max-request-chars=.
+- Remote-provider defaults do not disclose unnecessary absolute paths.
+
+*** Resolution
+
+- =deslop-target-source-metadata= derives bounded source type, major mode, and
+  either a file basename or sanitized buffer name from the live target buffer.
+- =deslop--dispatch-llm= adds the metadata to the first user message before
+  validation, history retention, or transport dispatch, covering every current
+  operation and structured-edit repair request without duplicating prompt
+  construction.
+- =deslop-source-name-disclosure= controls name inclusion globally, while a
+  provider profile's =:source-name-disclosure= value can override it.  Absolute
+  and remote paths are reduced to basenames.
+- ERT coverage verifies all five operations, repair prompts, privacy behavior,
+  bounded names, history retention, and request-size accounting.  The complete
+  suite passes 158 tests.
+
+* Elisp idioms, naming, and customization
+
+** TODO [Medium] Split the flat Customize group into descriptive subgroups
+:PROPERTIES:
+:FILES: all runtime Elisp files
+:END:
+
+*** Problem
+
+All customization variables use the single group defined at
+=deslop-core.el:16-19=.  The package has approximately 61 options spanning
+unrelated concerns, making =customize-group= difficult to navigate.
+
+=deslop-provider-profiles= uses raw =sexp= at =deslop-provider.el:51-60=, which
+provides no structured Customize guidance.  Many numeric options use =integer=
+or =number= even when zero and negative values are invalid.
+
+*** Required implementation
+
+1. Add subgroups for at least transport, providers, Codex, UI, review, history,
+   target/context, structured edits, and project tools.
+2. Assign each =defcustom= to the narrowest group.
+3. Use =natnum=, restricted choices, or custom widgets matching runtime
+   validation.
+4. Replace the raw provider-profile =sexp= widget with a structured repeat/alist
+   widget where practical, or add a validation setter and detailed examples.
+5. Keep runtime validation because users can set variables outside Customize.
+
+*** Acceptance criteria
+
+- Customize presents options by subsystem.
+- Invalid negative or zero values cannot be saved through Customize where they
+  are not meaningful.
+- Provider profile errors identify the profile and invalid field.
+
+** TODO [Low] Establish a consistent public/private naming policy
+:PROPERTIES:
+:FILES: deslop-commands.el, deslop-operation.el, deslop-queue.el, deslop-tools.el, all runtime Elisp files
+:END:
+
+*** Problem
+
+Several apparently internal functions lack the double-hyphen convention, for
+example =deslop-current-region= and =deslop-enqueue-operation= at
+=deslop-commands.el:21-78=.  Some scheduler and tool APIs are similarly unclear.
+At the same time, intended interactive commands and extension points are not
+clearly documented as public.
+
+The filenames =deslop-operation.el= and =deslop-operations.el= are also easy to
+confuse: one contains operation specifications and the other orchestration.
+
+*** Required implementation
+
+1. Document the supported public API: interactive commands, customization
+   variables, hooks, provider profile API, and any extension points.
+2. Rename implementation-only functions to =deslop--...= or a clear
+   subsystem-private form such as =deslop-provider--...=.
+3. Preserve old names only if there is evidence of external use; do not add
+   speculative compatibility aliases for unreleased internals.
+4. Rename one of the singular/plural operation files to communicate its role,
+   for example =deslop-operation-spec.el= and =deslop-operation-runner.el=.
+
+*** Acceptance criteria
+
+- A contributor can tell from a name and docstring whether an API is supported.
+- File names communicate distinct responsibilities.
+
+** TODO [Low] Format all ordinary Emacs conditions idiomatically
+:PROPERTIES:
+:FILES: deslop-core.el, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-error-display-message= uses =error-message-string= only when the
+condition's car is exactly =error= at =deslop-core.el:211-226=.  Conditions such
+as =user-error=, =file-error=, =buffer-read-only=, and =quit= fall through to raw
+printed Lisp such as =(user-error "...")=.
+
+*** Required implementation
+
+1. Recognize ordinary condition objects broadly rather than checking only
+   =(eq (car value) 'error)=.
+2. Call =error-message-string= under =condition-case= for valid conditions.
+3. Preserve bounded, single-line sanitization.
+4. Keep strings and =deslop-error= objects working as before.
+
+*** Acceptance criteria
+
+- Common Emacs conditions display their normal human-readable message.
+- Malformed values cannot cause error reporting itself to signal.
+- Messages remain bounded and single-line.
+
+** TODO [Low] Remove unjustified compatibility aliases for internal protocol names
+:PROPERTIES:
+:FILES: deslop-protocol.el
+:END:
+
+*** Problem
+
+=deslop-protocol.el:262-265= keeps aliases for previous internal names.  Internal
+double-hyphen APIs are not stable public interfaces, and there is no documented
+external consumer requiring compatibility.
+
+*** Required implementation
+
+1. Search the repository and known package consumers for uses of the old names.
+2. Remove the aliases if there is no concrete compatibility requirement.
+3. If external consumers exist, document the deprecation and removal version.
+
+*** Acceptance criteria
+
+- Compatibility code exists only for an identified shipped consumer or persisted
+  interface.
+
+* Packaging, repository structure, documentation, and tests
+
+** TODO [High] Add minimum public package documentation and metadata
+:PROPERTIES:
+:FILES: deslop.el, README.md, LICENSE, CHANGELOG.md, docs/
+:END:
+
+*** Problem
+
+The repository has no README, license, changelog, installation instructions,
+example configuration, contributor guide, privacy guide, troubleshooting guide,
+or documented test command.  The package commentary at =deslop.el:9-14= mentions
+only one key.
+
+=vision.org= describes an early local-LLM design and does not explain remote
+providers, Codex/OpenCode OAuth reuse, provider selection, history, review,
+structured edits, queue behavior, or project tools.
+
+*** Required implementation
+
+1. Add =README.md= covering installation, activation, commands, selector usage,
+   queueing, review behavior, provider profiles, and examples.
+2. Document the external =curl= dependency and add a clear startup/preflight
+   diagnostic when it is missing.
+3. Add a privacy/security section explaining what source leaves Emacs, history
+   retention, OAuth credential reuse, TRAMP policy, and review semantics.
+4. Add a license file and ensure package headers match it.
+5. Add a changelog beginning with the current version.
+6. Add URL/Homepage and Maintainer metadata and make author identity consistent.
+7. Document how to run tests and supported Emacs versions.
+
+*** Acceptance criteria
+
+- A new user can install and use the package without reading source code.
+- Remote-provider and credential behavior is disclosed before configuration.
+- Package metadata passes =package-lint= subject to deliberate documented
+  exceptions.
+
+** TODO [High] Determine and test the actual minimum supported Emacs version
+:PROPERTIES:
+:FILES: deslop.el, .github/workflows/ci.yml, README.md
+:END:
+
+*** Problem
+
+=deslop.el:7= requires Emacs 31.1.  This excludes older stable releases and is
+unusual unless the implementation intentionally depends on 31.1-only APIs.  No
+documentation identifies such APIs and no CI matrix verifies compatibility.
+
+*** Required implementation
+
+1. Audit used APIs and determine the lowest practical supported Emacs release.
+2. Test that release and the current stable release in CI.
+3. Lower =Package-Requires= if no 31.1-only dependency exists.
+4. If 31.1 is intentional, list the exact required APIs and rationale in README.
+
+*** Acceptance criteria
+
+- =Package-Requires= matches a version exercised by CI.
+- Compatibility policy is explicit and documented.
+
+** TODO [High] Split the monolithic test suite and add continuous integration
+:PROPERTIES:
+:FILES: deslop-test.el, test/, .github/workflows/ci.yml, Makefile
+:END:
+
+*** Problem
+
+The repository has 150 ERT tests, which is a major strength, but all 3,227 test
+lines are in =deslop-test.el=.  Transport, OAuth, queue, UI, review, parser,
+project-tool, and integration tests are mixed together.  There is no CI,
+supported-version matrix, batch test entry point, byte-compilation check,
+=checkdoc=, or =package-lint=.
+
+Some face tests mutate global faces without restoring them at
+=deslop-test.el:3119-3152=, which can leak state between tests.
+
+*** Required implementation
+
+1. Create =test/deslop-test-helpers.el= for reset logic, temporary-buffer macros,
+   fake transports, and process helpers.
+2. Split tests by subsystem, for example:
+   - =deslop-queue-test.el=
+   - =deslop-target-test.el=
+   - =deslop-operations-test.el=
+   - =deslop-review-test.el=
+   - =deslop-provider-test.el=
+   - =deslop-transport-test.el=
+   - =deslop-codex-test.el=
+   - =deslop-tools-test.el=
+   - =deslop-integration-test.el=
+3. Add one documented noninteractive command that loads and runs all tests.
+4. Add CI for ERT, byte compilation with warnings, =checkdoc=, =package-lint=,
+   and autoload generation.
+5. Test the declared minimum and current Emacs versions.
+6. Restore global face attributes and other global state in =unwind-protect=.
+7. Add missing regression tests identified by every issue in this file.
+
+*** Acceptance criteria
+
+- Tests can be run all together or by subsystem.
+- CI starts from a clean process and fails on test or compilation errors.
+- No test leaves processes, timers, buffers, temporary files, hooks, faces, or
+  package globals changed for the next test.
+
+** TODO [Medium] Reorganize top-level files without overcomplicating load paths
+:PROPERTIES:
+:FILES: repository layout, load-path setup, package recipe, documentation
+:END:
+
+*** Problem
+
+All runtime files, the 3,227-line test file, and planning documents currently
+share the repository root.  This makes the repository harder to scan.  However,
+deep runtime directories such as =lisp/ui/= and =lisp/transport/= would require
+additional load-path and package-recipe complexity for limited benefit because
+the runtime filenames already carry subsystem names.
+
+*** Required implementation
+
+Use a shallow organization:
+
+#+begin_src text
+README.md
+LICENSE
+CHANGELOG.md
+Makefile
+lisp/
+  deslop.el
+  deslop-*.el
+test/
+  deslop-test-helpers.el
+  deslop-*-test.el
+docs/
+  vision.org
+  roadmap.org
+  deferred.org
+  privacy.org
+.github/workflows/ci.yml
+#+end_src
+
+1. Keep runtime Elisp together in one =lisp/= directory.
+2. Split tests by subsystem under =test/=.
+3. Move planning and extended design documents under =docs/=.
+4. Update load-path setup, test commands, package recipes, links, and line
+   references after moving files.
+5. Do not move or rewrite human-owned planning documents without explicit human
+   approval; preserve their contents when relocating them.
+
+*** Acceptance criteria
+
+- Package loading remains simple with one runtime load-path directory.
+- Tests and documentation are clearly separated from shipped runtime code.
+- All links, test commands, and package recipes work after the move.
+
+** TODO [Medium] Resolve the repository/package naming mismatch
+:PROPERTIES:
+:FILES: repository name, README.md, package metadata
+:END:
+
+*** Problem
+
+The repository directory is named =enslop-mode= while every runtime file,
+feature, variable, and command uses =deslop=.  This appears to be residue from a
+rename and will confuse package discovery, URLs, installation instructions, and
+users reporting issues.
+
+*** Required implementation
+
+1. Decide whether the product name is =deslop= or =enslop=.
+2. Prefer the already consistent runtime/package name =deslop= unless there is a
+   product reason to rename all APIs.
+3. Rename the repository or document the distinction explicitly.
+4. Update homepage URLs and installation examples.
+
+*** Acceptance criteria
+
+- Repository, package metadata, documentation, and user-facing product name are
+  consistent.
+
+** TODO [Medium] Broaden autoloads and command discoverability
+:PROPERTIES:
+:FILES: deslop.el, deslop-commands.el, deslop-review.el, deslop-history.el, deslop-queue.el, deslop-provider.el
+:END:
+
+*** Problem
+
+Only =deslop-mode=, =deslop-reload=, and =deslop-selector-open= have autoload
+cookies.  Direct operations, queue status/abort, history, review actions, and
+cache clearing are interactive but not broadly discoverable.  There is no menu,
+prefix map, transient, Info page, or complete command listing.
+
+*** Required implementation
+
+1. Decide which interactive commands are supported public entry points.
+2. Add autoload cookies to those commands or route them through one autoloaded
+   prefix command.
+3. Add a prefix map, menu, or optional transient containing operations, queue,
+   history, provider retry/cache, and review commands.
+4. Document all commands in README.
+5. Do not advertise =deslop-reload= as a primary user command; it is a developer
+   lifecycle tool.
+
+*** Acceptance criteria
+
+- =M-x= and package documentation expose all intended user workflows.
+- Invoking an autoloaded command loads only its necessary dependencies.
+
+** TODO [Low] Replace fragile manual reload ordering
+:PROPERTIES:
+:FILES: deslop.el, all runtime Elisp files, deslop-test.el
+:END:
+
+*** Problem
+
+=deslop-reload= manually lists every file in dependency order at
+=deslop.el:102-120=.  The list must be updated after every file addition, rename,
+or dependency change.  It calls =locate-library= again, so a changed =load-path=
+can cause reload to execute a different =deslop.el= tree than the one originally
+loaded.
+
+*** Required implementation
+
+1. Capture the canonical package directory when the trusted facade is initially
+   loaded.
+2. Reload only from that directory and reject an unexpected remote path.
+3. Use the central lifecycle teardown before loading definitions.
+4. Generate or centralize dependency ordering rather than maintaining an
+   unrelated hard-coded list where possible.
+5. Ensure load-time hooks and registrations are idempotent.
+
+*** Acceptance criteria
+
+- Changing =load-path= after initial load cannot redirect reload to another
+  package tree.
+- Reload includes every runtime module exactly once and leaves no stale process,
+  timer, hook, or callback state.
+
+* Recommended implementation order
+
+The following order minimizes rework:
+
+1. Force all provider processes to run locally.
+2. Bound aggregate structured-edit growth.
+3. Fix structured-repair identities and unresolved-failure accounting.
+4. Protect selector buffer ownership and fix model-probe callback arity.
+5. Choose transaction and review-before-application semantics.
+6. Centralize lifecycle ownership and simplify transport session ownership.
+7. Make closed-file writes atomic and bound project traversal.
+8. Change privacy defaults for history and rejected output.
+9. Make project tools and Codex integration optional/lazy where possible.
+10. Improve selector, review navigation, faces, and discovery diagnostics.
+11. Clarify public APIs, dependencies, naming, and Customize groups.
+12. Add documentation, split tests, add CI, and reorganize into =lisp/=,
+    =test/=, and =docs/=.
+
+* Existing strengths to preserve
+
+These parts are well designed and should not be lost while addressing the
+issues above:
+
+- Lexical binding and consistent =deslop-= package prefixing.
+- Use of =cl-defstruct= for jobs, targets, sessions, history, and change sets.
+- Queue callbacks bind their originating job instead of trusting mutable global
+  current-job state.
+- Target markers, source digests, original narrowing, and buffer-local mutation
+  hooks handle many stale-target cases carefully.
+- Normal cancellation and settlement are generally idempotent and use
+  =unwind-protect= appropriately.
+- Processes use argument lists rather than a shell, avoiding ordinary shell
+  injection and quoting problems.
+- Bearer and refresh tokens are kept out of process argument lists.
+- Provider URLs and request headers receive unusually strong validation.
+- JSON network keys are parsed into hash tables without interning untrusted
+  symbols.
+- Response, SSE, stderr, header, and several output resources already have
+  configurable safety limits.
+- Review rejection uses atomic buffer changes and restores original text
+  properties.
+- The existing 150 ERT tests cover many subtle parser, queue, cancellation,
+  stale-callback, overlay-boundary, and authentication cases.

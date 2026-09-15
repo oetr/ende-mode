@@ -117,6 +117,10 @@ process for cancellation tests."
         (deslop-test--complete-call call))
       call)))
 
+(defun deslop-test--user-message (messages)
+  "Return the user content from MESSAGES."
+  (cdr (assoc "user" messages)))
+
 (defun deslop-test--sleep-process ()
   "Create a process that remains live until explicitly terminated."
   (make-process :name (generate-new-buffer-name "deslop-test-sleep")
@@ -453,6 +457,124 @@ process for cancellation tests."
   `(with-temp-buffer
      (insert ,contents)
      ,@body))
+
+(ert-deftest deslop-test/source-metadata-uses-file-basename-and-mode ()
+  (deslop-test--with-buffer "source"
+    (setq-local buffer-file-name "/ssh:user@example:/path/to/example.el")
+    (setq-local major-mode 'emacs-lisp-mode)
+    (let ((target (deslop-target-create
+                   :buffer (current-buffer)
+                   :start (point-min)
+                   :end (point-max)
+                   :cursor (point-min)
+                   :selected t)))
+      (unwind-protect
+          (let ((metadata (deslop-target-source-metadata target)))
+            (should (string= (plist-get metadata :name) "example.el"))
+            (should (string= (plist-get metadata :type) "file"))
+            (should (string= (plist-get metadata :major-mode)
+                             "emacs-lisp-mode"))
+            (should-not (string-match-p "/" (plist-get metadata :name))))
+        (deslop-target-release target)))))
+
+(ert-deftest deslop-test/source-metadata-bounds-buffer-names ()
+  (deslop-test--with-buffer "source"
+    (rename-buffer (concat "scratch\n" (make-string 300 ?x)) t)
+    (setq-local major-mode 'text-mode)
+    (let ((target (deslop-target-create
+                   :buffer (current-buffer)
+                   :start (point-min)
+                   :end (point-max)
+                   :cursor (point-min))))
+      (unwind-protect
+          (let ((name (plist-get (deslop-target-source-metadata target)
+                                 :name)))
+            (should (string-prefix-p "scratch " name))
+            (should (<= (length name)
+                        deslop-target--source-metadata-field-max-length))
+            (should-not (string-match-p "[[:cntrl:]]" name)))
+        (deslop-target-release target)))))
+
+(ert-deftest deslop-test/all-operations-include-source-metadata ()
+  (dolist (type '(insert improve summarize write-anywhere insert-anywhere))
+    (deslop-test--reset)
+    (let* ((response
+            (pcase type
+              ('insert "completion")
+              ('improve "improved")
+              ('summarize "summary")
+              ('write-anywhere
+               (concat "{\"version\":1,\"edits\":[{\"anchor\":\"test\","
+                       "\"position\":\"replace\",\"text\":\"changed\"}]}"))
+              ('insert-anywhere
+               (concat "{\"version\":1,\"edits\":[{\"anchor\":\"test\","
+                       "\"position\":\"before\",\"text\":\"X\"}]}"))))
+           (deslop-llm-function
+            (deslop-test--fake-llm (list response))))
+      (deslop-test--with-buffer "test"
+        (setq-local buffer-file-name "/tmp/example.el")
+        (setq-local major-mode 'emacs-lisp-mode)
+        (goto-char (point-max))
+        (pcase type
+          ('insert (deslop-insert-at-cursor))
+          ('improve (deslop-improve-at-cursor "Improve it"))
+          ('summarize (deslop-summarize))
+          ('write-anywhere (deslop-write-anywhere "Change it"))
+          ('insert-anywhere (deslop-insert-anywhere "Insert it")))
+        (let ((user-message
+               (deslop-test--user-message (car deslop-test--prompts))))
+          (should (string-prefix-p "Source metadata:\n" user-message))
+          (should (string-match-p "Name: example\\.el" user-message))
+          (should (string-match-p "Type: file" user-message))
+          (should (string-match-p "Major mode: emacs-lisp-mode"
+                                  user-message))
+          (should (= 1 (deslop-test--count-matches
+                        "Source metadata:" user-message))))))))
+
+(ert-deftest deslop-test/source-name-disclosure-can-be-overridden ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '("one" "two")))
+        (deslop-source-name-disclosure nil))
+    (deslop-test--with-buffer "source"
+      (rename-buffer "private-buffer" t)
+      (setq-local major-mode 'python-mode)
+      (deslop-enqueue-operation 'insert)
+      (let ((without-name
+             (deslop-test--user-message (car deslop-test--prompts))))
+        (should-not (string-match-p "Name:" without-name))
+        (should (string-match-p "Type: buffer" without-name))
+        (should (string-match-p "Major mode: python-mode" without-name)))
+      (deslop-approve-all-output)
+      (deslop-enqueue-operation 'insert nil '(:source-name-disclosure t))
+      (let ((with-name
+             (deslop-test--user-message (car deslop-test--prompts))))
+        (should (string-match-p "Name: private-buffer" with-name))))))
+
+(ert-deftest deslop-test/source-metadata-counts-toward-request-budget ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '("unused"))))
+    (deslop-test--with-buffer "source"
+      (setq-local buffer-file-name "/tmp/example.el")
+      (setq-local major-mode 'emacs-lisp-mode)
+      (let* ((target (deslop-target-create
+                      :buffer (current-buffer)
+                      :start (point-min)
+                      :end (point-max)
+                      :cursor (point-min)))
+             (job (deslop--make-job :type 'insert
+                                    :target target
+                                    :profile nil))
+             (messages (list (cons "system" "system")
+                             (cons "user" "Document:\nsource")))
+             (base-size
+              (cl-loop for message in messages
+                       sum (+ (length (format "%s" (car message)))
+                              (length (format "%s" (cdr message)))))))
+        (unwind-protect
+            (let ((deslop-max-request-chars base-size))
+              (should-error (deslop--dispatch-llm job messages))
+              (should-not deslop-test--calls))
+          (deslop-target-release target))))))
 
 (ert-deftest deslop-test/reset-does-not-kill-unowned-named-buffers ()
   (let* ((deslop-history-buffer-name " *deslop-unowned-history*")
@@ -1049,6 +1171,8 @@ process for cancellation tests."
            (list (list :content first-response)
                  (list :content repair-response)))))
     (deslop-test--with-buffer "one two"
+      (setq-local buffer-file-name "/tmp/example.el")
+      (setq-local major-mode 'emacs-lisp-mode)
       (let* ((job (deslop-write-anywhere "Fix every item"))
              (summary (plist-get (deslop-job-result job)
                                  :structured-summary))
@@ -1060,6 +1184,7 @@ process for cancellation tests."
         (should (= (plist-get summary :repaired) 1))
         (should (= (plist-get summary :skipped) 0))
         (should (= (plist-get summary :repair-attempts) 1))
+        (should (string-match-p "Name: example\\.el" repair-user))
         (should (string-match-p "Fix every item" repair-user))
         (should (string-match-p "occurrence 2 is not present" repair-user))
         (should (string-match-p "Current document:\nONE two" repair-user))
@@ -3011,8 +3136,23 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (let ((text (buffer-string)))
           (should (string-match-p "Output" text))
           (should (= (deslop-test--count-matches "result" text) 1))
+          (should (string-match-p "Source metadata:" text))
           (should (string-match-p "base" text))
           (should (eq buffer-undo-list t)))))))
+
+(ert-deftest deslop-test/history-omits-source-metadata-without-prompts ()
+  (deslop-test--reset)
+  (let ((deslop-history-retain-prompts nil)
+        (deslop-llm-function (deslop-test--fake-llm '(" result"))))
+    (deslop-test--with-buffer "secret source"
+      (setq-local buffer-file-name "/tmp/secret.el")
+      (setq-local major-mode 'emacs-lisp-mode)
+      (goto-char (point-max))
+      (deslop-insert-at-cursor)
+      (with-current-buffer deslop-history-buffer-name
+        (let ((text (buffer-string)))
+          (should-not (string-match-p "Source metadata:" text))
+          (should-not (string-match-p "secret source" text)))))))
 
 (ert-deftest deslop-test/history-retains-failed-stream-and-raw-usage ()
   (deslop-test--reset)
@@ -3064,7 +3204,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                   text))
           (should (string-match-p "Tokens: 4096" text))
           (should (string-match-p "Finish reason: length" text))
-          (should-not (string-match-p "data:" text)))))))
+          (should-not (string-match-p "\\(^\\|\\n\\)[[:space:]]*data:"
+                                      text)))))))
 
 (ert-deftest deslop-test/history-command-displays-buffer ()
   (deslop-test--reset)

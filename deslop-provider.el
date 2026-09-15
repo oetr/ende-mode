@@ -55,7 +55,8 @@ Each value is a plist.  Secrets must not be stored here; use auth-source
 fields :auth-source-host, :auth-source-user, and :auth-source-port instead.
 An optional :display-name overrides endpoint-reported provider names for the
 UI.  :max-concurrency limits parallel jobs for the provider, and :parallel
-enables parallel jobs by default."
+enables parallel jobs by default.  :source-name-disclosure overrides
+`deslop-source-name-disclosure' for operation prompts."
   :type 'sexp
   :group 'deslop)
 
@@ -200,6 +201,15 @@ can be dispatched."
     (dolist (key '(:token :api-key :secret :authorization :auth-token))
       (setq snapshot (plist-put snapshot key nil)))
     snapshot))
+
+(defun deslop-provider-source-name-disclosure-p (profile)
+  "Return non-nil when source names may be included for PROFILE."
+  (let ((value (if (plist-member profile :source-name-disclosure)
+                   (plist-get profile :source-name-disclosure)
+                 deslop-source-name-disclosure)))
+    (unless (memq value '(nil t))
+      (error "Source name disclosure must be boolean"))
+    value))
 
 (defun deslop-provider--friendly-name (name)
   "Return a friendly display spelling for provider NAME."

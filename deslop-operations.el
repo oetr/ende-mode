@@ -164,17 +164,59 @@ Do not use markdown fences, comments, or any keys other than those shown."
               :estimated (plist-get event :estimated)))))
         (deslop-job-emit-event job event)))))
 
+(defun deslop-operations--source-metadata-block (job)
+  "Return the source metadata prompt block for JOB, or nil."
+  (let ((metadata (deslop-target-source-metadata
+                   (deslop-job-target job))))
+    (when metadata
+      (let ((fields
+             (list
+              (and (deslop-provider-source-name-disclosure-p
+                    (deslop-job-profile job))
+                   (cons "Name" (plist-get metadata :name)))
+              (cons "Type" (plist-get metadata :type))
+              (cons "Major mode" (plist-get metadata :major-mode)))))
+        (concat
+         "Source metadata:\n"
+         (mapconcat (lambda (field)
+                      (format "%s: %s" (car field) (cdr field)))
+                    (delq nil fields)
+                    "\n")
+         "\n\n")))))
+
+(defun deslop-operations--add-source-metadata (job messages)
+  "Prepend JOB's source metadata to the first user message in MESSAGES."
+  (let ((block (deslop-operations--source-metadata-block job)))
+    (if (null block)
+        messages
+      (let ((added nil))
+        (mapcar
+         (lambda (message)
+           (if (and (not added)
+                    (consp message)
+                    (equal (car message) "user"))
+               (progn
+                 (setq added t)
+                 (cons (car message)
+                       (concat block
+                               (if (stringp (cdr message))
+                                   (cdr message)
+                                 (format "%s" (cdr message))))))
+             message))
+         messages)))))
+
 (defun deslop--dispatch-llm
     (job messages &optional on-done on-error no-begin)
-  "Validate MESSAGES, record history, and invoke LLM handler for JOB."
-  (deslop--validate-messages messages)
-  (unless no-begin
-    (deslop-job-emit-event job (list :type :begin :messages messages)))
-  (deslop--handle-llm-event job '(:type :status :status "Thinking"))
-  (funcall deslop-llm-function
-           messages
-            (deslop--llm-callbacks job on-done on-error)
-           (deslop-job-profile job)))
+  "Add source metadata, validate MESSAGES, record history, and invoke LLM."
+  (let ((messages (deslop-operations--add-source-metadata job messages)))
+    (deslop--validate-messages messages)
+    (unless no-begin
+      (deslop-job-emit-event job (list :type :begin :messages messages)))
+    (deslop--handle-llm-event job '(:type :status :status "Thinking"))
+    (funcall deslop-llm-function
+             messages
+             (deslop--llm-callbacks job on-done on-error)
+             (deslop-job-profile job))))
 
 (defun deslop--validate-messages (messages)
   "Return MESSAGES after enforcing character limits."

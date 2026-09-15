@@ -47,6 +47,15 @@ When nil, do not impose a request-size limit."
                  (integer :tag "Maximum characters"))
   :group 'deslop)
 
+(defcustom deslop-source-name-disclosure t
+  "Non-nil to include source file or buffer names in operation prompts.
+
+A provider profile can override this setting with its
+`:source-name-disclosure' value.  Source type and major mode are included
+regardless of this setting."
+  :type 'boolean
+  :group 'deslop)
+
 (defcustom deslop-max-output-tokens nil
   "Maximum completion tokens requested from an LLM provider.
 
