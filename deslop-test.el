@@ -2865,14 +2865,144 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (member "--noproxy" command))
      (should (member "--url" command))))
 
-(ert-deftest deslop-test/curl-command-uses-idle-not-total-timeout-by-default ()
+(ert-deftest deslop-test/curl-command-leaves-idle-timeout-to-elisp ()
   (let ((deslop-request-timeout nil)
         (deslop-response-idle-timeout 60))
     (let ((command (deslop-curl-command
                     '(:url "https://example.test/v1") "/tmp/headers" nil)))
       (should-not (member "--max-time" command))
-      (should (equal (cadr (member "--speed-time" command)) "60"))
-      (should (equal (cadr (member "--speed-limit" command)) "1")))))
+      (should-not (member "--speed-time" command))
+      (should-not (member "--speed-limit" command)))))
+
+(defun deslop-test--with-idle-request (timeout function &optional command)
+  "Call FUNCTION with a request guarded by TIMEOUT, then clean up.
+Use COMMAND for the process, or a silent sleep process by default."
+  (let* ((deslop-response-idle-timeout timeout)
+         (request (deslop-curl-start-request
+                   :profile '(:url "https://example.test/v1")
+                   :name "deslop-test-idle"
+                   :command (lambda (_headers _config)
+                              (or command '("sleep" "30")))
+                   :filter #'ignore :sentinel #'ignore))
+         (process (plist-get request :process)))
+    (unwind-protect
+        (funcall function process)
+      (deslop-curl-cleanup-resources
+       (list (plist-get request :response-buffer)
+             (plist-get request :stderr-buffer))
+       (list (plist-get request :headers-file)
+             (plist-get request :config-file))
+       (list process (plist-get request :stderr-process))))))
+
+(ert-deftest deslop-test/curl-idle-heartbeat-and-captured-setting ()
+  (deslop-test--with-idle-request
+   180
+   (lambda (process)
+     (let ((deslop-response-idle-timeout 999)
+           (parser (deslop-protocol-make-sse)))
+       ;; A comment yields no SSE event, but is still response activity.
+       (should-not (deslop-protocol-sse-feed parser ": heartbeat\n\n"))
+       (process-put process :deslop-last-response-time 0)
+       (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 179)))
+         (funcall (process-filter process) process ": heartbeat\n\n"))
+       ;; The original deadline has passed; the heartbeat extended it.
+       (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 181)))
+         (deslop-curl--check-idle process))
+       (should (process-live-p process))
+       (should (timerp (process-get process :deslop-idle-timer)))
+       ;; Empty chunks must not extend the deadline.
+       (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 358)))
+         (funcall (process-filter process) process ""))
+       (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 359)))
+         (deslop-curl--check-idle process))
+       (should-not (process-live-p process))
+       (should-not (process-get process :deslop-idle-timer))
+       (let ((failure (process-get process :deslop-idle-error)))
+         (should (eq (deslop-error-kind failure) 'timeout))
+         (should (equal (deslop-error-message failure)
+                        "No response data received for 180 seconds (`deslop-response-idle-timeout`).")))))))
+
+(ert-deftest deslop-test/curl-idle-timer-fires-before-first-response ()
+  (deslop-test--with-idle-request
+   0.05
+   (lambda (process)
+     (let ((deadline (+ (float-time) 2)))
+       (while (and (process-live-p process) (< (float-time) deadline))
+         (accept-process-output nil 0.02)))
+     (should (process-get process :deslop-idle-error))
+     (should-not (process-live-p process))
+     (should-not (process-get process :deslop-idle-timer)))))
+
+(ert-deftest deslop-test/curl-idle-cancellation-releases-timer ()
+  (deslop-test--with-idle-request
+   180
+   (lambda (process)
+     (let ((timer (process-get process :deslop-idle-timer)))
+       (delete-process process)
+       (should-not (process-get process :deslop-idle-timer))
+       (should-not (memq timer timer-list))
+       (deslop-curl--check-idle process)
+       (should-not (process-get process :deslop-idle-error))))))
+
+(ert-deftest deslop-test/curl-idle-error-reaches-both-transports-once ()
+  (dolist (transport '(llm codex))
+    (deslop-test--with-idle-request
+     180
+     (lambda (process)
+       (let* ((errors nil)
+              (callbacks (list :on-error (lambda (error) (push error errors))))
+              (session (if (eq transport 'llm)
+                           (deslop-llm--make-session :callbacks callbacks)
+                         (deslop-codex--make-session :callbacks callbacks)))
+              (sentinel (if (eq transport 'llm)
+                            #'deslop-llm--process-sentinel
+                          #'deslop-codex--sentinel)))
+         (process-put process :deslop-last-response-time 0)
+         (deslop-curl--check-idle process)
+         (funcall sentinel session process "killed\n")
+         (funcall sentinel session process "killed\n")
+         (should (= (length errors) 1))
+         (should (eq (car errors) (process-get process :deslop-idle-error))))))))
+
+(ert-deftest deslop-test/curl-idle-normal-exit-releases-timer ()
+  (deslop-test--with-idle-request
+   180
+   (lambda (process)
+     (let ((timer (process-get process :deslop-idle-timer))
+           (deadline (+ (float-time) 2)))
+       (while (and (process-live-p process) (< (float-time) deadline))
+         (accept-process-output nil 0.02))
+       (should (eq (process-status process) 'exit))
+       (should-not (process-get process :deslop-idle-error))
+       (should-not (process-get process :deslop-idle-timer))
+       (should-not (memq timer timer-list))))
+   '("true")))
+
+(ert-deftest deslop-test/curl-idle-refresh-reports-timeout-and-cleans-up ()
+  (let ((deslop-response-idle-timeout 180)
+        (deslop-codex--refresh-flights (make-hash-table :test #'equal))
+        (deslop-codex--refresh-processes nil)
+        (deslop-codex-auth-file (expand-file-name "unused-test-auth.json"))
+        (cancel nil)
+        (failure nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'deslop-codex--refresh-command)
+                   (lambda (&rest _) '("sleep" "30")))
+                  ((symbol-function 'process-send-string) #'ignore)
+                  ((symbol-function 'process-send-eof) #'ignore))
+          (setq cancel (deslop-codex--refresh-auth
+                        '(:refresh "test-refresh")
+                        (lambda (result) (setq failure result))))
+          (let* ((process (car deslop-codex--refresh-processes))
+                 (buffer (process-buffer process)))
+            (should (timerp (process-get process :deslop-idle-timer)))
+            (process-put process :deslop-last-response-time 0)
+            (deslop-curl--check-idle process)
+            (should (eq (deslop-error-kind failure) 'timeout))
+            (should-not (buffer-live-p buffer))
+            (should-not (process-get process :deslop-idle-timer))
+            (should (= (hash-table-count deslop-codex--refresh-flights) 0))))
+      (when cancel (funcall cancel)))))
 
 (ert-deftest deslop-test/json-parser-does-not-intern-keys-or-accept-garbage ()
   (let ((key (format "deslop-untrusted-key-%d" (random most-positive-fixnum))))

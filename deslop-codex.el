@@ -388,10 +388,11 @@ since the refresh began."
     (if (/= (process-exit-status process) 0)
         (deslop-codex--refresh-finish
          flight
-         (deslop-error-create
-          :kind 'auth
-          :message
-          (format "OpenAI token refresh failed: %s" (string-trim event))))
+         (or (process-get process :deslop-idle-error)
+             (deslop-error-create
+              :kind 'auth
+              :message
+              (format "OpenAI token refresh failed: %s" (string-trim event)))))
       (condition-case parse-error
           (let* ((headers
                   (deslop-curl-response-headers
@@ -498,6 +499,7 @@ since the refresh began."
                    :sentinel (apply-partially
                               #'deslop-codex--refresh-sentinel flight)))
             (setf (deslop-codex--refresh-flight-process flight) process)
+            (deslop-curl-watch-idle process)
             (push process deslop-codex--refresh-processes)
             (process-send-string
              process
@@ -671,11 +673,13 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                                         (if (/= (process-exit-status probe-process) 0)
                                             (finish
                                              nil
-                                             (deslop-error-create
-                                              :kind 'transport
-                                              :message
-                                              (format "Codex model probe failed: %s"
-                                                      (string-trim event))))
+                                             (or (process-get
+                                                  probe-process :deslop-idle-error)
+                                                 (deslop-error-create
+                                                  :kind 'transport
+                                                  :message
+                                                  (format "Codex model probe failed: %s"
+                                                          (string-trim event)))))
                                           (let* ((status
                                                   (car (deslop-curl-response-headers
                                                         headers-file)))
@@ -983,11 +987,12 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
      (if (/= (process-exit-status process) 0)
         (deslop-codex--fail
          session
-         (deslop-error-create
-          :kind (if (= (process-exit-status process) 28) 'timeout 'transport)
-          :message (format "curl exited with status %d (%s)"
-                           (process-exit-status process)
-                           (string-trim event))))
+         (or (process-get process :deslop-idle-error)
+             (deslop-error-create
+              :kind (if (= (process-exit-status process) 28) 'timeout 'transport)
+              :message (format "curl exited with status %d (%s)"
+                               (process-exit-status process)
+                               (string-trim event)))))
        (condition-case finish-error
            (let* ((headers
                    (deslop-curl-response-headers

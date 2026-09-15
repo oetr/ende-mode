@@ -466,9 +466,12 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Handle PROCESS terminal EVENT for SESSION."
   (when (and (not (deslop-llm--session-terminal session))
              (memq (process-status process) '(exit signal closed)))
-    (if (= (process-exit-status process) 0)
-        (deslop-llm--finish-success session)
-      (deslop-llm--finish-process-error session process event))))
+    (cond
+     ((process-get process :deslop-idle-error)
+      (deslop-llm--fail session (process-get process :deslop-idle-error)))
+     ((= (process-exit-status process) 0)
+      (deslop-llm--finish-success session))
+     (t (deslop-llm--finish-process-error session process event)))))
 
 (defun deslop-llm--discovery-result (session metadata)
   "Emit discovered METADATA for a live SESSION."

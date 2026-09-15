@@ -193,8 +193,6 @@ separate from user-configured profile headers."
 (defun deslop-curl-response-options (headers-file)
   "Return common curl options for a streamed response."
   (list "--silent" "--show-error" "--no-buffer"
-        "--speed-limit" "1"
-        "--speed-time" (number-to-string deslop-response-idle-timeout)
          "--dump-header" headers-file))
 
 (defun deslop-curl-stderr-filter (buffer process chunk)
@@ -242,6 +240,56 @@ separate from user-configured profile headers."
         deslop-request-timeout deslop-max-response-bytes)
        (list "--url" url))))
 
+(defun deslop-curl--cancel-idle-timer (process)
+  "Cancel PROCESS's response inactivity timer, if any."
+  (let ((timer (process-get process :deslop-idle-timer)))
+    (when timer
+      (cancel-timer timer)
+      (process-put process :deslop-idle-timer nil))))
+
+(defun deslop-curl--check-idle (process)
+  "Stop PROCESS if its captured response inactivity limit has expired."
+  (deslop-curl--cancel-idle-timer process)
+  (when (and (process-live-p process)
+             (not (process-get process :deslop-settled)))
+    (let* ((limit (process-get process :deslop-idle-limit))
+           (remaining (- (cdr limit)
+                         (- (float-time)
+                            (process-get process :deslop-last-response-time)))))
+      (if (> remaining 0)
+          (process-put process :deslop-idle-timer
+                       (run-at-time remaining nil
+                                    #'deslop-curl--check-idle process))
+        ;; Record the cause before deletion invokes the transport sentinel.
+        (process-put
+         process :deslop-idle-error
+         (deslop-error-create
+          :kind 'timeout
+          :message (format "No response data received for %s seconds (`%s`)."
+                           (cdr limit) (car limit))))
+        (delete-process process)))))
+
+(defun deslop-curl-watch-idle (process)
+  "Watch PROCESS for response inactivity using the current timeout setting.
+Wrap its filter and sentinel, preserving their transport-specific behavior."
+  (let* ((option 'deslop-response-idle-timeout)
+         (limit (cons option (symbol-value option)))
+         (filter (process-filter process))
+         (sentinel (process-sentinel process)))
+    (process-put process :deslop-idle-limit limit)
+    (process-put process :deslop-last-response-time (float-time))
+    (set-process-filter
+     process (lambda (proc chunk)
+               (unless (string-empty-p chunk)
+                 (process-put proc :deslop-last-response-time (float-time)))
+               (funcall filter proc chunk)))
+    (set-process-sentinel
+     process (lambda (proc event)
+               (when (memq (process-status proc) '(exit signal closed failed))
+                 (deslop-curl--cancel-idle-timer proc))
+               (funcall sentinel proc event)))
+    (deslop-curl--check-idle process)))
+
 (cl-defun deslop-curl-start-request
     (&key profile url name command filter sentinel
           internal-headers
@@ -249,8 +297,10 @@ separate from user-configured profile headers."
           (stderr-name " *deslop-curl-stderr*"))
   "Start a curl request and return its owned process resources.
 COMMAND receives the generated headers and config file paths.  FILTER and
-SENTINEL are installed on the process.  Startup failures clean up all
-resources before being re-signaled to the caller."
+SENTINEL are wrapped to track response inactivity and release its timer.
+An idle failure is stored in the process property `:deslop-idle-error'
+before SENTINEL runs.  Startup failures clean up all resources before
+being re-signaled to the caller."
    (let* ((default-directory (deslop-curl-local-directory))
           (response-buffer (generate-new-buffer buffer-name))
         (stderr-buffer (generate-new-buffer stderr-name))
@@ -261,7 +311,7 @@ resources before being re-signaled to the caller."
         (complete nil))
      (unwind-protect
          (progn
-          (deslop-validate-resource-options)
+           (deslop-validate-resource-options)
            (deslop-curl--validated-url profile url)
            (setq headers-file (make-temp-file "deslop-headers-"))
            (set-file-modes headers-file #o600)
@@ -281,13 +331,14 @@ resources before being re-signaled to the caller."
                  :connection-type 'pipe
                  :noquery t
                  :command (funcall command headers-file config-file)
-                 :filter filter
-                 :sentinel sentinel))
+                  :filter filter
+                  :sentinel sentinel))
           (process-put process :deslop-response-buffer response-buffer)
           (process-put process :deslop-stderr-buffer stderr-buffer)
           (process-put process :deslop-headers-file headers-file)
            (process-put process :deslop-config-file config-file)
-           (process-put process :deslop-stderr-process stderr-process)
+            (process-put process :deslop-stderr-process stderr-process)
+            (deslop-curl-watch-idle process)
            (setq complete t)
            (list :process process
                  :response-buffer response-buffer
@@ -296,6 +347,8 @@ resources before being re-signaled to the caller."
                  :headers-file headers-file
                  :config-file config-file))
        (unless complete
+          (when (processp process)
+            (deslop-curl--cancel-idle-timer process))
          (when (and (processp process) (process-live-p process))
             (deslop-ignore-errors #'delete-process process))
          (when (processp stderr-process)

@@ -35,7 +35,14 @@ When nil, an active stream has no total wall-clock deadline."
   :group 'deslop)
 
 (defcustom deslop-response-idle-timeout 60
-  "Maximum seconds with no response data before an LLM request fails."
+  "Maximum seconds without response-body data before a request fails.
+
+The wait starts when the curl process starts and resets on each nonempty
+response chunk, including SSE heartbeat comments.  Headers alone do not
+reset it.  A server that sends nothing during prompt prefill can therefore
+reach this limit before generating output.  Increase it for slow prefill.
+
+The value is captured when each request starts; changes affect new requests."
   :type 'number
   :group 'deslop)
 
