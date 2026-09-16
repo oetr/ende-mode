@@ -89,7 +89,8 @@
 
 (defun deslop-history-begin (job messages)
   "Start retaining JOB with MESSAGES as its prompt."
-  (when deslop-history-enabled
+  (when (and deslop-history-enabled
+             (not (eq (deslop-job-type job) 'rubber-duck)))
     (condition-case nil
         (puthash job
                   (deslop-history--make-entry

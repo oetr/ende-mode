@@ -17,6 +17,7 @@
 (require 'deslop-core)
 (require 'deslop-provider)
 (require 'deslop-commands)
+(require 'deslop-rubber-duck)
 
 (defcustom deslop-selector-buffer-name "*deslop-selector*"
   "Buffer used by the provider and model selector."
@@ -125,7 +126,8 @@
               "I  - insert anywhere\n"
               "w  - write anywhere\n"
               "m  - improve\n"
-              "s  - summarize\n\n"
+              "s  - summarize\n"
+              "r  - rubber duck\n\n"
                "RET       - confirm choice\n"
                "C-c C-c   - approve all LLM changes\n"
                "C-c C-k   - reject all LLM changes\n"
@@ -315,7 +317,9 @@
     (deslop-selector--save-selection)
     (deslop-selector-close)
     (with-current-buffer source
-       (deslop-enqueue-operation type instruction profile))))
+      (if (eq type 'rubber-duck)
+          (deslop-rubber-duck instruction profile)
+        (deslop-enqueue-operation type instruction profile)))))
 
 (defun deslop-selector-insert ()
   "Run insert using the current selector choice."
@@ -347,6 +351,11 @@
   (interactive)
   (deslop-selector--run 'summarize))
 
+(defun deslop-selector-rubber-duck ()
+  "Capture an explanation exercise using the current selector choice."
+  (interactive)
+  (deslop-selector--run 'rubber-duck (deslop-rubber-duck-read-level)))
+
 (defvar deslop-selector-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
@@ -367,6 +376,7 @@
   (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
   (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
   (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
+  (define-key deslop-selector-mode-map (kbd "r") #'deslop-selector-rubber-duck)
   (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
   (define-key deslop-selector-mode-map (kbd "C-c C-c")
               #'deslop-selector-approve-source-output)

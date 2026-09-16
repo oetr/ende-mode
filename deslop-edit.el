@@ -58,8 +58,9 @@ not intended to limit ordinary product usage."
      (error "%s result is not valid JSON: %s"
             operation (error-message-string caught)))))
 
-(defun deslop-edit--validate-document (document operation)
-  "Validate the common protocol envelope in DOCUMENT for OPERATION."
+(defun deslop-edit--validate-document (document operation &optional allow-empty)
+  "Validate the common protocol envelope in DOCUMENT for OPERATION.
+When ALLOW-EMPTY is non-nil, accept an empty edits array."
   (deslop-edit--validate-limits)
   (unless (and (hash-table-p document)
                 (equal (deslop-protocol-json-get "version" document) 1))
@@ -67,7 +68,7 @@ not intended to limit ordinary product usage."
   (let ((edits (deslop-protocol-json-get "edits" document)))
     (unless (vectorp edits)
       (error "%s result must contain an edits array" operation))
-    (when (zerop (length edits))
+    (when (and (not allow-empty) (zerop (length edits)))
       (error "%s result contains no edits" operation))
     (when (and deslop-max-write-anywhere-edits
                (> (length edits) deslop-max-write-anywhere-edits))
@@ -187,11 +188,13 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
                        edit-start))))
        selected-offsets))))
 
-(defun deslop-edit-parse-insertions (content source)
+(defun deslop-edit-parse-insertions (content source &optional allow-empty)
   "Parse insertion edits from CONTENT against SOURCE.
-Return a plist containing `:edits' and individual `:errors'."
+Return a plist containing `:edits' and individual `:errors'.
+When ALLOW-EMPTY is non-nil, accept an empty edits array."
   (let* ((document (deslop-edit--parse-document content "insert-anywhere"))
-         (raw-edits (deslop-edit--validate-document document "insert-anywhere"))
+         (raw-edits (deslop-edit--validate-document
+                     document "insert-anywhere" allow-empty))
          (edits nil)
          (errors nil))
     (dotimes (index (length raw-edits))

@@ -35,6 +35,7 @@
 (require 'deslop-tools)
 (require 'deslop-operations)
 (require 'deslop-commands)
+(require 'deslop-rubber-duck)
 (require 'deslop-history)
 (require 'deslop-selector)
 
@@ -121,7 +122,7 @@
                   "deslop-llm.el" "deslop-queue.el" "deslop-edit.el"
                   "deslop-tools.el"
                   "deslop-summary.el" "deslop-operations.el"
-                  "deslop-commands.el" "deslop-history.el"
+                  "deslop-commands.el" "deslop-rubber-duck.el" "deslop-history.el"
                   "deslop-selector.el" "deslop.el")))
     (dolist (f files) (load (expand-file-name f dir)))
     (setq deslop-mode-map (deslop--make-mode-map))

@@ -147,6 +147,11 @@ process for cancellation tests."
 (defun deslop-test--reset ()
   "Reset global state and clean test-created processes and buffers."
   (deslop-abort-queue)
+  (when (buffer-live-p deslop-rubber-duck--buffer)
+    (kill-buffer deslop-rubber-duck--buffer))
+  (setq deslop-rubber-duck--buffer nil
+        deslop-rubber-duck--queue nil
+        deslop-rubber-duck--tail nil)
   (dolist (call deslop-test--calls)
     (let ((process (plist-get call :process)))
       (when (and (processp process) (process-live-p process))
@@ -2463,12 +2468,13 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (deslop-selector--render)
        (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
                       "i  - insert" "I  - insert anywhere"
-                      "w  - write anywhere" "m  - improve" "s  - summarize"
+                       "w  - write anywhere" "m  - improve" "s  - summarize"
+                       "r  - rubber duck"
                       "RET       - confirm choice"
                       "C-c C-c   - approve all LLM changes"
                       "C-c C-k   - reject all LLM changes"))
          (should (string-match-p (regexp-quote key) (buffer-string))))
-       (should (= (count-lines (point-min) (point-max)) 15)))))
+        (should (= (count-lines (point-min) (point-max)) 16)))))
 
 (ert-deftest deslop-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key deslop-selector-mode-map (kbd "c")))
@@ -3683,6 +3689,198 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should (eq (get-char-property 1 'face) 'font-lock-string-face))
         (should (string= (get-char-property 1 'foreground-color) "#123456"))
         (should (null (get-char-property 1 'background-color)))))))
+
+;;;; Rubber-duck exercises
+
+(defconst deslop-test--duck-assessment
+  "\"assessment\":{\"score\":3,\"correctness\":\"Accurate main idea.\",\"coverage\":\"Explain the boundary condition.\"}"
+  "Valid assessment fields for mocked rubber-duck responses.")
+
+(defun deslop-test--duck-result (&optional edits)
+  "Return a rubber-duck response with JSON EDITS, defaulting to none."
+  (format "{\"version\":1,\"edits\":%s,%s}"
+          (or edits "[]") deslop-test--duck-assessment))
+
+(defmacro deslop-test--with-duck (responses &rest body)
+  "Run BODY with a disposable worksheet and asynchronous RESPONSES."
+  (declare (indent 1) (debug t))
+  `(progn
+     (deslop-test--reset)
+     (let ((deslop-llm-function (deslop-test--fake-llm ,responses t)))
+       (unwind-protect
+           (save-window-excursion
+             (with-temp-buffer
+               (insert "original")
+               (deslop-test--select (point-min) (point-max) (point-max))
+               (deslop-rubber-duck 'detailed)
+               (with-current-buffer deslop-rubber-duck--buffer
+                 ,@body)))
+         (deslop-test--reset)))))
+
+(ert-deftest deslop-test/rubber-duck-insertions-score-and-rejection ()
+  (deslop-test--with-duck
+      (list (deslop-test--duck-result
+             "[{\"anchor\":\"first\",\"position\":\"after\",\"text\":\" [AI: one]\"},{\"anchor\":\"last\",\"position\":\"after\",\"text\":\" [AI: two]\"}]"))
+    (erase-buffer)
+    (insert "first explanation\nlast")
+    (let ((submission (buffer-string))
+          (deslop-history-enabled t)
+          (job (deslop-rubber-duck-review)))
+      (should-error (deslop-rubber-duck-review) :type 'user-error)
+      (deslop-test--complete-call (car deslop-test--calls))
+      (should (eq (deslop-job-state job) 'completed))
+      (should deslop-rubber-duck--reviewed)
+      (should (string-prefix-p
+               "first [AI: one] explanation\nlast [AI: two]\n\n--- AI assessment ---"
+               (buffer-string)))
+      (should (string-suffix-p "Coverage: Explain the boundary condition.\n"
+                               (buffer-string)))
+      (should (= 3 (length (deslop-review--overlays-in-buffer))))
+      (should-not (deslop-history--entry job))
+      (should-not (buffer-live-p deslop-history--buffer-object))
+      (deslop-reject-all-output)
+      (should (equal submission (buffer-string)))
+      ;; Rejecting feedback does not turn the exercise into a retry session.
+      (should-error (deslop-rubber-duck-review) :type 'user-error))))
+
+(ert-deftest deslop-test/rubber-duck-empty-edits-and-unchanged-submission ()
+  (deslop-test--with-duck (list (deslop-test--duck-result))
+    (should-error (deslop-rubber-duck-review) :type 'user-error)
+    (should-not deslop-test--calls)
+    (goto-char (point-max))
+    (insert "\nMy explanation.")
+    ;; A region or narrowing must not limit the worksheet sent for review.
+    (narrow-to-region 3 6)
+    (let ((job (deslop-rubber-duck-review)))
+      (deslop-test--complete-call (car deslop-test--calls))
+      (should (eq (deslop-job-state job) 'completed))
+      (widen)
+      (should (string-match-p "Demonstrated understanding: 3/4 — Mostly sound"
+                              (buffer-string)))
+      (should (= 1 (length (deslop-review--overlays-in-buffer)))))))
+
+(ert-deftest deslop-test/rubber-duck-invalid-response-is-atomic ()
+  (dolist (response
+           (list
+            (deslop-test--duck-result
+             "[{\"anchor\":\"original\",\"position\":\"after\",\"text\":\"valid\"},{\"anchor\":\"original\",\"position\":\"replace\",\"text\":\"invalid\"}]")
+            (deslop-test--duck-result
+             "[{\"anchor\":\"missing\",\"position\":\"after\",\"text\":\"invalid\"}]")
+            "{\"version\":1,\"edits\":[],\"assessment\":{\"score\":9}}"))
+    (deslop-test--with-duck (list response)
+      (goto-char (point-max))
+      (insert " explanation")
+      (let ((submission (buffer-string))
+            (job (deslop-rubber-duck-review)))
+        (deslop-test--complete-call (car deslop-test--calls))
+        (should (eq (deslop-job-state job) 'failed))
+        (should (equal submission (buffer-string)))
+        (should-not (deslop-review--overlays-in-buffer))
+        (should-not deslop-rubber-duck--reviewed)))))
+
+(ert-deftest deslop-test/rubber-duck-application-failure-rolls-back-overlays ()
+  (deslop-test--with-duck
+      (list (deslop-test--duck-result
+             "[{\"anchor\":\"original\",\"position\":\"after\",\"text\":\" annotation\"}]"))
+    (goto-char (point-max))
+    (insert " explanation")
+    (let ((submission (buffer-string))
+          (job (deslop-rubber-duck-review))
+          (create (symbol-function 'deslop--create-review-overlay))
+          (count 0))
+      (cl-letf (((symbol-function 'deslop--create-review-overlay)
+                 (lambda (&rest args)
+                   (if (= (cl-incf count) 2)
+                       (error "Mock overlay failure")
+                     (apply create args)))))
+        (deslop-test--complete-call (car deslop-test--calls)))
+      (should (eq (deslop-job-state job) 'failed))
+      (should (equal submission (buffer-string)))
+      (should-not (deslop-review--overlays-in-buffer)))))
+
+(ert-deftest deslop-test/rubber-duck-edits-invalidate-pending-feedback ()
+  (dolist (position '(1 5 21))
+    (deslop-test--with-duck (list (deslop-test--duck-result))
+      (goto-char (point-max))
+      (insert " explanation")
+      (let ((job (deslop-rubber-duck-review)))
+        (goto-char position)
+        (insert "user edit")
+        (let ((changed (buffer-string)))
+          (deslop-test--complete-call (car deslop-test--calls))
+          (should (eq (deslop-job-state job) 'failed))
+          (should (equal changed (buffer-string)))
+          (should-not (deslop-review--overlays-in-buffer)))))))
+
+(ert-deftest deslop-test/rubber-duck-next-cancels-and-ignores-late-response ()
+  (deslop-test--with-duck (list (deslop-test--duck-result))
+    (let ((old (current-buffer)))
+      (with-temp-buffer
+        (insert "second")
+        (deslop-test--select 1 (point-max) (point-max))
+        (deslop-rubber-duck 'overview)
+        (erase-buffer)
+        (insert "source changed"))
+      (should (eq old deslop-rubber-duck--buffer))
+      (goto-char (point-max))
+      (insert " explanation")
+      (let ((job (deslop-rubber-duck-review))
+            (cancelled nil))
+        (deslop-test--callback (car deslop-test--calls) :on-start
+                              (lambda () (setq cancelled t)))
+        (deslop-rubber-duck-next)
+        (should cancelled)
+        (should (eq (deslop-job-state job) 'cancelled))
+        (should-not (buffer-live-p old))
+        (deslop-test--complete-call (car deslop-test--calls))
+        (with-current-buffer deslop-rubber-duck--buffer
+          (should (equal (buffer-string) "second"))
+          (should-not (deslop-review--overlays-in-buffer))
+          (should-not deslop-rubber-duck--reviewed))
+        (deslop-rubber-duck-next)
+        (should-not deslop-rubber-duck--buffer)
+        (should-not deslop-rubber-duck--queue)
+        (should-not deslop-rubber-duck--tail)))))
+
+(ert-deftest deslop-test/rubber-duck-queued-review-disposed-before-dispatch ()
+  (deslop-test--with-duck (list (deslop-test--duck-result))
+    (goto-char (point-max))
+    (insert " explanation")
+    (let* ((deslop--queue-suspended t)
+           (job (deslop-rubber-duck-review)))
+      (should (eq (deslop-job-state job) 'queued))
+      (deslop-rubber-duck-next)
+      (should (eq (deslop-job-state job) 'cancelled))
+      (should-not deslop-queue)
+      (should-not deslop-test--calls))))
+
+(ert-deftest deslop-test/rubber-duck-selector-captures-source-and-profile ()
+  (deslop-test--reset)
+  (unwind-protect
+      (save-window-excursion
+        (with-temp-buffer
+          (insert "selected source")
+          (deslop-test--select 1 (point-max) (point-max))
+          (let ((source (current-buffer)))
+            (deslop-selector-open)
+            (with-current-buffer deslop-selector-buffer-name
+              (setq deslop-selector--models '("duck-model")
+                    deslop-selector--model-index 0)
+              (should (eq (lookup-key deslop-selector-mode-map (kbd "r"))
+                          #'deslop-selector-rubber-duck))
+              (deslop-selector--run 'rubber-duck 'foundations))
+            (should (equal (with-current-buffer source (buffer-string))
+                           "selected source"))
+            (with-current-buffer deslop-rubber-duck--buffer
+              (let ((exercise deslop-rubber-duck--exercise))
+                (should (equal (buffer-string) "selected source"))
+                (should (eq (deslop-rubber-duck--exercise-level exercise)
+                            'foundations))
+                (should (equal
+                         (plist-get (deslop-rubber-duck--exercise-profile exercise)
+                                    :model)
+                         "duck-model")))))))
+    (deslop-test--reset)))
 
 (provide 'deslop-test)
 
