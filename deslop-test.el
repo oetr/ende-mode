@@ -1037,6 +1037,96 @@ process for cancellation tests."
                      (regexp-quote "{\"anchor\":\"missing\"")
                      history))))))))
 
+(ert-deftest deslop-test/anywhere-matches-only-selected-source ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (dolist (qualifier '("" ",\"occurrence\":1" ",\"all\":true"))
+      (deslop-test--reset)
+      (let* ((position (if (eq type 'write-anywhere) "replace" "after"))
+             (response
+              (format "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"%s\",\"text\":\"!\"%s}]}"
+                      position qualifier))
+             (deslop-llm-function
+              (deslop-test--fake-llm (list (list :content response)))))
+        (deslop-test--with-buffer "outside same|same|same outside"
+          (deslop-test--select 14 18 18)
+          (let ((job (deslop-enqueue-operation type "Edit the target")))
+            (should (eq (deslop-job-state job) 'completed))
+            (should (string-suffix-p
+                     "Document:\nsame"
+                     (deslop-test--user-message (car deslop-test--prompts))))
+            (should (string= (buffer-string)
+                             (if (eq type 'write-anywhere)
+                                 "outside same|!|same outside"
+                               "outside same|same!|same outside")))
+            (should-not (buffer-narrowed-p))))))))
+
+(ert-deftest deslop-test/anywhere-rejects-anchors-outside-selection ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (deslop-test--reset)
+    (let* ((deslop-structured-edit-repair-attempts 0)
+           (position (if (eq type 'write-anywhere) "replace" "after"))
+           (response
+            (format "{\"version\":1,\"edits\":[{\"anchor\":\"outside\",\"position\":\"%s\",\"text\":\"!\"},{\"anchor\":\"|same\",\"position\":\"%s\",\"text\":\"!\"},{\"anchor\":\"same|\",\"position\":\"%s\",\"text\":\"!\"}]}"
+                    position position position))
+           (deslop-llm-function
+            (deslop-test--fake-llm (list (list :content response)))))
+      (deslop-test--with-buffer "outside|same|outside"
+        (deslop-test--select 9 13 13)
+        (let ((job (deslop-enqueue-operation type)))
+          (should (eq (deslop-job-state job) 'failed))
+          (should (string= (buffer-string) "outside|same|outside"))
+          (should (= (plist-get (deslop--structured-summary
+                                (deslop-job-structured-state job))
+                               :skipped)
+                     3)))))))
+
+(ert-deftest deslop-test/anywhere-repair-keeps-moving-selection-and-edge-insertions ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (deslop-test--reset)
+    (let* ((deslop-structured-edit-repair-attempts 1)
+           (response
+            "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"same\",\"position\":\"after\",\"text\":\"Z\"},{\"anchor\":\"outside\",\"position\":\"after\",\"text\":\"!\"}]}")
+           (repair
+            "{\"version\":1,\"edits\":[{\"anchor\":\"Z\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"outside\",\"position\":\"after\",\"text\":\"BAD\"}]}")
+           (deslop-llm-function
+            (deslop-test--fake-llm
+             (list (list :content response) (list :content repair)) t)))
+      (deslop-test--with-buffer "outside|same|outside"
+        (deslop-test--select 9 13 13)
+        (let ((job (deslop-enqueue-operation type)))
+          (should-not (buffer-narrowed-p))
+          (deactivate-mark)
+          (goto-char (point-min))
+          (insert "user ")
+          (deslop-test--complete-call (car deslop-test--calls))
+          (should (eq (deslop-job-state job) 'running))
+          (should (string-suffix-p
+                   "Current document:\nAsameZ"
+                   (deslop-test--user-message (car deslop-test--prompts))))
+          (goto-char (point-min))
+          (insert "more ")
+          (deslop-test--complete-call (nth 1 deslop-test--calls))
+          (should (eq (deslop-job-state job) 'completed))
+          (should (string= (buffer-string)
+                           "more user outside|AsameZ!|outside"))
+          (should-not (buffer-narrowed-p)))))))
+
+(ert-deftest deslop-test/anywhere-without-selection-respects-narrowing ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (deslop-test--reset)
+    (let* ((response
+            "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"after\",\"text\":\"!\",\"all\":true}]}")
+           (deslop-llm-function
+            (deslop-test--fake-llm (list (list :content response)))))
+      (deslop-test--with-buffer "same|same|same"
+        (narrow-to-region 6 10)
+        (let ((job (deslop-enqueue-operation type)))
+          (should (eq (deslop-job-state job) 'completed))
+          (should (buffer-narrowed-p))
+          (should (string= (buffer-string) "same!"))
+          (widen)
+          (should (string= (buffer-string) "same|same!|same")))))))
+
 (ert-deftest deslop-test/insert-anywhere-rejects-character-offsets ()
   (deslop-test--reset)
   (let* ((response

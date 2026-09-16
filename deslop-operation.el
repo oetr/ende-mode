@@ -45,10 +45,10 @@
    (deslop-operation-spec--create
     :type 'summarize :target-kind 'selection-or-buffer)
    (deslop-operation-spec--create
-    :type 'write-anywhere :target-kind 'document :writes-buffer t
+    :type 'write-anywhere :target-kind 'selection-or-buffer :writes-buffer t
     :whole-buffer t :allows-source-changes t :structured-result 'replacement)
    (deslop-operation-spec--create
-    :type 'insert-anywhere :target-kind 'document :writes-buffer t
+    :type 'insert-anywhere :target-kind 'selection-or-buffer :writes-buffer t
      :whole-buffer t :allows-source-changes t :structured-result 'insertion))
   "Registered operation specifications.")
 

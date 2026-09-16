@@ -66,7 +66,7 @@ return price * (1 + tax)"
   "System prompt instructions for summarizing a target region.")
 
 (defconst deslop-write-anywhere-system
-  "You edit a document by returning a strict JSON edit list. Inspect the entire
+  "You edit a document by returning a strict JSON edit list. Inspect the provided
 document and make every edit needed to fulfill the user's task. When the task
 applies at multiple positions, return a separate edit for each position rather
 than placing all generated text together in one location.
@@ -92,7 +92,7 @@ Do not use markdown fences, comments, or any keys other than those shown."
 
 (defconst deslop-insert-anywhere-system
   "You perform an INSERT-ANYWHERE operation by returning a JSON insertion list.
-Inspect the entire document and find every position where the user's task calls
+Inspect the provided document and find every position where the user's task calls
 for an insertion. Multiple insertions at different positions are expected when
 appropriate; do not put all inserted text at one arbitrary location.
 
@@ -782,8 +782,8 @@ PREVIOUS contains failures from the preceding structured pass."
                                  "INSERT-ANYWHERE"
                                "WRITE-ANYWHERE")
                              (if insertion-only
-                                 "Find every appropriate insertion point across the entire document. Multiple separate insertions are expected when the task applies in multiple places."
-                               "Make all appropriate insertions and replacements across the entire document.")
+                                 "Find every appropriate insertion point within the provided document. Multiple separate insertions are expected when the task applies in multiple places."
+                               "Make all appropriate insertions and replacements within the provided document.")
                              source)))
           (lambda (result)
             (if insertion-only

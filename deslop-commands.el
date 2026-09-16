@@ -52,17 +52,23 @@ INSTRUCTION and PROFILE override the operation defaults."
                                 (eq type 'insert))
                      (deslop-target-ensure-size
                       start end (capitalize (symbol-name type))))
-                   (deslop-target-create
-                    :buffer buffer :start start :end end :cursor point
-                    :selected selected :placement placement
-                    :offset (and region (- point (car region))))))
+                   (save-restriction
+                     ;; Structured matching and repair share this saved scope.
+                     (when (and region
+                                (deslop-operation-spec-structured-result spec))
+                       (narrow-to-region start end))
+                     (deslop-target-create
+                      :buffer buffer :start start :end end :cursor point
+                      :selected selected :placement placement
+                      :offset (and region (- point (car region)))))))
          (overlay nil)
          (committed nil))
     (unwind-protect
         (progn
            (setq overlay
                  (unless (deslop-operation-whole-buffer-p type)
-                   (deslop-ui-create-overlay buffer start end "Queued")))
+                   (deslop-ui-create-overlay
+                    buffer start end "Queued" 'badge-only)))
           (let ((data (list :target target :overlay overlay)))
             (when profile
               (setq data (plist-put data :profile profile)))
@@ -83,12 +89,12 @@ INSTRUCTION and PROFILE override the operation defaults."
   (deslop-enqueue-operation 'insert))
 
 (defun deslop-write-anywhere (&optional instruction)
-  "Queue a request for the LLM to write multiple edits anywhere in the buffer."
+  "Queue multiple edits within the active region or accessible buffer."
   (interactive (list (read-string "Prompt: ")))
   (deslop-enqueue-operation 'write-anywhere instruction))
 
 (defun deslop-insert-anywhere (&optional instruction)
-  "Queue a request for the LLM to insert text at multiple buffer positions."
+  "Queue multiple insertions within the active region or accessible buffer."
   (interactive (list (read-string "Prompt: ")))
   (deslop-enqueue-operation 'insert-anywhere instruction))
 
