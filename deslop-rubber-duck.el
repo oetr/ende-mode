@@ -8,9 +8,8 @@
 
 ;; Capture a region with `deslop-rubber-duck', explain it in the worksheet,
 ;; then request insertion-only feedback with `deslop-rubber-duck-review'.
-;; `deslop-rubber-duck-next' destroys the current exercise and opens the next.
-;; Only pending exercises and the current worksheet are retained; review jobs
-;; are deliberately excluded from persistent request history.
+;; The minor mode coexists with the source's major mode.  Starting another
+;; exercise replaces the current worksheet; reviews use normal request history.
 
 ;;; Code:
 
@@ -33,10 +32,6 @@
   "An immutable source snapshot and the choices for its exercise."
   original source mode level profile)
 
-(defvar deslop-rubber-duck--queue nil
-  "Pending exercises in FIFO order.")
-(defvar deslop-rubber-duck--tail nil
-  "Last cons cell of `deslop-rubber-duck--queue'.")
 (defvar deslop-rubber-duck--buffer nil
   "The current disposable worksheet buffer, if live.")
 (defvar-local deslop-rubber-duck--exercise nil
@@ -45,6 +40,13 @@
   "Current review job, if any.")
 (defvar-local deslop-rubber-duck--reviewed nil
   "Non-nil once this exercise has received feedback.")
+(defvar-local deslop-rubber-duck--saved-header nil
+  "Previous header as (LOCAL-P . VALUE), or nil when not installed.")
+
+(dolist (variable '(deslop-rubber-duck-mode deslop-rubber-duck--exercise
+                    deslop-rubber-duck--job deslop-rubber-duck--reviewed
+                    deslop-rubber-duck--saved-header))
+  (put variable 'permanent-local t))
 
 (defun deslop-rubber-duck-read-level ()
   "Read and return an explanation level symbol."
@@ -57,52 +59,103 @@
   "Return the current exercise's header without changing its contents."
   (let ((exercise deslop-rubber-duck--exercise))
     (when exercise
-      (format " %s | %s | %d queued | C-c C-r review · C-c C-n next"
+      (format " %s | %s | C-c C-r review"
               (cadr (assq (deslop-rubber-duck--exercise-level exercise)
                           deslop-rubber-duck--levels))
               (deslop-bounded-single-line
-               (deslop-rubber-duck--exercise-source exercise) 80 t)
-              (length deslop-rubber-duck--queue)))))
+               (deslop-rubber-duck--exercise-source exercise) 80 t)))))
 
 (defvar deslop-rubber-duck-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-r") #'deslop-rubber-duck-review)
-    (define-key map (kbd "C-c C-n") #'deslop-rubber-duck-next)
     map)
   "Keymap for the editable rubber-duck worksheet.")
 
-(define-derived-mode deslop-rubber-duck-mode text-mode "Rubber Duck"
-  "Explain a region, review it, then discard it and move to the next.
+(defun deslop-rubber-duck--install-header ()
+  "Install the worksheet header, saving the major mode's header once."
+  (unless deslop-rubber-duck--saved-header
+    (setq deslop-rubber-duck--saved-header
+          (cons (local-variable-p 'header-line-format) header-line-format)))
+  (setq-local header-line-format '(:eval (deslop-rubber-duck--header))))
+
+(define-minor-mode deslop-rubber-duck-mode
+  "Explain a region alongside any major mode.
 \\<deslop-rubber-duck-mode-map>
 \\[deslop-rubber-duck-review] requests feedback.
-\\[deslop-rubber-duck-next] discards this exercise, including unapproved feedback."
-  (setq-local header-line-format '(:eval (deslop-rubber-duck--header)))
-  ;; Exercises are disposable even when their contents have been edited.
-  (setq-local buffer-offer-save nil))
+Disabling this mode retains the exercise and its edits.  Starting a new
+exercise replaces this worksheet; killing the buffer discards it."
+  :lighter " Duck"
+  :keymap deslop-rubber-duck-mode-map
+  (if deslop-rubber-duck-mode
+      (deslop-rubber-duck--install-header)
+    (when deslop-rubber-duck--saved-header
+      (if (car deslop-rubber-duck--saved-header)
+          (setq-local header-line-format (cdr deslop-rubber-duck--saved-header))
+        (kill-local-variable 'header-line-format))
+      (setq deslop-rubber-duck--saved-header nil))))
 
-(defun deslop-rubber-duck--open-next ()
-  "Open the oldest pending exercise, if any."
-  (when deslop-rubber-duck--queue
-    (let* ((exercise (car deslop-rubber-duck--queue))
-           (buffer (generate-new-buffer "*deslop-rubber-duck*")))
-      (with-current-buffer buffer
-        (deslop-rubber-duck-mode)
-        (insert (deslop-rubber-duck--exercise-original exercise))
-        (goto-char (point-min))
-        (setq-local deslop-rubber-duck--exercise exercise)
-        (setq buffer-undo-list nil)
-        (set-buffer-modified-p nil))
-      (setq deslop-rubber-duck--buffer buffer
-            deslop-rubber-duck--queue (cdr deslop-rubber-duck--queue))
-      (unless deslop-rubber-duck--queue
-        (setq deslop-rubber-duck--tail nil))
-      (pop-to-buffer buffer))))
+(defun deslop-rubber-duck--after-major-mode ()
+  "Restore worksheet UI and active review monitoring after a mode change."
+  (setq deslop-rubber-duck--saved-header nil)
+  (when deslop-rubber-duck-mode
+    (deslop-rubber-duck--install-header))
+  (setq-local buffer-offer-save nil)
+  (when (and deslop-rubber-duck--job
+             (deslop-job-current-p deslop-rubber-duck--job))
+    (let ((target (deslop-job-target deslop-rubber-duck--job)))
+      (dolist (entry
+               `((kill-buffer-hook . ,(deslop-target-kill-buffer-hook target))
+                 (before-change-functions . ,(deslop-target-before-change-hook target))
+                 (after-change-functions . ,(deslop-target-after-change-hook target))))
+        (when (cdr entry)
+          (add-hook (car entry) (cdr entry) nil t))))))
+
+(put 'deslop-rubber-duck--after-major-mode 'permanent-local-hook t)
+
+(defun deslop-rubber-duck--buffer-killed ()
+  "Forget the current worksheet when its buffer is killed."
+  (when (eq (current-buffer) deslop-rubber-duck--buffer)
+    (setq deslop-rubber-duck--buffer nil)))
+
+(put 'deslop-rubber-duck--buffer-killed 'permanent-local-hook t)
+
+(defun deslop-rubber-duck--open (exercise)
+  "Prepare EXERCISE, then replace the current worksheet.
+If initialization fails or the old buffer refuses to close, retain it."
+  (let ((buffer (generate-new-buffer "*deslop-rubber-duck*"))
+        (old deslop-rubber-duck--buffer)
+        (committed nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert (deslop-rubber-duck--exercise-original exercise))
+            (funcall (deslop-rubber-duck--exercise-mode exercise))
+            (setq-local buffer-read-only nil)
+            (setq-local buffer-offer-save nil)
+            (setq-local deslop-rubber-duck--exercise exercise)
+            (add-hook 'after-change-major-mode-hook
+                      #'deslop-rubber-duck--after-major-mode nil t)
+            (add-hook 'kill-buffer-hook
+                      #'deslop-rubber-duck--buffer-killed nil t)
+            (deslop-rubber-duck-mode 1)
+            (goto-char (point-min))
+            (setq buffer-undo-list nil)
+            (set-buffer-modified-p nil))
+          (when (and (buffer-live-p old) (not (kill-buffer old)))
+            (user-error "Worksheet was not discarded"))
+          (with-current-buffer buffer
+            (rename-buffer "*deslop-rubber-duck*" t))
+          (setq deslop-rubber-duck--buffer buffer
+                committed t)
+          (pop-to-buffer buffer))
+      (unless committed
+        (kill-buffer buffer)))))
 
 ;;;###autoload
 (defun deslop-rubber-duck (&optional level profile)
   "Capture the active region as an explanation exercise at LEVEL.
 PROFILE is the provider/model snapshot to use when reviewing the exercise.
-Open the first worksheet immediately; append subsequent exercises to the queue."
+Replace the current worksheet, cancelling its pending review if necessary."
   (interactive)
   (unless (use-region-p)
     (user-error "Select a region to explain first"))
@@ -115,34 +168,13 @@ Open the first worksheet immediately; append subsequent exercises to the queue."
          (level (or level (deslop-rubber-duck-read-level))))
     (unless (assq level deslop-rubber-duck--levels)
       (user-error "Unknown explanation level: %s" level))
-    (let ((cell (list (deslop-rubber-duck--make-exercise
+    (let ((exercise (deslop-rubber-duck--make-exercise
                        :original original :source source :mode mode :level level
                        :profile (copy-tree
                                  (or profile
-                                     (deslop-provider-profile-snapshot)))))))
-      (if deslop-rubber-duck--tail
-          (setcdr deslop-rubber-duck--tail cell)
-        (setq deslop-rubber-duck--queue cell))
-      (setq deslop-rubber-duck--tail cell))
-    (deactivate-mark)
-    (if (buffer-live-p deslop-rubber-duck--buffer)
-        (progn
-          (force-mode-line-update t)
-          (message "deslop: queued rubber duck (%d pending)"
-                   (length deslop-rubber-duck--queue)))
-      (deslop-rubber-duck--open-next))))
-
-(defun deslop-rubber-duck-next ()
-  "Destroy the current worksheet and open the next queued exercise.
-Killing the worksheet also cancels its queued or running review job."
-  (interactive)
-  (when (buffer-live-p deslop-rubber-duck--buffer)
-    (unless (kill-buffer deslop-rubber-duck--buffer)
-      (user-error "Worksheet was not discarded")))
-  (setq deslop-rubber-duck--buffer nil)
-  (if deslop-rubber-duck--queue
-      (deslop-rubber-duck--open-next)
-    (message "deslop: rubber-duck queue finished")))
+                                      (deslop-provider-profile-snapshot))))))
+      (deactivate-mark)
+      (deslop-rubber-duck--open exercise))))
 
 (defun deslop-rubber-duck-review ()
   "Evaluate this worksheet and insert annotations and a final assessment."
@@ -150,7 +182,7 @@ Killing the worksheet also cancels its queued or running review job."
   (unless deslop-rubber-duck--exercise
     (user-error "This is not a rubber-duck worksheet"))
   (when deslop-rubber-duck--reviewed
-    (user-error "This exercise has been reviewed; move to the next duck"))
+    (user-error "This exercise has been reviewed; start a new duck"))
   (when (and deslop-rubber-duck--job
              (not (deslop-job-terminal-p deslop-rubber-duck--job)))
     (user-error "A review is already queued or running"))

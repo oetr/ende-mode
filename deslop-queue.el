@@ -48,6 +48,10 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
 (defvar-local deslop--source-buffer-jobs nil
   "Jobs queued for or running against the current source buffer.")
 
+;; Job ownership and cancellation must survive changes of major mode.
+(put 'deslop--source-buffer-jobs 'permanent-local t)
+(put 'deslop--source-buffer-killed 'permanent-local-hook t)
+
 (defun deslop--unregister-source-job (job)
   "Remove JOB from its source buffer's job registry."
   (let ((buffer (deslop-target-buffer (deslop-job-target job))))
