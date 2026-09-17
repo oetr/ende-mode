@@ -12,6 +12,7 @@
 
 (require 'cl-lib)
 (require 'deslop-core)
+(require 'deslop-queue)
 
 (defcustom deslop-reduced-motion nil
   "Non-nil to disable the animated overlay spinner."
@@ -39,8 +40,6 @@
 
 (defvar deslop-ui--spinner-timer nil
   "Timer instance for driving the overlay spinner animation.")
-
-(declare-function deslop-job-overlay "deslop-queue" (job))
 
 ;;;; Badge Formatting & Animation
 

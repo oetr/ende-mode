@@ -6,8 +6,9 @@
 
 ;;; Commentary:
 
-;; Capture a region with `deslop-rubber-duck', explain it in the worksheet,
-;; then request insertion-only feedback with `deslop-rubber-duck-review'.
+;; Capture a region or buffer with `deslop-rubber-duck', explain it in the
+;; worksheet, then request insertion-only feedback with
+;; `deslop-rubber-duck-review'.
 ;; The minor mode coexists with the source's major mode.  Starting another
 ;; exercise replaces the current worksheet; reviews use normal request history.
 
@@ -153,14 +154,13 @@ If initialization fails or the old buffer refuses to close, retain it."
 
 ;;;###autoload
 (defun deslop-rubber-duck (&optional level profile)
-  "Capture the active region as an explanation exercise at LEVEL.
+  "Capture the active region or accessible buffer as an exercise at LEVEL.
 PROFILE is the provider/model snapshot to use when reviewing the exercise.
 Replace the current worksheet, cancelling its pending review if necessary."
   (interactive)
-  (unless (use-region-p)
-    (user-error "Select a region to explain first"))
-  (let* ((start (region-beginning))
-         (end (region-end))
+  (let* ((region (deslop-current-region))
+         (start (if region (car region) (point-min)))
+         (end (if region (cdr region) (point-max)))
          (_ (deslop-target-ensure-size start end "Rubber duck"))
          (original (buffer-substring-no-properties start end))
          (source (format "%s:%d" (buffer-name) (line-number-at-pos start)))
@@ -318,7 +318,7 @@ Put the assessment only in the assessment object; it will be appended for you."
         job
         (list (cons "system" deslop-rubber-duck--system)
               (cons "user"
-                    (format "Level: %s\nRequirements: %s\nOriginal major mode: %s\n\nOriginal region (immutable):\n%s\n\nSubmission to assess and annotate:\n%s"
+                    (format "Level: %s\nRequirements: %s\nOriginal major mode: %s\n\nOriginal source (immutable):\n%s\n\nSubmission to assess and annotate:\n%s"
                             (cadr level) (caddr level) (plist-get data :mode)
                             (plist-get data :original) source)))
         (lambda (result) (deslop-rubber-duck--apply job result)))))))

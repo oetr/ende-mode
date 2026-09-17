@@ -1338,13 +1338,38 @@ process for cancellation tests."
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"}]}" )
          (deslop-llm-function
           (deslop-test--fake-llm (list (list :content response)) t)))
-     (deslop-test--with-buffer "test"
-        (let ((job (deslop-insert-anywhere)))
-          (should (eq (deslop-job-state job) 'running))
-          (should-not (deslop-job-overlay job))
-          (should-not buffer-read-only)
+    (deslop-test--with-buffer "test"
+      (let ((job (deslop-insert-anywhere)))
+        (should (eq (deslop-job-state job) 'running))
+        (let ((overlay (deslop-job-overlay job)))
+          (should (= (overlay-start overlay) (point-min)))
+          (should (= (overlay-end overlay) (point-max)))
+          (should (overlay-get overlay 'before-string))
+          (should-not (overlay-get overlay 'face))
+          (should (string-match-p
+                   "Thinking" (deslop-test--overlay-label overlay))))
+        (should-not buffer-read-only)
+        (deslop-abort-queue)
+        (should-not (deslop-job-overlay job))
+        (should-not buffer-read-only)))))
+
+(ert-deftest deslop-test/anywhere-progress-precedes-selected-region ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (deslop-test--reset)
+    (let ((deslop-llm-function (deslop-test--fake-llm (list :stall) t)))
+      (deslop-test--with-buffer "before target after"
+        (deslop-test--select 8 14 14)
+        (let* ((job (deslop-enqueue-operation type))
+               (overlay (deslop-job-overlay job)))
+          (should (= (overlay-start overlay) 8))
+          (should (= (overlay-end overlay) 14))
+          (should (overlay-get overlay 'before-string))
+          (should-not (overlay-get overlay 'after-string))
+          (should-not (overlay-get overlay 'face))
+          (should (string-match-p
+                   "Thinking" (deslop-test--overlay-label overlay)))
           (deslop-abort-queue)
-          (should-not buffer-read-only)))))
+          (should-not (overlay-buffer overlay)))))))
 
 (ert-deftest deslop-test/mode-line-reports-buffer-job-count ()
   (deslop-test--reset)
@@ -1360,10 +1385,16 @@ process for cancellation tests."
         (setq second (deslop-write-anywhere))
         (should (eq (deslop-job-state second) 'queued))
         (should (string= deslop--mode-line-string " deslop[2]"))
+        (should (string-match-p
+                 "Thinking"
+                 (deslop-test--overlay-label (deslop-job-overlay first))))
+        (should (string-match-p
+                 "Queued"
+                 (deslop-test--overlay-label (deslop-job-overlay second))))
+        (deslop-abort-queue)
         (should-not (deslop-job-overlay first))
         (should-not (deslop-job-overlay second))
-         (deslop-abort-queue)
-         (should (string= deslop--mode-line-string " deslop[0]"))))))
+        (should (string= deslop--mode-line-string " deslop[0]"))))))
 
 (ert-deftest deslop-test/mode-line-reports-pending-review-count ()
   (deslop-test--reset)
@@ -3715,6 +3746,43 @@ Use COMMAND for the process, or a silent sleep process by default."
                  ,@body)))
          (deslop-test--reset)))))
 
+(ert-deftest deslop-test/rubber-duck-without-region-captures-buffer ()
+  (deslop-test--reset)
+  (unwind-protect
+      (save-window-excursion
+        (with-temp-buffer
+          (emacs-lisp-mode)
+          (insert "first\nsecond")
+          (goto-char 8)
+          (deactivate-mark)
+          (let ((source-name (buffer-name)))
+            (deslop-rubber-duck 'overview)
+            (with-current-buffer deslop-rubber-duck--buffer
+              (let ((exercise deslop-rubber-duck--exercise))
+                (should (equal (buffer-string) "first\nsecond"))
+                (should (eq major-mode 'emacs-lisp-mode))
+                (should (equal (deslop-rubber-duck--exercise-source exercise)
+                               (format "%s:1" source-name))))))))
+    (deslop-test--reset)))
+
+(ert-deftest deslop-test/rubber-duck-review-shows-progress ()
+  (deslop-test--with-duck (list :stall)
+    (erase-buffer)
+    (insert "My explanation")
+    (let* ((job (deslop-rubber-duck-review))
+           (overlay (deslop-job-overlay job)))
+      (should (eq (deslop-job-state job) 'running))
+      (should (= (overlay-start overlay) (point-min)))
+      (should (= (overlay-end overlay) (point-max)))
+      (should (overlay-get overlay 'before-string))
+      (should-not (overlay-get overlay 'face))
+      (should (string-match-p
+               "Thinking" (deslop-test--overlay-label overlay)))
+      (deslop-abort-queue)
+      (should (eq (deslop-job-state job) 'cancelled))
+      (should-not (deslop-job-overlay job))
+      (should-not (overlay-buffer overlay)))))
+
 (ert-deftest deslop-test/rubber-duck-insertions-score-and-rejection ()
   (deslop-test--with-duck
       (list (deslop-test--duck-result
@@ -3727,6 +3795,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should-error (deslop-rubber-duck-review) :type 'user-error)
       (deslop-test--complete-call (car deslop-test--calls))
       (should (eq (deslop-job-state job) 'completed))
+      (should-not (deslop-job-overlay job))
       (should deslop-rubber-duck--reviewed)
       (should (string-prefix-p
                "first [AI: one] explanation\nlast [AI: two]\n\n--- AI assessment ---"
