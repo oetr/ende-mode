@@ -4498,13 +4498,16 @@ Use COMMAND for the process, or a silent sleep process by default."
           (deslop-openrouter-batch--make-request
            :custom-id "deslop-job-2"
            :profile profile
-           :callbacks
+                 :callbacks
            (list :on-event (lambda (event) (push event events))
                  :on-done (lambda (value) (setq result value))
                  :on-error (lambda (value) (setq failure value)))))
+         (cancelled-request
+          (deslop-openrouter-batch--make-request
+           :custom-id "unrelated" :profile profile :cancelled t))
          (group
           (deslop-openrouter-batch--make-group
-           :profile profile :requests (list request)))
+           :profile profile :requests (list request cancelled-request)))
          (payload
           (deslop-protocol-json-read-string
            (concat
@@ -4584,6 +4587,128 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should-not (member "@-" command))
     (should (equal (cadr (member "--url" command))
                    "https://openrouter.ai/api/v1/batches/batch_1"))))
+
+(ert-deftest deslop-test/openrouter-batch-submits-polls-and-settles ()
+  (let* ((profile (plist-put (deslop-provider-profile 'openrouter-batch)
+                             :batch-window 0))
+         (stages nil)
+         (processes nil)
+         (files nil)
+         (events nil)
+         (result nil)
+         (failure nil)
+         (real-make-process (symbol-function 'make-process)))
+    (cl-letf
+        (((symbol-function 'deslop-curl-start-request)
+          (lambda (&rest arguments)
+            (let* ((response-buffer (generate-new-buffer
+                                     " *deslop-batch-test-response*"))
+                   (stderr-buffer (generate-new-buffer
+                                   " *deslop-batch-test-stderr*"))
+                   (headers-file (make-temp-file "deslop-batch-test-headers-"))
+                   (process
+                    (funcall real-make-process
+                             :name (generate-new-buffer-name
+                                    "deslop-batch-test-process")
+                             :buffer nil
+                             :command (list "cat")
+                             :connection-type 'pipe
+                             :noquery t))
+                   (request (list :process process
+                                  :response-buffer response-buffer
+                                  :stderr-buffer stderr-buffer
+                                  :stderr-process nil
+                                  :headers-file headers-file
+                                  :config-file nil))
+                   (stage (list :request request
+                                :filter (plist-get arguments :filter)
+                                :sentinel (plist-get arguments :sentinel)
+                                :command (plist-get arguments :command))))
+              (process-put process :deslop-response-buffer response-buffer)
+              (process-put process :deslop-stderr-buffer stderr-buffer)
+              (process-put process :deslop-headers-file headers-file)
+              (process-put process :deslop-stderr-process nil)
+              (setq stages (append stages (list stage))
+                    processes (cons process processes)
+                    files (cons headers-file files))
+              request))))
+      (unwind-protect
+          (progn
+            (deslop-openrouter-batch-default
+             '(("user" . "question"))
+             (list :on-event (lambda (event) (push event events))
+                   :on-done (lambda (value) (setq result value))
+                   :on-error (lambda (value) (setq failure value)))
+             profile)
+            (let ((group (car deslop-openrouter-batch--known-groups)))
+              (deslop-openrouter-batch--flush group)
+              (let ((stage (nth 0 stages)))
+                (with-temp-file (plist-get (plist-get stage :request)
+                                           :headers-file)
+                  (insert "HTTP/1.1 202 Accepted\r\n"
+                          "Content-Type: application/json\r\n\r\n"))
+                (funcall (plist-get stage :filter)
+                         (plist-get (plist-get stage :request) :process)
+                         "{\"id\":\"batch_1\",\"status\":\"validating\"}")
+                (while (process-live-p
+                        (plist-get (plist-get stage :request) :process))
+                  (accept-process-output
+                   (plist-get (plist-get stage :request) :process) 0.01))
+                (funcall (plist-get stage :sentinel)
+                         (plist-get (plist-get stage :request) :process)
+                         "finished"))
+              (deslop-openrouter-batch--cancel-timer
+               (deslop-openrouter-batch--group-poll-timer group))
+              (setf (deslop-openrouter-batch--group-poll-timer group) nil)
+              (deslop-openrouter-batch--poll group)
+              (let ((stage (nth 1 stages)))
+                (should (stringp
+                         (plist-get (plist-get stage :request)
+                                    :headers-file)))
+                (with-temp-file (plist-get (plist-get stage :request)
+                                           :headers-file)
+                  (insert "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: application/json\r\n\r\n"))
+                (funcall (plist-get stage :filter)
+                         (plist-get (plist-get stage :request) :process)
+                         (format
+                          (concat
+                           "{\"status\":\"completed\",\"usage\":{"
+                           "\"completion_tokens\":2},\"results\":[{"
+                           "\"custom_id\":\"%s\","
+                           "\"response\":{\"status_code\":200,\"body\":{"
+                           "\"choices\":[{\"message\":{\"content\":\"done\"}}]}}}]}"
+                           )
+                          (deslop-openrouter-batch--request-custom-id
+                           (car (deslop-openrouter-batch--group-requests
+                                 group)))))
+                (while (process-live-p
+                        (plist-get (plist-get stage :request) :process))
+                  (accept-process-output
+                   (plist-get (plist-get stage :request) :process) 0.01))
+                (funcall (plist-get stage :sentinel)
+                         (plist-get (plist-get stage :request) :process)
+                         "finished")))
+            (should-not failure)
+            (should (string= (plist-get result :content) "done"))
+            (should (= (plist-get result :tokens) 2))
+            (should (cl-find-if
+                     (lambda (event)
+                       (equal (plist-get event :status) "Submitting batch"))
+                     events))
+            (should (member "Accept: application/json"
+                            (funcall (plist-get (nth 0 stages) :command)
+                                     "/tmp/headers" nil)))
+            (should-not (member "--data-binary"
+                               (funcall (plist-get (nth 1 stages) :command)
+                                        "/tmp/headers" nil))))
+        (deslop-openrouter-batch-abort)
+        (dolist (process processes)
+          (when (process-live-p process)
+            (delete-process process)))
+        (dolist (file files)
+          (when (file-exists-p file)
+            (delete-file file)))))))
 
 (provide 'deslop-test)
 

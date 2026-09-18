@@ -122,7 +122,10 @@
                        (deslop-openrouter-batch--profile-value
                         profile :batch-poll-jitter
                         deslop-openrouter-batch-poll-jitter))))
-    (unless (and (numberp (cdr option)) (>= (cdr option) 0))
+    (unless (and (numberp (cdr option)) (>= (cdr option) 0)
+                 (or (not (eq (car option)
+                              'deslop-openrouter-batch-poll-jitter))
+                     (<= (cdr option) 1)))
       (error "%s must be a nonnegative number" (car option))))
   (let ((max-requests
          (deslop-openrouter-batch--profile-value
@@ -135,9 +138,16 @@
       (error "Batch max requests must be a positive integer"))
     (unless (or (null max-bytes) (and (integerp max-bytes) (> max-bytes 0)))
       (error "Batch max request bytes must be nil or a positive integer")))
-  (unless (and (stringp (plist-get profile :batch-url))
-               (not (string-empty-p (plist-get profile :batch-url))))
-    (error "Batch profile is missing :batch-url"))
+  (let* ((url (plist-get profile :batch-url))
+         (parsed (and (stringp url) (url-generic-parse-url url)))
+         (path (and parsed (url-filename parsed))))
+    (unless (and (stringp url)
+                 (not (string-empty-p url))
+                 (string= (downcase (or (and parsed (url-type parsed)) ""))
+                          "https")
+                 (string-match-p "\\`/api/v1/batches/?\\'" (or path "")))
+      (error "Batch profile must use an HTTPS /api/v1/batches endpoint"))
+    (deslop-curl--validated-url profile url))
   (unless (and (stringp (plist-get profile :batch-endpoint))
                (string-prefix-p "/v" (plist-get profile :batch-endpoint)))
     (error "Batch profile has an invalid :batch-endpoint"))
@@ -480,7 +490,11 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   "Handle the response to GROUP's batch submission."
   (cond
    (stage-error
-    (deslop-openrouter-batch--group-fail group stage-error))
+    (deslop-openrouter-batch--group-fail
+     group (deslop-error-create
+            :kind 'submission-unknown
+            :message "OpenRouter batch submission outcome is unknown"
+            :details stage-error)))
    ((not (= status 202))
     (deslop-openrouter-batch--group-fail
      group (deslop-openrouter-batch--response-error status body)))
@@ -559,8 +573,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   (cond
    (stage-error
     (if (and (deslop-error-p stage-error)
-             (deslop-openrouter-batch--retryable-status-p
-              (plist-get (deslop-error-details stage-error) :status)))
+             (memq (deslop-error-kind stage-error) '(timeout transport))
+             (< (deslop-openrouter-batch--group-poll-attempt group) 8))
         (progn
           (cl-incf (deslop-openrouter-batch--group-poll-attempt group))
           (deslop-openrouter-batch--schedule-poll group))
@@ -688,11 +702,17 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
       (dolist (result (if (vectorp results) (append results nil) results))
         (let ((custom-id (deslop-protocol-json-get "custom_id" result)))
           (if (or (not (stringp custom-id))
-                  (gethash custom-id by-id))
+                  (gethash custom-id by-id)
+                  (not (cl-some
+                        (lambda (request)
+                          (equal custom-id
+                                 (deslop-openrouter-batch--request-custom-id
+                                  request)))
+                        (deslop-openrouter-batch--group-requests group))))
               (setq failure
                     (deslop-error-create
                      :kind 'protocol
-                     :message "Batch results contain a missing or duplicate custom id"
+                     :message "Batch results contain an unknown, missing, or duplicate custom id"
                      :details result))
             (puthash custom-id result by-id)))))
     (dolist (request (deslop-openrouter-batch--group-requests group))
