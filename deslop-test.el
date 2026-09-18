@@ -4456,7 +4456,11 @@ Use COMMAND for the process, or a silent sleep process by default."
                      "/v1/chat/completions"))
     (should (equal (plist-get (deslop-provider-profile 'openrouter)
                              :transport)
-                   'auto))))
+                   'auto))
+    (should-error
+     (deslop-openrouter-batch--validate-options
+      (plist-put (copy-sequence profile)
+                  :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
 
 (ert-deftest deslop-test/openrouter-batch-body-is-non-streaming-and-ordered ()
   (let* ((deslop-max-output-tokens 64)
@@ -4709,6 +4713,35 @@ Use COMMAND for the process, or a silent sleep process by default."
         (dolist (file files)
           (when (file-exists-p file)
             (delete-file file)))))))
+
+(ert-deftest deslop-test/openrouter-auto-handoff-only-matches-batch-error ()
+  (let ((headers-file (make-temp-file "deslop-auto-batch-"))
+        (handoff nil))
+    (unwind-protect
+        (progn
+          (with-temp-file headers-file
+            (insert "HTTP/1.1 404 Not Found\r\n"
+                    "Content-Type: application/json\r\n\r\n"))
+          (cl-letf
+              (((symbol-function 'deslop-openrouter-batch-default)
+                (lambda (messages callbacks profile)
+                  (setq handoff (list messages callbacks profile))))
+               ((symbol-function 'deslop-llm--cleanup-session)
+                (lambda (_session) nil)))
+            (let ((session
+                   (deslop-llm--make-session
+                    :profile '(:transport auto
+                               :batch-url "https://openrouter.ai/api/v1/batches")
+                    :messages '(("user" . "question"))
+                    :headers-file headers-file
+                    :response-preview-parts
+                    '("{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}"))))
+              (deslop-llm--finish-success session)
+              (should handoff)
+               (should (eq (plist-get (nth 2 handoff) :transport)
+                           'openrouter-batch)))))
+      (when (file-exists-p headers-file)
+        (delete-file headers-file)))))
 
 (provide 'deslop-test)
 
