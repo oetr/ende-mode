@@ -2606,6 +2606,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (selector (generate-new-buffer " *deslop-selector-test*"))
          (deslop-providers '(local))
          (deslop-provider-profiles '((local :models ("one" "two"))))
+         (deslop-selector--last-selection nil)
          (queued nil))
     (unwind-protect
         (progn
@@ -2626,6 +2627,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                (deslop-selector-insert))))
           (should (eq (nth 0 queued) 'insert))
           (should (string= (plist-get (nth 2 queued) :model) "two"))
+          (should (equal deslop-selector--last-selection
+                         '(:provider local :model "two")))
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
@@ -2633,7 +2636,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest deslop-test/selector-model-completion-updates-choice ()
   (let ((buffer (generate-new-buffer " *deslop-selector-model-test*"))
-        (completion-call nil))
+        (completion-call nil)
+        (deslop-selector--last-selection nil))
     (unwind-protect
         (with-current-buffer buffer
           (deslop-selector-mode)
@@ -2687,7 +2691,36 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (should (equal (plist-get completion-call :styles) '(substring)))
           (should (plist-get completion-call :ignore-case))
           (should (= deslop-selector--model-index 1))
-          (should (string= (deslop-selector--model-name) "remote/beta")))
+          (should (string= (deslop-selector--model-name) "remote/beta"))
+          (should (equal deslop-selector--last-selection
+                         '(:provider remote :model "remote/beta"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-preserves-remembered-model-after-discovery ()
+  (let ((buffer (generate-new-buffer " *deslop-selector-discovery-test*"))
+        (probe-callback nil)
+        (deslop-selector--last-selection
+         '(:provider remote :model "remote/remembered"))
+        (deslop-provider-profiles
+         '((remote :url "http://remote.example/v1/chat/completions"
+                   :model "remote/default"))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0)
+          (cl-letf (((symbol-function 'deslop-provider-probe-models)
+                     (lambda (_profile callback)
+                       (setq probe-callback callback)
+                       (lambda () nil))))
+            (deslop-selector--set-provider 0)
+            (should (string= (deslop-selector--model-name)
+                             "remote/default"))
+            (funcall probe-callback
+                     '("remote/default" "remote/remembered") nil)
+            (should (string= (deslop-selector--model-name)
+                             "remote/remembered"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

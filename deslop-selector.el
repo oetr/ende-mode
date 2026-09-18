@@ -181,8 +181,9 @@
           deslop-selector--model-index
           (or (deslop-selector--index-of preferred models) 0))))
 
-(defun deslop-selector--probe-current-provider ()
-  "Probe the selected provider when it has dynamic model discovery."
+(defun deslop-selector--probe-current-provider (&optional preferred)
+  "Probe the selected provider when it has dynamic model discovery.
+PREFERRED is the model selected before discovery started."
   (let* ((provider (deslop-selector--provider-name))
          (profile (deslop-selector--provider-profile))
          (probe (plist-get profile :model-discovery-function))
@@ -207,7 +208,8 @@
                      (if error
                          (setq deslop-selector--model-state :error)
                        (deslop-selector--set-models
-                        models (deslop-selector--model-name))
+                        models (or preferred
+                                   (deslop-selector--model-name)))
                        (setq deslop-selector--model-details
                              (deslop-provider-model-details profile))
                        (setq deslop-selector--model-state :ready))
@@ -234,9 +236,10 @@
      (or preferred (plist-get profile :model)))
     (setq deslop-selector--model-details
           (deslop-provider-model-details profile))
-    (setq deslop-selector--model-state :ready))
-  (deslop-selector--render)
-  (deslop-selector--probe-current-provider))
+    (setq deslop-selector--model-state :ready)
+    (deslop-selector--render)
+    (deslop-selector--probe-current-provider
+     (or preferred (deslop-selector--model-name)))))
 
 (defun deslop-selector-next-provider ()
   "Select the next configured provider."
@@ -304,6 +307,7 @@ performed locally so typing a search term never starts another network request."
          (when (and selected-model index)
            (setq deslop-selector--models models
                  deslop-selector--model-index index)
+           (deslop-selector--save-selection)
            (deslop-selector--render)))))))
 
 (defun deslop-selector-set-concurrency ()
