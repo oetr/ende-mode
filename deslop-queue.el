@@ -30,6 +30,10 @@
    metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at)
 
+(cl-defstruct (deslop-queue-fence (:constructor deslop--make-fence))
+  "A queue barrier for jobs present when the fence was created."
+  provider cutoff)
+
 (defvar deslop--next-job-id 0
   "Next numeric identifier assigned to a job.")
 
@@ -41,6 +45,9 @@ is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
 
 (defvar deslop--active-jobs nil
   "Active jobs, in reverse dispatch order.")
+
+(defvar deslop--fences nil
+  "Queue barriers that have not yet been crossed by later jobs.")
 
 (defvar deslop--aborting nil
   "Non-nil while queue state is being invalidated by an abort.")
@@ -168,10 +175,14 @@ HANDLER receives one `deslop-job' object."
 
 (defun deslop--same-provider-p (left right)
   "Return non-nil when job profiles LEFT and RIGHT name the same provider."
-  (equal (or (plist-get (deslop-job-profile left) :name)
-             (plist-get (deslop-job-profile left) :url))
-         (or (plist-get (deslop-job-profile right) :name)
-             (plist-get (deslop-job-profile right) :url))))
+  (equal (deslop--job-provider-key left)
+         (deslop--job-provider-key right)))
+
+(defun deslop--job-provider-key (job)
+  "Return the provider identity used for JOB's scheduling rules."
+  (let ((profile (deslop-job-profile job)))
+    (or (plist-get profile :name)
+        (plist-get profile :url))))
 
 (defun deslop--active-provider-jobs (job)
   "Return active jobs using the same provider as JOB."
@@ -200,19 +211,48 @@ HANDLER receives one `deslop-job' object."
                      (deslop-job-type active)))))
         deslop--active-jobs)))
 
+(defun deslop--fence-applies-p (fence job)
+  "Return non-nil when FENCE can block JOB."
+  (and (> (deslop-job-id job) (deslop-queue-fence-cutoff fence))
+       (or (null (deslop-queue-fence-provider fence))
+           (equal (deslop-queue-fence-provider fence)
+                  (deslop--job-provider-key job)))))
+
+(defun deslop--fence-prerequisite-p (fence job)
+  "Return non-nil when JOB must finish before FENCE can be crossed."
+  (and (<= (deslop-job-id job) (deslop-queue-fence-cutoff fence))
+       (not (deslop-job-terminal-p job))
+       (or (null (deslop-queue-fence-provider fence))
+           (equal (deslop-queue-fence-provider fence)
+                  (deslop--job-provider-key job)))))
+
+(defun deslop--fence-blocking-p (job)
+  "Return non-nil when an unfinished fence blocks JOB.
+Completed fences are discarded while checking JOB."
+  (let ((jobs (append deslop--active-jobs deslop-queue))
+        (remaining nil)
+        (blocked nil))
+    (dolist (fence deslop--fences)
+      (if (cl-some (lambda (prior)
+                     (deslop--fence-prerequisite-p fence prior))
+                   jobs)
+          (progn
+            (push fence remaining)
+            (when (deslop--fence-applies-p fence job)
+              (setq blocked t)))))
+    (setq deslop--fences (nreverse remaining))
+    blocked))
+
 (defun deslop--job-admissible-p (job)
   "Return non-nil when JOB may start under provider concurrency rules."
-  (unless (deslop--buffer-write-locked-p job)
+  (unless (or (deslop--fence-blocking-p job)
+              (deslop--buffer-write-locked-p job))
     (let* ((active (deslop--active-provider-jobs job))
            (parallel (eq (plist-get (deslop-job-profile job) :parallel) t))
            (limit (deslop-provider-max-concurrency
                    (deslop-job-profile job))))
       (if parallel
-          (and (cl-every
-                (lambda (running)
-                  (eq (plist-get (deslop-job-profile running) :parallel) t))
-                active)
-               (< (length active) limit))
+          (< (length active) limit)
         (null active)))))
 
 (defun deslop--next-admissible-cell ()
@@ -372,6 +412,44 @@ When RESULT is non-nil, retain it for history and job inspection."
               (deslop--dispatch-job (deslop--queue-remove-cell cell))
             (setq done t)))))))
 
+;;;; Synchronization fences
+
+(defun deslop--create-fence (&optional provider)
+  "Create a fence for PROVIDER, or for all providers when nil."
+  (let* ((fence (deslop--make-fence
+                 :provider provider
+                 :cutoff deslop--next-job-id))
+         (pending (cl-count-if
+                   (lambda (job)
+                     (deslop--fence-prerequisite-p fence job))
+                   (append deslop--active-jobs deslop-queue))))
+    (push fence deslop--fences)
+    (deslop-process-next)
+    (message "deslop: %s fence created for %d existing job%s"
+             (if provider (format "provider %s" provider) "global")
+             pending
+             (if (= pending 1) "" "s"))
+    fence))
+
+(defun deslop-fence-all ()
+  "Prevent jobs queued after this command from crossing existing jobs."
+  (interactive)
+  (deslop--create-fence))
+
+(defun deslop-fence-provider (provider)
+  "Prevent later PROVIDER jobs from crossing existing PROVIDER jobs.
+When called interactively, prompt for one of the configured providers."
+  (interactive
+   (list
+    (intern
+     (completing-read
+      "Provider fence: "
+      (mapcar #'symbol-name (deslop-provider-names))
+      nil t))))
+  (unless (symbolp provider)
+    (user-error "Provider fence requires a provider name"))
+  (deslop--create-fence provider))
+
 ;;;; Cancellation and status
 
 (defun deslop--job-cancel (job)
@@ -430,6 +508,7 @@ When RESULT is non-nil, retain it for history and job inspection."
           (dolist (function deslop-queue-abort-functions)
             (deslop-ignore-errors function)))
       (setq deslop--aborting nil)
+      (setq deslop--fences nil)
       (message "deslop: queue aborted"))))
 
 (defun deslop-queue-status ()
@@ -439,10 +518,12 @@ When RESULT is non-nil, retain it for history and job inspection."
                       :active (and deslop--current-job
                                    (deslop-job-id deslop--current-job))
                       :active-jobs (mapcar #'deslop-job-id deslop--active-jobs)
-                      :pending (length deslop-queue))))
-    (message "deslop: active=%s pending=%d"
+                      :pending (length deslop-queue)
+                      :fences (length deslop--fences))))
+    (message "deslop: active=%s pending=%d fences=%d"
              (or (plist-get status :active) "none")
-             (plist-get status :pending))
+             (plist-get status :pending)
+             (plist-get status :fences))
     status))
 
 (provide 'deslop-queue)

@@ -164,6 +164,7 @@ process for cancellation tests."
          deslop--queue-suspended nil
          deslop--current-job nil
          deslop--active-jobs nil
+         deslop--fences nil
          deslop--aborting nil
          deslop--dispatching nil
          deslop--next-job-id 0
@@ -1999,13 +2000,139 @@ process for cancellation tests."
                      :profile profile)))
         (should (eq (deslop-job-state first) 'running))
         (should (eq (deslop-job-state second) 'queued))
-         (should (plist-get (deslop-job-profile second) :parallel))
-         (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (should (plist-get (deslop-job-profile second) :parallel))
+        (deslop-test--complete-call (nth 0 deslop-test--calls))
         (should (eq (deslop-job-state second) 'running))
-         (deslop-test--complete-call (nth 1 deslop-test--calls))
-         (should (string= (buffer-string) "baseAB"))))))
+        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (string= (buffer-string) "baseAB"))))))
 
-(ert-deftest deslop-test/equal-provider-identities-preserve-fifo ()
+(ert-deftest deslop-test/parallel-job-uses-free-slot-alongside-serial-job ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A" "B") t))
+        (serial-profile '(:name remote :model "serial"
+                          :max-concurrency 4 :parallel nil))
+        (parallel-profile '(:name remote :model "parallel"
+                            :max-concurrency 4 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((first
+             (deslop-enqueue
+              (list 'insert
+                    :target (deslop-target-create
+                             :buffer (current-buffer)
+                             :start 5 :end 5 :cursor 5)
+                    :profile serial-profile)))
+            (second nil))
+        (let ((deslop--queue-suspended t))
+          (setq second
+                (deslop-enqueue
+                 (list 'insert
+                       :target (deslop-target-create
+                                :buffer (current-buffer)
+                                :start 5 :end 5 :cursor 5)
+                       :profile parallel-profile))))
+        (should (eq (deslop-job-state first) 'running))
+        (should (eq (deslop-job-state second) 'queued))
+        (deslop-process-next)
+        (should (eq (deslop-job-state second) 'running))
+        (should (= (length deslop--active-jobs) 2))
+        (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (string= (buffer-string) "baseAB"))))))
+
+(ert-deftest deslop-test/global-fence-waits-for-existing-jobs ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A" "B" "C") t))
+        (profile '(:name remote :model "remote-model"
+                   :max-concurrency 4 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((first (deslop-enqueue
+                    (list 'insert
+                          :target (deslop-target-create
+                                   :buffer (current-buffer)
+                                   :start 5 :end 5 :cursor 5)
+                          :profile profile)))
+            (second (deslop-enqueue
+                     (list 'insert
+                           :target (deslop-target-create
+                                    :buffer (current-buffer)
+                                    :start 5 :end 5 :cursor 5)
+                           :profile profile)))
+            (third nil))
+        (deslop-fence-all)
+        (setq third
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile profile)))
+        (should (eq (deslop-job-state first) 'running))
+        (should (eq (deslop-job-state second) 'running))
+        (should (eq (deslop-job-state third) 'queued))
+        (should (= (length deslop--fences) 1))
+        (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (should (eq (deslop-job-state third) 'queued))
+        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (eq (deslop-job-state third) 'running))
+        (should-not deslop--fences)
+        (deslop-test--complete-call (nth 2 deslop-test--calls))
+        (should (string= (buffer-string) "baseABC"))))))
+
+(ert-deftest deslop-test/provider-fence-does-not-block-other-providers ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm '("A1" "B1" "A2" "B2") t))
+        (first-profile '(:name first :model "first-model"
+                         :max-concurrency 4 :parallel t))
+        (second-profile '(:name second :model "second-model"
+                          :max-concurrency 4 :parallel t)))
+    (deslop-test--with-buffer "base"
+      (goto-char (point-max))
+      (let ((first (deslop-enqueue
+                    (list 'insert
+                          :target (deslop-target-create
+                                   :buffer (current-buffer)
+                                   :start 5 :end 5 :cursor 5)
+                          :profile first-profile)))
+            (second (deslop-enqueue
+                     (list 'insert
+                           :target (deslop-target-create
+                                    :buffer (current-buffer)
+                                    :start 5 :end 5 :cursor 5)
+                           :profile second-profile)))
+            (third nil)
+            (fourth nil))
+        (deslop-fence-provider 'first)
+        (setq third
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile first-profile)))
+        (setq fourth
+              (deslop-enqueue
+               (list 'insert
+                     :target (deslop-target-create
+                              :buffer (current-buffer)
+                              :start 5 :end 5 :cursor 5)
+                     :profile second-profile)))
+        (should (eq (deslop-job-state first) 'running))
+        (should (eq (deslop-job-state second) 'running))
+        (should (eq (deslop-job-state third) 'queued))
+        (should (eq (deslop-job-state fourth) 'running))
+        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (should (eq (deslop-job-state third) 'running))
+        (deslop-test--complete-call (nth 3 deslop-test--calls))
+        (deslop-test--complete-call (nth 2 deslop-test--calls))
+        (should (string= (buffer-string) "baseA1B1B2A2"))))))
+
+(ert-deftest deslop-test/equal-provider-identities-share-free-slots ()
   (deslop-test--reset)
   (let* ((deslop-llm-function
           (deslop-test--fake-llm '("X" "A" "B") t))
@@ -2050,7 +2177,7 @@ process for cancellation tests."
         (should (= (length deslop-test--calls) 1))
         (deslop-test--complete-call (car deslop-test--calls))
         (should (eq (deslop-job-state serial) 'running))
-        (should (eq (deslop-job-state parallel) 'queued))
+        (should (eq (deslop-job-state parallel) 'running))
         (deslop-test--complete-call (nth 1 deslop-test--calls))
         (deslop-test--complete-call (nth 2 deslop-test--calls))
         (should (string= (buffer-string) "baseXAB"))))))
