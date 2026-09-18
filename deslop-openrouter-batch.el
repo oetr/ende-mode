@@ -45,6 +45,11 @@
   :type 'number
   :group 'deslop)
 
+(defcustom deslop-openrouter-batch-poll-not-found-max-age (* 5 60)
+  "Maximum seconds to retry an initially invisible batch."
+  :type 'number
+  :group 'deslop)
+
 (defcustom deslop-openrouter-batch-poll-max-delay 60.0
   "Maximum delay between Batch API polls."
   :type 'number
@@ -71,7 +76,7 @@
                (:constructor deslop-openrouter-batch--make-group))
   "A group of compatible logical requests submitted as one remote batch."
   key profile requests timer stage body batch-id status poll-attempt
-  poll-timer submitted-at deadline terminal)
+  not-found-attempt batch-visible-p poll-timer submitted-at deadline terminal)
 
 (defvar deslop-openrouter-batch--groups (make-hash-table :test #'equal)
   "Pending OpenRouter Batch groups keyed by their request shape.")
@@ -110,6 +115,10 @@
                        (deslop-openrouter-batch--profile-value
                         profile :batch-poll-initial-delay
                         deslop-openrouter-batch-poll-initial-delay))
+                 (cons 'deslop-openrouter-batch-poll-not-found-max-age
+                       (deslop-openrouter-batch--profile-value
+                        profile :batch-poll-not-found-max-age
+                        deslop-openrouter-batch-poll-not-found-max-age))
                  (cons 'deslop-openrouter-batch-poll-max-delay
                        (deslop-openrouter-batch--profile-value
                         profile :batch-poll-max-delay
@@ -419,8 +428,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   "Return non-nil when HTTP STATUS is safe to retry while polling."
   (memq status '(408 425 429 500 502 503 504 524 529)))
 
-(defun deslop-openrouter-batch--jittered-delay (group)
-  "Return the next poll delay for GROUP."
+(defun deslop-openrouter-batch--jittered-delay (group &optional attempt)
+  "Return the poll delay for GROUP and retry ATTEMPT."
   (let* ((profile (deslop-openrouter-batch--group-profile group))
          (initial (deslop-openrouter-batch--profile-value
                    profile :batch-poll-initial-delay
@@ -428,7 +437,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
          (maximum (deslop-openrouter-batch--profile-value
                    profile :batch-poll-max-delay
                    deslop-openrouter-batch-poll-max-delay))
-         (attempt (deslop-openrouter-batch--group-poll-attempt group))
+         (attempt (or attempt
+                       (deslop-openrouter-batch--group-poll-attempt group)))
          (base (min maximum (* initial (expt 2 attempt))))
          (jitter (deslop-openrouter-batch--profile-value
                   profile :batch-poll-jitter
@@ -436,6 +446,54 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
     (if (zerop jitter)
         base
       (* base (+ 1.0 (* jitter (- (random 2001) 1000) 0.001))))))
+
+(defun deslop-openrouter-batch--initial-not-found-retry-p (group)
+  "Return non-nil while GROUP may still be propagating remotely."
+  (let* ((profile (deslop-openrouter-batch--group-profile group))
+         (max-age (deslop-openrouter-batch--profile-value
+                   profile :batch-poll-not-found-max-age
+                   deslop-openrouter-batch-poll-not-found-max-age))
+         (submitted-at (deslop-openrouter-batch--group-submitted-at group)))
+    (and (not (deslop-openrouter-batch--group-batch-visible-p group))
+         (numberp submitted-at)
+         (< (- (float-time) submitted-at) max-age))))
+
+(defun deslop-openrouter-batch--not-found-error (group body)
+  "Build a terminal not-found error for GROUP and response BODY."
+  (let* ((batch-id (deslop-openrouter-batch--group-batch-id group))
+         (url (deslop-openrouter-batch--batch-url group))
+         (visibility
+          (if (deslop-openrouter-batch--group-batch-visible-p group)
+              "after it was previously visible"
+            "before it became visible and after the initial retry window")))
+    (deslop-error-create
+     :kind 'http
+     :message (format "OpenRouter batch %s was not found at %s; %s"
+                      batch-id url visibility)
+     :details body)))
+
+(defun deslop-openrouter-batch--retry-not-found (group body)
+  "Retry an initially invisible GROUP, or fail it with BODY."
+  (if (deslop-openrouter-batch--initial-not-found-retry-p group)
+      (let* ((profile (deslop-openrouter-batch--group-profile group))
+             (max-age (deslop-openrouter-batch--profile-value
+                       profile :batch-poll-not-found-max-age
+                       deslop-openrouter-batch-poll-not-found-max-age))
+             (submitted-at (deslop-openrouter-batch--group-submitted-at group))
+             (remaining (- max-age (- (float-time) submitted-at)))
+             (delay
+              (deslop-openrouter-batch--jittered-delay
+               group
+               (deslop-openrouter-batch--group-not-found-attempt group))))
+        (if (< delay remaining)
+            (progn
+              (cl-incf
+               (deslop-openrouter-batch--group-not-found-attempt group))
+              (deslop-openrouter-batch--schedule-poll group delay))
+          (deslop-openrouter-batch--group-fail
+           group (deslop-openrouter-batch--not-found-error group body))))
+    (deslop-openrouter-batch--group-fail
+     group (deslop-openrouter-batch--not-found-error group body))))
 
 (defun deslop-openrouter-batch--schedule-poll (group &optional delay)
   "Schedule a status poll for GROUP after DELAY seconds."
@@ -580,13 +638,18 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
           (deslop-openrouter-batch--schedule-poll group))
       (deslop-openrouter-batch--group-fail group stage-error)))
    ((not (= status 200))
-    (if (deslop-openrouter-batch--retryable-status-p status)
-        (progn
-          (cl-incf (deslop-openrouter-batch--group-poll-attempt group))
-          (deslop-openrouter-batch--schedule-poll group))
+    (cond
+     ((= status 404)
+      (deslop-openrouter-batch--retry-not-found group body))
+     ((deslop-openrouter-batch--retryable-status-p status)
+      (cl-incf (deslop-openrouter-batch--group-poll-attempt group))
+      (deslop-openrouter-batch--schedule-poll group))
+     (t
       (deslop-openrouter-batch--group-fail
-       group (deslop-openrouter-batch--response-error status body))))
+       group (deslop-openrouter-batch--response-error status body)))))
    (t
+    (setf (deslop-openrouter-batch--group-batch-visible-p group) t
+          (deslop-openrouter-batch--group-not-found-attempt group) 0)
     (let* ((payload (deslop-openrouter-batch--parse-object body))
            (remote-status
             (and (not (deslop-openrouter-batch--json-error-p payload))
@@ -811,7 +874,7 @@ one remote batch."
               (let ((new-group
                      (deslop-openrouter-batch--make-group
                       :key key :profile profile :requests nil
-                      :poll-attempt 0)))
+                      :poll-attempt 0 :not-found-attempt 0)))
                 (puthash key new-group deslop-openrouter-batch--groups)
                 (deslop-openrouter-batch--register-group new-group))))
     (push request (deslop-openrouter-batch--group-requests group))
