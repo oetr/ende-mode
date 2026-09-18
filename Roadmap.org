@@ -50,3 +50,6 @@ Are there better options? WDYT?
 * Make history an org mode native
 - org mode should be by default on for "*deslop-history*" buffer
 - sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
+* Display how much money each request took approximately
+* Fix this
+  http: HTTP status 404: This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.
