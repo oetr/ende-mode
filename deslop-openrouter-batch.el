@@ -465,7 +465,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
          (visibility
           (if (deslop-openrouter-batch--group-batch-visible-p group)
               "after it was previously visible"
-            "before it became visible and after the initial retry window")))
+            "without ever being observed; the initial retry window expired")))
     (deslop-error-create
      :kind 'http
      :message (format "OpenRouter batch %s was not found at %s; %s"

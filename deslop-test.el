@@ -4462,6 +4462,144 @@ Use COMMAND for the process, or a silent sleep process by default."
       (plist-put (copy-sequence profile)
                   :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
 
+(ert-deftest deslop-test/openrouter-batch-initial-404-retries-then-completes ()
+  (let* ((profile (plist-put
+                   (plist-put
+                    (plist-put (copy-sequence
+                                (deslop-provider-profile 'openrouter-batch))
+                               :batch-poll-initial-delay 2)
+                    :batch-poll-max-delay 60)
+                   :batch-poll-jitter 0))
+         (delays nil)
+         (result nil)
+         (failure nil)
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-404"
+           :profile profile
+           :callbacks
+           (list :on-done (lambda (value) (setq result value))
+                 :on-error (lambda (value) (setq failure value)))))
+         (group
+          (deslop-openrouter-batch--make-group
+           :profile profile
+           :requests (list request)
+           :batch-id "batch-1789766830-OF6zb6TiexdSIEpfCv8N"
+           :submitted-at (float-time)
+           :deadline (+ (float-time) 300)
+           :not-found-attempt 0)))
+    (cl-letf
+        (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+          (lambda (_group &optional delay)
+            (when delay
+              (setq delays (append delays (list delay))))))
+         ((symbol-function 'deslop-openrouter-batch--status)
+          (lambda (_group _status) nil)))
+      (deslop-openrouter-batch--poll-finished
+       group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
+      (deslop-openrouter-batch--poll-finished
+       group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
+      (should-not failure)
+      (should-not (deslop-openrouter-batch--group-terminal group))
+      (should (= (deslop-openrouter-batch--group-not-found-attempt group) 2))
+      (should (equal delays '(2 4)))
+      (deslop-openrouter-batch--poll-finished
+       group 200 "{\"status\":\"validating\"}" nil)
+      (should (deslop-openrouter-batch--group-batch-visible-p group))
+      (should (= (deslop-openrouter-batch--group-not-found-attempt group) 0))
+      (deslop-openrouter-batch--poll-finished
+       group 200
+       (format
+        (concat
+         "{\"status\":\"completed\",\"results\":[{"
+         "\"custom_id\":\"%s\",\"response\":{"
+         "\"status_code\":200,\"body\":{\"choices\":[{"
+         "\"message\":{\"content\":\"done\"}}]}}}]}"
+         )
+        (deslop-openrouter-batch--request-custom-id request))
+       nil))
+    (should-not failure)
+    (should (string= (plist-get result :content) "done"))
+    (should (deslop-openrouter-batch--group-terminal group))))
+
+(ert-deftest deslop-test/openrouter-batch-404-expires-with-context ()
+  (let* ((profile (plist-put
+                   (plist-put
+                    (plist-put
+                     (copy-sequence (deslop-provider-profile 'openrouter-batch))
+                     :batch-poll-initial-delay 1)
+                    :batch-poll-max-delay 4)
+                   :batch-poll-jitter 0))
+         (failure nil)
+         (delays nil)
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-expiring"
+           :profile profile
+           :callbacks (list :on-error (lambda (value) (setq failure value)))))
+         (group
+          (deslop-openrouter-batch--make-group
+           :profile profile
+           :requests (list request)
+           :batch-id "batch-1789766830-OF6zb6TiexdSIEpfCv8N"
+           :submitted-at (float-time)
+           :deadline (+ (float-time) 300)
+           :not-found-attempt 0)))
+    (setf (deslop-openrouter-batch--group-profile group)
+          (plist-put profile :batch-poll-not-found-max-age 3))
+    (cl-letf
+        (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+          (lambda (_group &optional delay)
+            (push delay delays))))
+      (deslop-openrouter-batch--poll-finished
+       group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
+      (should-not failure)
+      (should (equal delays '(1)))
+      (setf (deslop-openrouter-batch--group-submitted-at group)
+            (- (float-time) 2.5))
+      (deslop-openrouter-batch--poll-finished
+       group 404 "{\"error\":{\"message\":\"not found\"}}" nil))
+    (should (deslop-error-p failure))
+    (should (eq (deslop-error-kind failure) 'http))
+    (should (string-match-p
+             (regexp-quote
+              "batch-1789766830-OF6zb6TiexdSIEpfCv8N")
+             (deslop-error-message failure)))
+    (should (string-match-p
+             (regexp-quote
+              "https://openrouter.ai/api/v1/batches/batch-1789766830-OF6zb6TiexdSIEpfCv8N")
+             (deslop-error-message failure)))
+    (should (string-match-p "ever being observed"
+                           (deslop-error-message failure)))
+    (should (deslop-openrouter-batch--group-terminal group))))
+
+(ert-deftest deslop-test/openrouter-batch-404-after-visibility-is-terminal ()
+  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+         (failure nil)
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-visible"
+           :profile profile
+           :callbacks (list :on-error (lambda (value) (setq failure value)))))
+         (group
+          (deslop-openrouter-batch--make-group
+           :profile profile
+           :requests (list request)
+           :batch-id "batch-visible"
+           :submitted-at (float-time)
+           :deadline (+ (float-time) 300)
+           :not-found-attempt 0
+           :batch-visible-p t)))
+    (cl-letf (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+               (lambda (&rest _arguments)
+                 (error "visible batch must not retry 404"))))
+      (deslop-openrouter-batch--poll-finished
+       group 404 "{\"error\":{\"message\":\"not found\"}}" nil))
+    (should (deslop-error-p failure))
+    (should (string-match-p "previously visible"
+                           (deslop-error-message failure)))
+    (should (deslop-openrouter-batch--group-terminal group))))
+
 (ert-deftest deslop-test/openrouter-batch-body-is-non-streaming-and-ordered ()
   (let* ((deslop-max-output-tokens 64)
          (profile (deslop-provider-profile 'openrouter-batch))
