@@ -117,8 +117,8 @@ from remote buffers are supported, but their processes always run locally."
     (and downcased
          (or (member downcased
                      '("host" "content-length" "transfer-encoding"
-                       "content-type" "connection" "trailer" "upgrade"
-                       "expect" "proxy-connection"))
+                       "content-type" "accept" "connection" "trailer"
+                       "upgrade" "expect" "proxy-connection"))
              (string-match-p
               "\\(?:auth\\|token\\|key\\|secret\\|cookie\\|credential\\)"
               downcased)))))
@@ -234,6 +234,7 @@ separate from user-configured profile headers."
        (deslop-curl-response-options headers-file)
        (list "--request" "POST"
              "--header" "Content-Type: application/json"
+             "--header" "Accept: text/event-stream"
              "--data-binary" "@-")
        (when config-file (list "--config" config-file))
        (deslop-curl-timeout-options
@@ -357,8 +358,16 @@ being re-signaled to the caller."
           (list response-buffer stderr-buffer)
           (list headers-file config-file))))))
 
+(defun deslop-curl-event-stream-p (content-type)
+  "Return non-nil when CONTENT-TYPE denotes an SSE response."
+  (when (stringp content-type)
+    (let ((case-fold-search t))
+      (string-match-p
+       "\\`[ \t]*text/event-stream\\(?:[ \t]*;\\|[ \t]*\\'\\)"
+       content-type))))
+
 (defun deslop-curl-response-headers (file)
-  "Return (STATUS . CONTENT-TYPE) from curl header FILE."
+  "Return final (STATUS . CONTENT-TYPE) from curl header FILE."
   (when (file-readable-p file)
     (let ((size (file-attribute-size (file-attributes file))))
       (when (and deslop-max-response-header-bytes
@@ -367,18 +376,21 @@ being re-signaled to the caller."
     (with-temp-buffer
       (insert-file-contents file)
       (goto-char (point-min))
-      (let ((status nil) (content-type nil))
-        (while (re-search-forward "^HTTP/[0-9.]+[ \t]+\\([0-9]+\\)" nil t)
-          (setq status (string-to-number (match-string 1)))
-          (setq content-type nil)
-          (let ((block-end (or (save-excursion
-                                 (when (re-search-forward "^HTTP/" nil t)
+      (let ((case-fold-search t)
+            (status nil)
+            (content-type nil))
+        (while (re-search-forward
+                "^HTTP/[0-9]+\\(?:\\.[0-9]+\\)?[ \t]+\\([0-9]+\\)" nil t)
+          (let ((response-status (string-to-number (match-string 1)))
+                (block-end (or (save-excursion
+                                 (when (re-search-forward "^\r?$" nil t)
                                    (line-beginning-position)))
                                (point-max))))
+            (setq status response-status
+                  content-type nil)
             (save-excursion
               (when (re-search-forward
-                     "^[Cc]ontent-[Tt]ype:[ \t]*\\([^\r\n]+\\)"
-                     block-end t)
+                     "^content-type:[ \t]*\\([^\r\n]+\\)" block-end t)
                 (setq content-type (string-trim (match-string 1)))))))
         (cons status content-type)))))
 

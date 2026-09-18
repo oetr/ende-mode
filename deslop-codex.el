@@ -1002,9 +1002,8 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
              (cond
               ((or (null status) (< status 200) (>= status 300))
                (deslop-codex--fail session (deslop-codex--http-error session)))
-              ((or (null content-type)
-                   (let ((case-fold-search t))
-                     (not (string-match-p "text/event-stream" content-type))))
+              ((and content-type
+                    (not (deslop-curl-event-stream-p content-type)))
                (deslop-codex--fail
                 session
                 (deslop-error-create
@@ -1013,7 +1012,7 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                                   (or content-type "unknown")))))
               (t
                (dolist (event
-                        (deslop-protocol-sse-finish
+                        (deslop-protocol-sse-flush
                          (deslop-codex--session-sse session)))
                  (when (and (not (deslop-codex--session-terminal session))
                             (eq (plist-get event :type) :json))

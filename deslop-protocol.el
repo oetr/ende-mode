@@ -221,13 +221,13 @@ Errors are signaled so the transport can turn them into protocol failures."
             (error "SSE line exceeds deslop-max-sse-event-bytes"))))
       (nreverse events))))
 
-(defun deslop-protocol-sse-finish (parser)
-  "Flush a final complete SSE event and validate PARSER state."
+(defun deslop-protocol-sse-flush (parser)
+  "Flush and return any final complete event buffered by PARSER."
   (let ((events nil)
         (buffer (deslop-protocol--sse-pending-buffer parser)))
+    (setf (deslop-protocol--sse-buffer-parts parser) nil
+          (deslop-protocol--sse-buffer-bytes parser) 0)
     (when (> (length buffer) 0)
-      (setf (deslop-protocol--sse-buffer-parts parser) (list buffer)
-            (deslop-protocol--sse-buffer-bytes parser) (string-bytes buffer))
       (let ((event (deslop-protocol--sse-handle-raw-line parser buffer)))
         (when event
           (push event events))))
@@ -235,9 +235,14 @@ Errors are signaled so the transport can turn them into protocol failures."
       (let ((event (deslop-protocol--sse-event parser)))
         (when event
           (push event events))))
+    (nreverse events)))
+
+(defun deslop-protocol-sse-finish (parser)
+  "Flush a final complete SSE event and validate PARSER state."
+  (let ((events (deslop-protocol-sse-flush parser)))
     (unless (deslop-protocol--sse-done parser)
       (signal 'error (list "SSE stream ended without [DONE]")))
-    (nreverse events)))
+    events))
 
 ;;;; JSON helpers
 

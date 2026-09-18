@@ -2021,6 +2021,19 @@ process for cancellation tests."
     (deslop-protocol-sse-feed parser "data: {\"choices\":[]}\n\n")
     (should-error (deslop-protocol-sse-finish parser))))
 
+(ert-deftest deslop-test/sse-parser-flushes-final-event-without-done ()
+  (let ((parser (deslop-protocol-make-sse)))
+    (should-not
+     (deslop-protocol-sse-feed parser "data: {\"type\":\"response.completed\"}"))
+    (let ((events (deslop-protocol-sse-flush parser)))
+      (should (= (length events) 1))
+      (should (string=
+               (deslop-protocol-json-get
+                "type" (plist-get (car events) :value))
+               "response.completed")))
+    (should-not (deslop-protocol-sse-flush parser))
+    (should-error (deslop-protocol-sse-finish parser))))
+
 (ert-deftest deslop-test/transport-session-settles-once-and-cleans-resources ()
   (let* ((process-buffer (generate-new-buffer " *deslop-test-process*"))
          (stderr-buffer (generate-new-buffer " *deslop-test-stderr*"))
@@ -2266,6 +2279,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (= (nth 4 out) 0))
     (should (functionp (nth 5 out)))
     (should-not (member "hello" (nth 2 out)))
+    (should (member "Accept: text/event-stream" (nth 2 out)))
     (should (member "@-" (nth 2 out)))))
 
 (ert-deftest deslop-test/default-transport-accepts-text-completion-deltas ()
@@ -2274,6 +2288,15 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
     (should-not (nth 1 out))
     (should (string= (plist-get (nth 0 out) :content) "legacy"))))
+
+(ert-deftest deslop-test/default-transport-requires-done ()
+  (let ((out (deslop-test--run-default-transport
+              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+              "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}]}\n\n")))
+    (should-not (nth 0 out))
+    (should (eq (deslop-error-kind (nth 1 out)) 'protocol))
+    (should (string-match-p "without \\[DONE\\]"
+                            (deslop-error-message (nth 1 out))))))
 
 (ert-deftest deslop-test/default-transport-retains-joined-partial-result ()
   (let* ((first
@@ -2652,6 +2675,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (captured nil)
          (process nil)
          (result nil)
+         (failure nil)
          (real-make-process (symbol-function 'make-process)))
     (unwind-protect
         (progn
@@ -2673,43 +2697,127 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             (deslop-codex-default
              (list (cons "user" "body"))
              (list :on-done (lambda (value) (setq result value))
-                   :on-error (lambda (value) (setq result value)))
+                   :on-error (lambda (value) (setq failure value)))
              (deslop-provider-profile 'openai))
-             (let* ((command (plist-get captured :command))
-                    (config (cadr (member "--config" command)))
-                    (headers-file (cadr (member "--dump-header" command)))
-                    (filter (plist-get captured :filter))
-                    (sentinel (plist-get captured :sentinel)))
-               (should (not (member "access-token" command)))
-               (should (file-exists-p config))
-               (with-temp-file headers-file
-                 (insert "HTTP/1.1 200 OK\r\n"
-                         "Content-Type: text/event-stream\r\n\r\n"))
-                (with-temp-buffer
-                  (insert-file-contents config)
-                  (should (string-match-p "Authorization: Bearer access-token"
-                                         (buffer-string))))
-               (with-temp-buffer
-                 (insert-file-contents config)
-                 (should (string-match-p "User-Agent: deslop"
-                                         (buffer-string))))
-               (funcall
-                filter
-                process
-                (concat "data: {\"type\":\"response.output_text.delta\","
-                        "\"delta\":\"answer\"}\n\n"
-                        "data: {\"type\":\"response.completed\","
-                        "\"response\":{\"model\":\"gpt-test\"}}\n\n"
-                        "data: [DONE]\n\n"))
-               (while (process-live-p process)
-                 (accept-process-output process 0.05))
-               (funcall sentinel process "finished\n")
-               (should (string= (plist-get result :content) "answer"))
-               (should-not (file-exists-p config)))))
+            (let* ((command (plist-get captured :command))
+                   (config (cadr (member "--config" command)))
+                   (headers-file (cadr (member "--dump-header" command)))
+                   (filter (plist-get captured :filter))
+                   (sentinel (plist-get captured :sentinel)))
+              (should (not (member "access-token" command)))
+              (should (member "Accept: text/event-stream" command))
+              (should (file-exists-p config))
+              (with-temp-file headers-file
+                (insert "HTTP/1.1 200 OK\r\n\r\n"))
+              (with-temp-buffer
+                (insert-file-contents config)
+                (should (string-match-p "Authorization: Bearer access-token"
+                                        (buffer-string))))
+              (with-temp-buffer
+                (insert-file-contents config)
+                (should (string-match-p "User-Agent: deslop"
+                                        (buffer-string))))
+              (funcall
+               filter
+               process
+               (concat "data: {\"type\":\"response.output_text.delta\","
+                       "\"delta\":\"answer\"}\n\n"
+                       "data: {\"type\":\"response.completed\","
+                       "\"response\":{\"model\":\"gpt-test\","
+                       "\"usage\":{\"output_tokens\":7}}}"))
+              (while (process-live-p process)
+                (accept-process-output process 0.05))
+              (funcall sentinel process "finished\n")
+              (should-not failure)
+              (should (string= (plist-get result :content) "answer"))
+              (should (string= (plist-get result :model) "gpt-test"))
+              (should (= (plist-get result :tokens) 7))
+              (should (string= (plist-get result :finish-reason) "stop"))
+              (should-not (file-exists-p config)))))
       (when (and (processp process) (process-live-p process))
         (delete-process process))
       (when (file-exists-p auth-file)
         (delete-file auth-file)))))
+
+(ert-deftest deslop-test/openai-rejects-explicit-non-sse-content-type ()
+  (let ((headers-file (make-temp-file "deslop-openai-headers-"))
+        (process (make-process :name "deslop-openai-test"
+                               :command (list "true") :noquery t))
+        (result nil)
+        (failure nil)
+        (events nil))
+    (unwind-protect
+        (let ((session
+               (deslop-codex--make-session
+                :profile '(:model "gpt-test")
+                :process process
+                :headers-file headers-file
+                :callbacks
+                (list :on-event (lambda (event) (push event events))
+                      :on-done (lambda (value) (setq result value))
+                      :on-error (lambda (error) (setq failure error)))
+                :sse (deslop-protocol-make-sse)
+                :estimated-chars 0
+                :received-bytes 0
+                :preview-bytes 0)))
+          (with-temp-file headers-file
+            (insert "HTTP/2 200\r\nContent-Type: application/json\r\n\r\n"))
+          (deslop-codex--filter
+           session process
+           (concat "data: {\"type\":\"response.output_text.delta\","
+                   "\"delta\":\"answer\"}\n\n"
+                   "data: {\"type\":\"response.completed\","
+                   "\"response\":{\"model\":\"gpt-test\"}}\n\n"
+                   "data: [DONE]\n\n"))
+          (while (process-live-p process)
+            (accept-process-output process 0.05))
+          (deslop-codex--sentinel session process "finished\n")
+          (should-not result)
+          (should (eq (deslop-error-kind failure) 'protocol))
+          (should (string-match-p "application/json"
+                                  (deslop-error-message failure)))
+          (let ((partial
+                 (cl-find-if
+                  (lambda (event)
+                    (eq (plist-get event :type) :partial-result))
+                  events)))
+            (should (string= (plist-get (plist-get partial :result) :content)
+                             "answer"))))
+      (when (process-live-p process)
+        (delete-process process))
+      (when (file-exists-p headers-file)
+        (delete-file headers-file)))))
+
+(ert-deftest deslop-test/openai-missing-content-type-requires-terminal-event ()
+  (let ((headers-file (make-temp-file "deslop-openai-headers-"))
+        (process (make-process :name "deslop-openai-incomplete-test"
+                               :command (list "true") :noquery t))
+        (failure nil))
+    (unwind-protect
+        (let ((session
+               (deslop-codex--make-session
+                :profile '(:model "gpt-test")
+                :process process
+                :headers-file headers-file
+                :callbacks (list :on-error
+                                 (lambda (error) (setq failure error)))
+                :sse (deslop-protocol-make-sse)
+                :estimated-chars 0
+                :received-bytes 0
+                :preview-bytes 0)))
+          (with-temp-file headers-file
+            (insert "HTTP/2 200\r\n\r\n"))
+          (deslop-codex--filter session process "data: [DONE]\n\n")
+          (while (process-live-p process)
+            (accept-process-output process 0.05))
+          (deslop-codex--sentinel session process "finished\n")
+          (should (eq (deslop-error-kind failure) 'protocol))
+          (should (string-match-p "without a terminal response event"
+                                  (deslop-error-message failure))))
+      (when (process-live-p process)
+        (delete-process process))
+      (when (file-exists-p headers-file)
+        (delete-file headers-file)))))
 
 (ert-deftest deslop-test/openai-refresh-rotates-opencode-credentials-safely ()
   (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
@@ -2965,11 +3073,30 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (dolist (header '("X-Test: ok\nurl = https://attacker.test"
                     "Host: attacker.test"
                     "X-Auth-Token: secret"
+                    "Accept: application/json"
                     "Content-Length: 0"))
     (should-error
       (deslop-curl--config
       (list :url "https://example.test/v1"
             :request-headers (list header))))))
+
+(ert-deftest deslop-test/curl-response-headers-select-final-response ()
+  (let ((file (make-temp-file "deslop-response-headers-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "HTTP/1.1 200 Connection established\r\n\r\n"
+                    "HTTP/2 103 Early Hints\r\nLink: </model>\r\n\r\n"
+                    "HTTP/2 200\r\n"
+                    "CoNtEnT-TyPe: text/event-stream; charset=utf-8\r\n\r\n"))
+          (should (equal (deslop-curl-response-headers file)
+                         '(200 . "text/event-stream; charset=utf-8")))
+          (should (deslop-curl-event-stream-p
+                   "text/event-stream; charset=utf-8"))
+          (should-not (deslop-curl-event-stream-p
+                       "application/json; note=text/event-stream")))
+      (when (file-exists-p file)
+        (delete-file file)))))
 
 (ert-deftest deslop-test/provider-url-and-curl-command-are-hardened ()
   (should-error

@@ -344,9 +344,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                            (format "unexpected HTTP status %s" status))))))
            ((and (plist-get (deslop-llm--session-profile session) :require-sse)
                  (or (null content-type)
-                     (let ((case-fold-search t))
-                       (not (string-match-p "text/event-stream"
-                                            content-type)))))
+                     (not (deslop-curl-event-stream-p content-type))))
             (deslop-llm--fail
              session
              (deslop-error-create
