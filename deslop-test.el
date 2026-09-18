@@ -842,7 +842,7 @@ process for cancellation tests."
   (deslop-test--reset)
   (let ((deslop-llm-function
          (deslop-test--fake-llm
-          '("Claim [[deslop-source:3][source]]."))))
+          '("Claim [[deslop-source:3][source]]. [[deslop-source:2][important claim]]."))))
     (deslop-test--with-buffer "ignored\nfirst\nsecond"
       (setq-local buffer-file-name "/tmp/deslop source.org")
       (deslop-test--select 9 (point-max) (point-max))
@@ -861,7 +861,13 @@ process for cancellation tests."
     (should
      (string-match-p
       (regexp-quote "Claim [[file:/tmp/deslop source.org::3][source]].")
-      (buffer-string)))))
+      (buffer-string)))
+    (should
+     (string-match-p
+      (regexp-quote
+       "[[file:/tmp/deslop source.org::2][important claim]]")
+      (buffer-string)))
+    (should-not (string-match-p "lop-source:3" (buffer-string)))))
 
 (ert-deftest deslop-test/summarize-preserves-tramp-paths-in-local-links ()
   (deslop-test--reset)

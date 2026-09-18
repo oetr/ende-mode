@@ -62,17 +62,18 @@ return price * (1 + tax)"
   "System prompt instructions for improving a target region.")
 
 (defconst deslop-summarize-system
-  "Summarize the supplied text accurately and concisely using Org mode syntax. Use not more than one sentence per line, unless the sentences are short. Prefer using vertical space over horizontal space. Give the user the best possible experience by structuring your output into paragraphs, lists, code blocks, when applicable. Be creative! Generate elegant, and readable text.
+  "Summarize the supplied text accurately and concisely using Org mode syntax. Use not more than one sentence per line, unless the sentences are short. Prefer using vertical space over horizontal space. Give the user the best possible experience by structuring your output into sections, paragraphs, lists, code blocks. Be creative! Generate elegant, and readable text.
 
 Know your audience---given your input, what does the user most likely want? If it is pure source code from a pure source code file, what does the user want? If it is a text file, what does the user want? (Don't tell me, just structure and focus your summary accordingly). Understand the combination of provided user input with the fact that the user wants a summary, and try to figure out what the user actually wants.
 
-Return only the summary. Do not add a title or 1-level headings. Never use Markdown syntax or fenced code blocks.
+THIS IS ORG MODE.
+Return only the summary in org-mode syntax. Do not add a title or 1-level headings. Never use Markdown syntax.
 
 Use Org conventions:
-- Use *bold* and /italic/ for emphasis.
+- Use *bold* and /italic/ for emphasis. Using double **bold text** for bold is wrong, use *bold*.
 - Use ~code~ for inline code and =verbatim text= for literal text.
 - Org lists begin with - or 1, and can be nested. Use where approprate.
-- Use >1 level headings to structure your output like this:  `** <section title>` or if necessary `*** <deeper section title>`. But only when it helps to give the reader clarity.
+- Use >1 level headings to structure your output like this:  `** <section title>` or if necessary `*** <deeper section title>`. Though, if your summary is short, prefer a flat file.
 - Put multiline code in:
   #+begin_src LANGUAGE
   code
@@ -84,7 +85,13 @@ Use Org conventions:
 
 Preserve identifiers, commands, paths, and code exactly.
 
-The source text is prefixed with its absolute line numbers in the form `LINE | text`. These prefixes are metadata, not part of the source. Cite relevant concrete claims and excerpts using exactly `[[deslop-source:LINE][source]]`, where LINE is one of the supplied source lines. Do not invent another citation target or link type.
+The source text is prefixed with its absolute line numbers in the form `LINE | text`.
+These prefixes are metadata, not part of the source.
+Cite relevant concrete claims and excerpts using exactly `[[deslop-source:LINE][DESCRIPTION]]`, where LINE is one of the supplied source lines and DESCRIPTION is a concise label for the cited claim or excerpt.
+An exceptionally readable DESCRIPTION can also be the buffer/file name and line number. Here is a good example:
+`[[deslop-source:10][growing-neural-gas in gng.rkt:10]]`
+This example is great because the user can easier remember this than some generic \"source\" link.
+Do not invent another citation target or link type.
 
 When quoting Org source inside an Org source block, escape lines that Org could interpret structurally. Prefix a comma immediately before every quoted line beginning with *, ,*, #+, or ,#+.
 

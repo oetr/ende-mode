@@ -13,6 +13,7 @@
 (require 'cl-lib)
 (require 'deslop-core)
 (require 'org)
+(require 'rx)
 
 (defcustom deslop-summary-buffer-name "*deslop-summary*"
   "Name of the buffer used for summaries."
@@ -36,6 +37,14 @@
 (defvar deslop-summary--source-buffers
   (make-hash-table :test #'equal :weakness 'value)
   "Map summary source identifiers to live non-file buffers.")
+
+(defconst deslop-summary--citation-regexp
+  (rx "[["
+      "deslop-source:" (group (one-or-more digit))
+      "]["
+      (group (minimal-match (zero-or-more any)))
+      "]]")
+  "Regexp for source citations emitted by the summarization model.")
 
 (defun deslop-summary-source-capture (buffer start end)
   "Capture BUFFER identity and absolute line range for START through END."
@@ -94,13 +103,15 @@
 (defun deslop-summary--rewrite-citations (source content)
   "Replace valid source citation placeholders in CONTENT for SOURCE."
   (replace-regexp-in-string
-   "\\[\\[deslop-source:\\([0-9]+\\)\\]\\[source\\]\\]"
+   deslop-summary--citation-regexp
    (lambda (match)
-     (let ((line (string-to-number (match-string 1 match))))
+     (let* ((line (string-to-number (match-string 1 match)))
+            (description (match-string 2 match)))
        (if (<= (deslop-summary-source-start-line source)
                line
                (deslop-summary-source-end-line source))
-           (deslop-summary--source-link source line)
+           (save-match-data
+             (deslop-summary--source-link source line description))
          (format "[source line %d]" line))))
    content t t))
 
