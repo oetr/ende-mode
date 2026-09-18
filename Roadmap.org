@@ -40,3 +40,13 @@ There are several options I see:
 - highjack org mode follow link function that supports this syntax
 
 Are there better options? WDYT?
+* Tighten summary
+- optimize the prompt
+- improve the link format that the model should use
+  - update the prompt accordingly
+  - update the matcher
+- make the link matching more robust
+
+* Make history an org mode native
+- org mode should be by default on for "*deslop-history*" buffer
+- sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
