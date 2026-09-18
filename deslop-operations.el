@@ -832,16 +832,17 @@ PREVIOUS contains failures from the preceding structured pass."
 (defun deslop--run-summarize (job)
   "Execute a summarize JOB and write its result to a separate buffer."
   (let* ((target (deslop-job-target job))
-         (buffer (deslop-target-buffer target)))
+         (buffer (deslop-target-buffer target))
+         (source-name (buffer-name buffer)))
     (deslop--run-selected-operation
      job
      deslop-summarize-system
      (lambda (source) (format "Text to summarize:\n%s" source))
      (lambda (result)
        (deslop--apply-result
-        job result
+         job result
          (lambda (content display)
-           (deslop-summary-append buffer content display)))))))
+           (deslop-summary-append source-name content display)))))))
 
 (deslop-register-job-handler 'insert #'deslop--run-insert)
 (deslop-register-job-handler

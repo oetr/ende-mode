@@ -32,8 +32,8 @@
                               'deslop-summary--owned-buffer
                               #'text-mode)))
 
-(defun deslop-summary-append (source-buffer content display)
-  "Append CONTENT for SOURCE-BUFFER to the summary buffer.
+(defun deslop-summary-append (source-name content display)
+  "Append CONTENT for SOURCE-NAME to the summary buffer.
 DISPLAY supplies the provider label.  Return the review overlay."
   (let ((summary-buffer (deslop-summary-buffer))
         (review-overlay nil))
@@ -43,17 +43,17 @@ DISPLAY supplies the provider label.  Return the review overlay."
           (widen)
           (save-excursion
             (goto-char (point-max))
-            (let ((review-start (point)))
-              (unless (bobp) (insert "\n\n"))
-              (insert (format "Summary for %s:\n"
-                              (buffer-name source-buffer)))
-              (insert content)
-              (setq review-overlay
-                    (deslop-review-create-overlay
-                     summary-buffer review-start (point)
-                     (plist-get display :model)
-                     (plist-get display :client)
-                     "")))))))
+            (setq review-overlay
+                  (atomic-change-group
+                    (let ((review-start (point)))
+                      (unless (bobp) (insert "\n\n"))
+                      (insert (format "Summary for %s:\n" source-name))
+                      (insert content)
+                      (deslop-review-create-overlay
+                       summary-buffer review-start (point)
+                       (plist-get display :model)
+                       (plist-get display :client)
+                       ""))))))))
     (deslop-ignore-errors #'display-buffer summary-buffer)
     review-overlay))
 

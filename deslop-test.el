@@ -777,6 +777,34 @@ process for cancellation tests."
     (with-current-buffer deslop-summary-buffer-name
       (should (= (point) (point-min))))))
 
+(ert-deftest deslop-test/summarize-captures-source-name-across-async-callback ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
+    (with-temp-buffer
+      (rename-buffer "*phrases*" t)
+      (insert "source")
+      (let* ((source-name (buffer-name))
+             (job (deslop-summarize))
+             (call (car deslop-test--calls)))
+        (rename-buffer "*renamed-phrases*" t)
+        (with-temp-buffer
+          (deslop-test--complete-call call))
+        (should (eq (deslop-job-state job) 'completed))
+        (with-current-buffer deslop-summary-buffer-name
+          (should (string-prefix-p
+                   (format "Summary for %s:\nsummary" source-name)
+                   (buffer-string))))))))
+
+(ert-deftest deslop-test/summary-append-is-atomic ()
+  (deslop-test--reset)
+  (with-current-buffer (deslop-summary-buffer)
+    (insert "existing"))
+  (cl-letf (((symbol-function 'deslop-review-create-overlay)
+             (lambda (&rest _) (error "Mock review failure"))))
+    (should-error (deslop-summary-append "*phrases*" "summary" nil)))
+  (with-current-buffer deslop-summary-buffer-name
+    (should (string= (buffer-string) "existing"))))
+
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)
   (let ((deslop-provider-model "test-model")
