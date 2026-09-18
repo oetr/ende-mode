@@ -19,6 +19,7 @@
 (require 'deslop-protocol)
 (require 'deslop-transport)
 (require 'deslop-provider)
+(require 'deslop-openrouter-batch)
 (require 'deslop-codex)
 
 ;;;; Hookable LLM caller
@@ -38,7 +39,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 (cl-defstruct (deslop-llm--session
                (:constructor deslop-llm--make-session))
   "State owned by one asynchronous LLM transport request."
-  profile callbacks lifecycle discovery-cancel model json-data process process-buffer stderr-buffer
+  profile callbacks lifecycle discovery-cancel model messages json-data process process-buffer stderr-buffer
   stderr-process
   headers-file config-file sse reasoning content-parts thinking-parts usage
   provider-error actual-model actual-provider estimated-chars received-bytes
@@ -322,7 +323,24 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
            :finish-reason (deslop-llm--session-finish-reason session)
            :provider (deslop-llm--session-actual-provider session)
           :model (or (deslop-llm--session-actual-model session)
-                     (deslop-llm--session-model session)))))
+                      (deslop-llm--session-model session)))))
+
+(defun deslop-llm--handoff-to-batch (session)
+  "Retry SESSION through OpenRouter Batch after its exact Batch-only error."
+  (let ((callbacks (deslop-llm--session-callbacks session))
+        (profile (copy-tree (deslop-llm--session-profile session)))
+        (messages (deslop-llm--session-messages session)))
+    (setq profile (plist-put profile :transport 'openrouter-batch))
+    (condition-case caught
+        (progn
+          (deslop-openrouter-batch-default messages callbacks profile)
+          (setf (deslop-llm--session-terminal session) 'handoff)
+          (deslop-llm--cleanup-session session))
+      ((error quit)
+       (deslop-llm--fail
+        session
+        (deslop-error-create
+         :kind 'startup :message (error-message-string caught)))))))
 
 (defun deslop-llm--finish-success (session)
   "Validate and successfully finish SESSION, or settle it with an error."
@@ -331,17 +349,25 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
         (let* ((headers (deslop-curl-response-headers
                          (deslop-llm--session-headers-file session)))
                (status (car headers))
-               (content-type (cdr headers)))
+               (content-type (cdr headers))
+               (detail (and (or (null status) (< status 200) (>= status 300))
+                            (deslop-llm--http-error-detail session))))
           (cond
+           ((and (eq (plist-get (deslop-llm--session-profile session)
+                                :transport)
+                     'auto)
+                 (numberp status)
+                 (= status 404)
+                 (string-match-p "[Bb]atch API" (or detail "")))
+            (deslop-llm--handoff-to-batch session))
            ((or (null status) (< status 200) (>= status 300))
-            (let ((detail (deslop-llm--http-error-detail session)))
-              (deslop-llm--fail
-               session
-               (deslop-error-create
-                :kind 'http
-                :message (if detail
-                             (format "HTTP status %s: %s" status detail)
-                           (format "unexpected HTTP status %s" status))))))
+            (deslop-llm--fail
+             session
+             (deslop-error-create
+              :kind 'http
+              :message (if detail
+                           (format "HTTP status %s: %s" status detail)
+                         (format "unexpected HTTP status %s" status)))))
            ((and (plist-get (deslop-llm--session-profile session) :require-sse)
                  (or (null content-type)
                      (not (deslop-curl-event-stream-p content-type))))
@@ -496,6 +522,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   (deslop-validate-resource-options)
   (let ((default-directory (deslop-curl-local-directory))
         (profile (deslop-llm--session-profile session)))
+    (setf (deslop-llm--session-messages session) messages)
     (setf (deslop-llm--session-json-data session)
           (encode-coding-string
            (json-encode (deslop-llm--request-body messages profile)) 'utf-8))
@@ -538,11 +565,15 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
 
 (defun deslop-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
-  (if (eq (plist-get options :wire-api) 'responses)
-      (deslop-codex-default messages callbacks options)
-  (let* ((profile (if (plist-get options :name)
-                      options
-                    (deslop-plist-merge (deslop-provider-profile) options)))
+  (cond
+   ((eq (plist-get options :transport) 'openrouter-batch)
+    (deslop-openrouter-batch-default messages callbacks options))
+   ((eq (plist-get options :wire-api) 'responses)
+    (deslop-codex-default messages callbacks options))
+   (t
+    (let* ((profile (if (plist-get options :name)
+                       options
+                     (deslop-plist-merge (deslop-provider-profile) options)))
          (session
           (deslop-llm--make-session
             :profile profile :callbacks callbacks :model (plist-get profile :model)
@@ -557,7 +588,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
          session
          (deslop-error-create :kind 'startup
                               :message (error-message-string startup-error)))))
-     (deslop-llm--session-process session))))
+        (deslop-llm--session-process session)))))
 
 (provide 'deslop-llm)
 

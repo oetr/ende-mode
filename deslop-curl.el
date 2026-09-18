@@ -228,18 +228,27 @@ separate from user-configured profile headers."
 
 (defun deslop-curl-command (profile headers-file config-file)
   "Build curl command for PROFILE without embedding request data or secrets."
-  (let ((url (deslop-curl--validated-url profile)))
+  (deslop-curl-json-command
+   profile headers-file config-file "POST" "text/event-stream" t))
+
+(defun deslop-curl-json-command
+    (profile headers-file config-file method accept send-body &optional url)
+  "Build a JSON curl command for PROFILE.
+METHOD is the HTTP method, ACCEPT is the response media type, and SEND-BODY
+controls whether curl reads a request body from stdin.  Request data and
+secrets are deliberately kept out of the command arguments."
+  (let ((url (deslop-curl--validated-url profile url)))
     (append
-       (deslop-curl-base-command url)
-       (deslop-curl-response-options headers-file)
-       (list "--request" "POST"
-             "--header" "Content-Type: application/json"
-             "--header" "Accept: text/event-stream"
-             "--data-binary" "@-")
-       (when config-file (list "--config" config-file))
-       (deslop-curl-timeout-options
-        deslop-request-timeout deslop-max-response-bytes)
-       (list "--url" url))))
+     (deslop-curl-base-command url)
+     (deslop-curl-response-options headers-file)
+     (list "--request" method
+           "--header" "Content-Type: application/json"
+           "--header" (concat "Accept: " accept))
+     (when send-body (list "--data-binary" "@-"))
+     (when config-file (list "--config" config-file))
+     (deslop-curl-timeout-options
+      deslop-request-timeout deslop-max-response-bytes)
+     (list "--url" url))))
 
 (defun deslop-curl--cancel-idle-timer (process)
   "Cancel PROCESS's response inactivity timer, if any."

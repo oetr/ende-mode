@@ -121,9 +121,9 @@ Supported settings are `:max-concurrency' and `:parallel'."
 (defun deslop-provider-profile (&optional name)
   "Return a non-secret provider profile for NAME.
 
-The URL/model customizations remain the local-provider defaults.  OpenRouter
-is available as a profile template and requires an auth-source entry before it
-can be dispatched."
+ The URL/model customizations remain the local-provider defaults.  OpenRouter
+ provides both synchronous and Batch API profile templates and requires an
+ auth-source entry before it can be dispatched."
   (let* ((name (or name (car deslop-providers)
                    deslop-provider-default-profile))
          (base
@@ -138,16 +138,32 @@ can be dispatched."
                     :model-discovery-function #'deslop-codex-probe-models
                     :require-sse t
                    :display-name "OpenAI"))
-            ('openrouter
-             '(:url "https://openrouter.ai/api/v1/chat/completions"
-               :model "openai/gpt-4o-mini"
-               :max-concurrency 4
-               :parallel nil
-               :temperature 0.2
-               :auth-source-host "openrouter.ai"
-               :auth-source-user "deslop"
-               :auth-source-port 443
-               :require-sse t))
+             ('openrouter
+              '(:url "https://openrouter.ai/api/v1/chat/completions"
+                :batch-url "https://openrouter.ai/api/v1/batches"
+                :batch-endpoint "/v1/chat/completions"
+                :transport auto
+                :model "openai/gpt-4o-mini"
+                :max-concurrency 4
+                :parallel nil
+                :temperature 0.2
+                :auth-source-host "openrouter.ai"
+                :auth-source-user "deslop"
+                :auth-source-port 443
+                :require-sse t))
+             ('openrouter-batch
+              '(:url "https://openrouter.ai/api/v1/chat/completions"
+                :batch-url "https://openrouter.ai/api/v1/batches"
+                :batch-endpoint "/v1/chat/completions"
+                :transport openrouter-batch
+                :model "openai/gpt-4o-mini"
+                :max-concurrency 16
+                :parallel t
+                :temperature 0.2
+                :auth-source-host "openrouter.ai"
+                :auth-source-user "deslop"
+                :auth-source-port 443
+                :require-sse nil))
             (_
              (list :url deslop-provider-endpoint
                    :model deslop-provider-model
@@ -218,7 +234,8 @@ can be dispatched."
     (let ((downcased (downcase name)))
       (cond
        ((member downcased '("openai" "openai.com")) "OpenAI")
-       ((member downcased '("openrouter" "openrouter.ai")) "OpenRouter")
+       ((member downcased '("openrouter" "openrouter.ai" "openrouter-batch"))
+        "OpenRouter")
        ((member downcased '("llama.cpp" "llama-cpp")) "llama.cpp")
        (t name)))))
 

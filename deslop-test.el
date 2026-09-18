@@ -147,6 +147,8 @@ process for cancellation tests."
 (defun deslop-test--reset ()
   "Reset global state and clean test-created processes and buffers."
   (deslop-abort-queue)
+  (when (fboundp #'deslop-openrouter-batch-abort)
+    (deslop-openrouter-batch-abort))
   (when (buffer-live-p deslop-rubber-duck--buffer)
     (kill-buffer deslop-rubber-duck--buffer))
   (setq deslop-rubber-duck--buffer nil)
@@ -165,7 +167,11 @@ process for cancellation tests."
          deslop--aborting nil
          deslop--dispatching nil
          deslop--next-job-id 0
+         deslop-openrouter-batch--next-request-id 0
+         deslop-openrouter-batch--known-groups nil
          deslop-summary--next-source-id 0)
+  (when (boundp 'deslop-openrouter-batch--groups)
+    (clrhash deslop-openrouter-batch--groups))
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
   (deslop-provider-clear-runtime-settings)
@@ -4438,6 +4444,146 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should-not deslop-rubber-duck--reviewed))
       (with-current-buffer deslop-history--buffer-object
         (should (string-match-p "Accurate main idea" (buffer-string)))))))
+
+(ert-deftest deslop-test/openrouter-batch-profile-has-separate-endpoints ()
+  (let ((profile (deslop-provider-profile 'openrouter-batch)))
+    (should (eq (plist-get profile :transport) 'openrouter-batch))
+    (should (string= (plist-get profile :url)
+                     "https://openrouter.ai/api/v1/chat/completions"))
+    (should (string= (plist-get profile :batch-url)
+                     "https://openrouter.ai/api/v1/batches"))
+    (should (string= (plist-get profile :batch-endpoint)
+                     "/v1/chat/completions"))
+    (should (equal (plist-get (deslop-provider-profile 'openrouter)
+                             :transport)
+                   'auto))))
+
+(ert-deftest deslop-test/openrouter-batch-body-is-non-streaming-and-ordered ()
+  (let* ((deslop-max-output-tokens 64)
+         (profile (deslop-provider-profile 'openrouter-batch))
+         (group (deslop-openrouter-batch--make-group :profile profile))
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-1"
+           :messages '( ("system" . "rules") ("user" . "question"))
+           :profile profile)))
+    (setf (deslop-openrouter-batch--group-requests group) (list request))
+    (let* ((encoded (deslop-openrouter-batch--body group))
+           (text (decode-coding-string encoded 'utf-8))
+           (body (deslop-protocol-json-read-string text))
+           (request-body
+            (deslop-protocol-json-get
+             "body"
+             (aref (deslop-protocol-json-get "requests" body) 0))))
+      (should (string-match-p
+               "\"endpoint\".*\"model\".*\"requests\"" text))
+      (should (string= (deslop-protocol-json-get "endpoint" body)
+                       "/v1/chat/completions"))
+      (should (string= (deslop-protocol-json-get "custom_id"
+                                                 (aref
+                                                  (deslop-protocol-json-get
+                                                   "requests" body)
+                                                  0))
+                       "deslop-job-1"))
+      (should-not (deslop-protocol-json-has-key-p "stream" request-body))
+      (should-not (deslop-protocol-json-has-key-p "model" request-body))
+      (should (= (deslop-protocol-json-get "max_tokens" request-body) 64)))))
+
+(ert-deftest deslop-test/openrouter-batch-completion-routes-by-custom-id ()
+  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+         (events nil)
+         (result nil)
+         (failure nil)
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-2"
+           :profile profile
+           :callbacks
+           (list :on-event (lambda (event) (push event events))
+                 :on-done (lambda (value) (setq result value))
+                 :on-error (lambda (value) (setq failure value)))))
+         (group
+          (deslop-openrouter-batch--make-group
+           :profile profile :requests (list request)))
+         (payload
+          (deslop-protocol-json-read-string
+           (concat
+            "{\"status\":\"completed\","
+            "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3},"
+            "\"results\":["
+            "{\"custom_id\":\"unrelated\",\"error\":{\"message\":\"ignored\"}},"
+            "{\"custom_id\":\"deslop-job-2\",\"response\":{"
+            "\"status_code\":200,\"body\":{\"model\":\"actual/model\","
+            "\"choices\":[{\"message\":{\"content\":\"answer\","
+            "\"reasoning_content\":\"thought\"},\"finish_reason\":\"stop\"}]}}}]}"))))
+    (deslop-openrouter-batch--finish-completed group payload)
+    (should-not failure)
+    (should (string= (plist-get result :content) "answer"))
+    (should (string= (plist-get result :thinking) "thought"))
+    (should (string= (plist-get result :model) "actual/model"))
+    (should (= (plist-get result :tokens) 3))
+    (should (cl-find-if (lambda (event) (eq (plist-get event :type) :metadata))
+                        events))
+    (should (cl-find-if (lambda (event) (eq (plist-get event :type) :usage))
+                        events))))
+
+(ert-deftest deslop-test/openrouter-batch-result-failure-does-not-wedge-group ()
+  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+         (failure nil)
+         (request
+          (deslop-openrouter-batch--make-request
+           :custom-id "deslop-job-3"
+           :profile profile
+           :callbacks (list :on-error (lambda (value) (setq failure value)))))
+         (group
+          (deslop-openrouter-batch--make-group
+           :profile profile :requests (list request)))
+         (payload
+          (deslop-protocol-json-read-string
+           "{\"status\":\"completed\",\"results\":[{\"custom_id\":\"deslop-job-3\",\"error\":{\"message\":\"provider failed\"}}]}")))
+    (deslop-openrouter-batch--finish-completed group payload)
+    (should (deslop-error-p failure))
+    (should (eq (deslop-error-kind failure) 'provider))
+    (should-not (deslop-openrouter-batch--group-stage group))
+    (should (deslop-openrouter-batch--group-terminal group))))
+
+(ert-deftest deslop-test/openrouter-batch-request-cancellation-cleans-pending-group ()
+  (deslop-test--reset)
+  (let ((profile (plist-put (deslop-provider-profile 'openrouter-batch)
+                            :batch-window 60))
+        (cancel nil)
+        (done nil)
+        (failure nil))
+    (unwind-protect
+        (progn
+          (deslop-openrouter-batch-default
+           '(("user" . "question"))
+           (list :on-start (lambda (function) (setq cancel function))
+                 :on-done (lambda (_) (setq done t))
+                 :on-error (lambda (_) (setq failure t)))
+           profile)
+          (should (functionp cancel))
+          (funcall cancel)
+          (should-not done)
+          (should-not failure)
+          (should (= (hash-table-count deslop-openrouter-batch--groups) 0))
+          (should-not deslop-openrouter-batch--known-groups))
+      (deslop-openrouter-batch-abort))))
+
+(ert-deftest deslop-test/openrouter-batch-json-command-uses-json-accept ()
+  (let ((command
+         (deslop-curl-json-command
+          '(:url "https://openrouter.ai/api/v1/chat/completions"
+            :auth-source-host "openrouter.ai"
+            :auth-source-user "deslop"
+            :auth-source-port 443)
+          "/tmp/headers" nil "GET" "application/json" nil
+          "https://openrouter.ai/api/v1/batches/batch_1")))
+    (should (member "Accept: application/json" command))
+    (should-not (member "Accept: text/event-stream" command))
+    (should-not (member "@-" command))
+    (should (equal (cadr (member "--url" command))
+                   "https://openrouter.ai/api/v1/batches/batch_1"))))
 
 (provide 'deslop-test)
 

@@ -95,6 +95,7 @@
   (deslop--update-mode-line buffer))
 
 (add-hook 'deslop-queue-abort-functions #'deslop-provider-abort-discovery)
+(add-hook 'deslop-queue-abort-functions #'deslop-openrouter-batch-abort)
 (add-hook 'deslop-queue-abort-functions #'deslop-ui-clear-all)
 (add-hook 'deslop-job-event-functions #'deslop-ui-job-event)
 (add-hook 'deslop-job-event-functions #'deslop--mode-line-job-event)
@@ -117,9 +118,10 @@
           (files '("deslop-core.el" "deslop-operation.el" "deslop-protocol.el"
                    "deslop-transport.el" "deslop-curl.el" "deslop-provider.el"
                    "deslop-codex.el"
-                  "deslop-review.el" "deslop-project.el" "deslop-target.el"
-                  "deslop-ui.el"
-                  "deslop-llm.el" "deslop-queue.el" "deslop-edit.el"
+                   "deslop-review.el" "deslop-project.el" "deslop-target.el"
+                   "deslop-ui.el"
+                   "deslop-openrouter-batch.el" "deslop-llm.el"
+                   "deslop-queue.el" "deslop-edit.el"
                   "deslop-tools.el"
                   "deslop-summary.el" "deslop-operations.el"
                   "deslop-commands.el" "deslop-rubber-duck.el" "deslop-history.el"
