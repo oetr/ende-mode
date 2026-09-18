@@ -87,7 +87,9 @@
              (format "file:%s::%d" file line)
            (format "deslop-buffer:%s::%d"
                    (deslop-summary-source-id source) line))))
-    (org-link-make-string target (or description "source"))))
+    (if (fboundp 'org-make-link-string)
+        (org-make-link-string target (or description "source"))
+      (format "[[%s][%s]]" target (or description "source")))))
 
 (defun deslop-summary--rewrite-citations (source content)
   "Replace valid source citation placeholders in CONTENT for SOURCE."
