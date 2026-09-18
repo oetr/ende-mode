@@ -1,4 +1,42 @@
-* Make buffer origin known to operations
-- It matters if we start from a .lisp or from a .org buffer
-- The agent should know the buffer name at least
-- What else is useful to know?
+* DONE Provide full paths when summarizing and allow summary to reference original file/buffer
+- For a summary, I want summarizing deslop agents to reference original documents, where applicable, and the user to follow the links, so that they can directly check the agent's claims
+- for that we need to first provide the actual file name path, so that the org mode links can work
+- optional: make this work for TRAMP, but I don't expect issues if the path is directly provided in correct syntax
+
+#+begin_src org
+Here are some excerpts from a conversation I had with an LLM:
+
+In org mode, file links can be done with `::` followed by the line number:
+
+[[file:/home/peter/Dropbox-dec/blog/blog/gng.rkt::42][open at line 42]]
+
+You can also use a relative path:
+
+[[file:./file.txt::10][open file.txt at line 10]]
+
+When you follow the link, Emacs opens the file and moves point to the specified line. You can also use a search string instead of a line number if that is more robust:
+
+[[file:/path/to/file::text to find][open at matching text]]
+
+
+Ok, what about linking to buffers?
+Org does not have a dedicated `buffer:` link type, but you can use an `elisp:` link:
+
+[[elisp:(switch-to-buffer "*Messages*")][open the *Messages* buffer]]
+
+To jump to a particular line, combine `switch-to-buffer` with `goto-char` and `forward-line`:
+
+[[elisp:(progn (switch-to-buffer "my-buffer") (goto-char (point-min)) (forward-line 41))][open my-buffer at line 42]]
+
+Be aware that following `elisp:` links may require confirmation, depending on your Org security settings.
+#+end_src
+
+
+The solution for linking to file:line_number is quite clear.
+Jumping to buffers using elisp is a recipe for disaster, since it can do arbitrary code execution.
+
+There are several options I see:
+- tell the agent to use "buffer:*Buffer name*::line" as a placeholder, and we will post-process the output and insert elisp: code ourselves that does the right thing
+- highjack org mode follow link function that supports this syntax
+
+Are there better options? WDYT?
