@@ -164,7 +164,8 @@ process for cancellation tests."
          deslop--active-jobs nil
          deslop--aborting nil
          deslop--dispatching nil
-         deslop--next-job-id 0)
+         deslop--next-job-id 0
+         deslop-summary--next-source-id 0)
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
   (deslop-provider-clear-runtime-settings)
@@ -177,6 +178,7 @@ process for cancellation tests."
    (when (buffer-live-p deslop-summary--buffer-object)
      (kill-buffer deslop-summary--buffer-object))
    (setq deslop-summary--buffer-object nil)
+   (clrhash deslop-summary--source-buffers)
    (deslop-ui-clear-all))
 
 (ert-deftest deslop-test/queue-snapshots-do-not-expose-list-state ()
@@ -747,26 +749,37 @@ process for cancellation tests."
           (with-current-buffer deslop-summary-buffer-name
             (should (eq major-mode 'org-mode))
             (should (string=
-                     (buffer-string)
-                     (concat "* *summary-source* - 2026-09-18 11:10:07 - "
-                             "gpt-5.6-luna\n"
-                             "** Key point\n- short summary")))
+                      (buffer-string)
+                      (concat "* [[deslop-buffer:s1::1][*summary-source*]]"
+                              " - 2026-09-18 11:10:07 - "
+                              "gpt-5.6-luna\n"
+                              "** Key point\n- short summary")))
             (should-not (deslop-review--overlays-in-buffer))))))))
 
 (ert-deftest deslop-test/summary-entries-are-appended-as-org-headings ()
   (deslop-test--reset)
-  (deslop-summary-buffer)
-  (cl-letf (((symbol-function 'format-time-string)
-             (lambda (&rest _) "2026-09-18 11:10:07")))
-    (deslop-summary-append "first.org" "First summary" '(:model "one"))
-    (deslop-summary-append "second.org" "Second summary" '(:model "two")))
+  (let ((first (generate-new-buffer "first.org"))
+        (second (generate-new-buffer "second.org")))
+    (unwind-protect
+        (let ((first-source (deslop-summary-source-capture first 1 1))
+              (second-source (deslop-summary-source-capture second 1 1)))
+          (cl-letf (((symbol-function 'format-time-string)
+                     (lambda (&rest _) "2026-09-18 11:10:07")))
+            (deslop-summary-append
+             first-source "First summary" '(:model "one"))
+            (deslop-summary-append
+             second-source "Second summary" '(:model "two"))))
+      (kill-buffer first)
+      (kill-buffer second)))
   (with-current-buffer deslop-summary-buffer-name
     (should (string=
              (buffer-string)
-             (concat "* first.org - 2026-09-18 11:10:07 - one\n"
-                     "First summary\n\n"
-                     "* second.org - 2026-09-18 11:10:07 - two\n"
-                     "Second summary")))))
+              (concat "* [[deslop-buffer:s1::1][first.org]]"
+                      " - 2026-09-18 11:10:07 - one\n"
+                      "First summary\n\n"
+                      "* [[deslop-buffer:s2::1][second.org]]"
+                      " - 2026-09-18 11:10:07 - two\n"
+                      "Second summary")))))
 
 (ert-deftest deslop-test/summarize-reports-progress-and-preserves-buffer-point ()
   (deslop-test--reset)
@@ -805,8 +818,10 @@ process for cancellation tests."
             (deslop-test--complete-call call)))
         (should (eq (deslop-job-state job) 'completed))
         (with-current-buffer deslop-summary-buffer-name
-          (should (string-prefix-p
-                    (format "* %s - 2026-09-18 11:10:07 - async-model\nsummary"
+           (should (string-prefix-p
+                    (format (concat "* [[deslop-buffer:s1::1][%s]]"
+                                    " - 2026-09-18 11:10:07"
+                                    " - async-model\nsummary")
                             source-name)
                     (buffer-string))))))))
 
@@ -814,13 +829,100 @@ process for cancellation tests."
   (deslop-test--reset)
   (with-current-buffer (deslop-summary-buffer)
     (insert "existing"))
-  (should-error (deslop-summary-append "*phrases*" 'invalid nil))
+  (let ((source (deslop-summary-source-capture (current-buffer) 1 1)))
+    (should-error (deslop-summary-append source 'invalid nil)))
   (with-current-buffer deslop-summary-buffer-name
     (should (string= (buffer-string) "existing"))))
 
 (ert-deftest deslop-test/summarize-requests-org-mode-syntax ()
   (should (string-match-p "Org mode syntax" deslop-summarize-system))
-  (should (string-match-p "level-two or deeper" deslop-summarize-system)))
+  (should (string-match-p "deslop-source:LINE" deslop-summarize-system)))
+
+(ert-deftest deslop-test/summarize-rewrites-file-citations-locally ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm
+          '("Claim [[deslop-source:3][source]]."))))
+    (deslop-test--with-buffer "ignored\nfirst\nsecond"
+      (setq-local buffer-file-name "/tmp/deslop source.org")
+      (deslop-test--select 9 (point-max) (point-max))
+      (deslop-summarize)
+      (let ((prompt (deslop-test--user-message
+                     (car deslop-test--prompts))))
+        (should (string-match-p "Source lines: 2-3" prompt))
+        (should (string-match-p "2 | first\n3 | second" prompt))
+        (should-not (string-match-p "/tmp/deslop source\\.org" prompt)))))
+  (with-current-buffer deslop-summary-buffer-name
+    (should
+     (string-match-p
+      (regexp-quote
+       "[[file:/tmp/deslop source.org::2][/tmp/deslop source.org]]")
+      (buffer-string)))
+    (should
+     (string-match-p
+      (regexp-quote "Claim [[file:/tmp/deslop source.org::3][source]].")
+      (buffer-string)))))
+
+(ert-deftest deslop-test/summarize-preserves-tramp-paths-in-local-links ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm
+          '("Remote claim [[deslop-source:1][source]]"))))
+    (deslop-test--with-buffer "remote"
+      (setq-local buffer-file-name "/ssh:user@example:/tmp/remote file.org")
+      (deslop-summarize)
+      (should-not
+       (string-match-p
+        "ssh:user@example"
+        (deslop-test--user-message (car deslop-test--prompts))))))
+  (with-current-buffer deslop-summary-buffer-name
+    (should
+     (string-match-p
+      (regexp-quote
+       "[[file:/ssh:user@example:/tmp/remote file.org::1][source]]")
+      (buffer-string)))))
+
+(ert-deftest deslop-test/summarize-neutralizes-out-of-range-citations ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function
+         (deslop-test--fake-llm
+          '("Claim [[deslop-source:99][source]]."))))
+    (deslop-test--with-buffer "one line"
+      (deslop-summarize)))
+  (with-current-buffer deslop-summary-buffer-name
+    (should (string-match-p (regexp-quote "Claim [source line 99].")
+                            (buffer-string)))
+    (should-not (string-match-p "deslop-source:99" (buffer-string)))))
+
+(ert-deftest deslop-test/summary-buffer-links-track-renamed-live-buffers ()
+  (deslop-test--reset)
+  (let ((source-buffer (generate-new-buffer "deslop-link-source")))
+    (unwind-protect
+        (let (source)
+          (with-current-buffer source-buffer
+            (insert "first\nsecond\n")
+            (setq source
+                  (deslop-summary-source-capture
+                   source-buffer (point-min) (point-max)))
+            (rename-buffer "deslop-link-source-renamed" t))
+          (save-current-buffer
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _)
+                         (set-buffer buffer))))
+              (deslop-summary-follow-buffer-link
+               (format "%s::2" (deslop-summary-source-id source)) nil)
+              (should (eq (current-buffer) source-buffer))
+              (should (= (line-number-at-pos nil t) 2)))))
+      (kill-buffer source-buffer))))
+
+(ert-deftest deslop-test/summary-buffer-links-reject-killed-buffers ()
+  (deslop-test--reset)
+  (let* ((buffer (generate-new-buffer "deslop-dead-source"))
+         (source (deslop-summary-source-capture buffer 1 1))
+         (path (format "%s::1" (deslop-summary-source-id source))))
+    (kill-buffer buffer)
+    (should-error (deslop-summary-follow-buffer-link path nil)
+                  :type 'user-error)))
 
 (ert-deftest deslop-test/summary-uses-reported-model ()
   (deslop-test--reset)
@@ -838,9 +940,10 @@ process for cancellation tests."
           (should (eq (deslop-job-state job) 'completed)))))
     (with-current-buffer deslop-summary-buffer-name
       (should (string-prefix-p
-               (concat "* reported-source - 2026-09-18 11:10:07 - "
-                       "actual-model\n")
-               (buffer-string))))))
+                (concat "* [[deslop-buffer:s1::1][reported-source]]"
+                        " - 2026-09-18 11:10:07 - "
+                        "actual-model\n")
+                (buffer-string))))))
 
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)

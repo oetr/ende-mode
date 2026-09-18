@@ -84,6 +84,8 @@ Use Org conventions:
 
 Preserve identifiers, commands, paths, and code exactly.
 
+The source text is prefixed with its absolute line numbers in the form `LINE | text`. These prefixes are metadata, not part of the source. Cite relevant concrete claims and excerpts using exactly `[[deslop-source:LINE][source]]`, where LINE is one of the supplied source lines. Do not invent another citation target or link type.
+
 When quoting Org source inside an Org source block, escape lines that Org could interpret structurally. Prefix a comma immediately before every quoted line beginning with *, ,*, #+, or ,#+.
 
 Example:
@@ -865,16 +867,24 @@ PREVIOUS contains failures from the preceding structured pass."
   "Execute a summarize JOB and write its result to a separate buffer."
   (let* ((target (deslop-job-target job))
          (buffer (deslop-target-buffer target))
-         (source-name (buffer-name buffer)))
+         (summary-source nil))
     (deslop--run-selected-operation
      job
      deslop-summarize-system
-     (lambda (source) (format "Text to summarize:\n%s" source))
+     (lambda (source)
+       (setq summary-source
+             (deslop-summary-source-capture
+              buffer (deslop-target-start target) (deslop-target-end target)))
+       (format "Source lines: %d-%d\n\nLine-numbered text to summarize:\n%s"
+               (deslop-summary-source-start-line summary-source)
+               (deslop-summary-source-end-line summary-source)
+               (deslop-summary-number-source
+                source (deslop-summary-source-start-line summary-source))))
      (lambda (result)
        (deslop--apply-result
         job result
         (lambda (content display)
-          (deslop-summary-append source-name content display))
+          (deslop-summary-append summary-source content display))
         t)))))
 
 (deslop-register-job-handler 'insert #'deslop--run-insert)
