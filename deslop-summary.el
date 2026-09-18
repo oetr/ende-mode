@@ -11,7 +11,7 @@
 ;;; Code:
 
 (require 'deslop-core)
-(require 'deslop-review)
+(require 'org)
 
 (defcustom deslop-summary-buffer-name "*deslop-summary*"
   "Name of the buffer used for summaries."
@@ -30,32 +30,27 @@
         (deslop-owned-buffer deslop-summary--buffer-object
                               deslop-summary-buffer-name
                               'deslop-summary--owned-buffer
-                              #'text-mode)))
+                              #'org-mode)))
 
 (defun deslop-summary-append (source-name content display)
   "Append CONTENT for SOURCE-NAME to the summary buffer.
-DISPLAY supplies the provider label.  Return the review overlay."
-  (let ((summary-buffer (deslop-summary-buffer))
-        (review-overlay nil))
+DISPLAY supplies the model label."
+  (let ((summary-buffer (deslop-summary-buffer)))
     (with-current-buffer summary-buffer
       (let ((inhibit-read-only t))
         (save-restriction
           (widen)
           (save-excursion
             (goto-char (point-max))
-            (setq review-overlay
-                  (atomic-change-group
-                    (let ((review-start (point)))
-                      (unless (bobp) (insert "\n\n"))
-                      (insert (format "Summary for %s:\n" source-name))
-                      (insert content)
-                      (deslop-review-create-overlay
-                       summary-buffer review-start (point)
-                       (plist-get display :model)
-                       (plist-get display :client)
-                       ""))))))))
+            (atomic-change-group
+              (unless (bobp) (insert "\n\n"))
+              (insert (format "* %s - %s - %s\n"
+                              source-name
+                              (format-time-string "%Y-%m-%d %H:%M:%S")
+                              (or (plist-get display :model) "unknown")))
+              (insert content))))))
     (deslop-ignore-errors #'display-buffer summary-buffer)
-    review-overlay))
+    t))
 
 (provide 'deslop-summary)
 

@@ -730,32 +730,43 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/summarize-opens-buffer ()
   (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("short summary")))
+  (let ((deslop-provider-model "gpt-5.6-luna")
+        (deslop-llm-function
+         (deslop-test--fake-llm '("** Key point\n- short summary")))
         (displayed nil))
     (cl-letf (((symbol-function 'display-buffer)
                (lambda (buffer &rest _)
-                 (setq displayed buffer))))
+                 (setq displayed buffer)))
+              ((symbol-function 'format-time-string)
+               (lambda (&rest _) "2026-09-18 11:10:07")))
       (deslop-test--with-buffer "long source"
+        (rename-buffer "*summary-source*" t)
         (let ((job (deslop-summarize)))
           (should (eq (deslop-job-state job) 'completed))
           (should (eq displayed (get-buffer deslop-summary-buffer-name)))
-          (should (string-match-p
-                   "short summary"
-                   (with-current-buffer deslop-summary-buffer-name
-                     (buffer-string))))
           (with-current-buffer deslop-summary-buffer-name
-            (should (cl-some #'deslop-review-overlay-p
-                             (overlays-in (point-min) (point-max))))))))))
+            (should (eq major-mode 'org-mode))
+            (should (string=
+                     (buffer-string)
+                     (concat "* *summary-source* - 2026-09-18 11:10:07 - "
+                             "gpt-5.6-luna\n"
+                             "** Key point\n- short summary")))
+            (should-not (deslop-review--overlays-in-buffer))))))))
 
-(ert-deftest deslop-test/reject-summary-removes-entire-appended-block ()
+(ert-deftest deslop-test/summary-entries-are-appended-as-org-headings ()
   (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("short summary"))))
-    (deslop-test--with-buffer "source"
-      (deslop-summarize))
-    (with-current-buffer deslop-summary-buffer-name
-      (goto-char (point-max))
-      (deslop-reject-output)
-      (should (string-empty-p (buffer-string))))))
+  (deslop-summary-buffer)
+  (cl-letf (((symbol-function 'format-time-string)
+             (lambda (&rest _) "2026-09-18 11:10:07")))
+    (deslop-summary-append "first.org" "First summary" '(:model "one"))
+    (deslop-summary-append "second.org" "Second summary" '(:model "two")))
+  (with-current-buffer deslop-summary-buffer-name
+    (should (string=
+             (buffer-string)
+             (concat "* first.org - 2026-09-18 11:10:07 - one\n"
+                     "First summary\n\n"
+                     "* second.org - 2026-09-18 11:10:07 - two\n"
+                     "Second summary")))))
 
 (ert-deftest deslop-test/summarize-reports-progress-and-preserves-buffer-point ()
   (deslop-test--reset)
@@ -779,7 +790,8 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/summarize-captures-source-name-across-async-callback ()
   (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
+  (let ((deslop-provider-model "async-model")
+        (deslop-llm-function (deslop-test--fake-llm '("summary") t)))
     (with-temp-buffer
       (rename-buffer "*phrases*" t)
       (insert "source")
@@ -788,22 +800,47 @@ process for cancellation tests."
              (call (car deslop-test--calls)))
         (rename-buffer "*renamed-phrases*" t)
         (with-temp-buffer
-          (deslop-test--complete-call call))
+          (cl-letf (((symbol-function 'format-time-string)
+                     (lambda (&rest _) "2026-09-18 11:10:07")))
+            (deslop-test--complete-call call)))
         (should (eq (deslop-job-state job) 'completed))
         (with-current-buffer deslop-summary-buffer-name
           (should (string-prefix-p
-                   (format "Summary for %s:\nsummary" source-name)
-                   (buffer-string))))))))
+                    (format "* %s - 2026-09-18 11:10:07 - async-model\nsummary"
+                            source-name)
+                    (buffer-string))))))))
 
 (ert-deftest deslop-test/summary-append-is-atomic ()
   (deslop-test--reset)
   (with-current-buffer (deslop-summary-buffer)
     (insert "existing"))
-  (cl-letf (((symbol-function 'deslop-review-create-overlay)
-             (lambda (&rest _) (error "Mock review failure"))))
-    (should-error (deslop-summary-append "*phrases*" "summary" nil)))
+  (should-error (deslop-summary-append "*phrases*" 'invalid nil))
   (with-current-buffer deslop-summary-buffer-name
     (should (string= (buffer-string) "existing"))))
+
+(ert-deftest deslop-test/summarize-requests-org-mode-syntax ()
+  (should (string-match-p "Org mode syntax" deslop-summarize-system))
+  (should (string-match-p "level-two or deeper" deslop-summarize-system)))
+
+(ert-deftest deslop-test/summary-uses-reported-model ()
+  (deslop-test--reset)
+  (let ((deslop-provider-model "configured-model")
+        (deslop-llm-function
+         (deslop-test--fake-llm
+          '((:content "summary"
+             :reported-model "actual-model"
+             :reported-provider "llama.cpp")))))
+    (cl-letf (((symbol-function 'format-time-string)
+               (lambda (&rest _) "2026-09-18 11:10:07")))
+      (deslop-test--with-buffer "source"
+        (rename-buffer "reported-source" t)
+        (let ((job (deslop-summarize)))
+          (should (eq (deslop-job-state job) 'completed)))))
+    (with-current-buffer deslop-summary-buffer-name
+      (should (string-prefix-p
+               (concat "* reported-source - 2026-09-18 11:10:07 - "
+                       "actual-model\n")
+               (buffer-string))))))
 
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)

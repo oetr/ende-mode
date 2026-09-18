@@ -62,7 +62,38 @@ return price * (1 + tax)"
   "System prompt instructions for improving a target region.")
 
 (defconst deslop-summarize-system
-  "You summarize the supplied text accurately and concisely. Return ONLY the summary, without markdown fences or commentary."
+  "Summarize the supplied text accurately and concisely using Org mode syntax. Use not more than one sentence per line, unless the sentences are short. Prefer using vertical space over horizontal space. Give the user the best possible experience by structuring your output into paragraphs, lists, code blocks, when applicable. Be creative! Generate elegant, and readable text.
+
+Know your audience---given your input, what does the user most likely want? If it is pure source code from a pure source code file, what does the user want? If it is a text file, what does the user want? (Don't tell me, just structure and focus your summary accordingly). Understand the combination of provided user input with the fact that the user wants a summary, and try to figure out what the user actually wants.
+
+Return only the summary. Do not add a title or 1-level headings. Never use Markdown syntax or fenced code blocks.
+
+Use Org conventions:
+- Use *bold* and /italic/ for emphasis.
+- Use ~code~ for inline code and =verbatim text= for literal text.
+- Org lists begin with - or 1, and can be nested. Use where approprate.
+- Use >1 level headings to structure your output like this:  `** <section title>` or if necessary `*** <deeper section title>`. But only when it helps to give the reader clarity.
+- Put multiline code in:
+  #+begin_src LANGUAGE
+  code
+  #+end_src
+- Put quoted prose in:
+  #+begin_quote
+  quoted text
+  #+end_quote
+
+Preserve identifiers, commands, paths, and code exactly.
+
+When quoting Org source inside an Org source block, escape lines that Org could interpret structurally. Prefix a comma immediately before every quoted line beginning with *, ,*, #+, or ,#+.
+
+Example:
+
+#+begin_src org
+,* Escaped heading
+,#+TITLE: Escaped keyword
+#+end_src
+
+Apply this escaping only to quoted Org source. Do not escape ordinary summary markup or the #+begin_src and #+end_src delimiters themselves."
   "System prompt instructions for summarizing a target region.")
 
 (defconst deslop-write-anywhere-system
@@ -336,10 +367,10 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
                                       error
                                     (error-message-string error)))))
 
-(defun deslop--apply-result (job result apply-function)
+(defun deslop--apply-result (job result apply-function &optional skip-review)
   "Apply RESULT for JOB with APPLY-FUNCTION and settle JOB.
-APPLY-FUNCTION receives trimmed content and display metadata and must return
-the review overlay it creates."
+APPLY-FUNCTION receives trimmed content and display metadata.  Unless
+SKIP-REVIEW is non-nil, it must return the review overlay it creates."
   (when (deslop-job-current-p job)
     (condition-case failure
         (let* ((content (deslop-trim-trailing
@@ -354,7 +385,8 @@ the review overlay it creates."
                           finish-reason)
                  (error "empty completion"))))
           (setq review-overlay (funcall apply-function content display))
-          (unless (deslop-review-overlay-p review-overlay)
+          (unless (or skip-review
+                      (deslop-review-overlay-p review-overlay))
             (error "generated output could not be marked for review"))
           (deslop-job-finish job result))
        ((error quit)
@@ -840,9 +872,10 @@ PREVIOUS contains failures from the preceding structured pass."
      (lambda (source) (format "Text to summarize:\n%s" source))
      (lambda (result)
        (deslop--apply-result
-         job result
-         (lambda (content display)
-           (deslop-summary-append source-name content display)))))))
+        job result
+        (lambda (content display)
+          (deslop-summary-append source-name content display))
+        t)))))
 
 (deslop-register-job-handler 'insert #'deslop--run-insert)
 (deslop-register-job-handler
