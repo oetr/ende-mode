@@ -284,6 +284,15 @@ metadata and configured profile values."
 (defvar deslop-provider--discovery-processes nil
   "Live provider discovery processes available for explicit cancellation.")
 
+(defconst deslop-provider--model-pricing-fields
+  '(("prompt" . :prompt)
+    ("completion" . :completion)
+    ("internal_reasoning" . :internal-reasoning)
+    ("input_cache_read" . :input-cache-read)
+    ("input_cache_write" . :input-cache-write)
+    ("input_cache_write_1h" . :input-cache-write-1h))
+  "JSON pricing fields retained for discovered models.")
+
 (defun deslop-provider--discovery-key (profile)
   "Return a non-secret cache key for provider PROFILE."
   (list (plist-get profile :url)
@@ -335,13 +344,32 @@ metadata and configured profile values."
      ((vectorp data) (append data nil))
      ((listp data) data))))
 
+(defun deslop-provider--model-pricing (entry)
+  "Return supported pricing fields from model ENTRY."
+  (let ((pricing (deslop-protocol-json-get "pricing" entry))
+        (result nil))
+    (when (hash-table-p pricing)
+      (dolist (field deslop-provider--model-pricing-fields)
+        (let ((value (gethash (car field) pricing)))
+          (when (or (stringp value) (numberp value))
+            (setq result
+                  (plist-put result (cdr field) (format "%s" value)))))))
+    result))
+
+(defun deslop-provider--model-detail (entry)
+  "Return display metadata for model ENTRY, or nil without a valid ID."
+  (let ((id (deslop-protocol-json-get "id" entry))
+        (name (deslop-protocol-json-get "name" entry)))
+    (when (and (stringp id) (not (string-empty-p id)))
+      (list :id id
+            :name (and (stringp name) (not (string-empty-p name)) name)
+            :pricing (deslop-provider--model-pricing entry)))))
+
 (defun deslop-provider--discovery-metadata (profile payload)
   "Extract display metadata for PROFILE from discovery PAYLOAD."
   (let* ((entries (deslop-provider--model-entries payload))
-         (models (cl-loop for entry in entries
-                           for id = (deslop-protocol-json-get "id" entry)
-                          when (and (stringp id) (not (string-empty-p id)))
-                          collect id))
+         (details (delq nil (mapcar #'deslop-provider--model-detail entries)))
+         (models (mapcar (lambda (detail) (plist-get detail :id)) details))
          (requested (plist-get profile :model))
          (match (cl-find-if
                  (lambda (entry)
@@ -353,7 +381,10 @@ metadata and configured profile values."
                         (deslop-protocol-json-get "server" payload)))
           (model (or (and match (deslop-protocol-json-get "id" match))
                     requested))
-         (metadata (list :source :discovery :model model :models models)))
+          (metadata (list :source :discovery
+                          :model model
+                          :models models
+                          :model-details details)))
     (when (or match (stringp provider) models)
       (when (stringp provider)
         (setq metadata (plist-put metadata :provider provider)))
@@ -472,6 +503,45 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
   (let ((entry (deslop-provider--cached-entry
                 (deslop-provider--discovery-key profile))))
     (and entry (plist-get entry :metadata))))
+
+(defun deslop-provider-model-details (profile)
+  "Return copied cached model details for PROFILE, or nil."
+  (copy-tree (plist-get (deslop-provider-cached-metadata profile)
+                        :model-details)))
+
+(defun deslop-provider--price-per-million (value)
+  "Return numeric VALUE converted from dollars per token to dollars per million.
+Return nil when VALUE is not a nonnegative decimal price string."
+  (when (and (stringp value)
+             (string-match-p
+              "\\`[0-9]+\\(?:\\.[0-9]*\\)?\\(?:[eE][+-]?[0-9]+\\)?\\'"
+              value))
+    (* 1000000.0 (string-to-number value))))
+
+(defun deslop-provider--format-price (value)
+  "Format a dollars-per-token VALUE for a completion annotation."
+  (let ((per-million (deslop-provider--price-per-million value)))
+    (cond
+     ((null per-million) nil)
+     ((zerop per-million) "free")
+     (t (format "$%.3g/M" per-million)))))
+
+(defun deslop-provider-model-price-annotation (detail)
+  "Return a completion annotation for pricing in model DETAIL."
+  (let ((pricing (plist-get detail :pricing))
+        (parts nil))
+    (dolist (field '((:prompt . "in")
+                     (:completion . "out")
+                     (:input-cache-read . "cache-read")
+                     (:input-cache-write . "cache-write")
+                     (:input-cache-write-1h . "cache-write-1h")
+                     (:internal-reasoning . "reasoning")))
+      (let ((price (deslop-provider--format-price
+                    (plist-get pricing (car field)))))
+        (when price
+          (push (format "%s %s" (cdr field) price) parts))))
+    (when parts
+      (concat "  " (mapconcat #'identity (nreverse parts) "  ")))))
 
 (defun deslop-provider--cached-entry (key)
   "Return the live discovery cache entry for KEY, or nil when expired."

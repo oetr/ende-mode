@@ -2625,6 +2625,86 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (when (buffer-live-p buffer)
           (kill-buffer buffer)))))
 
+(ert-deftest deslop-test/selector-model-completion-updates-choice ()
+  (let ((buffer (generate-new-buffer " *deslop-selector-model-test*"))
+        (completion-call nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0
+                deslop-selector--models
+                '("remote/alpha" "remote/beta" "other/gamma")
+                deslop-selector--model-details
+                '((:id "remote/alpha" :name "Alpha Model"
+                   :pricing (:prompt "0.000003" :completion "0.000009"
+                             :input-cache-read "0.000001"
+                             :input-cache-write "0.000004"))
+                  (:id "remote/beta" :name "Beta Model")
+                  (:id "other/gamma" :name "Gamma Model"))
+                deslop-selector--model-index 0
+                deslop-selector--model-state :ready)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt collection predicate require-match
+                                     initial-input history default &rest _)
+                       (setq completion-call
+                             (list :prompt prompt
+                                   :collection collection
+                                   :predicate predicate
+                                   :require-match require-match
+                                   :initial-input initial-input
+                                   :history history
+                                   :default default
+                                   :extra-properties completion-extra-properties
+                                   :styles completion-styles
+                                   :ignore-case completion-ignore-case))
+                       "Beta Model (remote/beta)")))
+            (deslop-selector-select-model))
+          (should (equal (plist-get completion-call :prompt) "Model: "))
+          (should (equal (plist-get completion-call :collection)
+                         '("Alpha Model (remote/alpha)"
+                           "Beta Model (remote/beta)"
+                           "Gamma Model (other/gamma)")))
+          (should-not (member "input" (plist-get completion-call :collection)))
+          (should (plist-get completion-call :require-match))
+          (should-not (plist-get completion-call :initial-input))
+          (should (equal (plist-get completion-call :default)
+                         "Alpha Model (remote/alpha)"))
+          (let ((annotation
+                 (plist-get (plist-get completion-call :extra-properties)
+                            :annotation-function)))
+            (should (functionp annotation))
+            (should
+             (string=
+              (funcall annotation "Alpha Model (remote/alpha)")
+              "  in $3/M  out $9/M  cache-read $1/M  cache-write $4/M")))
+          (should (equal (plist-get completion-call :styles) '(substring)))
+          (should (plist-get completion-call :ignore-case))
+          (should (= deslop-selector--model-index 1))
+          (should (string= (deslop-selector--model-name) "remote/beta")))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-model-completion-rejects-incomplete-discovery ()
+  (let ((buffer (generate-new-buffer " *deslop-selector-model-loading-test*"))
+        (called nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0
+                deslop-selector--models '("remote/default")
+                deslop-selector--model-index 0
+                deslop-selector--model-state :loading)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (setq called t)
+                       "remote/default")))
+            (should-error (deslop-selector-select-model) :type 'user-error))
+          (should-not called))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest deslop-test/selector-uses-bottom-window-and-quits-it-on-close ()
   (let ((source (generate-new-buffer " *deslop-selector-window-source*"))
         (display-action nil)
@@ -2694,7 +2774,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (deslop-selector--render)
        (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
                       "i  - insert" "I  - insert anywhere"
-                       "w  - write anywhere" "m  - improve" "s  - summarize"
+                       "w  - write anywhere"
+                       "m  - select/search model"
+                       "s  - summarize"
                        "r  - rubber duck"
                       "RET       - confirm choice"
                       "C-c C-c   - approve all LLM changes"
@@ -2724,6 +2806,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                          #'deslop-selector-next-provider))
              (should (eq (key-binding (kbd "p"))
                          #'deslop-selector-previous-provider))
+             (should (eq (key-binding (kbd "m"))
+                         #'deslop-selector-select-model))
              (should (eq (key-binding (kbd "RET"))
                          #'deslop-selector-confirm))
              (should (eq (key-binding (kbd "C-c C-c"))
@@ -3501,15 +3585,43 @@ Use COMMAND for the process, or a silent sleep process by default."
          (metadata
           (deslop-provider--discovery-metadata
            profile
-             (deslop-protocol-json-read-string
-            "{\"object\":\"list\",\"data\":[{\"id\":\"llama3\",\"owned_by\":\"llama.cpp\"},{\"id\":\"llama4\"}]}"))))
+           (deslop-protocol-json-read-string
+            (concat
+             "{\"object\":\"list\",\"data\":["
+             "{\"id\":\"llama3\",\"name\":\"Llama 3\","
+             "\"owned_by\":\"llama.cpp\",\"pricing\":{"
+             "\"prompt\":\"0.000003\",\"completion\":\"0.000015\","
+             "\"input_cache_read\":\"0.000001\","
+             "\"input_cache_write\":\"0.000004\","
+             "\"input_cache_write_1h\":\"0.000005\","
+             "\"internal_reasoning\":\"0\"}},"
+             "{\"id\":\"llama4\"}]}")))))
     (should (string= (deslop-provider-models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
     (should (equal (plist-get metadata :models) '("llama3" "llama4")))
+    (let ((detail (car (plist-get metadata :model-details))))
+      (should (string= (plist-get detail :id) "llama3"))
+      (should (string= (plist-get detail :name) "Llama 3"))
+      (should (equal (plist-get detail :pricing)
+                     '(:prompt "0.000003"
+                       :completion "0.000015"
+                       :internal-reasoning "0"
+                       :input-cache-read "0.000001"
+                       :input-cache-write "0.000004"
+                       :input-cache-write-1h "0.000005"))))
     (should (string= (plist-get metadata :model) "llama3"))
     (should (string= (plist-get metadata :owner) "llama.cpp"))
     (should (string= (plist-get metadata :client) "llama.cpp"))))
+
+(ert-deftest deslop-test/provider-model-price-annotation-omits-invalid-fields ()
+  (should
+   (string=
+    (deslop-provider-model-price-annotation
+     '(:pricing (:prompt "0" :completion "0.000015"
+                         :input-cache-read "not-a-price"
+                         :input-cache-write-1h "0.000005")))
+    "  in free  out $15/M  cache-write-1h $5/M")))
 
 (ert-deftest deslop-test/provider-discovery-does-not-borrow-unrelated-owner ()
   (let* ((profile '(:url "https://example.test/v1/chat/completions"

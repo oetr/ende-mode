@@ -44,6 +44,9 @@
 (defvar-local deslop-selector--models nil
   "Model names available for the selected provider.")
 
+(defvar-local deslop-selector--model-details nil
+  "Cached display metadata for models available to the selected provider.")
+
 (defvar-local deslop-selector--model-index 0
   "Index of the selected model in the current selector.")
 
@@ -77,6 +80,31 @@
 (defun deslop-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
   (nth deslop-selector--model-index deslop-selector--models))
+
+(defun deslop-selector--model-detail (model)
+  "Return cached display metadata for MODEL, or nil."
+  (cl-find model deslop-selector--model-details
+           :key (lambda (detail) (plist-get detail :id))
+           :test #'equal))
+
+(defun deslop-selector--model-candidates ()
+  "Return completion display candidates paired with their model IDs."
+  (mapcar
+   (lambda (model)
+     (let* ((detail (deslop-selector--model-detail model))
+            (name (and detail
+                       (deslop-bounded-single-line
+                        (plist-get detail :name) 160 t)))
+            (display-model (deslop-bounded-single-line model 160 t))
+            (candidate (if (and name (not (string= name display-model)))
+                           (format "%s (%s)" name display-model)
+                         display-model)))
+       (cons candidate model)))
+   (cl-remove-if-not #'stringp deslop-selector--models)))
+
+(defun deslop-selector--candidate-for-model (model candidates)
+  "Return the completion candidate for MODEL in CANDIDATES."
+  (car (cl-find model candidates :key #'cdr :test #'equal)))
 
 (defun deslop-selector--index-of (value values)
   "Return the index of VALUE in VALUES, or nil."
@@ -125,7 +153,7 @@
       (insert "i  - insert\n"
               "I  - insert anywhere\n"
               "w  - write anywhere\n"
-              "m  - improve\n"
+              "m  - select/search model\n"
               "s  - summarize\n"
               "r  - rubber duck\n\n"
                "RET       - confirm choice\n"
@@ -169,19 +197,21 @@
       (deslop-selector--render)
       (let ((callback
              (lambda (models error)
-                (when (and (buffer-live-p selector-buffer)
-                           (with-current-buffer selector-buffer
-                             (= deslop-selector--probe-generation generation)))
-                  (setq completed t)
-                  (with-current-buffer selector-buffer
-                    (when (eq (deslop-selector--provider-name) provider)
-                      (setq deslop-selector--probe-cancel nil)
+               (when (and (buffer-live-p selector-buffer)
+                          (with-current-buffer selector-buffer
+                            (= deslop-selector--probe-generation generation)))
+                 (setq completed t)
+                 (with-current-buffer selector-buffer
+                   (when (eq (deslop-selector--provider-name) provider)
+                     (setq deslop-selector--probe-cancel nil)
                      (if error
                          (setq deslop-selector--model-state :error)
                        (deslop-selector--set-models
                         models (deslop-selector--model-name))
+                       (setq deslop-selector--model-details
+                             (deslop-provider-model-details profile))
                        (setq deslop-selector--model-state :ready))
-                      (deslop-selector--render)))))))
+                     (deslop-selector--render)))))))
         (let ((cancel (if (functionp probe)
                           (funcall probe callback)
                         (deslop-provider-probe-models profile callback))))
@@ -201,8 +231,10 @@
                          (plist-get deslop-selector--last-selection :model))))
     (deslop-selector--set-models
      (deslop-provider-models profile)
-     (or preferred (plist-get profile :model))))
-  (setq deslop-selector--model-state :ready)
+     (or preferred (plist-get profile :model)))
+    (setq deslop-selector--model-details
+          (deslop-provider-model-details profile))
+    (setq deslop-selector--model-state :ready))
   (deslop-selector--render)
   (deslop-selector--probe-current-provider))
 
@@ -234,6 +266,45 @@
   "Select the previous model for the current provider."
   (interactive)
   (deslop-selector--move-model -1))
+
+(defun deslop-selector-select-model ()
+  "Select a model for the current provider using completion.
+
+The model list is already populated by provider discovery.  Completion is
+performed locally so typing a search term never starts another network request."
+  (interactive)
+  (pcase deslop-selector--model-state
+    (:loading
+     (user-error "deslop model discovery is still loading"))
+    (:error
+     (user-error "deslop model discovery failed; change provider or retry"))
+    (_
+     (let ((models (cl-remove-if-not #'stringp deslop-selector--models)))
+       (unless models
+         (user-error "deslop has no models available for this provider"))
+       (let* ((candidates (deslop-selector--model-candidates))
+              (candidate-names (mapcar #'car candidates))
+              (current (deslop-selector--candidate-for-model
+                        (deslop-selector--model-name) candidates))
+              (details deslop-selector--model-details)
+              (completion-extra-properties
+               (list
+                :annotation-function
+                (lambda (candidate)
+                  (deslop-provider-model-price-annotation
+                   (cl-find (cdr (assoc candidate candidates)) details
+                            :key (lambda (detail) (plist-get detail :id))
+                            :test #'equal)))))
+              (completion-ignore-case t)
+              (completion-styles '(substring))
+              (choice (completing-read "Model: " candidate-names
+                                       nil t nil nil current))
+              (selected-model (cdr (assoc choice candidates)))
+              (index (cl-position selected-model models :test #'equal)))
+         (when (and selected-model index)
+           (setq deslop-selector--models models
+                 deslop-selector--model-index index)
+           (deslop-selector--render)))))))
 
 (defun deslop-selector-set-concurrency ()
   "Set and save the selected provider's session concurrency limit."
@@ -374,7 +445,7 @@
   (define-key deslop-selector-mode-map (kbd "i") #'deslop-selector-insert)
   (define-key deslop-selector-mode-map (kbd "w") #'deslop-selector-write-anywhere)
   (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
-  (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-improve)
+  (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-select-model)
   (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
   (define-key deslop-selector-mode-map (kbd "r") #'deslop-selector-rubber-duck)
   (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
@@ -412,6 +483,7 @@
             deslop-selector--providers providers
             deslop-selector--provider-index provider-index
             deslop-selector--models nil
+            deslop-selector--model-details nil
             deslop-selector--model-index 0
             deslop-selector--model-state :ready)
       (deslop-selector--set-provider provider-index))
