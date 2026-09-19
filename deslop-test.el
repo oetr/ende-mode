@@ -961,6 +961,7 @@ process for cancellation tests."
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
   (deslop-test--reset)
   (let ((deslop-provider-model "test-model")
+        (deslop-review-show-badges t)
         (deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
     (deslop-test--with-buffer "base"
       (goto-char (point-max))
@@ -1058,6 +1059,7 @@ process for cancellation tests."
 (ert-deftest deslop-test/response-metadata-wins-for-review-label ()
   (deslop-test--reset)
   (let ((deslop-provider-model "configured-model")
+        (deslop-review-show-badges t)
         (deslop-llm-function
          (deslop-test--fake-llm
           '((:content " generated"
@@ -4203,6 +4205,92 @@ Use COMMAND for the process, or a silent sleep process by default."
       (widen)
       (should (= (length (deslop-review--overlays-in-buffer)) 1))
       (deslop-review-delete-overlay second))))
+
+(ert-deftest deslop-test/review-badges-default-to-hidden ()
+  (deslop-test--reset)
+  (let ((default (default-value 'deslop-review-show-badges)))
+    (unwind-protect
+        (progn
+          (set-default 'deslop-review-show-badges nil)
+          (deslop-test--with-buffer "generated"
+            (let ((review (deslop-review-create-overlay
+                           (current-buffer) 1 2 "model" "client" "")))
+              (should-not (local-variable-p 'deslop-review-show-badges))
+              (should-not (overlay-get review 'before-string))
+              (should (deslop-review-overlay-p review))
+              (deslop-review-delete-overlay review))))
+      (set-default 'deslop-review-show-badges default))))
+
+(ert-deftest deslop-test/review-badge-toggle-preserves-review-highlight ()
+  (deslop-test--reset)
+  (set-face-foreground 'font-lock-keyword-face "#0000ff")
+  (set-face-background 'font-lock-keyword-face "#ffffff")
+  (let ((deslop-review-highlight t))
+    (deslop-test--with-buffer "defunLLM"
+      (add-text-properties 1 6 '(face font-lock-keyword-face))
+      (setq-local deslop-review-show-badges nil)
+      (let* ((review (deslop-review-create-overlay
+                      (current-buffer) 6 9 "model" "client" ""))
+             (face (overlay-get review 'face)))
+        (should (deslop-review-overlay-p review))
+        (should-not (overlay-get review 'before-string))
+        (should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
+        (deslop-toggle-review-badges)
+        (should deslop-review-show-badges)
+        (should (string-match-p "client model"
+                                (deslop-test--overlay-label review)))
+        (should (equal (overlay-get review 'face) face))
+        (deslop-toggle-review-badges)
+        (should-not deslop-review-show-badges)
+        (should-not (overlay-get review 'before-string))
+        (should (equal (overlay-get review 'face) face))
+        (goto-char (1+ (overlay-start review)))
+        (deslop-approve-output)
+        (should-not (deslop-review-overlay-p review))))))
+
+(ert-deftest deslop-test/review-badge-global-toggle-respects-local-values ()
+  (deslop-test--reset)
+  (let ((default (default-value 'deslop-review-show-badges))
+        (inherited (generate-new-buffer "*deslop-review-badges-inherited*"))
+        (local (generate-new-buffer "*deslop-review-badges-local*"))
+        inherited-review local-review)
+    (unwind-protect
+        (progn
+          (set-default 'deslop-review-show-badges nil)
+          (with-current-buffer inherited
+            (insert "generated")
+            (setq inherited-review
+                  (deslop-review-create-overlay
+                   (current-buffer) 1 2 "model" "client" "")))
+          (with-current-buffer local
+            (insert "generated")
+            (setq-local deslop-review-show-badges nil)
+            (setq local-review
+                  (deslop-review-create-overlay
+                   (current-buffer) 1 2 "model" "client" "")))
+          (with-current-buffer inherited
+            (deslop-toggle-review-badges t))
+          (should (default-value 'deslop-review-show-badges))
+          (with-current-buffer inherited
+            (should-not (local-variable-p 'deslop-review-show-badges))
+            (should (overlay-get inherited-review 'before-string)))
+          (with-current-buffer local
+            (should (local-variable-p 'deslop-review-show-badges))
+            (should-not (overlay-get local-review 'before-string))
+            (deslop-toggle-review-badges)
+            (should (overlay-get local-review 'before-string)))
+          (with-current-buffer inherited
+            (deslop-toggle-review-badges t))
+          (should-not (default-value 'deslop-review-show-badges))
+          (with-current-buffer inherited
+            (should-not (overlay-get inherited-review 'before-string)))
+          (with-current-buffer local
+            (should (overlay-get local-review 'before-string))))
+      (when (buffer-live-p inherited)
+        (kill-buffer inherited))
+      (when (buffer-live-p local)
+        (kill-buffer local))
+      (set-default 'deslop-review-show-badges default))))
 
 ;;;; Review highlight
 

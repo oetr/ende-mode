@@ -27,6 +27,14 @@ point and shifts its background slightly toward that foreground."
   :type 'number
   :group 'deslop)
 
+(defcustom deslop-review-show-badges nil
+  "Non-nil to display badges on pending review regions.
+This option is buffer-local.  Buffers without a local value use the global
+default."
+  :type 'boolean
+  :local t
+  :group 'deslop)
+
 (defvar deslop-review--keymap (make-sparse-keymap)
   "Keymap active while point is on generated output awaiting review.")
 
@@ -180,6 +188,26 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
       (propertize (format " [%s] " (mapconcat #'identity parts " "))
                   'face 'deslop-badge-face))))
 
+(defun deslop-review--refresh-badges (&optional buffer)
+  "Refresh review badges in BUFFER, or the current buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (dolist (overlay (deslop-review--overlays-in-buffer))
+          (overlay-put
+           overlay 'before-string
+           (and deslop-review-show-badges
+                (deslop-review--format-badge
+                 (overlay-get overlay 'client)
+                 (overlay-get overlay 'model)))))))))
+
+(defun deslop-review--refresh-inherited-badges ()
+  "Refresh review badges in buffers using the global visibility setting."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (unless (local-variable-p 'deslop-review-show-badges)
+        (deslop-review--refresh-badges)))))
+
 (defun deslop-review-overlay-p (overlay)
   "Return non-nil when OVERLAY marks output awaiting approval."
   (and (overlayp overlay)
@@ -224,7 +252,8 @@ the inserted characters are tinted using the review overlay's face."
     (when (deslop-review-overlaps-p buffer beg end)
       (error "Generated output overlaps an existing review"))
     ;; Resolve fallible presentation values before creating persistent state.
-    (let ((badge (deslop-review--format-badge client model))
+    (let ((badge (and deslop-review-show-badges
+                      (deslop-review--format-badge client model)))
           (style (and deslop-review-highlight
                       (deslop-review--style buffer beg)))
           (overlay nil)
@@ -262,6 +291,25 @@ the inserted characters are tinted using the review overlay's face."
       (deslop-review--notify-change buffer))))
 
 ;;;; Interactive Commands
+
+(defun deslop-toggle-review-badges (&optional global)
+  "Toggle visibility of pending review badges.
+Without a prefix argument, toggle badges in the current buffer and keep that
+choice local to it.  With a prefix argument, toggle the global default for
+buffers without an explicit local value."
+  (interactive "P")
+  (if global
+      (let ((show (not (default-value 'deslop-review-show-badges))))
+        (set-default 'deslop-review-show-badges show)
+        (deslop-review--refresh-inherited-badges)
+        (message "deslop: review badges %s by default"
+                 (if show "on" "off")))
+    (setq-local deslop-review-show-badges
+                (not deslop-review-show-badges))
+    (deslop-review--refresh-badges)
+    (message "deslop: review badges %s in %s"
+             (if deslop-review-show-badges "on" "off")
+             (buffer-name))))
 
 (defun deslop-review--overlays-in-target ()
   "Return active review overlays intersecting region or point."
