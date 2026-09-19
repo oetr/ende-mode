@@ -40,6 +40,12 @@ There are several options I see:
 - highjack org mode follow link function that supports this syntax
 
 Are there better options? WDYT?
+* DONE Add OpenRouter Batch API transport
+- OpenRouter has separate synchronous and Batch profiles.
+- Batch requests use =POST /api/v1/batches= with =/v1/chat/completions= as the
+  inner endpoint, then poll =GET /api/v1/batches/:id= for results.
+- The =openrouter= profile automatically hands off only for OpenRouter's exact
+  Batch-only model error; =openrouter-batch= selects Batch directly.
 * Tighten summary
 - optimize the prompt
 - improve the link format that the model should use
@@ -51,9 +57,24 @@ Are there better options? WDYT?
 - org mode should be by default on for "*deslop-history*" buffer
 - sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
 * Display how much money each request took approximately
-* DONE Add OpenRouter Batch API transport
-- OpenRouter has separate synchronous and Batch profiles.
-- Batch requests use =POST /api/v1/batches= with =/v1/chat/completions= as the
-  inner endpoint, then poll =GET /api/v1/batches/:id= for results.
-- The =openrouter= profile automatically hands off only for OpenRouter's exact
-  Batch-only model error; =openrouter-batch= selects Batch directly.
+* TODO Improve model picker design
+
+*Current design:*
+
+Claude Sonnet 4.5 (anthropic/claude-sonnet-4.5) in: $3/M  out: $15/M  cache-read: $0.30/M
+Claude Sonnet 4.4 (anthropic/claude-sonnet-4.4) in: $1/M  out: $10/M  cache-read: $0.30/M
+
+*Better design:*
+
+anthropic/claude-sonnet-4.5
+  in: $3  out: $15  cache-read: $0.30
+anthropic/claude-sonnet-4.4 
+  in: $1  out: $10  cache-read: $0.30
+
+
+I want in to color the numbers differently.
+in: grey, out red, cache-read: grey
+I want ot color model names golden.
+
+Maybe we can use the current theme here, so that the numbers are always visible.
+
