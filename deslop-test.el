@@ -2794,8 +2794,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                     :default default
                                     :extra-properties completion-extra-properties
                                     :styles completion-styles
-                                    :ignore-case completion-ignore-case
-                                    :format completions-format))
+                                    :ignore-case completion-ignore-case))
                         "remote/beta")))
              (deslop-selector-select-model))
            (should (equal (plist-get completion-call :prompt) "Model: "))
@@ -2823,7 +2822,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
              (should
               (string=
                (substring-no-properties priced-suffix)
-               "\n  in: $3  out: $9  cache-read: $1  cache-write: $4"))
+               "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
              (should (eq (get-text-property (string-match "in:" priced-suffix)
                                             'face priced-suffix)
                          'deslop-selector-price-muted-face))
@@ -2836,8 +2835,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                          'deslop-selector-price-muted-face))
              (should (equal (mapcar #'substring-no-properties
                                     (list (car unpriced) (nth 2 unpriced)))
-                            '("remote/beta" "")))
-             (should (eq (plist-get completion-call :format) 'vertical)))
+                            '("remote/beta" ""))))
             (should (equal (plist-get completion-call :styles) '(substring)))
             (should (plist-get completion-call :ignore-case))
             (should (= deslop-selector--model-index 1))

@@ -30,7 +30,7 @@
   :group 'deslop)
 
 (defface deslop-selector-model-face
-  '((t :inherit deslop-badge-face :weight bold))
+  '((t :inherit font-lock-constant-face :weight bold))
   "Face used for model IDs in the completion picker."
   :group 'deslop)
 
@@ -136,7 +136,7 @@ the discovered pricing metadata for those model IDs."
                         'deslop-selector-price-muted-face)))))))
        (list (propertize candidate 'face 'deslop-selector-model-face)
              ""
-             (if prices (concat "\n" prices) ""))))
+             (or prices ""))))
    completions))
 
 (defun deslop-selector--index-of (value values)
@@ -331,7 +331,6 @@ performed locally so typing a search term never starts another network request."
                     completions candidates details))))
                (completion-ignore-case t)
                (completion-styles '(substring))
-               (completions-format 'vertical)
                (choice (completing-read "Model: " candidate-names
                                         nil t nil nil current))
                (selected-model
