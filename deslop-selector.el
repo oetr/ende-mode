@@ -29,6 +29,21 @@
   :type 'integer
   :group 'deslop)
 
+(defface deslop-selector-model-face
+  '((t :inherit deslop-badge-face :weight bold))
+  "Face used for model IDs in the completion picker."
+  :group 'deslop)
+
+(defface deslop-selector-price-muted-face
+  '((t :inherit shadow))
+  "Face used for non-output prices in the completion picker."
+  :group 'deslop)
+
+(defface deslop-selector-price-output-face
+  '((t :inherit error))
+  "Face used for output prices in the completion picker."
+  :group 'deslop)
+
 (defvar deslop-selector--last-selection nil
   "Most recently confirmed selector choice as a provider/model plist.")
 
@@ -91,20 +106,38 @@
   "Return completion display candidates paired with their model IDs."
   (mapcar
    (lambda (model)
-     (let* ((detail (deslop-selector--model-detail model))
-            (name (and detail
-                       (deslop-bounded-single-line
-                        (plist-get detail :name) 160 t)))
-            (display-model (deslop-bounded-single-line model 160 t))
-            (candidate (if (and name (not (string= name display-model)))
-                           (format "%s (%s)" name display-model)
-                         display-model)))
-       (cons candidate model)))
+     (cons (deslop-bounded-single-line model 160 t) model))
    (cl-remove-if-not #'stringp deslop-selector--models)))
 
 (defun deslop-selector--candidate-for-model (model candidates)
   "Return the completion candidate for MODEL in CANDIDATES."
   (car (cl-find model candidates :key #'cdr :test #'equal)))
+
+(defun deslop-selector--model-affixations (completions candidates details)
+  "Return styled affixations for COMPLETIONS.
+CANDIDATES maps displayed completion strings to model IDs.  DETAILS contains
+the discovered pricing metadata for those model IDs."
+  (mapcar
+   (lambda (candidate)
+     (let* ((model (cdr (cl-find candidate candidates
+                                 :key #'car :test #'string=)))
+            (detail (cl-find model details
+                             :key (lambda (value) (plist-get value :id))
+                             :test #'equal))
+            (prices
+             (and detail
+                  (deslop-provider-model-price-annotation
+                   detail
+                   (lambda (field text)
+                     (propertize
+                      text 'face
+                      (if (eq field :completion)
+                          'deslop-selector-price-output-face
+                        'deslop-selector-price-muted-face)))))))
+       (list (propertize candidate 'face 'deslop-selector-model-face)
+             ""
+             (if prices (concat "\n" prices) ""))))
+   completions))
 
 (defun deslop-selector--index-of (value values)
   "Return the index of VALUE in VALUES, or nil."
@@ -285,30 +318,31 @@ performed locally so typing a search term never starts another network request."
      (let ((models (cl-remove-if-not #'stringp deslop-selector--models)))
        (unless models
          (user-error "deslop has no models available for this provider"))
-       (let* ((candidates (deslop-selector--model-candidates))
-              (candidate-names (mapcar #'car candidates))
-              (current (deslop-selector--candidate-for-model
-                        (deslop-selector--model-name) candidates))
-              (details deslop-selector--model-details)
-              (completion-extra-properties
-               (list
-                :annotation-function
-                (lambda (candidate)
-                  (deslop-provider-model-price-annotation
-                   (cl-find (cdr (assoc candidate candidates)) details
-                            :key (lambda (detail) (plist-get detail :id))
-                            :test #'equal)))))
-              (completion-ignore-case t)
-              (completion-styles '(substring))
-              (choice (completing-read "Model: " candidate-names
-                                       nil t nil nil current))
-              (selected-model (cdr (assoc choice candidates)))
-              (index (cl-position selected-model models :test #'equal)))
-         (when (and selected-model index)
-           (setq deslop-selector--models models
-                 deslop-selector--model-index index)
-           (deslop-selector--save-selection)
-           (deslop-selector--render)))))))
+        (let* ((candidates (deslop-selector--model-candidates))
+               (candidate-names (mapcar #'car candidates))
+               (current (deslop-selector--candidate-for-model
+                         (deslop-selector--model-name) candidates))
+               (details deslop-selector--model-details)
+               (completion-extra-properties
+                (list
+                 :affixation-function
+                 (lambda (completions)
+                   (deslop-selector--model-affixations
+                    completions candidates details))))
+               (completion-ignore-case t)
+               (completion-styles '(substring))
+               (completions-format 'vertical)
+               (choice (completing-read "Model: " candidate-names
+                                        nil t nil nil current))
+               (selected-model
+                (cdr (cl-find choice candidates
+                              :key #'car :test #'string=)))
+               (index (cl-position selected-model models :test #'equal)))
+          (when (and selected-model index)
+            (setq deslop-selector--models models
+                  deslop-selector--model-index index)
+            (deslop-selector--save-selection)
+            (deslop-selector--render)))))))
 
 (defun deslop-selector-set-concurrency ()
   "Set and save the selected provider's session concurrency limit."

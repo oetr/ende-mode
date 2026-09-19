@@ -2784,43 +2784,66 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (prompt collection predicate require-match
                                      initial-input history default &rest _)
-                       (setq completion-call
-                             (list :prompt prompt
-                                   :collection collection
-                                   :predicate predicate
-                                   :require-match require-match
-                                   :initial-input initial-input
-                                   :history history
-                                   :default default
-                                   :extra-properties completion-extra-properties
-                                   :styles completion-styles
-                                   :ignore-case completion-ignore-case))
-                       "Beta Model (remote/beta)")))
-            (deslop-selector-select-model))
-          (should (equal (plist-get completion-call :prompt) "Model: "))
-          (should (equal (plist-get completion-call :collection)
-                         '("Alpha Model (remote/alpha)"
-                           "Beta Model (remote/beta)"
-                           "Gamma Model (other/gamma)")))
-          (should-not (member "input" (plist-get completion-call :collection)))
-          (should (plist-get completion-call :require-match))
-          (should-not (plist-get completion-call :initial-input))
-          (should (equal (plist-get completion-call :default)
-                         "Alpha Model (remote/alpha)"))
-          (let ((annotation
-                 (plist-get (plist-get completion-call :extra-properties)
-                            :annotation-function)))
-            (should (functionp annotation))
-            (should
-             (string=
-              (funcall annotation "Alpha Model (remote/alpha)")
-              "  in $3/M  out $9/M  cache-read $1/M  cache-write $4/M")))
-          (should (equal (plist-get completion-call :styles) '(substring)))
-          (should (plist-get completion-call :ignore-case))
-          (should (= deslop-selector--model-index 1))
-          (should (string= (deslop-selector--model-name) "remote/beta"))
-          (should (equal deslop-selector--last-selection
-                         '(:provider remote :model "remote/beta"))))
+                        (setq completion-call
+                              (list :prompt prompt
+                                    :collection collection
+                                    :predicate predicate
+                                    :require-match require-match
+                                    :initial-input initial-input
+                                    :history history
+                                    :default default
+                                    :extra-properties completion-extra-properties
+                                    :styles completion-styles
+                                    :ignore-case completion-ignore-case
+                                    :format completions-format))
+                        "remote/beta")))
+             (deslop-selector-select-model))
+           (should (equal (plist-get completion-call :prompt) "Model: "))
+           (should (equal (plist-get completion-call :collection)
+                          '("remote/alpha" "remote/beta" "other/gamma")))
+           (should-not (member "input" (plist-get completion-call :collection)))
+           (should (plist-get completion-call :require-match))
+           (should-not (plist-get completion-call :initial-input))
+           (should (equal (plist-get completion-call :default)
+                          "remote/alpha"))
+           (let* ((properties (plist-get completion-call :extra-properties))
+                  (affixation (plist-get properties :affixation-function))
+                  (affixed (funcall affixation
+                                    (plist-get completion-call :collection)))
+                  (priced (car affixed))
+                  (unpriced (cadr affixed))
+                  (priced-model (car priced))
+                  (priced-suffix (nth 2 priced)))
+             (should (functionp affixation))
+             (should-not (plist-get properties :annotation-function))
+             (should (string= (substring-no-properties priced-model)
+                              "remote/alpha"))
+             (should (eq (get-text-property 0 'face priced-model)
+                         'deslop-selector-model-face))
+             (should
+              (string=
+               (substring-no-properties priced-suffix)
+               "\n  in: $3  out: $9  cache-read: $1  cache-write: $4"))
+             (should (eq (get-text-property (string-match "in:" priced-suffix)
+                                            'face priced-suffix)
+                         'deslop-selector-price-muted-face))
+             (should (eq (get-text-property (string-match "out:" priced-suffix)
+                                            'face priced-suffix)
+                         'deslop-selector-price-output-face))
+             (should (eq (get-text-property
+                          (string-match "cache-read:" priced-suffix)
+                          'face priced-suffix)
+                         'deslop-selector-price-muted-face))
+             (should (equal (mapcar #'substring-no-properties
+                                    (list (car unpriced) (nth 2 unpriced)))
+                            '("remote/beta" "")))
+             (should (eq (plist-get completion-call :format) 'vertical)))
+            (should (equal (plist-get completion-call :styles) '(substring)))
+            (should (plist-get completion-call :ignore-case))
+            (should (= deslop-selector--model-index 1))
+            (should (string= (deslop-selector--model-name) "remote/beta"))
+            (should (equal deslop-selector--last-selection
+                           '(:provider remote :model "remote/beta"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -3784,10 +3807,19 @@ Use COMMAND for the process, or a silent sleep process by default."
   (should
    (string=
     (deslop-provider-model-price-annotation
-     '(:pricing (:prompt "0" :completion "0.000015"
-                         :input-cache-read "not-a-price"
-                         :input-cache-write-1h "0.000005")))
-    "  in free  out $15/M  cache-write-1h $5/M")))
+      '(:pricing (:prompt "0" :completion "0.000015"
+                          :input-cache-read "not-a-price"
+                          :input-cache-write-1h "0.000005")))
+     "  in: free  out: $15  cache-write-1h: $5")))
+
+(ert-deftest deslop-test/provider-model-price-annotation-formats-small-values ()
+  (should
+   (string=
+    (deslop-provider-model-price-annotation
+     '(:pricing (:prompt "0.000003"
+                 :completion "0.000015"
+                 :input-cache-read "0.0000003")))
+    "  in: $3  out: $15  cache-read: $0.30")))
 
 (ert-deftest deslop-test/provider-discovery-does-not-borrow-unrelated-owner ()
   (let* ((profile '(:url "https://example.test/v1/chat/completions"

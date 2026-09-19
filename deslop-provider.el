@@ -541,10 +541,14 @@ Return nil when VALUE is not a nonnegative decimal price string."
     (cond
      ((null per-million) nil)
      ((zerop per-million) "free")
-     (t (format "$%.3g/M" per-million)))))
+     ((< per-million 0.1) (format "$%.3g" per-million))
+     ((< per-million 1) (format "$%.2f" per-million))
+     (t (format "$%.3g" per-million)))))
 
-(defun deslop-provider-model-price-annotation (detail)
-  "Return a completion annotation for pricing in model DETAIL."
+(defun deslop-provider-model-price-annotation (detail &optional part-function)
+  "Return a completion annotation for pricing in model DETAIL.
+When PART-FUNCTION is non-nil, call it with each pricing field and its
+formatted text before joining the parts."
   (let ((pricing (plist-get detail :pricing))
         (parts nil))
     (dolist (field '((:prompt . "in")
@@ -556,7 +560,11 @@ Return nil when VALUE is not a nonnegative decimal price string."
       (let ((price (deslop-provider--format-price
                     (plist-get pricing (car field)))))
         (when price
-          (push (format "%s %s" (cdr field) price) parts))))
+          (let ((part (format "%s: %s" (cdr field) price)))
+            (push (if part-function
+                      (funcall part-function (car field) part)
+                    part)
+                  parts)))))
     (when parts
       (concat "  " (mapconcat #'identity (nreverse parts) "  ")))))
 
