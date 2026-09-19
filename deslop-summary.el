@@ -115,6 +115,12 @@
          (format "[source line %d]" line))))
    content t t))
 
+(defun deslop-summary--sanitize (source content)
+  "Rewrite citations and escape top-level Org headings in CONTENT for SOURCE."
+  (replace-regexp-in-string
+   "^\\* " ",* "
+   (deslop-summary--rewrite-citations source content)))
+
 (defun deslop-summary-follow-buffer-link (path _argument)
   "Follow a safe summary buffer link encoded by PATH.
 PATH must have the form SOURCE-ID::LINE."
@@ -150,13 +156,15 @@ PATH must have the form SOURCE-ID::LINE."
 
 (defun deslop-summary-append (source content display)
   "Append CONTENT for captured SOURCE to the summary buffer.
-DISPLAY supplies the model label."
+DISPLAY supplies the model label.
+Move point to the new heading without selecting the summary window."
   (let ((summary-buffer (deslop-summary-buffer))
         (heading-link
          (deslop-summary--source-link
           source (deslop-summary-source-start-line source)
           (deslop-summary-source-name source)))
-        (content (deslop-summary--rewrite-citations source content)))
+        (content (deslop-summary--sanitize source content))
+        appended-start)
     (with-current-buffer summary-buffer
       (let ((inhibit-read-only t))
         (save-restriction
@@ -165,12 +173,19 @@ DISPLAY supplies the model label."
             (goto-char (point-max))
             (atomic-change-group
               (unless (bobp) (insert "\n\n"))
-              (insert (format "* %s - %s - %s\n"
-                              heading-link
-                              (format-time-string "%Y-%m-%d %H:%M:%S")
-                              (or (plist-get display :model) "unknown")))
-              (insert content))))))
-    (deslop-ignore-errors #'display-buffer summary-buffer)
+              (setq appended-start (point))
+              (insert (format "* *%s* - [%s] - %s\nFile: %s\n"
+                              (deslop-summary-source-buffer source)
+                              (format-time-string "%d %B %Y %H:%M:%S")
+                              (or (plist-get display :model) "unknown")
+                              heading-link))
+              (insert content)))
+          ;; Do this outside `save-excursion' so point stays here.
+          (goto-char appended-start))))
+    (let ((window (deslop-ignore-errors #'display-buffer summary-buffer)))
+      (when (window-live-p window)
+        ;; An existing window can have its own saved point.
+        (set-window-point window appended-start)))
     t))
 
 (provide 'deslop-summary)
