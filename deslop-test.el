@@ -757,10 +757,11 @@ process for cancellation tests."
             (should (eq major-mode 'org-mode))
             (should (string=
                       (buffer-string)
-                      (concat "* [[deslop-buffer:s1::1][*summary-source*]]"
-                              " - 2026-09-18 11:10:07 - "
-                              "gpt-5.6-luna\n"
-                              "** Key point\n- short summary")))
+                       (concat "* **summary-source** - "
+                               "[2026-09-18 11:10:07] - "
+                               "gpt-5.6-luna\n"
+                               "File: [[deslop-buffer:s1::1][*summary-source*]]\n"
+                               "** Key point\n- short summary")))
             (should-not (deslop-review--overlays-in-buffer))))))))
 
 (ert-deftest deslop-test/summary-entries-are-appended-as-org-headings ()
@@ -781,14 +782,14 @@ process for cancellation tests."
   (with-current-buffer deslop-summary-buffer-name
     (should (string=
              (buffer-string)
-              (concat "* [[deslop-buffer:s1::1][first.org]]"
-                      " - 2026-09-18 11:10:07 - one\n"
-                      "First summary\n\n"
-                      "* [[deslop-buffer:s2::1][second.org]]"
-                      " - 2026-09-18 11:10:07 - two\n"
-                      "Second summary")))))
+               (concat "* *first.org* - [2026-09-18 11:10:07] - one\n"
+                       "File: [[deslop-buffer:s1::1][first.org]]\n"
+                       "First summary\n\n"
+                       "* *second.org* - [2026-09-18 11:10:07] - two\n"
+                       "File: [[deslop-buffer:s2::1][second.org]]\n"
+                       "Second summary")))))
 
-(ert-deftest deslop-test/summarize-reports-progress-and-preserves-buffer-point ()
+(ert-deftest deslop-test/summarize-reports-progress-and-points-at-new-entry ()
   (deslop-test--reset)
   (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
      (with-current-buffer (deslop-summary-buffer)
@@ -806,7 +807,11 @@ process for cancellation tests."
         (should (= (overlay-get overlay 'tokens) 12))
         (deslop-test--complete-call call)))
     (with-current-buffer deslop-summary-buffer-name
-      (should (= (point) (point-min))))))
+      (should (= (point)
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "\n\n")
+                   (point)))))))
 
 (ert-deftest deslop-test/summarize-captures-source-name-across-async-callback ()
   (deslop-test--reset)
@@ -826,9 +831,10 @@ process for cancellation tests."
         (should (eq (deslop-job-state job) 'completed))
         (with-current-buffer deslop-summary-buffer-name
            (should (string-prefix-p
-                    (format (concat "* [[deslop-buffer:s1::1][%s]]"
-                                    " - 2026-09-18 11:10:07"
-                                    " - async-model\nsummary")
+                    (format (concat "* *%s* - [2026-09-18 11:10:07]"
+                                    " - async-model\n"
+                                    "File: [[deslop-buffer:s1::1][%s]]\nsummary")
+                            source-name
                             source-name)
                     (buffer-string))))))))
 
@@ -952,10 +958,10 @@ process for cancellation tests."
         (let ((job (deslop-summarize)))
           (should (eq (deslop-job-state job) 'completed)))))
     (with-current-buffer deslop-summary-buffer-name
-      (should (string-prefix-p
-                (concat "* [[deslop-buffer:s1::1][reported-source]]"
-                        " - 2026-09-18 11:10:07 - "
-                        "actual-model\n")
+       (should (string-prefix-p
+                (concat "* *reported-source* - "
+                        "[2026-09-18 11:10:07] - actual-model\n"
+                        "File: [[deslop-buffer:s1::1][reported-source]]\n")
                 (buffer-string))))))
 
 (ert-deftest deslop-test/output-remains-marked-until-approved ()
