@@ -1022,16 +1022,74 @@ process for cancellation tests."
 
 (ert-deftest deslop-test/task-cannot-start-inside-pending-review ()
   (deslop-test--reset)
-  (deslop-test--with-buffer "generated text"
-    (let ((review (deslop-review-create-overlay
-                   (current-buffer) 1 (point-max) nil nil "")))
-      (goto-char 5)
-      (should-error (deslop-insert-at-cursor) :type 'user-error)
-      (deslop-test--select 2 6 6)
-      (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
-      (should-error (deslop-summarize) :type 'user-error)
-      (should-not deslop-queue)
-      (deslop-review-delete-overlay review))))
+  (let ((deslop-review-conflict-policy 'block))
+    (deslop-test--with-buffer "generated text"
+      (let ((review (deslop-review-create-overlay
+                     (current-buffer) 1 (point-max) nil nil "")))
+        (goto-char 5)
+        (should-error (deslop-insert-at-cursor) :type 'user-error)
+        (deslop-test--select 2 6 6)
+        (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
+        (should-not deslop-queue)
+        (deslop-review-delete-overlay review)))))
+
+(ert-deftest deslop-test/summary-runs-over-pending-review ()
+  (deslop-test--reset)
+  (let ((deslop-llm-function (deslop-test--fake-llm '("summary"))))
+    (deslop-test--with-buffer "generated text"
+      (let ((review (deslop-review-create-overlay
+                     (current-buffer) 1 (point-max) nil nil "")))
+        (let ((job (deslop-summarize)))
+          (should (eq (deslop-job-state job) 'completed))
+          (should (deslop-review-overlay-p review))
+          (should (string-match-p
+                   "generated text"
+                   (deslop-test--user-message (car deslop-test--prompts))))
+          (with-current-buffer deslop-summary-buffer-name
+            (should (string-match-p "summary" (buffer-string)))))))))
+
+(ert-deftest deslop-test/overlapping-write-asks-before-approving-reviews ()
+  (deslop-test--reset)
+  (let ((deslop-review-conflict-policy 'confirm)
+        (deslop-llm-function (deslop-test--fake-llm '("!"))))
+    (deslop-test--with-buffer "old text"
+      (let ((conflict (deslop-review-create-overlay
+                       (current-buffer) 1 4 nil nil "old"))
+            (unrelated (deslop-review-create-overlay
+                        (current-buffer) 5 (point-max) nil nil "text")))
+        (goto-char 2)
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) nil)))
+          (should-error (deslop-insert-at-cursor) :type 'user-error))
+        (should (deslop-review-overlay-p conflict))
+        (should (deslop-review-overlay-p unrelated))
+        (should-not deslop-queue)
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) t)))
+          (let ((job (deslop-insert-at-cursor)))
+            (should (eq (deslop-job-state job) 'completed))))
+        (should-not (deslop-review-overlay-p conflict))
+        (should (deslop-review-overlay-p unrelated))
+        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (should (string= (buffer-string) "o!ld text"))))))
+
+(ert-deftest deslop-test/automatic-review-conflict-approval-is-local ()
+  (deslop-test--reset)
+  (let ((deslop-review-conflict-policy 'approve)
+        (deslop-llm-function (deslop-test--fake-llm '("!"))))
+    (deslop-test--with-buffer "old text"
+      (let ((conflict (deslop-review-create-overlay
+                       (current-buffer) 1 4 nil nil "old"))
+            (unrelated (deslop-review-create-overlay
+                        (current-buffer) 5 (point-max) nil nil "text")))
+        (goto-char 2)
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) (error "confirmation was not expected"))))
+          (let ((job (deslop-insert-at-cursor)))
+            (should (eq (deslop-job-state job) 'completed))))
+        (should-not (deslop-review-overlay-p conflict))
+        (should (deslop-review-overlay-p unrelated))
+        (should (string= (buffer-string) "o!ld text"))))))
 
 (ert-deftest deslop-test/queued-task-cannot-dispatch-into-new-review ()
   (deslop-test--reset)
