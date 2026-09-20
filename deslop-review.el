@@ -315,25 +315,28 @@ The behavior is controlled by `deslop-review-conflict-policy'.  Return the
 overlays that were resolved, or nil when there was no conflict."
   (let ((overlays (deslop-review--overlays-overlapping buffer start end)))
     (when overlays
-      (pcase deslop-review-conflict-policy
-        ('block
-         (deslop-review-assert-available buffer start end))
-        ((or 'confirm 'approve)
-         (when (or (eq deslop-review-conflict-policy 'approve)
-                   (yes-or-no-p
-                    (format "Approve %d overlapping deslop review%s and continue? "
-                            (length overlays)
-                            (if (= (length overlays) 1) "" "s"))))
-           (dolist (overlay overlays)
-             (deslop-review-delete-overlay overlay))
-           (message "deslop: approved %d overlapping generated region%s"
-                    (length overlays)
-                    (if (= (length overlays) 1) "" "s"))))
-        (_
-         (error "unknown deslop review conflict policy: %s"
-                deslop-review-conflict-policy)))
-      (when (cl-some #'deslop-review-overlay-p overlays)
-        (user-error "Pending deslop reviews remain in the new task's target")))
+      (let ((approve
+             (pcase deslop-review-conflict-policy
+               ('block
+                (deslop-review-assert-available buffer start end))
+               ('approve t)
+               ('confirm
+                (or (yes-or-no-p
+                     (format
+                      "Approve %d overlapping deslop review%s and continue? "
+                      (length overlays)
+                      (if (= (length overlays) 1) "" "s")))
+                    (user-error
+                     "deslop: job cancelled; pending reviews were not changed")))
+               (_
+                (error "unknown deslop review conflict policy: %s"
+                       deslop-review-conflict-policy)))))
+        (when approve
+          (dolist (overlay overlays)
+            (deslop-review-delete-overlay overlay))
+          (message "deslop: approved %d overlapping generated region%s"
+                   (length overlays)
+                   (if (= (length overlays) 1) "" "s")))))
     overlays))
 
 ;;;; Interactive Commands
