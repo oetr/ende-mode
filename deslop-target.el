@@ -33,7 +33,7 @@
   "A stable, restricted buffer target for a queued operation."
   buffer start-marker end-marker cursor-marker placement
   source-snapshot source-digest restriction-beg restriction-end selected offset
-   applying invalidated
+  review-policy applying invalidated
   kill-buffer-hook before-change-hook after-change-hook)
 
 ;;;; Creation and positions
@@ -58,15 +58,23 @@
   (secure-hash 'sha256 (current-buffer) start end))
 
 (cl-defun deslop-target-create
-    (&key buffer start end cursor selected placement offset source-snapshot)
+    (&key buffer start end cursor selected placement offset source-snapshot
+          (review-policy 'block))
   "Create a target in BUFFER from START to END anchored at CURSOR.
 SELECTED means START..END is immutable source.  PLACEMENT and OFFSET describe
 an insertion relative to that source.  SOURCE-SNAPSHOT is an optional textual
-fallback for callers that cannot capture a digest."
+fallback for callers that cannot capture a digest.  REVIEW-POLICY controls
+whether pending reviews are checked for this target: `block' checks them,
+`resolve' leaves conflict resolution to the caller, and `ignore' permits
+read-only access to reviewed text."
   (unless (buffer-live-p buffer)
     (error "target buffer no longer exists"))
+  (setq review-policy (or review-policy 'block))
+  (unless (memq review-policy '(block resolve ignore))
+    (error "unknown target review policy: %s" review-policy))
   (with-current-buffer buffer
-    (deslop-review-assert-available buffer start end)
+    (when (eq review-policy 'block)
+      (deslop-review-assert-available buffer start end))
     (deslop-target--create
      :buffer buffer
      :start-marker (deslop-target--make-marker buffer start (and selected t))
@@ -80,7 +88,8 @@ fallback for callers that cannot capture a digest."
      :restriction-beg (deslop-target--make-marker buffer (point-min) nil)
      :restriction-end (deslop-target--make-marker buffer (point-max) t)
      :selected selected
-     :offset offset)))
+     :offset offset
+     :review-policy review-policy)))
 
 (defun deslop-target-start (target)
   "Return TARGET's current start position, or nil."
@@ -276,16 +285,17 @@ each side is additionally capped by `deslop-target-window-chars'."
 
 (defun deslop-target-assert-available (target)
   "Signal when TARGET intersects output awaiting review."
-  (let ((buffer (deslop-target-buffer target))
-        (start (if (deslop-target-selected target)
-                   (deslop-target-start target)
-                 (deslop-target-cursor target)))
-        (end (if (deslop-target-selected target)
-                 (deslop-target-end target)
-               (deslop-target-cursor target))))
-    (unless (and (buffer-live-p buffer) start end)
-      (error "target anchor no longer exists"))
-    (deslop-review-assert-available buffer start end)))
+  (unless (eq (deslop-target-review-policy target) 'ignore)
+    (let ((buffer (deslop-target-buffer target))
+          (start (if (deslop-target-selected target)
+                     (deslop-target-start target)
+                   (deslop-target-cursor target)))
+          (end (if (deslop-target-selected target)
+                   (deslop-target-end target)
+                 (deslop-target-cursor target))))
+      (unless (and (buffer-live-p buffer) start end)
+        (error "target anchor no longer exists"))
+      (deslop-review-assert-available buffer start end))))
 
 ;;;; Active mutation monitoring
 

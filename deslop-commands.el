@@ -60,13 +60,18 @@ INSTRUCTION and PROFILE override the operation defaults."
                      (deslop-target-create
                       :buffer buffer :start start :end end :cursor point
                       :selected selected :placement placement
-                      :offset (and region (- point (car region)))))))
+                      :offset (and region (- point (car region)))
+                      :review-policy
+                      (deslop-operation-review-policy type)))))
          (overlay nil)
          (committed nil))
     (unwind-protect
         (progn
-           (setq overlay (deslop-ui-create-overlay
-                          buffer start end "Queued" 'badge-only))
+          (when (eq (deslop-target-review-policy target) 'resolve)
+            (deslop-review-resolve-conflicts
+             buffer (deslop-target-start target) (deslop-target-end target)))
+          (setq overlay (deslop-ui-create-overlay
+                         buffer start end "Queued" 'badge-only))
           (let ((data (list :target target :overlay overlay)))
             (when profile
               (setq data (plist-put data :profile profile)))

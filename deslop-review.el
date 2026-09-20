@@ -35,6 +35,16 @@ default."
   :local t
   :group 'deslop)
 
+(defcustom deslop-review-conflict-policy 'confirm
+  "How source-mutating jobs handle pending reviews they overlap.
+`confirm' asks before approving the overlapping reviews, `approve' approves
+them automatically, and `block' preserves the original blocking behavior.
+Read-only operations such as `summarize' do not use this policy."
+  :type '(choice (const :tag "Ask before approving" confirm)
+                 (const :tag "Approve automatically" approve)
+                 (const :tag "Block the job" block))
+  :group 'deslop)
+
 (defvar deslop-review--keymap (make-sparse-keymap)
   "Keymap active while point is on generated output awaiting review.")
 
@@ -221,19 +231,28 @@ is that face's background shifted `deslop-review-highlight-blend' toward FG."
     (cl-remove-if-not #'deslop-review-overlay-p
                       (overlays-in (point-min) (point-max)))))
 
+(defun deslop-review--overlay-overlaps-p (overlay start end)
+  "Return non-nil when OVERLAY intersects START..END."
+  (let ((review-start (overlay-start overlay))
+        (review-end (overlay-end overlay)))
+    (and review-start review-end
+         (if (= start end)
+             (and (<= review-start start) (< start review-end))
+           (< (max start review-start) (min end review-end))))))
+
+(defun deslop-review--overlays-overlapping (buffer start end)
+  "Return pending reviews in BUFFER intersecting START..END."
+  (with-current-buffer buffer
+    (cl-remove-if-not
+     (lambda (overlay)
+       (deslop-review--overlay-overlaps-p overlay start end))
+     (deslop-review--overlays-in-buffer))))
+
 (defun deslop-review-overlaps-p (buffer start end)
   "Return non-nil when START..END in BUFFER intersects pending output.
 A zero-width target is considered inside a review from its start up to, but
 not including, its end."
-  (with-current-buffer buffer
-    (cl-some
-     (lambda (overlay)
-       (let ((review-start (overlay-start overlay))
-             (review-end (overlay-end overlay)))
-         (if (= start end)
-             (and (<= review-start start) (< start review-end))
-           (< (max start review-start) (min end review-end)))))
-     (deslop-review--overlays-in-buffer))))
+  (not (null (deslop-review--overlays-overlapping buffer start end))))
 
 (defun deslop-review-assert-available (buffer start end)
   "Signal a user error if BUFFER's START..END intersects pending output."
@@ -289,6 +308,33 @@ the inserted characters are tinted using the review overlay's face."
     (let ((buffer (overlay-buffer overlay)))
       (delete-overlay overlay)
       (deslop-review--notify-change buffer))))
+
+(defun deslop-review-resolve-conflicts (buffer start end)
+  "Resolve pending reviews overlapping START..END in BUFFER.
+The behavior is controlled by `deslop-review-conflict-policy'.  Return the
+overlays that were resolved, or nil when there was no conflict."
+  (let ((overlays (deslop-review--overlays-overlapping buffer start end)))
+    (when overlays
+      (pcase deslop-review-conflict-policy
+        ('block
+         (deslop-review-assert-available buffer start end))
+        ((or 'confirm 'approve)
+         (when (or (eq deslop-review-conflict-policy 'approve)
+                   (yes-or-no-p
+                    (format "Approve %d overlapping deslop review%s and continue? "
+                            (length overlays)
+                            (if (= (length overlays) 1) "" "s"))))
+           (dolist (overlay overlays)
+             (deslop-review-delete-overlay overlay))
+           (message "deslop: approved %d overlapping generated region%s"
+                    (length overlays)
+                    (if (= (length overlays) 1) "" "s"))))
+        (_
+         (error "unknown deslop review conflict policy: %s"
+                deslop-review-conflict-policy)))
+      (when (cl-some #'deslop-review-overlay-p overlays)
+        (user-error "Pending deslop reviews remain in the new task's target")))
+    overlays))
 
 ;;;; Interactive Commands
 

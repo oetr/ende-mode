@@ -33,26 +33,31 @@
 (cl-defstruct (deslop-operation-spec
                (:constructor deslop-operation-spec--create))
   "Static behavior for one deslop operation."
-   type target-kind writes-buffer whole-buffer
-  allows-source-changes structured-result)
+  type target-kind writes-buffer whole-buffer
+  allows-source-changes structured-result review-policy)
 
 (defconst deslop-operation-specs
   (list
    (deslop-operation-spec--create
-    :type 'insert :target-kind 'cursor-or-selection :writes-buffer t)
+    :type 'insert :target-kind 'cursor-or-selection :writes-buffer t
+    :review-policy 'resolve)
    (deslop-operation-spec--create
-    :type 'improve :target-kind 'selection-or-buffer :writes-buffer t)
+    :type 'improve :target-kind 'selection-or-buffer :writes-buffer t
+    :review-policy 'resolve)
    (deslop-operation-spec--create
-    :type 'summarize :target-kind 'selection-or-buffer)
+    :type 'summarize :target-kind 'selection-or-buffer
+    :review-policy 'ignore)
    (deslop-operation-spec--create
     :type 'rubber-duck :target-kind 'document :writes-buffer t
-    :whole-buffer t)
+    :whole-buffer t :review-policy 'resolve)
    (deslop-operation-spec--create
     :type 'write-anywhere :target-kind 'selection-or-buffer :writes-buffer t
-    :whole-buffer t :allows-source-changes t :structured-result 'replacement)
+    :whole-buffer t :allows-source-changes t :structured-result 'replacement
+    :review-policy 'resolve)
    (deslop-operation-spec--create
     :type 'insert-anywhere :target-kind 'selection-or-buffer :writes-buffer t
-     :whole-buffer t :allows-source-changes t :structured-result 'insertion))
+    :whole-buffer t :allows-source-changes t :structured-result 'insertion
+    :review-policy 'resolve))
   "Registered operation specifications.")
 
 (defun deslop-operation-for (type)
@@ -84,6 +89,12 @@
   (let ((spec (cl-find type deslop-operation-specs
                        :key #'deslop-operation-spec-type :test #'eq)))
     (and spec (deslop-operation-spec-structured-result spec))))
+
+(defun deslop-operation-review-policy (type)
+  "Return the pending-review policy for operation TYPE."
+  (let ((spec (cl-find type deslop-operation-specs
+                       :key #'deslop-operation-spec-type :test #'eq)))
+    (and spec (deslop-operation-spec-review-policy spec))))
 
 (provide 'deslop-operation)
 
