@@ -6251,7 +6251,8 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/selector-ask-uses-selected-profile-in-org-buffer ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((remote :model "configured-model")))
+  (let ((ende-selector--last-selection nil)
+        (ende-provider-profiles '((remote :model "configured-model")))
         (ende-llm-function (ende-test--fake-llm '("Reply"))))
     (ende-test--with-buffer "* Root\n** Question\nAsk\n"
       (org-mode)
@@ -6276,7 +6277,8 @@ Use COMMAND for the process, or a silent sleep process by default."
 (ert-deftest ende-test/selector-ask-prepares-chat-from-non-org-buffer ()
   (dolist (initial '("" "* Existing\nPrevious material\n"))
     (ende-test--reset)
-    (let ((ende-llm-function (ende-test--fake-llm '("Reply"))))
+    (let ((ende-selector--last-selection nil)
+          (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "source text"
         (let ((source (current-buffer))
               (shown nil)
