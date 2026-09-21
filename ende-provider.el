@@ -154,8 +154,11 @@ Supported settings are `:max-concurrency' and `:parallel'."
                     :wire-api 'responses
                     :auth-method 'opencode-oauth
                     :model-discovery-function #'ende-codex-probe-models
+                    :reasoning-effort-discovery-function
+                    #'ende-codex-probe-reasoning-efforts
+                    :reasoning-effort-wire-api 'responses
                     :require-sse t
-                   :display-name "OpenAI"))
+                    :display-name "OpenAI"))
             ('openrouter
              (list :url "https://openrouter.ai/api/v1/chat/completions"
                    :batch-url "https://openrouter.ai/api/v1/batches"
@@ -170,6 +173,9 @@ Supported settings are `:max-concurrency' and `:parallel'."
                    :auth-source-port 443
                    :request-headers
                    (copy-sequence ende-provider--openrouter-request-headers)
+                   :reasoning-effort-discovery-function
+                   #'ende-provider--probe-openrouter-reasoning-efforts
+                   :reasoning-effort-wire-api 'openrouter
                    :require-sse t))
             ('openrouter-batch
              (list :url "https://openrouter.ai/api/v1/chat/completions"
@@ -185,6 +191,9 @@ Supported settings are `:max-concurrency' and `:parallel'."
                    :auth-source-port 443
                    :request-headers
                    (copy-sequence ende-provider--openrouter-request-headers)
+                   :reasoning-effort-discovery-function
+                   #'ende-provider--probe-openrouter-reasoning-efforts
+                   :reasoning-effort-wire-api 'openrouter
                    :require-sse nil))
             (_
              (list :url ende-provider-endpoint
@@ -232,6 +241,16 @@ Supported settings are `:max-concurrency' and `:parallel'."
 (defun ende-provider-parallel-enabled-p (profile)
   "Return non-nil when PROFILE enables parallel jobs by default."
   (eq (plist-get profile :parallel) t))
+
+(defun ende-provider-reasoning-effort (profile wire-api)
+  "Return PROFILE's selected effort when WIRE-API supports it.
+The selector is the only code that sets `:reasoning-effort', after a live
+capability check."
+  (let ((effort (plist-get profile :reasoning-effort)))
+    (and (eq (plist-get profile :reasoning-effort-wire-api) wire-api)
+         (stringp effort)
+         (not (string-empty-p effort))
+         effort)))
 
 (defun ende-provider-names ()
   "Return configured provider profile names for the selector."
@@ -556,7 +575,7 @@ selection without starting another model-list request."
                (finish (and (processp process)
                             (process-get process :ende-discovery-finish))))
           (when finish
-            (funcall finish nil t)))))))
+            (funcall finish nil nil t)))))))
 
 (defun ende-provider--prune-cache (cache)
   "Remove expired and excess entries from CACHE."
@@ -816,8 +835,12 @@ formatted text before joining the parts."
         (remhash key ende-provider--discovery-cache))
       nil)))
 
-(defun ende-provider--start-discovery (profile key url)
-  "Start an asynchronous discovery request for PROFILE at URL."
+(defun ende-provider--start-live-model-request
+    (profile url callback &optional discovery-key)
+  "Request a model list from URL and call CALLBACK with (PAYLOAD ERROR).
+
+This bypasses provider discovery caches.  DISCOVERY-KEY identifies a regular
+cached-discovery request so its waiters can cancel it."
   (let ((response-buf nil)
         (stderr-buf nil)
         (stderr-process nil)
@@ -829,7 +852,7 @@ formatted text before joining the parts."
         (finished nil)
         (finish nil))
     (setq finish
-          (lambda (metadata &optional no-cache)
+          (lambda (payload &optional error cancelled)
             (unless finished
               (setq finished t)
               (setq ende-provider--discovery-processes
@@ -843,7 +866,8 @@ formatted text before joining the parts."
                (list response-buf stderr-buf)
                (list headers-file config-file)
                (list stderr-process))
-              (ende-provider--finish-discovery key metadata no-cache))))
+              (unless cancelled
+                (funcall callback payload error)))))
     (condition-case _startup
         (let ((request
                (ende-curl-start-request
@@ -862,7 +886,12 @@ formatted text before joining the parts."
                     (if (and ende-provider-max-discovery-bytes
                              (> received-bytes
                                 ende-provider-max-discovery-bytes))
-                        (funcall finish nil)
+                        (funcall
+                         finish nil
+                         (ende-error-create
+                          :kind 'resource
+                          :message
+                          "Provider model response exceeds ende-provider-max-discovery-bytes"))
                       (let ((response (or (process-get
                                            proc :ende-response-buffer)
                                           (process-buffer proc))))
@@ -871,32 +900,73 @@ formatted text before joining the parts."
                             (goto-char (point-max))
                             (insert string)))))))
                 :sentinel
-                (lambda (proc _event)
+                (lambda (proc event)
                   (when (memq (process-status proc) '(exit signal closed))
-                    (if (= (process-exit-status proc) 0)
-                        (condition-case nil
-                            (funcall
-                             finish
-                             (ende-provider--parse-discovery-response
-                              profile response-buf headers-file))
-                          ((error quit) (funcall finish nil)))
-                      (funcall finish nil)))))))
-           (setq process (plist-get request :process)
+                    (if (/= (process-exit-status proc) 0)
+                        (funcall
+                         finish nil
+                         (or (process-get proc :ende-idle-error)
+                             (ende-error-create
+                              :kind 'transport
+                              :message
+                              (format "Provider model request failed: %s"
+                                      (string-trim event)))))
+                      (condition-case parse-error
+                          (let ((status
+                                 (car (ende-curl-response-headers headers-file)))
+                                (text
+                                 (with-current-buffer response-buf
+                                   (buffer-string))))
+                            (if (and status (>= status 200) (< status 300))
+                                (funcall finish
+                                         (ende-protocol-json-read-string text))
+                              (funcall
+                               finish nil
+                               (ende-error-create
+                                :kind 'http
+                                :message
+                                (format "Provider model request returned HTTP status %s"
+                                        (or status "unknown"))))))
+                        ((error quit)
+                         (funcall
+                          finish nil
+                          (ende-error-create
+                           :kind 'protocol
+                           :message (error-message-string parse-error)))))))))))
+          (setq process (plist-get request :process)
                 response-buf (plist-get request :response-buffer)
-                 stderr-buf (plist-get request :stderr-buffer)
-                 stderr-process (plist-get request :stderr-process)
-                 headers-file (plist-get request :headers-file)
-                 config-file (plist-get request :config-file))
-           (process-put process :ende-discovery-finish finish)
-           (process-put process :ende-discovery-key key)
-           (push process ende-provider--discovery-processes)
+                stderr-buf (plist-get request :stderr-buffer)
+                stderr-process (plist-get request :stderr-process)
+                headers-file (plist-get request :headers-file)
+                config-file (plist-get request :config-file))
+          (process-put process :ende-discovery-finish finish)
+          (when discovery-key
+            (process-put process :ende-discovery-key discovery-key))
+          (push process ende-provider--discovery-processes)
           (unless finished
-           (when ende-provider-discovery-timeout
-             (setq timer
-                   (run-at-time ende-provider-discovery-timeout nil
-                                (lambda () (funcall finish nil)))))))
+            (when ende-provider-discovery-timeout
+              (setq timer
+                    (run-at-time ende-provider-discovery-timeout nil
+                                 (lambda () (funcall finish nil)))))))
       ((error quit)
-       (funcall finish nil)))))
+       (funcall
+        finish nil
+        (ende-error-create :kind 'startup
+                           :message (error-message-string _startup)))))
+    (lambda () (funcall finish nil nil t))))
+
+(defun ende-provider--start-discovery (profile key url)
+  "Start an asynchronous cached discovery request for PROFILE at URL."
+  (ende-provider--start-live-model-request
+   profile url
+   (lambda (payload error)
+     (ende-provider--finish-discovery
+      key
+      (and (not error)
+           (condition-case nil
+               (ende-provider--discovery-metadata profile payload)
+             ((error quit) nil)))))
+   key))
 
 (defun ende-provider-discover (profile &optional callback)
   "Discover PROFILE metadata asynchronously and invoke CALLBACK with it.
@@ -943,11 +1013,11 @@ this callback; an unused shared request is cancelled."
            callback
            (list :models nil
                  :error
-                  (ende-error-create
-                   :kind 'discovery
-                   :message (if (not key)
-                                "Provider has no compatible model-list endpoint"
-                              "Provider model discovery is disabled"))))
+                 (ende-error-create
+                  :kind 'discovery
+                  :message (if (not key)
+                               "Provider has no compatible model-list endpoint"
+                             "Provider model discovery is disabled"))))
           (lambda () nil))
       (let ((entry (ende-provider--cached-model-entry key)))
         (if entry
@@ -962,6 +1032,116 @@ this callback; an unused shared request is cancelled."
               (ende-provider--start-model-discovery profile key))
             (apply-partially #'ende-provider--cancel-model-waiter
                              key callback)))))))
+
+(defun ende-provider--invoke-reasoning-effort-callback
+    (callback efforts default error)
+  "Invoke effort CALLBACK without propagating callback errors."
+  (condition-case nil
+      (funcall callback efforts default error)
+    ((error quit) nil)))
+
+(defun ende-provider--json-string-list (value)
+  "Return ordered, distinct nonempty strings from JSON array VALUE."
+  (let ((values (cond ((vectorp value) (append value nil))
+                      ((listp value) value)))
+        (seen nil)
+        (result nil))
+    (dolist (value values)
+      (when (and (stringp value) (not (string-empty-p value))
+                 (not (member value seen)))
+        (push value seen)
+        (push value result)))
+    (nreverse result)))
+
+(defun ende-provider--probe-openrouter-reasoning-efforts
+    (profile model callback)
+  "Query OpenRouter live for MODEL's advertised reasoning efforts.
+CALLBACK receives (EFFORTS DEFAULT ERROR).  This request deliberately bypasses
+the model catalog cache so the returned choices are current."
+  (let ((url (ende-provider-models-url profile)))
+    (if (not url)
+        (progn
+          (ende-provider--invoke-reasoning-effort-callback
+           callback nil nil
+           (ende-error-create
+            :kind 'discovery
+            :message "OpenRouter profile has no model-list endpoint"))
+          (lambda () nil))
+      (ende-provider--start-live-model-request
+       profile url
+       (lambda (payload request-error)
+         (if request-error
+             (ende-provider--invoke-reasoning-effort-callback
+              callback nil nil request-error)
+           (condition-case parse-error
+               (let* ((entry
+                       (cl-find model (ende-provider--model-entries payload)
+                                :key (lambda (value)
+                                       (ende-protocol-json-get "id" value))
+                                :test #'equal))
+                      (reasoning (and entry
+                                      (ende-protocol-json-get
+                                       "reasoning" entry)))
+                      (efforts
+                       (ende-provider--json-string-list
+                        (and reasoning
+                             (ende-protocol-json-get
+                              "supported_efforts" reasoning))))
+                      (default (and reasoning
+                                    (ende-protocol-json-get
+                                     "default_effort" reasoning))))
+                 (if efforts
+                     (ende-provider--invoke-reasoning-effort-callback
+                      callback efforts
+                      (and (stringp default) (member default efforts) default)
+                      nil)
+                   (ende-provider--invoke-reasoning-effort-callback
+                    callback nil nil
+                    (ende-error-create
+                     :kind 'discovery
+                     :message
+                     (format "OpenRouter does not advertise explicit reasoning efforts for %s"
+                             model)))))
+             ((error quit)
+              (ende-provider--invoke-reasoning-effort-callback
+               callback nil nil
+               (ende-error-create
+                :kind 'protocol
+                :message (error-message-string parse-error)))))))))))
+
+(defun ende-provider-probe-reasoning-efforts (profile model callback)
+  "Query PROFILE live for MODEL's supported reasoning efforts.
+CALLBACK receives (EFFORTS DEFAULT ERROR).  Unlike model discovery, this never
+uses or updates a cache."
+  (let ((probe (plist-get profile :reasoning-effort-discovery-function)))
+    (cond
+     ((not ende-provider-discovery-enabled)
+      (ende-provider--invoke-reasoning-effort-callback
+       callback nil nil
+       (ende-error-create :kind 'discovery
+                          :message "Provider model discovery is disabled"))
+      (lambda () nil))
+     ((not (functionp probe))
+      (ende-provider--invoke-reasoning-effort-callback
+       callback nil nil
+       (ende-error-create
+        :kind 'discovery
+        :message "Provider has no live reasoning-effort endpoint"))
+      (lambda () nil))
+     (t
+      (condition-case probe-error
+          (or (funcall
+               probe profile model
+               (lambda (efforts default error)
+                 (ende-provider--invoke-reasoning-effort-callback
+                  callback efforts default error)))
+              (lambda () nil))
+        ((error quit)
+         (ende-provider--invoke-reasoning-effort-callback
+          callback nil nil
+          (ende-error-create :kind 'startup
+                             :message (error-message-string probe-error)))
+         (lambda () nil)))))))
 
 (defun ende-provider-clear-discovery-cache ()
   "Clear cached provider discovery results."
@@ -990,7 +1170,7 @@ this callback; an unused shared request is cancelled."
     (let ((finish (and (processp process)
                        (process-get process :ende-discovery-finish))))
       (if finish
-          (funcall finish nil t)
+          (funcall finish nil nil t)
         (when (and (processp process) (process-live-p process))
           (ende-ignore-errors #'delete-process process)))))
   (setq ende-provider--discovery-processes nil))

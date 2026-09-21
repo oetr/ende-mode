@@ -173,6 +173,7 @@
           (plist-get profile :model)
           (plist-get profile :temperature)
           (plist-get profile :max-tokens)
+          (ende-provider-reasoning-effort profile 'openrouter)
           ende-max-output-tokens
           (plist-get profile :request-headers)))))
 
@@ -292,11 +293,16 @@
                                `((:role . ,(car message))
                                  (:content . ,(cdr message))))
                              messages))
-              ,@(when (numberp (plist-get profile :temperature))
-                  (list (cons :temperature
-                              (plist-get profile :temperature))))
-              ,@(when (integerp ende-max-output-tokens)
-                  (list (cons :max_tokens ende-max-output-tokens)))))))
+               ,@(when (numberp (plist-get profile :temperature))
+                   (list (cons :temperature
+                               (plist-get profile :temperature))))
+               ,@(let ((effort (ende-provider-reasoning-effort
+                                profile 'openrouter)))
+                   (when effort
+                     (list (cons :reasoning
+                                 (list (cons :effort effort))))))
+               ,@(when (integerp ende-max-output-tokens)
+                   (list (cons :max_tokens ende-max-output-tokens)))))))
 
 (defun ende-openrouter-batch--body (group)
   "Build the ordered JSON object submitted for GROUP."

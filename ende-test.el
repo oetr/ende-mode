@@ -4087,6 +4087,100 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (string= (plist-get metadata :owner) "llama.cpp"))
     (should (string= (plist-get metadata :client) "llama.cpp"))))
 
+(ert-deftest ende-test/codex-effort-probe-uses-selected-model-capabilities ()
+  (let ((calls 0)
+        (results nil)
+        (entries
+         (ende-codex--parse-model-entries
+          (concat
+           "{\"models\":["
+           "{\"slug\":\"other\",\"supported_reasoning_levels\":[{\"effort\":\"none\"}]},"
+           "{\"slug\":\"selected\",\"default_reasoning_level\":\"low\","
+           "\"supported_reasoning_levels\":[{\"effort\":\"high\"},{\"effort\":\"low\"},"
+           "{\"effort\":\"\"},{\"effort\":\"low\"}]}]}"))))
+    (cl-letf (((symbol-function 'ende-codex--probe-model-entries)
+               (lambda (callback)
+                 (cl-incf calls)
+                 (funcall callback entries nil)
+                 (lambda () nil))))
+      (dotimes (_ 2)
+        (ende-codex-probe-reasoning-efforts
+         nil "selected"
+         (lambda (efforts default error)
+           (push (list efforts default error) results))))
+      (should (= calls 2))
+      (should (equal results
+                     '((("high" "low") "low" nil)
+                       (("high" "low") "low" nil)))))))
+
+(ert-deftest ende-test/openrouter-effort-probe-is-live-and-cache-independent ()
+  (let ((ende-provider-discovery-enabled t)
+        (ende-provider--discovery-cache (make-hash-table :test #'equal))
+        (ende-provider--model-cache (make-hash-table :test #'equal))
+        (requests nil)
+        (results nil)
+        (profile (ende-provider-profile 'openrouter)))
+    (puthash 'metadata 'unchanged ende-provider--discovery-cache)
+    (puthash 'models 'unchanged ende-provider--model-cache)
+    (cl-letf
+        (((symbol-function 'ende-provider--start-live-model-request)
+          (lambda (_profile url callback &optional _discovery-key)
+            (push url requests)
+            (funcall
+             callback
+             (ende-protocol-json-read-string
+              (concat
+               "{\"data\":["
+               "{\"id\":\"other\",\"reasoning\":{\"supported_efforts\":[\"none\"]}},"
+               "{\"id\":\"selected\",\"reasoning\":{\"supported_efforts\":[\"high\",\"low\",\"high\"],"
+               "\"default_effort\":\"low\"}}]}"))
+             nil)
+            (lambda () nil))))
+      (dotimes (_ 2)
+        (ende-provider-probe-reasoning-efforts
+         profile "selected"
+         (lambda (efforts default error)
+           (push (list efforts default error) results))))
+      (should (equal requests
+                     '("https://openrouter.ai/api/v1/models"
+                       "https://openrouter.ai/api/v1/models")))
+      (should (equal results
+                     '((("high" "low") "low" nil)
+                       (("high" "low") "low" nil))))
+      (should (eq (gethash 'metadata ende-provider--discovery-cache)
+                  'unchanged))
+      (should (eq (gethash 'models ende-provider--model-cache) 'unchanged)))))
+
+(ert-deftest ende-test/reasoning-effort-is-serialized-only-by-supported-apis ()
+  (let* ((messages (list (cons "user" "question")))
+         (openrouter
+          (list :model "router-model" :temperature 0.2
+                :reasoning-effort-wire-api 'openrouter
+                :reasoning-effort "high"))
+         (responses
+          (list :model "codex-model" :reasoning-effort-wire-api 'responses
+                :reasoning-effort "low"))
+         (unsupported (list :model "local-model" :temperature 0.2
+                            :reasoning-effort "high"))
+         (router-body
+          (ende-protocol-json-read-string
+           (json-encode (ende-llm--request-body messages openrouter))))
+         (responses-body
+          (ende-protocol-json-read-string
+           (json-encode (ende-codex--request-body messages responses))))
+         (unsupported-body
+          (ende-protocol-json-read-string
+           (json-encode (ende-llm--request-body messages unsupported)))))
+    (should (string=
+             (ende-protocol-json-get
+              "effort" (ende-protocol-json-get "reasoning" router-body))
+             "high"))
+    (should (string=
+             (ende-protocol-json-get
+              "effort" (ende-protocol-json-get "reasoning" responses-body))
+             "low"))
+    (should-not (ende-protocol-json-has-key-p "reasoning" unsupported-body))))
+
 (ert-deftest ende-test/provider-model-price-annotation-omits-invalid-fields ()
   (should
    (string=
@@ -5389,7 +5483,8 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/openrouter-batch-body-is-non-streaming-and-ordered ()
   (let* ((ende-max-output-tokens 64)
-         (profile (ende-provider-profile 'openrouter-batch))
+         (profile (plist-put (ende-provider-profile 'openrouter-batch)
+                             :reasoning-effort "medium"))
          (group (ende-openrouter-batch--make-group :profile profile))
          (request
           (ende-openrouter-batch--make-request
@@ -5416,7 +5511,19 @@ Use COMMAND for the process, or a silent sleep process by default."
                        "ende-job-1"))
       (should-not (ende-protocol-json-has-key-p "stream" request-body))
       (should-not (ende-protocol-json-has-key-p "model" request-body))
-      (should (= (ende-protocol-json-get "max_tokens" request-body) 64)))))
+      (should (= (ende-protocol-json-get "max_tokens" request-body) 64))
+      (should (string=
+               (ende-protocol-json-get
+                "effort" (ende-protocol-json-get "reasoning" request-body))
+               "medium")))))
+
+(ert-deftest ende-test/openrouter-batches-separate-reasoning-efforts ()
+  (let* ((low (plist-put (ende-provider-profile 'openrouter-batch)
+                         :reasoning-effort "low"))
+         (high (plist-put (ende-provider-profile 'openrouter-batch)
+                          :reasoning-effort "high")))
+    (should-not (equal (ende-openrouter-batch--profile-key low)
+                       (ende-openrouter-batch--profile-key high)))))
 
 (ert-deftest ende-test/openrouter-batch-completion-routes-by-custom-id ()
   (let* ((profile (ende-provider-profile 'openrouter-batch))

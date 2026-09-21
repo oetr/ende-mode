@@ -507,12 +507,18 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   "Return the JSON request object for MESSAGES and PROFILE."
   (let ((body `((:model . ,(plist-get profile :model))
                 (:messages . ,(mapcar (lambda (message)
-                                       `((:role . ,(car message))
-                                         (:content . ,(cdr message))))
-                                     messages))
+                                        `((:role . ,(car message))
+                                          (:content . ,(cdr message))))
+                                      messages))
                 (:temperature . ,(plist-get profile :temperature))
                 (:stream . t)
                 (:stream_options . ((:include_usage . t))))))
+    (let ((effort (ende-provider-reasoning-effort profile 'openrouter)))
+      (when effort
+        (setq body
+              (append body
+                      (list (cons :reasoning
+                                  (list (cons :effort effort))))))))
     (if (integerp ende-max-output-tokens)
         (append body (list (cons :max_tokens ende-max-output-tokens)))
       body)))
