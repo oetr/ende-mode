@@ -192,6 +192,10 @@ process for cancellation tests."
      (kill-buffer ende-summary--buffer-object))
    (setq ende-summary--buffer-object nil)
    (clrhash ende-summary--source-buffers)
+   (when (buffer-live-p ende-chat--buffer-object)
+     (kill-buffer ende-chat--buffer-object))
+   (setq ende-chat--buffer-object nil
+         ende-chat--next-id 0)
    (ende-ui-clear-all))
 
 (ert-deftest ende-test/queue-snapshots-do-not-expose-list-state ()
@@ -5952,6 +5956,291 @@ Use COMMAND for the process, or a silent sleep process by default."
                            'openrouter-batch)))))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
+
+;;;; Org-backed chat
+
+(defun ende-test--chat-goto (heading)
+  "Move point to the Org headline whose exact text is HEADING."
+  (goto-char (point-min))
+  (search-forward (concat heading "\n"))
+  (org-back-to-heading t))
+
+(defun ende-test--chat-context-text (messages)
+  "Return all serialized chat message text in MESSAGES."
+  (mapconcat (lambda (message) (cdr message)) messages "\n"))
+
+(defun ende-test--chat-response-count ()
+  "Return the number of host-created response headlines in the buffer."
+  (cl-count-if
+   (lambda (headline)
+     (string= (org-element-property :raw-value headline) "Ende response"))
+   (org-element-map (org-element-parse-buffer) 'headline #'identity)))
+
+(ert-deftest ende-test/chat-context-isolates-level-one-roots ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* First root\n"
+              "First root material\n"
+              "** First question\n"
+              "First question\n"
+              "* Second root\n"
+              "Second root material\n"
+              "** Second question\n"
+              "Second question\n")
+    (org-mode)
+    (ende-test--chat-goto "** Second question")
+    (let* ((messages (ende-chat-context-at-point))
+           (text (ende-test--chat-context-text messages)))
+      (should (string-match-p "Second root material" text))
+      (should (string-match-p "Second question" text))
+      (should-not (string-match-p "First root material" text))
+      (should-not (string-match-p "First question" text)))))
+
+(ert-deftest ende-test/chat-hidden-and-reasoning-obey-independent-policies ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Root\n"
+              "** Assistant material\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: assistant\n"
+              ":END:\n"
+              "Answer\n"
+              "#+begin_reasoning\n"
+              "Provider thought\n"
+              "#+end_reasoning\n"
+              "*** Hidden assistant descendant\n"
+              ":PROPERTIES:\n"
+              ":ENDE_VISIBILITY: hidden\n"
+              ":END:\n"
+              "Never send this\n"
+              "*** Reasoning section\n"
+              ":PROPERTIES:\n"
+              ":ENDE_VISIBILITY: reasoning\n"
+              ":END:\n"
+              "Section thought\n"
+              "**** Hidden reasoning descendant\n"
+              ":PROPERTIES:\n"
+              ":ENDE_VISIBILITY: hidden\n"
+              ":END:\n"
+              "Still never send this\n"
+              "** Question\n"
+              "Ask\n")
+    (org-mode)
+    (ende-test--chat-goto "** Question")
+    (let ((without-reasoning
+           (ende-test--chat-context-text
+            (let ((ende-chat-include-reasoning nil))
+              (ende-chat-context-at-point)))))
+      (should (string-match-p "Answer" without-reasoning))
+      (should-not (string-match-p "Provider thought" without-reasoning))
+      (should-not (string-match-p "Section thought" without-reasoning))
+      (should-not (string-match-p "Never send this" without-reasoning)))
+    (let ((with-reasoning
+           (ende-test--chat-context-text
+            (let ((ende-chat-include-reasoning t))
+              (ende-chat-context-at-point)))))
+      (should (string-match-p "Provider thought" with-reasoning))
+      (should (string-match-p "Section thought" with-reasoning))
+      (should-not (string-match-p "Never send this" with-reasoning)))))
+
+(ert-deftest ende-test/chat-role-inheritance-is-overridden-explicitly ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Root\n"
+              "** Assistant section\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: assistant\n"
+              ":END:\n"
+              "Assistant answer\n"
+              "*** Inherited child\n"
+              "Inherited assistant text\n"
+              "*** Explicit user child\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: user\n"
+              ":END:\n"
+              "User reference text\n"
+              "** Question\n"
+              "Ask\n")
+    (org-mode)
+    (ende-test--chat-goto "** Question")
+    (let* ((messages (ende-chat-context-at-point))
+           (roles (mapcar #'car messages))
+           (text (ende-test--chat-context-text messages)))
+      (should (equal roles '("user" "assistant" "assistant" "user" "user")))
+      (should (string-match-p "Assistant answer" text))
+      (should (string-match-p "Inherited assistant text" text))
+      (should (string-match-p "User reference text" text))
+      (should (equal (car (car (last messages))) "user")))))
+
+(ert-deftest ende-test/chat-current-question-skips-independent-child-subtrees ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Root\n"
+              "** Question\n"
+              "Question body\n"
+              "*** Unmarked reference\n"
+              "Include this reference\n"
+              "*** Explicit user child\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: user\n"
+              ":END:\n"
+              "Do not include this turn\n"
+              "*** Assistant child\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: assistant\n"
+              ":END:\n"
+              "Do not include this answer\n"
+              "*** Hidden child\n"
+              ":PROPERTIES:\n"
+              ":ENDE_VISIBILITY: hidden\n"
+              ":END:\n"
+              "Do not include this private note\n"
+              "*** Later unmarked reference\n"
+              "Include this later reference\n"
+              "** Later sibling\n"
+              "Must not enter this request\n")
+    (org-mode)
+    (ende-test--chat-goto "** Question")
+    (let ((text (ende-test--chat-context-text
+                 (ende-chat-context-at-point))))
+      (should (string-match-p "Question body" text))
+      (should (string-match-p "Include this reference" text))
+      (should (string-match-p "Include this later reference" text))
+      (should-not (string-match-p "Do not include this turn" text))
+      (should-not (string-match-p "Do not include this answer" text))
+      (should-not (string-match-p "Do not include this private note" text))
+      (should-not (string-match-p "Must not enter this request" text)))))
+
+(ert-deftest ende-test/chat-root-prefix-policy-can-be-narrowed ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Root\n"
+              "Earlier material\n"
+              "** Question\n"
+              "Current material\n")
+    (org-mode)
+    (ende-test--chat-goto "** Question")
+    (let ((root-prefix (ende-test--chat-context-text
+                        (let ((ende-chat-context-policy 'root-prefix))
+                          (ende-chat-context-at-point))))
+          (current-only (ende-test--chat-context-text
+                         (let ((ende-chat-context-policy
+                                'current-section-only))
+                           (ende-chat-context-at-point)))))
+      (should (string-match-p "Earlier material" root-prefix))
+      (should-not (string-match-p "Earlier material" current-only))
+      (should (string-match-p "Current material" current-only)))))
+
+(ert-deftest ende-test/chat-ask-marks-question-and-retries-without-sent-state ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("First answer" "Second answer"))))
+    (ende-test--with-buffer "* Root\n** Question\nAsk again\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (ende-chat-ask)
+      (ende-chat-ask)
+      (should (= (ende-test--chat-response-count) 2))
+      (should (equal (org-entry-get nil ende-chat-role-property)
+                     "user"))
+      (should (< (string-match-p "First answer" (buffer-string))
+                 (string-match-p "Second answer" (buffer-string))))
+      (should-not (cl-some #'ende-review-overlay-p
+                           (overlays-in (point-min) (point-max)))))))
+
+(ert-deftest ende-test/chat-title-directive-is-applied-and-removed ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '("#+ENDE_CHAT_TITLE: Explain the request\n\nAnswer\n* Generated"))))
+    (ende-test--with-buffer "* Root\n** \nRequest body\n"
+      (org-mode)
+      (ende-test--chat-goto "** ")
+      (ende-chat-ask)
+      (should (string-match-p "^\\*\\* Explain the request$"
+                              (buffer-string)))
+      (should-not (string-match-p "ENDE_CHAT_TITLE" (buffer-string)))
+      (should (string-match-p "^\\*\\*\\* Generated$"
+                              (buffer-string))))))
+
+(ert-deftest ende-test/chat-reasoning-is-marked-and-configurable-in-future-context ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          (list (list :content "Answer" :thinking "Private thought")))))
+    (ende-test--with-buffer "* Root\n** Question\nAsk\n** Next\nNext\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (ende-chat-ask)
+      (should (string-match-p (regexp-quote "#+begin_reasoning")
+                              (buffer-string)))
+      (ende-test--chat-goto "** Next")
+      (let ((without (ende-test--chat-context-text
+                      (let ((ende-chat-include-reasoning nil))
+                        (ende-chat-context-at-point))))
+            (with (ende-test--chat-context-text
+                   (let ((ende-chat-include-reasoning t))
+                     (ende-chat-context-at-point)))))
+        (should-not (string-match-p "Private thought" without))
+        (should (string-match-p "Private thought" with))))))
+
+(ert-deftest ende-test/chat-failure-keeps-question-and-reserves-slot ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(:error))))
+    (ende-test--with-buffer "* Root\n** Question\nOriginal text\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (let ((job (ende-chat-ask)))
+        (should (eq (ende-job-state job) 'failed)))
+      (should (string-match-p "Original text" (buffer-string)))
+      (should (string-match-p ":ENDE_CHAT_STATE: failed" (buffer-string)))
+      (should (string-match-p ":ENDE_VISIBILITY: hidden" (buffer-string))))))
+
+(ert-deftest ende-test/chat-queued-context-is-built-at-dispatch-and-hides-placeholders ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+        (ende-llm-function (ende-test--fake-llm '("First" "Second") t)))
+    (ende-test--with-buffer "* Root\n** Question\nAsk\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (setq ende--queue-suspended t)
+      (let ((first (ende-chat-ask))
+            (second (ende-chat-ask)))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (= (length ende-test--calls) 2))
+        (dolist (messages ende-test--prompts)
+          (let ((users (mapcar #'cdr
+                               (cl-remove-if-not
+                                (lambda (message)
+                                  (equal (car message) "user"))
+                                messages))))
+            (should (cl-every
+                     (lambda (text)
+                       (and (not (string-match-p "ENDE_CHAT_STATE" text))
+                            (not (string-match-p "Ende response" text))))
+                     users))))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (should (eq (ende-job-state second) 'completed))
+        (should (eq (ende-job-state first) 'running))
+        (should (string-match-p "Second" (buffer-string)))
+        (should (string-match-p "ENDE_CHAT_STATE: pending" (buffer-string)))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (should (eq (ende-job-state first) 'completed))
+        (should (< (string-match-p "First" (buffer-string))
+                   (string-match-p "Second" (buffer-string))))))))
+
+(ert-deftest ende-test/chat-rejects-ineligible-questions ()
+  (dolist (property
+           '((":ENDE_ROLE: assistant" . "assistant-owned")
+             (":ENDE_VISIBILITY: hidden" . "hidden")
+             (":ENDE_VISIBILITY: reasoning" . "reasoning")))
+    (ende-test--reset)
+    (ende-test--with-buffer
+        (format "* Root\n** Question\n:PROPERTIES:\n%s\n:END:\nAsk\n"
+                (car property))
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (should-error (ende-chat-ask) :type 'user-error))))
 
 (provide 'ende-test)
 

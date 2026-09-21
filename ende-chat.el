@@ -149,26 +149,33 @@ keeps the effective user or assistant role of its enclosing section."
           (puthash (car stack)
                    (cons headline (gethash (car stack) children))
                    children))
-        (puthash headline
-                 (list :role
-                       (ende-chat--normalize-role
-                        (ende-chat--local-property
-                         headline ende-chat-role-property)
-                        headline)
-                       :visibility
-                       (ende-chat--normalize-visibility
-                        (ende-chat--local-property
-                         headline ende-chat-visibility-property)
-                        headline)
-                       :id (ende-chat--local-property
-                            headline ende-chat-id-property)
-                       :reply-to (ende-chat--local-property
-                                  headline ende-chat-reply-to-property)
-                       :request-id (ende-chat--local-property
-                                    headline ende-chat-request-id-property)
-                       :state (ende-chat--local-property
-                               headline ende-chat-state-property))
-                 properties)
+        (let* ((local-role (ende-chat--local-property
+                            headline ende-chat-role-property))
+               (local-visibility (ende-chat--local-property
+                                  headline ende-chat-visibility-property))
+               (values (list :id (ende-chat--local-property
+                                  headline ende-chat-id-property)
+                             :reply-to (ende-chat--local-property
+                                        headline ende-chat-reply-to-property)
+                             :request-id (ende-chat--local-property
+                                          headline ende-chat-request-id-property)
+                             :state (ende-chat--local-property
+                                     headline ende-chat-state-property))))
+          (when local-role
+            (setq values
+                  (plist-put values :role
+                             (ende-chat--normalize-role local-role headline))
+                  values
+                  (plist-put values :role-marked t)))
+          (when local-visibility
+            (setq values
+                  (plist-put
+                   values :visibility
+                   (ende-chat--normalize-visibility
+                    local-visibility headline))
+                  values
+                  (plist-put values :visibility-marked t)))
+          (puthash headline values properties))
         (push headline stack)))
     (maphash (lambda (headline value)
                (puthash headline (nreverse value) children))
@@ -255,11 +262,11 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
 
 (defun ende-chat--independent-subtree-p (document headline)
   "Return non-nil when HEADLINE explicitly starts a separate subtree."
-  (or (plist-member (gethash headline
-                              (ende-chat--document-properties document))
-                    :role)
-      (let ((visibility (ende-chat--property document headline :visibility)))
-        (and visibility (not (equal visibility "normal"))))))
+  (let ((properties (gethash headline
+                             (ende-chat--document-properties document))))
+    (or (plist-get properties :role-marked)
+        (and (plist-get properties :visibility-marked)
+             (not (equal (plist-get properties :visibility) "normal"))))))
 
 (defun ende-chat--headline-end (document headline)
   "Return the end of HEADLINE's own section, before its first child."
@@ -378,9 +385,8 @@ tests."
          (question (ende-chat--headline-at-point document)))
     (ende-chat--serialize document question)))
 
-(defun ende-chat--headline-at-point (_document)
+(defun ende-chat--headline-at-point (document)
   "Return the headline containing point from DOCUMENT."
-  (ignore _document)
   (save-excursion
     (condition-case nil
         (progn
@@ -388,7 +394,7 @@ tests."
           (or (cl-find-if
                (lambda (headline)
                  (= (org-element-property :begin headline) (point)))
-               (ende-chat--document-headlines _document))
+               (ende-chat--document-headlines document))
               (user-error "Point is not in an Org headline")))
       (error (user-error "Point is not in an Org headline")))))
 
