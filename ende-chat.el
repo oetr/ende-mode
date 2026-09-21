@@ -426,7 +426,6 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
 
 The result excludes the system prompt and is useful to preview callers and
 tests."
-  (interactive)
   (let* ((document (ende-chat--build-document))
          (question (ende-chat--headline-at-point document)))
     (ende-chat--serialize document question)))
