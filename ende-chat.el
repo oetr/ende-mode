@@ -92,7 +92,7 @@ keeps the effective user or assistant role of its enclosing section."
 
 (cl-defstruct (ende-chat--document (:constructor ende-chat--make-document))
   "Parsed Org document and its headline relationships."
-  tree headlines parent children properties)
+  tree headlines parent children properties exclusions)
 
 ;;;; Org document model
 
@@ -185,8 +185,12 @@ keeps the effective user or assistant role of its enclosing section."
     (maphash (lambda (headline value)
                (puthash headline (nreverse value) children))
              children)
-    (ende-chat--make-document :tree tree :headlines sorted :parent parent
-                              :children children :properties properties)))
+    (let ((document
+           (ende-chat--make-document
+            :tree tree :headlines sorted :parent parent :children children
+            :properties properties :exclusions (make-hash-table :test #'eq))))
+      (ende-chat--collect-section-exclusions document)
+      document)))
 
 (defun ende-chat--property-key (property)
   "Return the parsed-document key corresponding to PROPERTY."
@@ -297,59 +301,67 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
   (member (upcase (or (org-element-property :key property) ""))
           ende-chat--reserved-properties))
 
-(defun ende-chat--section-exclusions (document start end)
-  "Return control and reasoning ranges to omit from a section.
+(defun ende-chat--lineage-headline (element)
+  "Return the headline owning ELEMENT, or nil."
+  (let ((headline (org-element-lineage element '(headline) t)))
+    (and (eq (org-element-type headline) 'headline) headline)))
 
-Unrelated Org properties remain ordinary reference material.  A drawer made
-only of Ende control properties is removed as a whole; mixed drawers retain
-their user properties while removing the control lines."
+(defun ende-chat--collect-section-exclusions (document)
+  "Collect control and reasoning ranges for every headline in DOCUMENT."
   (let* ((tree (ende-chat--document-tree document))
-         (drawer-ranges nil)
-         (ranges nil))
+         (exclusions (ende-chat--document-exclusions document))
+         (removed-drawers (make-hash-table :test #'eq)))
     (org-element-map tree 'property-drawer
       (lambda (drawer)
-        (let ((drawer-start (org-element-property :begin drawer))
-              (drawer-end (org-element-property :end drawer))
-              (properties (org-element-map drawer 'node-property #'identity)))
-          (when (and (<= start drawer-start)
-                     (<= drawer-end end)
-                     (cl-every #'ende-chat--reserved-property-p properties))
-            (push (cons drawer-start drawer-end) drawer-ranges))))
+        (let ((properties (org-element-map drawer 'node-property #'identity))
+              (headline (ende-chat--lineage-headline drawer)))
+          (when (and headline (cl-every #'ende-chat--reserved-property-p
+                                        properties))
+            (puthash drawer t removed-drawers)
+            (puthash headline
+                     (cons (cons (org-element-property :begin drawer)
+                                 (org-element-property :end drawer))
+                           (gethash headline exclusions))
+                     exclusions))))
       nil nil nil)
     (org-element-map tree '(node-property special-block)
       (lambda (element)
-        (let ((element-start (org-element-property :begin element))
-              (element-end (org-element-property :end element)))
-          (when (and (<= start element-start)
-                     (<= element-end end)
-                     (or (and (eq (org-element-type element) 'node-property)
-                              (ende-chat--reserved-property-p element)
-                              (not
-                               (cl-some
-                                (lambda (range)
-                                  (and (<= (car range) element-start)
-                                       (<= element-end (cdr range))))
-                                drawer-ranges)))
-                         (and (eq (org-element-type element) 'special-block)
-                              (string= (downcase
-                                        (or (org-element-property :type element)
-                                            ""))
-                                       "reasoning")
-                              (not ende-chat-include-reasoning))))
-            (push (cons element-start element-end) ranges))))
+        (let* ((type (org-element-type element))
+               (headline (ende-chat--lineage-headline element))
+               (drawer (and (eq type 'node-property)
+                            (org-element-lineage
+                             element '(property-drawer) t)))
+               (remove
+                (or (and (eq type 'node-property)
+                         (ende-chat--reserved-property-p element)
+                         (not (gethash drawer removed-drawers)))
+                    (and (eq type 'special-block)
+                         (string= (downcase
+                                   (or (org-element-property :type element)
+                                       ""))
+                                  "reasoning")
+                         (not ende-chat-include-reasoning)))))
+          (when (and headline remove)
+            (puthash headline
+                     (cons (cons (org-element-property :begin element)
+                                 (org-element-property :end element))
+                           (gethash headline exclusions))
+                     exclusions))))
       nil nil nil)
-    (dolist (range drawer-ranges)
-      (push range ranges))
-    (mapcar (lambda (range)
-              (cons (- (car range) start) (- (cdr range) start)))
-            ranges)))
+    document))
+
+(defun ende-chat--section-exclusions (document headline start)
+  "Return ranges to omit from HEADLINE's own section."
+  (mapcar (lambda (range)
+            (cons (- (car range) start) (- (cdr range) start)))
+          (gethash headline (ende-chat--document-exclusions document))))
 
 (defun ende-chat--section-text (document headline)
   "Return HEADLINE's own heading and body, without control material."
   (let* ((start (org-element-property :begin headline))
          (end (ende-chat--headline-end document headline))
          (text (buffer-substring-no-properties start end))
-         (ranges (ende-chat--section-exclusions document start end)))
+         (ranges (ende-chat--section-exclusions document headline start)))
     (ende-chat--remove-ranges text ranges)))
 
 (defun ende-chat--prefix-headlines (document root question)
