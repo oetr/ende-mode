@@ -3394,7 +3394,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             ende-selector--model-index 0)
       (cl-letf (((symbol-function 'read-number)
                  (lambda (&rest _) 4)))
-       (ende-selector-set-concurrency))
+        (ende-selector-set-concurrency))
       (should (= (ende-provider-max-concurrency
                   (ende-provider-profile 'remote))
                  4))
@@ -3402,65 +3402,70 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
-       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
-                       "i  - insert" "I  - insert anywhere"
-                        "w  - write anywhere"
-                        "m  - select/search model"
-                        "e  - select reasoning effort"
-                        "s  - summarize"
-                       "r  - rubber duck"
-                      "RET       - confirm choice"
-                      "C-c C-c   - approve all LLM changes"
-                      "C-c C-k   - reject all LLM changes"))
-         (should (string-match-p (regexp-quote key) (buffer-string))))
-         (should (= (count-lines (point-min) (point-max)) 19)))))
+      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
+                     "i  - insert" "a  - ask" "I  - insert anywhere"
+                     "w  - write anywhere"
+                     "m  - select/search model"
+                     "e  - select reasoning effort"
+                     "s  - summarize"
+                     "r  - rubber duck"
+                     "RET       - confirm choice"
+                     "C-c C-c   - approve all LLM changes"
+                     "C-c C-k   - reject all LLM changes"))
+        (should (string-match-p (regexp-quote key) (buffer-string))))
+      (should (= (count-lines (point-min) (point-max)) 20)))))
 
 (ert-deftest ende-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key ende-selector-mode-map (kbd "c")))
-         (original-C (lookup-key ende-selector-mode-map (kbd "C")))
-         (original-P (lookup-key ende-selector-mode-map (kbd "P")))
-         (original-e (lookup-key ende-selector-mode-map (kbd "e"))))
+        (original-C (lookup-key ende-selector-mode-map (kbd "C")))
+        (original-P (lookup-key ende-selector-mode-map (kbd "P")))
+        (original-e (lookup-key ende-selector-mode-map (kbd "e")))
+        (original-a (lookup-key ende-selector-mode-map (kbd "a"))))
     (unwind-protect
         (progn
           ;; Simulate a keymap retained from before the new bindings existed.
-           (define-key ende-selector-mode-map (kbd "c") nil)
-           (define-key ende-selector-mode-map (kbd "C") nil)
-           (define-key ende-selector-mode-map (kbd "P") nil)
-           (define-key ende-selector-mode-map (kbd "e") nil)
+          (define-key ende-selector-mode-map (kbd "c") nil)
+          (define-key ende-selector-mode-map (kbd "C") nil)
+          (define-key ende-selector-mode-map (kbd "P") nil)
+          (define-key ende-selector-mode-map (kbd "e") nil)
+          (define-key ende-selector-mode-map (kbd "a") nil)
           (with-temp-buffer
             (ende-selector-mode)
             (should (eq (key-binding (kbd "c"))
                         #'ende-selector-set-concurrency))
             (should (eq (key-binding (kbd "C"))
                         #'ende-selector-set-concurrency))
-             (should (eq (key-binding (kbd "P"))
-                         #'ende-selector-toggle-parallel))
-             (should (eq (key-binding (kbd "n"))
-                         #'ende-selector-next-provider))
-             (should (eq (key-binding (kbd "p"))
-                         #'ende-selector-previous-provider))
-              (should (eq (key-binding (kbd "m"))
-                          #'ende-selector-select-model))
-              (should (eq (key-binding (kbd "e"))
-                          #'ende-selector-select-effort))
-             (should (eq (key-binding (kbd "RET"))
-                         #'ende-selector-confirm))
-             (should (eq (key-binding (kbd "C-c C-c"))
-                         #'ende-selector-approve-source-output))
-             (should (eq (key-binding (kbd "C-c C-k"))
-                         #'ende-selector-reject-source-output))
-             (should-not (eq (key-binding (kbd "DEL"))
-                             #'ende-selector-reject-source-output))
-             (should-not (eq (key-binding (kbd "<backspace>"))
-                             #'ende-selector-reject-source-output))
+            (should (eq (key-binding (kbd "P"))
+                        #'ende-selector-toggle-parallel))
+            (should (eq (key-binding (kbd "n"))
+                        #'ende-selector-next-provider))
+            (should (eq (key-binding (kbd "p"))
+                        #'ende-selector-previous-provider))
+            (should (eq (key-binding (kbd "m"))
+                        #'ende-selector-select-model))
+            (should (eq (key-binding (kbd "e"))
+                        #'ende-selector-select-effort))
+            (should (eq (key-binding (kbd "a"))
+                        #'ende-selector-ask))
+            (should (eq (key-binding (kbd "RET"))
+                        #'ende-selector-confirm))
+            (should (eq (key-binding (kbd "C-c C-c"))
+                        #'ende-selector-approve-source-output))
+            (should (eq (key-binding (kbd "C-c C-k"))
+                        #'ende-selector-reject-source-output))
+            (should-not (eq (key-binding (kbd "DEL"))
+                            #'ende-selector-reject-source-output))
+            (should-not (eq (key-binding (kbd "<backspace>"))
+                            #'ende-selector-reject-source-output))
             (should (eq (key-binding (kbd "w"))
                         #'ende-selector-write-anywhere))
             (should (eq (key-binding (kbd "I"))
                         #'ende-selector-insert-anywhere))))
-       (define-key ende-selector-mode-map (kbd "c") original-c)
-        (define-key ende-selector-mode-map (kbd "C") original-C)
-        (define-key ende-selector-mode-map (kbd "P") original-P)
-        (define-key ende-selector-mode-map (kbd "e") original-e))))
+      (define-key ende-selector-mode-map (kbd "c") original-c)
+      (define-key ende-selector-mode-map (kbd "C") original-C)
+      (define-key ende-selector-mode-map (kbd "P") original-P)
+      (define-key ende-selector-mode-map (kbd "e") original-e)
+      (define-key ende-selector-mode-map (kbd "a") original-a))))
 
 (ert-deftest ende-test/selector-labels-are-single-line-and-display-bounded ()
   (let ((multiline (ende-selector--display-label "provider\nspoof" 24))
@@ -6137,8 +6142,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "* Root\n** Question\nAsk again\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (ende-chat-ask)
-      (ende-chat-ask)
+      (ende-ask)
+      (ende-ask)
       (should (= (ende-test--chat-response-count) 2))
       (should (equal (org-entry-get nil ende-chat-role-property)
                      "user"))
@@ -6155,7 +6160,7 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "* Root\n** \nRequest body\n"
       (org-mode)
       (ende-test--chat-goto "** ")
-      (ende-chat-ask)
+      (ende-ask)
       (should (string-match-p "^\\*\\* Explain the request$"
                               (buffer-string)))
       (should-not (string-match-p "ENDE_CHAT_TITLE" (buffer-string)))
@@ -6170,7 +6175,7 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "* Root\n** Question\nAsk\n** Next\nNext\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (ende-chat-ask)
+      (ende-ask)
       (should (string-match-p (regexp-quote "#+begin_reasoning")
                               (buffer-string)))
       (ende-test--chat-goto "** Next")
@@ -6189,7 +6194,7 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "* Root\n** Question\nOriginal text\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (let ((job (ende-chat-ask)))
+      (let ((job (ende-ask)))
         (should (eq (ende-job-state job) 'failed)))
       (should (string-match-p "Original text" (buffer-string)))
       (should (string-match-p ":ENDE_CHAT_STATE: failed" (buffer-string)))
@@ -6203,8 +6208,8 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** Question")
       (setq ende--queue-suspended t)
-      (let ((first (ende-chat-ask))
-            (second (ende-chat-ask)))
+      (let ((first (ende-ask))
+            (second (ende-ask)))
         (setq ende--queue-suspended nil)
         (ende-process-next)
         (should (= (length ende-test--calls) 2))
@@ -6240,7 +6245,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                 (car property))
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (should-error (ende-chat-ask) :type 'user-error))))
+      (should-error (ende-ask) :type 'user-error))))
 
 (provide 'ende-test)
 

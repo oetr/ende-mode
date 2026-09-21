@@ -32,7 +32,7 @@
 ;;;; Configuration and durable fields
 
 (defcustom ende-chat-buffer-name "*ende-chat*"
-  "Name of the buffer created by `ende-chat'."
+  "Name of the buffer used for chat when the source is not Org."
   :type 'string
   :group 'ende)
 
@@ -785,12 +785,11 @@ stars in literal blocks are left untouched by Org's parser."
       (user-error "Cannot ask from assistant-owned chat content"))
     (list :question-id question-id)))
 
-(defun ende-chat-ask ()
-  "Ask the Org headline at point and reserve its response position.
+(defun ende-ask (&optional profile)
+  "Ask the Org headline at point using PROFILE.
 
 The question receives `ENDE_ROLE: user' when it is first asked.  Context is
-serialized when its queue job starts, not when this command is invoked."
-  (interactive)
+serialized when its queue job starts, not when this function is invoked."
   (let* ((document (ende-chat--build-document))
          (question (ende-chat--headline-at-point document))
          (data (ende-chat--ask-data document question))
@@ -829,11 +828,13 @@ serialized when its queue job starts, not when this command is invoked."
             (setq overlay
                   (ende-ui-create-overlay
                    (current-buffer) position position "Queued" 'badge-only))
-            (setq job
-                  (ende-enqueue
+            (let ((request
                    (list 'chat :target target :overlay overlay
                          :instruction (list :question-id question-id
                                             :request-id request-id))))
+              (when profile
+                (setq request (plist-put request :profile profile)))
+              (setq job (ende-enqueue request)))
             (setq committed t)
             (message "ende: queued chat request %d" (ende-job-id job))
             job)
@@ -855,32 +856,36 @@ serialized when its queue job starts, not when this command is invoked."
                                      (org-element-property :end failed))))
                 ((error quit) nil)))))))))
 
-(defun ende-chat-buffer ()
-  "Return the Org buffer owned by `ende-chat'."
+(defun ende-chat--ensure-buffer ()
+  "Return the owned Org chat buffer, creating it when necessary."
   (setq ende-chat--buffer-object
         (ende-owned-buffer ende-chat--buffer-object
                            ende-chat-buffer-name
                            'ende-chat--owned-buffer
-                           #'org-mode)))
+                           #'org-mode))
+  (with-current-buffer ende-chat--buffer-object
+    ;; The fallback buffer must support the same selector key as other sources.
+    (when (fboundp #'ende-mode)
+      (ende-mode 1)))
+  ende-chat--buffer-object)
 
-;;;###autoload
-(defun ende-chat ()
-  "Open the Ende chat Org buffer."
-  (interactive)
-  (pop-to-buffer (ende-chat-buffer)))
+(defun ende-chat--ensure-draft-root (buffer)
+  "Ensure BUFFER ends with a blank level-one question heading.
 
-;;;###autoload
-(defun ende-chat-new (title)
-  "Create a new level-one chat root titled TITLE."
-  (interactive (list (read-string "Chat root title: ")))
-  (let ((buffer (ende-chat-buffer)))
-    (with-current-buffer buffer
-      (goto-char (point-max))
-      (unless (or (bobp) (bolp))
-        (insert "\n"))
-      (insert "* " title "\n\n")
-      (backward-char 1))
-    (pop-to-buffer buffer)))
+Return non-nil when a heading was inserted.  Existing chat content is never
+changed except for appending the new draft root."
+  (with-current-buffer buffer
+    (goto-char (point-max))
+    (unless (bolp)
+      (insert "\n"))
+    (unless
+        (save-excursion
+          (goto-char (point-max))
+          (skip-chars-backward " \t\n")
+          (beginning-of-line)
+          (looking-at "\\* *$"))
+      (insert "* \n")
+      t)))
 
 (defun ende-chat--buffer-killed ()
   "Forget the owned chat buffer after it is killed."
