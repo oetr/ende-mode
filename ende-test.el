@@ -6178,6 +6178,8 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-ask)
       (should (string-match-p (regexp-quote "#+begin_reasoning")
                               (buffer-string)))
+      (should (string-match-p (regexp-quote "#+end_reasoning\n\nAnswer")
+                              (buffer-string)))
       (ende-test--chat-goto "** Next")
       (let ((without (ende-test--chat-context-text
                       (let ((ende-chat-include-reasoning nil))
@@ -6246,6 +6248,72 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** Question")
       (should-error (ende-ask) :type 'user-error))))
+
+(ert-deftest ende-test/selector-ask-uses-selected-profile-in-org-buffer ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((remote :model "configured-model")))
+        (ende-llm-function (ende-test--fake-llm '("Reply"))))
+    (ende-test--with-buffer "* Root\n** Question\nAsk\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (let ((source (current-buffer)))
+        (with-temp-buffer
+          (ende-selector-mode)
+          (setq ende-selector--source-buffer source
+                ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("selected-model")
+                ende-selector--model-index 0
+                ende-selector--model-state :ready
+                ende-selector--effort nil)
+          (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
+            (ende-selector-ask)))
+        (let ((profile (plist-get (car ende-test--calls) :options)))
+          (should (eq (plist-get profile :name) 'remote))
+          (should (equal (plist-get profile :model) "selected-model"))
+          (should (string-match-p "Reply" (buffer-string))))))))
+
+(ert-deftest ende-test/selector-ask-prepares-chat-from-non-org-buffer ()
+  (dolist (initial '("" "* Existing\nPrevious material\n"))
+    (ende-test--reset)
+    (let ((ende-llm-function (ende-test--fake-llm '("Reply"))))
+      (ende-test--with-buffer "source text"
+        (let ((source (current-buffer))
+              (shown nil)
+              (chat (ende-chat--ensure-buffer)))
+          (with-current-buffer chat
+            (insert initial))
+          (with-temp-buffer
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(local)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("local-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready
+                  ende-selector--effort nil)
+            (cl-letf (((symbol-function 'ende-selector-close) #'ignore)
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buffer) (setq shown buffer))))
+              (ende-selector-ask)
+              (with-current-buffer chat
+                (goto-char (point-max))
+                (insert "Question\n"))
+              (setq ende-selector--source-buffer chat)
+              (ende-selector-ask)))
+          (should (eq shown chat))
+          (with-current-buffer chat
+            (should (derived-mode-p 'org-mode))
+            (should (bound-and-true-p ende-mode))
+            (should (= (how-many "^\\* *$" (point-min) (point-max)) 1))
+            (should (string-match-p "Reply" (buffer-string)))
+            (should (string-match-p "^\\*\\* Ende response$"
+                                    (buffer-string)))
+            (should (string-match-p ":ENDE_ROLE: assistant"
+                                    (buffer-string)))
+            (when (not (string-empty-p initial))
+              (should (string-match-p "Previous material"
+                                      (buffer-string))))))))))
 
 (provide 'ende-test)
 

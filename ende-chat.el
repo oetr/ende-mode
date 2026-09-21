@@ -679,11 +679,11 @@ stars in literal blocks are left untouched by Org's parser."
             (ende-chat--response-property ende-chat-reply-to-property question-id)
             (ende-chat--response-property ende-chat-request-id-property request-id)
             ":END:\n\n"
-            body
             (when (and (stringp thinking) (not (string-empty-p thinking)))
-              (concat "\n\n#+begin_reasoning\n"
+              (concat "#+begin_reasoning\n"
                       (ende-trim-trailing thinking)
-                      "\n#+end_reasoning"))
+                      "\n#+end_reasoning\n\n"))
+            body
             "\n")))
 
 (defun ende-chat--apply-result (job result)
@@ -828,13 +828,13 @@ serialized when its queue job starts, not when this function is invoked."
             (setq overlay
                   (ende-ui-create-overlay
                    (current-buffer) position position "Queued" 'badge-only))
-            (let ((request
-                   (list 'chat :target target :overlay overlay
+            (let ((data
+                   (list :target target :overlay overlay
                          :instruction (list :question-id question-id
                                             :request-id request-id))))
               (when profile
-                (setq request (plist-put request :profile profile)))
-              (setq job (ende-enqueue request)))
+                (setq data (plist-put data :profile profile)))
+              (setq job (ende-enqueue (cons 'chat data))))
             (setq committed t)
             (message "ende: queued chat request %d" (ende-job-id job))
             job)
