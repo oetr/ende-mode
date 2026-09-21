@@ -186,8 +186,8 @@ DISPLAY supplies the model label; TIMESTAMP is a formatted time string."
           source (deslop-summary-source-start-line source)
           (deslop-summary--single-line
            (deslop-summary-source-name source)))))
-    (concat (format "* *%s* - [%s] - %s\nFile: %s\n"
-                    buffer-name timestamp model heading-link)
+    (concat (format "* *%s* - %s\nFile: %s\nModel: %s\n\n"
+                    buffer-name timestamp heading-link model)
             (deslop-summary--sanitize source content))))
 
 (defun deslop-summary--append-entry (buffer text)
