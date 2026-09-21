@@ -5981,6 +5981,35 @@ Use COMMAND for the process, or a silent sleep process by default."
      (string= (org-element-property :raw-value headline) "Ende response"))
    (org-element-map (org-element-parse-buffer) 'headline #'identity)))
 
+(defun ende-test--chat-control-drawers ()
+  "Return the Ende control property drawers in the current buffer."
+  (cl-remove-if-not
+   (lambda (drawer)
+     (cl-every #'ende-chat--reserved-property-p
+               (org-element-map drawer 'node-property #'identity)))
+   (org-element-map (org-element-parse-buffer) 'property-drawer #'identity)))
+
+(defun ende-test--chat-control-drawer-hidden-p (drawer)
+  "Return non-nil when DRAWER's first property line is folded."
+  (save-excursion
+    (goto-char (org-element-property :begin drawer))
+    (forward-line 1)
+    (invisible-p (point))))
+
+(defun ende-test--chat-response-headlines ()
+  "Return host-created response headlines in document order."
+  (cl-remove-if-not
+   (lambda (headline)
+     (string= (org-element-property :raw-value headline) "Ende response"))
+   (org-element-map (org-element-parse-buffer) 'headline #'identity)))
+
+(defun ende-test--chat-response-has-separator-p (headline)
+  "Return non-nil when HEADLINE has a blank line before it."
+  (save-excursion
+    (goto-char (org-element-property :begin headline))
+    (forward-line -1)
+    (looking-at-p "^[[:space:]]*$")))
+
 (ert-deftest ende-test/chat-context-isolates-level-one-roots ()
   (ende-test--reset)
   (ende-test--with-buffer
@@ -6209,32 +6238,83 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "* Root\n** Question\nAsk\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (setq ende--queue-suspended t)
-      (let ((first (ende-ask))
-            (second (ende-ask)))
-        (setq ende--queue-suspended nil)
-        (ende-process-next)
-        (should (= (length ende-test--calls) 2))
-        (dolist (messages ende-test--prompts)
-          (let ((users (mapcar #'cdr
-                               (cl-remove-if-not
-                                (lambda (message)
-                                  (equal (car message) "user"))
-                                messages))))
-            (should (cl-every
-                     (lambda (text)
-                       (and (not (string-match-p "ENDE_CHAT_STATE" text))
-                            (not (string-match-p "Ende response" text))))
-                     users))))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (should (eq (ende-job-state second) 'completed))
-        (should (eq (ende-job-state first) 'running))
-        (should (string-match-p "Second" (buffer-string)))
-        (should (string-match-p "ENDE_CHAT_STATE: pending" (buffer-string)))
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (should (eq (ende-job-state first) 'completed))
-        (should (< (string-match-p "First" (buffer-string))
-                   (string-match-p "Second" (buffer-string))))))))
+      (let ((point-before (point)))
+        (setq ende--queue-suspended t)
+        (let ((first (ende-ask))
+              (second (ende-ask)))
+          (should (= (point) point-before))
+          (let ((drawers (ende-test--chat-control-drawers)))
+            (should (= (length drawers) 3))
+            (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                              drawers)))
+          (let ((headlines (ende-test--chat-response-headlines)))
+            (should (= (length headlines) 2))
+            (should (cl-every #'ende-test--chat-response-has-separator-p
+                              headlines))
+            (dolist (job (list first second))
+              (should
+               (cl-some
+                (lambda (headline)
+                  (= (overlay-start (ende-job-overlay job))
+                     (1- (org-element-property :begin headline))))
+                headlines))))
+          (setq ende--queue-suspended nil)
+          (ende-process-next)
+          (should (= (length ende-test--calls) 2))
+          (dolist (messages ende-test--prompts)
+            (let ((users (mapcar #'cdr
+                                 (cl-remove-if-not
+                                  (lambda (message)
+                                    (equal (car message) "user"))
+                                  messages))))
+              (should (cl-every
+                       (lambda (text)
+                         (and (not (string-match-p "ENDE_CHAT_STATE" text))
+                              (not (string-match-p "Ende response" text))))
+                       users))))
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (should (eq (ende-job-state second) 'completed))
+          (should (eq (ende-job-state first) 'running))
+          (should (string-match-p "Second" (buffer-string)))
+          (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                            (ende-test--chat-control-drawers)))
+          (should (string-match-p "ENDE_CHAT_STATE: pending" (buffer-string)))
+          (ende-test--complete-call (nth 0 ende-test--calls))
+          (should (eq (ende-job-state first) 'completed))
+          (should (< (string-match-p "First" (buffer-string))
+                     (string-match-p "Second" (buffer-string))))
+          (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                            (ende-test--chat-control-drawers)))
+          (should (cl-every #'ende-test--chat-response-has-separator-p
+                            (ende-test--chat-response-headlines))))))))
+
+(ert-deftest ende-test/chat-preserves-point-through-async-lifecycle ()
+  (dolist (response '("Answer" :error))
+    (ende-test--reset)
+    (let ((ende-llm-function (ende-test--fake-llm (list response) t)))
+      (ende-test--with-buffer
+          "* Root\n** Question\nAsk\n** Work\nKeep editing\n"
+        (org-mode)
+        (ende-test--chat-goto "** Question")
+        (let ((question-point (point)))
+          (setq ende--queue-suspended t)
+          (let ((job (ende-ask)))
+            (should (= (point) question-point))
+            (setq ende--queue-suspended nil)
+            (ende-process-next)
+            (goto-char (point-min))
+            (search-forward "Keep editing")
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position)))
+                  (column (current-column)))
+              (ende-test--complete-call (car ende-test--calls))
+              (should (equal line
+                             (buffer-substring-no-properties
+                              (line-beginning-position)
+                              (line-end-position))))
+              (should (= column (current-column)))
+              (should (eq (ende-job-state job)
+                          (if (eq response :error) 'failed 'completed))))))))))
 
 (ert-deftest ende-test/chat-rejects-ineligible-questions ()
   (dolist (property

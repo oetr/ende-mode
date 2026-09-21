@@ -20,6 +20,7 @@
 (require 'cl-lib)
 (require 'org)
 (require 'org-element)
+(require 'org-fold)
 (require 'subr-x)
 (require 'ende-core)
 (require 'ende-operation)
@@ -300,6 +301,18 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
   "Return non-nil when PROPERTY is an Ende control property."
   (member (upcase (or (org-element-property :key property) ""))
           ende-chat--reserved-properties))
+
+(defun ende-chat--hide-control-drawers ()
+  "Hide Ende control property drawers in the current Org buffer."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (let ((tree (org-element-parse-buffer)))
+        (org-element-map tree 'property-drawer
+          (lambda (drawer)
+            (when (cl-every #'ende-chat--reserved-property-p
+                           (org-element-map drawer 'node-property #'identity))
+              (goto-char (org-element-property :begin drawer))
+              (org-fold-hide-drawer-toggle t t))))))))
 
 (defun ende-chat--lineage-headline (element)
   "Return the headline owning ELEMENT, or nil."
@@ -608,12 +621,14 @@ stars in literal blocks are left untouched by Org's parser."
                   (org-element-property :level question)))
          (position (ende-chat--insertion-position document question))
          (text (ende-chat--placeholder-text level question-id request-id)))
-    (goto-char position)
-    (unless (bolp)
-      (insert "\n"))
-    (let ((position (point)))
-      (insert text)
-      position)))
+    (save-excursion
+      (goto-char position)
+      (unless (bolp)
+        (insert "\n"))
+      (insert "\n")
+      (let ((heading-position (point)))
+        (insert text)
+        heading-position))))
 
 (defun ende-chat--placeholder (job)
   "Return JOB's current pending reply headline, or nil."
@@ -622,16 +637,17 @@ stars in literal blocks are left untouched by Org's parser."
          (request-id (plist-get instruction :request-id)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (save-restriction
-          (widen)
-          (let* ((document (ende-chat--build-document))
-                 (headline (ende-chat--find-by-property
-                            document ende-chat-request-id-property request-id)))
-            (when (and headline
-                       (equal (ende-chat--property
-                               document headline :state)
-                              "pending"))
-              (list document headline))))))))
+        (save-excursion
+          (save-restriction
+            (widen)
+            (let* ((document (ende-chat--build-document))
+                   (headline (ende-chat--find-by-property
+                              document ende-chat-request-id-property request-id)))
+              (when (and headline
+                         (equal (ende-chat--property
+                                 document headline :state)
+                                "pending"))
+                (list document headline)))))))))
 
 (defun ende-chat--failure-text (error)
   "Return a readable failure body for ERROR."
@@ -648,22 +664,24 @@ stars in literal blocks are left untouched by Org's parser."
           (pcase-let ((`(,_document ,headline) placeholder))
             (let ((buffer (ende-target-buffer (ende-job-target job))))
               (with-current-buffer buffer
-                (save-restriction
-                  (widen)
-                  (let ((inhibit-read-only t))
-                    (atomic-change-group
-                      (goto-char (org-element-property :begin headline))
-                      (org-entry-put nil ende-chat-state-property "failed")
-                      (let* ((updated (ende-chat--build-document))
-                             (failed
-                              (ende-chat--find-by-property
-                               updated ende-chat-request-id-property
-                               (plist-get (ende-job-instruction job)
-                                          :request-id))))
-                        (when failed
-                          (goto-char (org-element-property :end failed))
-                          (unless (bolp) (insert "\n"))
-                          (insert (ende-chat--failure-text error))))))))))))
+                (save-excursion
+                  (save-restriction
+                    (widen)
+                    (let ((inhibit-read-only t))
+                      (atomic-change-group
+                        (goto-char (org-element-property :begin headline))
+                        (org-entry-put nil ende-chat-state-property "failed")
+                        (let* ((updated (ende-chat--build-document))
+                               (failed
+                                (ende-chat--find-by-property
+                                 updated ende-chat-request-id-property
+                                 (plist-get (ende-job-instruction job)
+                                            :request-id))))
+                          (when failed
+                            (goto-char (org-element-property :end failed))
+                            (unless (bolp) (insert "\n"))
+                            (insert (ende-chat--failure-text error))
+                            (ende-chat--hide-control-drawers))))))))))))
     ((error quit) nil)))
 
 (defun ende-chat--assistant-text (level question-id request-id normalized thinking)
@@ -683,7 +701,7 @@ stars in literal blocks are left untouched by Org's parser."
                       (ende-trim-trailing thinking)
                       "\n#+end_reasoning\n\n"))
             body
-            "\n")))
+            "\n\n")))
 
 (defun ende-chat--apply-result (job result)
   "Replace JOB's pending reply with a completed assistant response."
@@ -708,26 +726,28 @@ stars in literal blocks are left untouched by Org's parser."
                    (question (ende-chat--find-by-property
                               document ende-chat-id-property question-id)))
               (with-current-buffer buffer
-                (save-restriction
-                  (widen)
-                  (atomic-change-group
-                    (when (and question
-                               (string-blank-p
-                                (org-element-property :raw-value question))
-                               (plist-get normalized :title))
-                      (ende-chat--set-headline-title
-                       question (plist-get normalized :title)))
-                    (let* ((updated (ende-chat--build-document))
-                           (headline
-                            (ende-chat--find-by-property
-                             updated ende-chat-request-id-property request-id)))
-                      (unless headline
-                        (error "Chat response destination no longer exists"))
-                      (delete-region (org-element-property :begin headline)
-                                     (org-element-property :end headline))
-                      (goto-char (org-element-property :begin headline))
-                      (insert response)))))))
-          (ende-job-finish job result))
+                (save-excursion
+                  (save-restriction
+                    (widen)
+                    (atomic-change-group
+                      (when (and question
+                                 (string-blank-p
+                                  (org-element-property :raw-value question))
+                                 (plist-get normalized :title))
+                        (ende-chat--set-headline-title
+                         question (plist-get normalized :title)))
+                      (let* ((updated (ende-chat--build-document))
+                             (headline
+                              (ende-chat--find-by-property
+                               updated ende-chat-request-id-property request-id)))
+                        (unless headline
+                          (error "Chat response destination no longer exists"))
+                        (delete-region (org-element-property :begin headline)
+                                       (org-element-property :end headline))
+                        (goto-char (org-element-property :begin headline))
+                        (insert response)
+                        (ende-chat--hide-control-drawers)))))))
+            (ende-job-finish job result)))
       ((error quit)
        (ende-job-fail job (ende--application-error failure))))))
 
@@ -742,25 +762,26 @@ stars in literal blocks are left untouched by Org's parser."
             (buffer (ende-target-buffer (ende-job-target job)))
             (question-id (plist-get instruction :question-id)))
        (with-current-buffer buffer
-         (save-restriction
-           (widen)
-           (let* ((document (ende-chat--build-document))
-                  (question (ende-chat--find-by-property
-                             document ende-chat-id-property question-id)))
-             (unless question
-               (error "Chat question no longer exists"))
-             (unless (and (eq (ende-chat--effective-role document question)
-                              'user)
-                          (eq (ende-chat--effective-visibility document question)
-                              'normal))
-               (error "Chat question is no longer eligible"))
-             (let ((messages (ende-chat--serialize document question)))
-               (unless messages
-                 (error "Chat question has no eligible content"))
-               (ende--dispatch-llm
-                job
-                (cons (cons "system" ende-chat--system) messages)
-                (lambda (result) (ende-chat--apply-result job result)))))))))))
+         (save-excursion
+           (save-restriction
+             (widen)
+             (let* ((document (ende-chat--build-document))
+                    (question (ende-chat--find-by-property
+                               document ende-chat-id-property question-id)))
+               (unless question
+                 (error "Chat question no longer exists"))
+               (unless (and (eq (ende-chat--effective-role document question)
+                                'user)
+                            (eq (ende-chat--effective-visibility document question)
+                                'normal))
+                 (error "Chat question is no longer eligible"))
+               (let ((messages (ende-chat--serialize document question)))
+                 (unless messages
+                   (error "Chat question has no eligible content"))
+                 (ende--dispatch-llm
+                  job
+                  (cons (cons "system" ende-chat--system) messages)
+                  (lambda (result) (ende-chat--apply-result job result))))))))))))
 
 (ende-register-job-handler 'chat #'ende-chat--run)
 
@@ -814,7 +835,8 @@ serialized when its queue job starts, not when this function is invoked."
                                                question-id)))
           (setq position
                 (ende-chat--insert-placeholder
-                 marked marked-question question-id request-id))))
+                 marked marked-question question-id request-id))
+          (ende-chat--hide-control-drawers)))
       (unwind-protect
           (progn
             (setq target
@@ -826,7 +848,8 @@ serialized when its queue job starts, not when this function is invoked."
                    :review-policy 'ignore))
             (setq overlay
                   (ende-ui-create-overlay
-                   (current-buffer) position position "Queued" 'badge-only))
+                   (current-buffer) (1- position) (1- position)
+                   "Queued" 'badge-only))
             (let ((data
                    (list :target target :overlay overlay
                          :instruction (list :question-id question-id
@@ -844,14 +867,14 @@ serialized when its queue job starts, not when this function is invoked."
             (ende-target-release target))
           (when (and (buffer-live-p (current-buffer)) position)
             (save-excursion
-              (goto-char position)
+              (goto-char (1- position))
               (condition-case nil
                   (let* ((failed-document (ende-chat--build-document))
                          (failed (ende-chat--find-by-property
                                   failed-document
                                   ende-chat-request-id-property request-id)))
                     (when failed
-                      (delete-region (org-element-property :begin failed)
+                      (delete-region (1- position)
                                      (org-element-property :end failed))))
                 ((error quit) nil)))))))))
 
