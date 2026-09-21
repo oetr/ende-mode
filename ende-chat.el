@@ -21,6 +21,7 @@
 (require 'org)
 (require 'org-element)
 (require 'org-fold)
+(require 'rx)
 (require 'subr-x)
 (require 'ende-core)
 (require 'ende-operation)
@@ -78,6 +79,16 @@ keeps the effective user or assistant role of its enclosing section."
   '("ENDE_ROLE" "ENDE_VISIBILITY" "ENDE_CHAT_ID" "ENDE_CHAT_REPLY_TO"
     "ENDE_CHAT_REQUEST_ID" "ENDE_CHAT_STATE")
   "Control properties that model output may not author.")
+
+(defconst ende-chat--reasoning-escape-regexp
+  (rx line-start
+      (group (zero-or-more (any " \t")))
+      (group (or (seq (one-or-more (any "*")) " "
+                      (zero-or-more (not (any "\r\n"))))
+                 (seq "#+end_reasoning"
+                      (zero-or-more (any " \t")))))
+      line-end)
+  "Regexp for Org constructs that must be escaped inside reasoning content.")
 
 (defconst ende-chat--title-key "ENDE_CHAT_TITLE"
   "Keyword used by the model to propose an empty question's title.")
@@ -313,6 +324,29 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
                            (org-element-map drawer 'node-property #'identity))
               (goto-char (org-element-property :begin drawer))
               (org-fold-hide-drawer-toggle t t))))))))
+
+(defun ende-chat--hide-reasoning-blocks (headline)
+  "Hide reasoning blocks belonging to HEADLINE without hiding its answer."
+  (when (derived-mode-p 'org-mode)
+    (org-element-map headline 'special-block
+      (lambda (block)
+        (when (string= (downcase (or (org-element-property :type block) ""))
+                       "reasoning")
+          (save-excursion
+            (goto-char (org-element-property :begin block))
+            (org-fold-hide-block-toggle t t)))))))
+
+(defun ende-chat--escape-reasoning-content (content)
+  "Escape Org headings and block terminators inside reasoning CONTENT.
+
+The host-owned delimiters remain unescaped so Org can recognize and fold the
+reasoning block.  Escaping is intentionally idempotent and limited to lines
+that could change that block's structure."
+  (let ((case-fold-search t))
+    (replace-regexp-in-string
+     ende-chat--reasoning-escape-regexp
+     "\\1,\\2"
+     content)))
 
 (defun ende-chat--lineage-headline (element)
   "Return the headline owning ELEMENT, or nil."
@@ -698,7 +732,8 @@ stars in literal blocks are left untouched by Org's parser."
             ":END:\n\n"
             (when (and (stringp thinking) (not (string-empty-p thinking)))
               (concat "#+begin_reasoning\n"
-                      (ende-trim-trailing thinking)
+                      (ende-chat--escape-reasoning-content
+                       (ende-trim-trailing thinking))
                       "\n#+end_reasoning\n\n"))
             body
             "\n\n")))
@@ -746,6 +781,14 @@ stars in literal blocks are left untouched by Org's parser."
                                        (org-element-property :end headline))
                         (goto-char (org-element-property :begin headline))
                         (insert response)
+                        (let* ((final (ende-chat--build-document))
+                               (response-headline
+                                (ende-chat--find-by-property
+                                 final ende-chat-request-id-property
+                                 request-id)))
+                          (when response-headline
+                            (ende-chat--hide-reasoning-blocks
+                             response-headline)))
                         (ende-chat--hide-control-drawers)))))))
             (ende-job-finish job result)))
       ((error quit)

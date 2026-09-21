@@ -6010,6 +6010,21 @@ Use COMMAND for the process, or a silent sleep process by default."
     (forward-line -1)
     (looking-at-p "^[[:space:]]*$")))
 
+(defun ende-test--chat-reasoning-blocks (element)
+  "Return reasoning blocks contained in ELEMENT."
+  (cl-remove-if-not
+   (lambda (block)
+     (string= (downcase (or (org-element-property :type block) ""))
+              "reasoning"))
+   (org-element-map element 'special-block #'identity)))
+
+(defun ende-test--chat-block-hidden-p (block)
+  "Return non-nil when the body of BLOCK is folded."
+  (save-excursion
+    (goto-char (org-element-property :begin block))
+    (forward-line 1)
+    (invisible-p (point))))
+
 (ert-deftest ende-test/chat-context-isolates-level-one-roots ()
   (ende-test--reset)
   (ende-test--with-buffer
@@ -6218,6 +6233,74 @@ Use COMMAND for the process, or a silent sleep process by default."
                      (ende-chat-context-at-point)))))
         (should-not (string-match-p "Private thought" without))
         (should (string-match-p "Private thought" with))))))
+
+(ert-deftest ende-test/chat-reasoning-keeps-org-structure-and-folds-response ()
+  (ende-test--reset)
+  (let* ((thinking (concat "Plan\n"
+                           "* First thought\n"
+                           "** Nested thought\n"
+                           "#+end_reasoning\n"
+                           "Still inside\n"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content "Answer\n** Actual section"
+                        :thinking thinking)))))
+    (ende-test--with-buffer
+        (concat "* Root\n"
+                "#+begin_reasoning\n"
+                "Existing thought\n"
+                "#+end_reasoning\n"
+                "** Question\n"
+                "Ask\n"
+                "** Next\n"
+                "Next\n")
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (ende-ask)
+      (let* ((tree (org-element-parse-buffer))
+             (headlines (org-element-map tree 'headline #'identity))
+             (response (cl-find-if
+                        (lambda (headline)
+                          (string= (org-element-property :raw-value headline)
+                                   "Ende response"))
+                        headlines))
+             (response-blocks (ende-test--chat-reasoning-blocks response))
+             (all-reasoning (ende-test--chat-reasoning-blocks tree)))
+        (should (= (length response-blocks) 1))
+        (should (= (length all-reasoning) 2))
+        (should (member "Actual section"
+                        (mapcar (lambda (headline)
+                                  (org-element-property :raw-value headline))
+                                headlines)))
+        (should-not (member "First thought"
+                            (mapcar (lambda (headline)
+                                      (org-element-property :raw-value headline))
+                                    headlines)))
+        (should (string-match-p (regexp-quote ",* First thought")
+                                (buffer-string)))
+        (should (string-match-p (regexp-quote ",** Nested thought")
+                                (buffer-string)))
+        (should (string-match-p (regexp-quote ",#+end_reasoning")
+                                (buffer-string)))
+        (should (ende-test--chat-block-hidden-p (car response-blocks)))
+        (should-not (ende-test--chat-block-hidden-p
+                     (car (cl-set-difference all-reasoning response-blocks))))
+        (save-excursion
+          (goto-char (org-element-property :begin (car response-blocks)))
+          (org-fold-hide-block-toggle 'off t)
+          (forward-line 1)
+          (should-not (invisible-p (point)))))
+      (ende-test--chat-goto "** Next")
+      (let ((without (ende-test--chat-context-text
+                      (let ((ende-chat-include-reasoning nil))
+                        (ende-chat-context-at-point))))
+            (with (ende-test--chat-context-text
+                   (let ((ende-chat-include-reasoning t))
+                     (ende-chat-context-at-point)))))
+        (should-not (string-match-p "First thought" without))
+        (should-not (string-match-p "Still inside" without))
+        (should (string-match-p "First thought" with))
+        (should (string-match-p (regexp-quote ",#+end_reasoning") with))))))
 
 (ert-deftest ende-test/chat-failure-keeps-question-and-reserves-slot ()
   (ende-test--reset)
