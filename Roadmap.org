@@ -46,18 +46,7 @@ Are there better options? WDYT?
   inner endpoint, then poll =GET /api/v1/batches/:id= for results.
 - The =openrouter= profile automatically hands off only for OpenRouter's exact
   Batch-only model error; =openrouter-batch= selects Batch directly.
-* Tighten summary
-- optimize the prompt
-- improve the link format that the model should use
-  - update the prompt accordingly
-  - update the matcher
-- make the link matching more robust
-
-* Make history an org mode native
-- org mode should be by default on for "*deslop-history*" buffer
-- sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
-* Display how much money each request took approximately
-* TODO Improve model picker design
+* DONE Improve model picker design
 
 *Current design:*
 
@@ -78,3 +67,15 @@ I want ot color model names golden.
 
 Maybe we can use the current theme here, so that the numbers are always visible.
 
+* Tighten summary
+- optimize the prompt
+- improve the link format that the model should use
+  - update the prompt accordingly
+  - update the matcher
+- make the link matching more robust
+
+* TODO Make history an org mode native
+- org mode should be by default on for "*deslop-history*" buffer
+- sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
+- use the sanitizing function also for the summaries (which are also org mode)
+* Display how much money each request took approximately
