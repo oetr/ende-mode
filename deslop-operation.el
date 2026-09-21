@@ -46,6 +46,7 @@
     :review-policy 'resolve)
    (deslop-operation-spec--create
     :type 'summarize :target-kind 'selection-or-buffer
+    :allows-source-changes t
     :review-policy 'ignore)
    (deslop-operation-spec--create
     :type 'rubber-duck :target-kind 'document :writes-buffer t
