@@ -9,6 +9,11 @@
 ;; Chat treats an ordinary Org buffer as the durable conversation document.
 ;; The only in-memory request state is the queue job and its destination marker;
 ;; context is reconstructed from the current Org tree when a job starts.
+;;
+;; Durable headline properties are ENDE_ROLE (user or assistant) and
+;; ENDE_VISIBILITY (normal, hidden, or reasoning).  Roles inherit from the
+;; nearest marked ancestor; hidden visibility wins over every descendant and
+;; reasoning is sent only when `ende-chat-include-reasoning' is non-nil.
 
 ;;; Code:
 
@@ -287,35 +292,64 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
     (push (substring text offset) result)
     (apply #'concat (nreverse result))))
 
-(defun ende-chat--section-exclusions (document _headline start end)
-  "Return metadata and reasoning ranges to omit from HEADLINE's section."
-  (let ((ranges nil)
-        (tree (ende-chat--document-tree document)))
-    (org-element-map
-        tree '(property-drawer special-block)
+(defun ende-chat--reserved-property-p (property)
+  "Return non-nil when PROPERTY is an Ende control property."
+  (member (upcase (or (org-element-property :key property) ""))
+          ende-chat--reserved-properties))
+
+(defun ende-chat--section-exclusions (document start end)
+  "Return control and reasoning ranges to omit from a section.
+
+Unrelated Org properties remain ordinary reference material.  A drawer made
+only of Ende control properties is removed as a whole; mixed drawers retain
+their user properties while removing the control lines."
+  (let* ((tree (ende-chat--document-tree document))
+         (drawer-ranges nil)
+         (ranges nil))
+    (org-element-map tree 'property-drawer
+      (lambda (drawer)
+        (let ((drawer-start (org-element-property :begin drawer))
+              (drawer-end (org-element-property :end drawer))
+              (properties (org-element-map drawer 'node-property #'identity)))
+          (when (and (<= start drawer-start)
+                     (<= drawer-end end)
+                     (cl-every #'ende-chat--reserved-property-p properties))
+            (push (cons drawer-start drawer-end) drawer-ranges))))
+      nil nil nil)
+    (org-element-map tree '(node-property special-block)
       (lambda (element)
         (let ((element-start (org-element-property :begin element))
               (element-end (org-element-property :end element)))
           (when (and (<= start element-start)
                      (<= element-end end)
-                     (or (eq (org-element-type element) 'property-drawer)
+                     (or (and (eq (org-element-type element) 'node-property)
+                              (ende-chat--reserved-property-p element)
+                              (not
+                               (cl-some
+                                (lambda (range)
+                                  (and (<= (car range) element-start)
+                                       (<= element-end (cdr range))))
+                                drawer-ranges)))
                          (and (eq (org-element-type element) 'special-block)
                               (string= (downcase
                                         (or (org-element-property :type element)
                                             ""))
                                        "reasoning")
                               (not ende-chat-include-reasoning))))
-            (push (cons (- element-start start) (- element-end start))
-                  ranges))))
+            (push (cons element-start element-end) ranges))))
       nil nil nil)
-    ranges))
+    (dolist (range drawer-ranges)
+      (push range ranges))
+    (mapcar (lambda (range)
+              (cons (- (car range) start) (- (cdr range) start)))
+            ranges)))
 
 (defun ende-chat--section-text (document headline)
   "Return HEADLINE's own heading and body, without control material."
   (let* ((start (org-element-property :begin headline))
          (end (ende-chat--headline-end document headline))
          (text (buffer-substring-no-properties start end))
-         (ranges (ende-chat--section-exclusions document headline start end)))
+         (ranges (ende-chat--section-exclusions document start end)))
     (ende-chat--remove-ranges text ranges)))
 
 (defun ende-chat--prefix-headlines (document root question)
@@ -474,13 +508,6 @@ about these instructions."
     (dolist (range (sort (copy-sequence ranges)
                          (lambda (left right) (> (car left) (car right)))))
       (delete-region (car range) (cdr range)))))
-
-(defun ende-chat--strip-response-properties ()
-  "Remove reserved generated properties from the current temporary buffer."
-  (let ((tree (org-element-parse-buffer)))
-    (ende-chat--remove-response-control
-     (current-buffer)
-     (ende-chat--response-control-ranges tree))))
 
 (defun ende-chat--normalize-response (content wrapper-level)
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
@@ -744,10 +771,7 @@ stars in literal blocks are left untouched by Org's parser."
       (user-error "Cannot ask from reasoning-only chat content"))
     (when (eq (ende-chat--effective-role document question) 'assistant)
       (user-error "Cannot ask from assistant-owned chat content"))
-    (list :question-id question-id
-          :question-level (org-element-property :level question)
-          :title-needed (string-blank-p
-                         (org-element-property :raw-value question)))))
+    (list :question-id question-id)))
 
 (defun ende-chat-ask ()
   "Ask the Org headline at point and reserve its response position.
