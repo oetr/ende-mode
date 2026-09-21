@@ -52,6 +52,9 @@
     :type 'rubber-duck :target-kind 'document :writes-buffer t
     :whole-buffer t :review-policy 'resolve)
    (ende-operation-spec--create
+    :type 'chat :target-kind 'document :writes-buffer t
+    :allows-source-changes t :review-policy 'ignore)
+   (ende-operation-spec--create
     :type 'write-anywhere :target-kind 'selection-or-buffer :writes-buffer t
     :whole-buffer t :allows-source-changes t :structured-result 'replacement
     :review-policy 'resolve)

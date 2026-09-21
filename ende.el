@@ -34,6 +34,7 @@
 (require 'ende-queue)
 (require 'ende-tools)
 (require 'ende-operations)
+(require 'ende-chat)
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-history)
@@ -122,9 +123,10 @@
                    "ende-ui.el"
                    "ende-openrouter-batch.el" "ende-llm.el"
                    "ende-queue.el" "ende-edit.el"
-                  "ende-tools.el"
-                  "ende-summary.el" "ende-operations.el"
-                  "ende-commands.el" "ende-rubber-duck.el" "ende-history.el"
+                   "ende-tools.el"
+                   "ende-summary.el" "ende-operations.el"
+                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
+                   "ende-history.el"
                   "ende-selector.el" "ende.el")))
     (dolist (f files) (load (expand-file-name f dir)))
     (setq ende-mode-map (ende--make-mode-map))
