@@ -1,4 +1,4 @@
-;;; deslop-queue.el --- FIFO job queue and execution engine for deslop -*- lexical-binding: t; -*-
+;;; ende-queue.el --- FIFO job queue and execution engine for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -7,283 +7,283 @@
 ;;; Commentary:
 
 ;; FIFO queue management, job identity, lifecycle transitions, and process
-;; cancellation for deslop.
+;; cancellation for ende.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'deslop-core)
-(require 'deslop-operation)
-(require 'deslop-provider)
-(require 'deslop-target)
+(require 'ende-core)
+(require 'ende-operation)
+(require 'ende-provider)
+(require 'ende-target)
 
 ;;;; Job records
 
-(defun deslop--invoke-cancellation (cancel-function)
+(defun ende--invoke-cancellation (cancel-function)
   "Invoke CANCEL-FUNCTION without allowing cleanup failures to escape."
   (when (functionp cancel-function)
-    (deslop-ignore-errors cancel-function)))
+    (ende-ignore-errors cancel-function)))
 
-(cl-defstruct (deslop-job (:constructor deslop--make-job))
+(cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile instruction
    metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at)
 
-(cl-defstruct (deslop-queue-fence (:constructor deslop--make-fence))
+(cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "A queue barrier for jobs present when the fence was created."
   provider cutoff)
 
-(defvar deslop--next-job-id 0
+(defvar ende--next-job-id 0
   "Next numeric identifier assigned to a job.")
 
-(defvar deslop--current-job nil
+(defvar ende--current-job nil
   "One active job retained for compatibility and status display.
 
 Callbacks must not use this variable to identify their originating job.  It
-is the scheduler's first active job; `deslop--active-jobs' is authoritative.")
+is the scheduler's first active job; `ende--active-jobs' is authoritative.")
 
-(defvar deslop--active-jobs nil
+(defvar ende--active-jobs nil
   "Active jobs, in reverse dispatch order.")
 
-(defvar deslop--fences nil
+(defvar ende--fences nil
   "Queue barriers that have not yet been crossed by later jobs.")
 
-(defvar deslop--aborting nil
+(defvar ende--aborting nil
   "Non-nil while queue state is being invalidated by an abort.")
 
-(defvar-local deslop--source-buffer-jobs nil
+(defvar-local ende--source-buffer-jobs nil
   "Jobs queued for or running against the current source buffer.")
 
 ;; Job ownership and cancellation must survive changes of major mode.
-(put 'deslop--source-buffer-jobs 'permanent-local t)
-(put 'deslop--source-buffer-killed 'permanent-local-hook t)
+(put 'ende--source-buffer-jobs 'permanent-local t)
+(put 'ende--source-buffer-killed 'permanent-local-hook t)
 
-(defun deslop--unregister-source-job (job)
+(defun ende--unregister-source-job (job)
   "Remove JOB from its source buffer's job registry."
-  (let ((buffer (deslop-target-buffer (deslop-job-target job))))
+  (let ((buffer (ende-target-buffer (ende-job-target job))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (setq deslop--source-buffer-jobs
-              (delq job deslop--source-buffer-jobs))
-        (when (null deslop--source-buffer-jobs)
+        (setq ende--source-buffer-jobs
+              (delq job ende--source-buffer-jobs))
+        (when (null ende--source-buffer-jobs)
           (remove-hook 'kill-buffer-hook
-                       #'deslop--source-buffer-killed t)))))
+                       #'ende--source-buffer-killed t)))))
   job)
 
-(defun deslop-job-terminal-p (job)
+(defun ende-job-terminal-p (job)
   "Non-nil when JOB has reached a terminal state."
-  (memq (deslop-job-state job) '(completed failed cancelled skipped)))
+  (memq (ende-job-state job) '(completed failed cancelled skipped)))
 
-(defun deslop-job-current-p (job)
+(defun ende-job-current-p (job)
   "Non-nil when JOB is the active, still-settleable job."
-  (and (memq job deslop--active-jobs)
-       (eq (deslop-job-state job) 'running)
-       (not deslop--aborting)))
+  (and (memq job ende--active-jobs)
+       (eq (ende-job-state job) 'running)
+       (not ende--aborting)))
 
-(defun deslop-job-cancellation-set (job cancel-function)
+(defun ende-job-cancellation-set (job cancel-function)
   "Associate CANCEL-FUNCTION with JOB, or invoke it if JOB is stale."
-  (if (deslop-job-current-p job)
-      (setf (deslop-job-cancel-function job) cancel-function)
-    (deslop--invoke-cancellation cancel-function))
+  (if (ende-job-current-p job)
+      (setf (ende-job-cancel-function job) cancel-function)
+    (ende--invoke-cancellation cancel-function))
   cancel-function)
 
-(defun deslop--job-release-current (job)
+(defun ende--job-release-current (job)
   "Release JOB from the active set and release its target."
-  (setq deslop--active-jobs (delq job deslop--active-jobs)
-        deslop--current-job (car deslop--active-jobs))
-  (deslop--unregister-source-job job)
-  (deslop-ignore-errors #'deslop-target-release (deslop-job-target job)))
+  (setq ende--active-jobs (delq job ende--active-jobs)
+        ende--current-job (car ende--active-jobs))
+  (ende--unregister-source-job job)
+  (ende-ignore-errors #'ende-target-release (ende-job-target job)))
 
 ;;;; Queue state
 
-(defvar deslop-queue nil
+(defvar ende-queue nil
   "Pending jobs in FIFO order.")
 
-(defun deslop-active-jobs ()
+(defun ende-active-jobs ()
   "Return a snapshot of currently active jobs.
 
 The returned list may be changed by the caller without changing scheduler
 state."
-  (copy-sequence deslop--active-jobs))
+  (copy-sequence ende--active-jobs))
 
-(defun deslop-pending-jobs ()
+(defun ende-pending-jobs ()
   "Return a snapshot of jobs waiting in the FIFO queue.
 
 The returned list may be changed by the caller without changing scheduler
 state."
-  (copy-sequence deslop-queue))
+  (copy-sequence ende-queue))
 
-(defvar deslop--queue-tail nil
-  "Tail cons cell of `deslop-queue'.")
+(defvar ende--queue-tail nil
+  "Tail cons cell of `ende-queue'.")
 
-(defvar deslop--dispatching nil
+(defvar ende--dispatching nil
   "Non-nil while the scheduler is dispatching jobs iteratively.")
 
-(defvar deslop--queue-suspended nil
+(defvar ende--queue-suspended nil
   "Non-nil when dispatch is temporarily suspended.")
 
-(defvar deslop--job-handlers nil
+(defvar ende--job-handlers nil
   "Alist mapping job type symbols to execution functions.")
 
-(defvar deslop-job-event-functions nil
+(defvar ende-job-event-functions nil
   "Functions called with a job and one normalized lifecycle event.")
 
-(defvar deslop-queue-abort-functions nil
+(defvar ende-queue-abort-functions nil
   "Functions called after all queued jobs have been invalidated.")
 
-(defun deslop-job-emit-event (job event)
+(defun ende-job-emit-event (job event)
   "Send EVENT for JOB to lifecycle observers without propagating failures."
-  (dolist (function deslop-job-event-functions)
-    (deslop-ignore-errors function job event)))
+  (dolist (function ende-job-event-functions)
+    (ende-ignore-errors function job event)))
 
-(defun deslop-register-job-handler (type handler)
+(defun ende-register-job-handler (type handler)
   "Register HANDLER function for jobs of symbol TYPE.
-HANDLER receives one `deslop-job' object."
-  (setf (alist-get type deslop--job-handlers) handler))
+HANDLER receives one `ende-job' object."
+  (setf (alist-get type ende--job-handlers) handler))
 
-(defun deslop--queue-push (job)
+(defun ende--queue-push (job)
   "Append JOB to the pending queue in constant time."
   (let ((cell (list job)))
-    (if deslop--queue-tail
-        (setcdr deslop--queue-tail cell)
-      (setq deslop-queue cell))
-    (setq deslop--queue-tail cell)))
+    (if ende--queue-tail
+        (setcdr ende--queue-tail cell)
+      (setq ende-queue cell))
+    (setq ende--queue-tail cell)))
 
-(defun deslop--queue-pop ()
+(defun ende--queue-pop ()
   "Pop and return the oldest pending job."
-  (let ((job (car deslop-queue)))
-    (setq deslop-queue (cdr deslop-queue))
-    (when (null deslop-queue)
-      (setq deslop--queue-tail nil))
+  (let ((job (car ende-queue)))
+    (setq ende-queue (cdr ende-queue))
+    (when (null ende-queue)
+      (setq ende--queue-tail nil))
     job))
 
-(defun deslop--queue-remove-cell (cell)
+(defun ende--queue-remove-cell (cell)
   "Remove queue CELL and return its job."
   (let ((job (car cell)))
-    (if (eq cell deslop-queue)
-        (deslop--queue-pop)
-      (let ((previous deslop-queue))
+    (if (eq cell ende-queue)
+        (ende--queue-pop)
+      (let ((previous ende-queue))
         (while (and previous (not (eq (cdr previous) cell)))
           (setq previous (cdr previous)))
         (unless previous
           (error "queue cell is not present"))
         (setcdr previous (cdr cell))
-        (when (eq cell deslop--queue-tail)
-          (setq deslop--queue-tail previous))
+        (when (eq cell ende--queue-tail)
+          (setq ende--queue-tail previous))
         job))))
 
-(defun deslop--same-provider-p (left right)
+(defun ende--same-provider-p (left right)
   "Return non-nil when job profiles LEFT and RIGHT name the same provider."
-  (equal (deslop--job-provider-key left)
-         (deslop--job-provider-key right)))
+  (equal (ende--job-provider-key left)
+         (ende--job-provider-key right)))
 
-(defun deslop--job-provider-key (job)
+(defun ende--job-provider-key (job)
   "Return the provider identity used for JOB's scheduling rules."
-  (let ((profile (deslop-job-profile job)))
+  (let ((profile (ende-job-profile job)))
     (or (plist-get profile :name)
         (plist-get profile :url))))
 
-(defun deslop--active-provider-jobs (job)
+(defun ende--active-provider-jobs (job)
   "Return active jobs using the same provider as JOB."
   (cl-remove-if-not
-   (lambda (active) (deslop--same-provider-p job active))
-   deslop--active-jobs))
+   (lambda (active) (ende--same-provider-p job active))
+   ende--active-jobs))
 
-(defun deslop--write-job-p (job)
+(defun ende--write-job-p (job)
   "Return non-nil when JOB can modify its target buffer."
-  (deslop-operation-writes-buffer-p (deslop-job-type job)))
+  (ende-operation-writes-buffer-p (ende-job-type job)))
 
-(defun deslop--same-buffer-p (left right)
+(defun ende--same-buffer-p (left right)
   "Return non-nil when jobs LEFT and RIGHT target the same buffer."
-  (eq (deslop-target-buffer (deslop-job-target left))
-      (deslop-target-buffer (deslop-job-target right))))
+  (eq (ende-target-buffer (ende-job-target left))
+      (ende-target-buffer (ende-job-target right))))
 
-(defun deslop--buffer-write-locked-p (job)
+(defun ende--buffer-write-locked-p (job)
   "Return non-nil when JOB conflicts with an active arbitrary write."
-  (and (deslop--write-job-p job)
+  (and (ende--write-job-p job)
        (cl-some
         (lambda (active)
-          (and (deslop--write-job-p active)
-               (deslop--same-buffer-p job active)
-                (or (deslop-operation-whole-buffer-p (deslop-job-type job))
-                    (deslop-operation-whole-buffer-p
-                     (deslop-job-type active)))))
-        deslop--active-jobs)))
+          (and (ende--write-job-p active)
+               (ende--same-buffer-p job active)
+                (or (ende-operation-whole-buffer-p (ende-job-type job))
+                    (ende-operation-whole-buffer-p
+                     (ende-job-type active)))))
+        ende--active-jobs)))
 
-(defun deslop--fence-applies-p (fence job)
+(defun ende--fence-applies-p (fence job)
   "Return non-nil when FENCE can block JOB."
-  (and (> (deslop-job-id job) (deslop-queue-fence-cutoff fence))
-       (or (null (deslop-queue-fence-provider fence))
-           (equal (deslop-queue-fence-provider fence)
-                  (deslop--job-provider-key job)))))
+  (and (> (ende-job-id job) (ende-queue-fence-cutoff fence))
+       (or (null (ende-queue-fence-provider fence))
+           (equal (ende-queue-fence-provider fence)
+                  (ende--job-provider-key job)))))
 
-(defun deslop--fence-prerequisite-p (fence job)
+(defun ende--fence-prerequisite-p (fence job)
   "Return non-nil when JOB must finish before FENCE can be crossed."
-  (and (<= (deslop-job-id job) (deslop-queue-fence-cutoff fence))
-       (not (deslop-job-terminal-p job))
-       (or (null (deslop-queue-fence-provider fence))
-           (equal (deslop-queue-fence-provider fence)
-                  (deslop--job-provider-key job)))))
+  (and (<= (ende-job-id job) (ende-queue-fence-cutoff fence))
+       (not (ende-job-terminal-p job))
+       (or (null (ende-queue-fence-provider fence))
+           (equal (ende-queue-fence-provider fence)
+                  (ende--job-provider-key job)))))
 
-(defun deslop--fence-blocking-p (job)
+(defun ende--fence-blocking-p (job)
   "Return non-nil when an unfinished fence blocks JOB.
 Completed fences are discarded while checking JOB."
-  (let ((jobs (append deslop--active-jobs deslop-queue))
+  (let ((jobs (append ende--active-jobs ende-queue))
         (remaining nil)
         (blocked nil))
-    (dolist (fence deslop--fences)
+    (dolist (fence ende--fences)
       (if (cl-some (lambda (prior)
-                     (deslop--fence-prerequisite-p fence prior))
+                     (ende--fence-prerequisite-p fence prior))
                    jobs)
           (progn
             (push fence remaining)
-            (when (deslop--fence-applies-p fence job)
+            (when (ende--fence-applies-p fence job)
               (setq blocked t)))))
-    (setq deslop--fences (nreverse remaining))
+    (setq ende--fences (nreverse remaining))
     blocked))
 
-(defun deslop--job-admissible-p (job)
+(defun ende--job-admissible-p (job)
   "Return non-nil when JOB may start under provider concurrency rules."
-  (unless (or (deslop--fence-blocking-p job)
-              (deslop--buffer-write-locked-p job))
-    (let* ((active (deslop--active-provider-jobs job))
-           (parallel (eq (plist-get (deslop-job-profile job) :parallel) t))
-           (limit (deslop-provider-max-concurrency
-                   (deslop-job-profile job))))
+  (unless (or (ende--fence-blocking-p job)
+              (ende--buffer-write-locked-p job))
+    (let* ((active (ende--active-provider-jobs job))
+           (parallel (eq (plist-get (ende-job-profile job) :parallel) t))
+           (limit (ende-provider-max-concurrency
+                   (ende-job-profile job))))
       (if parallel
           (< (length active) limit)
         (null active)))))
 
-(defun deslop--next-admissible-cell ()
+(defun ende--next-admissible-cell ()
   "Return the first FIFO queue cell whose provider can accept its job.
 Only the oldest queued job for each provider is considered, so a blocked job
 cannot be bypassed by a later job from that same provider."
   (let ((seen-providers nil))
     (catch 'found
-      (cl-loop for cell on deslop-queue do
+      (cl-loop for cell on ende-queue do
         (let* ((job (car cell))
-               (profile (deslop-job-profile job))
+               (profile (ende-job-profile job))
                (provider (or (plist-get profile :name)
                              (plist-get profile :url))))
            (unless (member provider seen-providers)
             (push provider seen-providers)
-            (when (deslop--job-admissible-p job)
+            (when (ende--job-admissible-p job)
               (throw 'found cell)))))
       nil)))
 
-(defun deslop--job-from-request (request)
+(defun ende--job-from-request (request)
   "Create a queued job from REQUEST, a (TYPE . PLIST) value."
   (let* ((type (car request))
          (data (cdr request))
          (target (plist-get data :target))
          (profile (copy-tree
                    (or (plist-get data :profile)
-                       (deslop-provider-profile-snapshot
+                       (ende-provider-profile-snapshot
                         (plist-get data :provider)))))
           (now (float-time))
-          (job (deslop--make-job
-                :id (cl-incf deslop--next-job-id)
+          (job (ende--make-job
+                :id (cl-incf ende--next-job-id)
                 :type type
                 :state 'queued
                 :overlay (plist-get data :overlay)
@@ -291,152 +291,152 @@ cannot be bypassed by a later job from that same provider."
                 :profile profile
                 :instruction (plist-get data :instruction)
                 :enqueued-at now)))
-    (unless (deslop-target-p target)
-      (error "deslop request is missing a target"))
-    (setf (deslop-job-profile job)
-          (plist-put (copy-tree (deslop-job-profile job))
-                     :job-id (deslop-job-id job)))
+    (unless (ende-target-p target)
+      (error "ende request is missing a target"))
+    (setf (ende-job-profile job)
+          (plist-put (copy-tree (ende-job-profile job))
+                     :job-id (ende-job-id job)))
     job))
 
-(defun deslop-enqueue (request)
+(defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.
-Return the newly created `deslop-job'."
-  (let ((job (deslop--job-from-request request)))
-    (let ((buffer (deslop-target-buffer (deslop-job-target job))))
+Return the newly created `ende-job'."
+  (let ((job (ende--job-from-request request)))
+    (let ((buffer (ende-target-buffer (ende-job-target job))))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (cl-pushnew job deslop--source-buffer-jobs :test #'eq)
+          (cl-pushnew job ende--source-buffer-jobs :test #'eq)
           (add-hook 'kill-buffer-hook
-                    #'deslop--source-buffer-killed -50 t))))
-    (deslop--queue-push job)
-    (deslop-job-emit-event
+                    #'ende--source-buffer-killed -50 t))))
+    (ende--queue-push job)
+    (ende-job-emit-event
      job
      (list :type :queued
-           :client (deslop-provider-client-name (deslop-job-profile job))
-           :model (plist-get (deslop-job-profile job) :model)))
-    (deslop-process-next)
+           :client (ende-provider-client-name (ende-job-profile job))
+           :model (plist-get (ende-job-profile job) :model)))
+    (ende-process-next)
     job))
 
 ;;;; Settlement and dispatch
 
-(defun deslop--job-settle (job state &optional result error)
+(defun ende--job-settle (job state &optional result error)
   "Settle active JOB exactly once with STATE, RESULT, and ERROR."
-  (when (deslop-job-current-p job)
-    (setf (deslop-job-state job) state
-          (deslop-job-result job) result
-          (deslop-job-error job) error
-          (deslop-job-finished-at job) (float-time))
-    (deslop-job-emit-event job (list :type :settled :state state))
+  (when (ende-job-current-p job)
+    (setf (ende-job-state job) state
+          (ende-job-result job) result
+          (ende-job-error job) error
+          (ende-job-finished-at job) (float-time))
+    (ende-job-emit-event job (list :type :settled :state state))
     (unwind-protect
-        (deslop--invoke-cancellation (deslop-job-cancel-function job))
-      (deslop--job-release-current job)
-      (unless deslop--aborting
-        (deslop-process-next)))))
+        (ende--invoke-cancellation (ende-job-cancel-function job))
+      (ende--job-release-current job)
+      (unless ende--aborting
+        (ende-process-next)))))
 
-(defun deslop-job-finish (job &optional result)
+(defun ende-job-finish (job &optional result)
   "Complete JOB with RESULT and advance the queue."
-  (when (deslop-job-current-p job)
-    (deslop-job-emit-event
+  (when (ende-job-current-p job)
+    (ende-job-emit-event
      job (list :type :done :result result
                :content (if (stringp result)
                             result
                           (and (listp result)
                                (plist-get result :content))))))
-  (deslop--job-settle job 'completed result nil))
+  (ende--job-settle job 'completed result nil))
 
-(defun deslop-job-fail (job error &optional result)
+(defun ende-job-fail (job error &optional result)
   "Fail JOB with ERROR and advance the queue.
 When RESULT is non-nil, retain it for history and job inspection."
-  (when (deslop-job-current-p job)
-    (let ((id (deslop-job-id job)))
-      (deslop-job-emit-event
+  (when (ende-job-current-p job)
+    (let ((id (ende-job-id job)))
+      (ende-job-emit-event
        job (append (list :type :error :error error)
                    (when result (list :result result))))
-      (deslop--job-settle job 'failed result error)
+      (ende--job-settle job 'failed result error)
       (condition-case nil
-          (message "deslop: job %d failed: %s"
-                   id (deslop-error-display-message error))
+          (message "ende: job %d failed: %s"
+                   id (ende-error-display-message error))
         ((error quit) nil)))))
 
-(defun deslop-job-skip (job message)
+(defun ende-job-skip (job message)
   "Skip active JOB with MESSAGE and advance the queue."
-  (when (deslop-job-current-p job)
-    (let ((id (deslop-job-id job)))
-      (deslop--job-settle job 'skipped nil
-                          (deslop-error-create :kind 'skipped
+  (when (ende-job-current-p job)
+    (let ((id (ende-job-id job)))
+      (ende--job-settle job 'skipped nil
+                          (ende-error-create :kind 'skipped
                                                :message message))
-      (message "deslop: skipped job %d (%s)" id message))))
+      (message "ende: skipped job %d (%s)" id message))))
 
-(defun deslop--dispatch-job (job)
+(defun ende--dispatch-job (job)
   "Start JOB and route scheduler or handler failures to settlement."
-  (let* ((type (deslop-job-type job))
-         (handler (alist-get type deslop--job-handlers))
-         (target (deslop-job-target job)))
-    (push job deslop--active-jobs)
-    (setq deslop--current-job (car deslop--active-jobs))
-    (setf (deslop-job-state job) 'running
-          (deslop-job-started-at job) (float-time))
+  (let* ((type (ende-job-type job))
+         (handler (alist-get type ende--job-handlers))
+         (target (ende-job-target job)))
+    (push job ende--active-jobs)
+    (setq ende--current-job (car ende--active-jobs))
+    (setf (ende-job-state job) 'running
+          (ende-job-started-at job) (float-time))
     (cond
-     ((not (deslop-target-live-p target))
-      (deslop-job-skip
+     ((not (ende-target-live-p target))
+      (ende-job-skip
        job (format "%s: target buffer no longer exists" type)))
      ((null handler)
-      (deslop-job-fail
-       job (deslop-error-create
+      (ende-job-fail
+       job (ende-error-create
             :kind 'scheduler
             :message (format "unknown job handler: %s" type))))
      (t
       (condition-case caught
           (progn
-            (deslop-target-activate
+            (ende-target-activate
              target
              (lambda (message)
-                (deslop-job-fail
-                 job (deslop-error-create :kind 'target :message message)))
-              (deslop-operation-allows-source-changes-p type))
-            (deslop-target-assert-available target)
+                (ende-job-fail
+                 job (ende-error-create :kind 'target :message message)))
+              (ende-operation-allows-source-changes-p type))
+            (ende-target-assert-available target)
             (funcall handler job))
         ((error quit)
-         (deslop-job-fail job caught)))))))
+         (ende-job-fail job caught)))))))
 
-(defun deslop-process-next ()
+(defun ende-process-next ()
   "Process all currently admissible queued jobs."
-  (unless deslop--dispatching
-    (let ((deslop--dispatching t)
+  (unless ende--dispatching
+    (let ((ende--dispatching t)
           (done nil))
-      (while (and (not deslop--queue-suspended)
-                  (not deslop--aborting)
+      (while (and (not ende--queue-suspended)
+                  (not ende--aborting)
                   (not done))
-        (let ((cell (deslop--next-admissible-cell)))
+        (let ((cell (ende--next-admissible-cell)))
           (if cell
-              (deslop--dispatch-job (deslop--queue-remove-cell cell))
+              (ende--dispatch-job (ende--queue-remove-cell cell))
             (setq done t)))))))
 
 ;;;; Synchronization fences
 
-(defun deslop--create-fence (&optional provider)
+(defun ende--create-fence (&optional provider)
   "Create a fence for PROVIDER, or for all providers when nil."
-  (let* ((fence (deslop--make-fence
+  (let* ((fence (ende--make-fence
                  :provider provider
-                 :cutoff deslop--next-job-id))
+                 :cutoff ende--next-job-id))
          (pending (cl-count-if
                    (lambda (job)
-                     (deslop--fence-prerequisite-p fence job))
-                   (append deslop--active-jobs deslop-queue))))
-    (push fence deslop--fences)
-    (deslop-process-next)
-    (message "deslop: %s fence created for %d existing job%s"
+                     (ende--fence-prerequisite-p fence job))
+                   (append ende--active-jobs ende-queue))))
+    (push fence ende--fences)
+    (ende-process-next)
+    (message "ende: %s fence created for %d existing job%s"
              (if provider (format "provider %s" provider) "global")
              pending
              (if (= pending 1) "" "s"))
     fence))
 
-(defun deslop-fence-all ()
+(defun ende-fence-all ()
   "Prevent jobs queued after this command from crossing existing jobs."
   (interactive)
-  (deslop--create-fence))
+  (ende--create-fence))
 
-(defun deslop-fence-provider (provider)
+(defun ende-fence-provider (provider)
   "Prevent later PROVIDER jobs from crossing existing PROVIDER jobs.
 When called interactively, prompt for one of the configured providers."
   (interactive
@@ -444,88 +444,88 @@ When called interactively, prompt for one of the configured providers."
     (intern
      (completing-read
       "Provider fence: "
-      (mapcar #'symbol-name (deslop-provider-names))
+      (mapcar #'symbol-name (ende-provider-names))
       nil t))))
   (unless (symbolp provider)
     (user-error "Provider fence requires a provider name"))
-  (deslop--create-fence provider))
+  (ende--create-fence provider))
 
 ;;;; Cancellation and status
 
-(defun deslop--job-cancel (job)
+(defun ende--job-cancel (job)
   "Mark JOB cancelled and clean its local state without dispatching."
-  (unless (deslop-job-terminal-p job)
-    (setf (deslop-job-state job) 'cancelled
-          (deslop-job-finished-at job) (float-time))
-    (deslop--unregister-source-job job)
-    (deslop--invoke-cancellation (deslop-job-cancel-function job))
-    (deslop-ignore-errors #'deslop-target-release (deslop-job-target job))
-    (deslop-job-emit-event job '(:type :cancelled))
-    (deslop-job-emit-event job '(:type :settled :state cancelled))))
+  (unless (ende-job-terminal-p job)
+    (setf (ende-job-state job) 'cancelled
+          (ende-job-finished-at job) (float-time))
+    (ende--unregister-source-job job)
+    (ende--invoke-cancellation (ende-job-cancel-function job))
+    (ende-ignore-errors #'ende-target-release (ende-job-target job))
+    (ende-job-emit-event job '(:type :cancelled))
+    (ende-job-emit-event job '(:type :settled :state cancelled))))
 
-(defun deslop--source-buffer-killed ()
+(defun ende--source-buffer-killed ()
   "Cancel all queued and active jobs targeting the current source buffer."
-  (let* ((was-aborting deslop--aborting)
-         (jobs (copy-sequence deslop--source-buffer-jobs))
-         (active (cl-intersection jobs deslop--active-jobs :test #'eq))
-         (pending (cl-intersection jobs deslop-queue :test #'eq)))
+  (let* ((was-aborting ende--aborting)
+         (jobs (copy-sequence ende--source-buffer-jobs))
+         (active (cl-intersection jobs ende--active-jobs :test #'eq))
+         (pending (cl-intersection jobs ende-queue :test #'eq)))
     ;; Remove jobs from scheduler state before invoking transport cancellation;
     ;; cancellation callbacks may run synchronously.
-    (setq deslop--source-buffer-jobs nil
-          deslop--aborting t)
+    (setq ende--source-buffer-jobs nil
+          ende--aborting t)
     (unwind-protect
         (progn
           (dolist (job pending)
-            (let ((cell (memq job deslop-queue)))
+            (let ((cell (memq job ende-queue)))
               (when cell
-                (deslop--queue-remove-cell cell))))
-          (setq deslop--active-jobs
-                (cl-set-difference deslop--active-jobs active :test #'eq)
-                deslop--current-job (car deslop--active-jobs))
+                (ende--queue-remove-cell cell))))
+          (setq ende--active-jobs
+                (cl-set-difference ende--active-jobs active :test #'eq)
+                ende--current-job (car ende--active-jobs))
           (dolist (job (append active pending))
-            (deslop--job-cancel job)))
-      (setq deslop--aborting was-aborting))
+            (ende--job-cancel job)))
+      (setq ende--aborting was-aborting))
     (unless was-aborting
-      (deslop-process-next))))
+      (ende-process-next))))
 
-(defun deslop-abort-queue ()
+(defun ende-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
   (interactive)
-  (let* ((active deslop--active-jobs)
-         (pending deslop-queue)
+  (let* ((active ende--active-jobs)
+         (pending ende-queue)
          (jobs (append active pending)))
     ;; Invalidate callbacks before invoking transport cancellation because a
     ;; transport may settle reentrantly.
-    (setq deslop--aborting t)
+    (setq ende--aborting t)
     (unwind-protect
         (progn
-          (setq deslop-queue nil)
-          (setq deslop--queue-tail nil)
-          (setq deslop--active-jobs nil)
-          (setq deslop--current-job nil)
+          (setq ende-queue nil)
+          (setq ende--queue-tail nil)
+          (setq ende--active-jobs nil)
+          (setq ende--current-job nil)
           (dolist (job jobs)
-            (deslop--job-cancel job))
-          (dolist (function deslop-queue-abort-functions)
-            (deslop-ignore-errors function)))
-      (setq deslop--aborting nil)
-      (setq deslop--fences nil)
-      (message "deslop: queue aborted"))))
+            (ende--job-cancel job))
+          (dolist (function ende-queue-abort-functions)
+            (ende-ignore-errors function)))
+      (setq ende--aborting nil)
+      (setq ende--fences nil)
+      (message "ende: queue aborted"))))
 
-(defun deslop-queue-status ()
+(defun ende-queue-status ()
   "Display and return a nonvisual snapshot of queue state."
   (interactive)
-  (let ((status (list :running (and deslop--active-jobs t)
-                      :active (and deslop--current-job
-                                   (deslop-job-id deslop--current-job))
-                      :active-jobs (mapcar #'deslop-job-id deslop--active-jobs)
-                      :pending (length deslop-queue)
-                      :fences (length deslop--fences))))
-    (message "deslop: active=%s pending=%d fences=%d"
+  (let ((status (list :running (and ende--active-jobs t)
+                      :active (and ende--current-job
+                                   (ende-job-id ende--current-job))
+                      :active-jobs (mapcar #'ende-job-id ende--active-jobs)
+                      :pending (length ende-queue)
+                      :fences (length ende--fences))))
+    (message "ende: active=%s pending=%d fences=%d"
              (or (plist-get status :active) "none")
              (plist-get status :pending)
              (plist-get status :fences))
     status))
 
-(provide 'deslop-queue)
+(provide 'ende-queue)
 
-;;; deslop-queue.el ends here
+;;; ende-queue.el ends here

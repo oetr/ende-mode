@@ -1,4 +1,4 @@
-;;; deslop-transport.el --- Shared transport helpers for deslop -*- lexical-binding: t; -*-
+;;; ende-transport.el --- Shared transport helpers for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -11,107 +11,107 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'deslop-core)
-(require 'deslop-protocol)
+(require 'ende-core)
+(require 'ende-protocol)
 
-(cl-defstruct (deslop-transport-session
-               (:constructor deslop-transport--make-session))
+(cl-defstruct (ende-transport-session
+               (:constructor ende-transport--make-session))
   "Shared lifecycle state for one asynchronous transport request."
   callbacks callback-error-handler process process-buffer stderr-buffer
   stderr-process headers-file config-file terminal)
 
-(defun deslop-transport-session-create (callbacks callback-error-handler)
+(defun ende-transport-session-create (callbacks callback-error-handler)
   "Create a transport session for CALLBACKS and CALLBACK-ERROR-HANDLER."
-  (deslop-transport--make-session
+  (ende-transport--make-session
    :callbacks callbacks
    :callback-error-handler callback-error-handler))
 
-(defun deslop-transport-session-invoke (session name &rest arguments)
+(defun ende-transport-session-invoke (session name &rest arguments)
   "Invoke callback NAME for SESSION with ARGUMENTS, safely."
-  (when (plist-get (deslop-transport-session-callbacks session) name)
+  (when (plist-get (ende-transport-session-callbacks session) name)
     (condition-case callback-error
-        (apply (plist-get (deslop-transport-session-callbacks session) name)
+        (apply (plist-get (ende-transport-session-callbacks session) name)
                arguments)
       ((error quit)
        (unless (eq name :on-error)
          (let ((handler
-                (deslop-transport-session-callback-error-handler session)))
+                (ende-transport-session-callback-error-handler session)))
            (when handler
              (funcall
               handler
-              (deslop-error-create
+              (ende-error-create
                :kind 'callback
                :message (error-message-string callback-error))))))))))
 
-(defun deslop-transport-session-set-resources (session request)
+(defun ende-transport-session-set-resources (session request)
   "Copy transport resource handles from REQUEST into SESSION."
-  (setf (deslop-transport-session-process session)
+  (setf (ende-transport-session-process session)
         (plist-get request :process)
-        (deslop-transport-session-process-buffer session)
+        (ende-transport-session-process-buffer session)
         (plist-get request :response-buffer)
-        (deslop-transport-session-stderr-buffer session)
+        (ende-transport-session-stderr-buffer session)
         (plist-get request :stderr-buffer)
-        (deslop-transport-session-stderr-process session)
+        (ende-transport-session-stderr-process session)
         (plist-get request :stderr-process)
-        (deslop-transport-session-headers-file session)
+        (ende-transport-session-headers-file session)
         (plist-get request :headers-file)
-        (deslop-transport-session-config-file session)
+        (ende-transport-session-config-file session)
         (plist-get request :config-file)))
 
-(defun deslop-transport-cleanup-resources (buffers files &optional processes)
+(defun ende-transport-cleanup-resources (buffers files &optional processes)
   "Kill BUFFERS, delete FILES, and terminate PROCESSES safely."
   (dolist (process processes)
     (when (processp process)
-      (deslop-ignore-errors #'delete-process process)))
+      (ende-ignore-errors #'delete-process process)))
   (dolist (buffer buffers)
     (when (buffer-live-p buffer)
-      (deslop-ignore-errors #'kill-buffer buffer)))
+      (ende-ignore-errors #'kill-buffer buffer)))
   (dolist (file files)
     (when (and file (file-exists-p file))
-      (deslop-ignore-errors #'delete-file file))))
+      (ende-ignore-errors #'delete-file file))))
 
-(defun deslop-transport-session-cleanup (session)
+(defun ende-transport-session-cleanup (session)
   "Release all process resources owned by SESSION."
-  (deslop-transport-cleanup-resources
-   (list (deslop-transport-session-process-buffer session)
-         (deslop-transport-session-stderr-buffer session))
-   (list (deslop-transport-session-headers-file session)
-         (deslop-transport-session-config-file session))
-   (list (deslop-transport-session-process session)
-         (deslop-transport-session-stderr-process session)))
-  (setf (deslop-transport-session-process session) nil
-        (deslop-transport-session-process-buffer session) nil
-        (deslop-transport-session-stderr-buffer session) nil
-        (deslop-transport-session-stderr-process session) nil
-        (deslop-transport-session-headers-file session) nil
-        (deslop-transport-session-config-file session) nil))
+  (ende-transport-cleanup-resources
+   (list (ende-transport-session-process-buffer session)
+         (ende-transport-session-stderr-buffer session))
+   (list (ende-transport-session-headers-file session)
+         (ende-transport-session-config-file session))
+   (list (ende-transport-session-process session)
+         (ende-transport-session-stderr-process session)))
+  (setf (ende-transport-session-process session) nil
+        (ende-transport-session-process-buffer session) nil
+        (ende-transport-session-stderr-buffer session) nil
+        (ende-transport-session-stderr-process session) nil
+        (ende-transport-session-headers-file session) nil
+        (ende-transport-session-config-file session) nil))
 
-(defun deslop-transport-session-settle
+(defun ende-transport-session-settle
     (session outcome value &optional partial-result)
   "Settle SESSION once and dispatch VALUE with optional PARTIAL-RESULT."
-  (unless (deslop-transport-session-terminal session)
-    (setf (deslop-transport-session-terminal session) outcome)
-    (let ((process (deslop-transport-session-process session)))
+  (unless (ende-transport-session-terminal session)
+    (setf (ende-transport-session-terminal session) outcome)
+    (let ((process (ende-transport-session-process session)))
       (when (processp process)
-        (process-put process :deslop-settled t)
+        (process-put process :ende-settled t)
         (when (process-live-p process)
-          (deslop-ignore-errors #'delete-process process))))
-    (deslop-transport-session-cleanup session)
+          (ende-ignore-errors #'delete-process process))))
+    (ende-transport-session-cleanup session)
     (unwind-protect
         (progn
           (when partial-result
-            (deslop-transport-session-invoke
+            (ende-transport-session-invoke
              session :on-event
              (list :type :partial-result :result partial-result)))
           (if (eq outcome 'success)
-              (deslop-transport-session-invoke session :on-done value)
-            (deslop-transport-session-invoke
+              (ende-transport-session-invoke session :on-done value)
+            (ende-transport-session-invoke
              session :on-event
              (list :type :error :error value :result partial-result))
-            (deslop-transport-session-invoke session :on-error value)))
-      (setf (deslop-transport-session-callbacks session) nil))))
+            (ende-transport-session-invoke session :on-error value)))
+      (setf (ende-transport-session-callbacks session) nil))))
 
-(defun deslop-transport-byte-prefix (text max-bytes)
+(defun ende-transport-byte-prefix (text max-bytes)
   "Return the longest character prefix of TEXT within MAX-BYTES."
   (if (<= (string-bytes text) max-bytes)
       text
@@ -124,18 +124,18 @@
             (setq high (1- middle)))))
       (substring text 0 low))))
 
-(defun deslop-transport-error-detail (preview)
+(defun ende-transport-error-detail (preview)
   "Return a useful provider error detail parsed from PREVIEW, or nil."
   (condition-case nil
-      (let* ((payload (deslop-protocol-json-read-string preview))
-             (error-payload (deslop-protocol-json-get "error" payload)))
-        (or (deslop-protocol-json-get "message" error-payload)
-            (deslop-protocol-json-get "detail" error-payload)
-            (deslop-protocol-json-get "message" payload)
-            (deslop-protocol-json-get "detail" payload)
+      (let* ((payload (ende-protocol-json-read-string preview))
+             (error-payload (ende-protocol-json-get "error" payload)))
+        (or (ende-protocol-json-get "message" error-payload)
+            (ende-protocol-json-get "detail" error-payload)
+            (ende-protocol-json-get "message" payload)
+            (ende-protocol-json-get "detail" payload)
             (and (stringp error-payload) error-payload)))
     (error nil)))
 
-(provide 'deslop-transport)
+(provide 'ende-transport)
 
-;;; deslop-transport.el ends here
+;;; ende-transport.el ends here

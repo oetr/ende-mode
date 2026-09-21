@@ -1,4 +1,4 @@
-;;; deslop-commands.el --- Interactive deslop commands -*- lexical-binding: t; -*-
+;;; ende-commands.el --- Interactive ende commands -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -11,26 +11,26 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'deslop-core)
-(require 'deslop-operation)
-(require 'deslop-provider)
-(require 'deslop-target)
-(require 'deslop-ui)
-(require 'deslop-queue)
+(require 'ende-core)
+(require 'ende-operation)
+(require 'ende-provider)
+(require 'ende-target)
+(require 'ende-ui)
+(require 'ende-queue)
 
-(defun deslop-current-region ()
+(defun ende-current-region ()
   "Return active region bounds as a cons cell, or nil."
   (when (use-region-p)
     (cons (region-beginning) (region-end))))
 
-(defun deslop-enqueue-operation (type &optional instruction profile)
+(defun ende-enqueue-operation (type &optional instruction profile)
   "Create and enqueue a TYPE operation for the current buffer.
 INSTRUCTION and PROFILE override the operation defaults."
-  (let* ((spec (deslop-operation-for type))
+  (let* ((spec (ende-operation-for type))
          (buffer (current-buffer))
-         (region (deslop-current-region))
+         (region (ende-current-region))
          (point (point))
-         (target-kind (deslop-operation-spec-target-kind spec))
+         (target-kind (ende-operation-spec-target-kind spec))
          (selected (pcase target-kind
                      ('document t)
                      ('selection-or-buffer t)
@@ -50,67 +50,67 @@ INSTRUCTION and PROFILE override the operation defaults."
          (target (progn
                    (unless (and (eq target-kind 'cursor-or-selection)
                                 (eq type 'insert))
-                     (deslop-target-ensure-size
+                     (ende-target-ensure-size
                       start end (capitalize (symbol-name type))))
                    (save-restriction
                      ;; Structured matching and repair share this saved scope.
                      (when (and region
-                                (deslop-operation-spec-structured-result spec))
+                                (ende-operation-spec-structured-result spec))
                        (narrow-to-region start end))
-                     (deslop-target-create
+                     (ende-target-create
                       :buffer buffer :start start :end end :cursor point
                       :selected selected :placement placement
                       :offset (and region (- point (car region)))
                       :review-policy
-                      (deslop-operation-review-policy type)))))
+                      (ende-operation-review-policy type)))))
          (overlay nil)
          (committed nil))
     (unwind-protect
         (progn
-          (when (eq (deslop-target-review-policy target) 'resolve)
-            (deslop-review-resolve-conflicts
-             buffer (deslop-target-start target) (deslop-target-end target)))
-          (setq overlay (deslop-ui-create-overlay
+          (when (eq (ende-target-review-policy target) 'resolve)
+            (ende-review-resolve-conflicts
+             buffer (ende-target-start target) (ende-target-end target)))
+          (setq overlay (ende-ui-create-overlay
                          buffer start end "Queued" 'badge-only))
           (let ((data (list :target target :overlay overlay)))
             (when profile
               (setq data (plist-put data :profile profile)))
             (when instruction
               (setq data (plist-put data :instruction instruction)))
-            (let ((job (deslop-enqueue (cons type data))))
+            (let ((job (ende-enqueue (cons type data))))
               (setq committed t)
-              (message "deslop: queued %s job %d" type (deslop-job-id job))
+              (message "ende: queued %s job %d" type (ende-job-id job))
               job)))
       (unless committed
-        (deslop-ignore-errors #'deslop-target-release target)
+        (ende-ignore-errors #'ende-target-release target)
         (when overlay
-          (deslop-ignore-errors #'deslop-ui-delete-overlay overlay))))))
+          (ende-ignore-errors #'ende-ui-delete-overlay overlay))))))
 
-(defun deslop-insert-at-cursor ()
+(defun ende-insert-at-cursor ()
   "Queue a request to insert LLM text at cursor position."
   (interactive)
-  (deslop-enqueue-operation 'insert))
+  (ende-enqueue-operation 'insert))
 
-(defun deslop-write-anywhere (&optional instruction)
+(defun ende-write-anywhere (&optional instruction)
   "Queue multiple edits within the active region or accessible buffer."
   (interactive (list (read-string "Prompt: ")))
-  (deslop-enqueue-operation 'write-anywhere instruction))
+  (ende-enqueue-operation 'write-anywhere instruction))
 
-(defun deslop-insert-anywhere (&optional instruction)
+(defun ende-insert-anywhere (&optional instruction)
   "Queue multiple insertions within the active region or accessible buffer."
   (interactive (list (read-string "Prompt: ")))
-  (deslop-enqueue-operation 'insert-anywhere instruction))
+  (ende-enqueue-operation 'insert-anywhere instruction))
 
-(defun deslop-improve-at-cursor (instruction)
+(defun ende-improve-at-cursor (instruction)
   "Queue an improvement of the active region or accessible buffer."
   (interactive (list (read-string "How should the text be improved? ")))
-  (deslop-enqueue-operation 'improve instruction))
+  (ende-enqueue-operation 'improve instruction))
 
-(defun deslop-summarize ()
+(defun ende-summarize ()
   "Queue a summary of the active region or accessible buffer."
   (interactive)
-  (deslop-enqueue-operation 'summarize))
+  (ende-enqueue-operation 'summarize))
 
-(provide 'deslop-commands)
+(provide 'ende-commands)
 
-;;; deslop-commands.el ends here
+;;; ende-commands.el ends here

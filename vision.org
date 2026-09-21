@@ -1,10 +1,10 @@
-#+TITLE: deslop
+#+TITLE: ende
 
 *Only humans are allowed to modify this file.*
 
 I want to write a minor Emacs mode, where I can trigger communication with a local LLM that does following things:
 
-* Insert at cursor, aka: deslop-insert-at-cursor
+* Insert at cursor, aka: ende-insert-at-cursor
 - user wants LLM output where his cursor currently is.
    - If the cursor does not select any part of the buffer, use the whole buffer as context (before and after the cursor, marking the part in a way that the LLM understands where to add things).
    - If only some of the buffer is selected, only use that part as context.
@@ -13,16 +13,16 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
      - If the cursor is in the beginning, then insert before the highlighted text and add a newline; otherwise insert a newline at the end of it and right after, the LLM text.
    - Highlighted text will not be mutated in this operation.
 
-* deslop-summarize
+* ende-summarize
 - summarize the user-highlighted region and open the summary in another buffer.
 
 * UX-Look and Feel
 - The requests are queued, so I can make several requests one after another and go to sleep.
   - The interesting part here is to figure out what to do when the same buffers/regions are used multiple times in the queue.
-    - e.g. deslop-insert-at-cursor is queued three times in a file
+    - e.g. ende-insert-at-cursor is queued three times in a file
       - Here it's easy---each highlighted regions are processed one after the other
-      - If they are disjoint (e.g. user does not highlights anything, and just puts his cursor at three different poitns in the buffer and calls deslop-insert-at-cursor), each cursor is processed one after another, of course accounting for the previous
-      - If the operation deslop-improve-at-cursor is used together with deslop-insert-at-cursor, especially in that order, there is no way to say where the cursor is in deslop-insert-at-cursor when using it on an improved region---should it still run?
+      - If they are disjoint (e.g. user does not highlights anything, and just puts his cursor at three different poitns in the buffer and calls ende-insert-at-cursor), each cursor is processed one after another, of course accounting for the previous
+      - If the operation ende-improve-at-cursor is used together with ende-insert-at-cursor, especially in that order, there is no way to say where the cursor is in ende-insert-at-cursor when using it on an improved region---should it still run?
       - We could make it nice and best effort, but we should specify what it means
       - Or we could further specify what happens and consider all different scenarios, where future regions happen are inside improved or inserted regions.
         
@@ -33,10 +33,10 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
 - statistics are visible
 
 
-* deslop-insert/write-anywhere
+* ende-insert/write-anywhere
 - user gives a prompt and the agent can either insert anywhere in the document, or overwrite anything the document
 
-* deslop-chat
+* ende-chat
 - talk to the agent in org-mode
 - several talks can be done at once
 - user can actively modify content/context
@@ -49,7 +49,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
 - The final vision for this mode will be such that the agent knows which files it processed and what has it learned
   - We will develop a concept for this, but later, just keep it in mind when developing other parts of this project
 
-* deslop-project-task
+* ende-project-task
 - Give the LLM a concrete outcome spanning multiple files, rather than asking for one completion at a time.
   - e.g. "Replace this deprecated API throughout the project, update the tests, and write a migration note."
   - It finds the relevant files, proposes a plan, and works in an isolated workspace so I can keep editing.
@@ -58,8 +58,8 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - Nothing touches the original files until I accept the changes; conflicting edits require resolution, not best-effort overwriting.
   - Files marked as human-only are never modified.
 
-* deslop-distill
-[User criticism]: I can just give a prompt with a deslop-write-anywhere command
+* ende-distill
+[User criticism]: I can just give a prompt with a ende-write-anywhere command
 - Turn a pile of source material into a useful, maintained document.
   - Select buffers, files, or Org subtrees and specify the deliverable: a technical specification, onboarding guide, decision record, or implementation checklist.
   - This is not just summarization: the LLM organizes information around the deliverable, connects related material, and identifies decisions or facts that are still missing.
@@ -67,12 +67,12 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - e.g. Turn scattered meeting notes and design discussions into a specification with requirements, unresolved questions, and actionable work items.
   - Later, rerun against changed sources to propose a targeted update, preserving my manual edits and showing which source changes motivated each revision.
 
-* deslop-playbook
+* ende-playbook
 - allows users to add recipees that the agent can ask for when doing things
 - agent can see the playbook, and can decide to access them using tool calls (one tool call to access them all is also possible)
 - the context is deduplicated so that recipees don't pollute it too much
 
-** deslop-clean-context [internal feature, not accessible to user]
+** ende-clean-context [internal feature, not accessible to user]
 - deduplicates the context so that repeated
 
 * Generation
@@ -81,7 +81,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
 # The ideas should be grand and not have supporting role, I want super creative ideas
 
 
-* deslop-semantic-table
+* ende-semantic-table
 - Turn a large collection into a table I can actually work on, without first forcing everything into a database.
   - Rows can be files, Org headings, functions, tickets, or arbitrary selected chunks; columns are questions or transformations.
   - e.g. For 200 customer reports: affected feature, reproduction conditions, likely duplicate group, and whether we have enough information to act.
@@ -90,7 +90,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - Computed cells are cached against their inputs, so changing one report does not require processing the whole collection again.
   - This is an interactive bulk-work interface, not a request for the LLM to print a giant Markdown table.
 
-* deslop-lenses
+* ende-lenses
 - Edit the same underlying material through different task-specific views.
   - e.g. View a sprawling Org specification as a requirements matrix, a release-scope outline, or a list of decisions grouped by owner.
   - Views retain explicit links to the original passages instead of becoming disconnected generated documents.
@@ -99,7 +99,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - Source changes invalidate affected parts of the view, not the entire workspace.
   - Human-only sources remain read-only through every lens.
 
-* deslop-tradeoff-lab
+* ende-tradeoff-lab
 - Explore a consequential decision by building competing, concrete versions of the outcome.
   - e.g. "What would this library look like with callbacks, futures, or channels?" or "What do we actually lose if this proposal must fit into two pages?"
   - Each alternative gets an isolated workspace and the same explicit requirements, examples, and evaluation budget.
@@ -108,7 +108,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - The result is a navigable comparison of working artifacts, not three persuasive essays or three completion candidates.
   - Choose an alternative or combine specific parts, with incompatible assumptions called out before merging.
 
-* deslop-example-contract
+* ende-example-contract
 - Turn examples and counterexamples into an executable definition of what I want.
   - I provide representative inputs, desired outputs, and cases that must not match.
   - e.g. Normalize inconsistent bibliography entries, extract structured events from logs, or enforce a project-specific rule that ordinary linters cannot express.
@@ -118,7 +118,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - I can run the resulting operation across thousands of items, inspect failures, add counterexamples, and rerun only affected items.
   - Unlike a playbook, the deliverable is a versioned operation with a test corpus, not instructions the agent may interpret differently next time.
 
-* deslop-work-packet
+* ende-work-packet
 - Make work delegatable even when the recipient does not have my buffers, environment, or accumulated context.
   - Select a concrete task and package the relevant source snapshots, constraints, examples, permitted commands, and acceptance checks.
   - e.g. Hand a contractor one subsystem change without exposing the entire repository, or send a difficult documentation task to an offline local agent.
@@ -126,7 +126,7 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - The packet includes a runnable entry point where practical, so the recipient can reproduce the starting state rather than reconstruct it from chat.
   - Returned work is imported as a changeset tied to the packet's base versions, with acceptance results and unresolved questions.
   - I can issue several packets independently and reconcile their returned work against my current tree, without giving anyone write access to the originals.
-  - This is a portable unit of delegated work, usable by another human or agent—not another conversation that only makes sense inside my current session.* deslop-ensemble
+  - This is a portable unit of delegated work, usable by another human or agent—not another conversation that only makes sense inside my current session.* ende-ensemble
 - One goal, many minds. Spawn several specialized sub-agents in parallel on the same prompt, each constrained to a single lens: correctness, performance, readability, security, API ergonomics.
   - Each agent produces its own answer independently, with no awareness of the others.
   - The results are presented not as a merged blob but as a structured debate: agreements are collapsed, disagreements are highlighted with the reasoning behind each position.
@@ -134,14 +134,14 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
   - This is not "show me three candidates" (that is trivial). The agents have different system prompts, different tool permissions, and different stopping conditions. One might refuse a change that another insists on.
   - Useful when you are unsure what you actually value most about a change and want the tension surfaced before you commit.
 
-* deslop-genesis
+* ende-genesis
 - Turn a single prose specification into a complete, internally consistent project skeleton: directory tree, file stubs with docstrings, test scaffolds, CI configuration, dependency declarations, and cross-references.
   - Every stub knows about every other stub. A function signature in file A is referenced by the test in file B with the correct import path, even though neither file has implementation yet.
-  - You can then fill any node independently with `deslop-insert-at-cursor` or `deslop-write-anywhere`, and the mode maintains the cross-reference graph as you go, flagging when a stub you just wrote contradicts a signature someone else filled.
+  - You can then fill any node independently with `ende-insert-at-cursor` or `ende-write-anywhere`, and the mode maintains the cross-reference graph as you go, flagging when a stub you just wrote contradicts a signature someone else filled.
   - The skeleton is not static. If you rename a module or restructure directories, the mode propagates the change across all stubs, tests, and import paths.
   - Useful for greenfield work where the architecture is decided but the implementation is months away.
 
-* deslop-converge
+* ende-converge
 - Semantic three-way merge of divergent documents, code, or notes—not a line diff, but an intent diff.
   - Give it a common ancestor and two divergent versions (yours and the LLM's, or two branches, or two drafts from different sittings).
   - It produces a merged result that preserves *meaning* rather than text adjacency, and annotates every region where the two versions made incompatible choices.
@@ -154,27 +154,27 @@ I want to write a minor Emacs mode, where I can trigger communication with a loc
 
 | Operation                    | Short Description                                                                |
 |------------------------------+----------------------------------------------------------------------------------|
-| [[*Insert at cursor, aka: deslop-insert-at-cursor][deslop-insert-at-cursor]]      | Insert LLM output at cursor; uses buffer or selection as context                 |
-| [[*deslop-summarize][deslop-summarize]]             | Summarize highlighted region and open result in another buffer                   |
-| [[*deslop-chat][deslop-chat]]                  | Conversational agent interaction within org-mode                                 |
-| [[*deslop-insert/write-anywhere][deslop-insert/write-anywhere]] | Agent inserts or overwrites content anywhere in the document via prompt          |
-| [[*deslop-project-task][deslop-project-task]]          | Multi-file concrete outcome with isolated workspace and self-verifying changeset |
-| [[*deslop-distill][deslop-distill]]               | Turn scattered source material into a maintained, linked deliverable document    |
-| [[*deslop-playbook][deslop-playbook]]              | User-authored recipes the agent accesses via tool calls with deduplication       |
-| [[*deslop-clean-context][deslop-clean-context]]         | Internal deduplication of context to prevent recipe pollution                    |
+| [[*Insert at cursor, aka: ende-insert-at-cursor][ende-insert-at-cursor]]      | Insert LLM output at cursor; uses buffer or selection as context                 |
+| [[*ende-summarize][ende-summarize]]             | Summarize highlighted region and open result in another buffer                   |
+| [[*ende-chat][ende-chat]]                  | Conversational agent interaction within org-mode                                 |
+| [[*ende-insert/write-anywhere][ende-insert/write-anywhere]] | Agent inserts or overwrites content anywhere in the document via prompt          |
+| [[*ende-project-task][ende-project-task]]          | Multi-file concrete outcome with isolated workspace and self-verifying changeset |
+| [[*ende-distill][ende-distill]]               | Turn scattered source material into a maintained, linked deliverable document    |
+| [[*ende-playbook][ende-playbook]]              | User-authored recipes the agent accesses via tool calls with deduplication       |
+| [[*ende-clean-context][ende-clean-context]]         | Internal deduplication of context to prevent recipe pollution                    |
 |------------------------------+----------------------------------------------------------------------------------|
-| [[*deslop-semantic-table][deslop-semantic-table]]        | Interactive bulk-work table over collections with cached computed cells          |
-| [[*deslop-lenses][deslop-lenses]]                | Edit same material through different task-specific views linked to source        |
-| [[*deslop-tradeoff-lab][deslop-tradeoff-lab]]          | Build competing concrete alternatives of a decision in isolated workspaces       |
-| [[*deslop-example-contract][deslop-example-contract]]      | Examples and counterexamples as versioned executable transformer/checker         |
-| [[*deslop-work-packet][deslop-work-packet]]           | Portable, self-contained unit of delegated work with acceptance checks           |
-| [[*deslop-ensemble][deslop-ensemble]]              | Parallel specialized sub-agents debate a goal; user adjudicates positions        |
-| [[*deslop-genesis][deslop-genesis]]               | Prose spec becomes complete cross-referenced project skeleton                    |
-| [[*deslop-converge][deslop-converge]]              | Semantic intent-based three-way merge with interactive conflict resolution       |
+| [[*ende-semantic-table][ende-semantic-table]]        | Interactive bulk-work table over collections with cached computed cells          |
+| [[*ende-lenses][ende-lenses]]                | Edit same material through different task-specific views linked to source        |
+| [[*ende-tradeoff-lab][ende-tradeoff-lab]]          | Build competing concrete alternatives of a decision in isolated workspaces       |
+| [[*ende-example-contract][ende-example-contract]]      | Examples and counterexamples as versioned executable transformer/checker         |
+| [[*ende-work-packet][ende-work-packet]]           | Portable, self-contained unit of delegated work with acceptance checks           |
+| [[*ende-ensemble][ende-ensemble]]              | Parallel specialized sub-agents debate a goal; user adjudicates positions        |
+| [[*ende-genesis][ende-genesis]]               | Prose spec becomes complete cross-referenced project skeleton                    |
+| [[*ende-converge][ende-converge]]              | Semantic intent-based three-way merge with interactive conflict resolution       |
 
 
 * Stupid
-** deslop-scene - garbage
+** ende-scene - garbage
 [User] this can only be used with local LLMs, since my kill ring can contain sensitive information.
 Agent seeing all my buffers is only possible with local LLMs.
 Even if the user is king!
@@ -183,12 +183,12 @@ User intent is either very focused: here is the buffer, do something in it; I go
 This feature is weird because it is not clear what the intent is. 
 
 - Your entire Emacs session—open buffers, recent commands, kill ring, bookmarks, minor-mode state, cursor positions—is a first-class, snapshotable, shareable artifact called a scene.
-  - `deslop-scene-snapshot` captures the full workspace state with annotations: what you were working on, what was left ambiguous, what you were about to try next.
+  - `ende-scene-snapshot` captures the full workspace state with annotations: what you were working on, what was left ambiguous, what you were about to try next.
   - You can hand a scene to another person (or to the agent after a session break) and they can rehydrate it: correct buffers opened, correct files positioned, correct minor modes active, and the agent briefed on where you left off.
   - The agent reads the scene as context for every subsequent request in that session, so it knows you have three files open in a specific arrangement and your kill ring contains a half-finished API contract.
   - Scenes can be diffed: "the scene before lunch vs. the scene after lunch" shows what you actually accomplished, which files changed, which questions you resolved and which you abandoned.
 
-** deslop-shadow - garbage
+** ende-shadow - garbage
 [User]: this is probably using non-llm "agent". It is surprising and annoying to have things in my undo stack other that I didnt "do"! WTF?
 - A background mode that watches your editing trajectory and pre-executes the next likely multi-edit sequence in the undo stack, invisible until you need it.
   - If you rename a function in one place, the shadow agent has already renamed it in the twelve other call sites, updated the docstring, and adjusted the import. Those edits sit in the undo history ahead of your cursor. If you undo past the rename, the shadow work appears; if you never undo, it is silently discarded.
@@ -196,7 +196,7 @@ This feature is weird because it is not clear what the intent is.
   - The shadow buffer (accessible via `C-c d s`) shows what it staged and why, so you can inspect the reasoning before accepting.
   - Nothing is applied to the buffer without your explicit undo-into-it action. You are always in control; the shadow only prepares.
 
-** deslop-investigate
+** ende-investigate
 [user] super dumb. I can just run codex for this
 - Give the agent an unexplained observation, and have it run an investigation rather than immediately propose a fix.
   - e.g. "Why does this test fail only after midnight?" or "Where does our documented cancellation behavior diverge from what actually happens?"
@@ -207,7 +207,7 @@ This feature is weird because it is not clear what the intent is.
   - The deliverable is a reproducible explanation: a minimal reproducer when possible, the causal chain supported by evidence, and a command to verify it.
   - If it cannot establish the cause, it leaves a precise boundary between what is known and what still needs testing, so the next attempt does not start from scratch.
 
-** deslop-teach
+** ende-teach
 [user]: dumbest ever because I have to do all that from emacs, and my buffers might be every time different, my keyboard bindings might be different, so what is the agent supposed to learn from, after seeing my keyboard typing and me going to buffers, etc? I am all for teaching, but 
 - Teach Emacs a new operation by doing it once, rather than repeatedly explaining it to an agent.
   - I start recording, perform a real workflow across buffers, and mark the result I care about.
@@ -218,19 +218,19 @@ This feature is weird because it is not clear what the intent is.
   - The resulting skill is inspectable and editable, with explicit permissions and checkpoints—not a hidden prompt that can do anything.
   - Over time I build a personal set of commands for work that previously required switching between tools and keeping the whole procedure in my head.
 
-** deslop-chat [Idea by LLM, looks weird]
-- A dedicated side-buffer (think `*deslop-chat*`) that maintains a rolling conversation anchored to the current buffer's content.
+** ende-chat [Idea by LLM, looks weird]
+- A dedicated side-buffer (think `*ende-chat*`) that maintains a rolling conversation anchored to the current buffer's content.
   - The user asks questions, requests partial rewrites, or negotiates phrasing: "make this paragraph shorter but keep the technical term."
   - The LLM responds with diffs or candidate text blocks, and the user yanks them into the main buffer with a single keypress (`M-y`-style, but scoped to the chat).
-  - Conversation history survives across `deslop-insert-at-cursor` and `deslop-review` calls, so the LLM remembers what it already knows about the document.
+  - Conversation history survives across `ende-insert-at-cursor` and `ende-review` calls, so the LLM remembers what it already knows about the document.
 
-** deslop-review [Idea by LLM, looks weird]
+** ende-review [Idea by LLM, looks weird]
 - Review the selected region, or the whole buffer if nothing is selected, without changing the text.
   - Show actionable findings in a separate buffer: contradictions, unclear wording, missing explanations, or likely bugs.
   - Each finding links back to its source location and offers an optional fix.
   - Applying a fix requires explicit approval; if the source text has changed, flag the suggestion as stale rather than overwriting newer edits.
 
-** deslop-preview [Idea by LLM, looks weird]
+** ende-preview [Idea by LLM, looks weird]
 - Let me compare several candidate completions before choosing what to insert.
   - Candidates appear in a temporary buffer, with enough surrounding context to judge whether they fit.
   - I can accept one, reject all, or request another variation with a short instruction.

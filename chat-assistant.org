@@ -2,7 +2,7 @@
 #+STARTUP: overview
 
 * Final Design
-Provide a chat workflow inside deslop without preventing the user from writing and editing ordinary Org content.
+Provide a chat workflow inside ende without preventing the user from writing and editing ordinary Org content.
 Use an ordinary Org buffer for chat, with top-level headings defining independent conversation roots.
 Message ownership is such that sections marked as assistant by properties, are also sent as such to the server.
 Section marked as such, assumes that all of its content is also marked as such.
@@ -35,7 +35,7 @@ Keep provider reasoning out of future context by default, and preserve ordinary 
 
 * Design Goal
 
-Provide a simple chat workflow inside deslop without preventing the user from
+Provide a simple chat workflow inside ende without preventing the user from
 writing and editing ordinary Org content.
 
 The chat document is an ordinary Org document.  Its outline is used for
@@ -82,17 +82,17 @@ Conversation headings carry explicit properties:
 #+begin_src org
 * Q: How can we use bash?
 :PROPERTIES:
-:DESLOP-CHAT-ROLE: user
-:DESLOP-CHAT-STATE: sent
-:DESLOP-CHAT-TURN: 1
+:ENDE-CHAT-ROLE: user
+:ENDE-CHAT-STATE: sent
+:ENDE-CHAT-TURN: 1
 :END:
 What is the best way to use bash on Linux?
 
 ** A: Start with the shell
 :PROPERTIES:
-:DESLOP-CHAT-ROLE: assistant
-:DESLOP-CHAT-ORIGIN: llm
-:DESLOP-CHAT-STATE: complete
+:ENDE-CHAT-ROLE: assistant
+:ENDE-CHAT-ORIGIN: llm
+:ENDE-CHAT-STATE: complete
 :END:
 #+end_src
 
@@ -134,7 +134,7 @@ turns are supported, specify and test their exact ordering and ownership.
 
 Also define an explicit reference override that stops role inheritance.
 Absence of a property cannot mean both 'inherit assistant' and 'explicitly
-reference'.  =deslop-chat-mark-reference= needs a durable representation.
+reference'.  =ende-chat-mark-reference= needs a durable representation.
 
 
 If an assistant annotation appears below several unmarked headings, the
@@ -198,7 +198,7 @@ recover accidental edits without requiring character-level provenance.
 
 * Context Selection
 
-When the user asks a question, deslop finds the active top-level chat root and
+When the user asks a question, ende finds the active top-level chat root and
 serializes the document in textual Org order up to the current question.
 
 The context includes:
@@ -262,7 +262,7 @@ the real serialization, rather than infer a second rule from the prefixes.
 The request for =Second question= is serialized as:
 
 #+begin_src text
-  system: deslop chat instructions
+  system: ende chat instructions
   user: Main question
   assistant: First answer
   user: Follow-up question
@@ -338,7 +338,7 @@ Uniform shifting preserves the answer's internal outline: this is an excellent
 fit for Org navigation.  Add tests for preambles, multiple top-level response
 sections, very deep headings, and attempts to emit control properties.
 
-Define which metadata is stripped: all reserved deslop control fields, not
+Define which metadata is stripped: all reserved ende control fields, not
 just role, including origin, state, IDs, and any inheritance overrides.
 Generated content must never gain authority merely by resembling a drawer.
 Treat generated Babel blocks, links, includes, and other active Org constructs
@@ -393,14 +393,14 @@ that arbitrary Org edits can never affect classification.
 
 The proposed commands are:
 
-- =deslop-chat=: open or create the chat Org buffer.
-- =deslop-chat-ask=: send the marked question at point.
-- =deslop-chat-new=: create a new top-level chat root.
-- =deslop-chat-mark-question=: mark the current section as a user question.
-- =deslop-chat-mark-assistant=: attribute the current section to an assistant
+- =ende-chat=: open or create the chat Org buffer.
+- =ende-chat-ask=: send the marked question at point.
+- =ende-chat-new=: create a new top-level chat root.
+- =ende-chat-mark-question=: mark the current section as a user question.
+- =ende-chat-mark-assistant=: attribute the current section to an assistant
   response.
-- =deslop-chat-mark-reference=: explicitly keep content as raw reference.
-- =deslop-chat-cancel=: cancel the active request.
+- =ende-chat-mark-reference=: explicitly keep content as raw reference.
+- =ende-chat-cancel=: cancel the active request.
 
 Return remains ordinary Org editing.  Sending is explicit so that a heading
 such as =*** Section= is not mistaken for a question merely because it was
@@ -413,7 +413,7 @@ here.  Keep standard Org navigation, folding, capture, and source-block editing.
 
 The simulated user finishes reading an answer and wants to ask a follow-up.
 Currently they must find a safe insertion level, create a heading, mark it, and
-send it.  Add =deslop-chat-follow-up= to create an empty, correctly placed draft
+send it.  Add =ende-chat-follow-up= to create an empty, correctly placed draft
 user turn and move point to its body.  Specify =ask= behavior in a question
 body, inside an assistant subtree, on reference text, and with an active
 region.  Do not unexpectedly mark and send arbitrary surrounding content.
@@ -434,12 +434,12 @@ Changing =C-c e= into a prefix can break the user's existing command.
 Letter-based =C-c= bindings are conventionally reserved for users.  Offer a
 customizable prefix map and documented example bindings rather than installing
 this takeover by default.  All operations should remain available through
-=M-x=; check existing deslop conventions before choosing packaged bindings.
+=M-x=; check existing ende conventions before choosing packaged bindings.
 
 
 * Transport Mapping
 
-The existing deslop transport already accepts role-tagged messages.  Chat
+The existing ende transport already accepts role-tagged messages.  Chat
 requests use:
 
 #+begin_src text
@@ -479,7 +479,7 @@ summary, keep it distinct from the answer and make inclusion intentional.
 
 * Implementation Shape
 
-The first implementation can remain within the existing deslop architecture:
+The first implementation can remain within the existing ende architecture:
 
 - Add a chat buffer and command layer using ordinary =org-mode=.
 - Add role/provenance properties and context serialization.
@@ -518,7 +518,7 @@ This is a thought experiment using the written specification, not an executed
 usability test.  Alex is an experienced Emacs user who relies on Org folding,
 refiling, keyboard navigation, and editing while background processes run.
 
-1. Alex runs =M-x deslop-chat=, creates a topic for shell scripting, and pastes
+1. Alex runs =M-x ende-chat=, creates a topic for shell scripting, and pastes
    notes containing source blocks.  Ordinary Org editing feels immediately
    familiar.  Explicit sends mean pressing Return cannot accidentally transmit
    unfinished text.  This is a substantial advantage over many chat interfaces.

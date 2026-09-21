@@ -1,5 +1,5 @@
 * DONE Provide full paths when summarizing and allow summary to reference original file/buffer
-- For a summary, I want summarizing deslop agents to reference original documents, where applicable, and the user to follow the links, so that they can directly check the agent's claims
+- For a summary, I want summarizing ende agents to reference original documents, where applicable, and the user to follow the links, so that they can directly check the agent's claims
 - for that we need to first provide the actual file name path, so that the org mode links can work
 - optional: make this work for TRAMP, but I don't expect issues if the path is directly provided in correct syntax
 
@@ -75,7 +75,7 @@ Maybe we can use the current theme here, so that the numbers are always visible.
 - make the link matching more robust
 
 * TODO Make history an org mode native
-- org mode should be by default on for "*deslop-history*" buffer
+- org mode should be by default on for "*ende-history*" buffer
 - sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
 - use the sanitizing function also for the summaries (which are also org mode)
 * Display how much money each request took approximately

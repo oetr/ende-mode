@@ -1,4 +1,4 @@
-;;; deslop-edit.el --- Structured edit protocols for deslop -*- lexical-binding: t; -*-
+;;; ende-edit.el --- Structured edit protocols for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -13,77 +13,77 @@
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
-(require 'deslop-operation)
-(require 'deslop-protocol)
+(require 'ende-operation)
+(require 'ende-protocol)
 
-(defcustom deslop-max-write-anywhere-edits 100
-  "Maximum number of edits accepted from one `deslop-write-anywhere' result."
+(defcustom ende-max-write-anywhere-edits 100
+  "Maximum number of edits accepted from one `ende-write-anywhere' result."
   :type 'integer
-  :group 'deslop)
+  :group 'ende)
 
-(defcustom deslop-max-normalized-edits 10000
+(defcustom ende-max-normalized-edits 10000
   "Maximum number of expanded structured edits accepted from one result.
 
 This is a generous safety ceiling for edits expanded from `all: true'; it is
 not intended to limit ordinary product usage."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum normalized edits"))
-  :group 'deslop)
+  :group 'ende)
 
-(define-error 'deslop-edit-resource-error
+(define-error 'ende-edit-resource-error
   "Structured edit resource limit exceeded")
 
-(defun deslop-edit--validate-limits ()
+(defun ende-edit--validate-limits ()
   "Validate raw and normalized structured-edit limits."
-  (dolist (option (list (cons 'deslop-max-write-anywhere-edits
-                              deslop-max-write-anywhere-edits)
-                        (cons 'deslop-max-normalized-edits
-                              deslop-max-normalized-edits)))
+  (dolist (option (list (cons 'ende-max-write-anywhere-edits
+                              ende-max-write-anywhere-edits)
+                        (cons 'ende-max-normalized-edits
+                              ende-max-normalized-edits)))
     (unless (or (null (cdr option))
                 (and (integerp (cdr option)) (> (cdr option) 0)))
       (error "%s must be nil or a positive integer" (car option))))
   t)
 
-(defun deslop-edit--normalized-limit-error ()
+(defun ende-edit--normalized-limit-error ()
   "Signal that structured-edit expansion exceeded its safety ceiling."
-  (signal 'deslop-edit-resource-error
+  (signal 'ende-edit-resource-error
           (list (format "normalized edit count exceeds %s"
-                        deslop-max-normalized-edits))))
+                        ende-max-normalized-edits))))
 
-(defun deslop-edit--parse-document (content operation)
+(defun ende-edit--parse-document (content operation)
   "Parse JSON CONTENT for OPERATION and return its document hash table."
   (condition-case caught
-       (deslop-protocol-json-read-string content)
+       (ende-protocol-json-read-string content)
     (error
      (error "%s result is not valid JSON: %s"
             operation (error-message-string caught)))))
 
-(defun deslop-edit--validate-document (document operation &optional allow-empty)
+(defun ende-edit--validate-document (document operation &optional allow-empty)
   "Validate the common protocol envelope in DOCUMENT for OPERATION.
 When ALLOW-EMPTY is non-nil, accept an empty edits array."
-  (deslop-edit--validate-limits)
+  (ende-edit--validate-limits)
   (unless (and (hash-table-p document)
-                (equal (deslop-protocol-json-get "version" document) 1))
+                (equal (ende-protocol-json-get "version" document) 1))
     (error "%s result has an unsupported protocol version" operation))
-  (let ((edits (deslop-protocol-json-get "edits" document)))
+  (let ((edits (ende-protocol-json-get "edits" document)))
     (unless (vectorp edits)
       (error "%s result must contain an edits array" operation))
     (when (and (not allow-empty) (zerop (length edits)))
       (error "%s result contains no edits" operation))
-    (when (and deslop-max-write-anywhere-edits
-               (> (length edits) deslop-max-write-anywhere-edits))
+    (when (and ende-max-write-anywhere-edits
+               (> (length edits) ende-max-write-anywhere-edits))
       (error "%s result contains too many edits" operation))
     edits))
 
-(defun deslop-edit--required-fields (object fields)
+(defun ende-edit--required-fields (object fields)
   "Return missing JSON FIELDS from OBJECT."
   (and (hash-table-p object)
        (cl-remove-if
         (lambda (field)
-          (deslop-protocol-json-has-key-p field object))
+          (ende-protocol-json-has-key-p field object))
         fields)))
 
-(defun deslop-edit-replacement-overlaps-p (left right)
+(defun ende-edit-replacement-overlaps-p (left right)
   "Return non-nil when replacement edits LEFT and RIGHT overlap."
   (let ((left-start (plist-get left :start))
         (left-end (plist-get left :end))
@@ -98,7 +98,7 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
        (and (<= left-start right-start) (< right-start left-end)))
      (t (and (< left-start right-end) (< right-start left-end))))))
 
-(defun deslop-edit--anchor-offsets (source anchor &optional limit)
+(defun ende-edit--anchor-offsets (source anchor &optional limit)
   "Return zero-based SOURCE offsets at which ANCHOR occurs.
 When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
   (let ((start 0)
@@ -107,35 +107,35 @@ When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
                 (string-match (regexp-quote anchor) source start))
       (push (match-beginning 0) offsets)
       (when (and limit (> (length offsets) limit))
-        (deslop-edit--normalized-limit-error))
+        (ende-edit--normalized-limit-error))
       (setq start (1+ (match-beginning 0))))
     (nreverse offsets)))
 
-(defun deslop-edit--parse-anchor-edits
+(defun ende-edit--parse-anchor-edits
     (index raw source positions &optional normalized-limit)
   "Parse one anchor-based RAW edit at INDEX against SOURCE.
 POSITIONS lists the accepted values for the edit's position field.
 NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
   (let* ((anchor (and (hash-table-p raw)
-                       (deslop-protocol-json-get "anchor" raw)))
+                       (ende-protocol-json-get "anchor" raw)))
          (position (and (hash-table-p raw)
-                         (deslop-protocol-json-get "position" raw)))
+                         (ende-protocol-json-get "position" raw)))
            (occurrence-present (and (hash-table-p raw)
-                                   (deslop-protocol-json-has-key-p
+                                   (ende-protocol-json-has-key-p
                                     "occurrence" raw)))
            (occurrence (and occurrence-present
-                            (deslop-protocol-json-get "occurrence" raw)))
+                            (ende-protocol-json-get "occurrence" raw)))
            (all-present (and (hash-table-p raw)
-                             (deslop-protocol-json-has-key-p "all" raw)))
+                             (ende-protocol-json-has-key-p "all" raw)))
            (all-value (and all-present
-                           (deslop-protocol-json-get "all" raw)))
+                           (ende-protocol-json-get "all" raw)))
           (all (eq all-value t))
           (text (and (hash-table-p raw)
-                      (deslop-protocol-json-get "text" raw))))
+                      (ende-protocol-json-get "text" raw))))
      (unless (and (hash-table-p raw)
-                  (deslop-protocol-json-has-key-p "anchor" raw)
-                  (deslop-protocol-json-has-key-p "position" raw)
-                  (deslop-protocol-json-has-key-p "text" raw))
+                  (ende-protocol-json-has-key-p "anchor" raw)
+                  (ende-protocol-json-has-key-p "position" raw)
+                  (ende-protocol-json-has-key-p "text" raw))
       (error "missing required anchor, position, or text field"))
     (unless (and (stringp anchor) (not (string-empty-p anchor)))
       (error "anchor must be a non-empty string"))
@@ -152,13 +152,13 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
                (not (and (integerp occurrence) (>= occurrence 1))))
       (error "occurrence must be a positive integer"))
     (let* ((offset-limit (and all normalized-limit))
-           (offsets (deslop-edit--anchor-offsets source anchor offset-limit))
+           (offsets (ende-edit--anchor-offsets source anchor offset-limit))
            (selected-offsets
             (cond
              (all
               (when (and normalized-limit
                          (> (length offsets) normalized-limit))
-                (deslop-edit--normalized-limit-error))
+                (ende-edit--normalized-limit-error))
               offsets)
              (occurrence
               (unless (<= occurrence (length offsets))
@@ -171,7 +171,7 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
       (when (and normalized-limit
                  (<= normalized-limit 0)
                  selected-offsets)
-        (deslop-edit--normalized-limit-error))
+        (ende-edit--normalized-limit-error))
       (unless selected-offsets
         (error "anchor was not found"))
       (mapcar
@@ -188,26 +188,26 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
                        edit-start))))
        selected-offsets))))
 
-(defun deslop-edit-parse-insertions (content source &optional allow-empty)
+(defun ende-edit-parse-insertions (content source &optional allow-empty)
   "Parse insertion edits from CONTENT against SOURCE.
 Return a plist containing `:edits' and individual `:errors'.
 When ALLOW-EMPTY is non-nil, accept an empty edits array."
-  (let* ((document (deslop-edit--parse-document content "insert-anywhere"))
-         (raw-edits (deslop-edit--validate-document
+  (let* ((document (ende-edit--parse-document content "insert-anywhere"))
+         (raw-edits (ende-edit--validate-document
                      document "insert-anywhere" allow-empty))
          (edits nil)
          (errors nil))
     (dotimes (index (length raw-edits))
       (condition-case caught
           (let ((parsed
-                 (deslop-edit--parse-anchor-edits
+                 (ende-edit--parse-anchor-edits
                   index (aref raw-edits index) source
                   '("before" "after")
-                  (and deslop-max-normalized-edits
-                       (- deslop-max-normalized-edits
+                  (and ende-max-normalized-edits
+                       (- ende-max-normalized-edits
                           (length edits))))))
             (setq edits (nconc edits parsed)))
-        (deslop-edit-resource-error
+        (ende-edit-resource-error
          (signal (car caught) (cdr caught)))
         ((error quit)
          (push (list :index index
@@ -217,24 +217,24 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
     (setq errors (nreverse errors))
     (list :edits edits :errors errors)))
 
-(defun deslop-edit-parse-replacements (content source)
+(defun ende-edit-parse-replacements (content source)
   "Parse anchor-based replacement edits from CONTENT against SOURCE.
 Return a plist containing valid `:edits' and individual `:errors'."
-  (let* ((document (deslop-edit--parse-document content "write-anywhere"))
-         (raw-edits (deslop-edit--validate-document document "write-anywhere"))
+  (let* ((document (ende-edit--parse-document content "write-anywhere"))
+         (raw-edits (ende-edit--validate-document document "write-anywhere"))
          (edits nil)
          (errors nil))
     (dotimes (index (length raw-edits))
       (condition-case caught
           (let ((parsed
-                 (deslop-edit--parse-anchor-edits
+                 (ende-edit--parse-anchor-edits
                   index (aref raw-edits index) source
                   '("before" "after" "replace")
-                  (and deslop-max-normalized-edits
-                       (- deslop-max-normalized-edits
+                  (and ende-max-normalized-edits
+                       (- ende-max-normalized-edits
                           (length edits))))))
             (setq edits (nconc edits parsed)))
-        (deslop-edit-resource-error
+        (ende-edit-resource-error
          (signal (car caught) (cdr caught)))
         ((error quit)
          (push (list :index index
@@ -341,7 +341,7 @@ Return a plist containing valid `:edits' and individual `:errors'."
                 errors))))
     (list :edits edits :errors errors)))
 
-(defun deslop-edit-format-failures (failures &optional separator)
+(defun ende-edit-format-failures (failures &optional separator)
   "Format edit FAILURES using SEPARATOR, defaulting to a newline."
   (mapconcat
    (lambda (failure)
@@ -353,11 +353,11 @@ Return a plist containing valid `:edits' and individual `:errors'."
                "")))
    failures (or separator "\n")))
 
-(defun deslop-edit-format-insertion-failures (failures &optional separator)
+(defun ende-edit-format-insertion-failures (failures &optional separator)
   "Format insertion FAILURES using SEPARATOR, defaulting to a newline."
-  (deslop-edit-format-failures failures separator))
+  (ende-edit-format-failures failures separator))
 
-(defun deslop-edit-add-insertion-failures (result failures)
+(defun ende-edit-add-insertion-failures (result failures)
   "Return RESULT annotated with insertion FAILURES."
   (if (null failures)
       result
@@ -366,7 +366,7 @@ Return a plist containing valid `:edits' and individual `:errors'."
           (plist-put annotated :insert-anywhere-errors failures))
       (list :content result :insert-anywhere-errors failures))))
 
-(defun deslop-edit-add-replacement-failures (result failures)
+(defun ende-edit-add-replacement-failures (result failures)
   "Return RESULT annotated with replacement FAILURES."
   (if (null failures)
       result
@@ -375,6 +375,6 @@ Return a plist containing valid `:edits' and individual `:errors'."
           (plist-put annotated :write-anywhere-errors failures))
       (list :content result :write-anywhere-errors failures))))
 
-(provide 'deslop-edit)
+(provide 'ende-edit)
 
-;;; deslop-edit.el ends here
+;;; ende-edit.el ends here

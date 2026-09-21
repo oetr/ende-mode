@@ -1,4 +1,4 @@
-;;; deslop-test.el --- ERT tests for deslop -*- lexical-binding: t; -*-
+;;; ende-test.el --- ERT tests for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -13,50 +13,50 @@
 
 (require 'ert)
 (require 'cl-lib)
-(require 'deslop-provider)
-(require 'deslop)
+(require 'ende-provider)
+(require 'ende)
 
 ;;;; Test harness
 
-(defvar deslop-test--prompts nil)
-(defvar deslop-test--calls nil)
-(defvar deslop-test--fake-responses nil)
+(defvar ende-test--prompts nil)
+(defvar ende-test--calls nil)
+(defvar ende-test--fake-responses nil)
 
-(defun deslop-test--callback (call name &rest args)
+(defun ende-test--callback (call name &rest args)
   "Invoke callback NAME from CALL with ARGS when it exists."
   (let ((callback (plist-get (plist-get call :callbacks) name)))
     (when callback
       (apply callback args))))
 
-(defun deslop-test--overlay-label (overlay)
+(defun ende-test--overlay-label (overlay)
   "Return the display label attached to OVERLAY."
   (substring-no-properties
    (or (overlay-get overlay 'before-string)
        (overlay-get overlay 'after-string)
        "")))
 
-(defun deslop-test--complete-call (call)
+(defun ende-test--complete-call (call)
   "Complete asynchronous fake CALL using its queued response."
   (let ((response (plist-get call :response)))
     (cond
      ((eq response :stall) nil)
      ((eq response :error)
-      (deslop-test--callback
+      (ende-test--callback
        call :on-error
-       (deslop-error-create :kind 'mock :message "mock failure")))
+       (ende-error-create :kind 'mock :message "mock failure")))
      ((stringp response)
-       (deslop-test--callback call :on-event
+       (ende-test--callback call :on-event
                               (list :type :status :status "Generating"))
-       (deslop-test--callback call :on-event
+       (ende-test--callback call :on-event
                               (list :type :delta :channel :content
                                     :text response))
-       (deslop-test--callback call :on-event
+       (ende-test--callback call :on-event
                               (list :type :usage :tokens 10 :speed 50.0))
-       (deslop-test--callback call :on-done response))
+       (ende-test--callback call :on-done response))
       ((and (listp response) response)
        (when (or (plist-get response :reported-model)
                  (plist-get response :reported-provider))
-         (deslop-test--callback
+         (ende-test--callback
           call :on-event
           (list :type :metadata
                 :metadata
@@ -64,78 +64,78 @@
                       :model (plist-get response :reported-model)
                       :provider (plist-get response :reported-provider)))))
        (when (stringp (plist-get response :thinking))
-         (deslop-test--callback
+         (ende-test--callback
           call :on-event
           (list :type :delta :channel :thinking
                 :text (plist-get response :thinking))))
        (when (stringp (plist-get response :content))
-         (deslop-test--callback
+         (ende-test--callback
           call :on-event
           (list :type :delta :channel :content
                 :text (plist-get response :content))))
        (when (plist-member response :usage)
-         (deslop-test--callback
+         (ende-test--callback
           call :on-event
           (list :type :usage
                 :tokens (plist-get response :tokens)
                 :speed (plist-get response :speed)
                 :usage (plist-get response :usage))))
        (when (listp (plist-get response :partial))
-         (deslop-test--callback
+         (ende-test--callback
           call :on-event
           (list :type :partial-result :result (plist-get response :partial))))
-       (deslop-test--callback call :on-done response))
+       (ende-test--callback call :on-done response))
      (t
-      (deslop-test--callback call :on-error
+      (ende-test--callback call :on-error
                              (format "unknown mock response: %S" response))))))
 
-(defun deslop-test--fake-llm (responses &optional asynchronous process-factory)
+(defun ende-test--fake-llm (responses &optional asynchronous process-factory)
   "Return a mock LLM dispatcher for RESPONSES.
-When ASYNCHRONOUS is non-nil, calls remain in `deslop-test--calls' until
-`deslop-test--complete-call' is invoked.  PROCESS-FACTORY can provide a real
+When ASYNCHRONOUS is non-nil, calls remain in `ende-test--calls' until
+`ende-test--complete-call' is invoked.  PROCESS-FACTORY can provide a real
 process for cancellation tests."
-  (setq deslop-test--fake-responses (copy-sequence responses))
+  (setq ende-test--fake-responses (copy-sequence responses))
   (lambda (messages callbacks &optional options)
-    (push messages deslop-test--prompts)
+    (push messages ende-test--prompts)
     (let ((call (list :messages messages
                       :callbacks callbacks
                       :options options
-                      :response (pop deslop-test--fake-responses))))
+                      :response (pop ende-test--fake-responses))))
       (when process-factory
         (setq call
               (plist-put call :process (funcall process-factory)))
-        (deslop-test--callback
+        (ende-test--callback
          call :on-start
          (lambda ()
            (let ((process (plist-get call :process)))
              (when (and (processp process) (process-live-p process))
-               (process-put process :deslop-cancelled t)
+               (process-put process :ende-cancelled t)
                (delete-process process))))))
-      (setq deslop-test--calls
-            (append deslop-test--calls (list call)))
+      (setq ende-test--calls
+            (append ende-test--calls (list call)))
       (unless asynchronous
-        (deslop-test--complete-call call))
+        (ende-test--complete-call call))
       call)))
 
-(defun deslop-test--user-message (messages)
+(defun ende-test--user-message (messages)
   "Return the user content from MESSAGES."
   (cdr (assoc "user" messages)))
 
-(defun deslop-test--sleep-process ()
+(defun ende-test--sleep-process ()
   "Create a process that remains live until explicitly terminated."
-  (make-process :name (generate-new-buffer-name "deslop-test-sleep")
+  (make-process :name (generate-new-buffer-name "ende-test-sleep")
                 :command (list "sleep" "30")
                 :connection-type 'pipe
                 :noquery t))
 
-(defun deslop-test--select (start end point)
+(defun ende-test--select (start end point)
   "Activate the region START..END with point at POINT."
   (setq transient-mark-mode t)
   (goto-char point)
   (set-mark (if (= point end) start end))
   (setq mark-active t))
 
-(defun deslop-test--count-matches (regexp text)
+(defun ende-test--count-matches (regexp text)
   "Return the number of nonoverlapping REGEXP matches in TEXT."
   (let ((start 0)
         (count 0))
@@ -144,84 +144,84 @@ process for cancellation tests."
       (setq start (match-end 0)))
     count))
 
-(defun deslop-test--reset ()
+(defun ende-test--reset ()
   "Reset global state and clean test-created processes and buffers."
-  (deslop-abort-queue)
-  (when (fboundp #'deslop-openrouter-batch-abort)
-    (deslop-openrouter-batch-abort))
-  (when (buffer-live-p deslop-rubber-duck--buffer)
-    (kill-buffer deslop-rubber-duck--buffer))
-  (setq deslop-rubber-duck--buffer nil)
-  (dolist (call deslop-test--calls)
+  (ende-abort-queue)
+  (when (fboundp #'ende-openrouter-batch-abort)
+    (ende-openrouter-batch-abort))
+  (when (buffer-live-p ende-rubber-duck--buffer)
+    (kill-buffer ende-rubber-duck--buffer))
+  (setq ende-rubber-duck--buffer nil)
+  (dolist (call ende-test--calls)
     (let ((process (plist-get call :process)))
       (when (and (processp process) (process-live-p process))
         (delete-process process))))
-  (setq deslop-test--prompts nil
-        deslop-test--calls nil
-        deslop-test--fake-responses nil
-        deslop-queue nil
-        deslop--queue-tail nil
-         deslop--queue-suspended nil
-         deslop--current-job nil
-         deslop--active-jobs nil
-         deslop--fences nil
-         deslop--aborting nil
-         deslop--dispatching nil
-         deslop--next-job-id 0
-         deslop-openrouter-batch--next-request-id 0
-         deslop-openrouter-batch--known-groups nil
-         deslop-summary--next-source-id 0)
-  (when (boundp 'deslop-openrouter-batch--groups)
-    (clrhash deslop-openrouter-batch--groups))
-  (clrhash deslop-provider--discovery-cache)
-  (clrhash deslop-provider--discovery-inflight)
-  (clrhash deslop-provider--model-cache)
-  (clrhash deslop-provider--model-inflight)
-  (clrhash deslop-provider--model-cancellations)
-  (setq deslop-provider--model-generation 0)
-  (clrhash deslop-selector--model-validations)
-  (deslop-provider-clear-runtime-settings)
-   (clrhash deslop-history--entries)
-   (deslop-tools-clear-change-sets)
-   (setq deslop-tools--next-change-set-id 0)
-   (when (buffer-live-p deslop-history--buffer-object)
-    (kill-buffer deslop-history--buffer-object))
-  (setq deslop-history--buffer-object nil)
-   (when (buffer-live-p deslop-summary--buffer-object)
-     (kill-buffer deslop-summary--buffer-object))
-   (setq deslop-summary--buffer-object nil)
-   (clrhash deslop-summary--source-buffers)
-   (deslop-ui-clear-all))
+  (setq ende-test--prompts nil
+        ende-test--calls nil
+        ende-test--fake-responses nil
+        ende-queue nil
+        ende--queue-tail nil
+         ende--queue-suspended nil
+         ende--current-job nil
+         ende--active-jobs nil
+         ende--fences nil
+         ende--aborting nil
+         ende--dispatching nil
+         ende--next-job-id 0
+         ende-openrouter-batch--next-request-id 0
+         ende-openrouter-batch--known-groups nil
+         ende-summary--next-source-id 0)
+  (when (boundp 'ende-openrouter-batch--groups)
+    (clrhash ende-openrouter-batch--groups))
+  (clrhash ende-provider--discovery-cache)
+  (clrhash ende-provider--discovery-inflight)
+  (clrhash ende-provider--model-cache)
+  (clrhash ende-provider--model-inflight)
+  (clrhash ende-provider--model-cancellations)
+  (setq ende-provider--model-generation 0)
+  (clrhash ende-selector--model-validations)
+  (ende-provider-clear-runtime-settings)
+   (clrhash ende-history--entries)
+   (ende-tools-clear-change-sets)
+   (setq ende-tools--next-change-set-id 0)
+   (when (buffer-live-p ende-history--buffer-object)
+    (kill-buffer ende-history--buffer-object))
+  (setq ende-history--buffer-object nil)
+   (when (buffer-live-p ende-summary--buffer-object)
+     (kill-buffer ende-summary--buffer-object))
+   (setq ende-summary--buffer-object nil)
+   (clrhash ende-summary--source-buffers)
+   (ende-ui-clear-all))
 
-(ert-deftest deslop-test/queue-snapshots-do-not-expose-list-state ()
-  (let ((deslop--active-jobs (list :active))
-        (deslop-queue (list :pending)))
-    (let ((active (deslop-active-jobs))
-          (pending (deslop-pending-jobs)))
+(ert-deftest ende-test/queue-snapshots-do-not-expose-list-state ()
+  (let ((ende--active-jobs (list :active))
+        (ende-queue (list :pending)))
+    (let ((active (ende-active-jobs))
+          (pending (ende-pending-jobs)))
       (setcar active :changed)
       (setcar pending :changed)
-      (should (equal deslop--active-jobs '(:active)))
-      (should (equal deslop-queue '(:pending))))))
+      (should (equal ende--active-jobs '(:active)))
+      (should (equal ende-queue '(:pending))))))
 
-(defun deslop-test--tool-result (name arguments root)
+(defun ende-test--tool-result (name arguments root)
   "Invoke tool NAME and return its successful result in ROOT."
-  (let ((call (deslop-tool-call name arguments root)))
+  (let ((call (ende-tool-call name arguments root)))
     (should (plist-get call :ok))
     (plist-get call :result)))
 
-(ert-deftest deslop-test/project-tools-expose-json-definitions ()
-  (should (= (length (deslop-tool-definitions)) 8))
-  (should-not (deslop-tool-read-only
-               (deslop-tool--find "edit_source")))
+(ert-deftest ende-test/project-tools-expose-json-definitions ()
+  (should (= (length (ende-tool-definitions)) 8))
+  (should-not (ende-tool-read-only
+               (ende-tool--find "edit_source")))
   (should (string-match-p
            "edit_source"
-           (json-encode (deslop-tool-definitions)))))
+           (json-encode (ende-tool-definitions)))))
 
-(ert-deftest deslop-test/project-tools-enforce-scope-and-report-file-info ()
-  (let* ((root (make-temp-file "deslop-tools-project-" t))
+(ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
+  (let* ((root (make-temp-file "ende-tools-project-" t))
          (source (expand-file-name "src/main.el" root))
          (secret (expand-file-name ".env" root))
-         (outside (make-temp-file "deslop-tools-outside-")))
+         (outside (make-temp-file "ende-tools-outside-")))
     (unwind-protect
         (progn
           (make-directory (file-name-directory source) t)
@@ -229,10 +229,10 @@ process for cancellation tests."
             (insert "one\ntwo\nthree\n"))
           (with-temp-file secret
             (insert "TOKEN=secret\n"))
-          (let ((deslop-project-root-directory root))
-            (let* ((info (deslop-test--tool-result
+          (let ((ende-project-root-directory root))
+            (let* ((info (ende-test--tool-result
                           "file_info" '(("path" . "src/main.el")) root))
-                   (files (deslop-test--tool-result
+                   (files (ende-test--tool-result
                            "list_project_files" nil root)))
               (should (= (plist-get info :line_count) 3))
               (should (= (length (plist-get files :files)) 1))
@@ -240,7 +240,7 @@ process for cancellation tests."
                                 (car (plist-get files :files)) :path)
                                "src/main.el")))
             (let ((failure
-                   (deslop-tool-call
+                   (ende-tool-call
                     "read_file" '(("path" . "../outside")) root)))
               (should-not (plist-get failure :ok))
               (should (string-match-p "outside the project"
@@ -250,8 +250,8 @@ process for cancellation tests."
       (when (file-exists-p outside)
         (delete-file outside)))))
 
-(ert-deftest deslop-test/project-tools-prefer-unsaved-visiting-buffers ()
-  (let* ((root (make-temp-file "deslop-tools-buffer-project-" t))
+(ert-deftest ende-test/project-tools-prefer-unsaved-visiting-buffers ()
+  (let* ((root (make-temp-file "ende-tools-buffer-project-" t))
          (path (expand-file-name "main.el" root))
          (buffer nil))
     (unwind-protect
@@ -263,12 +263,12 @@ process for cancellation tests."
             (goto-char (point-min))
             (insert "unsaved\n")
             (set-buffer-modified-p t))
-          (let* ((deslop-project-root-directory root)
-                 (listed (deslop-test--tool-result
+          (let* ((ende-project-root-directory root)
+                 (listed (ende-test--tool-result
                           "list_project_buffers" nil root))
                  (record (car (plist-get listed :buffers)))
                  (buffer-id (plist-get record :buffer_id))
-                 (read (deslop-test--tool-result
+                 (read (ende-test--tool-result
                         "read_buffer"
                         (list (cons "buffer_id" buffer-id)
                               (cons "start_line" 1)
@@ -283,8 +283,8 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest deslop-test/project-tools-read-search-and-cap-results ()
-  (let* ((root (make-temp-file "deslop-tools-search-project-" t))
+(ert-deftest ende-test/project-tools-read-search-and-cap-results ()
+  (let* ((root (make-temp-file "ende-tools-search-project-" t))
          (first (expand-file-name "first.txt" root))
          (second (expand-file-name "second.txt" root)))
     (unwind-protect
@@ -293,14 +293,14 @@ process for cancellation tests."
             (insert "needle one\nkeep\nneedle two\n"))
           (with-temp-file second
             (insert "needle three\n"))
-          (let* ((deslop-project-root-directory root)
-                 (read (deslop-test--tool-result
+          (let* ((ende-project-root-directory root)
+                 (read (ende-test--tool-result
                         "read_file"
                         '(("path" . "first.txt")
                           ("start_line" . 2)
                           ("line_count" . 1))
                         root))
-                 (search (deslop-test--tool-result
+                 (search (ende-test--tool-result
                           "search_project"
                           '(("regexp" . "needle")
                             ("max_results" . 2)
@@ -317,18 +317,18 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest deslop-test/project-tools-edit-requires-digest-and-is-reviewable ()
-  (let* ((root (make-temp-file "deslop-tools-edit-project-" t))
+(ert-deftest ende-test/project-tools-edit-requires-digest-and-is-reviewable ()
+  (let* ((root (make-temp-file "ende-tools-edit-project-" t))
          (path (expand-file-name "main.el" root))
          (buffer nil))
     (unwind-protect
         (progn
           (with-temp-file path
             (insert "hello world\n"))
-          (let* ((deslop-project-root-directory root)
-                 (info (deslop-test--tool-result
+          (let* ((ende-project-root-directory root)
+                 (info (ende-test--tool-result
                         "file_info" '(("path" . "main.el")) root))
-                 (proposal (deslop-test--tool-result
+                 (proposal (ende-test--tool-result
                             "edit_source"
                             (list
                              (cons "path" "main.el")
@@ -346,21 +346,21 @@ process for cancellation tests."
                                (insert-file-contents path)
                                (buffer-string))
                              "hello world\n"))
-             (deslop-tools-apply-change-set change-set-id)
-             (should-error (deslop-tools-change-set change-set-id))
+             (ende-tools-apply-change-set change-set-id)
+             (should-error (ende-tools-change-set change-set-id))
              (should (string= (with-temp-buffer
                                (insert-file-contents path)
                                (buffer-string))
                              "hello Emacs\n")))
           (setq buffer (find-file-noselect path))
-          (let* ((deslop-project-root-directory root)
-                 (listed (deslop-test--tool-result
+          (let* ((ende-project-root-directory root)
+                 (listed (ende-test--tool-result
                           "list_project_buffers" nil root))
                  (buffer-id (plist-get
                              (car (plist-get listed :buffers)) :buffer_id))
-                 (info (deslop-test--tool-result
+                 (info (ende-test--tool-result
                         "file_info" '(("path" . "main.el")) root))
-                 (proposal (deslop-test--tool-result
+                 (proposal (ende-test--tool-result
                             "edit_source"
                             (list
                              (cons "buffer_id" buffer-id)
@@ -373,14 +373,14 @@ process for cancellation tests."
                                           (cons "replacement" "Lisp")))))
                             root)))
              (let ((change-set-id (plist-get proposal :change_set_id)))
-               (deslop-tools-apply-change-set change-set-id)
-               (should-error (deslop-tools-change-set change-set-id)))
+               (ende-tools-apply-change-set change-set-id)
+               (should-error (ende-tools-change-set change-set-id)))
              (with-current-buffer buffer
               (should (string= (buffer-string) "hello Lisp\n"))
-              (should (cl-some #'deslop-review-overlay-p
+              (should (cl-some #'ende-review-overlay-p
                                (overlays-in (point-min) (point-max)))))))
           (let ((failure
-                 (deslop-tool-call
+                 (ende-tool-call
                   "edit_source"
                   '(("path" . "main.el")
                     ("base_digest" . "stale")
@@ -396,18 +396,18 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest deslop-test/project-tools-can-directly-write-closed-files ()
-  (let* ((root (make-temp-file "deslop-tools-direct-project-" t))
+(ert-deftest ende-test/project-tools-can-directly-write-closed-files ()
+  (let* ((root (make-temp-file "ende-tools-direct-project-" t))
          (path (expand-file-name "main.el" root)))
     (unwind-protect
         (progn
-          (deslop-tools-clear-change-sets)
+          (ende-tools-clear-change-sets)
           (with-temp-file path
             (insert "old\n"))
-          (let* ((deslop-tools-direct-write t)
-                 (info (deslop-test--tool-result
+          (let* ((ende-tools-direct-write t)
+                 (info (ende-test--tool-result
                         "file_info" '(("path" . "main.el")) root))
-                 (result (deslop-test--tool-result
+                 (result (ende-test--tool-result
                           "edit_source"
                           (list
                            (cons "path" "main.el")
@@ -427,17 +427,17 @@ process for cancellation tests."
        (when (file-directory-p root)
          (delete-directory root t)))))
 
-(ert-deftest deslop-test/project-tools-retain-failed-change-sets-until-settled ()
-  (let* ((root (make-temp-file "deslop-tools-pending-project-" t))
+(ert-deftest ende-test/project-tools-retain-failed-change-sets-until-settled ()
+  (let* ((root (make-temp-file "ende-tools-pending-project-" t))
          (path (expand-file-name "main.el" root))
-         (deslop-project-root-directory root))
+         (ende-project-root-directory root))
     (unwind-protect
         (progn
           (with-temp-file path
             (insert "old\n"))
-          (let* ((info (deslop-test--tool-result
+          (let* ((info (ende-test--tool-result
                         "file_info" '(("path" . "main.el")) root))
-                 (proposal (deslop-test--tool-result
+                 (proposal (ende-test--tool-result
                             "edit_source"
                             (list
                              (cons "path" "main.el")
@@ -452,69 +452,69 @@ process for cancellation tests."
                  (id (plist-get proposal :change_set_id)))
             (with-temp-file path
               (insert "changed\n"))
-            (should-error (deslop-tools-apply-change-set id))
-            (should (deslop-change-set-p (deslop-tools-change-set id)))
-            (deslop-tools-reject-change-set id)
-            (should-error (deslop-tools-change-set id))))
+            (should-error (ende-tools-apply-change-set id))
+            (should (ende-change-set-p (ende-tools-change-set id)))
+            (ende-tools-reject-change-set id)
+            (should-error (ende-tools-change-set id))))
        (when (file-directory-p root)
          (delete-directory root t)))))
 
-(ert-deftest deslop-test/project-tools-reject-ambiguous-boundary-edits ()
+(ert-deftest ende-test/project-tools-reject-ambiguous-boundary-edits ()
   (should-error
-   (deslop-tools--validate-edits
+   (ende-tools--validate-edits
     '((("start" . 3) ("end" . 3) ("expected" . "")
        ("replacement" . "!"))
       (("start" . 3) ("end" . 6) ("expected" . "XYZ")
        ("replacement" . "Q")))
     "abcXYZ")))
 
-(defmacro deslop-test--with-buffer (contents &rest body)
+(defmacro ende-test--with-buffer (contents &rest body)
   "Evaluate BODY in a temporary buffer containing CONTENTS."
   (declare (indent 1) (debug t))
   `(with-temp-buffer
      (insert ,contents)
      ,@body))
 
-(ert-deftest deslop-test/source-metadata-uses-file-basename-and-mode ()
-  (deslop-test--with-buffer "source"
+(ert-deftest ende-test/source-metadata-uses-file-basename-and-mode ()
+  (ende-test--with-buffer "source"
     (setq-local buffer-file-name "/ssh:user@example:/path/to/example.el")
     (setq-local major-mode 'emacs-lisp-mode)
-    (let ((target (deslop-target-create
+    (let ((target (ende-target-create
                    :buffer (current-buffer)
                    :start (point-min)
                    :end (point-max)
                    :cursor (point-min)
                    :selected t)))
       (unwind-protect
-          (let ((metadata (deslop-target-source-metadata target)))
+          (let ((metadata (ende-target-source-metadata target)))
             (should (string= (plist-get metadata :name) "example.el"))
             (should (string= (plist-get metadata :type) "file"))
             (should (string= (plist-get metadata :major-mode)
                              "emacs-lisp-mode"))
             (should-not (string-match-p "/" (plist-get metadata :name))))
-        (deslop-target-release target)))))
+        (ende-target-release target)))))
 
-(ert-deftest deslop-test/source-metadata-bounds-buffer-names ()
-  (deslop-test--with-buffer "source"
+(ert-deftest ende-test/source-metadata-bounds-buffer-names ()
+  (ende-test--with-buffer "source"
     (rename-buffer (concat "scratch\n" (make-string 300 ?x)) t)
     (setq-local major-mode 'text-mode)
-    (let ((target (deslop-target-create
+    (let ((target (ende-target-create
                    :buffer (current-buffer)
                    :start (point-min)
                    :end (point-max)
                    :cursor (point-min))))
       (unwind-protect
-          (let ((name (plist-get (deslop-target-source-metadata target)
+          (let ((name (plist-get (ende-target-source-metadata target)
                                  :name)))
             (should (string-prefix-p "scratch " name))
             (should (<= (length name)
-                        deslop-target--source-metadata-field-max-length))
+                        ende-target--source-metadata-field-max-length))
             (should-not (string-match-p "[[:cntrl:]]" name)))
-        (deslop-target-release target)))))
+        (ende-target-release target)))))
 
-(ert-deftest deslop-test/all-operations-include-source-metadata ()
+(ert-deftest ende-test/all-operations-include-source-metadata ()
   (dolist (type '(insert improve summarize write-anywhere insert-anywhere))
-    (deslop-test--reset)
+    (ende-test--reset)
     (let* ((response
             (pcase type
               ('insert "completion")
@@ -526,59 +526,59 @@ process for cancellation tests."
               ('insert-anywhere
                (concat "{\"version\":1,\"edits\":[{\"anchor\":\"test\","
                        "\"position\":\"before\",\"text\":\"X\"}]}"))))
-           (deslop-llm-function
-            (deslop-test--fake-llm (list response))))
-      (deslop-test--with-buffer "test"
+           (ende-llm-function
+            (ende-test--fake-llm (list response))))
+      (ende-test--with-buffer "test"
         (setq-local buffer-file-name "/tmp/example.el")
         (setq-local major-mode 'emacs-lisp-mode)
         (goto-char (point-max))
         (pcase type
-          ('insert (deslop-insert-at-cursor))
-          ('improve (deslop-improve-at-cursor "Improve it"))
-          ('summarize (deslop-summarize))
-          ('write-anywhere (deslop-write-anywhere "Change it"))
-          ('insert-anywhere (deslop-insert-anywhere "Insert it")))
+          ('insert (ende-insert-at-cursor))
+          ('improve (ende-improve-at-cursor "Improve it"))
+          ('summarize (ende-summarize))
+          ('write-anywhere (ende-write-anywhere "Change it"))
+          ('insert-anywhere (ende-insert-anywhere "Insert it")))
         (let ((user-message
-               (deslop-test--user-message (car deslop-test--prompts))))
+               (ende-test--user-message (car ende-test--prompts))))
           (should (string-prefix-p "Source metadata:\n" user-message))
           (should (string-match-p "Name: example\\.el" user-message))
           (should (string-match-p "Type: file" user-message))
           (should (string-match-p "Major mode: emacs-lisp-mode"
                                   user-message))
-          (should (= 1 (deslop-test--count-matches
+          (should (= 1 (ende-test--count-matches
                         "Source metadata:" user-message))))))))
 
-(ert-deftest deslop-test/source-name-disclosure-can-be-overridden ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("one" "two")))
-        (deslop-source-name-disclosure nil))
-    (deslop-test--with-buffer "source"
+(ert-deftest ende-test/source-name-disclosure-can-be-overridden ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("one" "two")))
+        (ende-source-name-disclosure nil))
+    (ende-test--with-buffer "source"
       (rename-buffer "private-buffer" t)
       (setq-local major-mode 'python-mode)
-      (deslop-enqueue-operation 'insert)
+      (ende-enqueue-operation 'insert)
       (let ((without-name
-             (deslop-test--user-message (car deslop-test--prompts))))
+             (ende-test--user-message (car ende-test--prompts))))
         (should-not (string-match-p "Name:" without-name))
         (should (string-match-p "Type: buffer" without-name))
         (should (string-match-p "Major mode: python-mode" without-name)))
-      (deslop-approve-all-output)
-      (deslop-enqueue-operation 'insert nil '(:source-name-disclosure t))
+      (ende-approve-all-output)
+      (ende-enqueue-operation 'insert nil '(:source-name-disclosure t))
       (let ((with-name
-             (deslop-test--user-message (car deslop-test--prompts))))
+             (ende-test--user-message (car ende-test--prompts))))
         (should (string-match-p "Name: private-buffer" with-name))))))
 
-(ert-deftest deslop-test/source-metadata-counts-toward-request-budget ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("unused"))))
-    (deslop-test--with-buffer "source"
+(ert-deftest ende-test/source-metadata-counts-toward-request-budget ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("unused"))))
+    (ende-test--with-buffer "source"
       (setq-local buffer-file-name "/tmp/example.el")
       (setq-local major-mode 'emacs-lisp-mode)
-      (let* ((target (deslop-target-create
+      (let* ((target (ende-target-create
                       :buffer (current-buffer)
                       :start (point-min)
                       :end (point-max)
                       :cursor (point-min)))
-             (job (deslop--make-job :type 'insert
+             (job (ende--make-job :type 'insert
                                     :target target
                                     :profile nil))
              (messages (list (cons "system" "system")
@@ -588,21 +588,21 @@ process for cancellation tests."
                        sum (+ (length (format "%s" (car message)))
                               (length (format "%s" (cdr message)))))))
         (unwind-protect
-            (let ((deslop-max-request-chars base-size))
-              (should-error (deslop--dispatch-llm job messages))
-              (should-not deslop-test--calls))
-          (deslop-target-release target))))))
+            (let ((ende-max-request-chars base-size))
+              (should-error (ende--dispatch-llm job messages))
+              (should-not ende-test--calls))
+          (ende-target-release target))))))
 
-(ert-deftest deslop-test/reset-does-not-kill-unowned-named-buffers ()
-  (let* ((deslop-history-buffer-name " *deslop-unowned-history*")
-         (deslop-summary-buffer-name " *deslop-unowned-summary*")
-         (history (get-buffer-create deslop-history-buffer-name))
-         (summary (get-buffer-create deslop-summary-buffer-name)))
+(ert-deftest ende-test/reset-does-not-kill-unowned-named-buffers ()
+  (let* ((ende-history-buffer-name " *ende-unowned-history*")
+         (ende-summary-buffer-name " *ende-unowned-summary*")
+         (history (get-buffer-create ende-history-buffer-name))
+         (summary (get-buffer-create ende-summary-buffer-name)))
     (unwind-protect
         (progn
-           (setq deslop-history--buffer-object nil
-                 deslop-summary--buffer-object nil)
-          (deslop-test--reset)
+           (setq ende-history--buffer-object nil
+                 ende-summary--buffer-object nil)
+          (ende-test--reset)
           (should (buffer-live-p history))
           (should (buffer-live-p summary)))
       (when (buffer-live-p history)
@@ -612,668 +612,668 @@ process for cancellation tests."
 
 ;;;; Normal operations
 
-(ert-deftest deslop-test/insert-no-selection ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" there"))))
-    (deslop-test--with-buffer "hello world"
+(ert-deftest ende-test/insert-no-selection ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" there"))))
+    (ende-test--with-buffer "hello world"
       (goto-char 6)
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'completed))
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "hello there world"))
-        (let ((user-msg (cdr (cadr (car deslop-test--prompts)))))
+        (let ((user-msg (cdr (cadr (car ende-test--prompts)))))
           (should (string-match "hello<CURSOR> world" user-msg)))))))
 
-(ert-deftest deslop-test/insert-at-buffer-boundaries ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("START " " END"))))
-    (deslop-test--with-buffer "middle"
+(ert-deftest ende-test/insert-at-buffer-boundaries ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("START " " END"))))
+    (ende-test--with-buffer "middle"
       (goto-char (point-min))
-      (deslop-insert-at-cursor)
+      (ende-insert-at-cursor)
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
+      (ende-insert-at-cursor)
       (should (string= (buffer-string) "START middle END")))))
 
-(ert-deftest deslop-test/insert-selected-placements ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("HEADER" "FOOTER") t)))
-    (deslop-test--with-buffer "alpha beta"
-      (deslop-test--select 1 11 1)
-      (setq deslop--queue-suspended t)
-      (deslop-insert-at-cursor)
-      (deslop-test--select 1 11 11)
-      (deslop-insert-at-cursor)
-      (setq deslop--queue-suspended nil)
-      (deslop-process-next)
-      (deslop-test--complete-call (nth 0 deslop-test--calls))
-      (deslop-test--complete-call (nth 1 deslop-test--calls))
+(ert-deftest ende-test/insert-selected-placements ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("HEADER" "FOOTER") t)))
+    (ende-test--with-buffer "alpha beta"
+      (ende-test--select 1 11 1)
+      (setq ende--queue-suspended t)
+      (ende-insert-at-cursor)
+      (ende-test--select 1 11 11)
+      (ende-insert-at-cursor)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (ende-test--complete-call (nth 0 ende-test--calls))
+      (ende-test--complete-call (nth 1 ende-test--calls))
       (should (string= (buffer-string)
                        "HEADER\nalpha beta\nFOOTER")))))
 
-(ert-deftest deslop-test/insert-does-not-mutate-selected-characters ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("MIDDLE"))))
-    (deslop-test--with-buffer "foobar"
-      (let ((overlay (deslop-ui-create-overlay (current-buffer) 1 7 "Queued"))
+(ert-deftest ende-test/insert-does-not-mutate-selected-characters ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("MIDDLE"))))
+    (ende-test--with-buffer "foobar"
+      (let ((overlay (ende-ui-create-overlay (current-buffer) 1 7 "Queued"))
             (request nil))
         (setq request
               (list 'insert
                     :target
-                    (deslop-target-create
+                    (ende-target-create
                      :buffer (current-buffer) :start 1 :end 7 :cursor 4
                      :selected t :placement :inside :offset 3
                      :source-snapshot "foobar")
                     :overlay overlay))
-      (deslop-enqueue request))
+      (ende-enqueue request))
       (should (string= (buffer-string) "foo\nMIDDLE\nbar")))))
 
-(ert-deftest deslop-test/insert-large-context-elision ()
-  (deslop-test--reset)
-  (let ((deslop-target-max-context-chars 30)
-        (deslop-target-window-chars 10)
-        (deslop-llm-function (deslop-test--fake-llm '("X"))))
-    (deslop-test--with-buffer
+(ert-deftest ende-test/insert-large-context-elision ()
+  (ende-test--reset)
+  (let ((ende-target-max-context-chars 30)
+        (ende-target-window-chars 10)
+        (ende-llm-function (ende-test--fake-llm '("X"))))
+    (ende-test--with-buffer
         (concat (make-string 20 ?A) (make-string 20 ?B))
       (goto-char 21)
-      (deslop-insert-at-cursor)
-      (let ((user-msg (cdr (cadr (car deslop-test--prompts)))))
+      (ende-insert-at-cursor)
+      (let ((user-msg (cdr (cadr (car ende-test--prompts)))))
         (should (string-match-p "characters elided" user-msg))
         (should (string-match "AAAA<CURSOR>BBBB" user-msg))))))
 
-(ert-deftest deslop-test/target-context-window-enforces-source-budget ()
-  (let* ((deslop-target-max-context-chars 30)
-         (deslop-target-window-chars 100)
-         (context (deslop-target-string-marker-context
+(ert-deftest ende-test/target-context-window-enforces-source-budget ()
+  (let* ((ende-target-max-context-chars 30)
+         (ende-target-window-chars 100)
+         (context (ende-target-string-marker-context
                     (concat (make-string 50 ?A) (make-string 50 ?B)) 50))
          (source-chars (+ (cl-count ?A context) (cl-count ?B context))))
-    (should (<= source-chars deslop-target-max-context-chars))
+    (should (<= source-chars ende-target-max-context-chars))
     (should (string-match-p "<CURSOR>" context))
     (should (string-match-p "characters elided" context))))
 
-(ert-deftest deslop-test/large-replacement-targets-are-rejected-before-queueing ()
-  (deslop-test--reset)
-  (let ((deslop-target-max-context-chars 4))
-    (deslop-test--with-buffer "oversized"
-      (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
-      (should-error (deslop-summarize) :type 'user-error)
-      (should-not deslop-queue)
-      (should-not deslop--current-job)
-      (should-not deslop-ui--managed-overlays))))
+(ert-deftest ende-test/large-replacement-targets-are-rejected-before-queueing ()
+  (ende-test--reset)
+  (let ((ende-target-max-context-chars 4))
+    (ende-test--with-buffer "oversized"
+      (should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
+      (should-error (ende-summarize) :type 'user-error)
+      (should-not ende-queue)
+      (should-not ende--current-job)
+      (should-not ende-ui--managed-overlays))))
 
-(ert-deftest deslop-test/final-request-budget-includes-instructions ()
-  (deslop-test--reset)
-  (let ((deslop-max-request-chars 100)
-        (deslop-insert-instruction (make-string 200 ?X))
-        (deslop-llm-function (deslop-test--fake-llm '("never"))))
-    (deslop-test--with-buffer "base"
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-test--calls)
+(ert-deftest ende-test/final-request-budget-includes-instructions ()
+  (ende-test--reset)
+  (let ((ende-max-request-chars 100)
+        (ende-insert-instruction (make-string 200 ?X))
+        (ende-llm-function (ende-test--fake-llm '("never"))))
+    (ende-test--with-buffer "base"
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende-test--calls)
         (should (string= (buffer-string) "base"))))))
 
-(ert-deftest deslop-test/custom-transport-output-is-bounded ()
-  (deslop-test--reset)
-  (let ((deslop-max-output-chars 3)
-        (deslop-llm-function (deslop-test--fake-llm '("four"))))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/custom-transport-output-is-bounded ()
+  (ende-test--reset)
+  (let ((ende-max-output-chars 3)
+        (ende-llm-function (ende-test--fake-llm '("four"))))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-         (should (eq (deslop-job-state job) 'failed))
+      (let ((job (ende-insert-at-cursor)))
+         (should (eq (ende-job-state job) 'failed))
          (should (string= (buffer-string) "base"))))))
 
-(ert-deftest deslop-test/custom-transport-output-can-be-unbounded ()
-  (deslop-test--reset)
-  (let ((deslop-max-output-chars nil)
-        (deslop-llm-function (deslop-test--fake-llm '("four"))))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/custom-transport-output-can-be-unbounded ()
+  (ende-test--reset)
+  (let ((ende-max-output-chars nil)
+        (ende-llm-function (ende-test--fake-llm '("four"))))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'completed))
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "basefour"))))))
 
-(ert-deftest deslop-test/improve-replaces-selection ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("improved"))))
-    (deslop-test--with-buffer "old text"
-      (deslop-test--select 1 9 9)
-      (let ((job (deslop-improve-at-cursor "make it better")))
-        (should (eq (deslop-job-state job) 'completed))
+(ert-deftest ende-test/improve-replaces-selection ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("improved"))))
+    (ende-test--with-buffer "old text"
+      (ende-test--select 1 9 9)
+      (let ((job (ende-improve-at-cursor "make it better")))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "improved"))
-        (should (cl-some #'deslop-review-overlay-p
+        (should (cl-some #'ende-review-overlay-p
                          (overlays-in (point-min) (point-max))))))))
 
-(ert-deftest deslop-test/summarize-opens-buffer ()
-  (deslop-test--reset)
-  (let ((deslop-provider-model "gpt-5.6-luna")
-        (deslop-llm-function
-         (deslop-test--fake-llm '("** Key point\n- short summary")))
+(ert-deftest ende-test/summarize-opens-buffer ()
+  (ende-test--reset)
+  (let ((ende-provider-model "gpt-5.6-luna")
+        (ende-llm-function
+         (ende-test--fake-llm '("** Key point\n- short summary")))
         (displayed nil))
     (cl-letf (((symbol-function 'display-buffer)
                (lambda (buffer &rest _)
                  (setq displayed buffer)))
               ((symbol-function 'format-time-string)
                (lambda (&rest _) "2026-09-18 11:10:07")))
-      (deslop-test--with-buffer "long source"
+      (ende-test--with-buffer "long source"
         (rename-buffer "*summary-source*" t)
-        (let ((job (deslop-summarize)))
-          (should (eq (deslop-job-state job) 'completed))
-          (should (eq displayed (get-buffer deslop-summary-buffer-name)))
-          (with-current-buffer deslop-summary-buffer-name
+        (let ((job (ende-summarize)))
+          (should (eq (ende-job-state job) 'completed))
+          (should (eq displayed (get-buffer ende-summary-buffer-name)))
+          (with-current-buffer ende-summary-buffer-name
             (should (eq major-mode 'org-mode))
             (should (string=
                       (buffer-string)
                        (concat "* **summary-source** - "
                                "2026-09-18 11:10:07\n"
-                               "File: [[deslop-buffer:s1::1][*summary-source*]]\n"
+                               "File: [[ende-buffer:s1::1][*summary-source*]]\n"
                                "Model: gpt-5.6-luna\n"
                                "\n"
                                "** Key point\n- short summary")))
-            (should-not (deslop-review--overlays-in-buffer))))))))
+            (should-not (ende-review--overlays-in-buffer))))))))
 
-(ert-deftest deslop-test/summary-entries-are-appended-as-org-headings ()
-  (deslop-test--reset)
+(ert-deftest ende-test/summary-entries-are-appended-as-org-headings ()
+  (ende-test--reset)
   (let ((first (generate-new-buffer "first.org"))
         (second (generate-new-buffer "second.org")))
     (unwind-protect
-        (let ((first-source (deslop-summary-source-capture first 1 1))
-              (second-source (deslop-summary-source-capture second 1 1)))
+        (let ((first-source (ende-summary-source-capture first 1 1))
+              (second-source (ende-summary-source-capture second 1 1)))
           (cl-letf (((symbol-function 'format-time-string)
                      (lambda (&rest _) "2026-09-18 11:10:07")))
-            (deslop-summary-append
+            (ende-summary-append
              first-source "First summary" '(:model "one"))
-            (deslop-summary-append
+            (ende-summary-append
              second-source "Second summary" '(:model "two"))))
       (kill-buffer first)
       (kill-buffer second)))
-  (with-current-buffer deslop-summary-buffer-name
+  (with-current-buffer ende-summary-buffer-name
     (should (string=
              (buffer-string)
                (concat "* *first.org* - 2026-09-18 11:10:07\n"
-                       "File: [[deslop-buffer:s1::1][first.org]]\n"
+                       "File: [[ende-buffer:s1::1][first.org]]\n"
                        "Model: one\n"
                        "\n"
                        "First summary\n\n"
                        "* *second.org* - 2026-09-18 11:10:07\n"
-                       "File: [[deslop-buffer:s2::1][second.org]]\n"
+                       "File: [[ende-buffer:s2::1][second.org]]\n"
                        "Model: two\n"
                        "\n"
                        "Second summary")))))
 
-(ert-deftest deslop-test/summarize-reports-progress-and-points-at-new-entry ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
-     (with-current-buffer (deslop-summary-buffer)
+(ert-deftest ende-test/summarize-reports-progress-and-points-at-new-entry ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("summary") t)))
+     (with-current-buffer (ende-summary-buffer)
       (insert "existing")
       (goto-char (point-min)))
-    (deslop-test--with-buffer "source"
-      (let* ((job (deslop-summarize))
-             (call (car deslop-test--calls))
-             (overlay (deslop-job-overlay job)))
-        (deslop-test--callback
+    (ende-test--with-buffer "source"
+      (let* ((job (ende-summarize))
+             (call (car ende-test--calls))
+             (overlay (ende-job-overlay job)))
+        (ende-test--callback
          call :on-event '(:type :status :status "Generating"))
-        (deslop-test--callback
+        (ende-test--callback
          call :on-event '(:type :usage :tokens 12 :speed 34.0))
         (should (string= (overlay-get overlay 'status) "Generating"))
         (should (= (overlay-get overlay 'tokens) 12))
-        (deslop-test--complete-call call)))
-    (with-current-buffer deslop-summary-buffer-name
+        (ende-test--complete-call call)))
+    (with-current-buffer ende-summary-buffer-name
       (should (= (point)
                  (save-excursion
                    (goto-char (point-min))
                    (search-forward "\n\n")
                    (point)))))))
 
-(ert-deftest deslop-test/summarize-survives-source-edit-during-generation ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("summary") t)))
-    (deslop-test--with-buffer "source"
-      (let* ((job (deslop-summarize))
-             (call (car deslop-test--calls)))
+(ert-deftest ende-test/summarize-survives-source-edit-during-generation ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("summary") t)))
+    (ende-test--with-buffer "source"
+      (let* ((job (ende-summarize))
+             (call (car ende-test--calls)))
         (goto-char (point-min))
         (delete-char 1)
         (insert "S")
-        (should (eq (deslop-job-state job) 'running))
+        (should (eq (ende-job-state job) 'running))
         (should (string= (buffer-string) "Source"))
         (should (string-match-p
                  "Line-numbered text to summarize:\n1 | source"
-                 (deslop-test--user-message
-                  (car deslop-test--prompts))))
-        (deslop-test--complete-call call)
-        (should (eq (deslop-job-state job) 'completed))))
-    (with-current-buffer deslop-summary-buffer-name
+                 (ende-test--user-message
+                  (car ende-test--prompts))))
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'completed))))
+    (with-current-buffer ende-summary-buffer-name
       (should (string-match-p "summary" (buffer-string))))))
 
-(ert-deftest deslop-test/summarize-captures-source-name-across-async-callback ()
-  (deslop-test--reset)
-  (let ((deslop-provider-model "async-model")
-        (deslop-llm-function (deslop-test--fake-llm '("summary") t)))
+(ert-deftest ende-test/summarize-captures-source-name-across-async-callback ()
+  (ende-test--reset)
+  (let ((ende-provider-model "async-model")
+        (ende-llm-function (ende-test--fake-llm '("summary") t)))
     (with-temp-buffer
       (rename-buffer "*phrases*" t)
       (insert "source")
       (let* ((source-name (buffer-name))
-             (job (deslop-summarize))
-             (call (car deslop-test--calls)))
+             (job (ende-summarize))
+             (call (car ende-test--calls)))
         (rename-buffer "*renamed-phrases*" t)
         (with-temp-buffer
           (cl-letf (((symbol-function 'format-time-string)
                      (lambda (&rest _) "2026-09-18 11:10:07")))
-            (deslop-test--complete-call call)))
-        (should (eq (deslop-job-state job) 'completed))
-        (with-current-buffer deslop-summary-buffer-name
+            (ende-test--complete-call call)))
+        (should (eq (ende-job-state job) 'completed))
+        (with-current-buffer ende-summary-buffer-name
           (should (string-prefix-p
                    (format (concat "* *%s* - 2026-09-18 11:10:07\n"
-                                   "File: [[deslop-buffer:s1::1][%s]]\n"
+                                   "File: [[ende-buffer:s1::1][%s]]\n"
                                    "Model: async-model\n\n"
                                    "summary")
                            source-name
                            source-name)
                     (buffer-string))))))))
 
-(ert-deftest deslop-test/summary-append-is-atomic ()
-  (deslop-test--reset)
-  (with-current-buffer (deslop-summary-buffer)
+(ert-deftest ende-test/summary-append-is-atomic ()
+  (ende-test--reset)
+  (with-current-buffer (ende-summary-buffer)
     (insert "existing"))
-  (let ((source (deslop-summary-source-capture (current-buffer) 1 1)))
-    (should-error (deslop-summary-append source 'invalid nil)))
-  (with-current-buffer deslop-summary-buffer-name
+  (let ((source (ende-summary-source-capture (current-buffer) 1 1)))
+    (should-error (ende-summary-append source 'invalid nil)))
+  (with-current-buffer ende-summary-buffer-name
     (should (string= (buffer-string) "existing"))))
 
-(ert-deftest deslop-test/summarize-requests-org-mode-syntax ()
-  (should (string-match-p "Org mode syntax" deslop-summarize-system))
-  (should (string-match-p "deslop-source:LINE" deslop-summarize-system)))
+(ert-deftest ende-test/summarize-requests-org-mode-syntax ()
+  (should (string-match-p "Org mode syntax" ende-summarize-system))
+  (should (string-match-p "ende-source:LINE" ende-summarize-system)))
 
-(ert-deftest deslop-test/summarize-rewrites-file-citations-locally ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
-          '("Claim [[deslop-source:3][source]]. [[deslop-source:2][important claim]]."))))
-    (deslop-test--with-buffer "ignored\nfirst\nsecond"
-      (setq-local buffer-file-name "/tmp/deslop source.org")
-      (deslop-test--select 9 (point-max) (point-max))
-      (deslop-summarize)
-      (let ((prompt (deslop-test--user-message
-                     (car deslop-test--prompts))))
+(ert-deftest ende-test/summarize-rewrites-file-citations-locally ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '("Claim [[ende-source:3][source]]. [[ende-source:2][important claim]]."))))
+    (ende-test--with-buffer "ignored\nfirst\nsecond"
+      (setq-local buffer-file-name "/tmp/ende source.org")
+      (ende-test--select 9 (point-max) (point-max))
+      (ende-summarize)
+      (let ((prompt (ende-test--user-message
+                     (car ende-test--prompts))))
         (should (string-match-p "Source lines: 2-3" prompt))
         (should (string-match-p "2 | first\n3 | second" prompt))
-        (should-not (string-match-p "/tmp/deslop source\\.org" prompt)))))
-  (with-current-buffer deslop-summary-buffer-name
+        (should-not (string-match-p "/tmp/ende source\\.org" prompt)))))
+  (with-current-buffer ende-summary-buffer-name
     (should
      (string-match-p
       (regexp-quote
-       "[[file:/tmp/deslop source.org::2][/tmp/deslop source.org]]")
+       "[[file:/tmp/ende source.org::2][/tmp/ende source.org]]")
       (buffer-string)))
     (should
      (string-match-p
-      (regexp-quote "Claim [[file:/tmp/deslop source.org::3][source]].")
+      (regexp-quote "Claim [[file:/tmp/ende source.org::3][source]].")
       (buffer-string)))
     (should
      (string-match-p
       (regexp-quote
-       "[[file:/tmp/deslop source.org::2][important claim]]")
+       "[[file:/tmp/ende source.org::2][important claim]]")
       (buffer-string)))
     (should-not (string-match-p "lop-source:3" (buffer-string)))))
 
-(ert-deftest deslop-test/summarize-preserves-tramp-paths-in-local-links ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
-          '("Remote claim [[deslop-source:1][source]]"))))
-    (deslop-test--with-buffer "remote"
+(ert-deftest ende-test/summarize-preserves-tramp-paths-in-local-links ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '("Remote claim [[ende-source:1][source]]"))))
+    (ende-test--with-buffer "remote"
       (setq-local buffer-file-name "/ssh:user@example:/tmp/remote file.org")
-      (deslop-summarize)
+      (ende-summarize)
       (should-not
        (string-match-p
         "ssh:user@example"
-        (deslop-test--user-message (car deslop-test--prompts))))))
-  (with-current-buffer deslop-summary-buffer-name
+        (ende-test--user-message (car ende-test--prompts))))))
+  (with-current-buffer ende-summary-buffer-name
     (should
      (string-match-p
       (regexp-quote
        "[[file:/ssh:user@example:/tmp/remote file.org::1][source]]")
       (buffer-string)))))
 
-(ert-deftest deslop-test/summarize-neutralizes-out-of-range-citations ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
-          '("Claim [[deslop-source:99][source]]."))))
-    (deslop-test--with-buffer "one line"
-      (deslop-summarize)))
-  (with-current-buffer deslop-summary-buffer-name
+(ert-deftest ende-test/summarize-neutralizes-out-of-range-citations ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '("Claim [[ende-source:99][source]]."))))
+    (ende-test--with-buffer "one line"
+      (ende-summarize)))
+  (with-current-buffer ende-summary-buffer-name
     (should (string-match-p (regexp-quote "Claim [source line 99].")
                             (buffer-string)))
-    (should-not (string-match-p "deslop-source:99" (buffer-string)))))
+    (should-not (string-match-p "ende-source:99" (buffer-string)))))
 
-(ert-deftest deslop-test/summary-buffer-links-track-renamed-live-buffers ()
-  (deslop-test--reset)
-  (let ((source-buffer (generate-new-buffer "deslop-link-source")))
+(ert-deftest ende-test/summary-buffer-links-track-renamed-live-buffers ()
+  (ende-test--reset)
+  (let ((source-buffer (generate-new-buffer "ende-link-source")))
     (unwind-protect
         (let (source)
           (with-current-buffer source-buffer
             (insert "first\nsecond\n")
             (setq source
-                  (deslop-summary-source-capture
+                  (ende-summary-source-capture
                    source-buffer (point-min) (point-max)))
-            (rename-buffer "deslop-link-source-renamed" t))
+            (rename-buffer "ende-link-source-renamed" t))
           (save-current-buffer
             (cl-letf (((symbol-function 'pop-to-buffer)
                        (lambda (buffer &rest _)
                          (set-buffer buffer))))
-              (deslop-summary-follow-buffer-link
-               (format "%s::2" (deslop-summary-source-id source)) nil)
+              (ende-summary-follow-buffer-link
+               (format "%s::2" (ende-summary-source-id source)) nil)
               (should (eq (current-buffer) source-buffer))
               (should (= (line-number-at-pos nil t) 2)))))
       (kill-buffer source-buffer))))
 
-(ert-deftest deslop-test/summary-buffer-links-reject-killed-buffers ()
-  (deslop-test--reset)
-  (let* ((buffer (generate-new-buffer "deslop-dead-source"))
-         (source (deslop-summary-source-capture buffer 1 1))
-         (path (format "%s::1" (deslop-summary-source-id source))))
+(ert-deftest ende-test/summary-buffer-links-reject-killed-buffers ()
+  (ende-test--reset)
+  (let* ((buffer (generate-new-buffer "ende-dead-source"))
+         (source (ende-summary-source-capture buffer 1 1))
+         (path (format "%s::1" (ende-summary-source-id source))))
     (kill-buffer buffer)
-    (should-error (deslop-summary-follow-buffer-link path nil)
+    (should-error (ende-summary-follow-buffer-link path nil)
                   :type 'user-error)))
 
-(ert-deftest deslop-test/summary-uses-reported-model ()
-  (deslop-test--reset)
-  (let ((deslop-provider-model "configured-model")
-        (deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/summary-uses-reported-model ()
+  (ende-test--reset)
+  (let ((ende-provider-model "configured-model")
+        (ende-llm-function
+         (ende-test--fake-llm
           '((:content "summary"
              :reported-model "actual-model"
              :reported-provider "llama.cpp")))))
     (cl-letf (((symbol-function 'format-time-string)
                (lambda (&rest _) "2026-09-18 11:10:07")))
-      (deslop-test--with-buffer "source"
+      (ende-test--with-buffer "source"
         (rename-buffer "reported-source" t)
-        (let ((job (deslop-summarize)))
-          (should (eq (deslop-job-state job) 'completed)))))
-    (with-current-buffer deslop-summary-buffer-name
+        (let ((job (ende-summarize)))
+          (should (eq (ende-job-state job) 'completed)))))
+    (with-current-buffer ende-summary-buffer-name
        (should (string-prefix-p
                 (concat "* *reported-source* - 2026-09-18 11:10:07\n"
-                        "File: [[deslop-buffer:s1::1][reported-source]]\n"
+                        "File: [[ende-buffer:s1::1][reported-source]]\n"
                         "Model: actual-model\n\n")
                 (buffer-string))))))
 
-(ert-deftest deslop-test/output-remains-marked-until-approved ()
-  (deslop-test--reset)
-  (let ((deslop-provider-model "test-model")
-        (deslop-review-show-badges t)
-        (deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/output-remains-marked-until-approved ()
+  (ende-test--reset)
+  (let ((ende-provider-model "test-model")
+        (ende-review-show-badges t)
+        (ende-llm-function (ende-test--fake-llm '(" generated") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let* ((job (deslop-insert-at-cursor))
-             (queued-overlay (deslop-job-overlay job)))
+      (let* ((job (ende-insert-at-cursor))
+             (queued-overlay (ende-job-overlay job)))
         (should (string-match-p "test-model"
-                                (deslop-test--overlay-label queued-overlay)))
+                                (ende-test--overlay-label queued-overlay)))
         (should (string-match-p "localhost"
-                                (deslop-test--overlay-label queued-overlay)))
-        (deslop-test--complete-call (car deslop-test--calls))
+                                (ende-test--overlay-label queued-overlay)))
+        (ende-test--complete-call (car ende-test--calls))
         (let ((review (cl-find-if
-                       #'deslop-review-overlay-p
+                       #'ende-review-overlay-p
                        (overlays-in (point-min) (point-max)))))
           (should review)
           (should (string= (overlay-get review 'model) "test-model"))
           (should (string= (overlay-get review 'client) "localhost"))
           (should (string-match-p "test-model"
-                                  (deslop-test--overlay-label review)))
+                                  (ende-test--overlay-label review)))
            (should (string-match-p "localhost"
-                                   (deslop-test--overlay-label review)))
+                                   (ende-test--overlay-label review)))
             (dolist (key '("RET" "C-m" "DEL" "<backspace>" "C-d"))
               (should-not (lookup-key (overlay-get review 'keymap)
                                       (kbd key))))
             (should (eq (lookup-key (overlay-get review 'keymap)
                                     (kbd "C-c C-c"))
-                        #'deslop-approve-output))
+                        #'ende-approve-output))
             (should (eq (lookup-key (overlay-get review 'keymap)
                                     (kbd "C-c C-k"))
-                        #'deslop-reject-output))
+                        #'ende-reject-output))
            (goto-char (overlay-end review))
            (should-not (eq (key-binding (kbd "RET"))
-                           #'deslop-approve-output))
+                           #'ende-approve-output))
            (goto-char (1+ (overlay-start review)))
            (insert "edited ")
-           (should (deslop-review-overlay-p review))
-           (deslop-approve-output)
-           (should-not (deslop-review-overlay-p review)))))))
+           (should (ende-review-overlay-p review))
+           (ende-approve-output)
+           (should-not (ende-review-overlay-p review)))))))
 
-(ert-deftest deslop-test/enter-works-after-editing-past-review-output ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" generated") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/enter-works-after-editing-past-review-output ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" generated") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (let ((call (car deslop-test--calls)))
-        (deslop-test--complete-call call)
+      (ende-insert-at-cursor)
+      (let ((call (car ende-test--calls)))
+        (ende-test--complete-call call)
         (let ((review (cl-find-if
-                       #'deslop-review-overlay-p
+                       #'ende-review-overlay-p
                        (overlays-in (point-min) (point-max)))))
           (goto-char (overlay-end review))
           (newline)
           (insert "typed")
           (should-not (eq (key-binding (kbd "RET"))
-                          #'deslop-approve-output))
+                          #'ende-approve-output))
           (funcall (key-binding (kbd "RET")))
           (should (string= (buffer-string) "base generated\ntyped\n"))
-          (should (deslop-review-overlay-p review)))))))
+          (should (ende-review-overlay-p review)))))))
 
-(ert-deftest deslop-test/task-cannot-start-inside-pending-review ()
-  (deslop-test--reset)
-  (let ((deslop-review-conflict-policy 'block))
-    (deslop-test--with-buffer "generated text"
-      (let ((review (deslop-review-create-overlay
+(ert-deftest ende-test/task-cannot-start-inside-pending-review ()
+  (ende-test--reset)
+  (let ((ende-review-conflict-policy 'block))
+    (ende-test--with-buffer "generated text"
+      (let ((review (ende-review-create-overlay
                      (current-buffer) 1 (point-max) nil nil "")))
         (goto-char 5)
-        (should-error (deslop-insert-at-cursor) :type 'user-error)
-        (deslop-test--select 2 6 6)
-        (should-error (deslop-improve-at-cursor "rewrite") :type 'user-error)
-        (should-not deslop-queue)
-        (deslop-review-delete-overlay review)))))
+        (should-error (ende-insert-at-cursor) :type 'user-error)
+        (ende-test--select 2 6 6)
+        (should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
+        (should-not ende-queue)
+        (ende-review-delete-overlay review)))))
 
-(ert-deftest deslop-test/summary-runs-over-pending-review ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("summary"))))
-    (deslop-test--with-buffer "generated text"
-      (let ((review (deslop-review-create-overlay
+(ert-deftest ende-test/summary-runs-over-pending-review ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("summary"))))
+    (ende-test--with-buffer "generated text"
+      (let ((review (ende-review-create-overlay
                      (current-buffer) 1 (point-max) nil nil "")))
-        (let ((job (deslop-summarize)))
-          (should (eq (deslop-job-state job) 'completed))
-          (should (deslop-review-overlay-p review))
+        (let ((job (ende-summarize)))
+          (should (eq (ende-job-state job) 'completed))
+          (should (ende-review-overlay-p review))
           (should (string-match-p
                    "generated text"
-                   (deslop-test--user-message (car deslop-test--prompts))))
-          (with-current-buffer deslop-summary-buffer-name
+                   (ende-test--user-message (car ende-test--prompts))))
+          (with-current-buffer ende-summary-buffer-name
             (should (string-match-p "summary" (buffer-string)))))))))
 
-(ert-deftest deslop-test/overlapping-write-asks-before-approving-reviews ()
-  (deslop-test--reset)
-  (let ((deslop-review-conflict-policy 'confirm)
-        (deslop-llm-function (deslop-test--fake-llm '("!"))))
-    (deslop-test--with-buffer "old text"
-      (let ((conflict (deslop-review-create-overlay
+(ert-deftest ende-test/overlapping-write-asks-before-approving-reviews ()
+  (ende-test--reset)
+  (let ((ende-review-conflict-policy 'confirm)
+        (ende-llm-function (ende-test--fake-llm '("!"))))
+    (ende-test--with-buffer "old text"
+      (let ((conflict (ende-review-create-overlay
                        (current-buffer) 1 4 nil nil "old"))
-            (unrelated (deslop-review-create-overlay
+            (unrelated (ende-review-create-overlay
                         (current-buffer) 5 (point-max) nil nil "text")))
         (goto-char 2)
         (cl-letf (((symbol-function 'yes-or-no-p)
                    (lambda (&rest _) nil)))
-          (should-error (deslop-insert-at-cursor) :type 'user-error))
-        (should (deslop-review-overlay-p conflict))
-        (should (deslop-review-overlay-p unrelated))
-        (should-not deslop-queue)
+          (should-error (ende-insert-at-cursor) :type 'user-error))
+        (should (ende-review-overlay-p conflict))
+        (should (ende-review-overlay-p unrelated))
+        (should-not ende-queue)
         (cl-letf (((symbol-function 'yes-or-no-p)
                    (lambda (&rest _) t)))
-          (let ((job (deslop-insert-at-cursor)))
-            (should (eq (deslop-job-state job) 'completed))))
-        (should-not (deslop-review-overlay-p conflict))
-        (should (deslop-review-overlay-p unrelated))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+          (let ((job (ende-insert-at-cursor)))
+            (should (eq (ende-job-state job) 'completed))))
+        (should-not (ende-review-overlay-p conflict))
+        (should (ende-review-overlay-p unrelated))
+        (should (= (length (ende-review--overlays-in-buffer)) 2))
         (should (string= (buffer-string) "o!ld text"))))))
 
-(ert-deftest deslop-test/automatic-review-conflict-approval-is-local ()
-  (deslop-test--reset)
-  (let ((deslop-review-conflict-policy 'approve)
-        (deslop-llm-function (deslop-test--fake-llm '("!"))))
-    (deslop-test--with-buffer "old text"
-      (let ((conflict (deslop-review-create-overlay
+(ert-deftest ende-test/automatic-review-conflict-approval-is-local ()
+  (ende-test--reset)
+  (let ((ende-review-conflict-policy 'approve)
+        (ende-llm-function (ende-test--fake-llm '("!"))))
+    (ende-test--with-buffer "old text"
+      (let ((conflict (ende-review-create-overlay
                        (current-buffer) 1 4 nil nil "old"))
-            (unrelated (deslop-review-create-overlay
+            (unrelated (ende-review-create-overlay
                         (current-buffer) 5 (point-max) nil nil "text")))
         (goto-char 2)
         (cl-letf (((symbol-function 'yes-or-no-p)
                    (lambda (&rest _) (error "confirmation was not expected"))))
-          (let ((job (deslop-insert-at-cursor)))
-            (should (eq (deslop-job-state job) 'completed))))
-        (should-not (deslop-review-overlay-p conflict))
-        (should (deslop-review-overlay-p unrelated))
+          (let ((job (ende-insert-at-cursor)))
+            (should (eq (ende-job-state job) 'completed))))
+        (should-not (ende-review-overlay-p conflict))
+        (should (ende-review-overlay-p unrelated))
         (should (string= (buffer-string) "o!ld text"))))))
 
-(ert-deftest deslop-test/queued-task-cannot-dispatch-into-new-review ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" never") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/queued-task-cannot-dispatch-into-new-review ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" never") t)))
+    (ende-test--with-buffer "base"
       (goto-char 3)
-      (setq deslop--queue-suspended t)
-      (let ((job (deslop-insert-at-cursor))
-            (review (deslop-review-create-overlay
+      (setq ende--queue-suspended t)
+      (let ((job (ende-insert-at-cursor))
+            (review (ende-review-create-overlay
                      (current-buffer) 1 (point-max) nil nil "")))
-        (setq deslop--queue-suspended nil)
-        (deslop-process-next)
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-test--calls)
-        (deslop-review-delete-overlay review)))))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende-test--calls)
+        (ende-review-delete-overlay review)))))
 
-(ert-deftest deslop-test/review-creation-failure-leaves-no-overlay ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "text"
-    (let ((deslop-review-highlight-blend 'invalid))
+(ert-deftest ende-test/review-creation-failure-leaves-no-overlay ()
+  (ende-test--reset)
+  (ende-test--with-buffer "text"
+    (let ((ende-review-highlight-blend 'invalid))
       (should-error
-       (deslop-review-create-overlay (current-buffer) 1 3 nil nil ""))
-      (should-not (deslop-review--overlays-in-buffer)))))
+       (ende-review-create-overlay (current-buffer) 1 3 nil nil ""))
+      (should-not (ende-review--overlays-in-buffer)))))
 
-(ert-deftest deslop-test/response-metadata-wins-for-review-label ()
-  (deslop-test--reset)
-  (let ((deslop-provider-model "configured-model")
-        (deslop-review-show-badges t)
-        (deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/response-metadata-wins-for-review-label ()
+  (ende-test--reset)
+  (let ((ende-provider-model "configured-model")
+        (ende-review-show-badges t)
+        (ende-llm-function
+         (ende-test--fake-llm
           '((:content " generated"
              :reported-model "actual-model"
              :reported-provider "llama.cpp"))
           t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-        (deslop-test--complete-call (car deslop-test--calls))
+      (let ((job (ende-insert-at-cursor)))
+        (ende-test--complete-call (car ende-test--calls))
         (let ((review (cl-find-if
-                       #'deslop-review-overlay-p
+                       #'ende-review-overlay-p
                        (overlays-in (point-min) (point-max)))))
           (should review)
           (should (string= (overlay-get review 'model) "actual-model"))
           (should (string= (overlay-get review 'client) "llama.cpp"))
           (should (string-match-p "actual-model"
-                                  (deslop-test--overlay-label review)))
+                                  (ende-test--overlay-label review)))
           (should-not (string-match-p "configured-model"
-                                      (deslop-test--overlay-label review)))
-          (should (eq (deslop-job-state job) 'completed)))))))
+                                      (ende-test--overlay-label review)))
+          (should (eq (ende-job-state job) 'completed)))))))
 
-(ert-deftest deslop-test/response-metadata-cannot-be-overwritten-by-discovery ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/response-metadata-cannot-be-overwritten-by-discovery ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let* ((job (deslop-insert-at-cursor))
-             (call (car deslop-test--calls)))
-        (deslop-test--callback
+      (let* ((job (ende-insert-at-cursor))
+             (call (car ende-test--calls)))
+        (ende-test--callback
          call :on-event
          '(:type :metadata :metadata
            (:source :response :model "response-model" :provider "llama.cpp")))
-        (deslop-test--callback
+        (ende-test--callback
          call :on-event
          '(:type :metadata :metadata
            (:source :discovery :model "stale-model" :provider "stale")))
-        (should (string= (overlay-get (deslop-job-overlay job) 'model)
+        (should (string= (overlay-get (ende-job-overlay job) 'model)
                          "response-model"))
-        (should (string= (overlay-get (deslop-job-overlay job) 'client)
+        (should (string= (overlay-get (ende-job-overlay job) 'client)
                          "llama.cpp"))))))
 
-(ert-deftest deslop-test/reject-restores-properties-and-saving-remains-allowed ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("new")))
+(ert-deftest ende-test/reject-restores-properties-and-saving-remains-allowed ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("new")))
         (kill-ring nil)
         (kill-ring-yank-pointer nil))
-    (deslop-test--with-buffer "old"
-      (add-text-properties 1 4 '(deslop-test-property original))
-      (deslop-test--select 1 4 4)
-      (deslop-improve-at-cursor "rewrite")
+    (ende-test--with-buffer "old"
+      (add-text-properties 1 4 '(ende-test-property original))
+      (ende-test--select 1 4 4)
+      (ende-improve-at-cursor "rewrite")
       (run-hooks 'before-save-hook)
       (goto-char 2)
-      (deslop-reject-output)
+      (ende-reject-output)
       (should (string= (buffer-string) "old"))
       (should (equal kill-ring '("new")))
-      (should (eq (get-text-property 1 'deslop-test-property) 'original))
-      (should-not (deslop-review--overlays-in-buffer)))))
+      (should (eq (get-text-property 1 'ende-test-property) 'original))
+      (should-not (ende-review--overlays-in-buffer)))))
 
-(ert-deftest deslop-test/mass-review-actions-cover-the-whole-buffer ()
-  (deslop-test--reset)
+(ert-deftest ende-test/mass-review-actions-cover-the-whole-buffer ()
+  (ende-test--reset)
   (let ((kill-ring nil)
         (kill-ring-yank-pointer nil))
-    (deslop-test--with-buffer "XY"
-      (let ((first (deslop-review-create-overlay
+    (ende-test--with-buffer "XY"
+      (let ((first (ende-review-create-overlay
                     (current-buffer) 1 2 nil nil "A"))
-            (second (deslop-review-create-overlay
+            (second (ende-review-create-overlay
                      (current-buffer) 2 3 nil nil "B")))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))
-        (deslop-reject-all-output)
+        (should (= (length (ende-review--overlays-in-buffer)) 2))
+        (ende-reject-all-output)
         (should (string= (buffer-string) "AB"))
         (should (equal kill-ring '("X" "Y")))
-        (should-not (deslop-review--overlays-in-buffer))
-        (should-not (deslop-review-overlay-p first))
-        (should-not (deslop-review-overlay-p second))
-        (deslop-review-create-overlay
+        (should-not (ende-review--overlays-in-buffer))
+        (should-not (ende-review-overlay-p first))
+        (should-not (ende-review-overlay-p second))
+        (ende-review-create-overlay
          (current-buffer) 1 2 nil nil "A")
-        (deslop-review-create-overlay
+        (ende-review-create-overlay
          (current-buffer) 2 3 nil nil "B")
-        (deslop-approve-all-output)
-        (should-not (deslop-review--overlays-in-buffer))))))
+        (ende-approve-all-output)
+        (should-not (ende-review--overlays-in-buffer))))))
 
-(ert-deftest deslop-test/write-anywhere-creates-independent-reviews ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-creates-independent-reviews ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"two\",\"position\":\"replace\",\"text\":\"TWO\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)))))
-    (deslop-test--with-buffer "one two"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)))))
+    (ende-test--with-buffer "one two"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
          (should (string= (buffer-string) "Aone TWO"))
         (should-not buffer-read-only)
-        (let ((reviews (deslop-review--overlays-in-buffer)))
+        (let ((reviews (ende-review--overlays-in-buffer)))
           (should (= (length reviews) 2))
           (goto-char (overlay-start (car reviews)))
-          (deslop-approve-output)
-          (should (= (length (deslop-review--overlays-in-buffer)) 1))
-          (let ((remaining (car (deslop-review--overlays-in-buffer))))
+          (ende-approve-output)
+          (should (= (length (ende-review--overlays-in-buffer)) 1))
+          (let ((remaining (car (ende-review--overlays-in-buffer))))
             (goto-char (overlay-start remaining))
-            (deslop-reject-output))
+            (ende-reject-output))
            (should (string= (buffer-string) "Aone two")))))))
 
-(ert-deftest deslop-test/write-anywhere-applies-valid-edits-around-invalid-ones ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-applies-valid-edits-around-invalid-ones ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"text\":\"ONE\"},{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"},{\"anchor\":\"two\",\"position\":\"after\",\"text\":\"!\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
-          (deslop-llm-function
-           (deslop-test--fake-llm
+          (ende-llm-function
+           (ende-test--fake-llm
             (list (list :content response)
                   (list :content repair-response)))))
-    (deslop-test--with-buffer "one two"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+    (ende-test--with-buffer "one two"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "ONE two!"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))
-        (with-current-buffer deslop-history--buffer-object
+        (should (= (length (ende-review--overlays-in-buffer)) 2))
+        (with-current-buffer ende-history--buffer-object
            (let ((history (buffer-string)))
              (should (string-match-p "Skipped edits" history))
              (should (string-match-p "COMPLETED WITH WARNINGS" history))
@@ -1283,34 +1283,34 @@ process for cancellation tests."
                      (regexp-quote "{\"anchor\":\"missing\"")
                      history))))))))
 
-(ert-deftest deslop-test/write-anywhere-supports-occurrence-and-all-anchors ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-supports-occurrence-and-all-anchors ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"all\":true,\"text\":\"ONE\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)))))
-    (deslop-test--with-buffer "one\none"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)))))
+    (ende-test--with-buffer "one\none"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "ONE\nONE"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))))))
+        (should (= (length (ende-review--overlays-in-buffer)) 2))))))
 
-(ert-deftest deslop-test/write-anywhere-retains-all-skipped-edits-on-failure ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-retains-all-skipped-edits-on-failure ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"}]}" )
-          (deslop-llm-function
-           (deslop-test--fake-llm
+          (ende-llm-function
+           (ende-test--fake-llm
             (list (list :content response)
                   (list :content repair-response)))))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'failed))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'failed))
         (should (string= (buffer-string) "test"))
-        (should-not (deslop-review--overlays-in-buffer))
-        (with-current-buffer deslop-history--buffer-object
+        (should-not (ende-review--overlays-in-buffer))
+        (with-current-buffer ende-history--buffer-object
           (let ((history (buffer-string)))
             (should (string-match-p "Skipped edits" history))
             (should (string-match-p "Edit 1: anchor was not found" history))
@@ -1318,136 +1318,136 @@ process for cancellation tests."
                      (regexp-quote "{\"anchor\":\"missing\"")
                      history))))))))
 
-(ert-deftest deslop-test/anywhere-matches-only-selected-source ()
+(ert-deftest ende-test/anywhere-matches-only-selected-source ()
   (dolist (type '(insert-anywhere write-anywhere))
     (dolist (qualifier '("" ",\"occurrence\":1" ",\"all\":true"))
-      (deslop-test--reset)
+      (ende-test--reset)
       (let* ((position (if (eq type 'write-anywhere) "replace" "after"))
              (response
               (format "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"%s\",\"text\":\"!\"%s}]}"
                       position qualifier))
-             (deslop-llm-function
-              (deslop-test--fake-llm (list (list :content response)))))
-        (deslop-test--with-buffer "outside same|same|same outside"
-          (deslop-test--select 14 18 18)
-          (let ((job (deslop-enqueue-operation type "Edit the target")))
-            (should (eq (deslop-job-state job) 'completed))
+             (ende-llm-function
+              (ende-test--fake-llm (list (list :content response)))))
+        (ende-test--with-buffer "outside same|same|same outside"
+          (ende-test--select 14 18 18)
+          (let ((job (ende-enqueue-operation type "Edit the target")))
+            (should (eq (ende-job-state job) 'completed))
             (should (string-suffix-p
                      "Document:\nsame"
-                     (deslop-test--user-message (car deslop-test--prompts))))
+                     (ende-test--user-message (car ende-test--prompts))))
             (should (string= (buffer-string)
                              (if (eq type 'write-anywhere)
                                  "outside same|!|same outside"
                                "outside same|same!|same outside")))
             (should-not (buffer-narrowed-p))))))))
 
-(ert-deftest deslop-test/anywhere-rejects-anchors-outside-selection ()
+(ert-deftest ende-test/anywhere-rejects-anchors-outside-selection ()
   (dolist (type '(insert-anywhere write-anywhere))
-    (deslop-test--reset)
-    (let* ((deslop-structured-edit-repair-attempts 0)
+    (ende-test--reset)
+    (let* ((ende-structured-edit-repair-attempts 0)
            (position (if (eq type 'write-anywhere) "replace" "after"))
            (response
             (format "{\"version\":1,\"edits\":[{\"anchor\":\"outside\",\"position\":\"%s\",\"text\":\"!\"},{\"anchor\":\"|same\",\"position\":\"%s\",\"text\":\"!\"},{\"anchor\":\"same|\",\"position\":\"%s\",\"text\":\"!\"}]}"
                     position position position))
-           (deslop-llm-function
-            (deslop-test--fake-llm (list (list :content response)))))
-      (deslop-test--with-buffer "outside|same|outside"
-        (deslop-test--select 9 13 13)
-        (let ((job (deslop-enqueue-operation type)))
-          (should (eq (deslop-job-state job) 'failed))
+           (ende-llm-function
+            (ende-test--fake-llm (list (list :content response)))))
+      (ende-test--with-buffer "outside|same|outside"
+        (ende-test--select 9 13 13)
+        (let ((job (ende-enqueue-operation type)))
+          (should (eq (ende-job-state job) 'failed))
           (should (string= (buffer-string) "outside|same|outside"))
-          (should (= (plist-get (deslop--structured-summary
-                                (deslop-job-structured-state job))
+          (should (= (plist-get (ende--structured-summary
+                                (ende-job-structured-state job))
                                :skipped)
                      3)))))))
 
-(ert-deftest deslop-test/anywhere-repair-keeps-moving-selection-and-edge-insertions ()
+(ert-deftest ende-test/anywhere-repair-keeps-moving-selection-and-edge-insertions ()
   (dolist (type '(insert-anywhere write-anywhere))
-    (deslop-test--reset)
-    (let* ((deslop-structured-edit-repair-attempts 1)
+    (ende-test--reset)
+    (let* ((ende-structured-edit-repair-attempts 1)
            (response
             "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"same\",\"position\":\"after\",\"text\":\"Z\"},{\"anchor\":\"outside\",\"position\":\"after\",\"text\":\"!\"}]}")
            (repair
             "{\"version\":1,\"edits\":[{\"anchor\":\"Z\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"outside\",\"position\":\"after\",\"text\":\"BAD\"}]}")
-           (deslop-llm-function
-            (deslop-test--fake-llm
+           (ende-llm-function
+            (ende-test--fake-llm
              (list (list :content response) (list :content repair)) t)))
-      (deslop-test--with-buffer "outside|same|outside"
-        (deslop-test--select 9 13 13)
-        (let ((job (deslop-enqueue-operation type)))
+      (ende-test--with-buffer "outside|same|outside"
+        (ende-test--select 9 13 13)
+        (let ((job (ende-enqueue-operation type)))
           (should-not (buffer-narrowed-p))
           (deactivate-mark)
           (goto-char (point-min))
           (insert "user ")
-          (deslop-test--complete-call (car deslop-test--calls))
-          (should (eq (deslop-job-state job) 'running))
+          (ende-test--complete-call (car ende-test--calls))
+          (should (eq (ende-job-state job) 'running))
           (should (string-suffix-p
                    "Current document:\nAsameZ"
-                   (deslop-test--user-message (car deslop-test--prompts))))
+                   (ende-test--user-message (car ende-test--prompts))))
           (goto-char (point-min))
           (insert "more ")
-          (deslop-test--complete-call (nth 1 deslop-test--calls))
-          (should (eq (deslop-job-state job) 'completed))
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (should (eq (ende-job-state job) 'completed))
           (should (string= (buffer-string)
                            "more user outside|AsameZ!|outside"))
           (should-not (buffer-narrowed-p)))))))
 
-(ert-deftest deslop-test/anywhere-without-selection-respects-narrowing ()
+(ert-deftest ende-test/anywhere-without-selection-respects-narrowing ()
   (dolist (type '(insert-anywhere write-anywhere))
-    (deslop-test--reset)
+    (ende-test--reset)
     (let* ((response
             "{\"version\":1,\"edits\":[{\"anchor\":\"same\",\"position\":\"after\",\"text\":\"!\",\"all\":true}]}")
-           (deslop-llm-function
-            (deslop-test--fake-llm (list (list :content response)))))
-      (deslop-test--with-buffer "same|same|same"
+           (ende-llm-function
+            (ende-test--fake-llm (list (list :content response)))))
+      (ende-test--with-buffer "same|same|same"
         (narrow-to-region 6 10)
-        (let ((job (deslop-enqueue-operation type)))
-          (should (eq (deslop-job-state job) 'completed))
+        (let ((job (ende-enqueue-operation type)))
+          (should (eq (ende-job-state job) 'completed))
           (should (buffer-narrowed-p))
           (should (string= (buffer-string) "same!"))
           (widen)
           (should (string= (buffer-string) "same|same!|same")))))))
 
-(ert-deftest deslop-test/insert-anywhere-rejects-character-offsets ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-rejects-character-offsets ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"start\":1,\"end\":1,\"expected\":\"\",\"text\":\"X\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)))))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'failed))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)))))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-insert-anywhere)))
+        (should (eq (ende-job-state job) 'failed))
         (should (string= (buffer-string) "test"))
-         (should-not (deslop-review--overlays-in-buffer))))))
+         (should-not (ende-review--overlays-in-buffer))))))
 
-(ert-deftest deslop-test/insert-anywhere-reports-missing-fields ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-reports-missing-fields ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"position\":\"before\",\"text\":\"X\"}]}" )
          (repair-response response)
-          (deslop-llm-function
-           (deslop-test--fake-llm
+          (ende-llm-function
+           (ende-test--fake-llm
             (list (list :content response)
                   (list :content repair-response)))))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'failed))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-insert-anywhere)))
+        (should (eq (ende-job-state job) 'failed))
         (should (string-match-p "missing required anchor, position, or text field"
-                               (deslop-error-message (deslop-job-error job))))))))
+                               (ende-error-message (ende-job-error job))))))))
 
-(ert-deftest deslop-test/insert-anywhere-creates-independent-insertions ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-creates-independent-insertions ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"B\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)))))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)))))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-insert-anywhere
                   "Add a marker at every appropriate position")))
-        (should (eq (deslop-job-state job) 'completed))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "AtestB"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))
-        (let ((messages (car deslop-test--prompts)))
+        (should (= (length (ende-review--overlays-in-buffer)) 2))
+        (let ((messages (car ende-test--prompts)))
           (should (string-match-p "INSERT-ANYWHERE"
                                   (cdr (cadr messages))))
           (should (string-match-p
@@ -1456,61 +1456,61 @@ process for cancellation tests."
            (should (string-match-p "Multiple insertions"
                                    (cdr (car messages)))))))))
 
-(ert-deftest deslop-test/insert-anywhere-applies-valid-edits-around-invalid-ones ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-applies-valid-edits-around-invalid-ones ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"anchor\":\"aa\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"},{\"anchor\":\"bb\",\"position\":\"after\",\"text\":\"B\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"}]}" )
-          (deslop-llm-function
-           (deslop-test--fake-llm
+          (ende-llm-function
+           (ende-test--fake-llm
             (list (list :content response)
                   (list :content repair-response)))))
-    (deslop-test--with-buffer "aa\nbb"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+    (ende-test--with-buffer "aa\nbb"
+      (let ((job (ende-insert-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "Aaa\nbbB"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 2))
+        (should (= (length (ende-review--overlays-in-buffer)) 2))
         (should (string-match-p
                  "Skipped edits"
-                 (with-current-buffer deslop-history--buffer-object
+                 (with-current-buffer ende-history--buffer-object
                    (buffer-string))))
         (should (string-match-p
                  "Edit 2: anchor was not found"
-                 (with-current-buffer deslop-history--buffer-object
+                 (with-current-buffer ende-history--buffer-object
                    (buffer-string))))))))
 
-(ert-deftest deslop-test/insert-anywhere-supports-occurrence-and-all-anchors ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-supports-occurrence-and-all-anchors ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"occurrence\":1,\"text\":\"A\"},{\"anchor\":\"one\",\"position\":\"after\",\"all\":true,\"text\":\"B\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)))))
-    (deslop-test--with-buffer "one\none"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)))))
+    (ende-test--with-buffer "one\none"
+      (let ((job (ende-insert-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
          (should (string= (buffer-string) "AoneB\noneB"))
-         (should (= (length (deslop-review--overlays-in-buffer)) 3))))))
+         (should (= (length (ende-review--overlays-in-buffer)) 3))))))
 
-(ert-deftest deslop-test/structured-edit-normalized-expansion-is-bounded ()
-  (let ((deslop-max-normalized-edits 2))
+(ert-deftest ende-test/structured-edit-normalized-expansion-is-bounded ()
+  (let ((ende-max-normalized-edits 2))
     (should-error
-     (deslop-edit-parse-insertions
+     (ende-edit-parse-insertions
       "{\"version\":1,\"edits\":[{\"anchor\":\"x\",\"position\":\"before\",\"all\":true,\"text\":\"!\"}]}"
       "x x x")
-     :type 'deslop-edit-resource-error)))
+     :type 'ende-edit-resource-error)))
 
-(ert-deftest deslop-test/structured-edit-conflicts-use-a-sweep ()
+(ert-deftest ende-test/structured-edit-conflicts-use-a-sweep ()
   (let ((parsed
-         (deslop-edit-parse-replacements
+         (ende-edit-parse-replacements
           "{\"version\":1,\"edits\":[{\"anchor\":\"abc\",\"position\":\"replace\",\"text\":\"A\"},{\"anchor\":\"bcd\",\"position\":\"replace\",\"text\":\"B\"}]}"
           "abcdef")))
     (should-not (plist-get parsed :edits))
     (should (= (length (plist-get parsed :errors)) 2))))
 
-(ert-deftest deslop-test/structured-edit-rejects-before-replace-at-same-anchor ()
+(ert-deftest ende-test/structured-edit-rejects-before-replace-at-same-anchor ()
   (let ((parsed
-         (deslop-edit-parse-replacements
+         (ende-edit-parse-replacements
           "{\"version\":1,\"edits\":[{\"anchor\":\"abc\",\"position\":\"replace\",\"text\":\"X\"},{\"anchor\":\"abc\",\"position\":\"before\",\"text\":\"Y\"}]}"
           "abc")))
     (should-not (plist-get parsed :edits))
@@ -1519,94 +1519,94 @@ process for cancellation tests."
              "overlaps"
              (plist-get (car (plist-get parsed :errors)) :message)))))
 
-(ert-deftest deslop-test/structured-edits-preserve-user-point-by-default ()
-  (should-not deslop-structured-edit-move-point)
+(ert-deftest ende-test/structured-edits-preserve-user-point-by-default ()
+  (should-not ende-structured-edit-move-point)
   (dolist (spec '((write-anywhere "replace" "MIDDLE" "left MIDDLE right")
                   (insert-anywhere "after" "!" "left middle! right")))
     (pcase-let ((`(,type ,position ,text ,expected) spec))
-      (deslop-test--reset)
+      (ende-test--reset)
       (let* ((response
               (format (concat "{\"version\":1,\"edits\":[{\"anchor\":\"middle\","
                               "\"position\":\"%s\",\"text\":\"%s\"}]}")
                       position text))
-             (deslop-llm-function
-              (deslop-test--fake-llm (list (list :content response)) t)))
-        (deslop-test--with-buffer "left middle right"
+             (ende-llm-function
+              (ende-test--fake-llm (list (list :content response)) t)))
+        (ende-test--with-buffer "left middle right"
           (let ((source (current-buffer))
-                (callback-buffer (generate-new-buffer " *deslop-callback*")))
+                (callback-buffer (generate-new-buffer " *ende-callback*")))
             (unwind-protect
                 (progn
-                  (deslop-test--select 6 12 12)
-                  (let* ((job (deslop-enqueue-operation type "Change middle"))
-                         (call (car deslop-test--calls)))
+                  (ende-test--select 6 12 12)
+                  (let* ((job (ende-enqueue-operation type "Change middle"))
+                         (call (car ende-test--calls)))
                     (deactivate-mark)
                     (goto-char 2)
                     (with-current-buffer callback-buffer
-                      (deslop-test--complete-call call)
+                      (ende-test--complete-call call)
                       (should (eq (current-buffer) callback-buffer)))
                     (with-current-buffer source
-                      (should (eq (deslop-job-state job) 'completed))
+                      (should (eq (ende-job-state job) 'completed))
                       (should (string= (buffer-string) expected))
                       (should (= (point) 2))
                       (should-not (buffer-narrowed-p)))))
               (when (buffer-live-p callback-buffer)
                 (kill-buffer callback-buffer)))))))))
 
-(ert-deftest deslop-test/structured-edits-move-point-when-enabled ()
+(ert-deftest ende-test/structured-edits-move-point-when-enabled ()
   (dolist (spec '((write-anywhere "replace" "MIDDLE" "left MIDDLE right")
                   (insert-anywhere "after" "!" "left middle! right")))
     (pcase-let ((`(,type ,position ,text ,expected) spec))
-      (deslop-test--reset)
-      (let* ((deslop-structured-edit-move-point t)
+      (ende-test--reset)
+      (let* ((ende-structured-edit-move-point t)
              (response
               (format (concat "{\"version\":1,\"edits\":[{\"anchor\":\"middle\","
                               "\"position\":\"%s\",\"text\":\"%s\"}]}")
                       position text))
-             (deslop-llm-function
-              (deslop-test--fake-llm (list (list :content response)) t)))
-        (deslop-test--with-buffer "left middle right"
-          (deslop-test--select 6 12 12)
-          (let* ((job (deslop-enqueue-operation type "Change middle"))
-                 (call (car deslop-test--calls)))
+             (ende-llm-function
+              (ende-test--fake-llm (list (list :content response)) t)))
+        (ende-test--with-buffer "left middle right"
+          (ende-test--select 6 12 12)
+          (let* ((job (ende-enqueue-operation type "Change middle"))
+                 (call (car ende-test--calls)))
             (deactivate-mark)
             (goto-char 2)
-            (deslop-test--complete-call call)
-            (let ((review (car (deslop-review--overlays-in-buffer))))
-              (should (eq (deslop-job-state job) 'completed))
+            (ende-test--complete-call call)
+            (let ((review (car (ende-review--overlays-in-buffer))))
+              (should (eq (ende-job-state job) 'completed))
               (should (string= (buffer-string) expected))
               (should review)
               (should (= (point) (overlay-end review))))))))))
 
-(ert-deftest deslop-test/structured-edit-orders-adjacent-after-before-replace ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/structured-edit-orders-adjacent-after-before-replace ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
           (list
            (list :content
                  "{\"version\":1,\"edits\":[{\"anchor\":\"XYZ\",\"position\":\"replace\",\"text\":\"Q\"},{\"anchor\":\"abc\",\"position\":\"after\",\"text\":\"!\"}]}")))))
-    (deslop-test--with-buffer "abcXYZ"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'completed))
+    (ende-test--with-buffer "abcXYZ"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "abc!Q"))))))
 
-(ert-deftest deslop-test/structured-edit-repairs-failed-edits ()
-  (deslop-test--reset)
+(ert-deftest ende-test/structured-edit-repairs-failed-edits ()
+  (ende-test--reset)
   (let* ((first-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"text\":\"ONE\"},{\"anchor\":\"two\",\"position\":\"replace\",\"occurrence\":2,\"text\":\"BAD\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"two\",\"position\":\"replace\",\"text\":\"TWO\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm
+         (ende-llm-function
+          (ende-test--fake-llm
            (list (list :content first-response)
                  (list :content repair-response)))))
-    (deslop-test--with-buffer "one two"
+    (ende-test--with-buffer "one two"
       (setq-local buffer-file-name "/tmp/example.el")
       (setq-local major-mode 'emacs-lisp-mode)
-      (let* ((job (deslop-write-anywhere "Fix every item"))
-             (summary (plist-get (deslop-job-result job)
+      (let* ((job (ende-write-anywhere "Fix every item"))
+             (summary (plist-get (ende-job-result job)
                                  :structured-summary))
-             (repair-user (cdr (cadr (car deslop-test--prompts)))))
-        (should (eq (deslop-job-state job) 'completed))
+             (repair-user (cdr (cadr (car ende-test--prompts)))))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "ONE TWO"))
         (should (= (plist-get summary :requested) 2))
         (should (= (plist-get summary :first-pass-applied) 1))
@@ -1617,345 +1617,345 @@ process for cancellation tests."
         (should (string-match-p "Fix every item" repair-user))
         (should (string-match-p "occurrence 2 is not present" repair-user))
         (should (string-match-p "Current document:\nONE two" repair-user))
-        (with-current-buffer deslop-history--buffer-object
+        (with-current-buffer ende-history--buffer-object
           (should (string-match-p "Structured edits" (buffer-string)))
           (should (string-match-p "Repaired: 1" (buffer-string))))))))
 
-(ert-deftest deslop-test/structured-edit-rejects-read-only-before-dispatch ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("unused") t)))
-    (deslop-test--with-buffer "test"
+(ert-deftest ende-test/structured-edit-rejects-read-only-before-dispatch ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("unused") t)))
+    (ende-test--with-buffer "test"
       (setq buffer-read-only t)
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop-test--calls)
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende-test--calls)
         (should (string-match-p "read-only"
                                 (error-message-string
-                                 (deslop-job-error job))))))))
+                                 (ende-job-error job))))))))
 
-(ert-deftest deslop-test/structured-edit-rejects-read-only-before-application ()
-  (deslop-test--reset)
+(ert-deftest ende-test/structured-edit-rejects-read-only-before-application ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"replace\",\"text\":\"TEST\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-write-anywhere)))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)) t)))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-write-anywhere)))
         (setq buffer-read-only t)
-        (deslop-test--complete-call (car deslop-test--calls))
-        (should (eq (deslop-job-state job) 'failed))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state job) 'failed))
         (should (string= (buffer-string) "test"))
-        (should-not (deslop-review--overlays-in-buffer))))))
+        (should-not (ende-review--overlays-in-buffer))))))
 
-(ert-deftest deslop-test/write-anywhere-leaves-buffer-writable-while-running ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-leaves-buffer-writable-while-running ()
+  (ende-test--reset)
   (let* ((response
          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"replace\",\"text\":\"TEST\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-write-anywhere)))
-        (should (eq (deslop-job-state job) 'running))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)) t)))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-write-anywhere)))
+        (should (eq (ende-job-state job) 'running))
         (should-not buffer-read-only)
         (run-hooks 'before-save-hook)
         (goto-char (point-min))
         (insert "user\n")
         (should (string= (buffer-string) "user\ntest"))
-        (deslop-test--complete-call (car deslop-test--calls))
-        (should (eq (deslop-job-state job) 'completed))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "user\nTEST"))
-        (deslop-abort-queue)
+        (ende-abort-queue)
         (should-not buffer-read-only)))))
 
-(ert-deftest deslop-test/insert-anywhere-leaves-buffer-writable-while-running ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-leaves-buffer-writable-while-running ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
-        (should (eq (deslop-job-state job) 'running))
-        (let ((overlay (deslop-job-overlay job)))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)) t)))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-insert-anywhere)))
+        (should (eq (ende-job-state job) 'running))
+        (let ((overlay (ende-job-overlay job)))
           (should (= (overlay-start overlay) (point-min)))
           (should (= (overlay-end overlay) (point-max)))
           (should (overlay-get overlay 'before-string))
           (should-not (overlay-get overlay 'face))
           (should (string-match-p
-                   "Thinking" (deslop-test--overlay-label overlay))))
+                   "Thinking" (ende-test--overlay-label overlay))))
         (should-not buffer-read-only)
-        (deslop-abort-queue)
-        (should-not (deslop-job-overlay job))
+        (ende-abort-queue)
+        (should-not (ende-job-overlay job))
         (should-not buffer-read-only)))))
 
-(ert-deftest deslop-test/anywhere-progress-precedes-selected-region ()
+(ert-deftest ende-test/anywhere-progress-precedes-selected-region ()
   (dolist (type '(insert-anywhere write-anywhere))
-    (deslop-test--reset)
-    (let ((deslop-llm-function (deslop-test--fake-llm (list :stall) t)))
-      (deslop-test--with-buffer "before target after"
-        (deslop-test--select 8 14 14)
-        (let* ((job (deslop-enqueue-operation type))
-               (overlay (deslop-job-overlay job)))
+    (ende-test--reset)
+    (let ((ende-llm-function (ende-test--fake-llm (list :stall) t)))
+      (ende-test--with-buffer "before target after"
+        (ende-test--select 8 14 14)
+        (let* ((job (ende-enqueue-operation type))
+               (overlay (ende-job-overlay job)))
           (should (= (overlay-start overlay) 8))
           (should (= (overlay-end overlay) 14))
           (should (overlay-get overlay 'before-string))
           (should-not (overlay-get overlay 'after-string))
           (should-not (overlay-get overlay 'face))
           (should (string-match-p
-                   "Thinking" (deslop-test--overlay-label overlay)))
-          (deslop-abort-queue)
+                   "Thinking" (ende-test--overlay-label overlay)))
+          (ende-abort-queue)
           (should-not (overlay-buffer overlay)))))))
 
-(ert-deftest deslop-test/mode-line-reports-buffer-job-count ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm (list :stall :stall) t)))
-    (deslop-test--with-buffer "test"
-       (deslop-mode 1)
-      (should (string= deslop--mode-line-string " deslop[0]"))
-      (let ((first (deslop-write-anywhere))
+(ert-deftest ende-test/mode-line-reports-buffer-job-count ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm (list :stall :stall) t)))
+    (ende-test--with-buffer "test"
+       (ende-mode 1)
+      (should (string= ende--mode-line-string " ende[0]"))
+      (let ((first (ende-write-anywhere))
             (second nil))
-        (should (eq (deslop-job-state first) 'running))
-        (should (string= deslop--mode-line-string " deslop[1]"))
-        (setq second (deslop-write-anywhere))
-        (should (eq (deslop-job-state second) 'queued))
-        (should (string= deslop--mode-line-string " deslop[2]"))
+        (should (eq (ende-job-state first) 'running))
+        (should (string= ende--mode-line-string " ende[1]"))
+        (setq second (ende-write-anywhere))
+        (should (eq (ende-job-state second) 'queued))
+        (should (string= ende--mode-line-string " ende[2]"))
         (should (string-match-p
                  "Thinking"
-                 (deslop-test--overlay-label (deslop-job-overlay first))))
+                 (ende-test--overlay-label (ende-job-overlay first))))
         (should (string-match-p
                  "Queued"
-                 (deslop-test--overlay-label (deslop-job-overlay second))))
-        (deslop-abort-queue)
-        (should-not (deslop-job-overlay first))
-        (should-not (deslop-job-overlay second))
-        (should (string= deslop--mode-line-string " deslop[0]"))))))
+                 (ende-test--overlay-label (ende-job-overlay second))))
+        (ende-abort-queue)
+        (should-not (ende-job-overlay first))
+        (should-not (ende-job-overlay second))
+        (should (string= ende--mode-line-string " ende[0]"))))))
 
-(ert-deftest deslop-test/mode-line-reports-pending-review-count ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "test"
-    (deslop-mode 1)
-    (should (string= deslop--mode-line-string " deslop[0]"))
-    (let ((review (deslop-review-create-overlay
+(ert-deftest ende-test/mode-line-reports-pending-review-count ()
+  (ende-test--reset)
+  (ende-test--with-buffer "test"
+    (ende-mode 1)
+    (should (string= ende--mode-line-string " ende[0]"))
+    (let ((review (ende-review-create-overlay
                    (current-buffer) 1 2 nil nil "t")))
-      (should (string= deslop--mode-line-string " deslop[0|1]"))
-      (deslop-approve-all-output)
-      (should (string= deslop--mode-line-string " deslop[0]"))
-      (deslop-review-create-overlay
+      (should (string= ende--mode-line-string " ende[0|1]"))
+      (ende-approve-all-output)
+      (should (string= ende--mode-line-string " ende[0]"))
+      (ende-review-create-overlay
        (current-buffer) 1 2 nil nil "t")
-      (should (string= deslop--mode-line-string " deslop[0|1]"))
-      (deslop-reject-all-output)
-      (should (string= deslop--mode-line-string " deslop[0]"))
-      (should-not (deslop-review-overlay-p review)))))
+      (should (string= ende--mode-line-string " ende[0|1]"))
+      (ende-reject-all-output)
+      (should (string= ende--mode-line-string " ende[0]"))
+      (should-not (ende-review-overlay-p review)))))
 
-(ert-deftest deslop-test/insert-anywhere-reconciles-against-current-buffer ()
-  (deslop-test--reset)
+(ert-deftest ende-test/insert-anywhere-reconciles-against-current-buffer ()
+  (ende-test--reset)
   (let* ((response
            "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
-          (deslop-llm-function
-           (deslop-test--fake-llm
+          (ende-llm-function
+           (ende-test--fake-llm
             (list (list :content response)
                   (list :content repair-response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-insert-anywhere)))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-insert-anywhere)))
         (goto-char (point-min))
         (insert "user\n")
-         (should (eq (deslop-job-state job) 'running))
-         (deslop-test--complete-call (car deslop-test--calls))
-         (should (eq (deslop-job-state job) 'running))
-         (deslop-test--complete-call (nth 1 deslop-test--calls))
-         (should (eq (deslop-job-state job) 'completed))
+         (should (eq (ende-job-state job) 'running))
+         (ende-test--complete-call (car ende-test--calls))
+         (should (eq (ende-job-state job) 'running))
+         (ende-test--complete-call (nth 1 ende-test--calls))
+         (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "user\ntest!"))
-        (should (= (length (deslop-review--overlays-in-buffer)) 1))
+        (should (= (length (ende-review--overlays-in-buffer)) 1))
         (should (string-match-p
                  "Skipped edits"
-                 (with-current-buffer deslop-history--buffer-object
+                 (with-current-buffer ende-history--buffer-object
                    (buffer-string))))))))
 
-(ert-deftest deslop-test/write-anywhere-applies-from-another-current-buffer ()
-  (deslop-test--reset)
+(ert-deftest ende-test/write-anywhere-applies-from-another-current-buffer ()
+  (ende-test--reset)
   (let* ((response
           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"before\",\"text\":\"A\"}]}" )
-         (deslop-llm-function
-          (deslop-test--fake-llm (list (list :content response)) t)))
-    (deslop-test--with-buffer "test"
-      (let ((job (deslop-write-anywhere))
-            (callback-buffer (generate-new-buffer " *deslop-callback*")))
+         (ende-llm-function
+          (ende-test--fake-llm (list (list :content response)) t)))
+    (ende-test--with-buffer "test"
+      (let ((job (ende-write-anywhere))
+            (callback-buffer (generate-new-buffer " *ende-callback*")))
         (unwind-protect
             (with-current-buffer callback-buffer
-              (deslop-test--complete-call (car deslop-test--calls)))
+              (ende-test--complete-call (car ende-test--calls)))
           (when (buffer-live-p callback-buffer)
             (kill-buffer callback-buffer)))
-        (should (eq (deslop-job-state job) 'completed))
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "Atest"))
         (should-not buffer-read-only)
-        (should (= (length (deslop-review--overlays-in-buffer)) 1))))))
+        (should (= (length (ende-review--overlays-in-buffer)) 1))))))
 
 ;;;; Queue lifecycle
 
-(ert-deftest deslop-test/queue-fifo-ordering-async ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '(" 1" " 2" " 3") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/queue-fifo-ordering-async ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '(" 1" " 2" " 3") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop--queue-suspended t)
-      (deslop-insert-at-cursor)
-      (deslop-insert-at-cursor)
-      (deslop-insert-at-cursor)
-      (setq deslop--queue-suspended nil)
-      (deslop-process-next)
-      (should (= (length deslop-test--calls) 1))
-      (deslop-test--complete-call (nth 0 deslop-test--calls))
-      (deslop-test--complete-call (nth 1 deslop-test--calls))
-      (deslop-test--complete-call (nth 2 deslop-test--calls))
+      (setq ende--queue-suspended t)
+      (ende-insert-at-cursor)
+      (ende-insert-at-cursor)
+      (ende-insert-at-cursor)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (should (= (length ende-test--calls) 1))
+      (ende-test--complete-call (nth 0 ende-test--calls))
+      (ende-test--complete-call (nth 1 ende-test--calls))
+      (ende-test--complete-call (nth 2 ende-test--calls))
       (should (string= (buffer-string) "base 1 2 3"))
-      (should (null deslop-queue))
-      (should (null deslop--current-job)))))
+      (should (null ende-queue))
+      (should (null ende--current-job)))))
 
-(ert-deftest deslop-test/abort-invalidates-before-kill ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '(:stall "never") t
-                                #'deslop-test--sleep-process)))
-    (deslop-test--with-buffer "content"
-      (let ((job (deslop-insert-at-cursor)))
-        (deslop-insert-at-cursor)
-        (let ((call (car deslop-test--calls)))
-          (should deslop--current-job)
-          (deslop-abort-queue)
-          (should (eq (deslop-job-state job) 'cancelled))
-          (should-not deslop--current-job)
-          (should (null deslop-queue))
+(ert-deftest ende-test/abort-invalidates-before-kill ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '(:stall "never") t
+                                #'ende-test--sleep-process)))
+    (ende-test--with-buffer "content"
+      (let ((job (ende-insert-at-cursor)))
+        (ende-insert-at-cursor)
+        (let ((call (car ende-test--calls)))
+          (should ende--current-job)
+          (ende-abort-queue)
+          (should (eq (ende-job-state job) 'cancelled))
+          (should-not ende--current-job)
+          (should (null ende-queue))
           (should-not (process-live-p (plist-get call :process)))
           ;; A late transport callback must be inert.
-          (deslop-test--callback call :on-done "orphan")
+          (ende-test--callback call :on-done "orphan")
           (should (string= (buffer-string) "content")))))))
 
-(ert-deftest deslop-test/stale-callback-cannot-settle-next-job ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '(" A" " B") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/stale-callback-cannot-settle-next-job ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '(" A" " B") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop--queue-suspended t)
-      (deslop-insert-at-cursor)
-      (deslop-insert-at-cursor)
-      (setq deslop--queue-suspended nil)
-      (deslop-process-next)
-      (let ((first (nth 0 deslop-test--calls)))
-        (deslop-test--complete-call first)
-        (let ((second (nth 1 deslop-test--calls)))
+      (setq ende--queue-suspended t)
+      (ende-insert-at-cursor)
+      (ende-insert-at-cursor)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (let ((first (nth 0 ende-test--calls)))
+        (ende-test--complete-call first)
+        (let ((second (nth 1 ende-test--calls)))
           (should second)
-          (should (eq (deslop-job-state deslop--current-job) 'running))
-          (deslop-test--callback first :on-done " stale")
-          (deslop-test--callback first :on-error "stale error")
-          (should (eq (deslop-job-state deslop--current-job) 'running))
-          (deslop-test--complete-call second)))
+          (should (eq (ende-job-state ende--current-job) 'running))
+          (ende-test--callback first :on-done " stale")
+          (ende-test--callback first :on-error "stale error")
+          (should (eq (ende-job-state ende--current-job) 'running))
+          (ende-test--complete-call second)))
       (should (string= (buffer-string) "base A B")))))
 
-(ert-deftest deslop-test/duplicate-completion-is-idempotent ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/duplicate-completion-is-idempotent ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor))
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
-        (deslop-test--complete-call call)
-        (deslop-test--callback call :on-done " X")
-        (should (eq (deslop-job-state job) 'completed))
+        (setq call (car ende-test--calls))
+        (ende-test--complete-call call)
+        (ende-test--callback call :on-done " X")
+        (should (eq (ende-job-state job) 'completed))
         (should (string= (buffer-string) "base X"))
-        (should-not deslop--current-job)))))
+        (should-not ende--current-job)))))
 
-(ert-deftest deslop-test/deleted-pending-overlay-cannot-fail-committed-insert ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" A" " B") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/deleted-pending-overlay-cannot-fail-committed-insert ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" A" " B") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (setq deslop--queue-suspended t)
-      (let ((first (deslop-insert-at-cursor))
-            (second (deslop-insert-at-cursor)))
-        (delete-overlay (deslop-job-overlay second))
-        (setq deslop--queue-suspended nil)
-        (deslop-process-next)
-        (deslop-test--complete-call (nth 0 deslop-test--calls))
-        (should (eq (deslop-job-state first) 'completed))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
-        (should (eq (deslop-job-state second) 'completed))
+      (setq ende--queue-suspended t)
+      (let ((first (ende-insert-at-cursor))
+            (second (ende-insert-at-cursor)))
+        (delete-overlay (ende-job-overlay second))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (should (eq (ende-job-state first) 'completed))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (should (eq (ende-job-state second) 'completed))
         (should (string= (buffer-string) "base A B"))))))
 
-(ert-deftest deslop-test/malformed-structured-error-cannot-wedge-queue ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
+(ert-deftest ende-test/malformed-structured-error-cannot-wedge-queue ()
+  (ende-test--reset)
+  (let ((ende-llm-function
          (lambda (_messages callbacks &optional _options)
            (funcall (plist-get callbacks :on-error)
-                    (deslop-error-create :kind 'provider :message 123)))))
-    (deslop-test--with-buffer "base"
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop--current-job)
-        (should-not deslop--current-job)))))
+                    (ende-error-create :kind 'provider :message 123)))))
+    (ende-test--with-buffer "base"
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende--current-job)
+        (should-not ende--current-job)))))
 
-(ert-deftest deslop-test/synchronous-failure-backlog-is-iterative ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "base"
-    (let ((deslop--queue-suspended t)
+(ert-deftest ende-test/synchronous-failure-backlog-is-iterative ()
+  (ende-test--reset)
+  (ende-test--with-buffer "base"
+    (let ((ende--queue-suspended t)
           (max-lisp-eval-depth 100))
       (dotimes (_ 500)
-        (deslop-enqueue
+        (ende-enqueue
          (list 'unknown
-               :target (deslop-target-create
+               :target (ende-target-create
                         :buffer (current-buffer) :start 1 :end 1 :cursor 1))))
-      (setq deslop--queue-suspended nil)
+      (setq ende--queue-suspended nil)
       (cl-letf (((symbol-function 'message) #'ignore))
-        (deslop-process-next))
-      (should-not deslop--current-job)
-      (should-not deslop-queue))))
+        (ende-process-next))
+      (should-not ende--current-job)
+      (should-not ende-queue))))
 
-(ert-deftest deslop-test/quit-and-cleanup-errors-still-settle-jobs ()
-  (deslop-test--reset)
-  (let ((deslop--job-handlers (copy-tree deslop--job-handlers)))
-    (deslop-register-job-handler
+(ert-deftest ende-test/quit-and-cleanup-errors-still-settle-jobs ()
+  (ende-test--reset)
+  (let ((ende--job-handlers (copy-tree ende--job-handlers)))
+    (ende-register-job-handler
      'quit-test (lambda (_job) (signal 'quit nil)))
-    (deslop-test--with-buffer "base"
-      (let ((job (deslop-enqueue
+    (ende-test--with-buffer "base"
+      (let ((job (ende-enqueue
                   (list 'quit-test
-                        :target (deslop-target-create
+                        :target (ende-target-create
                                  :buffer (current-buffer)
                                  :start 1 :end 1 :cursor 1)))))
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop--current-job))))
-  (deslop-test--reset)
-  (let ((deslop--job-handlers (copy-tree deslop--job-handlers)))
-    (deslop-register-job-handler
-     'cleanup-test (lambda (job) (deslop-job-finish job "ok")))
-    (deslop-test--with-buffer "base"
-      (let* ((overlay (deslop-ui-create-overlay
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende--current-job))))
+  (ende-test--reset)
+  (let ((ende--job-handlers (copy-tree ende--job-handlers)))
+    (ende-register-job-handler
+     'cleanup-test (lambda (job) (ende-job-finish job "ok")))
+    (ende-test--with-buffer "base"
+      (let* ((overlay (ende-ui-create-overlay
                        (current-buffer) 1 1 "Queued"))
              (job nil))
-        (cl-letf (((symbol-function 'deslop-ui-delete-overlay)
+        (cl-letf (((symbol-function 'ende-ui-delete-overlay)
                    (lambda (_) (error "cleanup failed"))))
           (setq job
-                 (deslop-enqueue
+                 (ende-enqueue
                   (list 'cleanup-test
-                        :target (deslop-target-create
+                        :target (ende-target-create
                                  :buffer (current-buffer)
                                  :start 1 :end 1 :cursor 1)
                         :overlay overlay))))
-        (should (eq (deslop-job-state job) 'completed))
-        (should-not deslop--current-job)
+        (should (eq (ende-job-state job) 'completed))
+        (should-not ende--current-job)
         (delete-overlay overlay)))))
 
 ;;;; Target failure paths
 
-(ert-deftest deslop-test/killed-source-buffer-cancels-active-and-queued-jobs ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t))
-        (buffer (generate-new-buffer " *deslop-killed*"))
+(ert-deftest ende-test/killed-source-buffer-cancels-active-and-queued-jobs ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t))
+        (buffer (generate-new-buffer " *ende-killed*"))
         (active nil)
         (pending nil))
     (unwind-protect
@@ -1963,25 +1963,25 @@ process for cancellation tests."
           (with-current-buffer buffer
              (insert "base")
              (goto-char (point-max))
-             (setq active (deslop-insert-at-cursor)))
-          (let ((deslop--queue-suspended t))
+             (setq active (ende-insert-at-cursor)))
+          (let ((ende--queue-suspended t))
             (with-current-buffer buffer
-              (setq pending (deslop-insert-at-cursor))))
-          (should (eq (deslop-job-state active) 'running))
-          (should (eq (deslop-job-state pending) 'queued))
+              (setq pending (ende-insert-at-cursor))))
+          (should (eq (ende-job-state active) 'running))
+          (should (eq (ende-job-state pending) 'queued))
           (kill-buffer buffer)
-          (should (eq (deslop-job-state active) 'cancelled))
-          (should (eq (deslop-job-state pending) 'cancelled))
-          (should-not deslop--current-job)
-          (should-not deslop-queue)
-          (deslop-test--callback (car deslop-test--calls) :on-done "late")
-          (should (eq (deslop-job-state active) 'cancelled)))
+          (should (eq (ende-job-state active) 'cancelled))
+          (should (eq (ende-job-state pending) 'cancelled))
+          (should-not ende--current-job)
+          (should-not ende-queue)
+          (ende-test--callback (car ende-test--calls) :on-done "late")
+          (should (eq (ende-job-state active) 'cancelled)))
        (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/source-buffer-cancellation-preserves-outer-abort ()
-  (deslop-test--reset)
-  (let ((first (generate-new-buffer " *deslop-abort-first*"))
-        (second (generate-new-buffer " *deslop-abort-second*"))
+(ert-deftest ende-test/source-buffer-cancellation-preserves-outer-abort ()
+  (ende-test--reset)
+  (let ((first (generate-new-buffer " *ende-abort-first*"))
+        (second (generate-new-buffer " *ende-abort-second*"))
         (observed nil)
         (first-job nil)
         (second-job nil))
@@ -1990,307 +1990,307 @@ process for cancellation tests."
           (with-current-buffer first
             (insert "first")
             (setq first-job
-                  (deslop--make-job
+                  (ende--make-job
                    :id 1 :state 'running
-                   :target (deslop-target-create
+                   :target (ende-target-create
                             :buffer first :start 1 :end 1 :cursor 1)
                    :cancel-function
                    (lambda ()
                      (kill-buffer second)
-                     (setq observed deslop--aborting)))
-                  deslop--source-buffer-jobs (list first-job))
-            (add-hook 'kill-buffer-hook #'deslop--source-buffer-killed nil t))
+                     (setq observed ende--aborting)))
+                  ende--source-buffer-jobs (list first-job))
+            (add-hook 'kill-buffer-hook #'ende--source-buffer-killed nil t))
           (with-current-buffer second
             (insert "second")
             (setq second-job
-                  (deslop--make-job
+                  (ende--make-job
                    :id 2 :state 'queued
-                   :target (deslop-target-create
+                   :target (ende-target-create
                             :buffer second :start 1 :end 1 :cursor 1)))
-            (setq deslop--source-buffer-jobs (list second-job))
-            (add-hook 'kill-buffer-hook #'deslop--source-buffer-killed nil t))
-          (setq deslop--active-jobs (list first-job)
-                deslop--current-job first-job
-                deslop-queue (list second-job)
-                deslop--queue-tail deslop-queue)
-          (deslop-abort-queue)
+            (setq ende--source-buffer-jobs (list second-job))
+            (add-hook 'kill-buffer-hook #'ende--source-buffer-killed nil t))
+          (setq ende--active-jobs (list first-job)
+                ende--current-job first-job
+                ende-queue (list second-job)
+                ende--queue-tail ende-queue)
+          (ende-abort-queue)
           (should observed)
-          (should-not deslop--aborting)
-          (should (eq (deslop-job-state first-job) 'cancelled))
-          (should (eq (deslop-job-state second-job) 'cancelled)))
+          (should-not ende--aborting)
+          (should (eq (ende-job-state first-job) 'cancelled))
+          (should (eq (ende-job-state second-job) 'cancelled)))
       (when (buffer-live-p first) (kill-buffer first))
       (when (buffer-live-p second) (kill-buffer second)))))
 
-(ert-deftest deslop-test/read-only-target-settles-job ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/read-only-target-settles-job ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor))
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
+        (setq call (car ende-test--calls))
         (setq buffer-read-only t)
-        (deslop-test--complete-call call)
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop--current-job)
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende--current-job)
         (should (string= (buffer-string) "base"))))))
 
-(ert-deftest deslop-test/narrowed-target-settles-job ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/narrowed-target-settles-job ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor))
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
+        (setq call (car ende-test--calls))
         (narrow-to-region (point-min) (1- (point-max)))
-        (deslop-test--complete-call call)
-         (should (eq (deslop-job-state job) 'failed))
-         (should-not deslop--current-job)))))
+        (ende-test--complete-call call)
+         (should (eq (ende-job-state job) 'failed))
+         (should-not ende--current-job)))))
 
-(ert-deftest deslop-test/widening-does-not-expand-queued-context ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "SECRET safe SECRET"
+(ert-deftest ende-test/widening-does-not-expand-queued-context ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "SECRET safe SECRET"
       (narrow-to-region 8 12)
       (goto-char 10)
-      (setq deslop--queue-suspended t)
-      (deslop-insert-at-cursor)
+      (setq ende--queue-suspended t)
+      (ende-insert-at-cursor)
       (widen)
-      (setq deslop--queue-suspended nil)
-      (deslop-process-next)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
       (let ((user-message
-             (cdr (cadr (plist-get (car deslop-test--calls) :messages)))))
+             (cdr (cadr (plist-get (car ende-test--calls) :messages)))))
         (should (string-match-p "sa<CURSOR>fe" user-message))
         (should-not (string-match-p "SECRET" user-message))))))
 
-(ert-deftest deslop-test/modification-hook-settles-job ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/modification-hook-settles-job ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor))
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
+        (setq call (car ende-test--calls))
         (add-hook 'before-change-functions
                   (lambda (&rest _) (error "blocked")) nil t)
-        (deslop-test--complete-call call)
-        (should (eq (deslop-job-state job) 'failed))
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'failed))
         (should (string= (buffer-string) "base"))
-        (should-not deslop--current-job)))))
+        (should-not ende--current-job)))))
 
-(ert-deftest deslop-test/empty-result-does-not-insert-separators ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("\n") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/empty-result-does-not-insert-separators ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("\n") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor))
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
-        (deslop-test--complete-call call)
-        (should (eq (deslop-job-state job) 'failed))
+        (setq call (car ende-test--calls))
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'failed))
         (should (string= (buffer-string) "base"))))))
 
 ;;;; Anchor ordering and conflicts
 
-(ert-deftest deslop-test/same-endpoint-preserves-fifo ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("A" "B") t)))
-    (deslop-test--with-buffer "alpha"
-      (deslop-test--select 1 6 6)
-      (setq deslop--queue-suspended t)
-      (deslop-insert-at-cursor)
-      (deslop-insert-at-cursor)
-      (setq deslop--queue-suspended nil)
-      (deslop-process-next)
-      (deslop-test--complete-call (nth 0 deslop-test--calls))
-       (deslop-test--complete-call (nth 1 deslop-test--calls))
+(ert-deftest ende-test/same-endpoint-preserves-fifo ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("A" "B") t)))
+    (ende-test--with-buffer "alpha"
+      (ende-test--select 1 6 6)
+      (setq ende--queue-suspended t)
+      (ende-insert-at-cursor)
+      (ende-insert-at-cursor)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (ende-test--complete-call (nth 0 ende-test--calls))
+       (ende-test--complete-call (nth 1 ende-test--calls))
        (should (string= (buffer-string) "alpha\nA\nB")))))
 
-(ert-deftest deslop-test/parallel-same-endpoint-preserves-enqueue-order ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A" "B") t))
+(ert-deftest ende-test/parallel-same-endpoint-preserves-enqueue-order ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A" "B") t))
         (profile '(:name remote :model "remote-model"
                    :max-concurrency 2 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((deslop--queue-suspended t)
-            (target (deslop-target-create
+      (let ((ende--queue-suspended t)
+            (target (ende-target-create
                      :buffer (current-buffer) :start 5 :end 5 :cursor 5)))
-        (deslop-enqueue (list 'insert :target target :profile profile))
-        (deslop-enqueue
+        (ende-enqueue (list 'insert :target target :profile profile))
+        (ende-enqueue
          (list 'insert
-               :target (deslop-target-create
+               :target (ende-target-create
                         :buffer (current-buffer) :start 5 :end 5 :cursor 5)
                :profile profile))
-        (setq deslop--queue-suspended nil)
-        (deslop-process-next))
-      (should (= (length deslop--active-jobs) 2))
-      (deslop-test--complete-call (nth 1 deslop-test--calls))
-      (deslop-test--complete-call (nth 0 deslop-test--calls))
+        (setq ende--queue-suspended nil)
+        (ende-process-next))
+      (should (= (length ende--active-jobs) 2))
+      (ende-test--complete-call (nth 1 ende-test--calls))
+      (ende-test--complete-call (nth 0 ende-test--calls))
       (should (string= (buffer-string) "baseAB")))))
 
-(ert-deftest deslop-test/parallel-job-at-provider-limit-keeps-policy ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A" "B") t))
+(ert-deftest ende-test/parallel-job-at-provider-limit-keeps-policy ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A" "B") t))
         (profile '(:name remote :model "remote-model"
                    :max-concurrency 1 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((first (deslop-enqueue
+      (let ((first (ende-enqueue
                     (list 'insert
-                          :target (deslop-target-create
+                          :target (ende-target-create
                                    :buffer (current-buffer)
                                    :start 5 :end 5 :cursor 5)
                           :profile profile)))
             (second nil))
         (setq second
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile profile)))
-        (should (eq (deslop-job-state first) 'running))
-        (should (eq (deslop-job-state second) 'queued))
-        (should (plist-get (deslop-job-profile second) :parallel))
-        (deslop-test--complete-call (nth 0 deslop-test--calls))
-        (should (eq (deslop-job-state second) 'running))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (eq (ende-job-state first) 'running))
+        (should (eq (ende-job-state second) 'queued))
+        (should (plist-get (ende-job-profile second) :parallel))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (should (eq (ende-job-state second) 'running))
+        (ende-test--complete-call (nth 1 ende-test--calls))
         (should (string= (buffer-string) "baseAB"))))))
 
-(ert-deftest deslop-test/parallel-job-uses-free-slot-alongside-serial-job ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A" "B") t))
+(ert-deftest ende-test/parallel-job-uses-free-slot-alongside-serial-job ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A" "B") t))
         (serial-profile '(:name remote :model "serial"
                           :max-concurrency 4 :parallel nil))
         (parallel-profile '(:name remote :model "parallel"
                             :max-concurrency 4 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first
-             (deslop-enqueue
+             (ende-enqueue
               (list 'insert
-                    :target (deslop-target-create
+                    :target (ende-target-create
                              :buffer (current-buffer)
                              :start 5 :end 5 :cursor 5)
                     :profile serial-profile)))
             (second nil))
-        (let ((deslop--queue-suspended t))
+        (let ((ende--queue-suspended t))
           (setq second
-                (deslop-enqueue
+                (ende-enqueue
                  (list 'insert
-                       :target (deslop-target-create
+                       :target (ende-target-create
                                 :buffer (current-buffer)
                                 :start 5 :end 5 :cursor 5)
                        :profile parallel-profile))))
-        (should (eq (deslop-job-state first) 'running))
-        (should (eq (deslop-job-state second) 'queued))
-        (deslop-process-next)
-        (should (eq (deslop-job-state second) 'running))
-        (should (= (length deslop--active-jobs) 2))
-        (deslop-test--complete-call (nth 0 deslop-test--calls))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
+        (should (eq (ende-job-state first) 'running))
+        (should (eq (ende-job-state second) 'queued))
+        (ende-process-next)
+        (should (eq (ende-job-state second) 'running))
+        (should (= (length ende--active-jobs) 2))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (ende-test--complete-call (nth 1 ende-test--calls))
         (should (string= (buffer-string) "baseAB"))))))
 
-(ert-deftest deslop-test/global-fence-waits-for-existing-jobs ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A" "B" "C") t))
+(ert-deftest ende-test/global-fence-waits-for-existing-jobs ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A" "B" "C") t))
         (profile '(:name remote :model "remote-model"
                    :max-concurrency 4 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((first (deslop-enqueue
+      (let ((first (ende-enqueue
                     (list 'insert
-                          :target (deslop-target-create
+                          :target (ende-target-create
                                    :buffer (current-buffer)
                                    :start 5 :end 5 :cursor 5)
                           :profile profile)))
-            (second (deslop-enqueue
+            (second (ende-enqueue
                      (list 'insert
-                           :target (deslop-target-create
+                           :target (ende-target-create
                                     :buffer (current-buffer)
                                     :start 5 :end 5 :cursor 5)
                            :profile profile)))
             (third nil))
-        (deslop-fence-all)
+        (ende-fence-all)
         (setq third
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile profile)))
-        (should (eq (deslop-job-state first) 'running))
-        (should (eq (deslop-job-state second) 'running))
-        (should (eq (deslop-job-state third) 'queued))
-        (should (= (length deslop--fences) 1))
-        (deslop-test--complete-call (nth 0 deslop-test--calls))
-        (should (eq (deslop-job-state third) 'queued))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
-        (should (eq (deslop-job-state third) 'running))
-        (should-not deslop--fences)
-        (deslop-test--complete-call (nth 2 deslop-test--calls))
+        (should (eq (ende-job-state first) 'running))
+        (should (eq (ende-job-state second) 'running))
+        (should (eq (ende-job-state third) 'queued))
+        (should (= (length ende--fences) 1))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (should (eq (ende-job-state third) 'queued))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (should (eq (ende-job-state third) 'running))
+        (should-not ende--fences)
+        (ende-test--complete-call (nth 2 ende-test--calls))
         (should (string= (buffer-string) "baseABC"))))))
 
-(ert-deftest deslop-test/provider-fence-does-not-block-other-providers ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A1" "B1" "A2" "B2") t))
+(ert-deftest ende-test/provider-fence-does-not-block-other-providers ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A1" "B1" "A2" "B2") t))
         (first-profile '(:name first :model "first-model"
                          :max-concurrency 4 :parallel t))
         (second-profile '(:name second :model "second-model"
                           :max-concurrency 4 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((first (deslop-enqueue
+      (let ((first (ende-enqueue
                     (list 'insert
-                          :target (deslop-target-create
+                          :target (ende-target-create
                                    :buffer (current-buffer)
                                    :start 5 :end 5 :cursor 5)
                           :profile first-profile)))
-            (second (deslop-enqueue
+            (second (ende-enqueue
                      (list 'insert
-                           :target (deslop-target-create
+                           :target (ende-target-create
                                     :buffer (current-buffer)
                                     :start 5 :end 5 :cursor 5)
                            :profile second-profile)))
             (third nil)
             (fourth nil))
-        (deslop-fence-provider 'first)
+        (ende-fence-provider 'first)
         (setq third
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile first-profile)))
         (setq fourth
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile second-profile)))
-        (should (eq (deslop-job-state first) 'running))
-        (should (eq (deslop-job-state second) 'running))
-        (should (eq (deslop-job-state third) 'queued))
-        (should (eq (deslop-job-state fourth) 'running))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
-        (deslop-test--complete-call (nth 0 deslop-test--calls))
-        (should (eq (deslop-job-state third) 'running))
-        (deslop-test--complete-call (nth 3 deslop-test--calls))
-        (deslop-test--complete-call (nth 2 deslop-test--calls))
+        (should (eq (ende-job-state first) 'running))
+        (should (eq (ende-job-state second) 'running))
+        (should (eq (ende-job-state third) 'queued))
+        (should (eq (ende-job-state fourth) 'running))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (should (eq (ende-job-state third) 'running))
+        (ende-test--complete-call (nth 3 ende-test--calls))
+        (ende-test--complete-call (nth 2 ende-test--calls))
         (should (string= (buffer-string) "baseA1B1B2A2"))))))
 
-(ert-deftest deslop-test/equal-provider-identities-share-free-slots ()
-  (deslop-test--reset)
-  (let* ((deslop-llm-function
-          (deslop-test--fake-llm '("X" "A" "B") t))
+(ert-deftest ende-test/equal-provider-identities-share-free-slots ()
+  (ende-test--reset)
+  (let* ((ende-llm-function
+          (ende-test--fake-llm '("X" "A" "B") t))
          (url "http://same.example/v1/chat/completions")
          (active-profile (list :url (copy-sequence url)
                                :model "active" :max-concurrency 2
@@ -2301,98 +2301,98 @@ process for cancellation tests."
          (parallel-profile (list :url (copy-sequence url)
                                  :model "parallel" :max-concurrency 2
                                  :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((active (deslop-enqueue
+      (let ((active (ende-enqueue
                      (list 'insert
-                           :target (deslop-target-create
+                           :target (ende-target-create
                                     :buffer (current-buffer)
                                     :start 5 :end 5 :cursor 5)
                            :profile active-profile)))
             (serial nil)
             (parallel nil))
-        (let ((deslop--queue-suspended t))
+        (let ((ende--queue-suspended t))
           (setq serial
-                (deslop-enqueue
+                (ende-enqueue
                  (list 'insert
-                       :target (deslop-target-create
+                       :target (ende-target-create
                                 :buffer (current-buffer)
                                 :start 5 :end 5 :cursor 5)
                        :profile serial-profile))
                 parallel
-                (deslop-enqueue
+                (ende-enqueue
                  (list 'insert
-                       :target (deslop-target-create
+                       :target (ende-target-create
                                 :buffer (current-buffer)
                                 :start 5 :end 5 :cursor 5)
                        :profile parallel-profile))))
-        (should (eq (deslop-job-state active) 'running))
-        (should (eq (deslop-job-state serial) 'queued))
-        (should (eq (deslop-job-state parallel) 'queued))
-        (should (= (length deslop-test--calls) 1))
-        (deslop-test--complete-call (car deslop-test--calls))
-        (should (eq (deslop-job-state serial) 'running))
-        (should (eq (deslop-job-state parallel) 'running))
-        (deslop-test--complete-call (nth 1 deslop-test--calls))
-        (deslop-test--complete-call (nth 2 deslop-test--calls))
+        (should (eq (ende-job-state active) 'running))
+        (should (eq (ende-job-state serial) 'queued))
+        (should (eq (ende-job-state parallel) 'queued))
+        (should (= (length ende-test--calls) 1))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state serial) 'running))
+        (should (eq (ende-job-state parallel) 'running))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (ende-test--complete-call (nth 2 ende-test--calls))
         (should (string= (buffer-string) "baseXAB"))))))
 
-(ert-deftest deslop-test/parallel-slots-are-scoped-per-provider ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm '("A1" "B1" "A2") t))
+(ert-deftest ende-test/parallel-slots-are-scoped-per-provider ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("A1" "B1" "A2") t))
         (first-profile '(:name first :model "first-model"
                          :max-concurrency 1 :parallel t))
         (second-profile '(:name second :model "second-model"
                           :max-concurrency 1 :parallel t)))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((first (deslop-enqueue
+      (let ((first (ende-enqueue
                     (list 'insert
-                          :target (deslop-target-create
+                          :target (ende-target-create
                                    :buffer (current-buffer)
                                    :start 5 :end 5 :cursor 5)
                           :profile first-profile)))
             (second nil)
             (third nil))
         (setq second
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile first-profile)))
         (setq third
-              (deslop-enqueue
+              (ende-enqueue
                (list 'insert
-                     :target (deslop-target-create
+                     :target (ende-target-create
                               :buffer (current-buffer)
                               :start 5 :end 5 :cursor 5)
                      :profile second-profile)))
-        (should (eq (deslop-job-state first) 'running))
-        (should (eq (deslop-job-state second) 'queued))
-        (should (eq (deslop-job-state third) 'running))
-        (should (= (length deslop--active-jobs) 2))
-        (deslop-abort-queue)))))
+        (should (eq (ende-job-state first) 'running))
+        (should (eq (ende-job-state second) 'queued))
+        (should (eq (ende-job-state third) 'running))
+        (should (= (length ende--active-jobs) 2))
+        (ende-abort-queue)))))
 
-(ert-deftest deslop-test/changed-selection-is-skipped ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("X") t)))
-    (deslop-test--with-buffer "original"
-      (deslop-test--select 1 9 9)
-      (let ((job (deslop-insert-at-cursor))
+(ert-deftest ende-test/changed-selection-is-skipped ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("X") t)))
+    (ende-test--with-buffer "original"
+      (ende-test--select 1 9 9)
+      (let ((job (ende-insert-at-cursor))
             (call nil))
-        (setq call (car deslop-test--calls))
+        (setq call (car ende-test--calls))
         (goto-char 3)
         (delete-char 1)
         (insert "X")
-        (deslop-test--complete-call call)
-        (should (eq (deslop-job-state job) 'failed))
-        (should-not deslop--current-job)))))
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'failed))
+        (should-not ende--current-job)))))
 
 ;;;; Incremental reasoning parser
 
-(defun deslop-test--reasoning-callbacks (thinking content)
+(defun ende-test--reasoning-callbacks (thinking content)
   "Return callbacks appending thinking and content into two symbols."
   (list :on-delta
         (lambda (type text)
@@ -2401,112 +2401,112 @@ process for cancellation tests."
             (set content (concat (symbol-value content) text))))
         :on-status #'ignore))
 
-(ert-deftest deslop-test/thinking-parser-separation ()
+(ert-deftest ende-test/thinking-parser-separation ()
   (let ((thinking-symbol (make-symbol "thinking"))
         (content-symbol (make-symbol "content")))
     (set thinking-symbol "")
     (set content-symbol "")
-    (let* ((parser (deslop-protocol-make-reasoning))
-           (callbacks (deslop-test--reasoning-callbacks
+    (let* ((parser (ende-protocol-make-reasoning))
+           (callbacks (ende-test--reasoning-callbacks
                        thinking-symbol content-symbol)))
-      (deslop-protocol-reasoning-feed
+      (ende-protocol-reasoning-feed
        parser "Intro <think>Plan here" callbacks)
-      (deslop-protocol-reasoning-feed
+      (ende-protocol-reasoning-feed
        parser "...done</think>Final answer" callbacks)
-      (should-not (deslop-protocol-reasoning-finish parser callbacks))
+      (should-not (ende-protocol-reasoning-finish parser callbacks))
       (should (string= (symbol-value thinking-symbol) "Plan here...done"))
       (should (string= (symbol-value content-symbol) "Intro Final answer")))))
 
-(ert-deftest deslop-test/thinking-parser-all-delimiter-splits ()
+(ert-deftest ende-test/thinking-parser-all-delimiter-splits ()
   (dolist (split (number-sequence 0 (length "<think>secret</think>answer")))
     (let ((thinking "") (content "")
-          (parser (deslop-protocol-make-reasoning)))
+          (parser (ende-protocol-make-reasoning)))
       (let ((callbacks
              (list :on-delta
                    (lambda (type text)
                      (if (eq type :thinking)
                          (setq thinking (concat thinking text))
                        (setq content (concat content text)))))))
-        (deslop-protocol-reasoning-feed
+        (ende-protocol-reasoning-feed
          parser (substring "<think>secret</think>answer" 0 split) callbacks)
-        (deslop-protocol-reasoning-feed
+        (ende-protocol-reasoning-feed
          parser (substring "<think>secret</think>answer" split) callbacks)
-        (should-not (deslop-protocol-reasoning-finish parser callbacks))
+        (should-not (ende-protocol-reasoning-finish parser callbacks))
         (should (string= thinking "secret"))
         (should (string= content "answer"))))))
 
-(ert-deftest deslop-test/thinking-parser-unclosed-is-error ()
-  (let ((parser (deslop-protocol-make-reasoning)))
-    (deslop-protocol-reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
-    (should (deslop-error-p
-              (deslop-protocol-reasoning-finish parser (list :on-delta #'ignore))))))
+(ert-deftest ende-test/thinking-parser-unclosed-is-error ()
+  (let ((parser (ende-protocol-make-reasoning)))
+    (ende-protocol-reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
+    (should (ende-error-p
+              (ende-protocol-reasoning-finish parser (list :on-delta #'ignore))))))
 
 ;;;; SSE parser
 
-(ert-deftest deslop-test/sse-parser-fragmented-and-done ()
-  (let ((parser (deslop-protocol-make-sse))
+(ert-deftest ende-test/sse-parser-fragmented-and-done ()
+  (let ((parser (ende-protocol-make-sse))
         (events nil))
     (setq events
           (append events
-                   (deslop-protocol-sse-feed
+                   (ende-protocol-sse-feed
                    parser "data: {\"choices\":[{\"delta\":{\"content\":\"hi")))
     (setq events
           (append events
-                   (deslop-protocol-sse-feed
+                   (ende-protocol-sse-feed
                    parser " there\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n")))
     (should (= (length events) 2))
     (should (eq (plist-get (nth 0 events) :type) :json))
-    (should (string= (deslop-protocol-json-get
+    (should (string= (ende-protocol-json-get
                       "content"
-                      (deslop-protocol-json-get
+                      (ende-protocol-json-get
                        "delta"
-                        (aref (deslop-protocol-json-get
+                        (aref (ende-protocol-json-get
                               "choices"
                               (plist-get (nth 0 events) :value))
                              0)))
                      "hi there"))
     (should (eq (plist-get (nth 1 events) :type) :done))
-     (should-not (deslop-protocol-sse-finish parser))))
+     (should-not (ende-protocol-sse-finish parser))))
 
-(ert-deftest deslop-test/sse-parser-rejects-malformed-and-ignores-late-data ()
-  (let ((parser (deslop-protocol-make-sse)))
+(ert-deftest ende-test/sse-parser-rejects-malformed-and-ignores-late-data ()
+  (let ((parser (ende-protocol-make-sse)))
     (should-error
-     (deslop-protocol-sse-feed parser "data: {bad}\n\n"))
-    (let ((done-parser (deslop-protocol-make-sse)))
-      (deslop-protocol-sse-feed done-parser "data: [DONE]\n\n")
+     (ende-protocol-sse-feed parser "data: {bad}\n\n"))
+    (let ((done-parser (ende-protocol-make-sse)))
+      (ende-protocol-sse-feed done-parser "data: [DONE]\n\n")
       (should-not
-       (deslop-protocol-sse-feed
+       (ende-protocol-sse-feed
         done-parser "data: {\"choices\":[]}\n\n")))))
 
-(ert-deftest deslop-test/sse-parser-requires-done ()
-  (let ((parser (deslop-protocol-make-sse)))
-    (deslop-protocol-sse-feed parser "data: {\"choices\":[]}\n\n")
-    (should-error (deslop-protocol-sse-finish parser))))
+(ert-deftest ende-test/sse-parser-requires-done ()
+  (let ((parser (ende-protocol-make-sse)))
+    (ende-protocol-sse-feed parser "data: {\"choices\":[]}\n\n")
+    (should-error (ende-protocol-sse-finish parser))))
 
-(ert-deftest deslop-test/sse-parser-flushes-final-event-without-done ()
-  (let ((parser (deslop-protocol-make-sse)))
+(ert-deftest ende-test/sse-parser-flushes-final-event-without-done ()
+  (let ((parser (ende-protocol-make-sse)))
     (should-not
-     (deslop-protocol-sse-feed parser "data: {\"type\":\"response.completed\"}"))
-    (let ((events (deslop-protocol-sse-flush parser)))
+     (ende-protocol-sse-feed parser "data: {\"type\":\"response.completed\"}"))
+    (let ((events (ende-protocol-sse-flush parser)))
       (should (= (length events) 1))
       (should (string=
-               (deslop-protocol-json-get
+               (ende-protocol-json-get
                 "type" (plist-get (car events) :value))
                "response.completed")))
-    (should-not (deslop-protocol-sse-flush parser))
-    (should-error (deslop-protocol-sse-finish parser))))
+    (should-not (ende-protocol-sse-flush parser))
+    (should-error (ende-protocol-sse-finish parser))))
 
-(ert-deftest deslop-test/transport-session-settles-once-and-cleans-resources ()
-  (let* ((process-buffer (generate-new-buffer " *deslop-test-process*"))
-         (stderr-buffer (generate-new-buffer " *deslop-test-stderr*"))
-         (headers-file (make-temp-file "deslop-test-headers-"))
-         (config-file (make-temp-file "deslop-test-config-"))
+(ert-deftest ende-test/transport-session-settles-once-and-cleans-resources ()
+  (let* ((process-buffer (generate-new-buffer " *ende-test-process*"))
+         (stderr-buffer (generate-new-buffer " *ende-test-stderr*"))
+         (headers-file (make-temp-file "ende-test-headers-"))
+         (config-file (make-temp-file "ende-test-config-"))
          (events 0)
          (done 0)
           (errors 0)
           (discovery-cancelled nil)
           (session
-           (deslop-llm--make-session
+           (ende-llm--make-session
            :callbacks
            (list :on-event (lambda (_event)
                              (setq events (1+ events))
@@ -2516,62 +2516,62 @@ process for cancellation tests."
             :discovery-cancel (lambda () (setq discovery-cancelled t))
             :process-buffer process-buffer :stderr-buffer stderr-buffer
            :headers-file headers-file :config-file config-file)))
-    (deslop-llm--fail
-     session (deslop-error-create :kind 'transport :message "failed"))
-    (deslop-llm--fail
-     session (deslop-error-create :kind 'transport :message "late"))
-    (deslop-llm--settle session 'success "late")
-    (should (eq (deslop-llm--session-terminal session) 'failure))
+    (ende-llm--fail
+     session (ende-error-create :kind 'transport :message "failed"))
+    (ende-llm--fail
+     session (ende-error-create :kind 'transport :message "late"))
+    (ende-llm--settle session 'success "late")
+    (should (eq (ende-llm--session-terminal session) 'failure))
     (should (= events 1))
     (should (= done 0))
      (should (= errors 1))
      (should discovery-cancelled)
-     (should-not (deslop-llm--session-discovery-cancel session))
-     (should-not (deslop-llm--session-callbacks session))
-     (should-not (deslop-llm--session-process session))
-     (should-not (deslop-llm--session-process-buffer session))
-     (should-not (deslop-llm--session-stderr-buffer session))
-     (should-not (deslop-llm--session-stderr-process session))
-     (should-not (deslop-llm--session-headers-file session))
-     (should-not (deslop-llm--session-config-file session))
+     (should-not (ende-llm--session-discovery-cancel session))
+     (should-not (ende-llm--session-callbacks session))
+     (should-not (ende-llm--session-process session))
+     (should-not (ende-llm--session-process-buffer session))
+     (should-not (ende-llm--session-stderr-buffer session))
+     (should-not (ende-llm--session-stderr-process session))
+     (should-not (ende-llm--session-headers-file session))
+     (should-not (ende-llm--session-config-file session))
      (should-not (buffer-live-p process-buffer))
     (should-not (buffer-live-p stderr-buffer))
      (should-not (file-exists-p headers-file))
      (should-not (file-exists-p config-file))))
 
-(ert-deftest deslop-test/codex-session-clears-resource-slots ()
-  (let ((process-buffer (generate-new-buffer " *deslop-test-codex-process*"))
-        (stderr-buffer (generate-new-buffer " *deslop-test-codex-stderr*"))
-        (headers-file (make-temp-file "deslop-test-codex-headers-"))
-        (config-file (make-temp-file "deslop-test-codex-config-")))
+(ert-deftest ende-test/codex-session-clears-resource-slots ()
+  (let ((process-buffer (generate-new-buffer " *ende-test-codex-process*"))
+        (stderr-buffer (generate-new-buffer " *ende-test-codex-stderr*"))
+        (headers-file (make-temp-file "ende-test-codex-headers-"))
+        (config-file (make-temp-file "ende-test-codex-config-")))
     (let ((session
-           (deslop-codex--make-session
+           (ende-codex--make-session
             :callbacks nil
             :process-buffer process-buffer
             :stderr-buffer stderr-buffer
             :headers-file headers-file
             :config-file config-file)))
-      (deslop-codex--fail
-       session (deslop-error-create :kind 'transport :message "failed"))
-      (should-not (deslop-codex--session-process session))
-      (should-not (deslop-codex--session-process-buffer session))
-      (should-not (deslop-codex--session-stderr-buffer session))
-      (should-not (deslop-codex--session-stderr-process session))
-      (should-not (deslop-codex--session-headers-file session))
-      (should-not (deslop-codex--session-config-file session))
+      (ende-codex--fail
+       session (ende-error-create :kind 'transport :message "failed"))
+      (should-not (ende-codex--session-process session))
+      (should-not (ende-codex--session-process-buffer session))
+      (should-not (ende-codex--session-stderr-buffer session))
+      (should-not (ende-codex--session-stderr-process session))
+      (should-not (ende-codex--session-headers-file session))
+      (should-not (ende-codex--session-config-file session))
       (should-not (buffer-live-p process-buffer))
       (should-not (buffer-live-p stderr-buffer))
       (should-not (file-exists-p headers-file))
       (should-not (file-exists-p config-file)))))
 
-(ert-deftest deslop-test/provider-processes-from-tramp-stay-local ()
+(ert-deftest ende-test/provider-processes-from-tramp-stay-local ()
   (dolist (operation '(generation codex-generation discovery models refresh))
     (let ((native-comp-enable-subr-trampolines nil)
-          (default-directory "/ssh:deslop-test.invalid:/source/")
-          (deslop-provider-discovery-enabled nil)
-          (deslop-provider--discovery-cache (make-hash-table :test #'equal))
-          (deslop-provider--discovery-inflight (make-hash-table :test #'equal))
-          (deslop-codex--refresh-flights (make-hash-table :test #'equal))
+          (default-directory "/ssh:ende-test.invalid:/source/")
+          (ende-provider-discovery-enabled nil)
+          (ende-provider--discovery-cache (make-hash-table :test #'equal))
+          (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (auth '(:access "test-access" :refresh "test-refresh"
                   :expires 9999999999999))
           (profile '(:name test :url "https://example.test/v1/chat/completions"
@@ -2593,7 +2593,7 @@ process for cancellation tests."
                          (should-not (file-remote-p path))
                          (should (file-exists-p path)))))
                    (setq process
-                         (funcall real-process :name "deslop-test-local"
+                         (funcall real-process :name "ende-test-local"
                                   :command '("cat") :connection-type 'pipe
                                   :noquery t))))
                 ((symbol-function 'make-pipe-process)
@@ -2615,57 +2615,57 @@ process for cancellation tests."
                    (when (eq operation 'refresh)
                      (should (string-match-p "refresh_token=test-refresh" body)))
                    (cl-incf send-count)))
-                ((symbol-function 'deslop-codex--auth-entry) (lambda () auth)))
+                ((symbol-function 'ende-codex--auth-entry) (lambda () auth)))
         (unwind-protect
             (let ((callbacks (list :on-start (lambda (value) (setq cancel value))
                                    :on-error (lambda (value) (setq failure value)))))
               (pcase operation
                 ('generation
-                 (deslop-llm-default '(("user" . "remote source")) callbacks profile))
+                 (ende-llm-default '(("user" . "remote source")) callbacks profile))
                 ('codex-generation
-                 (deslop-codex-default '(("user" . "remote source")) callbacks))
+                 (ende-codex-default '(("user" . "remote source")) callbacks))
                 ('discovery
-                 (let ((deslop-provider-discovery-enabled t))
-                   (setq cancel (deslop-provider-discover profile #'ignore))))
+                 (let ((ende-provider-discovery-enabled t))
+                   (setq cancel (ende-provider-discover profile #'ignore))))
                 ('models
-                 (setq cancel (deslop-codex-probe-models
+                 (setq cancel (ende-codex-probe-models
                                (lambda (_models error) (setq failure error)))))
                 ('refresh
-                 (setq cancel (deslop-codex--refresh-auth
+                 (setq cancel (ende-codex--refresh-auth
                                auth (lambda (value) (setq failure value))))))
               (should-not failure)
               (should (= process-count 1))
               (should (= pipe-count 1))
               (should (= send-count (if (memq operation '(discovery models)) 0 1)))
               (should files)
-              (should (equal default-directory "/ssh:deslop-test.invalid:/source/")))
+              (should (equal default-directory "/ssh:ende-test.invalid:/source/")))
           (when cancel (funcall cancel))
           (when (and process (process-live-p process)) (delete-process process))
           (when process
-            (deslop-curl-cleanup-resources
-             (list (process-get process :deslop-response-buffer)
-                   (process-get process :deslop-stderr-buffer))
+            (ende-curl-cleanup-resources
+             (list (process-get process :ende-response-buffer)
+                   (process-get process :ende-stderr-buffer))
              files
-             (list (process-get process :deslop-stderr-process)))))))))
+             (list (process-get process :ende-stderr-process)))))))))
 
-(ert-deftest deslop-test/provider-rejects-unsafe-temporary-directory ()
-  (dolist (directory '("/ssh:deslop-test.invalid:/tmp/" "relative-temp/"))
+(ert-deftest ende-test/provider-rejects-unsafe-temporary-directory ()
+  (dolist (directory '("/ssh:ende-test.invalid:/tmp/" "relative-temp/"))
     (let ((native-comp-enable-subr-trampolines nil)
           (temporary-file-directory directory))
       (cl-letf (((symbol-function 'make-process)
                  (lambda (&rest _) (ert-fail "Started a process")))
                 ((symbol-function 'make-temp-file)
                  (lambda (&rest _) (ert-fail "Created a temporary file")))
-                ((symbol-function 'deslop-curl--auth-secret)
+                ((symbol-function 'ende-curl--auth-secret)
                  (lambda (&rest _) (ert-fail "Read credentials"))))
-        (should-error (deslop-curl-local-directory) :type 'user-error)
+        (should-error (ende-curl-local-directory) :type 'user-error)
         (should-error
-         (deslop-curl-start-request :profile '(:url "https://example.test"))
+         (ende-curl-start-request :profile '(:url "https://example.test"))
          :type 'user-error)
-        (should-error (deslop-curl--config '(:url "https://example.test"))
+        (should-error (ende-curl--config '(:url "https://example.test"))
                       :type 'user-error)))))
 
-(defun deslop-test--run-default-transport (header response)
+(defun ende-test--run-default-transport (header response)
   "Run the default transport with a mocked process and HEADER/RESPONSE.
 Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((captured nil)
@@ -2676,7 +2676,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (error-count 0)
          (cancel-function nil)
          (events nil)
-        (deslop-provider-discovery-enabled nil)
+        (ende-provider-discovery-enabled nil)
         (real-make-process (symbol-function 'make-process))
          (profile (list :name 'test
                         :job-id 1
@@ -2697,7 +2697,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         :connection-type 'pipe)))))
       (unwind-protect
           (progn
-            (deslop-llm-default
+            (ende-llm-default
              (list (cons "user" "body"))
                (list :on-start (lambda (cancel)
                                  (setq cancel-function cancel))
@@ -2729,8 +2729,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (when (and (processp process) (process-live-p process))
           (delete-process process))))))
 
-(ert-deftest deslop-test/default-transport-completes-valid-sse ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-completes-valid-sse ()
+  (let ((out (ende-test--run-default-transport
                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
                "data: {\"model\":\"actual-model\",\"provider\":\"llama.cpp\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")))
     (should-not (nth 1 out))
@@ -2743,31 +2743,31 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should-not (member "hello" (nth 2 out)))
     (should (member "Accept: text/event-stream" (nth 2 out)))
     (should (equal (cadr (member "--user-agent" (nth 2 out)))
-                   deslop-client-name))
+                   ende-client-name))
     (should (member "@-" (nth 2 out)))))
 
-(ert-deftest deslop-test/default-transport-accepts-text-completion-deltas ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-accepts-text-completion-deltas ()
+  (let ((out (ende-test--run-default-transport
                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
                "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
     (should-not (nth 1 out))
     (should (string= (plist-get (nth 0 out) :content) "legacy"))))
 
-(ert-deftest deslop-test/default-transport-requires-done ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-requires-done ()
+  (let ((out (ende-test--run-default-transport
               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
               "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}]}\n\n")))
     (should-not (nth 0 out))
-    (should (eq (deslop-error-kind (nth 1 out)) 'protocol))
+    (should (eq (ende-error-kind (nth 1 out)) 'protocol))
     (should (string-match-p "without \\[DONE\\]"
-                            (deslop-error-message (nth 1 out))))))
+                            (ende-error-message (nth 1 out))))))
 
-(ert-deftest deslop-test/default-transport-retains-joined-partial-result ()
+(ert-deftest ende-test/default-transport-retains-joined-partial-result ()
   (let* ((first
           "data: {\"choices\":[{\"finish_reason\":null,\"delta\":{\"reasoning_content\":\"Sub\"}}]}\n\n")
          (second
           "data: {\"choices\":[{\"finish_reason\":\"length\",\"delta\":{\"reasoning_content\":\"headings\"}}]}\n\n")
-         (out (deslop-test--run-default-transport
+         (out (ende-test--run-default-transport
                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
                (concat first second
                        "data: {\"choices\":[],\"usage\":{\"completion_tokens\":4096}}\n\n"
@@ -2782,26 +2782,26 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (string= (plist-get (plist-get partial :result) :finish-reason)
                      "length"))))
 
-(ert-deftest deslop-test/default-transport-rejects-http-errors ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-rejects-http-errors ()
+  (let ((out (ende-test--run-default-transport
               "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/event-stream\r\n\r\n"
               "data: {\"error\":{\"message\":\"bad key\"}}\n\ndata: [DONE]\n\n")))
     (should-not (nth 0 out))
-    (should (deslop-error-p (nth 1 out)))
-    (should (eq (deslop-error-kind (nth 1 out)) 'http))
+    (should (ende-error-p (nth 1 out)))
+    (should (eq (ende-error-kind (nth 1 out)) 'http))
     (should (= (nth 3 out) 0))
     (should (= (nth 4 out) 1))))
 
-(ert-deftest deslop-test/default-transport-settles-empty-provider-error ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-settles-empty-provider-error ()
+  (let ((out (ende-test--run-default-transport
               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
               "data: {\"error\":{}}\n\ndata: [DONE]\n\n")))
     (should-not (nth 0 out))
-    (should (eq (deslop-error-kind (nth 1 out)) 'provider))
+    (should (eq (ende-error-kind (nth 1 out)) 'provider))
     (should (= (nth 4 out) 1))))
 
-(ert-deftest deslop-test/default-transport-done-ignores-same-chunk-trailing-data ()
-  (let ((out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-done-ignores-same-chunk-trailing-data ()
+  (let ((out (ende-test--run-default-transport
               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
               (concat
                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
@@ -2811,57 +2811,57 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
      (should-not (nth 1 out))
      (should (= (nth 3 out) 1))))
 
-(ert-deftest deslop-test/openai-profile-uses-opencode-oauth ()
-  (let ((profile (deslop-provider-profile 'openai)))
+(ert-deftest ende-test/openai-profile-uses-opencode-oauth ()
+  (let ((profile (ende-provider-profile 'openai)))
     (should (eq (plist-get profile :wire-api) 'responses))
     (should (eq (plist-get profile :auth-method) 'opencode-oauth))
     (should (string= (plist-get profile :model) "gpt-5.6-luna"))
     (should (string= (plist-get profile :url)
                      "https://chatgpt.com/backend-api/codex/responses"))
-    (should-not (deslop-provider-configured-model profile))
-    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :access))
-    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :refresh)))
-  (let ((deslop-codex-model "gpt-configured"))
-    (should (string= (deslop-provider-configured-model
-                     (deslop-provider-profile 'openai))
+    (should-not (ende-provider-configured-model profile))
+    (should-not (plist-get (ende-provider-profile-snapshot 'openai) :access))
+    (should-not (plist-get (ende-provider-profile-snapshot 'openai) :refresh)))
+  (let ((ende-codex-model "gpt-configured"))
+    (should (string= (ende-provider-configured-model
+                     (ende-provider-profile 'openai))
                     "gpt-configured"))))
 
-(ert-deftest deslop-test/provider-list-and-configured-models-are-selectable ()
-  (let ((deslop-providers '(openai local))
-        (deslop-provider-profiles
+(ert-deftest ende-test/provider-list-and-configured-models-are-selectable ()
+  (let ((ende-providers '(openai local))
+        (ende-provider-profiles
          '((local :models ("local-one" "local-two")))))
-    (should (equal (deslop-provider-names) '(openai local)))
-    (should (equal (deslop-provider-models
-                    (deslop-provider-profile 'local))
+    (should (equal (ende-provider-names) '(openai local)))
+    (should (equal (ende-provider-models
+                    (ende-provider-profile 'local))
                    '("local-one" "local-two")))))
 
-(ert-deftest deslop-test/provider-runtime-concurrency-and-parallel-settings ()
-  (deslop-provider-clear-runtime-settings)
-  (let ((deslop-provider-profiles
+(ert-deftest ende-test/provider-runtime-concurrency-and-parallel-settings ()
+  (ende-provider-clear-runtime-settings)
+  (let ((ende-provider-profiles
          '((remote :max-concurrency 3 :parallel nil))))
-    (let ((profile (deslop-provider-profile 'remote)))
-      (should (= (deslop-provider-max-concurrency profile) 3))
-      (should-not (deslop-provider-parallel-enabled-p profile)))
-    (deslop-provider-set-runtime-setting 'remote :max-concurrency 5)
-    (deslop-provider-set-runtime-setting 'remote :parallel t)
-    (let ((profile (deslop-provider-profile 'remote)))
-      (should (= (deslop-provider-max-concurrency profile) 5))
-      (should (deslop-provider-parallel-enabled-p profile)))))
+    (let ((profile (ende-provider-profile 'remote)))
+      (should (= (ende-provider-max-concurrency profile) 3))
+      (should-not (ende-provider-parallel-enabled-p profile)))
+    (ende-provider-set-runtime-setting 'remote :max-concurrency 5)
+    (ende-provider-set-runtime-setting 'remote :parallel t)
+    (let ((profile (ende-provider-profile 'remote)))
+      (should (= (ende-provider-max-concurrency profile) 5))
+      (should (ende-provider-parallel-enabled-p profile)))))
 
-(ert-deftest deslop-test/openai-model-probe-parses-official-slugs ()
+(ert-deftest ende-test/openai-model-probe-parses-official-slugs ()
   (should (equal
-           (deslop-codex--parse-models
+           (ende-codex--parse-models
             (concat "{\"models\":[{\"slug\":\"gpt-5.6-luna\"},"
                     "{\"slug\":\"gpt-5.5\"},{\"title\":\"ignored\"}]}"))
            '("gpt-5.6-luna" "gpt-5.5"))))
 
-(ert-deftest deslop-test/openai-model-probe-response-is-bounded ()
-  (let ((deslop-provider-max-discovery-bytes 4)
+(ert-deftest ende-test/openai-model-probe-response-is-bounded ()
+  (let ((ende-provider-max-discovery-bytes 4)
         (captured nil)
         (process nil)
         (result nil)
         (real-make-process (symbol-function 'make-process)))
-    (cl-letf (((symbol-function 'deslop-codex--resolve-auth)
+    (cl-letf (((symbol-function 'ende-codex--resolve-auth)
                (lambda (callback)
                  (funcall callback '(:access "access-token"))
                  nil))
@@ -2876,73 +2876,73 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                 :connection-type 'pipe)))))
       (unwind-protect
           (progn
-            (deslop-codex-probe-models
+            (ende-codex-probe-models
              (lambda (models error)
                (setq result (list models error))))
             (should (process-live-p process))
             (funcall (plist-get captured :filter) process "oversized")
             (should (equal (car result) nil))
-            (should (deslop-error-p (cadr result)))
-            (should (eq (deslop-error-kind (cadr result)) 'resource))
+            (should (ende-error-p (cadr result)))
+            (should (eq (ende-error-kind (cadr result)) 'resource))
             (should-not (process-live-p process))
-            (should-not deslop-codex--model-probe-processes))
+            (should-not ende-codex--model-probe-processes))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (setq deslop-codex--model-probe-processes nil)))))
+        (setq ende-codex--model-probe-processes nil)))))
 
-(ert-deftest deslop-test/selector-runs-from-source-with-selected-profile ()
-  (let* ((source (generate-new-buffer " *deslop-selector-source*"))
-         (selector (generate-new-buffer " *deslop-selector-test*"))
-         (deslop-providers '(local))
-         (deslop-provider-profiles '((local :models ("one" "two"))))
-         (deslop-selector--last-selection nil)
+(ert-deftest ende-test/selector-runs-from-source-with-selected-profile ()
+  (let* ((source (generate-new-buffer " *ende-selector-source*"))
+         (selector (generate-new-buffer " *ende-selector-test*"))
+         (ende-providers '(local))
+         (ende-provider-profiles '((local :models ("one" "two"))))
+         (ende-selector--last-selection nil)
          (queued nil))
     (unwind-protect
         (progn
           (with-current-buffer source
             (insert "source"))
           (with-current-buffer selector
-            (deslop-selector-mode)
-            (setq deslop-selector--source-buffer source
-                  deslop-selector--providers '(local)
-                  deslop-selector--provider-index 0
-                  deslop-selector--models '("one" "two")
-                  deslop-selector--model-index 0)
-            (deslop-selector-next-model)
-             (cl-letf (((symbol-function 'deslop-enqueue-operation)
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(local)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("one" "two")
+                  ende-selector--model-index 0)
+            (ende-selector-next-model)
+             (cl-letf (((symbol-function 'ende-enqueue-operation)
                        (lambda (type instruction profile)
                          (setq queued
                                (list type instruction profile (current-buffer))))))
-               (deslop-selector-insert))))
+               (ende-selector-insert))))
           (should (eq (nth 0 queued) 'insert))
           (should (string= (plist-get (nth 2 queued) :model) "two"))
-          (should (equal deslop-selector--last-selection
+          (should (equal ende-selector--last-selection
                          '(:provider local :model "two")))
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-model-completion-updates-choice ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-model-test*"))
+(ert-deftest ende-test/selector-model-completion-updates-choice ()
+  (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
         (completion-call nil)
-        (deslop-selector--last-selection nil))
+        (ende-selector--last-selection nil))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0
-                deslop-selector--models
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models
                 '("remote/alpha" "remote/beta" "other/gamma")
-                deslop-selector--model-details
+                ende-selector--model-details
                 '((:id "remote/alpha" :name "Alpha Model"
                    :pricing (:prompt "0.000003" :completion "0.000009"
                              :input-cache-read "0.000001"
                              :input-cache-write "0.000004"))
                   (:id "remote/beta" :name "Beta Model")
                   (:id "other/gamma" :name "Gamma Model"))
-                deslop-selector--model-index 0
-                deslop-selector--model-state :ready)
+                ende-selector--model-index 0
+                ende-selector--model-state :ready)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (prompt collection predicate require-match
                                      initial-input history default &rest _)
@@ -2958,7 +2958,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                     :styles completion-styles
                                     :ignore-case completion-ignore-case))
                         "remote/beta")))
-             (deslop-selector-select-model))
+             (ende-selector-select-model))
            (should (equal (plist-get completion-call :prompt) "Model: "))
            (should (equal (plist-get completion-call :collection)
                           '("remote/alpha" "remote/beta" "other/gamma")))
@@ -2980,176 +2980,176 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
              (should (string= (substring-no-properties priced-model)
                               "remote/alpha"))
              (should (eq (get-text-property 0 'face priced-model)
-                         'deslop-selector-model-face))
+                         'ende-selector-model-face))
              (should
               (string=
                (substring-no-properties priced-suffix)
                "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
              (should (eq (get-text-property (string-match "in:" priced-suffix)
                                             'face priced-suffix)
-                         'deslop-selector-price-muted-face))
+                         'ende-selector-price-muted-face))
              (should (eq (get-text-property (string-match "out:" priced-suffix)
                                             'face priced-suffix)
-                         'deslop-selector-price-output-face))
+                         'ende-selector-price-output-face))
              (should (eq (get-text-property
                           (string-match "cache-read:" priced-suffix)
                           'face priced-suffix)
-                         'deslop-selector-price-muted-face))
+                         'ende-selector-price-muted-face))
              (should (equal (mapcar #'substring-no-properties
                                     (list (car unpriced) (nth 2 unpriced)))
                             '("remote/beta" ""))))
             (should (equal (plist-get completion-call :styles) '(substring)))
             (should (plist-get completion-call :ignore-case))
-            (should (= deslop-selector--model-index 1))
-            (should (string= (deslop-selector--model-name) "remote/beta"))
-            (should (equal deslop-selector--last-selection
+            (should (= ende-selector--model-index 1))
+            (should (string= (ende-selector--model-name) "remote/beta"))
+            (should (equal ende-selector--last-selection
                            '(:provider remote :model "remote/beta"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-preserves-remembered-model-after-discovery ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-discovery-test*"))
+(ert-deftest ende-test/selector-preserves-remembered-model-after-discovery ()
+  (let ((buffer (generate-new-buffer " *ende-selector-discovery-test*"))
         (probe-callback nil)
-        (deslop-selector--last-selection
+        (ende-selector--last-selection
          '(:provider remote :model "remote/remembered"))
-        (deslop-provider-profiles
+        (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions"
                    :model "remote/default"))))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0)
-          (cl-letf (((symbol-function 'deslop-provider-probe-models)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0)
+          (cl-letf (((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
                        (setq probe-callback callback)
                        (lambda () nil))))
-            (deslop-selector--set-provider 0)
-            (should (string= (deslop-selector--model-name)
+            (ende-selector--set-provider 0)
+            (should (string= (ende-selector--model-name)
                              "remote/remembered"))
             (should (string-match-p "validating"
                                     (buffer-string)))
             (funcall probe-callback
                      '("remote/default" "remote/remembered") nil)
-            (should (string= (deslop-selector--model-name)
+            (should (string= (ende-selector--model-name)
                              "remote/remembered"))))
        (when (buffer-live-p buffer)
          (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-uses-cached-models-before-rendering ()
-  (let* ((buffer (generate-new-buffer " *deslop-selector-cached-models-test*"))
+(ert-deftest ende-test/selector-uses-cached-models-before-rendering ()
+  (let* ((buffer (generate-new-buffer " *ende-selector-cached-models-test*"))
          (profile '(:name remote
                     :url "http://remote.example/v1/chat/completions"))
-         (deslop-providers '(remote))
-         (deslop-provider-profiles
+         (ende-providers '(remote))
+         (ende-provider-profiles
           '((remote :url "http://remote.example/v1/chat/completions")))
-         (deslop-selector--last-selection
+         (ende-selector--last-selection
           '(:provider remote :model "remote/saved"))
-         (deslop-provider--model-cache (make-hash-table :test #'equal))
-         (deslop-provider--model-inflight (make-hash-table :test #'equal))
-         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-         (deslop-provider--model-generation 0))
+         (ende-provider--model-cache (make-hash-table :test #'equal))
+         (ende-provider--model-inflight (make-hash-table :test #'equal))
+         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--model-generation 0))
     (unwind-protect
         (progn
-          (deslop-provider--finish-model-discovery
-           (deslop-provider--model-cache-key profile)
+          (ende-provider--finish-model-discovery
+           (ende-provider--model-cache-key profile)
            '("remote/first" "remote/saved") nil nil)
           (with-current-buffer buffer
-            (deslop-selector-mode)
-            (setq deslop-selector--providers '(remote)
-                  deslop-selector--provider-index 0)
-            (cl-letf (((symbol-function 'deslop-provider-probe-models)
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0)
+            (cl-letf (((symbol-function 'ende-provider-probe-models)
                        (lambda (&rest _)
                          (error "cached model catalog was not used"))))
-              (deslop-selector--set-provider 0)
-              (should (string= (deslop-selector--model-name)
+              (ende-selector--set-provider 0)
+              (should (string= (ende-selector--model-name)
                                "remote/saved"))
-              (should (eq deslop-selector--model-state :ready))
-              (setq deslop-selector--last-selection nil)
-              (deslop-selector--set-provider 0)
-              (should (string= (deslop-selector--model-name)
+              (should (eq ende-selector--model-state :ready))
+              (setq ende-selector--last-selection nil)
+              (ende-selector--set-provider 0)
+              (should (string= (ende-selector--model-name)
                                "remote/first")))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-validates-first-model-without-preference ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-first-model-test*"))
+(ert-deftest ende-test/selector-validates-first-model-without-preference ()
+  (let ((buffer (generate-new-buffer " *ende-selector-first-model-test*"))
         (probe-callback nil)
-        (deslop-providers '(remote))
-        (deslop-provider-profiles
+        (ende-providers '(remote))
+        (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions")))
-        (deslop-selector--last-selection nil))
+        (ende-selector--last-selection nil))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0)
-          (cl-letf (((symbol-function 'deslop-provider-probe-models)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0)
+          (cl-letf (((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
                        (setq probe-callback callback)
                        (lambda () nil))))
-            (deslop-selector--set-provider 0)
-            (should-not (deslop-selector--model-name))
+            (ende-selector--set-provider 0)
+            (should-not (ende-selector--model-name))
             (should (string-match-p "validating" (buffer-string)))
             (funcall probe-callback '("remote/first" "remote/second") nil)
-            (should (string= (deslop-selector--model-name)
+            (should (string= (ende-selector--model-name)
                              "remote/first"))
-            (should (eq deslop-selector--model-state :ready))))
+            (should (eq ende-selector--model-state :ready))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-validates-preferences-once-per-catalog ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-validation-test*"))
+(ert-deftest ende-test/selector-validates-preferences-once-per-catalog ()
+  (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
         (messages nil)
-        (deslop-providers '(remote))
-        (deslop-provider-profiles
+        (ende-providers '(remote))
+        (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions")))
-        (deslop-selector--last-selection
+        (ende-selector--last-selection
          '(:provider remote :model "remote/missing"))
-        (deslop-selector--model-validations (make-hash-table :test #'equal))
-        (deslop-provider--model-cache (make-hash-table :test #'equal))
-        (deslop-provider--model-inflight (make-hash-table :test #'equal))
-        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-        (deslop-provider--model-generation 0))
+        (ende-selector--model-validations (make-hash-table :test #'equal))
+        (ende-provider--model-cache (make-hash-table :test #'equal))
+        (ende-provider--model-inflight (make-hash-table :test #'equal))
+        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--model-generation 0))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0)
           (cl-letf (((symbol-function 'message)
                      (lambda (format-string &rest args)
                        (push (apply #'format format-string args) messages)))
-                    ((symbol-function 'deslop-provider-probe-models)
+                    ((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
                        (funcall callback '("remote/first" "remote/second") nil)
                        (lambda () nil))))
-            (deslop-selector--set-provider 0)
-            (should (string= (deslop-selector--model-name) "remote/first"))
+            (ende-selector--set-provider 0)
+            (should (string= (ende-selector--model-name) "remote/first"))
             (should (= (cl-count-if
                         (lambda (value)
                           (string-match-p "unavailable" value))
                         messages)
                        1))
-            (deslop-selector--set-provider 0)
+            (ende-selector--set-provider 0)
             (should (= (cl-count-if
                         (lambda (value)
                           (string-match-p "unavailable" value))
                         messages)
                        1))
-            (setq deslop-selector--last-selection
+            (setq ende-selector--last-selection
                   '(:provider remote :model "remote/second"))
-            (deslop-selector--set-provider 0)
-            (should (string= (deslop-selector--model-name)
+            (ende-selector--set-provider 0)
+            (should (string= (ende-selector--model-name)
                              "remote/second"))
             (should (= (cl-count-if
                         (lambda (value)
                           (string-match-p "unavailable" value))
                         messages)
                        1))
-            (deslop-provider-clear-discovery-cache)
-            (setq deslop-selector--last-selection
+            (ende-provider-clear-discovery-cache)
+            (setq ende-selector--last-selection
                   '(:provider remote :model "remote/missing"))
-            (deslop-selector--set-provider 0)
+            (ende-selector--set-provider 0)
             (should (= (cl-count-if
                         (lambda (value)
                           (string-match-p "unavailable" value))
@@ -3158,28 +3158,28 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-model-completion-rejects-incomplete-discovery ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-model-loading-test*"))
+(ert-deftest ende-test/selector-model-completion-rejects-incomplete-discovery ()
+  (let ((buffer (generate-new-buffer " *ende-selector-model-loading-test*"))
         (called nil))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0
-                deslop-selector--models '("remote/default")
-                deslop-selector--model-index 0
-                deslop-selector--model-state :loading)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("remote/default")
+                ende-selector--model-index 0
+                ende-selector--model-state :loading)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (&rest _)
                        (setq called t)
                        "remote/default")))
-            (should-error (deslop-selector-select-model) :type 'user-error))
+            (should-error (ende-selector-select-model) :type 'user-error))
           (should-not called))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/selector-uses-bottom-window-and-quits-it-on-close ()
-  (let ((source (generate-new-buffer " *deslop-selector-window-source*"))
+(ert-deftest ende-test/selector-uses-bottom-window-and-quits-it-on-close ()
+  (let ((source (generate-new-buffer " *ende-selector-window-source*"))
         (display-action nil)
         (quit-window-call nil)
         (probe-profile nil)
@@ -3193,28 +3193,28 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      ((symbol-function 'quit-window)
                       (lambda (kill window)
                         (setq quit-window-call (list kill window))))
-                     ((symbol-function 'deslop-provider-probe-models)
+                     ((symbol-function 'ende-provider-probe-models)
                       (lambda (profile callback)
                         (setq probe-profile profile)
                         (funcall callback '("local-model") nil)
                         (lambda () nil))))
-            (let ((deslop-providers '(local))
-                  (deslop-provider-profiles
+            (let ((ende-providers '(local))
+                  (ende-provider-profiles
                    '((local :model "local-model"))))
-              (deslop-selector-open)
-              (setq selector (get-buffer deslop-selector-buffer-name))
+              (ende-selector-open)
+              (setq selector (get-buffer ende-selector-buffer-name))
               (should (eq (plist-get probe-profile :name) 'local))
               (should (eq (car display-action) selector))
               (should (eq (car (car (cadr display-action)))
                           #'display-buffer-at-bottom))
               (should (eq (cdr (assq 'window-height
                                      (cdr (cadr display-action))))
-                          #'deslop-selector--fit-window))
+                          #'ende-selector--fit-window))
               (should (equal (cdr (assq 'window-min-height
                                         (cdr (cadr display-action))))
-                             deslop-selector-window-min-height))
+                             ende-selector-window-min-height))
               (with-current-buffer selector
-                (deslop-selector-close))
+                (ende-selector-close))
               (should (equal (car quit-window-call) t))
               (should (eq (cadr quit-window-call) (selected-window)))
               (should-not (buffer-live-p selector)))))
@@ -3223,28 +3223,28 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
-(ert-deftest deslop-test/selector-changes-provider-runtime-settings ()
-  (deslop-provider-clear-runtime-settings)
-  (let ((deslop-providers '(remote))
-        (deslop-provider-profiles
+(ert-deftest ende-test/selector-changes-provider-runtime-settings ()
+  (ende-provider-clear-runtime-settings)
+  (let ((ende-providers '(remote))
+        (ende-provider-profiles
          '((remote :model "remote-model" :max-concurrency 2
                    :parallel nil))))
     (with-temp-buffer
-      (deslop-selector-mode)
-      (setq deslop-selector--providers '(remote)
-            deslop-selector--provider-index 0
-            deslop-selector--models '("remote-model")
-            deslop-selector--model-index 0)
+      (ende-selector-mode)
+      (setq ende-selector--providers '(remote)
+            ende-selector--provider-index 0
+            ende-selector--models '("remote-model")
+            ende-selector--model-index 0)
       (cl-letf (((symbol-function 'read-number)
                  (lambda (&rest _) 4)))
-       (deslop-selector-set-concurrency))
-      (should (= (deslop-provider-max-concurrency
-                  (deslop-provider-profile 'remote))
+       (ende-selector-set-concurrency))
+      (should (= (ende-provider-max-concurrency
+                  (ende-provider-profile 'remote))
                  4))
-      (should-not (deslop-selector--provider-parallel-p))
-      (deslop-selector-toggle-parallel)
-      (should (deslop-selector--provider-parallel-p))
-      (deslop-selector--render)
+      (should-not (ende-selector--provider-parallel-p))
+      (ende-selector-toggle-parallel)
+      (should (ende-selector--provider-parallel-p))
+      (ende-selector--render)
        (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
                       "i  - insert" "I  - insert anywhere"
                        "w  - write anywhere"
@@ -3257,51 +3257,51 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (should (string-match-p (regexp-quote key) (buffer-string))))
         (should (= (count-lines (point-min) (point-max)) 16)))))
 
-(ert-deftest deslop-test/selector-runtime-keybindings-survive-reload ()
-  (let ((original-c (lookup-key deslop-selector-mode-map (kbd "c")))
-        (original-C (lookup-key deslop-selector-mode-map (kbd "C")))
-        (original-P (lookup-key deslop-selector-mode-map (kbd "P"))))
+(ert-deftest ende-test/selector-runtime-keybindings-survive-reload ()
+  (let ((original-c (lookup-key ende-selector-mode-map (kbd "c")))
+        (original-C (lookup-key ende-selector-mode-map (kbd "C")))
+        (original-P (lookup-key ende-selector-mode-map (kbd "P"))))
     (unwind-protect
         (progn
           ;; Simulate a keymap retained from before the new bindings existed.
-          (define-key deslop-selector-mode-map (kbd "c") nil)
-          (define-key deslop-selector-mode-map (kbd "C") nil)
-          (define-key deslop-selector-mode-map (kbd "P") nil)
+          (define-key ende-selector-mode-map (kbd "c") nil)
+          (define-key ende-selector-mode-map (kbd "C") nil)
+          (define-key ende-selector-mode-map (kbd "P") nil)
           (with-temp-buffer
-            (deslop-selector-mode)
+            (ende-selector-mode)
             (should (eq (key-binding (kbd "c"))
-                        #'deslop-selector-set-concurrency))
+                        #'ende-selector-set-concurrency))
             (should (eq (key-binding (kbd "C"))
-                        #'deslop-selector-set-concurrency))
+                        #'ende-selector-set-concurrency))
              (should (eq (key-binding (kbd "P"))
-                         #'deslop-selector-toggle-parallel))
+                         #'ende-selector-toggle-parallel))
              (should (eq (key-binding (kbd "n"))
-                         #'deslop-selector-next-provider))
+                         #'ende-selector-next-provider))
              (should (eq (key-binding (kbd "p"))
-                         #'deslop-selector-previous-provider))
+                         #'ende-selector-previous-provider))
              (should (eq (key-binding (kbd "m"))
-                         #'deslop-selector-select-model))
+                         #'ende-selector-select-model))
              (should (eq (key-binding (kbd "RET"))
-                         #'deslop-selector-confirm))
+                         #'ende-selector-confirm))
              (should (eq (key-binding (kbd "C-c C-c"))
-                         #'deslop-selector-approve-source-output))
+                         #'ende-selector-approve-source-output))
              (should (eq (key-binding (kbd "C-c C-k"))
-                         #'deslop-selector-reject-source-output))
+                         #'ende-selector-reject-source-output))
              (should-not (eq (key-binding (kbd "DEL"))
-                             #'deslop-selector-reject-source-output))
+                             #'ende-selector-reject-source-output))
              (should-not (eq (key-binding (kbd "<backspace>"))
-                             #'deslop-selector-reject-source-output))
+                             #'ende-selector-reject-source-output))
             (should (eq (key-binding (kbd "w"))
-                        #'deslop-selector-write-anywhere))
+                        #'ende-selector-write-anywhere))
             (should (eq (key-binding (kbd "I"))
-                        #'deslop-selector-insert-anywhere))))
-      (define-key deslop-selector-mode-map (kbd "c") original-c)
-       (define-key deslop-selector-mode-map (kbd "C") original-C)
-       (define-key deslop-selector-mode-map (kbd "P") original-P))))
+                        #'ende-selector-insert-anywhere))))
+      (define-key ende-selector-mode-map (kbd "c") original-c)
+       (define-key ende-selector-mode-map (kbd "C") original-C)
+       (define-key ende-selector-mode-map (kbd "P") original-P))))
 
-(ert-deftest deslop-test/selector-labels-are-single-line-and-display-bounded ()
-  (let ((multiline (deslop-selector--display-label "provider\nspoof" 24))
-        (long (deslop-selector--display-label
+(ert-deftest ende-test/selector-labels-are-single-line-and-display-bounded ()
+  (let ((multiline (ende-selector--display-label "provider\nspoof" 24))
+        (long (ende-selector--display-label
                "provider-name-that-is-longer-than-the-row" 24)))
     (should (string-match-p "provider spoof" multiline))
     (should-not (string-match-p "\n" multiline))
@@ -3309,30 +3309,30 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (string-suffix-p "..." (string-trim-right long)))
     (should (= (string-width long) 24))))
 
-(ert-deftest deslop-test/selector-probe-callbacks-are-generation-bound ()
-  (let ((buffer (generate-new-buffer " *deslop-selector-probe-test*"))
+(ert-deftest ende-test/selector-probe-callbacks-are-generation-bound ()
+  (let ((buffer (generate-new-buffer " *ende-selector-probe-test*"))
         (callbacks nil)
         (cancelled 0)
-        (deslop-provider-profiles
+        (ende-provider-profiles
          '((remote :url "http://remote.example/v1"
                    :model "configured"))))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0
-                deslop-selector--models '("configured")
-                deslop-selector--model-index 0)
-          (cl-letf (((symbol-function 'deslop-provider-probe-models)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("configured")
+                ende-selector--model-index 0)
+          (cl-letf (((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
                        (setq callbacks (append callbacks (list callback)))
                        (lambda () (setq cancelled (1+ cancelled))))))
-            (deslop-selector--set-provider 0)
+            (ende-selector--set-provider 0)
             (let ((stale (car callbacks)))
-              (deslop-selector--cancel-probe)
-              (deslop-selector--set-provider 0)
+              (ende-selector--cancel-probe)
+              (ende-selector--set-provider 0)
               (funcall stale '("stale") nil)
-              (should (equal deslop-selector--models '("configured")))
+              (should (equal ende-selector--models '("configured")))
               (let ((current (car (last callbacks))))
                 (kill-buffer buffer)
                 (should (= cancelled 2))
@@ -3341,50 +3341,50 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/openai-request-body-matches-codex-responses-shape ()
-  (let* ((body (deslop-protocol-json-read-string
+(ert-deftest ende-test/openai-request-body-matches-codex-responses-shape ()
+  (let* ((body (ende-protocol-json-read-string
                 (json-encode
-                 (deslop-codex--request-body
+                 (ende-codex--request-body
                   (list (cons "system" "rules")
                         (cons "user" "question")
                         (cons "assistant" "answer"))
                   '(:model "gpt-test")))))
-          (input (deslop-protocol-json-get "input" body))
+          (input (ende-protocol-json-get "input" body))
          (user (aref input 1))
-          (user-content (aref (deslop-protocol-json-get "content" user) 0))
+          (user-content (aref (ende-protocol-json-get "content" user) 0))
          (assistant (aref input 2))
          (assistant-content
-          (aref (deslop-protocol-json-get "content" assistant) 0)))
-    (should (eq (deslop-protocol-json-get "store" body) :false))
-    (should (eq (deslop-protocol-json-get "stream" body) t))
-    (should (string= (deslop-protocol-json-get "text" user-content)
+          (aref (ende-protocol-json-get "content" assistant) 0)))
+    (should (eq (ende-protocol-json-get "store" body) :false))
+    (should (eq (ende-protocol-json-get "stream" body) t))
+    (should (string= (ende-protocol-json-get "text" user-content)
                      "question"))
-    (should (string= (deslop-protocol-json-get "type" user-content)
+    (should (string= (ende-protocol-json-get "type" user-content)
                      "input_text"))
-    (should (string= (deslop-protocol-json-get "text" assistant-content)
+    (should (string= (ende-protocol-json-get "text" assistant-content)
                      "answer"))
-    (should (string= (deslop-protocol-json-get "type" assistant-content)
+    (should (string= (ende-protocol-json-get "type" assistant-content)
                      "output_text"))))
 
-(ert-deftest deslop-test/openai-http-error-keeps-provider-detail ()
-  (let ((headers-file (make-temp-file "deslop-openai-error-")))
+(ert-deftest ende-test/openai-http-error-keeps-provider-detail ()
+  (let ((headers-file (make-temp-file "ende-openai-error-")))
     (unwind-protect
         (progn
           (with-temp-file headers-file
             (insert "HTTP/1.1 400 Bad Request\r\n\r\n"))
           (let* ((session
-                  (deslop-codex--make-session
+                  (ende-codex--make-session
                    :headers-file headers-file
                    :preview-parts '("{\"detail\":\"invalid request body\"}")))
-                 (error (deslop-codex--http-error session)))
-            (should (string= (deslop-error-message error)
+                 (error (ende-codex--http-error session)))
+            (should (string= (ende-error-message error)
                              "HTTP status 400: invalid request body"))))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
-(ert-deftest deslop-test/openai-auth-entry-is-read-from-opencode-file ()
-  (let* ((file (make-temp-file "deslop-openai-auth-test-"))
-         (deslop-codex-auth-file file))
+(ert-deftest ende-test/openai-auth-entry-is-read-from-opencode-file ()
+  (let* ((file (make-temp-file "ende-openai-auth-test-"))
+         (ende-codex-auth-file file))
     (unwind-protect
         (progn
           (with-temp-file file
@@ -3393,16 +3393,16 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "\"refresh\":\"refresh-token\","
                     "\"expires\":9999999999999,"
                     "\"accountId\":\"account-id\"}}"))
-          (let ((auth (deslop-codex--auth-entry)))
+          (let ((auth (ende-codex--auth-entry)))
             (should (string= (plist-get auth :access) "access-token"))
             (should (string= (plist-get auth :refresh) "refresh-token"))
             (should (string= (plist-get auth :account-id) "account-id"))))
       (when (file-exists-p file)
         (delete-file file)))))
 
-(ert-deftest deslop-test/openai-transport-keeps-token-out-of-command-arguments ()
-  (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
-         (deslop-codex-auth-file auth-file)
+(ert-deftest ende-test/openai-transport-keeps-token-out-of-command-arguments ()
+  (let* ((auth-file (make-temp-file "ende-openai-auth-test-"))
+         (ende-codex-auth-file auth-file)
          (captured nil)
          (process nil)
          (result nil)
@@ -3425,11 +3425,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                       :buffer (plist-get args :buffer)
                                       :command (list "cat")
                                       :connection-type 'pipe)))))
-            (deslop-codex-default
+            (ende-codex-default
              (list (cons "user" "body"))
              (list :on-done (lambda (value) (setq result value))
                    :on-error (lambda (value) (setq failure value)))
-             (deslop-provider-profile 'openai))
+             (ende-provider-profile 'openai))
             (let* ((command (plist-get captured :command))
                    (config (cadr (member "--config" command)))
                    (headers-file (cadr (member "--dump-header" command)))
@@ -3445,7 +3445,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                 (should (string-match-p "Authorization: Bearer access-token"
                                         (buffer-string))))
               (should (equal (cadr (member "--user-agent" command))
-                             deslop-client-name))
+                             ende-client-name))
               (funcall
                filter
                process
@@ -3468,16 +3468,16 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (file-exists-p auth-file)
         (delete-file auth-file)))))
 
-(ert-deftest deslop-test/openai-rejects-explicit-non-sse-content-type ()
-  (let ((headers-file (make-temp-file "deslop-openai-headers-"))
-        (process (make-process :name "deslop-openai-test"
+(ert-deftest ende-test/openai-rejects-explicit-non-sse-content-type ()
+  (let ((headers-file (make-temp-file "ende-openai-headers-"))
+        (process (make-process :name "ende-openai-test"
                                :command (list "true") :noquery t))
         (result nil)
         (failure nil)
         (events nil))
     (unwind-protect
         (let ((session
-               (deslop-codex--make-session
+               (ende-codex--make-session
                 :profile '(:model "gpt-test")
                 :process process
                 :headers-file headers-file
@@ -3485,13 +3485,13 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                 (list :on-event (lambda (event) (push event events))
                       :on-done (lambda (value) (setq result value))
                       :on-error (lambda (error) (setq failure error)))
-                :sse (deslop-protocol-make-sse)
+                :sse (ende-protocol-make-sse)
                 :estimated-chars 0
                 :received-bytes 0
                 :preview-bytes 0)))
           (with-temp-file headers-file
             (insert "HTTP/2 200\r\nContent-Type: application/json\r\n\r\n"))
-          (deslop-codex--filter
+          (ende-codex--filter
            session process
            (concat "data: {\"type\":\"response.output_text.delta\","
                    "\"delta\":\"answer\"}\n\n"
@@ -3500,11 +3500,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                    "data: [DONE]\n\n"))
           (while (process-live-p process)
             (accept-process-output process 0.05))
-          (deslop-codex--sentinel session process "finished\n")
+          (ende-codex--sentinel session process "finished\n")
           (should-not result)
-          (should (eq (deslop-error-kind failure) 'protocol))
+          (should (eq (ende-error-kind failure) 'protocol))
           (should (string-match-p "application/json"
-                                  (deslop-error-message failure)))
+                                  (ende-error-message failure)))
           (let ((partial
                  (cl-find-if
                   (lambda (event)
@@ -3517,41 +3517,41 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
-(ert-deftest deslop-test/openai-missing-content-type-requires-terminal-event ()
-  (let ((headers-file (make-temp-file "deslop-openai-headers-"))
-        (process (make-process :name "deslop-openai-incomplete-test"
+(ert-deftest ende-test/openai-missing-content-type-requires-terminal-event ()
+  (let ((headers-file (make-temp-file "ende-openai-headers-"))
+        (process (make-process :name "ende-openai-incomplete-test"
                                :command (list "true") :noquery t))
         (failure nil))
     (unwind-protect
         (let ((session
-               (deslop-codex--make-session
+               (ende-codex--make-session
                 :profile '(:model "gpt-test")
                 :process process
                 :headers-file headers-file
                 :callbacks (list :on-error
                                  (lambda (error) (setq failure error)))
-                :sse (deslop-protocol-make-sse)
+                :sse (ende-protocol-make-sse)
                 :estimated-chars 0
                 :received-bytes 0
                 :preview-bytes 0)))
           (with-temp-file headers-file
             (insert "HTTP/2 200\r\n\r\n"))
-          (deslop-codex--filter session process "data: [DONE]\n\n")
+          (ende-codex--filter session process "data: [DONE]\n\n")
           (while (process-live-p process)
             (accept-process-output process 0.05))
-          (deslop-codex--sentinel session process "finished\n")
-          (should (eq (deslop-error-kind failure) 'protocol))
+          (ende-codex--sentinel session process "finished\n")
+          (should (eq (ende-error-kind failure) 'protocol))
           (should (string-match-p "without a terminal response event"
-                                  (deslop-error-message failure))))
+                                  (ende-error-message failure))))
       (when (process-live-p process)
         (delete-process process))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
-(ert-deftest deslop-test/openai-refresh-rotates-opencode-credentials-safely ()
-  (let* ((auth-file (make-temp-file "deslop-openai-auth-test-"))
-         (deslop-codex-auth-file auth-file)
-         (deslop-codex-issuer "https://auth.openai.com:443")
+(ert-deftest ende-test/openai-refresh-rotates-opencode-credentials-safely ()
+  (let* ((auth-file (make-temp-file "ende-openai-auth-test-"))
+         (ende-codex-auth-file auth-file)
+         (ende-codex-issuer "https://auth.openai.com:443")
          (captured nil)
          (process nil)
          (refreshed nil)
@@ -3580,9 +3580,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                       :command (list "cat")
                                       :connection-type 'pipe
                                       :noquery t)))))
-             (deslop-codex--refresh-auth auth
+             (ende-codex--refresh-auth auth
                                          (lambda (value) (setq refreshed value)))
-             (deslop-codex--refresh-auth
+             (ende-codex--refresh-auth
               auth (lambda (value) (setq refreshed-again value)))
              (should (= make-process-count 1))
              (let* ((command (plist-get captured :command))
@@ -3609,79 +3609,79 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                (should (string= (plist-get refreshed :access) "new-access"))
                (should (string= (plist-get refreshed :refresh) "new-refresh"))
                (should (equal refreshed-again refreshed))
-               (should (string= (plist-get (deslop-codex--auth-entry) :refresh)
+               (should (string= (plist-get (ende-codex--auth-entry) :refresh)
                                 "new-refresh")))))
       (when (and (processp process) (process-live-p process))
         (delete-process process))
        (when (file-exists-p auth-file)
           (delete-file auth-file)))))
 
-(ert-deftest deslop-test/openai-refresh-startup-failure-does-not-wedge-flight ()
-  (let* ((key '(deslop-test-refresh))
+(ert-deftest ende-test/openai-refresh-startup-failure-does-not-wedge-flight ()
+  (let* ((key '(ende-test-refresh))
          (result nil)
          (flight
-          (deslop-codex--make-refresh-flight
+          (ende-codex--make-refresh-flight
            :key key
            :auth '(:refresh "refresh-token")
            :waiters
            (list
-            (deslop-codex--make-refresh-waiter
+            (ende-codex--make-refresh-waiter
              :callback (lambda (value) (setq result value))))))
-         (deslop-codex--refresh-flights (make-hash-table :test #'equal))
-         (deslop-codex--refresh-processes nil))
-    (puthash key flight deslop-codex--refresh-flights)
+         (ende-codex--refresh-flights (make-hash-table :test #'equal))
+         (ende-codex--refresh-processes nil))
+    (puthash key flight ende-codex--refresh-flights)
     (cl-letf (((symbol-function 'make-temp-file)
                (lambda (&rest _)
                  (error "temporary file creation failed"))))
-      (deslop-codex--start-refresh-flight flight))
-    (should (deslop-codex--refresh-flight-finished flight))
-    (should (deslop-error-p result))
-    (should-not (gethash key deslop-codex--refresh-flights))
-    (should-not deslop-codex--refresh-processes)
+      (ende-codex--start-refresh-flight flight))
+    (should (ende-codex--refresh-flight-finished flight))
+    (should (ende-error-p result))
+    (should-not (gethash key ende-codex--refresh-flights))
+    (should-not ende-codex--refresh-processes)
     (should-not (buffer-live-p
-                 (deslop-codex--refresh-flight-response-buffer flight)))
+                 (ende-codex--refresh-flight-response-buffer flight)))
     (should-not (buffer-live-p
-                 (deslop-codex--refresh-flight-stderr-buffer flight)))))
+                 (ende-codex--refresh-flight-stderr-buffer flight)))))
 
-(ert-deftest deslop-test/openai-credentials-use-only-official-endpoints ()
-  (should (string= (deslop-codex--validated-generation-url
+(ert-deftest ende-test/openai-credentials-use-only-official-endpoints ()
+  (should (string= (ende-codex--validated-generation-url
                     "https://chatgpt.com:443/backend-api/codex/responses")
                    "https://chatgpt.com:443/backend-api/codex/responses"))
   (should-error
-   (deslop-codex--validated-generation-url
+   (ende-codex--validated-generation-url
     "https://chatgpt.com.attacker.test/backend-api/codex/responses"))
   (should-error
-   (deslop-codex--validated-generation-url
+   (ende-codex--validated-generation-url
     "https://chatgpt.com/backend-api/codex/responses?redirect=attacker"))
-  (let ((deslop-codex-issuer "https://auth.openai.com.attacker.test"))
-    (should-error (deslop-codex--validated-refresh-url))))
+  (let ((ende-codex-issuer "https://auth.openai.com.attacker.test"))
+    (should-error (ende-codex--validated-refresh-url))))
 
-(ert-deftest deslop-test/openai-request-body-applies-output-token-limit ()
-  (let ((deslop-max-output-tokens 123))
-    (let ((body (deslop-codex--request-body
+(ert-deftest ende-test/openai-request-body-applies-output-token-limit ()
+  (let ((ende-max-output-tokens 123))
+    (let ((body (ende-codex--request-body
                  (list (cons "user" "body"))
                  '(:model "test-model"))))
       (should (= (alist-get :max_output_tokens body) 123)))))
 
-(ert-deftest deslop-test/curl-stderr-is-byte-bounded ()
-  (let ((buffer (generate-new-buffer " *deslop-test-stderr*"))
-        (process (make-pipe-process :name "deslop-test-stderr-process"
+(ert-deftest ende-test/curl-stderr-is-byte-bounded ()
+  (let ((buffer (generate-new-buffer " *ende-test-stderr*"))
+        (process (make-pipe-process :name "ende-test-stderr-process"
                                     :buffer nil :noquery t))
-        (deslop-max-stderr-bytes 4))
+        (ende-max-stderr-bytes 4))
     (unwind-protect
         (progn
-          (deslop-curl-stderr-filter buffer process "12345")
-          (deslop-curl-stderr-filter buffer process "6")
+          (ende-curl-stderr-filter buffer process "12345")
+          (ende-curl-stderr-filter buffer process "6")
           (with-current-buffer buffer
             (should (string= (buffer-string) "1234"))))
       (delete-process process)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/openai-credential-replacement-is-side-by-side ()
-  (let* ((directory (make-temp-file "deslop-openai-auth-dir-" t))
+(ert-deftest ende-test/openai-credential-replacement-is-side-by-side ()
+  (let* ((directory (make-temp-file "ende-openai-auth-dir-" t))
          (file (expand-file-name "auth.json" directory))
-         (deslop-codex-auth-file file)
+         (ende-codex-auth-file file)
          (old '(:access "old-access" :refresh "old-refresh"
                 :expires 0 :account-id "account-id"))
          (new '(:access "new-access" :refresh "new-refresh"
@@ -3693,103 +3693,103 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "\"access\":\"old-access\","
                     "\"refresh\":\"old-refresh\","
                     "\"expires\":0,\"accountId\":\"account-id\"}}"))
-          (deslop-codex--store-auth new (deslop-codex--auth-version old))
-          (should (string= (plist-get (deslop-codex--auth-entry) :access)
+          (ende-codex--store-auth new (ende-codex--auth-version old))
+          (should (string= (plist-get (ende-codex--auth-entry) :access)
                            "new-access"))
           (should (= (logand (file-modes file) #o777) #o600))
           (should-not
-           (directory-files directory nil "\\`\\.deslop-openai-auth-" t))
+           (directory-files directory nil "\\`\\.ende-openai-auth-" t))
           (should-error
-           (deslop-codex--store-auth
-            old (deslop-codex--auth-version
+           (ende-codex--store-auth
+            old (ende-codex--auth-version
                  '(:access "other" :refresh "other" :expires 0
                    :account-id "account-id")))))
       (when (file-directory-p directory)
         (delete-directory directory t)))))
 
-(ert-deftest deslop-test/openai-responses-events-normalize-to-deslop-result ()
+(ert-deftest ende-test/openai-responses-events-normalize-to-ende-result ()
           (let* ((events nil)
           (result nil)
          (failure nil)
          (session
-         (deslop-codex--make-session
+         (ende-codex--make-session
           :profile '(:model "gpt-test")
           :callbacks (list :on-event (lambda (event) (push event events))
                            :on-done (lambda (value) (setq result value))
                            :on-error (lambda (value) (setq failure value)))
-          :sse (deslop-protocol-make-sse)
+          :sse (ende-protocol-make-sse)
           :estimated-chars 0)))
-    (deslop-codex--handle-event
+    (ende-codex--handle-event
      session
-      (deslop-protocol-json-read-string
+      (ende-protocol-json-read-string
       "{\"type\":\"response.created\",\"response\":{\"model\":\"gpt-actual\"}}"))
-    (deslop-codex--handle-event
+    (ende-codex--handle-event
      session
-      (deslop-protocol-json-read-string
+      (ende-protocol-json-read-string
       "{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}"))
-    (deslop-codex--handle-event
+    (ende-codex--handle-event
      session
-      (deslop-protocol-json-read-string
+      (ende-protocol-json-read-string
       "{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}"))
-    (deslop-codex--handle-event
+    (ende-codex--handle-event
      session
-      (deslop-protocol-json-read-string
+      (ende-protocol-json-read-string
       "{\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-actual\",\"usage\":{\"output_tokens\":7}}}"))
-    (setq result (deslop-codex--result session))
+    (setq result (ende-codex--result session))
     (should-not failure)
     (should (string= (plist-get result :content) "answer"))
     (should (string= (plist-get result :thinking) "thinking"))
     (should (string= (plist-get result :model) "gpt-actual"))
     (should (= (plist-get result :tokens) 7))
-    (should (deslop-codex--session-terminal-event session))
-    (should-not (deslop-codex--session-terminal session))))
+    (should (ende-codex--session-terminal-event session))
+    (should-not (ende-codex--session-terminal session))))
 
 ;;;; Profiles, history, and transport command safety
 
-(ert-deftest deslop-test/profile-is-snapshotted-at-enqueue ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(:stall) t))
-        (deslop-provider-endpoint "http://one.example/v1"))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/profile-is-snapshotted-at-enqueue ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(:stall) t))
+        (ende-provider-endpoint "http://one.example/v1"))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-        (setq deslop-provider-endpoint "http://two.example/v1")
-        (should (string= (plist-get (deslop-job-profile job) :url)
+      (let ((job (ende-insert-at-cursor)))
+        (setq ende-provider-endpoint "http://two.example/v1")
+        (should (string= (plist-get (ende-job-profile job) :url)
                          "http://one.example/v1"))))))
 
-(ert-deftest deslop-test/auth-and-body-are-not-command-arguments ()
+(ert-deftest ende-test/auth-and-body-are-not-command-arguments ()
   (let* ((token "secret-token")
          (profile (list :name 'remote
                         :url "https://example.test/v1"
                         :model "model"
                          :temperature 0.2
                          :auth-source-host "example.test"
-                         :auth-source-user "deslop"
+                         :auth-source-user "ende"
                          :auth-source-port 443))
          (config nil))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _) (list (list :secret token)))))
-      (setq config (deslop-curl--config profile))
+      (setq config (ende-curl--config profile))
       (unwind-protect
-          (let ((command (deslop-curl-command
+          (let ((command (ende-curl-command
                           profile "/tmp/headers" config)))
             (should-not (member token command))
             (should-not (member "body" command))
             (should-not (member "--fail-with-body" command)))
          (when (file-exists-p config) (delete-file config))))))
 
-(ert-deftest deslop-test/unbounded-output-omits-provider-token-limit ()
-  (let ((deslop-max-output-tokens nil))
-    (let ((body (deslop-llm--request-body
+(ert-deftest ende-test/unbounded-output-omits-provider-token-limit ()
+  (let ((ende-max-output-tokens nil))
+    (let ((body (ende-llm--request-body
                  (list (cons "user" "body"))
                  '(:model "test-model" :temperature 0.2))))
       (should-not (alist-get :max_tokens body))
       (should-not (string-match-p "max_tokens" (json-encode body))))))
 
-(ert-deftest deslop-test/curl-config-escapes-and-rejects-unsafe-headers ()
+(ert-deftest ende-test/curl-config-escapes-and-rejects-unsafe-headers ()
   (let* ((profile '(:url "https://example.test/v1"
                     :request-headers ("X-Title: a\"b\\c")))
-         (config (deslop-curl--config profile)))
+         (config (ende-curl--config profile)))
     (unwind-protect
         (with-temp-buffer
           (should (= (logand (file-modes config) #o777) #o600))
@@ -3805,12 +3805,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "Accept: application/json"
                     "Content-Length: 0"))
     (should-error
-      (deslop-curl--config
+      (ende-curl--config
       (list :url "https://example.test/v1"
             :request-headers (list header))))))
 
-(ert-deftest deslop-test/curl-response-headers-select-final-response ()
-  (let ((file (make-temp-file "deslop-response-headers-")))
+(ert-deftest ende-test/curl-response-headers-select-final-response ()
+  (let ((file (make-temp-file "ende-response-headers-")))
     (unwind-protect
         (progn
           (with-temp-file file
@@ -3818,199 +3818,199 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "HTTP/2 103 Early Hints\r\nLink: </model>\r\n\r\n"
                     "HTTP/2 200\r\n"
                     "CoNtEnT-TyPe: text/event-stream; charset=utf-8\r\n\r\n"))
-          (should (equal (deslop-curl-response-headers file)
+          (should (equal (ende-curl-response-headers file)
                          '(200 . "text/event-stream; charset=utf-8")))
-          (should (deslop-curl-event-stream-p
+          (should (ende-curl-event-stream-p
                    "text/event-stream; charset=utf-8"))
-          (should-not (deslop-curl-event-stream-p
+          (should-not (ende-curl-event-stream-p
                        "application/json; note=text/event-stream")))
       (when (file-exists-p file)
         (delete-file file)))))
 
-(ert-deftest deslop-test/provider-url-and-curl-command-are-hardened ()
+(ert-deftest ende-test/provider-url-and-curl-command-are-hardened ()
   (should-error
-    (deslop-curl--validated-url '(:url "http://127.attacker.test/v1")))
+    (ende-curl--validated-url '(:url "http://127.attacker.test/v1")))
   (should-error
-    (deslop-curl--validated-url '(:url "https://example.test/v1?key=secret")))
+    (ende-curl--validated-url '(:url "https://example.test/v1?key=secret")))
   (should-error
-    (deslop-curl--validated-url
+    (ende-curl--validated-url
     '(:url "https://other.test/v1"
       :auth-source-host "example.test"
-      :auth-source-user "deslop"
+      :auth-source-user "ende"
       :auth-source-port 443)))
   (let ((command
-         (deslop-curl-command
+         (ende-curl-command
           '(:url "https://example.test/v1") "/tmp/headers" nil)))
     (should (string= (nth 1 command) "--disable"))
     (should (member "--globoff" command))
     (should (member "--noproxy" command))
     (should (equal (cadr (member "--user-agent" command))
-                   deslop-client-name))
+                   ende-client-name))
      (should (member "--url" command))))
 
-(ert-deftest deslop-test/curl-command-leaves-idle-timeout-to-elisp ()
-  (let ((deslop-request-timeout nil)
-        (deslop-response-idle-timeout 60))
-    (let ((command (deslop-curl-command
+(ert-deftest ende-test/curl-command-leaves-idle-timeout-to-elisp ()
+  (let ((ende-request-timeout nil)
+        (ende-response-idle-timeout 60))
+    (let ((command (ende-curl-command
                     '(:url "https://example.test/v1") "/tmp/headers" nil)))
       (should-not (member "--max-time" command))
       (should-not (member "--speed-time" command))
       (should-not (member "--speed-limit" command)))))
 
-(defun deslop-test--with-idle-request (timeout function &optional command)
+(defun ende-test--with-idle-request (timeout function &optional command)
   "Call FUNCTION with a request guarded by TIMEOUT, then clean up.
 Use COMMAND for the process, or a silent sleep process by default."
-  (let* ((deslop-response-idle-timeout timeout)
-         (request (deslop-curl-start-request
+  (let* ((ende-response-idle-timeout timeout)
+         (request (ende-curl-start-request
                    :profile '(:url "https://example.test/v1")
-                   :name "deslop-test-idle"
+                   :name "ende-test-idle"
                    :command (lambda (_headers _config)
                               (or command '("sleep" "30")))
                    :filter #'ignore :sentinel #'ignore))
          (process (plist-get request :process)))
     (unwind-protect
         (funcall function process)
-      (deslop-curl-cleanup-resources
+      (ende-curl-cleanup-resources
        (list (plist-get request :response-buffer)
              (plist-get request :stderr-buffer))
        (list (plist-get request :headers-file)
              (plist-get request :config-file))
        (list process (plist-get request :stderr-process))))))
 
-(ert-deftest deslop-test/curl-idle-heartbeat-and-captured-setting ()
-  (deslop-test--with-idle-request
+(ert-deftest ende-test/curl-idle-heartbeat-and-captured-setting ()
+  (ende-test--with-idle-request
    180
    (lambda (process)
-     (let ((deslop-response-idle-timeout 999)
-           (parser (deslop-protocol-make-sse)))
+     (let ((ende-response-idle-timeout 999)
+           (parser (ende-protocol-make-sse)))
        ;; A comment yields no SSE event, but is still response activity.
-       (should-not (deslop-protocol-sse-feed parser ": heartbeat\n\n"))
-       (process-put process :deslop-last-response-time 0)
+       (should-not (ende-protocol-sse-feed parser ": heartbeat\n\n"))
+       (process-put process :ende-last-response-time 0)
        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 179)))
          (funcall (process-filter process) process ": heartbeat\n\n"))
        ;; The original deadline has passed; the heartbeat extended it.
        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 181)))
-         (deslop-curl--check-idle process))
+         (ende-curl--check-idle process))
        (should (process-live-p process))
-       (should (timerp (process-get process :deslop-idle-timer)))
+       (should (timerp (process-get process :ende-idle-timer)))
        ;; Empty chunks must not extend the deadline.
        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 358)))
          (funcall (process-filter process) process ""))
        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 359)))
-         (deslop-curl--check-idle process))
+         (ende-curl--check-idle process))
        (should-not (process-live-p process))
-       (should-not (process-get process :deslop-idle-timer))
-       (let ((failure (process-get process :deslop-idle-error)))
-         (should (eq (deslop-error-kind failure) 'timeout))
-         (should (equal (deslop-error-message failure)
-                        "No response data received for 180 seconds (`deslop-response-idle-timeout`).")))))))
+       (should-not (process-get process :ende-idle-timer))
+       (let ((failure (process-get process :ende-idle-error)))
+         (should (eq (ende-error-kind failure) 'timeout))
+         (should (equal (ende-error-message failure)
+                        "No response data received for 180 seconds (`ende-response-idle-timeout`).")))))))
 
-(ert-deftest deslop-test/curl-idle-timer-fires-before-first-response ()
-  (deslop-test--with-idle-request
+(ert-deftest ende-test/curl-idle-timer-fires-before-first-response ()
+  (ende-test--with-idle-request
    0.05
    (lambda (process)
      (let ((deadline (+ (float-time) 2)))
        (while (and (process-live-p process) (< (float-time) deadline))
          (accept-process-output nil 0.02)))
-     (should (process-get process :deslop-idle-error))
+     (should (process-get process :ende-idle-error))
      (should-not (process-live-p process))
-     (should-not (process-get process :deslop-idle-timer)))))
+     (should-not (process-get process :ende-idle-timer)))))
 
-(ert-deftest deslop-test/curl-idle-cancellation-releases-timer ()
-  (deslop-test--with-idle-request
+(ert-deftest ende-test/curl-idle-cancellation-releases-timer ()
+  (ende-test--with-idle-request
    180
    (lambda (process)
-     (let ((timer (process-get process :deslop-idle-timer)))
+     (let ((timer (process-get process :ende-idle-timer)))
        (delete-process process)
-       (should-not (process-get process :deslop-idle-timer))
+       (should-not (process-get process :ende-idle-timer))
        (should-not (memq timer timer-list))
-       (deslop-curl--check-idle process)
-       (should-not (process-get process :deslop-idle-error))))))
+       (ende-curl--check-idle process)
+       (should-not (process-get process :ende-idle-error))))))
 
-(ert-deftest deslop-test/curl-idle-error-reaches-both-transports-once ()
+(ert-deftest ende-test/curl-idle-error-reaches-both-transports-once ()
   (dolist (transport '(llm codex))
-    (deslop-test--with-idle-request
+    (ende-test--with-idle-request
      180
      (lambda (process)
        (let* ((errors nil)
               (callbacks (list :on-error (lambda (error) (push error errors))))
               (session (if (eq transport 'llm)
-                           (deslop-llm--make-session :callbacks callbacks)
-                         (deslop-codex--make-session :callbacks callbacks)))
+                           (ende-llm--make-session :callbacks callbacks)
+                         (ende-codex--make-session :callbacks callbacks)))
               (sentinel (if (eq transport 'llm)
-                            #'deslop-llm--process-sentinel
-                          #'deslop-codex--sentinel)))
-         (process-put process :deslop-last-response-time 0)
-         (deslop-curl--check-idle process)
+                            #'ende-llm--process-sentinel
+                          #'ende-codex--sentinel)))
+         (process-put process :ende-last-response-time 0)
+         (ende-curl--check-idle process)
          (funcall sentinel session process "killed\n")
          (funcall sentinel session process "killed\n")
          (should (= (length errors) 1))
-         (should (eq (car errors) (process-get process :deslop-idle-error))))))))
+         (should (eq (car errors) (process-get process :ende-idle-error))))))))
 
-(ert-deftest deslop-test/curl-idle-normal-exit-releases-timer ()
-  (deslop-test--with-idle-request
+(ert-deftest ende-test/curl-idle-normal-exit-releases-timer ()
+  (ende-test--with-idle-request
    180
    (lambda (process)
-     (let ((timer (process-get process :deslop-idle-timer))
+     (let ((timer (process-get process :ende-idle-timer))
            (deadline (+ (float-time) 2)))
        (while (and (process-live-p process) (< (float-time) deadline))
          (accept-process-output nil 0.02))
        (should (eq (process-status process) 'exit))
-       (should-not (process-get process :deslop-idle-error))
-       (should-not (process-get process :deslop-idle-timer))
+       (should-not (process-get process :ende-idle-error))
+       (should-not (process-get process :ende-idle-timer))
        (should-not (memq timer timer-list))))
    '("true")))
 
-(ert-deftest deslop-test/curl-idle-refresh-reports-timeout-and-cleans-up ()
-  (let ((deslop-response-idle-timeout 180)
-        (deslop-codex--refresh-flights (make-hash-table :test #'equal))
-        (deslop-codex--refresh-processes nil)
-        (deslop-codex-auth-file (expand-file-name "unused-test-auth.json"))
+(ert-deftest ende-test/curl-idle-refresh-reports-timeout-and-cleans-up ()
+  (let ((ende-response-idle-timeout 180)
+        (ende-codex--refresh-flights (make-hash-table :test #'equal))
+        (ende-codex--refresh-processes nil)
+        (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
         (cancel nil)
         (failure nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'deslop-codex--refresh-command)
+        (cl-letf (((symbol-function 'ende-codex--refresh-command)
                    (lambda (&rest _) '("sleep" "30")))
                   ((symbol-function 'process-send-string) #'ignore)
                   ((symbol-function 'process-send-eof) #'ignore))
-          (setq cancel (deslop-codex--refresh-auth
+          (setq cancel (ende-codex--refresh-auth
                         '(:refresh "test-refresh")
                         (lambda (result) (setq failure result))))
-          (let* ((process (car deslop-codex--refresh-processes))
+          (let* ((process (car ende-codex--refresh-processes))
                  (buffer (process-buffer process)))
-            (should (timerp (process-get process :deslop-idle-timer)))
-            (process-put process :deslop-last-response-time 0)
-            (deslop-curl--check-idle process)
-            (should (eq (deslop-error-kind failure) 'timeout))
+            (should (timerp (process-get process :ende-idle-timer)))
+            (process-put process :ende-last-response-time 0)
+            (ende-curl--check-idle process)
+            (should (eq (ende-error-kind failure) 'timeout))
             (should-not (buffer-live-p buffer))
-            (should-not (process-get process :deslop-idle-timer))
-            (should (= (hash-table-count deslop-codex--refresh-flights) 0))))
+            (should-not (process-get process :ende-idle-timer))
+            (should (= (hash-table-count ende-codex--refresh-flights) 0))))
       (when cancel (funcall cancel)))))
 
-(ert-deftest deslop-test/json-parser-does-not-intern-keys-or-accept-garbage ()
-  (let ((key (format "deslop-untrusted-key-%d" (random most-positive-fixnum))))
+(ert-deftest ende-test/json-parser-does-not-intern-keys-or-accept-garbage ()
+  (let ((key (format "ende-untrusted-key-%d" (random most-positive-fixnum))))
     (should-not (intern-soft key))
-    (let ((payload (deslop-protocol-json-read-string
+    (let ((payload (ende-protocol-json-read-string
                     (format "{\"%s\":1}" key))))
       (should (hash-table-p payload))
-      (should (= (deslop-protocol-json-get key payload) 1))
+      (should (= (ende-protocol-json-get key payload) 1))
       (should-not (intern-soft key))))
-  (should-error (deslop-protocol-json-read-string "{\"ok\":1} garbage")))
+  (should-error (ende-protocol-json-read-string "{\"ok\":1} garbage")))
 
-(ert-deftest deslop-test/default-transport-enforces-response-byte-limit ()
-  (let* ((deslop-max-response-bytes 16)
-         (out (deslop-test--run-default-transport
+(ert-deftest ende-test/default-transport-enforces-response-byte-limit ()
+  (let* ((ende-max-response-bytes 16)
+         (out (ende-test--run-default-transport
                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
                (make-string 100 ?X))))
     (should-not (nth 0 out))
-    (should (eq (deslop-error-kind (nth 1 out)) 'resource))
+    (should (eq (ende-error-kind (nth 1 out)) 'resource))
     (should (= (nth 4 out) 1))))
 
-(ert-deftest deslop-test/response-byte-limit-retains-safe-prefix ()
+(ert-deftest ende-test/response-byte-limit-retains-safe-prefix ()
   (let* ((prefix
           "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}\n\n")
-         (deslop-max-response-bytes (string-bytes prefix))
-         (out (deslop-test--run-default-transport
+         (ende-max-response-bytes (string-bytes prefix))
+         (out (ende-test--run-default-transport
                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
                (concat prefix (make-string 100 ?X))))
          (partial (cl-find-if
@@ -4018,47 +4018,47 @@ Use COMMAND for the process, or a silent sleep process by default."
                      (eq (plist-get event :type) :partial-result))
                    (nth 6 out))))
     (should-not (nth 0 out))
-    (should (eq (deslop-error-kind (nth 1 out)) 'resource))
+    (should (eq (ende-error-kind (nth 1 out)) 'resource))
     (should partial)
     (should (string= (plist-get (plist-get partial :result) :content)
                      "kept"))))
 
-(ert-deftest deslop-test/sse-parser-enforces-line-and-event-limits ()
-  (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol-make-sse)))
-    (should-error (deslop-protocol-sse-feed parser "123456789")))
-  (let ((deslop-max-sse-event-bytes 8)
-        (parser (deslop-protocol-make-sse)))
+(ert-deftest ende-test/sse-parser-enforces-line-and-event-limits ()
+  (let ((ende-max-sse-event-bytes 8)
+        (parser (ende-protocol-make-sse)))
+    (should-error (ende-protocol-sse-feed parser "123456789")))
+  (let ((ende-max-sse-event-bytes 8)
+        (parser (ende-protocol-make-sse)))
     (should-error
-     (deslop-protocol-sse-feed
+     (ende-protocol-sse-feed
       parser (mapconcat (lambda (_) "data:\n") (number-sequence 1 10) "")))))
 
-(ert-deftest deslop-test/provider-discovery-cache-is-bounded ()
-  (let ((deslop-provider--discovery-cache (make-hash-table :test #'equal))
-        (deslop-provider--discovery-inflight (make-hash-table :test #'equal))
-        (deslop-provider-discovery-cache-size 2))
+(ert-deftest ende-test/provider-discovery-cache-is-bounded ()
+  (let ((ende-provider--discovery-cache (make-hash-table :test #'equal))
+        (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+        (ende-provider-discovery-cache-size 2))
     (dotimes (index 5)
-      (deslop-provider--finish-discovery (list index) (list :model index)))
-    (should (= (hash-table-count deslop-provider--discovery-cache) 2))))
+      (ende-provider--finish-discovery (list index) (list :model index)))
+    (should (= (hash-table-count ende-provider--discovery-cache) 2))))
 
-(ert-deftest deslop-test/provider-client-display-names ()
-  (should (string= (deslop-provider-client-name
+(ert-deftest ende-test/provider-client-display-names ()
+  (should (string= (ende-provider-client-name
                     '(:url "http://localhost:8080/v1"))
                    "localhost"))
-  (should (string= (deslop-provider-client-name
+  (should (string= (ende-provider-client-name
                     '(:url "http://192.168.1.20:8080/v1"))
                    "192.168.1.20"))
-  (should (string= (deslop-provider-client-name
+  (should (string= (ende-provider-client-name
                     '(:url "https://api.openai.com/v1/chat/completions"))
                    "OpenAI")))
 
-(ert-deftest deslop-test/provider-discovery-parses-model-metadata ()
+(ert-deftest ende-test/provider-discovery-parses-model-metadata ()
   (let* ((profile '(:url "http://localhost:8080/v1/chat/completions"
                     :model "llama3"))
          (metadata
-          (deslop-provider--discovery-metadata
+          (ende-provider--discovery-metadata
            profile
-           (deslop-protocol-json-read-string
+           (ende-protocol-json-read-string
             (concat
              "{\"object\":\"list\",\"data\":["
              "{\"id\":\"llama3\",\"name\":\"Llama 3\","
@@ -4069,7 +4069,7 @@ Use COMMAND for the process, or a silent sleep process by default."
              "\"input_cache_write_1h\":\"0.000005\","
              "\"internal_reasoning\":\"0\"}},"
              "{\"id\":\"llama4\"}]}")))))
-    (should (string= (deslop-provider-models-url profile)
+    (should (string= (ende-provider-models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
     (should (equal (plist-get metadata :models) '("llama3" "llama4")))
@@ -4087,37 +4087,37 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (string= (plist-get metadata :owner) "llama.cpp"))
     (should (string= (plist-get metadata :client) "llama.cpp"))))
 
-(ert-deftest deslop-test/provider-model-price-annotation-omits-invalid-fields ()
+(ert-deftest ende-test/provider-model-price-annotation-omits-invalid-fields ()
   (should
    (string=
-    (deslop-provider-model-price-annotation
+    (ende-provider-model-price-annotation
       '(:pricing (:prompt "0" :completion "0.000015"
                           :input-cache-read "not-a-price"
                           :input-cache-write-1h "0.000005")))
      "  in: free  out: $15  cache-write-1h: $5")))
 
-(ert-deftest deslop-test/provider-model-price-annotation-formats-small-values ()
+(ert-deftest ende-test/provider-model-price-annotation-formats-small-values ()
   (should
    (string=
-    (deslop-provider-model-price-annotation
+    (ende-provider-model-price-annotation
      '(:pricing (:prompt "0.000003"
                  :completion "0.000015"
                  :input-cache-read "0.0000003")))
     "  in: $3  out: $15  cache-read: $0.30")))
 
-(ert-deftest deslop-test/provider-discovery-does-not-borrow-unrelated-owner ()
+(ert-deftest ende-test/provider-discovery-does-not-borrow-unrelated-owner ()
   (let* ((profile '(:url "https://example.test/v1/chat/completions"
                     :model "requested"))
          (metadata
-          (deslop-provider--discovery-metadata
+          (ende-provider--discovery-metadata
            profile
-            (deslop-protocol-json-read-string
+            (ende-protocol-json-read-string
              "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
     (should (equal (plist-get metadata :models) '("other")))
     (should-not (plist-get metadata :owner))
     (should-not (plist-get metadata :client))))
 
-(ert-deftest deslop-test/provider-discovery-is-async-and-cached ()
+(ert-deftest ende-test/provider-discovery-is-async-and-cached ()
   (let ((profile '(:name local
                    :url "http://localhost:8080/v1/chat/completions"
                    :model "llama3"))
@@ -4139,7 +4139,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                                 :connection-type 'pipe)))))
       (unwind-protect
           (progn
-            (deslop-provider-probe-models
+            (ende-provider-probe-models
              profile
              (lambda (models error)
                (push (list models error) probe-values)))
@@ -4161,7 +4161,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                        (with-current-buffer (plist-get captured :buffer)
                          (buffer-string))))
               (should (plist-get
-                       (deslop-provider--parse-discovery-response
+                       (ende-provider--parse-discovery-response
                         profile (plist-get captured :buffer) headers-file)
                        :model))
               (process-send-eof process)
@@ -4172,40 +4172,40 @@ Use COMMAND for the process, or a silent sleep process by default."
             (should (= (length probe-values) 1))
             (should (equal (car (car probe-values)) '("llama3" "llama4")))
             (should-not (cadr (car probe-values)))
-            (deslop-provider-discover
+            (ende-provider-discover
              profile (lambda (metadata) (push metadata values)))
             (should (= (length values) 1))
             (should (string= (plist-get (car values) :model) "llama3"))
             (let ((models nil)
                   (probe-error nil))
-              (deslop-provider-probe-models
+              (ende-provider-probe-models
                profile
                (lambda (value error)
                  (setq models value
                        probe-error error)))
               (should (equal models '("llama3" "llama4")))
               (should-not probe-error))
-            (deslop-provider-discover
+            (ende-provider-discover
              profile (lambda (metadata) (push metadata values)))
             (should (= make-process-count 1))
             (should (= (length values) 2))
             (should (string= (plist-get (car values) :model) "llama3")))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash deslop-provider--discovery-cache)
-        (clrhash deslop-provider--discovery-inflight)))))
+        (clrhash ende-provider--discovery-cache)
+        (clrhash ende-provider--discovery-inflight)))))
 
-(ert-deftest deslop-test/model-probe-cache-shares-custom-discovery ()
+(ert-deftest ende-test/model-probe-cache-shares-custom-discovery ()
   (let ((probe-count 0)
         (cancel-count 0)
         (probe-callback nil)
         (first-values nil)
         (second-values nil)
         (third-values nil)
-        (deslop-provider--model-cache (make-hash-table :test #'equal))
-        (deslop-provider--model-inflight (make-hash-table :test #'equal))
-        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-        (deslop-provider--model-generation 0))
+        (ende-provider--model-cache (make-hash-table :test #'equal))
+        (ende-provider--model-inflight (make-hash-table :test #'equal))
+        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--model-generation 0))
     (let* ((probe
             (lambda (callback)
               (setq probe-callback callback)
@@ -4219,11 +4219,11 @@ Use COMMAND for the process, or a silent sleep process by default."
                                        :model "gpt-changed")))
       (unwind-protect
           (progn
-            (deslop-provider-probe-models
+            (ende-provider-probe-models
              profile
              (lambda (models error)
                (setq first-values (list models error))))
-            (deslop-provider-probe-models
+            (ende-provider-probe-models
              profile
              (lambda (models error)
                (setq second-values (list models error))))
@@ -4233,16 +4233,16 @@ Use COMMAND for the process, or a silent sleep process by default."
                            (list '("gpt-saved" "gpt-next") nil)))
             (should (equal second-values
                            (list '("gpt-saved" "gpt-next") nil)))
-            (deslop-provider-probe-models
+            (ende-provider-probe-models
              changed-profile
              (lambda (models error)
                (setq third-values (list models error))))
             (should (= probe-count 1))
             (should (equal third-values
                            (list '("gpt-saved" "gpt-next") nil)))
-            (should (> (deslop-provider-models-generation profile) 0))
-            (deslop-provider-clear-discovery-cache)
-            (deslop-provider-probe-models
+            (should (> (ende-provider-models-generation profile) 0))
+            (ende-provider-clear-discovery-cache)
+            (ende-provider-probe-models
              changed-profile
              (lambda (models error)
                (setq third-values (list models error))))
@@ -4250,28 +4250,28 @@ Use COMMAND for the process, or a silent sleep process by default."
             (funcall probe-callback '("gpt-new") nil)
             (should (equal third-values (list '("gpt-new") nil)))
             (should (= cancel-count 0)))
-        (deslop-provider-abort-discovery)
-        (clrhash deslop-provider--model-cache)
-        (clrhash deslop-provider--model-inflight)
-        (clrhash deslop-provider--model-cancellations)))))
+        (ende-provider-abort-discovery)
+        (clrhash ende-provider--model-cache)
+        (clrhash ende-provider--model-inflight)
+        (clrhash ende-provider--model-cancellations)))))
 
-(ert-deftest deslop-test/model-probe-failures-are-retried-and-success-is-cached ()
+(ert-deftest ende-test/model-probe-failures-are-retried-and-success-is-cached ()
   (let ((attempts 0)
         (first-error nil)
         (retry-models nil)
         (retry-error nil)
         (cached-models nil)
-        (deslop-provider--model-cache (make-hash-table :test #'equal))
-        (deslop-provider--model-inflight (make-hash-table :test #'equal))
-        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-        (deslop-provider--model-generation 0))
+        (ende-provider--model-cache (make-hash-table :test #'equal))
+        (ende-provider--model-inflight (make-hash-table :test #'equal))
+        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--model-generation 0))
     (let* ((probe
             (lambda (callback)
               (cl-incf attempts)
               (if (= attempts 1)
                   (funcall
                    callback nil
-                   (deslop-error-create
+                   (ende-error-create
                     :kind 'discovery
                     :message "temporary probe failure"))
                 (funcall callback '("remote/first" "remote/second") nil))
@@ -4279,17 +4279,17 @@ Use COMMAND for the process, or a silent sleep process by default."
            (profile (list :name 'remote
                           :url "http://remote.example/v1/chat/completions"
                           :model-discovery-function probe)))
-      (deslop-provider-probe-models
+      (ende-provider-probe-models
        profile
        (lambda (_models error)
          (setq first-error error)))
       (should (= attempts 1))
-      (should (deslop-error-p first-error))
-      (should (string= (deslop-error-message first-error)
+      (should (ende-error-p first-error))
+      (should (string= (ende-error-message first-error)
                        "temporary probe failure"))
-      (should-not (deslop-provider-cached-models profile))
+      (should-not (ende-provider-cached-models profile))
 
-      (deslop-provider-probe-models
+      (ende-provider-probe-models
        profile
        (lambda (models error)
          (setq retry-models models
@@ -4299,7 +4299,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal retry-models
                      '("remote/first" "remote/second")))
 
-      (deslop-provider-probe-models
+      (ende-provider-probe-models
        profile
        (lambda (models error)
          (setq cached-models (list models error))))
@@ -4307,40 +4307,40 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal cached-models
                      (list '("remote/first" "remote/second") nil))))))
 
-(ert-deftest deslop-test/generic-model-probe-retries-after-failure ()
+(ert-deftest ende-test/generic-model-probe-retries-after-failure ()
   (let* ((profile '(:name remote
                     :url "http://remote.example/v1/chat/completions"))
          (requests 0)
          (first-error nil)
          (retry-models nil)
          (retry-error nil)
-         (discovery-key (deslop-provider--discovery-key profile))
-         (deslop-provider--discovery-cache (make-hash-table :test #'equal))
-         (deslop-provider--model-cache (make-hash-table :test #'equal))
-         (deslop-provider--model-inflight (make-hash-table :test #'equal))
-         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-         (deslop-provider--model-generation 0))
-    (cl-letf (((symbol-function 'deslop-provider-discover)
+         (discovery-key (ende-provider--discovery-key profile))
+         (ende-provider--discovery-cache (make-hash-table :test #'equal))
+         (ende-provider--model-cache (make-hash-table :test #'equal))
+         (ende-provider--model-inflight (make-hash-table :test #'equal))
+         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--model-generation 0))
+    (cl-letf (((symbol-function 'ende-provider-discover)
                (lambda (_profile callback)
                  (cl-incf requests)
                  (if (= requests 1)
                      (progn
                        (puthash discovery-key
                                 (list :time (float-time) :metadata nil)
-                                deslop-provider--discovery-cache)
+                                ende-provider--discovery-cache)
                        (funcall callback nil))
                    (funcall callback '(:models ("remote/first"))))
                  (lambda () nil))))
-      (deslop-provider-probe-models
+      (ende-provider-probe-models
        profile
        (lambda (_models error)
          (setq first-error error)))
       (should (= requests 1))
-      (should (deslop-error-p first-error))
-      (should-not (gethash discovery-key deslop-provider--discovery-cache))
-      (should-not (deslop-provider-cached-models profile))
+      (should (ende-error-p first-error))
+      (should-not (gethash discovery-key ende-provider--discovery-cache))
+      (should-not (ende-provider-cached-models profile))
 
-      (deslop-provider-probe-models
+      (ende-provider-probe-models
        profile
        (lambda (models error)
          (setq retry-models models
@@ -4348,12 +4348,12 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (= requests 2))
       (should-not retry-error)
       (should (equal retry-models '("remote/first")))
-      (should (equal (plist-get (deslop-provider-cached-models profile)
+      (should (equal (plist-get (ende-provider-cached-models profile)
                                 :models)
                      '("remote/first"))))))
 
-(ert-deftest deslop-test/selector-retries-failed-model-probe ()
-  (let* ((buffer (generate-new-buffer " *deslop-selector-probe-retry-test*"))
+(ert-deftest ende-test/selector-retries-failed-model-probe ()
+  (let* ((buffer (generate-new-buffer " *ende-selector-probe-retry-test*"))
          (attempts 0)
          (probe
           (lambda (callback)
@@ -4361,43 +4361,43 @@ Use COMMAND for the process, or a silent sleep process by default."
             (if (= attempts 1)
                 (funcall
                  callback nil
-                 (deslop-error-create
+                 (ende-error-create
                   :kind 'discovery
                   :message "temporary probe failure"))
               (funcall callback '("remote/first") nil))
             (lambda () nil)))
-         (deslop-providers '(remote))
-         (deslop-provider-profiles
+         (ende-providers '(remote))
+         (ende-provider-profiles
           (list (list 'remote
                       :url "http://remote.example/v1/chat/completions"
                       :model-discovery-function probe)))
-         (deslop-selector--last-selection nil)
-         (deslop-selector--model-validations (make-hash-table :test #'equal))
-         (deslop-provider--model-cache (make-hash-table :test #'equal))
-         (deslop-provider--model-inflight (make-hash-table :test #'equal))
-         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
-         (deslop-provider--model-generation 0))
+         (ende-selector--last-selection nil)
+         (ende-selector--model-validations (make-hash-table :test #'equal))
+         (ende-provider--model-cache (make-hash-table :test #'equal))
+         (ende-provider--model-inflight (make-hash-table :test #'equal))
+         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--model-generation 0))
     (unwind-protect
         (with-current-buffer buffer
-          (deslop-selector-mode)
-          (setq deslop-selector--providers '(remote)
-                deslop-selector--provider-index 0)
-          (deslop-selector--set-provider 0)
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0)
+          (ende-selector--set-provider 0)
           (should (= attempts 1))
-          (should (eq deslop-selector--model-state :error))
+          (should (eq ende-selector--model-state :error))
           (should (string-match-p "\\[probe failed\\]" (buffer-string)))
 
-          (deslop-selector--set-provider 0)
+          (ende-selector--set-provider 0)
           (should (= attempts 2))
-          (should (eq deslop-selector--model-state :ready))
-          (should (string= (deslop-selector--model-name) "remote/first"))
+          (should (eq ende-selector--model-state :ready))
+          (should (string= (ende-selector--model-name) "remote/first"))
 
-          (deslop-selector--set-provider 0)
+          (ende-selector--set-provider 0)
           (should (= attempts 2)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest deslop-test/provider-discovery-cancellation-releases-last-waiter ()
+(ert-deftest ende-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
                    :url "http://localhost:8080/v1/chat/completions"
                    :model "llama3"))
@@ -4413,22 +4413,22 @@ Use COMMAND for the process, or a silent sleep process by default."
                                 :command (list "cat")
                                 :connection-type 'pipe)))))
       (unwind-protect
-          (let* ((key (deslop-provider--discovery-key profile))
+          (let* ((key (ende-provider--discovery-key profile))
                  (cancel
-                  (deslop-provider-discover
+                  (ende-provider-discover
                    profile (lambda (metadata) (setq value metadata)))))
             (should (process-live-p process))
-            (should (gethash key deslop-provider--discovery-inflight))
+            (should (gethash key ende-provider--discovery-inflight))
             (funcall cancel)
             (should-not value)
             (should-not (process-live-p process))
-             (should-not (gethash key deslop-provider--discovery-inflight))
-             (should-not (gethash key deslop-provider--discovery-cache))
-             (should-not deslop-provider--discovery-processes)
+             (should-not (gethash key ende-provider--discovery-inflight))
+             (should-not (gethash key ende-provider--discovery-cache))
+             (should-not ende-provider--discovery-processes)
              (let* ((probe-value nil)
                     (probe-error nil)
                     (probe-cancel
-                    (deslop-provider-probe-models
+                    (ende-provider-probe-models
                      profile
                      (lambda (models error)
                        (setq probe-value models
@@ -4438,19 +4438,19 @@ Use COMMAND for the process, or a silent sleep process by default."
                (should-not probe-value)
                (should-not probe-error)
                (should-not (process-live-p process))
-               (should-not (gethash key deslop-provider--discovery-inflight))
-               (should-not deslop-provider--discovery-processes)))
+               (should-not (gethash key ende-provider--discovery-inflight))
+               (should-not ende-provider--discovery-processes)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash deslop-provider--discovery-cache)
-        (clrhash deslop-provider--discovery-inflight)
-        (setq deslop-provider--discovery-processes nil)))))
+        (clrhash ende-provider--discovery-cache)
+        (clrhash ende-provider--discovery-inflight)
+        (setq ende-provider--discovery-processes nil)))))
 
-(ert-deftest deslop-test/provider-discovery-response-is-bounded ()
+(ert-deftest ende-test/provider-discovery-response-is-bounded ()
   (let ((profile '(:name local
                    :url "http://localhost:8080/v1/chat/completions"
                    :model "llama3"))
-        (deslop-provider-max-discovery-bytes 4)
+        (ende-provider-max-discovery-bytes 4)
         (captured nil)
         (process nil)
         (values nil)
@@ -4466,50 +4466,50 @@ Use COMMAND for the process, or a silent sleep process by default."
                                 :connection-type 'pipe)))))
       (unwind-protect
           (progn
-            (deslop-provider-discover
+            (ende-provider-discover
              profile (lambda (metadata) (push metadata values)))
             (funcall (plist-get captured :filter) process "oversized")
             (should (equal values '(nil)))
             (should-not (process-live-p process))
             (should (= (hash-table-count
-                        deslop-provider--discovery-inflight) 0)))
+                        ende-provider--discovery-inflight) 0)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash deslop-provider--discovery-cache)
-        (clrhash deslop-provider--discovery-inflight)))))
+        (clrhash ende-provider--discovery-cache)
+        (clrhash ende-provider--discovery-inflight)))))
 
-(ert-deftest deslop-test/history-retains-terminal-result ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" result"))))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/history-retains-terminal-result ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" result"))))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (with-current-buffer deslop-history-buffer-name
+      (ende-insert-at-cursor)
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
           (should (string-match-p "Output" text))
-          (should (= (deslop-test--count-matches "result" text) 1))
+          (should (= (ende-test--count-matches "result" text) 1))
           (should (string-match-p "Source metadata:" text))
           (should (string-match-p "base" text))
           (should (eq buffer-undo-list t)))))))
 
-(ert-deftest deslop-test/history-omits-source-metadata-without-prompts ()
-  (deslop-test--reset)
-  (let ((deslop-history-retain-prompts nil)
-        (deslop-llm-function (deslop-test--fake-llm '(" result"))))
-    (deslop-test--with-buffer "secret source"
+(ert-deftest ende-test/history-omits-source-metadata-without-prompts ()
+  (ende-test--reset)
+  (let ((ende-history-retain-prompts nil)
+        (ende-llm-function (ende-test--fake-llm '(" result"))))
+    (ende-test--with-buffer "secret source"
       (setq-local buffer-file-name "/tmp/secret.el")
       (setq-local major-mode 'emacs-lisp-mode)
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (with-current-buffer deslop-history-buffer-name
+      (ende-insert-at-cursor)
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
           (should-not (string-match-p "Source metadata:" text))
           (should-not (string-match-p "secret source" text)))))))
 
-(ert-deftest deslop-test/history-retains-failed-stream-and-raw-usage ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/history-retains-failed-stream-and-raw-usage ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
           '((:thinking "reasoning before failure"
              :content ""
              :tokens 4096
@@ -4518,11 +4518,11 @@ Use COMMAND for the process, or a silent sleep process by default."
                      :completion_tokens 4096
                      :reasoning_tokens 4000
                      :total_tokens 4108))))))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'failed)))
-      (with-current-buffer deslop-history-buffer-name
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'failed)))
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
           (should (string-match-p "Prompt" text))
           (should (string-match-p "base" text))
@@ -4535,21 +4535,21 @@ Use COMMAND for the process, or a silent sleep process by default."
           (let ((buffer-read-only nil))
             (should-error (insert "user edit") :type 'user-error)))))))
 
-(ert-deftest deslop-test/history-retains-joined-partial-result-on-failure ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/history-retains-joined-partial-result-on-failure ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
           '((:content ""
              :partial (:content ""
                        :thinking "Subheadings: ** TODO"
                        :tokens 4096
                        :speed 57.1
                        :finish-reason "length"))))))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let ((job (deslop-insert-at-cursor)))
-        (should (eq (deslop-job-state job) 'failed)))
-      (with-current-buffer deslop-history-buffer-name
+      (let ((job (ende-insert-at-cursor)))
+        (should (eq (ende-job-state job) 'failed)))
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
           (should (string-match-p "Thinking" text))
           (should (string-match-p (regexp-quote "Subheadings: ** TODO")
@@ -4559,98 +4559,98 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should-not (string-match-p "\\(^\\|\\n\\)[[:space:]]*data:"
                                       text)))))))
 
-(ert-deftest deslop-test/history-command-displays-buffer ()
-  (deslop-test--reset)
+(ert-deftest ende-test/history-command-displays-buffer ()
+  (ende-test--reset)
   (let ((displayed nil))
     (cl-letf (((symbol-function 'display-buffer)
                (lambda (buffer &rest _) (setq displayed buffer))))
-      (deslop-history)
-      (should (eq displayed (get-buffer deslop-history-buffer-name)))))
-  (should (eq (lookup-key deslop-mode-map (kbd "C-c e"))
-              #'deslop-selector-open)))
+      (ende-history)
+      (should (eq displayed (get-buffer ende-history-buffer-name)))))
+  (should (eq (lookup-key ende-mode-map (kbd "C-c e"))
+              #'ende-selector-open)))
 
-(ert-deftest deslop-test/history-terminal-cleanup-survives-disable-and-write-errors ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" result") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/history-terminal-cleanup-survives-disable-and-write-errors ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" result") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (should (= (hash-table-count deslop-history--entries) 1))
-      (let ((deslop-history-enabled nil))
-        (deslop-test--complete-call (car deslop-test--calls)))
-      (should (= (hash-table-count deslop-history--entries) 0))))
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" result") t)))
-    (deslop-test--with-buffer "base"
+      (ende-insert-at-cursor)
+      (should (= (hash-table-count ende-history--entries) 1))
+      (let ((ende-history-enabled nil))
+        (ende-test--complete-call (car ende-test--calls)))
+      (should (= (hash-table-count ende-history--entries) 0))))
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" result") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (deslop-insert-at-cursor)
-      (with-current-buffer (deslop-history--buffer)
+      (ende-insert-at-cursor)
+      (with-current-buffer (ende-history--buffer)
         (add-hook 'before-change-functions
                   (lambda (&rest _) (error "history blocked")) nil t))
-      (deslop-test--complete-call (car deslop-test--calls))
-      (should (= (hash-table-count deslop-history--entries) 0)))))
+      (ende-test--complete-call (car ende-test--calls))
+      (should (= (hash-table-count ende-history--entries) 0)))))
 
-(ert-deftest deslop-test/history-is-bounded-and-body-cannot-create-headings ()
-  (deslop-test--reset)
-  (let ((deslop-history-max-entries 2)
-        (deslop-llm-function
-         (deslop-test--fake-llm '(" one" " two" "\n* fake heading"))))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/history-is-bounded-and-body-cannot-create-headings ()
+  (ende-test--reset)
+  (let ((ende-history-max-entries 2)
+        (ende-llm-function
+         (ende-test--fake-llm '(" one" " two" "\n* fake heading"))))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
       (dotimes (_ 3)
-        (deslop-insert-at-cursor)
-        (deslop-review-delete-overlay
-         (cl-find-if #'deslop-review-overlay-p
+        (ende-insert-at-cursor)
+        (ende-review-delete-overlay
+         (cl-find-if #'ende-review-overlay-p
                      (overlays-in (point-min) (point-max)))))
-      (with-current-buffer deslop-history-buffer-name
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
-           (should (= (deslop-test--count-matches "^\\* Job " text) 2))
+           (should (= (ende-test--count-matches "^\\* Job " text) 2))
            (should-not (string-match-p "^\\* fake heading" text)))))))
 
-(ert-deftest deslop-test/history-replaces-oldest-entries-at-default-limit ()
-  (deslop-test--reset)
-  (let ((deslop-history-max-entries 100)
-        (deslop-llm-function
-         (deslop-test--fake-llm
+(ert-deftest ende-test/history-replaces-oldest-entries-at-default-limit ()
+  (ende-test--reset)
+  (let ((ende-history-max-entries 100)
+        (ende-llm-function
+         (ende-test--fake-llm
           (cl-loop for index from 0 to 102
                    collect (format " item-%d" index)))))
-    (deslop-test--with-buffer "base"
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
       (dotimes (_ 103)
-        (deslop-insert-at-cursor)
-        (deslop-review-delete-overlay
-         (cl-find-if #'deslop-review-overlay-p
+        (ende-insert-at-cursor)
+        (ende-review-delete-overlay
+         (cl-find-if #'ende-review-overlay-p
                      (overlays-in (point-min) (point-max)))))
-      (with-current-buffer deslop-history-buffer-name
+      (with-current-buffer ende-history-buffer-name
         (let ((text (buffer-string)))
-          (should (= (deslop-test--count-matches "^\\* Job " text) 100))
+          (should (= (ende-test--count-matches "^\\* Job " text) 100))
           (should-not (string-match-p "^\\* Job 1:" text))
           (should-not (string-match-p "^\\* Job 3:" text))
           (should (string-match-p "^\\* Job 103:" text)))))))
 
 ;;;; Overlay lifecycle
 
-(ert-deftest deslop-test/insert-anchor-does-not-follow-edits-at-point ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '(" X") t)))
-    (deslop-test--with-buffer "base"
+(ert-deftest ende-test/insert-anchor-does-not-follow-edits-at-point ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(" X") t)))
+    (ende-test--with-buffer "base"
       (goto-char (point-max))
-      (let* ((job (deslop-insert-at-cursor))
-             (call (car deslop-test--calls))
-             (overlay (deslop-job-overlay job)))
+      (let* ((job (ende-insert-at-cursor))
+             (call (car ende-test--calls))
+             (overlay (ende-job-overlay job)))
         (dotimes (_ 5)
           (insert "\n"))
         (should (= (overlay-start overlay) 5))
-        (should (= (deslop-target-cursor (deslop-job-target job))
+        (should (= (ende-target-cursor (ende-job-target job))
                    5))
-        (deslop-test--complete-call call)
+        (ende-test--complete-call call)
         (should (string= (buffer-string) "base X\n\n\n\n\n"))))))
 
-(ert-deftest deslop-test/zero-width-overlay-boundary-behavior ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "abc"
+(ert-deftest ende-test/zero-width-overlay-boundary-behavior ()
+  (ende-test--reset)
+  (ende-test--with-buffer "abc"
     (goto-char (point-max))
-    (let ((ov (deslop-ui-create-overlay (current-buffer) (point) (point)
+    (let ((ov (ende-ui-create-overlay (current-buffer) (point) (point)
                                         "Queued")))
       (insert "\n")
       (should (= (overlay-start ov) 4))
@@ -4663,111 +4663,111 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (= (overlay-start ov) 5))
       (should (= (overlay-end ov) 5)))))
 
-(ert-deftest deslop-test/overlay-lifecycle ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "hello"
-    (let ((ov (deslop-ui-create-overlay (current-buffer) 1 3 "Queued")))
+(ert-deftest ende-test/overlay-lifecycle ()
+  (ende-test--reset)
+  (ende-test--with-buffer "hello"
+    (let ((ov (ende-ui-create-overlay (current-buffer) 1 3 "Queued")))
       (should (overlayp ov))
-      (should (= (length deslop-ui--managed-overlays) 1))
-      (should-not deslop-ui--spinning-overlays)
-      (should-not deslop-ui--spinner-timer)
-      (deslop-ui-update-overlay ov :status "Thinking")
-      (should (memq ov deslop-ui--spinning-overlays))
-      (should (timerp deslop-ui--spinner-timer))
-      (deslop-ui-delete-overlay ov)
-      (should (null deslop-ui--managed-overlays))
-      (should (null deslop-ui--spinner-timer)))))
+      (should (= (length ende-ui--managed-overlays) 1))
+      (should-not ende-ui--spinning-overlays)
+      (should-not ende-ui--spinner-timer)
+      (ende-ui-update-overlay ov :status "Thinking")
+      (should (memq ov ende-ui--spinning-overlays))
+      (should (timerp ende-ui--spinner-timer))
+      (ende-ui-delete-overlay ov)
+      (should (null ende-ui--managed-overlays))
+      (should (null ende-ui--spinner-timer)))))
 
-(ert-deftest deslop-test/narrowing-does-not-affect-review-discovery ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "first second"
-    (let ((first (deslop-review-create-overlay
+(ert-deftest ende-test/narrowing-does-not-affect-review-discovery ()
+  (ende-test--reset)
+  (ende-test--with-buffer "first second"
+    (let ((first (ende-review-create-overlay
                   (current-buffer) 1 6 nil nil ""))
-          (second (deslop-review-create-overlay
+          (second (ende-review-create-overlay
                    (current-buffer) 7 13 nil nil "")))
       (narrow-to-region 1 6)
-      (deslop-review-delete-overlay first)
-      (should (= (length (deslop-review--overlays-in-buffer)) 1))
+      (ende-review-delete-overlay first)
+      (should (= (length (ende-review--overlays-in-buffer)) 1))
       (widen)
-      (should (= (length (deslop-review--overlays-in-buffer)) 1))
-      (deslop-review-delete-overlay second))))
+      (should (= (length (ende-review--overlays-in-buffer)) 1))
+      (ende-review-delete-overlay second))))
 
-(ert-deftest deslop-test/review-badges-default-to-hidden ()
-  (deslop-test--reset)
-  (let ((default (default-value 'deslop-review-show-badges)))
+(ert-deftest ende-test/review-badges-default-to-hidden ()
+  (ende-test--reset)
+  (let ((default (default-value 'ende-review-show-badges)))
     (unwind-protect
         (progn
-          (set-default 'deslop-review-show-badges nil)
-          (deslop-test--with-buffer "generated"
-            (let ((review (deslop-review-create-overlay
+          (set-default 'ende-review-show-badges nil)
+          (ende-test--with-buffer "generated"
+            (let ((review (ende-review-create-overlay
                            (current-buffer) 1 2 "model" "client" "")))
-              (should-not (local-variable-p 'deslop-review-show-badges))
+              (should-not (local-variable-p 'ende-review-show-badges))
               (should-not (overlay-get review 'before-string))
-              (should (deslop-review-overlay-p review))
-              (deslop-review-delete-overlay review))))
-      (set-default 'deslop-review-show-badges default))))
+              (should (ende-review-overlay-p review))
+              (ende-review-delete-overlay review))))
+      (set-default 'ende-review-show-badges default))))
 
-(ert-deftest deslop-test/review-badge-toggle-preserves-review-highlight ()
-  (deslop-test--reset)
+(ert-deftest ende-test/review-badge-toggle-preserves-review-highlight ()
+  (ende-test--reset)
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (let ((deslop-review-highlight t))
-    (deslop-test--with-buffer "defunLLM"
+  (let ((ende-review-highlight t))
+    (ende-test--with-buffer "defunLLM"
       (add-text-properties 1 6 '(face font-lock-keyword-face))
-      (setq-local deslop-review-show-badges nil)
-      (let* ((review (deslop-review-create-overlay
+      (setq-local ende-review-show-badges nil)
+      (let* ((review (ende-review-create-overlay
                       (current-buffer) 6 9 "model" "client" ""))
              (face (overlay-get review 'face)))
-        (should (deslop-review-overlay-p review))
+        (should (ende-review-overlay-p review))
         (should-not (overlay-get review 'before-string))
         (should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
-        (deslop-toggle-review-badges)
-        (should deslop-review-show-badges)
+        (ende-toggle-review-badges)
+        (should ende-review-show-badges)
         (should (string-match-p "client model"
-                                (deslop-test--overlay-label review)))
+                                (ende-test--overlay-label review)))
         (should (equal (overlay-get review 'face) face))
-        (deslop-toggle-review-badges)
-        (should-not deslop-review-show-badges)
+        (ende-toggle-review-badges)
+        (should-not ende-review-show-badges)
         (should-not (overlay-get review 'before-string))
         (should (equal (overlay-get review 'face) face))
         (goto-char (1+ (overlay-start review)))
-        (deslop-approve-output)
-        (should-not (deslop-review-overlay-p review))))))
+        (ende-approve-output)
+        (should-not (ende-review-overlay-p review))))))
 
-(ert-deftest deslop-test/review-badge-global-toggle-respects-local-values ()
-  (deslop-test--reset)
-  (let ((default (default-value 'deslop-review-show-badges))
-        (inherited (generate-new-buffer "*deslop-review-badges-inherited*"))
-        (local (generate-new-buffer "*deslop-review-badges-local*"))
+(ert-deftest ende-test/review-badge-global-toggle-respects-local-values ()
+  (ende-test--reset)
+  (let ((default (default-value 'ende-review-show-badges))
+        (inherited (generate-new-buffer "*ende-review-badges-inherited*"))
+        (local (generate-new-buffer "*ende-review-badges-local*"))
         inherited-review local-review)
     (unwind-protect
         (progn
-          (set-default 'deslop-review-show-badges nil)
+          (set-default 'ende-review-show-badges nil)
           (with-current-buffer inherited
             (insert "generated")
             (setq inherited-review
-                  (deslop-review-create-overlay
+                  (ende-review-create-overlay
                    (current-buffer) 1 2 "model" "client" "")))
           (with-current-buffer local
             (insert "generated")
-            (setq-local deslop-review-show-badges nil)
+            (setq-local ende-review-show-badges nil)
             (setq local-review
-                  (deslop-review-create-overlay
+                  (ende-review-create-overlay
                    (current-buffer) 1 2 "model" "client" "")))
           (with-current-buffer inherited
-            (deslop-toggle-review-badges t))
-          (should (default-value 'deslop-review-show-badges))
+            (ende-toggle-review-badges t))
+          (should (default-value 'ende-review-show-badges))
           (with-current-buffer inherited
-            (should-not (local-variable-p 'deslop-review-show-badges))
+            (should-not (local-variable-p 'ende-review-show-badges))
             (should (overlay-get inherited-review 'before-string)))
           (with-current-buffer local
-            (should (local-variable-p 'deslop-review-show-badges))
+            (should (local-variable-p 'ende-review-show-badges))
             (should-not (overlay-get local-review 'before-string))
-            (deslop-toggle-review-badges)
+            (ende-toggle-review-badges)
             (should (overlay-get local-review 'before-string)))
           (with-current-buffer inherited
-            (deslop-toggle-review-badges t))
-          (should-not (default-value 'deslop-review-show-badges))
+            (ende-toggle-review-badges t))
+          (should-not (default-value 'ende-review-show-badges))
           (with-current-buffer inherited
             (should-not (overlay-get inherited-review 'before-string)))
           (with-current-buffer local
@@ -4776,127 +4776,127 @@ Use COMMAND for the process, or a silent sleep process by default."
         (kill-buffer inherited))
       (when (buffer-live-p local)
         (kill-buffer local))
-      (set-default 'deslop-review-show-badges default))))
+      (set-default 'ende-review-show-badges default))))
 
 ;;;; Review highlight
 
-(ert-deftest deslop-test/review-highlight-blend-color-math ()
-  (should (string= (deslop-review--blend-color "#ffffff" "#0000ff" 0.15) "#d9d9ff"))
-  (should (string= (deslop-review--blend-color "#000000" "#ffffff" 0.5) "#808080"))
-  (should (string= (deslop-review--blend-color "#333333" "#ffffff" 0.0) "#333333"))
-  (should (string= (deslop-review--blend-color "#333333" "#ffffff" 1.0) "#ffffff"))
-  (should (null (deslop-review--blend-color "#abc" "#ffffff" 0.5)))
-  (should (null (deslop-review--blend-color "#ffffff" "junk" 0.5))))
+(ert-deftest ende-test/review-highlight-blend-color-math ()
+  (should (string= (ende-review--blend-color "#ffffff" "#0000ff" 0.15) "#d9d9ff"))
+  (should (string= (ende-review--blend-color "#000000" "#ffffff" 0.5) "#808080"))
+  (should (string= (ende-review--blend-color "#333333" "#ffffff" 0.0) "#333333"))
+  (should (string= (ende-review--blend-color "#333333" "#ffffff" 1.0) "#ffffff"))
+  (should (null (ende-review--blend-color "#abc" "#ffffff" 0.5)))
+  (should (null (ende-review--blend-color "#ffffff" "junk" 0.5))))
 
-(ert-deftest deslop-test/review-highlight-hex-round-trip ()
-  (should (equal (deslop-review--hex-components "#a1b2c3") '(161 178 195)))
-  (should (string= (deslop-review--hex-join '(161 178 195)) "#a1b2c3"))
-  (should (null (deslop-review--hex-components "red")))
-  (should (null (deslop-review--hex-components "#12345")))
-  (should (null (deslop-review--hex-components "#1234567")))
-  (should (null (deslop-review--hex-join '(1 2)))))
+(ert-deftest ende-test/review-highlight-hex-round-trip ()
+  (should (equal (ende-review--hex-components "#a1b2c3") '(161 178 195)))
+  (should (string= (ende-review--hex-join '(161 178 195)) "#a1b2c3"))
+  (should (null (ende-review--hex-components "red")))
+  (should (null (ende-review--hex-components "#12345")))
+  (should (null (ende-review--hex-components "#1234567")))
+  (should (null (ende-review--hex-join '(1 2)))))
 
-(ert-deftest deslop-test/review-highlight-face-attr-resolution ()
+(ert-deftest ende-test/review-highlight-face-attr-resolution ()
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (should (string= (deslop-review--face-attr 'font-lock-keyword-face :foreground)
+  (should (string= (ende-review--face-attr 'font-lock-keyword-face :foreground)
                    "#0000ff"))
-  (should (string= (deslop-review--face-attr 'font-lock-keyword-face :background)
+  (should (string= (ende-review--face-attr 'font-lock-keyword-face :background)
                    "#ffffff"))
-  (should (string= (deslop-review--face-attr
+  (should (string= (ende-review--face-attr
                     '(:foreground "red" :background "blue") :foreground)
                    "red"))
-  (should (string= (deslop-review--face-attr
+  (should (string= (ende-review--face-attr
                     '((:foreground "cyan") (:weight bold)) :foreground)
                    "cyan"))
-  (should (string= (deslop-review--face-attr
+  (should (string= (ende-review--face-attr
                     '((:foreground "cyan") (:background "magenta")) :background)
                    "magenta"))
-  (should (null (deslop-review--face-attr '(:weight bold) :foreground))))
+  (should (null (ende-review--face-attr '(:weight bold) :foreground))))
 
-(ert-deftest deslop-test/review-highlight-style-from-adjacent-face ()
+(ert-deftest ende-test/review-highlight-style-from-adjacent-face ()
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (deslop-test--with-buffer "defun x"
+  (ende-test--with-buffer "defun x"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (should (equal (deslop-review--style (current-buffer) 6)
+    (should (equal (ende-review--style (current-buffer) 6)
                    '("#0000ff" . "#d9d9ff")))))
 
-(ert-deftest deslop-test/review-highlight-style-default-fallback ()
+(ert-deftest ende-test/review-highlight-style-default-fallback ()
   (set-face-foreground 'default "#111111")
   (set-face-background 'default "#222222")
-  (deslop-test--with-buffer "plain x"
-    (should (equal (deslop-review--style (current-buffer) 6)
+  (ende-test--with-buffer "plain x"
+    (should (equal (ende-review--style (current-buffer) 6)
                    '("#111111" . "#1f1f1f")))
-    (should (equal (deslop-review--style (current-buffer) 1)
+    (should (equal (ende-review--style (current-buffer) 1)
                    '("#111111" . "#1f1f1f")))))
 
-(ert-deftest deslop-test/review-highlight-dark-background-light-foreground ()
+(ert-deftest ende-test/review-highlight-dark-background-light-foreground ()
   (set-face-foreground 'default "#e6e6e6")
   (set-face-background 'default "#1e1e1e")
-  (deslop-test--with-buffer "plain text"
-    (should (equal (deslop-review--style (current-buffer) 6)
+  (ende-test--with-buffer "plain text"
+    (should (equal (ende-review--style (current-buffer) 6)
                    '("#e6e6e6" . "#3c3c3c")))))
 
-(ert-deftest deslop-test/review-highlight-overlay-sets-face ()
-  (deslop-test--reset)
+(ert-deftest ende-test/review-highlight-overlay-sets-face ()
+  (ende-test--reset)
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (deslop-test--with-buffer "defunLLM"
+  (ende-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (let ((overlay (deslop-review-create-overlay
+    (let ((overlay (ende-review-create-overlay
                     (current-buffer) 6 9 nil nil "")))
       (should (overlayp overlay))
       (should (equal (overlay-get overlay 'face)
                      '(:foreground "#0000ff" :background "#d9d9ff")))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
-      (deslop-review-delete-overlay overlay)
+      (ende-review-delete-overlay overlay)
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face)))))
 
-(ert-deftest deslop-test/review-highlight-disabled-sets-no-properties ()
-  (deslop-test--reset)
-  (deslop-test--with-buffer "defunLLM"
+(ert-deftest ende-test/review-highlight-disabled-sets-no-properties ()
+  (ende-test--reset)
+  (ende-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
-    (let ((deslop-review-highlight nil))
-      (let ((overlay (deslop-review-create-overlay
+    (let ((ende-review-highlight nil))
+      (let ((overlay (ende-review-create-overlay
                       (current-buffer) 6 9 nil nil "")))
         (should (null (overlay-get overlay 'face)))))))
 
-(ert-deftest deslop-test/review-highlight-approval-cleans-properties ()
-  (deslop-test--reset)
+(ert-deftest ende-test/review-highlight-approval-cleans-properties ()
+  (ende-test--reset)
   (set-face-foreground 'font-lock-keyword-face "#0000ff")
   (set-face-background 'font-lock-keyword-face "#ffffff")
-  (let ((deslop-llm-function (deslop-test--fake-llm '("LLM"))))
-    (deslop-test--with-buffer "kw rest"
+  (let ((ende-llm-function (ende-test--fake-llm '("LLM"))))
+    (ende-test--with-buffer "kw rest"
       (add-text-properties 1 3 '(face font-lock-keyword-face))
       (goto-char 3)
-      (deslop-insert-at-cursor)
+      (ende-insert-at-cursor)
       (should (string= (buffer-string) "kwLLM rest"))
-      (let ((review (cl-find-if #'deslop-review-overlay-p
+      (let ((review (cl-find-if #'ende-review-overlay-p
                                 (overlays-in (point-min) (point-max)))))
         (should review)
         (should (equal (overlay-get review 'face)
                        '(:foreground "#0000ff" :background "#d9d9ff")))
         (goto-char 4)
-        (deslop-approve-output)
+        (ende-approve-output)
         (should (string= (buffer-string) "kwLLM rest"))
-        (should-not (deslop-review-overlay-p review))))))
+        (should-not (ende-review-overlay-p review))))))
 
-(ert-deftest deslop-test/review-highlight-rejection-preserves-original-properties ()
-  (deslop-test--reset)
-  (let ((deslop-llm-function (deslop-test--fake-llm '("new"))))
-    (deslop-test--with-buffer "old text"
+(ert-deftest ende-test/review-highlight-rejection-preserves-original-properties ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("new"))))
+    (ende-test--with-buffer "old text"
       (add-text-properties 1 4 '(face font-lock-string-face))
       (add-text-properties 1 4 '(foreground-color "#123456"))
-      (deslop-test--select 1 9 1)
-      (deslop-improve-at-cursor "rewrite")
+      (ende-test--select 1 9 1)
+      (ende-improve-at-cursor "rewrite")
       (should (string= (buffer-string) "new"))
-      (let ((review (cl-find-if #'deslop-review-overlay-p
+      (let ((review (cl-find-if #'ende-review-overlay-p
                                 (overlays-in (point-min) (point-max)))))
         (should review)
         (goto-char 2)
-        (deslop-reject-output)
+        (ende-reject-output)
         (should (string= (buffer-string) "old text"))
         (should (eq (get-char-property 1 'face) 'font-lock-string-face))
         (should (string= (get-char-property 1 'foreground-color) "#123456"))
@@ -4904,33 +4904,33 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 ;;;; Rubber-duck exercises
 
-(defconst deslop-test--duck-assessment
+(defconst ende-test--duck-assessment
   "\"assessment\":{\"score\":3,\"correctness\":\"Accurate main idea.\",\"coverage\":\"Explain the boundary condition.\"}"
   "Valid assessment fields for mocked rubber-duck responses.")
 
-(defun deslop-test--duck-result (&optional edits)
+(defun ende-test--duck-result (&optional edits)
   "Return a rubber-duck response with JSON EDITS, defaulting to none."
   (format "{\"version\":1,\"edits\":%s,%s}"
-          (or edits "[]") deslop-test--duck-assessment))
+          (or edits "[]") ende-test--duck-assessment))
 
-(defmacro deslop-test--with-duck (responses &rest body)
+(defmacro ende-test--with-duck (responses &rest body)
   "Run BODY with a disposable worksheet and asynchronous RESPONSES."
   (declare (indent 1) (debug t))
   `(progn
-     (deslop-test--reset)
-     (let ((deslop-llm-function (deslop-test--fake-llm ,responses t)))
+     (ende-test--reset)
+     (let ((ende-llm-function (ende-test--fake-llm ,responses t)))
        (unwind-protect
            (save-window-excursion
              (with-temp-buffer
                (insert "original")
-               (deslop-test--select (point-min) (point-max) (point-max))
-               (deslop-rubber-duck 'detailed)
-               (with-current-buffer deslop-rubber-duck--buffer
+               (ende-test--select (point-min) (point-max) (point-max))
+               (ende-rubber-duck 'detailed)
+               (with-current-buffer ende-rubber-duck--buffer
                  ,@body)))
-         (deslop-test--reset)))))
+         (ende-test--reset)))))
 
-(ert-deftest deslop-test/rubber-duck-without-region-captures-buffer ()
-  (deslop-test--reset)
+(ert-deftest ende-test/rubber-duck-without-region-captures-buffer ()
+  (ende-test--reset)
   (unwind-protect
       (save-window-excursion
         (with-temp-buffer
@@ -4939,278 +4939,278 @@ Use COMMAND for the process, or a silent sleep process by default."
           (goto-char 8)
           (deactivate-mark)
           (let ((source-name (buffer-name)))
-            (deslop-rubber-duck 'overview)
-            (with-current-buffer deslop-rubber-duck--buffer
-              (let ((exercise deslop-rubber-duck--exercise))
+            (ende-rubber-duck 'overview)
+            (with-current-buffer ende-rubber-duck--buffer
+              (let ((exercise ende-rubber-duck--exercise))
                 (should (equal (buffer-string) "first\nsecond"))
                 (should (eq major-mode 'emacs-lisp-mode))
-                (should (equal (deslop-rubber-duck--exercise-source exercise)
+                (should (equal (ende-rubber-duck--exercise-source exercise)
                                (format "%s:1" source-name))))))))
-    (deslop-test--reset)))
+    (ende-test--reset)))
 
-(ert-deftest deslop-test/rubber-duck-review-shows-progress ()
-  (deslop-test--with-duck (list :stall)
+(ert-deftest ende-test/rubber-duck-review-shows-progress ()
+  (ende-test--with-duck (list :stall)
     (erase-buffer)
     (insert "My explanation")
-    (let* ((job (deslop-rubber-duck-review))
-           (overlay (deslop-job-overlay job)))
-      (should (eq (deslop-job-state job) 'running))
+    (let* ((job (ende-rubber-duck-review))
+           (overlay (ende-job-overlay job)))
+      (should (eq (ende-job-state job) 'running))
       (should (= (overlay-start overlay) (point-min)))
       (should (= (overlay-end overlay) (point-max)))
       (should (overlay-get overlay 'before-string))
       (should-not (overlay-get overlay 'face))
       (should (string-match-p
-               "Thinking" (deslop-test--overlay-label overlay)))
-      (deslop-abort-queue)
-      (should (eq (deslop-job-state job) 'cancelled))
-      (should-not (deslop-job-overlay job))
+               "Thinking" (ende-test--overlay-label overlay)))
+      (ende-abort-queue)
+      (should (eq (ende-job-state job) 'cancelled))
+      (should-not (ende-job-overlay job))
       (should-not (overlay-buffer overlay)))))
 
-(ert-deftest deslop-test/rubber-duck-insertions-score-and-rejection ()
-  (deslop-test--with-duck
-      (list (deslop-test--duck-result
+(ert-deftest ende-test/rubber-duck-insertions-score-and-rejection ()
+  (ende-test--with-duck
+      (list (ende-test--duck-result
              "[{\"anchor\":\"first\",\"position\":\"after\",\"text\":\" [AI: one]\"},{\"anchor\":\"last\",\"position\":\"after\",\"text\":\" [AI: two]\"}]"))
     (erase-buffer)
     (insert "first explanation\nlast")
     (let* ((submission (buffer-string))
-           (deslop-history-enabled t)
-          (job (deslop-rubber-duck-review)))
-      (should-error (deslop-rubber-duck-review) :type 'user-error)
-      (deslop-test--complete-call (car deslop-test--calls))
-      (should (eq (deslop-job-state job) 'completed))
-      (should-not (deslop-job-overlay job))
-      (should deslop-rubber-duck--reviewed)
+           (ende-history-enabled t)
+          (job (ende-rubber-duck-review)))
+      (should-error (ende-rubber-duck-review) :type 'user-error)
+      (ende-test--complete-call (car ende-test--calls))
+      (should (eq (ende-job-state job) 'completed))
+      (should-not (ende-job-overlay job))
+      (should ende-rubber-duck--reviewed)
       (should (string-prefix-p
                "first [AI: one] explanation\nlast [AI: two]\n\n--- AI assessment ---"
                (buffer-string)))
       (should (string-suffix-p "Coverage: Explain the boundary condition.\n"
                                (buffer-string)))
-      (should (= 3 (length (deslop-review--overlays-in-buffer))))
-      (should-not (deslop-history--entry job))
-      (should (buffer-live-p deslop-history--buffer-object))
-      (with-current-buffer deslop-history--buffer-object
+      (should (= 3 (length (ende-review--overlays-in-buffer))))
+      (should-not (ende-history--entry job))
+      (should (buffer-live-p ende-history--buffer-object))
+      (with-current-buffer ende-history--buffer-object
         (should (string-match-p "AI: one" (buffer-string)))
         (should (string-match-p "Accurate main idea" (buffer-string))))
-      (deslop-reject-all-output)
+      (ende-reject-all-output)
       (should (equal submission (buffer-string)))
       ;; Rejecting feedback does not turn the exercise into a retry session.
-      (should-error (deslop-rubber-duck-review) :type 'user-error))))
+      (should-error (ende-rubber-duck-review) :type 'user-error))))
 
-(ert-deftest deslop-test/rubber-duck-empty-edits-and-unchanged-submission ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
-    (should-error (deslop-rubber-duck-review) :type 'user-error)
-    (should-not deslop-test--calls)
+(ert-deftest ende-test/rubber-duck-empty-edits-and-unchanged-submission ()
+  (ende-test--with-duck (list (ende-test--duck-result))
+    (should-error (ende-rubber-duck-review) :type 'user-error)
+    (should-not ende-test--calls)
     (goto-char (point-max))
     (insert "\nMy explanation.")
     ;; A region or narrowing must not limit the worksheet sent for review.
     (narrow-to-region 3 6)
-    (let ((job (deslop-rubber-duck-review)))
-      (deslop-test--complete-call (car deslop-test--calls))
-      (should (eq (deslop-job-state job) 'completed))
+    (let ((job (ende-rubber-duck-review)))
+      (ende-test--complete-call (car ende-test--calls))
+      (should (eq (ende-job-state job) 'completed))
       (widen)
       (should (string-match-p "Demonstrated understanding: 3/4 — Mostly sound"
                               (buffer-string)))
-      (should (= 1 (length (deslop-review--overlays-in-buffer)))))))
+      (should (= 1 (length (ende-review--overlays-in-buffer)))))))
 
-(ert-deftest deslop-test/rubber-duck-invalid-response-is-atomic ()
+(ert-deftest ende-test/rubber-duck-invalid-response-is-atomic ()
   (dolist (response
            (list
-            (deslop-test--duck-result
+            (ende-test--duck-result
              "[{\"anchor\":\"original\",\"position\":\"after\",\"text\":\"valid\"},{\"anchor\":\"original\",\"position\":\"replace\",\"text\":\"invalid\"}]")
-            (deslop-test--duck-result
+            (ende-test--duck-result
              "[{\"anchor\":\"missing\",\"position\":\"after\",\"text\":\"invalid\"}]")
             "{\"version\":1,\"edits\":[],\"assessment\":{\"score\":9}}"))
-    (deslop-test--with-duck (list response)
+    (ende-test--with-duck (list response)
       (goto-char (point-max))
       (insert " explanation")
       (let ((submission (buffer-string))
-            (job (deslop-rubber-duck-review)))
-        (deslop-test--complete-call (car deslop-test--calls))
-        (should (eq (deslop-job-state job) 'failed))
+            (job (ende-rubber-duck-review)))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state job) 'failed))
         (should (equal submission (buffer-string)))
-        (should-not (deslop-review--overlays-in-buffer))
-        (should-not deslop-rubber-duck--reviewed)))))
+        (should-not (ende-review--overlays-in-buffer))
+        (should-not ende-rubber-duck--reviewed)))))
 
-(ert-deftest deslop-test/rubber-duck-application-failure-rolls-back-overlays ()
-  (deslop-test--with-duck
-      (list (deslop-test--duck-result
+(ert-deftest ende-test/rubber-duck-application-failure-rolls-back-overlays ()
+  (ende-test--with-duck
+      (list (ende-test--duck-result
              "[{\"anchor\":\"original\",\"position\":\"after\",\"text\":\" annotation\"}]"))
     (goto-char (point-max))
     (insert " explanation")
     (let ((submission (buffer-string))
-          (job (deslop-rubber-duck-review))
-          (create (symbol-function 'deslop--create-review-overlay))
+          (job (ende-rubber-duck-review))
+          (create (symbol-function 'ende--create-review-overlay))
           (count 0))
-      (cl-letf (((symbol-function 'deslop--create-review-overlay)
+      (cl-letf (((symbol-function 'ende--create-review-overlay)
                  (lambda (&rest args)
                    (if (= (cl-incf count) 2)
                        (error "Mock overlay failure")
                      (apply create args)))))
-        (deslop-test--complete-call (car deslop-test--calls)))
-      (should (eq (deslop-job-state job) 'failed))
+        (ende-test--complete-call (car ende-test--calls)))
+      (should (eq (ende-job-state job) 'failed))
       (should (equal submission (buffer-string)))
-      (should-not (deslop-review--overlays-in-buffer)))))
+      (should-not (ende-review--overlays-in-buffer)))))
 
-(ert-deftest deslop-test/rubber-duck-edits-invalidate-pending-feedback ()
+(ert-deftest ende-test/rubber-duck-edits-invalidate-pending-feedback ()
   (dolist (position '(1 5 21))
-    (deslop-test--with-duck (list (deslop-test--duck-result))
+    (ende-test--with-duck (list (ende-test--duck-result))
       (goto-char (point-max))
       (insert " explanation")
-      (let ((job (deslop-rubber-duck-review)))
+      (let ((job (ende-rubber-duck-review)))
         (goto-char position)
         (insert "user edit")
         (let ((changed (buffer-string)))
-          (deslop-test--complete-call (car deslop-test--calls))
-          (should (eq (deslop-job-state job) 'failed))
+          (ende-test--complete-call (car ende-test--calls))
+          (should (eq (ende-job-state job) 'failed))
           (should (equal changed (buffer-string)))
-          (should-not (deslop-review--overlays-in-buffer)))))))
+          (should-not (ende-review--overlays-in-buffer)))))))
 
-(ert-deftest deslop-test/rubber-duck-replacement-cancels-and-ignores-late-response ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
+(ert-deftest ende-test/rubber-duck-replacement-cancels-and-ignores-late-response ()
+  (ende-test--with-duck (list (ende-test--duck-result))
     (let ((old (current-buffer)))
       (goto-char (point-max))
       (insert " explanation")
-      (let ((job (deslop-rubber-duck-review))
+      (let ((job (ende-rubber-duck-review))
             (cancelled nil))
-        (deslop-test--callback (car deslop-test--calls) :on-start
+        (ende-test--callback (car ende-test--calls) :on-start
                               (lambda () (setq cancelled t)))
         (emacs-lisp-mode)
-        (deslop-rubber-duck-mode -1)
+        (ende-rubber-duck-mode -1)
         (with-temp-buffer
           (insert "second")
-          (deslop-test--select 1 (point-max) (point-max))
-          (deslop-rubber-duck 'overview))
+          (ende-test--select 1 (point-max) (point-max))
+          (ende-rubber-duck 'overview))
         (should cancelled)
-        (should (eq (deslop-job-state job) 'cancelled))
+        (should (eq (ende-job-state job) 'cancelled))
         (should-not (buffer-live-p old))
-        (deslop-test--complete-call (car deslop-test--calls))
-        (with-current-buffer deslop-rubber-duck--buffer
+        (ende-test--complete-call (car ende-test--calls))
+        (with-current-buffer ende-rubber-duck--buffer
           (should (equal (buffer-string) "second"))
-          (should-not (deslop-review--overlays-in-buffer))
-          (should-not deslop-rubber-duck--reviewed))
-        (kill-buffer deslop-rubber-duck--buffer)
-        (should-not deslop-rubber-duck--buffer)))))
+          (should-not (ende-review--overlays-in-buffer))
+          (should-not ende-rubber-duck--reviewed))
+        (kill-buffer ende-rubber-duck--buffer)
+        (should-not ende-rubber-duck--buffer)))))
 
-(ert-deftest deslop-test/rubber-duck-queued-review-disposed-before-dispatch ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
+(ert-deftest ende-test/rubber-duck-queued-review-disposed-before-dispatch ()
+  (ende-test--with-duck (list (ende-test--duck-result))
     (goto-char (point-max))
     (insert " explanation")
-    (let* ((deslop--queue-suspended t)
-           (job (deslop-rubber-duck-review)))
-      (should (eq (deslop-job-state job) 'queued))
+    (let* ((ende--queue-suspended t)
+           (job (ende-rubber-duck-review)))
+      (should (eq (ende-job-state job) 'queued))
       (emacs-lisp-mode)
       (kill-buffer (current-buffer))
-      (should (eq (deslop-job-state job) 'cancelled))
-      (should-not deslop-queue)
-      (should-not deslop-test--calls))))
+      (should (eq (ende-job-state job) 'cancelled))
+      (should-not ende-queue)
+      (should-not ende-test--calls))))
 
-(ert-deftest deslop-test/rubber-duck-selector-captures-source-and-profile ()
-  (deslop-test--reset)
+(ert-deftest ende-test/rubber-duck-selector-captures-source-and-profile ()
+  (ende-test--reset)
   (unwind-protect
       (save-window-excursion
         (with-temp-buffer
           (emacs-lisp-mode)
           (insert "selected source")
-          (deslop-test--select 1 (point-max) (point-max))
+          (ende-test--select 1 (point-max) (point-max))
           (let ((source (current-buffer)))
-            (deslop-selector-open)
-            (with-current-buffer deslop-selector-buffer-name
-              (setq deslop-selector--models '("duck-model")
-                    deslop-selector--model-index 0)
-              (should (eq (lookup-key deslop-selector-mode-map (kbd "r"))
-                          #'deslop-selector-rubber-duck))
-              (deslop-selector--run 'rubber-duck 'foundations))
+            (ende-selector-open)
+            (with-current-buffer ende-selector-buffer-name
+              (setq ende-selector--models '("duck-model")
+                    ende-selector--model-index 0)
+              (should (eq (lookup-key ende-selector-mode-map (kbd "r"))
+                          #'ende-selector-rubber-duck))
+              (ende-selector--run 'rubber-duck 'foundations))
             (should (equal (with-current-buffer source (buffer-string))
                            "selected source"))
-            (with-current-buffer deslop-rubber-duck--buffer
-              (let ((exercise deslop-rubber-duck--exercise))
+            (with-current-buffer ende-rubber-duck--buffer
+              (let ((exercise ende-rubber-duck--exercise))
                 (should (equal (buffer-string) "selected source"))
                 (should (eq major-mode 'emacs-lisp-mode))
-                (should deslop-rubber-duck-mode)
-                (should (eq (deslop-rubber-duck--exercise-level exercise)
+                (should ende-rubber-duck-mode)
+                (should (eq (ende-rubber-duck--exercise-level exercise)
                             'foundations))
                 (should (equal
-                         (plist-get (deslop-rubber-duck--exercise-profile exercise)
+                         (plist-get (ende-rubber-duck--exercise-profile exercise)
                                     :model)
                          "duck-model")))))))
-    (deslop-test--reset)))
+    (ende-test--reset)))
 
-(ert-deftest deslop-test/rubber-duck-survives-mode-switches-and-toggles ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
-    (let ((exercise deslop-rubber-duck--exercise))
+(ert-deftest ende-test/rubber-duck-survives-mode-switches-and-toggles ()
+  (ende-test--with-duck (list (ende-test--duck-result))
+    (let ((exercise ende-rubber-duck--exercise))
       (goto-char (point-max))
       (insert " explanation")
-      (deslop-rubber-duck-mode -1)
+      (ende-rubber-duck-mode -1)
       (setq-local header-line-format "Previous header")
-      (deslop-rubber-duck-mode 1)
-      (deslop-rubber-duck-mode 1)
-      (deslop-rubber-duck-mode -1)
+      (ende-rubber-duck-mode 1)
+      (ende-rubber-duck-mode 1)
+      (ende-rubber-duck-mode -1)
       (should (equal header-line-format "Previous header"))
       (emacs-lisp-mode)
-      (should-not deslop-rubber-duck-mode)
-      (should (eq exercise deslop-rubber-duck--exercise))
-      (deslop-rubber-duck-mode 1)
+      (should-not ende-rubber-duck-mode)
+      (should (eq exercise ende-rubber-duck--exercise))
+      (ende-rubber-duck-mode 1)
       (text-mode)
-      (should deslop-rubber-duck-mode)
-      (should (equal header-line-format '(:eval (deslop-rubber-duck--header))))
-      (should (eq (key-binding (kbd "C-c C-r")) #'deslop-rubber-duck-review))
-      (let ((job (deslop-rubber-duck-review)))
+      (should ende-rubber-duck-mode)
+      (should (equal header-line-format '(:eval (ende-rubber-duck--header))))
+      (should (eq (key-binding (kbd "C-c C-r")) #'ende-rubber-duck-review))
+      (let ((job (ende-rubber-duck-review)))
         (emacs-lisp-mode)
-        (should (eq job deslop-rubber-duck--job))
-        (deslop-test--complete-call (car deslop-test--calls))
-        (should (eq (deslop-job-state job) 'completed))
+        (should (eq job ende-rubber-duck--job))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state job) 'completed))
         (text-mode)
-        (should deslop-rubber-duck--reviewed)
-        (should-error (deslop-rubber-duck-review) :type 'user-error)
-        (deslop-reject-all-output)
+        (should ende-rubber-duck--reviewed)
+        (should-error (ende-rubber-duck-review) :type 'user-error)
+        (ende-reject-all-output)
         (should (equal (buffer-string) "original explanation"))))))
 
-(ert-deftest deslop-test/rubber-duck-mode-switch-preserves-change-monitoring ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
+(ert-deftest ende-test/rubber-duck-mode-switch-preserves-change-monitoring ()
+  (ende-test--with-duck (list (ende-test--duck-result))
     (goto-char (point-max))
     (insert " explanation")
-    (let ((job (deslop-rubber-duck-review)))
+    (let ((job (ende-rubber-duck-review)))
       (emacs-lisp-mode)
       (text-mode)
       (goto-char 4)
       (insert "changed")
-      (should (eq (deslop-job-state job) 'failed))
+      (should (eq (ende-job-state job) 'failed))
       (let ((submission (buffer-string)))
-        (deslop-test--complete-call (car deslop-test--calls))
+        (ende-test--complete-call (car ende-test--calls))
         (should (equal submission (buffer-string)))))))
 
-(ert-deftest deslop-test/rubber-duck-failed-replacement-retains-draft ()
-  (deslop-test--with-duck nil
+(ert-deftest ende-test/rubber-duck-failed-replacement-retains-draft ()
+  (ende-test--with-duck nil
     (let ((old (current-buffer))
-          (exercise deslop-rubber-duck--exercise))
+          (exercise ende-rubber-duck--exercise))
       (with-temp-buffer
         (insert "second")
-        (deslop-test--select 1 (point-max) (point-max))
+        (ende-test--select 1 (point-max) (point-max))
         (cl-letf (((symbol-function 'fundamental-mode)
                    (lambda () (error "Mock initialization failure"))))
-          (should-error (deslop-rubber-duck 'overview))))
-      (should (eq old deslop-rubber-duck--buffer))
+          (should-error (ende-rubber-duck 'overview))))
+      (should (eq old ende-rubber-duck--buffer))
       (should (buffer-live-p old))
-      (should (eq exercise deslop-rubber-duck--exercise)))))
+      (should (eq exercise ende-rubber-duck--exercise)))))
 
-(ert-deftest deslop-test/rubber-duck-replacement-from-worksheet-keeps-history ()
-  (deslop-test--with-duck (list (deslop-test--duck-result))
+(ert-deftest ende-test/rubber-duck-replacement-from-worksheet-keeps-history ()
+  (ende-test--with-duck (list (ende-test--duck-result))
     (goto-char (point-max))
     (insert " explanation")
-    (deslop-rubber-duck-review)
-    (deslop-test--complete-call (car deslop-test--calls))
+    (ende-rubber-duck-review)
+    (ende-test--complete-call (car ende-test--calls))
     (let ((old (current-buffer)))
-      (deslop-test--select 1 9 9)
-      (deslop-rubber-duck 'overview)
+      (ende-test--select 1 9 9)
+      (ende-rubber-duck 'overview)
       (should-not (buffer-live-p old))
-      (with-current-buffer deslop-rubber-duck--buffer
+      (with-current-buffer ende-rubber-duck--buffer
         (should (equal (buffer-string) "original"))
-        (should-not deslop-rubber-duck--reviewed))
-      (with-current-buffer deslop-history--buffer-object
+        (should-not ende-rubber-duck--reviewed))
+      (with-current-buffer ende-history--buffer-object
         (should (string-match-p "Accurate main idea" (buffer-string)))))))
 
-(ert-deftest deslop-test/openrouter-batch-profile-has-separate-endpoints ()
-  (let ((profile (deslop-provider-profile 'openrouter-batch)))
+(ert-deftest ende-test/openrouter-batch-profile-has-separate-endpoints ()
+  (let ((profile (ende-provider-profile 'openrouter-batch)))
     (should (eq (plist-get profile :transport) 'openrouter-batch))
     (should (string= (plist-get profile :url)
                      "https://openrouter.ai/api/v1/chat/completions"))
@@ -5218,20 +5218,20 @@ Use COMMAND for the process, or a silent sleep process by default."
                      "https://openrouter.ai/api/v1/batches"))
     (should (string= (plist-get profile :batch-endpoint)
                      "/v1/chat/completions"))
-    (should (equal (plist-get (deslop-provider-profile 'openrouter)
+    (should (equal (plist-get (ende-provider-profile 'openrouter)
                              :transport)
                    'auto))
     (should-error
-     (deslop-openrouter-batch--validate-options
+     (ende-openrouter-batch--validate-options
       (plist-put (copy-sequence profile)
                   :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
 
-(ert-deftest deslop-test/openrouter-profiles-advertise-ende-mode ()
+(ert-deftest ende-test/openrouter-profiles-advertise-ende-mode ()
   (dolist (name '(openrouter openrouter-batch))
-    (let* ((profile (deslop-provider-profile name))
+    (let* ((profile (ende-provider-profile name))
            (headers (plist-get profile :request-headers))
            (config
-            (deslop-curl--config
+            (ende-curl--config
              (list :url (plist-get profile :url)
                    :request-headers headers))))
       (unwind-protect
@@ -5249,11 +5249,11 @@ Use COMMAND for the process, or a silent sleep process by default."
         (when (file-exists-p config)
           (delete-file config))))))
 
-(ert-deftest deslop-test/openrouter-batch-initial-404-retries-then-completes ()
+(ert-deftest ende-test/openrouter-batch-initial-404-retries-then-completes ()
   (let* ((profile (plist-put
                    (plist-put
                     (plist-put (copy-sequence
-                                (deslop-provider-profile 'openrouter-batch))
+                                (ende-provider-profile 'openrouter-batch))
                                :batch-poll-initial-delay 2)
                     :batch-poll-max-delay 60)
                    :batch-poll-jitter 0))
@@ -5261,14 +5261,14 @@ Use COMMAND for the process, or a silent sleep process by default."
          (result nil)
          (failure nil)
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-404"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-404"
            :profile profile
            :callbacks
            (list :on-done (lambda (value) (setq result value))
                  :on-error (lambda (value) (setq failure value)))))
          (group
-          (deslop-openrouter-batch--make-group
+          (ende-openrouter-batch--make-group
            :profile profile
            :requests (list request)
            :batch-id "batch-1789766830-OF6zb6TiexdSIEpfCv8N"
@@ -5276,25 +5276,25 @@ Use COMMAND for the process, or a silent sleep process by default."
            :deadline (+ (float-time) 300)
            :not-found-attempt 0)))
     (cl-letf
-        (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+        (((symbol-function 'ende-openrouter-batch--schedule-poll)
           (lambda (_group &optional delay)
             (when delay
               (setq delays (append delays (list delay))))))
-         ((symbol-function 'deslop-openrouter-batch--status)
+         ((symbol-function 'ende-openrouter-batch--status)
           (lambda (_group _status) nil)))
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
       (should-not failure)
-      (should-not (deslop-openrouter-batch--group-terminal group))
-      (should (= (deslop-openrouter-batch--group-not-found-attempt group) 2))
+      (should-not (ende-openrouter-batch--group-terminal group))
+      (should (= (ende-openrouter-batch--group-not-found-attempt group) 2))
       (should (equal delays '(2 4)))
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 200 "{\"status\":\"validating\"}" nil)
-      (should (deslop-openrouter-batch--group-batch-visible-p group))
-      (should (= (deslop-openrouter-batch--group-not-found-attempt group) 0))
-      (deslop-openrouter-batch--poll-finished
+      (should (ende-openrouter-batch--group-batch-visible-p group))
+      (should (= (ende-openrouter-batch--group-not-found-attempt group) 0))
+      (ende-openrouter-batch--poll-finished
        group 200
        (format
         (concat
@@ -5303,73 +5303,73 @@ Use COMMAND for the process, or a silent sleep process by default."
          "\"status_code\":200,\"body\":{\"choices\":[{"
          "\"message\":{\"content\":\"done\"}}]}}}]}"
          )
-        (deslop-openrouter-batch--request-custom-id request))
+        (ende-openrouter-batch--request-custom-id request))
        nil))
     (should-not failure)
     (should (string= (plist-get result :content) "done"))
-    (should (deslop-openrouter-batch--group-terminal group))))
+    (should (ende-openrouter-batch--group-terminal group))))
 
-(ert-deftest deslop-test/openrouter-batch-404-expires-with-context ()
+(ert-deftest ende-test/openrouter-batch-404-expires-with-context ()
   (let* ((profile (plist-put
                    (plist-put
                     (plist-put
-                     (copy-sequence (deslop-provider-profile 'openrouter-batch))
+                     (copy-sequence (ende-provider-profile 'openrouter-batch))
                      :batch-poll-initial-delay 1)
                     :batch-poll-max-delay 4)
                    :batch-poll-jitter 0))
          (failure nil)
          (delays nil)
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-expiring"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-expiring"
            :profile profile
            :callbacks (list :on-error (lambda (value) (setq failure value)))))
          (group
-          (deslop-openrouter-batch--make-group
+          (ende-openrouter-batch--make-group
            :profile profile
            :requests (list request)
            :batch-id "batch-1789766830-OF6zb6TiexdSIEpfCv8N"
            :submitted-at (float-time)
            :deadline (+ (float-time) 300)
            :not-found-attempt 0)))
-    (setf (deslop-openrouter-batch--group-profile group)
+    (setf (ende-openrouter-batch--group-profile group)
           (plist-put profile :batch-poll-not-found-max-age 3))
     (cl-letf
-        (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+        (((symbol-function 'ende-openrouter-batch--schedule-poll)
           (lambda (_group &optional delay)
             (push delay delays))))
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil)
       (should-not failure)
       (should (equal delays '(1)))
-      (setf (deslop-openrouter-batch--group-submitted-at group)
+      (setf (ende-openrouter-batch--group-submitted-at group)
             (- (float-time) 2.5))
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil))
-    (should (deslop-error-p failure))
-    (should (eq (deslop-error-kind failure) 'http))
+    (should (ende-error-p failure))
+    (should (eq (ende-error-kind failure) 'http))
     (should (string-match-p
              (regexp-quote
               "batch-1789766830-OF6zb6TiexdSIEpfCv8N")
-             (deslop-error-message failure)))
+             (ende-error-message failure)))
     (should (string-match-p
              (regexp-quote
               "https://openrouter.ai/api/v1/batches/batch-1789766830-OF6zb6TiexdSIEpfCv8N")
-             (deslop-error-message failure)))
+             (ende-error-message failure)))
     (should (string-match-p "ever being observed"
-                           (deslop-error-message failure)))
-    (should (deslop-openrouter-batch--group-terminal group))))
+                           (ende-error-message failure)))
+    (should (ende-openrouter-batch--group-terminal group))))
 
-(ert-deftest deslop-test/openrouter-batch-404-after-visibility-is-terminal ()
-  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+(ert-deftest ende-test/openrouter-batch-404-after-visibility-is-terminal ()
+  (let* ((profile (ende-provider-profile 'openrouter-batch))
          (failure nil)
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-visible"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-visible"
            :profile profile
            :callbacks (list :on-error (lambda (value) (setq failure value)))))
          (group
-          (deslop-openrouter-batch--make-group
+          (ende-openrouter-batch--make-group
            :profile profile
            :requests (list request)
            :batch-id "batch-visible"
@@ -5377,78 +5377,78 @@ Use COMMAND for the process, or a silent sleep process by default."
            :deadline (+ (float-time) 300)
            :not-found-attempt 0
            :batch-visible-p t)))
-    (cl-letf (((symbol-function 'deslop-openrouter-batch--schedule-poll)
+    (cl-letf (((symbol-function 'ende-openrouter-batch--schedule-poll)
                (lambda (&rest _arguments)
                  (error "visible batch must not retry 404"))))
-      (deslop-openrouter-batch--poll-finished
+      (ende-openrouter-batch--poll-finished
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil))
-    (should (deslop-error-p failure))
+    (should (ende-error-p failure))
     (should (string-match-p "previously visible"
-                           (deslop-error-message failure)))
-    (should (deslop-openrouter-batch--group-terminal group))))
+                           (ende-error-message failure)))
+    (should (ende-openrouter-batch--group-terminal group))))
 
-(ert-deftest deslop-test/openrouter-batch-body-is-non-streaming-and-ordered ()
-  (let* ((deslop-max-output-tokens 64)
-         (profile (deslop-provider-profile 'openrouter-batch))
-         (group (deslop-openrouter-batch--make-group :profile profile))
+(ert-deftest ende-test/openrouter-batch-body-is-non-streaming-and-ordered ()
+  (let* ((ende-max-output-tokens 64)
+         (profile (ende-provider-profile 'openrouter-batch))
+         (group (ende-openrouter-batch--make-group :profile profile))
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-1"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-1"
            :messages '( ("system" . "rules") ("user" . "question"))
            :profile profile)))
-    (setf (deslop-openrouter-batch--group-requests group) (list request))
-    (let* ((encoded (deslop-openrouter-batch--body group))
+    (setf (ende-openrouter-batch--group-requests group) (list request))
+    (let* ((encoded (ende-openrouter-batch--body group))
            (text (decode-coding-string encoded 'utf-8))
-           (body (deslop-protocol-json-read-string text))
+           (body (ende-protocol-json-read-string text))
            (request-body
-            (deslop-protocol-json-get
+            (ende-protocol-json-get
              "body"
-             (aref (deslop-protocol-json-get "requests" body) 0))))
+             (aref (ende-protocol-json-get "requests" body) 0))))
       (should (string-match-p
                "\"endpoint\".*\"model\".*\"requests\"" text))
-      (should (string= (deslop-protocol-json-get "endpoint" body)
+      (should (string= (ende-protocol-json-get "endpoint" body)
                        "/v1/chat/completions"))
-      (should (string= (deslop-protocol-json-get "custom_id"
+      (should (string= (ende-protocol-json-get "custom_id"
                                                  (aref
-                                                  (deslop-protocol-json-get
+                                                  (ende-protocol-json-get
                                                    "requests" body)
                                                   0))
-                       "deslop-job-1"))
-      (should-not (deslop-protocol-json-has-key-p "stream" request-body))
-      (should-not (deslop-protocol-json-has-key-p "model" request-body))
-      (should (= (deslop-protocol-json-get "max_tokens" request-body) 64)))))
+                       "ende-job-1"))
+      (should-not (ende-protocol-json-has-key-p "stream" request-body))
+      (should-not (ende-protocol-json-has-key-p "model" request-body))
+      (should (= (ende-protocol-json-get "max_tokens" request-body) 64)))))
 
-(ert-deftest deslop-test/openrouter-batch-completion-routes-by-custom-id ()
-  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+(ert-deftest ende-test/openrouter-batch-completion-routes-by-custom-id ()
+  (let* ((profile (ende-provider-profile 'openrouter-batch))
          (events nil)
          (result nil)
          (failure nil)
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-2"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-2"
            :profile profile
                  :callbacks
            (list :on-event (lambda (event) (push event events))
                  :on-done (lambda (value) (setq result value))
                  :on-error (lambda (value) (setq failure value)))))
          (cancelled-request
-          (deslop-openrouter-batch--make-request
+          (ende-openrouter-batch--make-request
            :custom-id "unrelated" :profile profile :cancelled t))
          (group
-          (deslop-openrouter-batch--make-group
+          (ende-openrouter-batch--make-group
            :profile profile :requests (list request cancelled-request)))
          (payload
-          (deslop-protocol-json-read-string
+          (ende-protocol-json-read-string
            (concat
             "{\"status\":\"completed\","
             "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3},"
             "\"results\":["
             "{\"custom_id\":\"unrelated\",\"error\":{\"message\":\"ignored\"}},"
-            "{\"custom_id\":\"deslop-job-2\",\"response\":{"
+            "{\"custom_id\":\"ende-job-2\",\"response\":{"
             "\"status_code\":200,\"body\":{\"model\":\"actual/model\","
             "\"choices\":[{\"message\":{\"content\":\"answer\","
             "\"reasoning_content\":\"thought\"},\"finish_reason\":\"stop\"}]}}}]}"))))
-    (deslop-openrouter-batch--finish-completed group payload)
+    (ende-openrouter-batch--finish-completed group payload)
     (should-not failure)
     (should (string= (plist-get result :content) "answer"))
     (should (string= (plist-get result :thinking) "thought"))
@@ -5459,36 +5459,36 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (cl-find-if (lambda (event) (eq (plist-get event :type) :usage))
                         events))))
 
-(ert-deftest deslop-test/openrouter-batch-result-failure-does-not-wedge-group ()
-  (let* ((profile (deslop-provider-profile 'openrouter-batch))
+(ert-deftest ende-test/openrouter-batch-result-failure-does-not-wedge-group ()
+  (let* ((profile (ende-provider-profile 'openrouter-batch))
          (failure nil)
          (request
-          (deslop-openrouter-batch--make-request
-           :custom-id "deslop-job-3"
+          (ende-openrouter-batch--make-request
+           :custom-id "ende-job-3"
            :profile profile
            :callbacks (list :on-error (lambda (value) (setq failure value)))))
          (group
-          (deslop-openrouter-batch--make-group
+          (ende-openrouter-batch--make-group
            :profile profile :requests (list request)))
          (payload
-          (deslop-protocol-json-read-string
-           "{\"status\":\"completed\",\"results\":[{\"custom_id\":\"deslop-job-3\",\"error\":{\"message\":\"provider failed\"}}]}")))
-    (deslop-openrouter-batch--finish-completed group payload)
-    (should (deslop-error-p failure))
-    (should (eq (deslop-error-kind failure) 'provider))
-    (should-not (deslop-openrouter-batch--group-stage group))
-    (should (deslop-openrouter-batch--group-terminal group))))
+          (ende-protocol-json-read-string
+           "{\"status\":\"completed\",\"results\":[{\"custom_id\":\"ende-job-3\",\"error\":{\"message\":\"provider failed\"}}]}")))
+    (ende-openrouter-batch--finish-completed group payload)
+    (should (ende-error-p failure))
+    (should (eq (ende-error-kind failure) 'provider))
+    (should-not (ende-openrouter-batch--group-stage group))
+    (should (ende-openrouter-batch--group-terminal group))))
 
-(ert-deftest deslop-test/openrouter-batch-request-cancellation-cleans-pending-group ()
-  (deslop-test--reset)
-  (let ((profile (plist-put (deslop-provider-profile 'openrouter-batch)
+(ert-deftest ende-test/openrouter-batch-request-cancellation-cleans-pending-group ()
+  (ende-test--reset)
+  (let ((profile (plist-put (ende-provider-profile 'openrouter-batch)
                             :batch-window 60))
         (cancel nil)
         (done nil)
         (failure nil))
     (unwind-protect
         (progn
-          (deslop-openrouter-batch-default
+          (ende-openrouter-batch-default
            '(("user" . "question"))
            (list :on-start (lambda (function) (setq cancel function))
                  :on-done (lambda (_) (setq done t))
@@ -5498,16 +5498,16 @@ Use COMMAND for the process, or a silent sleep process by default."
           (funcall cancel)
           (should-not done)
           (should-not failure)
-          (should (= (hash-table-count deslop-openrouter-batch--groups) 0))
-          (should-not deslop-openrouter-batch--known-groups))
-      (deslop-openrouter-batch-abort))))
+          (should (= (hash-table-count ende-openrouter-batch--groups) 0))
+          (should-not ende-openrouter-batch--known-groups))
+      (ende-openrouter-batch-abort))))
 
-(ert-deftest deslop-test/openrouter-batch-json-command-uses-json-accept ()
+(ert-deftest ende-test/openrouter-batch-json-command-uses-json-accept ()
   (let ((command
-         (deslop-curl-json-command
+         (ende-curl-json-command
           '(:url "https://openrouter.ai/api/v1/chat/completions"
             :auth-source-host "openrouter.ai"
-            :auth-source-user "deslop"
+            :auth-source-user "ende"
             :auth-source-port 443)
           "/tmp/headers" nil "GET" "application/json" nil
           "https://openrouter.ai/api/v1/batches/batch_1")))
@@ -5517,8 +5517,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (equal (cadr (member "--url" command))
                    "https://openrouter.ai/api/v1/batches/batch_1"))))
 
-(ert-deftest deslop-test/openrouter-batch-submits-polls-and-settles ()
-  (let* ((profile (plist-put (deslop-provider-profile 'openrouter-batch)
+(ert-deftest ende-test/openrouter-batch-submits-polls-and-settles ()
+  (let* ((profile (plist-put (ende-provider-profile 'openrouter-batch)
                              :batch-window 0))
          (stages nil)
          (processes nil)
@@ -5528,17 +5528,17 @@ Use COMMAND for the process, or a silent sleep process by default."
          (failure nil)
          (real-make-process (symbol-function 'make-process)))
     (cl-letf
-        (((symbol-function 'deslop-curl-start-request)
+        (((symbol-function 'ende-curl-start-request)
           (lambda (&rest arguments)
             (let* ((response-buffer (generate-new-buffer
-                                     " *deslop-batch-test-response*"))
+                                     " *ende-batch-test-response*"))
                    (stderr-buffer (generate-new-buffer
-                                   " *deslop-batch-test-stderr*"))
-                   (headers-file (make-temp-file "deslop-batch-test-headers-"))
+                                   " *ende-batch-test-stderr*"))
+                   (headers-file (make-temp-file "ende-batch-test-headers-"))
                    (process
                     (funcall real-make-process
                              :name (generate-new-buffer-name
-                                    "deslop-batch-test-process")
+                                    "ende-batch-test-process")
                              :buffer nil
                              :command (list "cat")
                              :connection-type 'pipe
@@ -5553,24 +5553,24 @@ Use COMMAND for the process, or a silent sleep process by default."
                                 :filter (plist-get arguments :filter)
                                 :sentinel (plist-get arguments :sentinel)
                                 :command (plist-get arguments :command))))
-              (process-put process :deslop-response-buffer response-buffer)
-              (process-put process :deslop-stderr-buffer stderr-buffer)
-              (process-put process :deslop-headers-file headers-file)
-              (process-put process :deslop-stderr-process nil)
+              (process-put process :ende-response-buffer response-buffer)
+              (process-put process :ende-stderr-buffer stderr-buffer)
+              (process-put process :ende-headers-file headers-file)
+              (process-put process :ende-stderr-process nil)
               (setq stages (append stages (list stage))
                     processes (cons process processes)
                     files (cons headers-file files))
               request))))
       (unwind-protect
           (progn
-            (deslop-openrouter-batch-default
+            (ende-openrouter-batch-default
              '(("user" . "question"))
              (list :on-event (lambda (event) (push event events))
                    :on-done (lambda (value) (setq result value))
                    :on-error (lambda (value) (setq failure value)))
              profile)
-            (let ((group (car deslop-openrouter-batch--known-groups)))
-              (deslop-openrouter-batch--flush group)
+            (let ((group (car ende-openrouter-batch--known-groups)))
+              (ende-openrouter-batch--flush group)
               (let ((stage (nth 0 stages)))
                 (with-temp-file (plist-get (plist-get stage :request)
                                            :headers-file)
@@ -5586,10 +5586,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                 (funcall (plist-get stage :sentinel)
                          (plist-get (plist-get stage :request) :process)
                          "finished"))
-              (deslop-openrouter-batch--cancel-timer
-               (deslop-openrouter-batch--group-poll-timer group))
-              (setf (deslop-openrouter-batch--group-poll-timer group) nil)
-              (deslop-openrouter-batch--poll group)
+              (ende-openrouter-batch--cancel-timer
+               (ende-openrouter-batch--group-poll-timer group))
+              (setf (ende-openrouter-batch--group-poll-timer group) nil)
+              (ende-openrouter-batch--poll group)
               (let ((stage (nth 1 stages)))
                 (should (stringp
                          (plist-get (plist-get stage :request)
@@ -5608,8 +5608,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                            "\"response\":{\"status_code\":200,\"body\":{"
                            "\"choices\":[{\"message\":{\"content\":\"done\"}}]}}}]}"
                            )
-                          (deslop-openrouter-batch--request-custom-id
-                           (car (deslop-openrouter-batch--group-requests
+                          (ende-openrouter-batch--request-custom-id
+                           (car (ende-openrouter-batch--group-requests
                                  group)))))
                 (while (process-live-p
                         (plist-get (plist-get stage :request) :process))
@@ -5631,7 +5631,7 @@ Use COMMAND for the process, or a silent sleep process by default."
             (should-not (member "--data-binary"
                                (funcall (plist-get (nth 1 stages) :command)
                                         "/tmp/headers" nil))))
-        (deslop-openrouter-batch-abort)
+        (ende-openrouter-batch-abort)
         (dolist (process processes)
           (when (process-live-p process)
             (delete-process process)))
@@ -5639,8 +5639,8 @@ Use COMMAND for the process, or a silent sleep process by default."
           (when (file-exists-p file)
             (delete-file file)))))))
 
-(ert-deftest deslop-test/openrouter-auto-handoff-only-matches-batch-error ()
-  (let ((headers-file (make-temp-file "deslop-auto-batch-"))
+(ert-deftest ende-test/openrouter-auto-handoff-only-matches-batch-error ()
+  (let ((headers-file (make-temp-file "ende-auto-batch-"))
         (handoff nil))
     (unwind-protect
         (progn
@@ -5648,26 +5648,26 @@ Use COMMAND for the process, or a silent sleep process by default."
             (insert "HTTP/1.1 404 Not Found\r\n"
                     "Content-Type: application/json\r\n\r\n"))
           (cl-letf
-              (((symbol-function 'deslop-openrouter-batch-default)
+              (((symbol-function 'ende-openrouter-batch-default)
                 (lambda (messages callbacks profile)
                   (setq handoff (list messages callbacks profile))))
-               ((symbol-function 'deslop-llm--cleanup-session)
+               ((symbol-function 'ende-llm--cleanup-session)
                 (lambda (_session) nil)))
             (let ((session
-                   (deslop-llm--make-session
+                   (ende-llm--make-session
                     :profile '(:transport auto
                                :batch-url "https://openrouter.ai/api/v1/batches")
                     :messages '(("user" . "question"))
                     :headers-file headers-file
                     :response-preview-parts
                     '("{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}"))))
-              (deslop-llm--finish-success session)
+              (ende-llm--finish-success session)
               (should handoff)
                (should (eq (plist-get (nth 2 handoff) :transport)
                            'openrouter-batch)))))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
-(provide 'deslop-test)
+(provide 'ende-test)
 
-;;; deslop-test.el ends here
+;;; ende-test.el ends here

@@ -1,4 +1,4 @@
-;;; deslop-ui.el --- Visual overlays and animations for deslop -*- lexical-binding: t; -*-
+;;; ende-ui.el --- Visual overlays and animations for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -6,54 +6,54 @@
 
 ;;; Commentary:
 
-;; Visual indicator overlays, badges, and spinner animations for deslop jobs.
+;; Visual indicator overlays, badges, and spinner animations for ende jobs.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'deslop-core)
-(require 'deslop-queue)
+(require 'ende-core)
+(require 'ende-queue)
 
-(defcustom deslop-reduced-motion nil
+(defcustom ende-reduced-motion nil
   "Non-nil to disable the animated overlay spinner."
   :type 'boolean
-  :group 'deslop)
+  :group 'ende)
 
-(defface deslop-working-face
+(defface ende-working-face
   '((t :underline (:color "#38bdf8" :style line)))
   "Face applied to buffer text regions currently being processed by LLM."
-  :group 'deslop)
+  :group 'ende)
 
 ;;;; Internal State
 
-(defvar deslop-ui--managed-overlays nil
+(defvar ende-ui--managed-overlays nil
   "List of all active job overlays across queue and execution.")
 
-(defvar deslop-ui--spinning-overlays nil
+(defvar ende-ui--spinning-overlays nil
   "List of running job overlays that require animation.")
 
-(defvar deslop-ui--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+(defvar ende-ui--spinner-frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Frames for the dynamic overlay spinner animation.")
 
-(defvar deslop-ui--spinner-index 0
-  "Current frame index in `deslop-ui--spinner-frames'.")
+(defvar ende-ui--spinner-index 0
+  "Current frame index in `ende-ui--spinner-frames'.")
 
-(defvar deslop-ui--spinner-timer nil
+(defvar ende-ui--spinner-timer nil
   "Timer instance for driving the overlay spinner animation.")
 
 ;;;; Badge Formatting & Animation
 
-(defun deslop-ui--display-label (value)
+(defun ende-ui--display-label (value)
   "Return VALUE as a bounded, single-line display label."
-  (deslop-bounded-single-line value 80 t))
+  (ende-bounded-single-line value 80 t))
 
-(defun deslop-ui--format-badge (ov spinner)
+(defun ende-ui--format-badge (ov spinner)
   "Format the display badge string for overlay OV using SPINNER frame."
   (let* ((status (or (overlay-get ov 'status) "Queued"))
          (is-queued (string= status "Queued"))
          (icon (if is-queued "⏳" spinner))
-         (client (deslop-ui--display-label (overlay-get ov 'client)))
-         (model (deslop-ui--display-label (overlay-get ov 'model)))
+         (client (ende-ui--display-label (overlay-get ov 'client)))
+         (model (ende-ui--display-label (overlay-get ov 'model)))
          (provider-str
           (let ((parts (delq nil (list client model))))
             (if parts
@@ -71,13 +71,13 @@
             (format " (%s%d tok)" (if estimated "~" "") tokens))
            (t "")))
          (badge (format " [%s %s%s%s] " icon status provider-str metric-str)))
-    (propertize badge 'face 'deslop-badge-face)))
+    (propertize badge 'face 'ende-badge-face)))
 
-(defun deslop-ui--put-badge (ov spinner)
+(defun ende-ui--put-badge (ov spinner)
   "Place the SPINNER badge on OV's appropriate side.
 Zero-width indicators use `after-string' so point can remain before them;
 range overlays keep their badge before the covered text."
-  (let ((badge (deslop-ui--format-badge ov spinner)))
+  (let ((badge (ende-ui--format-badge ov spinner)))
     (if (= (overlay-start ov) (overlay-end ov))
         (progn
           (overlay-put ov 'before-string nil)
@@ -85,7 +85,7 @@ range overlays keep their badge before the covered text."
       (overlay-put ov 'after-string nil)
       (overlay-put ov 'before-string badge))))
 
-(defun deslop-ui--prune-dead-overlays ()
+(defun ende-ui--prune-dead-overlays ()
   "Remove any deleted overlays or overlays on dead buffers from tracking."
   (let ((live-overlays
          (lambda (overlays)
@@ -93,51 +93,51 @@ range overlays keep their badge before the covered text."
             (lambda (ov)
               (and (overlayp ov) (buffer-live-p (overlay-buffer ov))))
             overlays))))
-    (setq deslop-ui--managed-overlays
-          (funcall live-overlays deslop-ui--managed-overlays)
-          deslop-ui--spinning-overlays
-          (funcall live-overlays deslop-ui--spinning-overlays))))
+    (setq ende-ui--managed-overlays
+          (funcall live-overlays ende-ui--managed-overlays)
+          ende-ui--spinning-overlays
+          (funcall live-overlays ende-ui--spinning-overlays))))
 
-(defun deslop-ui--refresh-all-overlays ()
+(defun ende-ui--refresh-all-overlays ()
   "Refresh all active overlays. Queued items remain static; active items spin."
-  (deslop-ui--prune-dead-overlays)
-  (if (or deslop-reduced-motion (null deslop-ui--spinning-overlays))
-      (deslop-ui--stop-spinner)
-    (setq deslop-ui--spinner-index
-          (% (1+ deslop-ui--spinner-index) (length deslop-ui--spinner-frames)))
-    (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-      (dolist (ov deslop-ui--spinning-overlays)
-        (deslop-ui--put-badge ov spinner)))))
+  (ende-ui--prune-dead-overlays)
+  (if (or ende-reduced-motion (null ende-ui--spinning-overlays))
+      (ende-ui--stop-spinner)
+    (setq ende-ui--spinner-index
+          (% (1+ ende-ui--spinner-index) (length ende-ui--spinner-frames)))
+    (let ((spinner (aref ende-ui--spinner-frames ende-ui--spinner-index)))
+      (dolist (ov ende-ui--spinning-overlays)
+        (ende-ui--put-badge ov spinner)))))
 
-(defun deslop-ui--start-spinner ()
+(defun ende-ui--start-spinner ()
   "Start spinner animation timer if not currently running."
-  (unless (or deslop-reduced-motion (timerp deslop-ui--spinner-timer))
-    (setq deslop-ui--spinner-index 0)
-    (setq deslop-ui--spinner-timer
-          (run-with-timer 0 0.5 #'deslop-ui--refresh-all-overlays))))
+  (unless (or ende-reduced-motion (timerp ende-ui--spinner-timer))
+    (setq ende-ui--spinner-index 0)
+    (setq ende-ui--spinner-timer
+          (run-with-timer 0 0.5 #'ende-ui--refresh-all-overlays))))
 
-(defun deslop-ui--stop-spinner ()
+(defun ende-ui--stop-spinner ()
   "Stop the overlay spinner timer."
-  (when (timerp deslop-ui--spinner-timer)
-    (cancel-timer deslop-ui--spinner-timer)
-    (setq deslop-ui--spinner-timer nil)))
+  (when (timerp ende-ui--spinner-timer)
+    (cancel-timer ende-ui--spinner-timer)
+    (setq ende-ui--spinner-timer nil)))
 
-(defun deslop-ui-create-overlay (buf beg end &optional status appearance)
+(defun ende-ui-create-overlay (buf beg end &optional status appearance)
   "Create an indicator overlay in BUF from BEG to END with STATUS.
 When APPEARANCE is `badge-only', do not apply a face to the covered text."
   (with-current-buffer buf
     (let ((ov (make-overlay beg end buf nil nil)))
       (when (and (> end beg) (not (eq appearance 'badge-only)))
-        (overlay-put ov 'face 'deslop-working-face))
+        (overlay-put ov 'face 'ende-working-face))
       (overlay-put ov 'status (or status "Queued"))
       (overlay-put ov 'tokens 0)
       (overlay-put ov 'speed nil)
       (overlay-put ov 'estimated nil)
-      (deslop-ui--put-badge ov (aref deslop-ui--spinner-frames 0))
-      (push ov deslop-ui--managed-overlays)
+      (ende-ui--put-badge ov (aref ende-ui--spinner-frames 0))
+      (push ov ende-ui--managed-overlays)
       ov)))
 
-(defun deslop-ui-update-overlay (ov &rest props)
+(defun ende-ui-update-overlay (ov &rest props)
   "Update properties of overlay OV with PROPS plist and update badge."
   (when (and (overlayp ov) (buffer-live-p (overlay-buffer ov)))
     (while props
@@ -148,53 +148,53 @@ When APPEARANCE is `badge-only', do not apply a face to the covered text."
           (:status
            (overlay-put ov 'status val)
            (if (string= (or val "Queued") "Queued")
-               (setq deslop-ui--spinning-overlays
-                     (delq ov deslop-ui--spinning-overlays))
-             (cl-pushnew ov deslop-ui--spinning-overlays)
-             (deslop-ui--start-spinner)))
+               (setq ende-ui--spinning-overlays
+                     (delq ov ende-ui--spinning-overlays))
+             (cl-pushnew ov ende-ui--spinning-overlays)
+             (ende-ui--start-spinner)))
           (:client (overlay-put ov 'client val))
           (:model (overlay-put ov 'model val))
           (:tokens (overlay-put ov 'tokens val))
           (:speed  (overlay-put ov 'speed val))
           (:estimated (overlay-put ov 'estimated val)))))
-    (let ((spinner (aref deslop-ui--spinner-frames deslop-ui--spinner-index)))
-       (deslop-ui--put-badge ov spinner))))
+    (let ((spinner (aref ende-ui--spinner-frames ende-ui--spinner-index)))
+       (ende-ui--put-badge ov spinner))))
 
-(defun deslop-ui-job-event (job event)
+(defun ende-ui-job-event (job event)
   "Update JOB's indicator in response to lifecycle EVENT.
-Queue ownership stays in `deslop-queue'; this function is the presentation
+Queue ownership stays in `ende-queue'; this function is the presentation
 adapter for queued and terminal states."
-  (let ((overlay (deslop-job-overlay job)))
+  (let ((overlay (ende-job-overlay job)))
     (pcase (plist-get event :type)
       (:queued
        (when overlay
-         (deslop-ui-update-overlay
+         (ende-ui-update-overlay
           overlay
           :client (plist-get event :client)
           :model (plist-get event :model))))
       (:settled
        (when overlay
-         (deslop-ui-delete-overlay overlay)
-         (setf (deslop-job-overlay job) nil))))))
+         (ende-ui-delete-overlay overlay)
+         (setf (ende-job-overlay job) nil))))))
 
-(defun deslop-ui-delete-overlay (ov)
+(defun ende-ui-delete-overlay (ov)
   "Delete overlay OV and clean up managed tracking."
   (when (overlayp ov)
-    (setq deslop-ui--managed-overlays (delq ov deslop-ui--managed-overlays))
-    (setq deslop-ui--spinning-overlays (delq ov deslop-ui--spinning-overlays))
+    (setq ende-ui--managed-overlays (delq ov ende-ui--managed-overlays))
+    (setq ende-ui--spinning-overlays (delq ov ende-ui--spinning-overlays))
     (delete-overlay ov)
-    (when (null deslop-ui--spinning-overlays)
-      (deslop-ui--stop-spinner))))
+    (when (null ende-ui--spinning-overlays)
+      (ende-ui--stop-spinner))))
 
-(defun deslop-ui-clear-all ()
+(defun ende-ui-clear-all ()
   "Delete all managed overlays and stop spinner animation."
-  (dolist (ov deslop-ui--managed-overlays)
+  (dolist (ov ende-ui--managed-overlays)
     (when (overlayp ov)
       (delete-overlay ov)))
-  (setq deslop-ui--managed-overlays nil)
-  (setq deslop-ui--spinning-overlays nil)
-  (deslop-ui--stop-spinner))
+  (setq ende-ui--managed-overlays nil)
+  (setq ende-ui--spinning-overlays nil)
+  (ende-ui--stop-spinner))
 
-(provide 'deslop-ui)
+(provide 'ende-ui)
 
-;;; deslop-ui.el ends here
+;;; ende-ui.el ends here

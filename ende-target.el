@@ -1,4 +1,4 @@
-;;; deslop-target.el --- Buffer targets for deslop jobs -*- lexical-binding: t; -*-
+;;; ende-target.el --- Buffer targets for ende jobs -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -7,29 +7,29 @@
 ;;; Commentary:
 
 ;; Stable buffer targets, source validation, restrictions, conflict checks,
-;; mutation monitoring, and queued insertion-anchor movement for deslop.
+;; mutation monitoring, and queued insertion-anchor movement for ende.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'deslop-core)
-(require 'deslop-review)
+(require 'ende-core)
+(require 'ende-review)
 
-(defcustom deslop-target-max-context-chars nil
+(defcustom ende-target-max-context-chars nil
   "Maximum number of characters sent to the LLM as target context.
   Tokens are estimated as chars/4.  When nil, send the complete target."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum characters"))
-  :group 'deslop)
+  :group 'ende)
 
-(defcustom deslop-target-window-chars nil
+(defcustom ende-target-window-chars nil
   "Characters kept on each side of the cursor when target context is elided."
   :type '(choice (const :tag "Unlimited" nil)
                  (integer :tag "Maximum characters"))
-  :group 'deslop)
+  :group 'ende)
 
-(cl-defstruct (deslop-target (:constructor deslop-target--create))
+(cl-defstruct (ende-target (:constructor ende-target--create))
   "A stable, restricted buffer target for a queued operation."
   buffer start-marker end-marker cursor-marker placement
   source-snapshot source-digest restriction-beg restriction-end selected offset
@@ -38,26 +38,26 @@
 
 ;;;; Creation and positions
 
-(defun deslop-target--make-marker (buffer position insertion-type)
+(defun ende-target--make-marker (buffer position insertion-type)
   "Create a marker in BUFFER at POSITION with INSERTION-TYPE."
   (let ((marker (make-marker)))
     (set-marker marker position buffer)
     (set-marker-insertion-type marker insertion-type)
     marker))
 
-(defun deslop-target--marker-position (marker)
+(defun ende-target--marker-position (marker)
   "Return MARKER's position, or nil when it has no live buffer."
   (and (markerp marker) (marker-position marker)))
 
-(defun deslop-target--anchor-position (anchor)
+(defun ende-target--anchor-position (anchor)
   "Return ANCHOR as a live marker position or numeric position."
   (if (markerp anchor) (marker-position anchor) anchor))
 
-(defun deslop-target-region-digest (start end)
+(defun ende-target-region-digest (start end)
   "Return a stable digest of the current buffer between START and END."
   (secure-hash 'sha256 (current-buffer) start end))
 
-(cl-defun deslop-target-create
+(cl-defun ende-target-create
     (&key buffer start end cursor selected placement offset source-snapshot
           (review-policy 'block))
   "Create a target in BUFFER from START to END anchored at CURSOR.
@@ -74,44 +74,44 @@ read-only access to reviewed text."
     (error "unknown target review policy: %s" review-policy))
   (with-current-buffer buffer
     (when (eq review-policy 'block)
-      (deslop-review-assert-available buffer start end))
-    (deslop-target--create
+      (ende-review-assert-available buffer start end))
+    (ende-target--create
      :buffer buffer
-     :start-marker (deslop-target--make-marker buffer start (and selected t))
-     :end-marker (deslop-target--make-marker buffer end nil)
-     :cursor-marker (deslop-target--make-marker buffer cursor nil)
+     :start-marker (ende-target--make-marker buffer start (and selected t))
+     :end-marker (ende-target--make-marker buffer end nil)
+     :cursor-marker (ende-target--make-marker buffer cursor nil)
      :placement placement
      :source-snapshot source-snapshot
      :source-digest (and selected
                          (null source-snapshot)
-                         (deslop-target-region-digest start end))
-     :restriction-beg (deslop-target--make-marker buffer (point-min) nil)
-     :restriction-end (deslop-target--make-marker buffer (point-max) t)
+                         (ende-target-region-digest start end))
+     :restriction-beg (ende-target--make-marker buffer (point-min) nil)
+     :restriction-end (ende-target--make-marker buffer (point-max) t)
      :selected selected
      :offset offset
      :review-policy review-policy)))
 
-(defun deslop-target-start (target)
+(defun ende-target-start (target)
   "Return TARGET's current start position, or nil."
-  (deslop-target--marker-position (deslop-target-start-marker target)))
+  (ende-target--marker-position (ende-target-start-marker target)))
 
-(defun deslop-target-end (target)
+(defun ende-target-end (target)
   "Return TARGET's current end position, or nil."
-  (deslop-target--marker-position (deslop-target-end-marker target)))
+  (ende-target--marker-position (ende-target-end-marker target)))
 
-(defun deslop-target-cursor (target)
+(defun ende-target-cursor (target)
   "Return TARGET's current cursor position, or nil."
-  (deslop-target--marker-position (deslop-target-cursor-marker target)))
+  (ende-target--marker-position (ende-target-cursor-marker target)))
 
-(defun deslop-target-live-p (target)
+(defun ende-target-live-p (target)
   "Return non-nil when TARGET's buffer is live."
-  (and (deslop-target-p target)
-       (buffer-live-p (deslop-target-buffer target))))
+  (and (ende-target-p target)
+       (buffer-live-p (ende-target-buffer target))))
 
-(defconst deslop-target--source-metadata-field-max-length 256
+(defconst ende-target--source-metadata-field-max-length 256
   "Maximum length of a source metadata field sent to an LLM.")
 
-(defun deslop-target--safe-buffer-name (name)
+(defun ende-target--safe-buffer-name (name)
   "Return NAME without an absolute or remote path component."
   (if (and (stringp name)
            (or (file-name-absolute-p name)
@@ -119,13 +119,13 @@ read-only access to reviewed text."
       (file-name-nondirectory name)
     name))
 
-(defun deslop-target-source-metadata (target)
+(defun ende-target-source-metadata (target)
   "Return bounded source metadata for TARGET's buffer, or nil.
 
 Visiting files contribute only their basename.  Other buffers contribute their
 buffer name unless it looks like an absolute or remote path."
-  (let ((buffer (and (deslop-target-p target)
-                     (deslop-target-buffer target))))
+  (let ((buffer (and (ende-target-p target)
+                     (ende-target-buffer target))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (let* ((file-name (and (stringp buffer-file-name)
@@ -133,48 +133,48 @@ buffer name unless it looks like an absolute or remote path."
                                buffer-file-name))
                (raw-name (if file-name
                              (file-name-nondirectory file-name)
-                           (deslop-target--safe-buffer-name
+                           (ende-target--safe-buffer-name
                             (buffer-name))))
                (mode (if (symbolp major-mode)
                          (symbol-name major-mode)
                        (format "%s" major-mode))))
-          (list :name (or (deslop-bounded-single-line
+          (list :name (or (ende-bounded-single-line
                            raw-name
-                           deslop-target--source-metadata-field-max-length
+                           ende-target--source-metadata-field-max-length
                            t)
                           "unnamed-buffer")
                 :type (if file-name "file" "buffer")
-                :major-mode (or (deslop-bounded-single-line
+                :major-mode (or (ende-bounded-single-line
                                  mode
-                                 deslop-target--source-metadata-field-max-length
+                                 ende-target--source-metadata-field-max-length
                                  t)
                                 "unknown")))))))
 
 ;;;; Restrictions, source, context, and conflicts
 
-(defun deslop-target-context-window (length offset)
+(defun ende-target-context-window (length offset)
   "Return bounded (START . END) offsets around OFFSET in text of LENGTH.
-The returned source span never exceeds `deslop-target-max-context-chars', and
-each side is additionally capped by `deslop-target-window-chars'."
-  (unless (or (null deslop-target-max-context-chars)
-              (and (integerp deslop-target-max-context-chars)
-                   (> deslop-target-max-context-chars 0)))
-    (error "deslop-target-max-context-chars must be nil or a positive integer"))
-  (unless (or (null deslop-target-window-chars)
-              (and (integerp deslop-target-window-chars)
-                   (>= deslop-target-window-chars 0)))
-    (error "deslop-target-window-chars must be nil or a nonnegative integer"))
+The returned source span never exceeds `ende-target-max-context-chars', and
+each side is additionally capped by `ende-target-window-chars'."
+  (unless (or (null ende-target-max-context-chars)
+              (and (integerp ende-target-max-context-chars)
+                   (> ende-target-max-context-chars 0)))
+    (error "ende-target-max-context-chars must be nil or a positive integer"))
+  (unless (or (null ende-target-window-chars)
+              (and (integerp ende-target-window-chars)
+                   (>= ende-target-window-chars 0)))
+    (error "ende-target-window-chars must be nil or a nonnegative integer"))
   (setq offset (max 0 (min length offset)))
-  (if (or (null deslop-target-max-context-chars)
-          (<= length deslop-target-max-context-chars))
+  (if (or (null ende-target-max-context-chars)
+          (<= length ende-target-max-context-chars))
       (cons 0 length)
-    (let* ((left-cap (if deslop-target-window-chars
-                         (min offset deslop-target-window-chars)
+    (let* ((left-cap (if ende-target-window-chars
+                         (min offset ende-target-window-chars)
                        offset))
-           (right-cap (if deslop-target-window-chars
-                          (min (- length offset) deslop-target-window-chars)
+           (right-cap (if ende-target-window-chars
+                          (min (- length offset) ende-target-window-chars)
                         (- length offset)))
-           (budget deslop-target-max-context-chars)
+           (budget ende-target-max-context-chars)
            (left (min left-cap (/ budget 2)))
            (right (min right-cap (- budget left)))
            (remaining (- budget left right))
@@ -184,7 +184,7 @@ each side is additionally capped by `deslop-target-window-chars'."
       (setq right (+ right (min remaining (- right-cap right))))
       (cons (- offset left) (+ offset right)))))
 
-(defun deslop-target-format-marker-context
+(defun ende-target-format-marker-context
     (before after omitted-before omitted-after)
   "Format BEFORE and AFTER around a cursor, marking omitted sides."
   (concat
@@ -194,32 +194,32 @@ each side is additionally capped by `deslop-target-window-chars'."
    after
    (when omitted-after "\n...[characters elided]...")))
 
-(defun deslop-target-string-marker-context (text offset)
+(defun ende-target-string-marker-context (text offset)
   "Return bounded TEXT context with a <CURSOR> marker at OFFSET."
   (setq offset (max 0 (min (length text) offset)))
-  (let* ((bounds (deslop-target-context-window (length text) offset))
+  (let* ((bounds (ende-target-context-window (length text) offset))
          (start (car bounds))
          (end (cdr bounds)))
-    (deslop-target-format-marker-context
+    (ende-target-format-marker-context
      (substring text start offset)
      (substring text offset end)
      (> start 0)
      (< end (length text)))))
 
-(defun deslop-target-restriction-valid-p (target start end)
+(defun ende-target-restriction-valid-p (target start end)
   "Return non-nil when START and END are accessible for TARGET."
   (let ((restriction-start
-         (deslop-target--anchor-position
-          (deslop-target-restriction-beg target)))
+         (ende-target--anchor-position
+          (ende-target-restriction-beg target)))
         (restriction-end
-         (deslop-target--anchor-position
-          (deslop-target-restriction-end target))))
+         (ende-target--anchor-position
+          (ende-target-restriction-end target))))
     (and (number-or-marker-p start) (number-or-marker-p end)
          restriction-start restriction-end
          (<= (point-min) restriction-start start)
          (<= start end restriction-end (point-max)))))
 
-(defmacro deslop-target-with-restriction (target &rest body)
+(defmacro ende-target-with-restriction (target &rest body)
   "Evaluate BODY within TARGET's original and current restrictions."
   (declare (indent 1) (debug t))
   `(let ((current-start (point-min))
@@ -227,11 +227,11 @@ each side is additionally capped by `deslop-target-window-chars'."
      (save-restriction
        (widen)
        (let* ((original-start
-               (deslop-target--anchor-position
-                (deslop-target-restriction-beg ,target)))
+               (ende-target--anchor-position
+                (ende-target-restriction-beg ,target)))
               (original-end
-               (deslop-target--anchor-position
-                (deslop-target-restriction-end ,target)))
+               (ende-target--anchor-position
+                (ende-target-restriction-end ,target)))
               (restriction-start
                (and original-start (max original-start current-start)))
               (restriction-end
@@ -243,161 +243,161 @@ each side is additionally capped by `deslop-target-window-chars'."
          (narrow-to-region restriction-start restriction-end)
          ,@body))))
 
-(defun deslop-target-validate-source (target start end)
+(defun ende-target-validate-source (target start end)
   "Signal when TARGET's selected source at START..END has changed."
-  (unless (deslop-target-restriction-valid-p target start end)
+  (unless (ende-target-restriction-valid-p target start end)
     (error "target is outside the original restriction"))
-  (let ((digest (deslop-target-source-digest target))
-        (snapshot (deslop-target-source-snapshot target)))
+  (let ((digest (ende-target-source-digest target))
+        (snapshot (ende-target-source-snapshot target)))
     (cond
      (digest
-      (unless (string= digest (deslop-target-region-digest start end))
+      (unless (string= digest (ende-target-region-digest start end))
         (error "selected source changed before dispatch")))
      (snapshot
       (unless (string= snapshot
                        (buffer-substring-no-properties start end))
         (error "selected source changed before dispatch"))))))
 
-(defun deslop-target-selected-source (target start end)
+(defun ende-target-selected-source (target start end)
   "Return TARGET's selected source at START..END, or signal if changed."
-  (deslop-target-validate-source target start end)
+  (ende-target-validate-source target start end)
   (buffer-substring-no-properties start end))
 
-(defun deslop-target-buffer-marker-context (start end offset)
+(defun ende-target-buffer-marker-context (start end offset)
   "Return bounded buffer context from START to END with a marker at OFFSET."
   (setq offset (max start (min end offset)))
   (let* ((length (- end start))
          (relative-offset (- offset start))
-         (bounds (deslop-target-context-window length relative-offset))
+         (bounds (ende-target-context-window length relative-offset))
          (window-start (+ start (car bounds)))
          (window-end (+ start (cdr bounds))))
-    (deslop-target-format-marker-context
+    (ende-target-format-marker-context
      (buffer-substring-no-properties window-start offset)
      (buffer-substring-no-properties offset window-end)
      (> window-start start) (< window-end end))))
 
-(defun deslop-target-ensure-size (start end operation)
+(defun ende-target-ensure-size (start end operation)
   "Reject an OPERATION target larger than the configured context limit."
-  (when (and deslop-target-max-context-chars
-             (> (- end start) deslop-target-max-context-chars))
+  (when (and ende-target-max-context-chars
+             (> (- end start) ende-target-max-context-chars))
     (user-error "%s target is %d characters; limit is %d"
-                operation (- end start) deslop-target-max-context-chars)))
+                operation (- end start) ende-target-max-context-chars)))
 
-(defun deslop-target-assert-available (target)
+(defun ende-target-assert-available (target)
   "Signal when TARGET intersects output awaiting review."
-  (unless (eq (deslop-target-review-policy target) 'ignore)
-    (let ((buffer (deslop-target-buffer target))
-          (start (if (deslop-target-selected target)
-                     (deslop-target-start target)
-                   (deslop-target-cursor target)))
-          (end (if (deslop-target-selected target)
-                   (deslop-target-end target)
-                 (deslop-target-cursor target))))
+  (unless (eq (ende-target-review-policy target) 'ignore)
+    (let ((buffer (ende-target-buffer target))
+          (start (if (ende-target-selected target)
+                     (ende-target-start target)
+                   (ende-target-cursor target)))
+          (end (if (ende-target-selected target)
+                   (ende-target-end target)
+                 (ende-target-cursor target))))
       (unless (and (buffer-live-p buffer) start end)
         (error "target anchor no longer exists"))
-      (deslop-review-assert-available buffer start end))))
+      (ende-review-assert-available buffer start end))))
 
 ;;;; Active mutation monitoring
 
-(defun deslop-target--add-local-hook (hook function)
+(defun ende-target--add-local-hook (hook function)
   "Add FUNCTION to buffer-local HOOK in the current buffer."
   (add-hook hook function nil t))
 
-(defun deslop-target--remove-local-hook (hook function)
+(defun ende-target--remove-local-hook (hook function)
   "Remove FUNCTION from buffer-local HOOK in the current buffer."
   (remove-hook hook function t))
 
-(defun deslop-target--change-overlaps-p (target beg end)
+(defun ende-target--change-overlaps-p (target beg end)
   "Return non-nil when BEG..END overlaps TARGET's selected source."
-  (let ((start (deslop-target-start target))
-        (finish (deslop-target-end target)))
-    (and (deslop-target-selected target)
+  (let ((start (ende-target-start target))
+        (finish (ende-target-end target)))
+    (and (ende-target-selected target)
          start finish
          (if (= beg end)
              (and (> beg start) (< beg finish))
            (< (max beg start) (min end finish))))))
 
-(defun deslop-target-activate (target on-invalid &optional allow-source-changes)
+(defun ende-target-activate (target on-invalid &optional allow-source-changes)
   "Monitor TARGET and call ON-INVALID if it becomes unusable.
 When ALLOW-SOURCE-CHANGES is non-nil, changes to TARGET's selected source do
 not invalidate it.  The target buffer being killed remains fatal."
-  (let ((buffer (deslop-target-buffer target)))
+  (let ((buffer (ende-target-buffer target)))
     (when (buffer-live-p buffer)
       (let ((kill-hook
              (lambda ()
                (funcall on-invalid "target buffer was killed")))
             (before-hook
              (lambda (beg end)
-                (when (not (deslop-target-applying target))
+                (when (not (ende-target-applying target))
                     (when (and (not allow-source-changes)
-                               (deslop-target--change-overlaps-p target beg end))
-                     (setf (deslop-target-invalidated target) t)))))
+                               (ende-target--change-overlaps-p target beg end))
+                     (setf (ende-target-invalidated target) t)))))
              (after-hook
               (lambda (&rest _)
                 (when (and (not allow-source-changes)
-                           (deslop-target-invalidated target))
+                           (ende-target-invalidated target))
                   (funcall on-invalid
                            "selected source changed during generation")))))
-        (setf (deslop-target-kill-buffer-hook target) kill-hook
-              (deslop-target-before-change-hook target) before-hook
-              (deslop-target-after-change-hook target) after-hook)
+        (setf (ende-target-kill-buffer-hook target) kill-hook
+              (ende-target-before-change-hook target) before-hook
+              (ende-target-after-change-hook target) after-hook)
         (with-current-buffer buffer
-          (deslop-target--add-local-hook 'kill-buffer-hook kill-hook)
-          (deslop-target--add-local-hook
+          (ende-target--add-local-hook 'kill-buffer-hook kill-hook)
+          (ende-target--add-local-hook
            'before-change-functions before-hook)
-          (deslop-target--add-local-hook
+          (ende-target--add-local-hook
            'after-change-functions after-hook)))))
   target)
 
-(defmacro deslop-target-with-application (target &rest body)
+(defmacro ende-target-with-application (target &rest body)
   "Evaluate BODY while TARGET ignores mutations made by its own result."
   (declare (indent 1) (debug t))
   `(progn
-     (setf (deslop-target-applying ,target) t)
+     (setf (ende-target-applying ,target) t)
      (unwind-protect
          (progn ,@body)
-       (setf (deslop-target-applying ,target) nil))))
+       (setf (ende-target-applying ,target) nil))))
 
-(defun deslop-target--remove-hooks (target)
+(defun ende-target--remove-hooks (target)
   "Remove lifecycle hooks installed for TARGET."
-  (let ((buffer (deslop-target-buffer target))
-        (kill-hook (deslop-target-kill-buffer-hook target))
-        (before-hook (deslop-target-before-change-hook target))
-        (after-hook (deslop-target-after-change-hook target)))
+  (let ((buffer (ende-target-buffer target))
+        (kill-hook (ende-target-kill-buffer-hook target))
+        (before-hook (ende-target-before-change-hook target))
+        (after-hook (ende-target-after-change-hook target)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (when kill-hook
-          (deslop-target--remove-local-hook 'kill-buffer-hook kill-hook))
+          (ende-target--remove-local-hook 'kill-buffer-hook kill-hook))
         (when before-hook
-          (deslop-target--remove-local-hook
+          (ende-target--remove-local-hook
            'before-change-functions before-hook))
         (when after-hook
-          (deslop-target--remove-local-hook
+          (ende-target--remove-local-hook
            'after-change-functions after-hook))))
-    (setf (deslop-target-kill-buffer-hook target) nil
-          (deslop-target-before-change-hook target) nil
-          (deslop-target-after-change-hook target) nil)))
+    (setf (ende-target-kill-buffer-hook target) nil
+          (ende-target-before-change-hook target) nil
+          (ende-target-after-change-hook target) nil)))
 
-(defun deslop-target-release (target)
+(defun ende-target-release (target)
   "Remove TARGET's hooks and detach all of its markers."
-  (deslop-target--remove-hooks target)
-  (dolist (marker (list (deslop-target-start-marker target)
-                        (deslop-target-end-marker target)
-                        (deslop-target-cursor-marker target)
-                        (deslop-target-restriction-beg target)
-                        (deslop-target-restriction-end target)))
+  (ende-target--remove-hooks target)
+  (dolist (marker (list (ende-target-start-marker target)
+                        (ende-target-end-marker target)
+                        (ende-target-cursor-marker target)
+                        (ende-target-restriction-beg target)
+                        (ende-target-restriction-end target)))
     (when (markerp marker)
       (set-marker marker nil)))
   target)
 
 ;;;; Pending insertion anchors
 
-(defun deslop-target-advance-queued-anchors
+(defun ende-target-advance-queued-anchors
     (targets buffer position new-position &optional on-move)
   "Advance TARGETS' cursor anchors at POSITION to NEW-POSITION in BUFFER.
 Call ON-MOVE with each moved target when it is non-nil."
   (dolist (target targets)
-    (let ((marker (deslop-target-cursor-marker target)))
+    (let ((marker (ende-target-cursor-marker target)))
       (when (and (markerp marker)
                  (eq (marker-buffer marker) buffer)
                  (= (marker-position marker) position))
@@ -405,6 +405,6 @@ Call ON-MOVE with each moved target when it is non-nil."
         (when on-move
           (funcall on-move target))))))
 
-(provide 'deslop-target)
+(provide 'ende-target)
 
-;;; deslop-target.el ends here
+;;; ende-target.el ends here

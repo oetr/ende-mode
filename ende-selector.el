@@ -1,4 +1,4 @@
-;;; deslop-selector.el --- Provider and model selector for deslop -*- lexical-binding: t; -*-
+;;; ende-selector.el --- Provider and model selector for ende -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter
 ;; Author: Peter
@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 
-;; The selector is the entry point for all interactive deslop requests.  It
+;; The selector is the entry point for all interactive ende requests.  It
 ;; keeps the source buffer separate from the selector buffer and attaches the
 ;; selected provider/model to the queued job.
 
@@ -14,147 +14,147 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'deslop-core)
-(require 'deslop-provider)
-(require 'deslop-commands)
-(require 'deslop-rubber-duck)
+(require 'ende-core)
+(require 'ende-provider)
+(require 'ende-commands)
+(require 'ende-rubber-duck)
 
-(defcustom deslop-selector-buffer-name "*deslop-selector*"
+(defcustom ende-selector-buffer-name "*ende-selector*"
   "Buffer used by the provider and model selector."
   :type 'string
-  :group 'deslop)
+  :group 'ende)
 
-(defcustom deslop-selector-window-min-height 4
+(defcustom ende-selector-window-min-height 4
   "Minimum total height of the bottom selector window."
   :type 'integer
-  :group 'deslop)
+  :group 'ende)
 
-(defface deslop-selector-model-face
+(defface ende-selector-model-face
   '((t :inherit font-lock-constant-face :weight bold))
   "Face used for model IDs in the completion picker."
-  :group 'deslop)
+  :group 'ende)
 
-(defface deslop-selector-price-muted-face
+(defface ende-selector-price-muted-face
   '((t :inherit shadow))
   "Face used for non-output prices in the completion picker."
-  :group 'deslop)
+  :group 'ende)
 
-(defface deslop-selector-price-output-face
+(defface ende-selector-price-output-face
   '((t :inherit error))
   "Face used for output prices in the completion picker."
-  :group 'deslop)
+  :group 'ende)
 
-(defvar deslop-selector--last-selection nil
+(defvar ende-selector--last-selection nil
   "Most recently confirmed selector choice as a provider/model plist.")
 
-(defvar deslop-selector--model-validations (make-hash-table :test #'equal)
+(defvar ende-selector--model-validations (make-hash-table :test #'equal)
   "Cached model preference validation results.")
 
-(defvar-local deslop-selector--source-buffer nil
+(defvar-local ende-selector--source-buffer nil
   "Source buffer associated with the current selector buffer.")
 
-(defvar-local deslop-selector--providers nil
+(defvar-local ende-selector--providers nil
   "Provider names available in the current selector.")
 
-(defvar-local deslop-selector--provider-index 0
+(defvar-local ende-selector--provider-index 0
   "Index of the selected provider in the current selector.")
 
-(defvar-local deslop-selector--models nil
+(defvar-local ende-selector--models nil
   "Model names available for the selected provider.")
 
-(defvar-local deslop-selector--model-details nil
+(defvar-local ende-selector--model-details nil
   "Cached display metadata for models available to the selected provider.")
 
-(defvar-local deslop-selector--model-index 0
+(defvar-local ende-selector--model-index 0
   "Index of the selected model in the current selector.")
 
-(defvar-local deslop-selector--model-state nil
+(defvar-local ende-selector--model-state nil
   "State of model discovery for the selected provider.")
 
-(defvar-local deslop-selector--model-selection-generation 0
+(defvar-local ende-selector--model-selection-generation 0
   "Generation incremented when the user changes the current model.")
 
-(defvar-local deslop-selector--probe-cancel nil
+(defvar-local ende-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
 
-(defvar deslop-selector--next-probe-generation 0
+(defvar ende-selector--next-probe-generation 0
   "Next generation identifier assigned to a selector model probe.")
 
-(defvar-local deslop-selector--probe-generation 0
+(defvar-local ende-selector--probe-generation 0
   "Generation identifier for the current selector model probe.")
 
-(defvar-local deslop-selector--window nil
+(defvar-local ende-selector--window nil
   "Window displaying the current selector buffer.")
 
-(defun deslop-selector--fit-window (window)
+(defun ende-selector--fit-window (window)
   "Fit WINDOW to the selector contents."
-  (fit-window-to-buffer window nil deslop-selector-window-min-height))
+  (fit-window-to-buffer window nil ende-selector-window-min-height))
 
-(defun deslop-selector--provider-name ()
+(defun ende-selector--provider-name ()
   "Return the selected provider name."
-  (nth deslop-selector--provider-index deslop-selector--providers))
+  (nth ende-selector--provider-index ende-selector--providers))
 
-(defun deslop-selector--provider-profile ()
+(defun ende-selector--provider-profile ()
   "Return the selected provider profile."
-  (deslop-provider-profile (deslop-selector--provider-name)))
+  (ende-provider-profile (ende-selector--provider-name)))
 
-(defun deslop-selector--model-name ()
+(defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
-  (nth deslop-selector--model-index deslop-selector--models))
+  (nth ende-selector--model-index ende-selector--models))
 
-(defun deslop-selector--remembered-model (provider)
+(defun ende-selector--remembered-model (provider)
   "Return the remembered model for PROVIDER, or nil."
-  (and (eq provider (plist-get deslop-selector--last-selection :provider))
-       (plist-get deslop-selector--last-selection :model)))
+  (and (eq provider (plist-get ende-selector--last-selection :provider))
+       (plist-get ende-selector--last-selection :model)))
 
-(defun deslop-selector--preferred-model (provider profile)
+(defun ende-selector--preferred-model (provider profile)
   "Return the saved or explicitly configured model for PROVIDER PROFILE."
-  (or (deslop-selector--remembered-model provider)
-      (deslop-provider-configured-model profile)))
+  (or (ende-selector--remembered-model provider)
+      (ende-provider-configured-model profile)))
 
-(defun deslop-selector--model-validation-key (provider models generation model)
+(defun ende-selector--model-validation-key (provider models generation model)
   "Return the validation key for MODEL in PROVIDER's catalog."
   (list provider generation model
         (secure-hash 'sha256 (prin1-to-string models))))
 
-(defun deslop-selector--valid-model-p (provider profile models generation model)
+(defun ende-selector--valid-model-p (provider profile models generation model)
   "Return non-nil when MODEL is available in the current catalog.
 Report an unavailable model once for each catalog generation."
   (when (and (stringp model) models)
-    (let* ((key (deslop-selector--model-validation-key
+    (let* ((key (ende-selector--model-validation-key
                  provider models generation model))
-           (status (gethash key deslop-selector--model-validations)))
+           (status (gethash key ende-selector--model-validations)))
       (if status
           (plist-get status :valid)
         (let ((valid (member model models)))
           (puthash key (list :valid valid)
-                   deslop-selector--model-validations)
+                   ende-selector--model-validations)
           (unless valid
             (message
-             "deslop: model %s is unavailable for %s; using %s"
+             "ende: model %s is unavailable for %s; using %s"
              model
-             (deslop-provider-client-name profile)
+             (ende-provider-client-name profile)
              (or (car models) "the first available model")))
           valid)))))
 
-(defun deslop-selector--model-detail (model)
+(defun ende-selector--model-detail (model)
   "Return cached display metadata for MODEL, or nil."
-  (cl-find model deslop-selector--model-details
+  (cl-find model ende-selector--model-details
            :key (lambda (detail) (plist-get detail :id))
            :test #'equal))
 
-(defun deslop-selector--model-candidates ()
+(defun ende-selector--model-candidates ()
   "Return completion display candidates paired with their model IDs."
   (mapcar
    (lambda (model)
-     (cons (deslop-bounded-single-line model 160 t) model))
-   (cl-remove-if-not #'stringp deslop-selector--models)))
+     (cons (ende-bounded-single-line model 160 t) model))
+   (cl-remove-if-not #'stringp ende-selector--models)))
 
-(defun deslop-selector--candidate-for-model (model candidates)
+(defun ende-selector--candidate-for-model (model candidates)
   "Return the completion candidate for MODEL in CANDIDATES."
   (car (cl-find model candidates :key #'cdr :test #'equal)))
 
-(defun deslop-selector--model-affixations (completions candidates details)
+(defun ende-selector--model-affixations (completions candidates details)
   "Return styled affixations for COMPLETIONS.
 CANDIDATES maps displayed completion strings to model IDs.  DETAILS contains
 the discovered pricing metadata for those model IDs."
@@ -167,55 +167,55 @@ the discovered pricing metadata for those model IDs."
                              :test #'equal))
             (prices
              (and detail
-                  (deslop-provider-model-price-annotation
+                  (ende-provider-model-price-annotation
                    detail
                    (lambda (field text)
                      (propertize
                       text 'face
                       (if (eq field :completion)
-                          'deslop-selector-price-output-face
-                        'deslop-selector-price-muted-face)))))))
-       (list (propertize candidate 'face 'deslop-selector-model-face)
+                          'ende-selector-price-output-face
+                        'ende-selector-price-muted-face)))))))
+       (list (propertize candidate 'face 'ende-selector-model-face)
              ""
              (or prices ""))))
    completions))
 
-(defun deslop-selector--index-of (value values)
+(defun ende-selector--index-of (value values)
   "Return the index of VALUE in VALUES, or nil."
   (cl-position value values :test #'equal))
 
-(defun deslop-selector--display-provider ()
+(defun ende-selector--display-provider ()
   "Return a display name for the selected provider."
-  (deslop-provider-client-name (deslop-selector--provider-profile)))
+  (ende-provider-client-name (ende-selector--provider-profile)))
 
-(defun deslop-selector--display-label (value width)
+(defun ende-selector--display-label (value width)
   "Return sanitized VALUE padded or truncated to display WIDTH columns."
-  (let* ((text (or (deslop-bounded-single-line value 80 t) ""))
+  (let* ((text (or (ende-bounded-single-line value 80 t) ""))
          (text (truncate-string-to-width text width 0 nil "...")))
     (concat text (make-string (max 0 (- width (string-width text))) ?\s))))
 
-(defun deslop-selector--provider-concurrency ()
+(defun ende-selector--provider-concurrency ()
   "Return the selected provider's current concurrency limit."
-  (deslop-provider-max-concurrency (deslop-selector--provider-profile)))
+  (ende-provider-max-concurrency (ende-selector--provider-profile)))
 
-(defun deslop-selector--provider-parallel-p ()
+(defun ende-selector--provider-parallel-p ()
   "Return whether the selected provider defaults to parallel jobs."
-  (deslop-provider-parallel-enabled-p (deslop-selector--provider-profile)))
+  (ende-provider-parallel-enabled-p (ende-selector--provider-profile)))
 
-(defun deslop-selector--render ()
+(defun ende-selector--render ()
   "Render the current selector state."
-  (let* ((model-name (deslop-selector--model-name))
-         (provider (deslop-selector--display-label
-                    (deslop-selector--display-provider) 24))
-         (model (deslop-selector--display-label
+  (let* ((model-name (ende-selector--model-name))
+         (provider (ende-selector--display-label
+                    (ende-selector--display-provider) 24))
+         (model (ende-selector--display-label
                  (or model-name
-                     (if (memq deslop-selector--model-state
+                     (if (memq ende-selector--model-state
                                '(:loading :validating))
                          "validating..."
                        "(none available)"))
                  24))
          (model-status
-          (pcase deslop-selector--model-state
+          (pcase ende-selector--model-state
             ((or :loading :validating)
              (if model-name " [validating...]" ""))
             (:error " [probe failed]")
@@ -226,9 +226,9 @@ the discovered pricing metadata for those model IDs."
       (insert (format "Model:        %s%s(C-n / C-p)\n"
                       model model-status))
       (insert (format "Concurrency:  %-24d(c/C)\n"
-                      (deslop-selector--provider-concurrency)))
+                      (ende-selector--provider-concurrency)))
       (insert (format "Parallel:     %-24s(P)\n\n"
-                      (if (deslop-selector--provider-parallel-p)
+                      (if (ende-selector--provider-parallel-p)
                           "on"
                         "off")))
       (insert "i  - insert\n"
@@ -243,186 +243,186 @@ the discovered pricing metadata for those model IDs."
                "q/ESC     - close\n")
       (goto-char (point-min)))))
 
-(defun deslop-selector--cancel-probe ()
+(defun ende-selector--cancel-probe ()
   "Cancel the current model probe, if any."
-  (let ((cancel deslop-selector--probe-cancel))
-    (setq deslop-selector--probe-cancel nil
-          deslop-selector--probe-generation
-          (cl-incf deslop-selector--next-probe-generation))
+  (let ((cancel ende-selector--probe-cancel))
+    (setq ende-selector--probe-cancel nil
+          ende-selector--probe-generation
+          (cl-incf ende-selector--next-probe-generation))
     (when (functionp cancel)
-      (deslop-ignore-errors cancel))))
+      (ende-ignore-errors cancel))))
 
-(defun deslop-selector--set-models (models &optional preferred)
+(defun ende-selector--set-models (models &optional preferred)
   "Set the current provider's MODELS and select PREFERRED when available."
   (let ((models (cl-remove-if-not #'stringp models)))
-    (setq deslop-selector--models models
-          deslop-selector--model-index
+    (setq ende-selector--models models
+          ende-selector--model-index
           (or (and (stringp preferred)
-                   (deslop-selector--index-of preferred models))
+                   (ende-selector--index-of preferred models))
               0))))
 
-(defun deslop-selector--set-provisional-models (profile preferred)
+(defun ende-selector--set-provisional-models (profile preferred)
   "Show PROFILE's provisional models while discovery validates PREFERRED."
-  (let ((configured (deslop-provider-models profile)))
+  (let ((configured (ende-provider-models profile)))
     (cond
      (preferred
-      (deslop-selector--set-models
+      (ende-selector--set-models
        (if (member preferred configured)
            configured
          (cons preferred configured))
        preferred))
-     ((deslop-provider-configured-models-explicit-p profile)
-      (deslop-selector--set-models configured))
+     ((ende-provider-configured-models-explicit-p profile)
+      (ende-selector--set-models configured))
      (t
-      (deslop-selector--set-models nil)))))
+      (ende-selector--set-models nil)))))
 
-(defun deslop-selector--apply-model-catalog
+(defun ende-selector--apply-model-catalog
     (profile models details generation preferred &optional error)
   "Apply a discovered or configured model CATALOG to PROFILE.
 PREFERRED is selected only when it is present in MODELS."
   (let ((models (cl-remove-if-not #'stringp models)))
-    (setq deslop-selector--model-details (copy-tree details))
+    (setq ende-selector--model-details (copy-tree details))
     (if error
-        (setq deslop-selector--model-state :error)
+        (setq ende-selector--model-state :error)
       (let ((selected
              (and preferred
-                  (deslop-selector--valid-model-p
-                   (deslop-selector--provider-name)
+                  (ende-selector--valid-model-p
+                   (ende-selector--provider-name)
                    profile models generation preferred)
                   preferred)))
-        (deslop-selector--set-models models selected)
-        (setq deslop-selector--model-state
+        (ende-selector--set-models models selected)
+        (setq ende-selector--model-state
               (if models :ready :error))))))
 
-(defun deslop-selector--probe-current-provider (&optional preferred)
+(defun ende-selector--probe-current-provider (&optional preferred)
   "Probe the selected provider when it has dynamic model discovery.
 PREFERRED is the model selected before discovery started."
-  (let* ((provider (deslop-selector--provider-name))
-         (profile (deslop-selector--provider-profile))
+  (let* ((provider (ende-selector--provider-name))
+         (profile (ende-selector--provider-profile))
          (selector-buffer (current-buffer))
-         (generation (cl-incf deslop-selector--next-probe-generation))
-         (selection-generation deslop-selector--model-selection-generation)
+         (generation (cl-incf ende-selector--next-probe-generation))
+         (selection-generation ende-selector--model-selection-generation)
          (completed nil))
-    (setq deslop-selector--probe-generation generation)
-    (setq deslop-selector--model-state :validating)
+    (setq ende-selector--probe-generation generation)
+    (setq ende-selector--model-state :validating)
     (let ((callback
            (lambda (models error)
              (when (and (buffer-live-p selector-buffer)
                         (with-current-buffer selector-buffer
-                          (= deslop-selector--probe-generation generation)))
+                          (= ende-selector--probe-generation generation)))
                (setq completed t)
                (with-current-buffer selector-buffer
-                 (when (eq (deslop-selector--provider-name) provider)
-                   (setq deslop-selector--probe-cancel nil)
+                 (when (eq (ende-selector--provider-name) provider)
+                   (setq ende-selector--probe-cancel nil)
                    (if error
-                       (setq deslop-selector--model-state :error)
-                     (let* ((live-profile (deslop-provider-profile provider))
+                       (setq ende-selector--model-state :error)
+                     (let* ((live-profile (ende-provider-profile provider))
                             (live-preferred
                              (if (= selection-generation
-                                    deslop-selector--model-selection-generation)
-                                 (deslop-selector--preferred-model
+                                    ende-selector--model-selection-generation)
+                                 (ende-selector--preferred-model
                                   provider live-profile)
-                               (deslop-selector--model-name)))
+                               (ende-selector--model-name)))
                             (catalog-generation
-                             (deslop-provider-models-generation live-profile)))
-                       (deslop-selector--apply-model-catalog
+                             (ende-provider-models-generation live-profile)))
+                       (ende-selector--apply-model-catalog
                         live-profile models
-                        (deslop-provider-model-details live-profile)
+                        (ende-provider-model-details live-profile)
                         catalog-generation live-preferred)))
-                   (deslop-selector--render)))))))
-      (let ((cancel (deslop-provider-probe-models profile callback)))
+                   (ende-selector--render)))))))
+      (let ((cancel (ende-provider-probe-models profile callback)))
         (when (and (not completed)
-                   (= deslop-selector--probe-generation generation))
-          (setq deslop-selector--probe-cancel cancel))))))
+                   (= ende-selector--probe-generation generation))
+          (setq ende-selector--probe-cancel cancel))))))
 
-(defun deslop-selector--set-provider (index)
+(defun ende-selector--set-provider (index)
   "Select provider at INDEX and start dynamic model discovery if needed."
-  (deslop-selector--cancel-probe)
-  (setq deslop-selector--provider-index
-        (mod index (max 1 (length deslop-selector--providers))))
-  (cl-incf deslop-selector--model-selection-generation)
-  (let* ((provider (deslop-selector--provider-name))
-         (profile (deslop-selector--provider-profile))
-         (preferred (deslop-selector--preferred-model provider profile))
-         (catalog (deslop-provider-cached-models profile)))
-    (setq deslop-selector--models nil
-          deslop-selector--model-details nil)
+  (ende-selector--cancel-probe)
+  (setq ende-selector--provider-index
+        (mod index (max 1 (length ende-selector--providers))))
+  (cl-incf ende-selector--model-selection-generation)
+  (let* ((provider (ende-selector--provider-name))
+         (profile (ende-selector--provider-profile))
+         (preferred (ende-selector--preferred-model provider profile))
+         (catalog (ende-provider-cached-models profile)))
+    (setq ende-selector--models nil
+          ende-selector--model-details nil)
     (cond
      (catalog
       (if (plist-get catalog :error)
           (progn
-            (deslop-selector--set-provisional-models profile preferred)
-            (setq deslop-selector--model-state :error))
-        (deslop-selector--apply-model-catalog
+            (ende-selector--set-provisional-models profile preferred)
+            (setq ende-selector--model-state :error))
+        (ende-selector--apply-model-catalog
          profile
          (plist-get catalog :models)
          (plist-get catalog :details)
          (plist-get catalog :generation)
          preferred)))
-      ((deslop-provider-model-discovery-available-p profile)
-       (deslop-selector--set-provisional-models profile preferred)
-       (setq deslop-selector--model-state :validating)
-       (deslop-selector--probe-current-provider preferred))
+      ((ende-provider-model-discovery-available-p profile)
+       (ende-selector--set-provisional-models profile preferred)
+       (setq ende-selector--model-state :validating)
+       (ende-selector--probe-current-provider preferred))
      (t
-      (deslop-selector--apply-model-catalog
-       profile (deslop-provider-models profile) nil 0 preferred)))
-    (deslop-selector--render)))
+      (ende-selector--apply-model-catalog
+       profile (ende-provider-models profile) nil 0 preferred)))
+    (ende-selector--render)))
 
-(defun deslop-selector-next-provider ()
+(defun ende-selector-next-provider ()
   "Select the next configured provider."
   (interactive)
-  (deslop-selector--set-provider (1+ deslop-selector--provider-index)))
+  (ende-selector--set-provider (1+ ende-selector--provider-index)))
 
-(defun deslop-selector-previous-provider ()
+(defun ende-selector-previous-provider ()
   "Select the previous configured provider."
   (interactive)
-  (deslop-selector--set-provider (1- deslop-selector--provider-index)))
+  (ende-selector--set-provider (1- ende-selector--provider-index)))
 
-(defun deslop-selector--move-model (delta)
+(defun ende-selector--move-model (delta)
   "Move the selected model by DELTA."
-  (if (null deslop-selector--models)
-      (message "deslop: no models available")
-     (setq deslop-selector--model-index
-           (mod (+ deslop-selector--model-index delta)
-                (length deslop-selector--models)))
-     (cl-incf deslop-selector--model-selection-generation)
-     (deslop-selector--render)))
+  (if (null ende-selector--models)
+      (message "ende: no models available")
+     (setq ende-selector--model-index
+           (mod (+ ende-selector--model-index delta)
+                (length ende-selector--models)))
+     (cl-incf ende-selector--model-selection-generation)
+     (ende-selector--render)))
 
-(defun deslop-selector-next-model ()
+(defun ende-selector-next-model ()
   "Select the next model for the current provider."
   (interactive)
-  (deslop-selector--move-model 1))
+  (ende-selector--move-model 1))
 
-(defun deslop-selector-previous-model ()
+(defun ende-selector-previous-model ()
   "Select the previous model for the current provider."
   (interactive)
-  (deslop-selector--move-model -1))
+  (ende-selector--move-model -1))
 
-(defun deslop-selector-select-model ()
+(defun ende-selector-select-model ()
   "Select a model for the current provider using completion.
 
 The model list is already populated by provider discovery.  Completion is
 performed locally so typing a search term never starts another network request."
   (interactive)
-  (pcase deslop-selector--model-state
+  (pcase ende-selector--model-state
     ((or :loading :validating)
-     (user-error "deslop model discovery is still loading"))
+     (user-error "ende model discovery is still loading"))
     (:error
-     (user-error "deslop model discovery failed; change provider or retry"))
+     (user-error "ende model discovery failed; change provider or retry"))
     (_
-     (let ((models (cl-remove-if-not #'stringp deslop-selector--models)))
+     (let ((models (cl-remove-if-not #'stringp ende-selector--models)))
        (unless models
-         (user-error "deslop has no models available for this provider"))
-        (let* ((candidates (deslop-selector--model-candidates))
+         (user-error "ende has no models available for this provider"))
+        (let* ((candidates (ende-selector--model-candidates))
                (candidate-names (mapcar #'car candidates))
-               (current (deslop-selector--candidate-for-model
-                         (deslop-selector--model-name) candidates))
-               (details deslop-selector--model-details)
+               (current (ende-selector--candidate-for-model
+                         (ende-selector--model-name) candidates))
+               (details ende-selector--model-details)
                (completion-extra-properties
                 (list
                  :affixation-function
                  (lambda (completions)
-                   (deslop-selector--model-affixations
+                   (ende-selector--model-affixations
                     completions candidates details))))
                (completion-ignore-case t)
                (completion-styles '(substring))
@@ -433,206 +433,206 @@ performed locally so typing a search term never starts another network request."
                               :key #'car :test #'string=)))
                (index (cl-position selected-model models :test #'equal)))
           (when (and selected-model index)
-            (setq deslop-selector--models models
-                  deslop-selector--model-index index)
-            (cl-incf deslop-selector--model-selection-generation)
-            (deslop-selector--save-selection)
-            (deslop-selector--render)))))))
+            (setq ende-selector--models models
+                  ende-selector--model-index index)
+            (cl-incf ende-selector--model-selection-generation)
+            (ende-selector--save-selection)
+            (ende-selector--render)))))))
 
-(defun deslop-selector-set-concurrency ()
+(defun ende-selector-set-concurrency ()
   "Set and save the selected provider's session concurrency limit."
   (interactive)
-  (let* ((provider (deslop-selector--provider-name))
-         (current (deslop-selector--provider-concurrency))
+  (let* ((provider (ende-selector--provider-name))
+         (current (ende-selector--provider-concurrency))
          (value (read-number "Max concurrent jobs: " current)))
-    (deslop-provider-set-runtime-setting provider :max-concurrency value)
-    (deslop-selector--render)
-    (deslop-process-next)))
+    (ende-provider-set-runtime-setting provider :max-concurrency value)
+    (ende-selector--render)
+    (ende-process-next)))
 
-(defun deslop-selector-toggle-parallel ()
+(defun ende-selector-toggle-parallel ()
   "Toggle and save the selected provider's default parallel setting."
   (interactive)
-  (let* ((provider (deslop-selector--provider-name))
-         (enabled (not (deslop-selector--provider-parallel-p))))
-    (deslop-provider-set-runtime-setting provider :parallel enabled)
-     (deslop-selector--render)
-     (deslop-process-next)))
+  (let* ((provider (ende-selector--provider-name))
+         (enabled (not (ende-selector--provider-parallel-p))))
+    (ende-provider-set-runtime-setting provider :parallel enabled)
+     (ende-selector--render)
+     (ende-process-next)))
 
-(defun deslop-selector--review-source (function)
+(defun ende-selector--review-source (function)
   "Call review FUNCTION for the selector's source buffer and close selector."
-  (let ((source deslop-selector--source-buffer))
+  (let ((source ende-selector--source-buffer))
     (unless (buffer-live-p source)
       (user-error "Source buffer no longer exists"))
     (with-current-buffer source
       (funcall function source))
-    (deslop-selector-close)))
+    (ende-selector-close)))
 
-(defun deslop-selector-approve-source-output ()
+(defun ende-selector-approve-source-output ()
   "Approve all generated output in the selector's source buffer."
   (interactive)
-  (deslop-selector--review-source #'deslop-approve-all-output))
+  (ende-selector--review-source #'ende-approve-all-output))
 
-(defun deslop-selector-reject-source-output ()
+(defun ende-selector-reject-source-output ()
   "Reject all generated output in the selector's source buffer."
   (interactive)
-  (deslop-selector--review-source #'deslop-reject-all-output))
+  (ende-selector--review-source #'ende-reject-all-output))
 
-(defun deslop-selector--save-selection ()
+(defun ende-selector--save-selection ()
   "Save the current provider/model choice."
-  (setq deslop-selector--last-selection
-        (list :provider (deslop-selector--provider-name)
-              :model (deslop-selector--model-name))))
+  (setq ende-selector--last-selection
+        (list :provider (ende-selector--provider-name)
+              :model (ende-selector--model-name))))
 
-(defun deslop-selector-close ()
+(defun ende-selector-close ()
   "Close the selector without starting a request."
   (interactive)
-  (deslop-selector--cancel-probe)
+  (ende-selector--cancel-probe)
   (let ((buffer (current-buffer))
-        (window (or (and (window-live-p deslop-selector--window)
-                         deslop-selector--window)
+        (window (or (and (window-live-p ende-selector--window)
+                         ende-selector--window)
                     (get-buffer-window (current-buffer) t))))
-    (setq deslop-selector--window nil)
+    (setq ende-selector--window nil)
     (when (window-live-p window)
       (quit-window t window))
      (when (buffer-live-p buffer)
        (kill-buffer buffer))))
 
-(defun deslop-selector--buffer-killed ()
+(defun ende-selector--buffer-killed ()
   "Cancel a selector probe when its buffer is killed externally."
-  (deslop-selector--cancel-probe))
+  (ende-selector--cancel-probe))
 
-(defun deslop-selector-confirm ()
+(defun ende-selector-confirm ()
   "Confirm the current choice and close the selector."
   (interactive)
-  (deslop-selector--save-selection)
-  (deslop-selector-close))
+  (ende-selector--save-selection)
+  (ende-selector-close))
 
-(defun deslop-selector--run (type &optional instruction)
+(defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model."
-  (let ((source deslop-selector--source-buffer)
-        (profile (deslop-provider-profile-snapshot
-                  (deslop-selector--provider-name)))
-        (model (deslop-selector--model-name)))
+  (let ((source ende-selector--source-buffer)
+        (profile (ende-provider-profile-snapshot
+                  (ende-selector--provider-name)))
+        (model (ende-selector--model-name)))
     (unless (buffer-live-p source)
-      (user-error "deslop source buffer no longer exists"))
+      (user-error "ende source buffer no longer exists"))
     (unless (stringp model)
-      (user-error "deslop has no selected model"))
+      (user-error "ende has no selected model"))
     (setq profile (plist-put profile :model model))
-    (deslop-selector--save-selection)
-    (deslop-selector-close)
+    (ende-selector--save-selection)
+    (ende-selector-close)
     (with-current-buffer source
       (if (eq type 'rubber-duck)
-          (deslop-rubber-duck instruction profile)
-        (deslop-enqueue-operation type instruction profile)))))
+          (ende-rubber-duck instruction profile)
+        (ende-enqueue-operation type instruction profile)))))
 
-(defun deslop-selector-insert ()
+(defun ende-selector-insert ()
   "Run insert using the current selector choice."
   (interactive)
-  (deslop-selector--run 'insert))
+  (ende-selector--run 'insert))
 
-(defun deslop-selector-write-anywhere ()
+(defun ende-selector-write-anywhere ()
   "Run a structured multi-edit using the current selector choice."
   (interactive)
-  (deslop-selector--run
+  (ende-selector--run
    'write-anywhere
    (read-string "Prompt: ")))
 
-(defun deslop-selector-insert-anywhere ()
+(defun ende-selector-insert-anywhere ()
   "Run a structured multi-insertion using the current selector choice."
   (interactive)
-  (deslop-selector--run
+  (ende-selector--run
    'insert-anywhere
    (read-string "Prompt: ")))
 
-(defun deslop-selector-improve ()
+(defun ende-selector-improve ()
   "Prompt for an improvement and run it using the current choice."
   (interactive)
-  (deslop-selector--run
+  (ende-selector--run
    'improve (read-string "How should the text be improved? ")))
 
-(defun deslop-selector-summarize ()
+(defun ende-selector-summarize ()
   "Run summarize using the current selector choice."
   (interactive)
-  (deslop-selector--run 'summarize))
+  (ende-selector--run 'summarize))
 
-(defun deslop-selector-rubber-duck ()
+(defun ende-selector-rubber-duck ()
   "Capture an explanation exercise using the current selector choice."
   (interactive)
-  (deslop-selector--run 'rubber-duck (deslop-rubber-duck-read-level)))
+  (ende-selector--run 'rubber-duck (ende-rubber-duck-read-level)))
 
-(defvar deslop-selector-mode-map
+(defvar ende-selector-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     map)
-  "Keymap for `deslop-selector-mode'.")
+  "Keymap for `ende-selector-mode'.")
 
-(defun deslop-selector--install-keybindings ()
+(defun ende-selector--install-keybindings ()
   "Install selector bindings, including when this file is reloaded."
-  (define-key deslop-selector-mode-map (kbd "n") #'deslop-selector-next-provider)
-  (define-key deslop-selector-mode-map (kbd "p") #'deslop-selector-previous-provider)
-  (define-key deslop-selector-mode-map (kbd "C-n") #'deslop-selector-next-model)
-  (define-key deslop-selector-mode-map (kbd "C-p") #'deslop-selector-previous-model)
-  (define-key deslop-selector-mode-map (kbd "c") #'deslop-selector-set-concurrency)
-  (define-key deslop-selector-mode-map (kbd "C") #'deslop-selector-set-concurrency)
-  (define-key deslop-selector-mode-map (kbd "P") #'deslop-selector-toggle-parallel)
-  (define-key deslop-selector-mode-map (kbd "i") #'deslop-selector-insert)
-  (define-key deslop-selector-mode-map (kbd "w") #'deslop-selector-write-anywhere)
-  (define-key deslop-selector-mode-map (kbd "I") #'deslop-selector-insert-anywhere)
-  (define-key deslop-selector-mode-map (kbd "m") #'deslop-selector-select-model)
-  (define-key deslop-selector-mode-map (kbd "s") #'deslop-selector-summarize)
-  (define-key deslop-selector-mode-map (kbd "r") #'deslop-selector-rubber-duck)
-  (define-key deslop-selector-mode-map (kbd "RET") #'deslop-selector-confirm)
-  (define-key deslop-selector-mode-map (kbd "C-c C-c")
-              #'deslop-selector-approve-source-output)
-  (define-key deslop-selector-mode-map (kbd "C-c C-k")
-              #'deslop-selector-reject-source-output)
-  (define-key deslop-selector-mode-map (kbd "DEL") nil)
-  (define-key deslop-selector-mode-map (kbd "<backspace>") nil)
-  (define-key deslop-selector-mode-map (kbd "q") #'deslop-selector-close)
-  (define-key deslop-selector-mode-map (kbd "ESC") #'deslop-selector-close))
+  (define-key ende-selector-mode-map (kbd "n") #'ende-selector-next-provider)
+  (define-key ende-selector-mode-map (kbd "p") #'ende-selector-previous-provider)
+  (define-key ende-selector-mode-map (kbd "C-n") #'ende-selector-next-model)
+  (define-key ende-selector-mode-map (kbd "C-p") #'ende-selector-previous-model)
+  (define-key ende-selector-mode-map (kbd "c") #'ende-selector-set-concurrency)
+  (define-key ende-selector-mode-map (kbd "C") #'ende-selector-set-concurrency)
+  (define-key ende-selector-mode-map (kbd "P") #'ende-selector-toggle-parallel)
+  (define-key ende-selector-mode-map (kbd "i") #'ende-selector-insert)
+  (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
+  (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)
+  (define-key ende-selector-mode-map (kbd "m") #'ende-selector-select-model)
+  (define-key ende-selector-mode-map (kbd "s") #'ende-selector-summarize)
+  (define-key ende-selector-mode-map (kbd "r") #'ende-selector-rubber-duck)
+  (define-key ende-selector-mode-map (kbd "RET") #'ende-selector-confirm)
+  (define-key ende-selector-mode-map (kbd "C-c C-c")
+              #'ende-selector-approve-source-output)
+  (define-key ende-selector-mode-map (kbd "C-c C-k")
+              #'ende-selector-reject-source-output)
+  (define-key ende-selector-mode-map (kbd "DEL") nil)
+  (define-key ende-selector-mode-map (kbd "<backspace>") nil)
+  (define-key ende-selector-mode-map (kbd "q") #'ende-selector-close)
+  (define-key ende-selector-mode-map (kbd "ESC") #'ende-selector-close))
 
-(deslop-selector--install-keybindings)
+(ende-selector--install-keybindings)
 
-(define-derived-mode deslop-selector-mode special-mode "deslop-selector"
-  "Major mode for selecting a deslop provider and model."
-  (deslop-selector--install-keybindings)
-  (add-hook 'kill-buffer-hook #'deslop-selector--buffer-killed nil t)
+(define-derived-mode ende-selector-mode special-mode "ende-selector"
+  "Major mode for selecting a ende provider and model."
+  (ende-selector--install-keybindings)
+  (add-hook 'kill-buffer-hook #'ende-selector--buffer-killed nil t)
   (setq truncate-lines t)
   (setq buffer-read-only t))
 
 ;;;###autoload
-(defun deslop-selector-open ()
+(defun ende-selector-open ()
   "Open the provider/model selector for the current source buffer."
   (interactive)
   (let* ((source (current-buffer))
-         (providers (deslop-provider-names))
-         (last-provider (plist-get deslop-selector--last-selection :provider))
+         (providers (ende-provider-names))
+         (last-provider (plist-get ende-selector--last-selection :provider))
          (provider-index (or (cl-position last-provider providers :test #'eq) 0))
-         (buffer (get-buffer-create deslop-selector-buffer-name)))
+         (buffer (get-buffer-create ende-selector-buffer-name)))
     (with-current-buffer buffer
-      (deslop-selector--cancel-probe)
-      (deslop-selector-mode)
-      (setq deslop-selector--source-buffer source
-            deslop-selector--providers providers
-            deslop-selector--provider-index provider-index
-             deslop-selector--models nil
-             deslop-selector--model-details nil
-             deslop-selector--model-index 0
-             deslop-selector--model-selection-generation 0
-             deslop-selector--model-state :ready)
-      (deslop-selector--set-provider provider-index))
+      (ende-selector--cancel-probe)
+      (ende-selector-mode)
+      (setq ende-selector--source-buffer source
+            ende-selector--providers providers
+            ende-selector--provider-index provider-index
+             ende-selector--models nil
+             ende-selector--model-details nil
+             ende-selector--model-index 0
+             ende-selector--model-selection-generation 0
+             ende-selector--model-state :ready)
+      (ende-selector--set-provider provider-index))
     (let ((window
            (display-buffer
             buffer
               `((display-buffer-at-bottom)
-                (window-height . deslop-selector--fit-window)
-                (window-min-height . ,deslop-selector-window-min-height)))))
+                (window-height . ende-selector--fit-window)
+                (window-min-height . ,ende-selector-window-min-height)))))
       (with-current-buffer buffer
-        (setq deslop-selector--window window))
+        (setq ende-selector--window window))
       (when (window-live-p window)
-        (deslop-selector--fit-window window)
+        (ende-selector--fit-window window)
         (select-window window)))))
 
-(provide 'deslop-selector)
+(provide 'ende-selector)
 
-;;; deslop-selector.el ends here
+;;; ende-selector.el ends here
