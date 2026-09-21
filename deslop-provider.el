@@ -94,6 +94,11 @@ When nil, use only the response inactivity timeout."
                  (integer :tag "Maximum entries"))
   :group 'deslop)
 
+(defconst deslop-provider--openrouter-request-headers
+  '("HTTP-Referer: https://github.com/oetr/ende-mode"
+    "X-OpenRouter-Title: ende-mode")
+  "OpenRouter app-attribution headers for the built-in profiles.")
+
 ;;;; Profiles and display policy
 
 (defvar deslop-provider--runtime-settings (make-hash-table :test #'eq)
@@ -151,32 +156,36 @@ Supported settings are `:max-concurrency' and `:parallel'."
                     :model-discovery-function #'deslop-codex-probe-models
                     :require-sse t
                    :display-name "OpenAI"))
-             ('openrouter
-              '(:url "https://openrouter.ai/api/v1/chat/completions"
-                :batch-url "https://openrouter.ai/api/v1/batches"
-                :batch-endpoint "/v1/chat/completions"
-                :transport auto
-                :model "openai/gpt-4o-mini"
-                :max-concurrency 4
-                :parallel nil
-                :temperature 0.2
-                :auth-source-host "openrouter.ai"
-                :auth-source-user "deslop"
-                :auth-source-port 443
-                :require-sse t))
-             ('openrouter-batch
-              '(:url "https://openrouter.ai/api/v1/chat/completions"
-                :batch-url "https://openrouter.ai/api/v1/batches"
-                :batch-endpoint "/v1/chat/completions"
-                :transport openrouter-batch
-                :model "openai/gpt-4o-mini"
-                :max-concurrency 16
-                :parallel t
-                :temperature 0.2
-                :auth-source-host "openrouter.ai"
-                :auth-source-user "deslop"
-                :auth-source-port 443
-                :require-sse nil))
+            ('openrouter
+             (list :url "https://openrouter.ai/api/v1/chat/completions"
+                   :batch-url "https://openrouter.ai/api/v1/batches"
+                   :batch-endpoint "/v1/chat/completions"
+                   :transport 'auto
+                   :model deslop-provider--default-openrouter-model
+                   :max-concurrency 4
+                   :parallel nil
+                   :temperature 0.2
+                   :auth-source-host "openrouter.ai"
+                   :auth-source-user "deslop"
+                   :auth-source-port 443
+                   :request-headers
+                   (copy-sequence deslop-provider--openrouter-request-headers)
+                   :require-sse t))
+            ('openrouter-batch
+             (list :url "https://openrouter.ai/api/v1/chat/completions"
+                   :batch-url "https://openrouter.ai/api/v1/batches"
+                   :batch-endpoint "/v1/chat/completions"
+                   :transport 'openrouter-batch
+                   :model deslop-provider--default-openrouter-model
+                   :max-concurrency 16
+                   :parallel t
+                   :temperature 0.2
+                   :auth-source-host "openrouter.ai"
+                   :auth-source-user "deslop"
+                   :auth-source-port 443
+                   :request-headers
+                   (copy-sequence deslop-provider--openrouter-request-headers)
+                   :require-sse nil))
             (_
              (list :url deslop-provider-endpoint
                    :model deslop-provider-model

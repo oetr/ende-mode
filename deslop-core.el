@@ -18,6 +18,9 @@
   :prefix "deslop-"
   :group 'convenience)
 
+(defconst deslop-client-name "ende-mode"
+  "Client name advertised in outbound HTTP requests.")
+
 ;;;; Transport and request resource options
 
 (defcustom deslop-connect-timeout nil

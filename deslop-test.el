@@ -2658,6 +2658,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (functionp (nth 5 out)))
     (should-not (member "hello" (nth 2 out)))
     (should (member "Accept: text/event-stream" (nth 2 out)))
+    (should (equal (cadr (member "--user-agent" (nth 2 out)))
+                   deslop-client-name))
     (should (member "@-" (nth 2 out)))))
 
 (ert-deftest deslop-test/default-transport-accepts-text-completion-deltas ()
@@ -3358,10 +3360,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                 (insert-file-contents config)
                 (should (string-match-p "Authorization: Bearer access-token"
                                         (buffer-string))))
-              (with-temp-buffer
-                (insert-file-contents config)
-                (should (string-match-p "User-Agent: deslop"
-                                        (buffer-string))))
+              (should (equal (cadr (member "--user-agent" command))
+                             deslop-client-name))
               (funcall
                filter
                process
@@ -3760,6 +3760,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (string= (nth 1 command) "--disable"))
     (should (member "--globoff" command))
     (should (member "--noproxy" command))
+    (should (equal (cadr (member "--user-agent" command))
+                   deslop-client-name))
      (should (member "--url" command))))
 
 (ert-deftest deslop-test/curl-command-leaves-idle-timeout-to-elisp ()
@@ -5139,6 +5141,29 @@ Use COMMAND for the process, or a silent sleep process by default."
      (deslop-openrouter-batch--validate-options
       (plist-put (copy-sequence profile)
                   :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
+
+(ert-deftest deslop-test/openrouter-profiles-advertise-ende-mode ()
+  (dolist (name '(openrouter openrouter-batch))
+    (let* ((profile (deslop-provider-profile name))
+           (headers (plist-get profile :request-headers))
+           (config
+            (deslop-curl--config
+             (list :url (plist-get profile :url)
+                   :request-headers headers))))
+      (unwind-protect
+          (progn
+            (should (equal headers
+                           '("HTTP-Referer: https://github.com/oetr/ende-mode"
+                             "X-OpenRouter-Title: ende-mode")))
+            (with-temp-buffer
+              (insert-file-contents config)
+              (should (equal
+                       (buffer-string)
+                       (concat
+                        "header = \"HTTP-Referer: https://github.com/oetr/ende-mode\"\n"
+                        "header = \"X-OpenRouter-Title: ende-mode\"\n")))))
+        (when (file-exists-p config)
+          (delete-file config))))))
 
 (ert-deftest deslop-test/openrouter-batch-initial-404-retries-then-completes ()
   (let* ((profile (plist-put

@@ -187,7 +187,8 @@ separate from user-configured profile headers."
 
 (defun deslop-curl-base-command (url)
   "Return the common curl command prefix for URL."
-  (append (list "curl" "--disable")
+  (append (list "curl" "--disable"
+                "--user-agent" deslop-client-name)
           (deslop-curl--network-options url)))
 
 (defun deslop-curl-response-options (headers-file)

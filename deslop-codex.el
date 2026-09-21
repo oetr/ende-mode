@@ -632,7 +632,6 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
                                     (list
                                      (concat "Authorization: Bearer "
                                              (plist-get auth-or-error :access))
-                                     "User-Agent: deslop"
                                      "originator: opencode")
                                     (when account-id
                                       (list (concat "ChatGPT-Account-Id: "
@@ -1072,7 +1071,6 @@ CALLBACK receives (MODELS ERROR).  Return a cancellation function."
           (headers (append
                     (list (concat "Authorization: Bearer "
                                   (plist-get auth :access))
-                          "User-Agent: deslop"
                           "originator: opencode"
                          (concat "session-id: "
                                  (secure-hash 'sha256
