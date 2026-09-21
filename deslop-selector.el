@@ -47,6 +47,9 @@
 (defvar deslop-selector--last-selection nil
   "Most recently confirmed selector choice as a provider/model plist.")
 
+(defvar deslop-selector--model-validations (make-hash-table :test #'equal)
+  "Cached model preference validation results.")
+
 (defvar-local deslop-selector--source-buffer nil
   "Source buffer associated with the current selector buffer.")
 
@@ -67,6 +70,9 @@
 
 (defvar-local deslop-selector--model-state nil
   "State of model discovery for the selected provider.")
+
+(defvar-local deslop-selector--model-selection-generation 0
+  "Generation incremented when the user changes the current model.")
 
 (defvar-local deslop-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
@@ -95,6 +101,41 @@
 (defun deslop-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
   (nth deslop-selector--model-index deslop-selector--models))
+
+(defun deslop-selector--remembered-model (provider)
+  "Return the remembered model for PROVIDER, or nil."
+  (and (eq provider (plist-get deslop-selector--last-selection :provider))
+       (plist-get deslop-selector--last-selection :model)))
+
+(defun deslop-selector--preferred-model (provider profile)
+  "Return the saved or explicitly configured model for PROVIDER PROFILE."
+  (or (deslop-selector--remembered-model provider)
+      (deslop-provider-configured-model profile)))
+
+(defun deslop-selector--model-validation-key (provider models generation model)
+  "Return the validation key for MODEL in PROVIDER's catalog."
+  (list provider generation model
+        (secure-hash 'sha256 (prin1-to-string models))))
+
+(defun deslop-selector--valid-model-p (provider profile models generation model)
+  "Return non-nil when MODEL is available in the current catalog.
+Report an unavailable model once for each catalog generation."
+  (when (and (stringp model) models)
+    (let* ((key (deslop-selector--model-validation-key
+                 provider models generation model))
+           (status (gethash key deslop-selector--model-validations)))
+      (if status
+          (plist-get status :valid)
+        (let ((valid (member model models)))
+          (puthash key (list :valid valid)
+                   deslop-selector--model-validations)
+          (unless valid
+            (message
+             "deslop: model %s is unavailable for %s; using %s"
+             model
+             (deslop-provider-client-name profile)
+             (or (car models) "the first available model")))
+          valid)))))
 
 (defun deslop-selector--model-detail (model)
   "Return cached display metadata for MODEL, or nil."
@@ -163,20 +204,27 @@ the discovered pricing metadata for those model IDs."
 
 (defun deslop-selector--render ()
   "Render the current selector state."
-  (let* ((provider (deslop-selector--display-label
+  (let* ((model-name (deslop-selector--model-name))
+         (provider (deslop-selector--display-label
                     (deslop-selector--display-provider) 24))
          (model (deslop-selector--display-label
-                 (or (deslop-selector--model-name) "(none available)") 24))
+                 (or model-name
+                     (if (memq deslop-selector--model-state
+                               '(:loading :validating))
+                         "validating..."
+                       "(none available)"))
+                 24))
          (model-status
           (pcase deslop-selector--model-state
-            (:loading " [loading]")
+            ((or :loading :validating)
+             (if model-name " [validating...]" ""))
             (:error " [probe failed]")
             (_ ""))))
     (let ((inhibit-read-only t))
-       (erase-buffer)
-       (insert (format "Provider:     %s(n/p)\n" provider))
-       (insert (format "Model:        %s%s(C-n / C-p)\n"
-                       model model-status))
+      (erase-buffer)
+      (insert (format "Provider:     %s(n/p)\n" provider))
+      (insert (format "Model:        %s%s(C-n / C-p)\n"
+                      model model-status))
       (insert (format "Concurrency:  %-24d(c/C)\n"
                       (deslop-selector--provider-concurrency)))
       (insert (format "Parallel:     %-24s(P)\n\n"
@@ -206,73 +254,119 @@ the discovered pricing metadata for those model IDs."
 
 (defun deslop-selector--set-models (models &optional preferred)
   "Set the current provider's MODELS and select PREFERRED when available."
-  (let* ((preferred (or preferred
-                        (deslop-selector--model-name)
-                        (plist-get deslop-selector--last-selection :model)))
-         (models (cl-remove-if-not #'stringp models)))
+  (let ((models (cl-remove-if-not #'stringp models)))
     (setq deslop-selector--models models
           deslop-selector--model-index
-          (or (deslop-selector--index-of preferred models) 0))))
+          (or (and (stringp preferred)
+                   (deslop-selector--index-of preferred models))
+              0))))
+
+(defun deslop-selector--set-provisional-models (profile preferred)
+  "Show PROFILE's provisional models while discovery validates PREFERRED."
+  (let ((configured (deslop-provider-models profile)))
+    (cond
+     (preferred
+      (deslop-selector--set-models
+       (if (member preferred configured)
+           configured
+         (cons preferred configured))
+       preferred))
+     ((deslop-provider-configured-models-explicit-p profile)
+      (deslop-selector--set-models configured))
+     (t
+      (deslop-selector--set-models nil)))))
+
+(defun deslop-selector--apply-model-catalog
+    (profile models details generation preferred &optional error)
+  "Apply a discovered or configured model CATALOG to PROFILE.
+PREFERRED is selected only when it is present in MODELS."
+  (let ((models (cl-remove-if-not #'stringp models)))
+    (setq deslop-selector--model-details (copy-tree details))
+    (if error
+        (setq deslop-selector--model-state :error)
+      (let ((selected
+             (and preferred
+                  (deslop-selector--valid-model-p
+                   (deslop-selector--provider-name)
+                   profile models generation preferred)
+                  preferred)))
+        (deslop-selector--set-models models selected)
+        (setq deslop-selector--model-state
+              (if models :ready :error))))))
 
 (defun deslop-selector--probe-current-provider (&optional preferred)
   "Probe the selected provider when it has dynamic model discovery.
 PREFERRED is the model selected before discovery started."
   (let* ((provider (deslop-selector--provider-name))
          (profile (deslop-selector--provider-profile))
-         (probe (plist-get profile :model-discovery-function))
-         (generic-probe (and (null probe)
-                              (deslop-provider-models-url profile)))
          (selector-buffer (current-buffer))
          (generation (cl-incf deslop-selector--next-probe-generation))
+         (selection-generation deslop-selector--model-selection-generation)
          (completed nil))
     (setq deslop-selector--probe-generation generation)
-    (when (or (functionp probe) generic-probe)
-      (setq deslop-selector--model-state :loading)
-      (deslop-selector--render)
-      (let ((callback
-             (lambda (models error)
-               (when (and (buffer-live-p selector-buffer)
-                          (with-current-buffer selector-buffer
-                            (= deslop-selector--probe-generation generation)))
-                 (setq completed t)
-                 (with-current-buffer selector-buffer
-                   (when (eq (deslop-selector--provider-name) provider)
-                     (setq deslop-selector--probe-cancel nil)
-                     (if error
-                         (setq deslop-selector--model-state :error)
-                       (deslop-selector--set-models
-                        models (or preferred
-                                   (deslop-selector--model-name)))
-                       (setq deslop-selector--model-details
-                             (deslop-provider-model-details profile))
-                       (setq deslop-selector--model-state :ready))
-                     (deslop-selector--render)))))))
-        (let ((cancel (if (functionp probe)
-                          (funcall probe callback)
-                        (deslop-provider-probe-models profile callback))))
-          (when (and (not completed)
-                     (= deslop-selector--probe-generation generation))
-            (setq deslop-selector--probe-cancel cancel)))))))
+    (setq deslop-selector--model-state :validating)
+    (let ((callback
+           (lambda (models error)
+             (when (and (buffer-live-p selector-buffer)
+                        (with-current-buffer selector-buffer
+                          (= deslop-selector--probe-generation generation)))
+               (setq completed t)
+               (with-current-buffer selector-buffer
+                 (when (eq (deslop-selector--provider-name) provider)
+                   (setq deslop-selector--probe-cancel nil)
+                   (if error
+                       (setq deslop-selector--model-state :error)
+                     (let* ((live-profile (deslop-provider-profile provider))
+                            (live-preferred
+                             (if (= selection-generation
+                                    deslop-selector--model-selection-generation)
+                                 (deslop-selector--preferred-model
+                                  provider live-profile)
+                               (deslop-selector--model-name)))
+                            (catalog-generation
+                             (deslop-provider-models-generation live-profile)))
+                       (deslop-selector--apply-model-catalog
+                        live-profile models
+                        (deslop-provider-model-details live-profile)
+                        catalog-generation live-preferred)))
+                   (deslop-selector--render)))))))
+      (let ((cancel (deslop-provider-probe-models profile callback)))
+        (when (and (not completed)
+                   (= deslop-selector--probe-generation generation))
+          (setq deslop-selector--probe-cancel cancel))))))
 
 (defun deslop-selector--set-provider (index)
   "Select provider at INDEX and start dynamic model discovery if needed."
   (deslop-selector--cancel-probe)
   (setq deslop-selector--provider-index
         (mod index (max 1 (length deslop-selector--providers))))
+  (cl-incf deslop-selector--model-selection-generation)
   (let* ((provider (deslop-selector--provider-name))
          (profile (deslop-selector--provider-profile))
-         (last-provider (plist-get deslop-selector--last-selection :provider))
-         (preferred (and (eq provider last-provider)
-                         (plist-get deslop-selector--last-selection :model))))
-    (deslop-selector--set-models
-     (deslop-provider-models profile)
-     (or preferred (plist-get profile :model)))
-    (setq deslop-selector--model-details
-          (deslop-provider-model-details profile))
-    (setq deslop-selector--model-state :ready)
-    (deslop-selector--render)
-    (deslop-selector--probe-current-provider
-     (or preferred (deslop-selector--model-name)))))
+         (preferred (deslop-selector--preferred-model provider profile))
+         (catalog (deslop-provider-cached-models profile)))
+    (setq deslop-selector--models nil
+          deslop-selector--model-details nil)
+    (cond
+     (catalog
+      (if (plist-get catalog :error)
+          (progn
+            (deslop-selector--set-provisional-models profile preferred)
+            (setq deslop-selector--model-state :error))
+        (deslop-selector--apply-model-catalog
+         profile
+         (plist-get catalog :models)
+         (plist-get catalog :details)
+         (plist-get catalog :generation)
+         preferred)))
+      ((deslop-provider-model-discovery-available-p profile)
+       (deslop-selector--set-provisional-models profile preferred)
+       (setq deslop-selector--model-state :validating)
+       (deslop-selector--probe-current-provider preferred))
+     (t
+      (deslop-selector--apply-model-catalog
+       profile (deslop-provider-models profile) nil 0 preferred)))
+    (deslop-selector--render)))
 
 (defun deslop-selector-next-provider ()
   "Select the next configured provider."
@@ -288,10 +382,11 @@ PREFERRED is the model selected before discovery started."
   "Move the selected model by DELTA."
   (if (null deslop-selector--models)
       (message "deslop: no models available")
-    (setq deslop-selector--model-index
-          (mod (+ deslop-selector--model-index delta)
-               (length deslop-selector--models)))
-    (deslop-selector--render)))
+     (setq deslop-selector--model-index
+           (mod (+ deslop-selector--model-index delta)
+                (length deslop-selector--models)))
+     (cl-incf deslop-selector--model-selection-generation)
+     (deslop-selector--render)))
 
 (defun deslop-selector-next-model ()
   "Select the next model for the current provider."
@@ -310,7 +405,7 @@ The model list is already populated by provider discovery.  Completion is
 performed locally so typing a search term never starts another network request."
   (interactive)
   (pcase deslop-selector--model-state
-    (:loading
+    ((or :loading :validating)
      (user-error "deslop model discovery is still loading"))
     (:error
      (user-error "deslop model discovery failed; change provider or retry"))
@@ -340,6 +435,7 @@ performed locally so typing a search term never starts another network request."
           (when (and selected-model index)
             (setq deslop-selector--models models
                   deslop-selector--model-index index)
+            (cl-incf deslop-selector--model-selection-generation)
             (deslop-selector--save-selection)
             (deslop-selector--render)))))))
 
@@ -519,10 +615,11 @@ performed locally so typing a search term never starts another network request."
       (setq deslop-selector--source-buffer source
             deslop-selector--providers providers
             deslop-selector--provider-index provider-index
-            deslop-selector--models nil
-            deslop-selector--model-details nil
-            deslop-selector--model-index 0
-            deslop-selector--model-state :ready)
+             deslop-selector--models nil
+             deslop-selector--model-details nil
+             deslop-selector--model-index 0
+             deslop-selector--model-selection-generation 0
+             deslop-selector--model-state :ready)
       (deslop-selector--set-provider provider-index))
     (let ((window
            (display-buffer

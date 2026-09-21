@@ -175,6 +175,11 @@ process for cancellation tests."
     (clrhash deslop-openrouter-batch--groups))
   (clrhash deslop-provider--discovery-cache)
   (clrhash deslop-provider--discovery-inflight)
+  (clrhash deslop-provider--model-cache)
+  (clrhash deslop-provider--model-inflight)
+  (clrhash deslop-provider--model-cancellations)
+  (setq deslop-provider--model-generation 0)
+  (clrhash deslop-selector--model-validations)
   (deslop-provider-clear-runtime-settings)
    (clrhash deslop-history--entries)
    (deslop-tools-clear-change-sets)
@@ -2727,8 +2732,13 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (string= (plist-get profile :model) "gpt-5.6-luna"))
     (should (string= (plist-get profile :url)
                      "https://chatgpt.com/backend-api/codex/responses"))
+    (should-not (deslop-provider-configured-model profile))
     (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :access))
-    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :refresh))))
+    (should-not (plist-get (deslop-provider-profile-snapshot 'openai) :refresh)))
+  (let ((deslop-codex-model "gpt-configured"))
+    (should (string= (deslop-provider-configured-model
+                     (deslop-provider-profile 'openai))
+                    "gpt-configured"))))
 
 (ert-deftest deslop-test/provider-list-and-configured-models-are-selectable ()
   (let ((deslop-providers '(openai local))
@@ -2930,11 +2940,135 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                        (lambda () nil))))
             (deslop-selector--set-provider 0)
             (should (string= (deslop-selector--model-name)
-                             "remote/default"))
+                             "remote/remembered"))
+            (should (string-match-p "validating"
+                                    (buffer-string)))
             (funcall probe-callback
                      '("remote/default" "remote/remembered") nil)
             (should (string= (deslop-selector--model-name)
                              "remote/remembered"))))
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-uses-cached-models-before-rendering ()
+  (let* ((buffer (generate-new-buffer " *deslop-selector-cached-models-test*"))
+         (profile '(:name remote
+                    :url "http://remote.example/v1/chat/completions"))
+         (deslop-providers '(remote))
+         (deslop-provider-profiles
+          '((remote :url "http://remote.example/v1/chat/completions")))
+         (deslop-selector--last-selection
+          '(:provider remote :model "remote/saved"))
+         (deslop-provider--model-cache (make-hash-table :test #'equal))
+         (deslop-provider--model-inflight (make-hash-table :test #'equal))
+         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+         (deslop-provider--model-generation 0))
+    (unwind-protect
+        (progn
+          (deslop-provider--finish-model-discovery
+           (deslop-provider--model-cache-key profile)
+           '("remote/first" "remote/saved") nil nil)
+          (with-current-buffer buffer
+            (deslop-selector-mode)
+            (setq deslop-selector--providers '(remote)
+                  deslop-selector--provider-index 0)
+            (cl-letf (((symbol-function 'deslop-provider-probe-models)
+                       (lambda (&rest _)
+                         (error "cached model catalog was not used"))))
+              (deslop-selector--set-provider 0)
+              (should (string= (deslop-selector--model-name)
+                               "remote/saved"))
+              (should (eq deslop-selector--model-state :ready))
+              (setq deslop-selector--last-selection nil)
+              (deslop-selector--set-provider 0)
+              (should (string= (deslop-selector--model-name)
+                               "remote/first")))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-validates-first-model-without-preference ()
+  (let ((buffer (generate-new-buffer " *deslop-selector-first-model-test*"))
+        (probe-callback nil)
+        (deslop-providers '(remote))
+        (deslop-provider-profiles
+         '((remote :url "http://remote.example/v1/chat/completions")))
+        (deslop-selector--last-selection nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0)
+          (cl-letf (((symbol-function 'deslop-provider-probe-models)
+                     (lambda (_profile callback)
+                       (setq probe-callback callback)
+                       (lambda () nil))))
+            (deslop-selector--set-provider 0)
+            (should-not (deslop-selector--model-name))
+            (should (string-match-p "validating" (buffer-string)))
+            (funcall probe-callback '("remote/first" "remote/second") nil)
+            (should (string= (deslop-selector--model-name)
+                             "remote/first"))
+            (should (eq deslop-selector--model-state :ready))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest deslop-test/selector-validates-preferences-once-per-catalog ()
+  (let ((buffer (generate-new-buffer " *deslop-selector-validation-test*"))
+        (messages nil)
+        (deslop-providers '(remote))
+        (deslop-provider-profiles
+         '((remote :url "http://remote.example/v1/chat/completions")))
+        (deslop-selector--last-selection
+         '(:provider remote :model "remote/missing"))
+        (deslop-selector--model-validations (make-hash-table :test #'equal))
+        (deslop-provider--model-cache (make-hash-table :test #'equal))
+        (deslop-provider--model-inflight (make-hash-table :test #'equal))
+        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+        (deslop-provider--model-generation 0))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0)
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format-string &rest args)
+                       (push (apply #'format format-string args) messages)))
+                    ((symbol-function 'deslop-provider-probe-models)
+                     (lambda (_profile callback)
+                       (funcall callback '("remote/first" "remote/second") nil)
+                       (lambda () nil))))
+            (deslop-selector--set-provider 0)
+            (should (string= (deslop-selector--model-name) "remote/first"))
+            (should (= (cl-count-if
+                        (lambda (value)
+                          (string-match-p "unavailable" value))
+                        messages)
+                       1))
+            (deslop-selector--set-provider 0)
+            (should (= (cl-count-if
+                        (lambda (value)
+                          (string-match-p "unavailable" value))
+                        messages)
+                       1))
+            (setq deslop-selector--last-selection
+                  '(:provider remote :model "remote/second"))
+            (deslop-selector--set-provider 0)
+            (should (string= (deslop-selector--model-name)
+                             "remote/second"))
+            (should (= (cl-count-if
+                        (lambda (value)
+                          (string-match-p "unavailable" value))
+                        messages)
+                       1))
+            (deslop-provider-clear-discovery-cache)
+            (setq deslop-selector--last-selection
+                  '(:provider remote :model "remote/missing"))
+            (deslop-selector--set-provider 0)
+            (should (= (cl-count-if
+                        (lambda (value)
+                          (string-match-p "unavailable" value))
+                        messages)
+                       2))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -3974,6 +4108,66 @@ Use COMMAND for the process, or a silent sleep process by default."
           (delete-process process))
         (clrhash deslop-provider--discovery-cache)
         (clrhash deslop-provider--discovery-inflight)))))
+
+(ert-deftest deslop-test/model-probe-cache-shares-custom-discovery ()
+  (let ((probe-count 0)
+        (cancel-count 0)
+        (probe-callback nil)
+        (first-values nil)
+        (second-values nil)
+        (third-values nil)
+        (deslop-provider--model-cache (make-hash-table :test #'equal))
+        (deslop-provider--model-inflight (make-hash-table :test #'equal))
+        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+        (deslop-provider--model-generation 0))
+    (let* ((probe
+            (lambda (callback)
+              (setq probe-callback callback)
+              (cl-incf probe-count)
+              (lambda () (cl-incf cancel-count))))
+           (profile (list :name 'openai
+                          :url "https://chatgpt.example/responses"
+                          :model "gpt-saved"
+                          :model-discovery-function probe))
+           (changed-profile (plist-put (copy-sequence profile)
+                                       :model "gpt-changed")))
+      (unwind-protect
+          (progn
+            (deslop-provider-probe-models
+             profile
+             (lambda (models error)
+               (setq first-values (list models error))))
+            (deslop-provider-probe-models
+             profile
+             (lambda (models error)
+               (setq second-values (list models error))))
+            (should (= probe-count 1))
+            (funcall probe-callback '("gpt-saved" "gpt-next") nil)
+            (should (equal first-values
+                           (list '("gpt-saved" "gpt-next") nil)))
+            (should (equal second-values
+                           (list '("gpt-saved" "gpt-next") nil)))
+            (deslop-provider-probe-models
+             changed-profile
+             (lambda (models error)
+               (setq third-values (list models error))))
+            (should (= probe-count 1))
+            (should (equal third-values
+                           (list '("gpt-saved" "gpt-next") nil)))
+            (should (> (deslop-provider-models-generation profile) 0))
+            (deslop-provider-clear-discovery-cache)
+            (deslop-provider-probe-models
+             changed-profile
+             (lambda (models error)
+               (setq third-values (list models error))))
+            (should (= probe-count 2))
+            (funcall probe-callback '("gpt-new") nil)
+            (should (equal third-values (list '("gpt-new") nil)))
+            (should (= cancel-count 0)))
+        (deslop-provider-abort-discovery)
+        (clrhash deslop-provider--model-cache)
+        (clrhash deslop-provider--model-inflight)
+        (clrhash deslop-provider--model-cancellations)))))
 
 (ert-deftest deslop-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
