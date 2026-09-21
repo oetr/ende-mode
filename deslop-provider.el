@@ -582,10 +582,12 @@ selection without starting another model-list request."
   (deslop-provider--prune-cache deslop-provider--discovery-cache))
 
 (defun deslop-provider--cached-model-entry (key)
-  "Return the live model catalog entry for KEY, or nil when expired."
+  "Return the usable model catalog entry for KEY, or nil when unavailable."
   (let* ((entry (gethash key deslop-provider--model-cache))
          (age (and entry (- (float-time) (plist-get entry :time)))))
     (if (and entry
+             (null (plist-get entry :error))
+             (consp (plist-get entry :models))
              (or (null deslop-provider-discovery-ttl)
                  (< age deslop-provider-discovery-ttl)))
         entry
@@ -637,16 +639,24 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
 
 (defun deslop-provider--finish-model-discovery
     (key models details error &optional no-cache)
-  "Notify model catalog waiters for KEY and optionally cache the result."
-  (let ((entry nil))
-    (unless no-cache
+  "Notify model catalog waiters for KEY and cache only successful results."
+  (setq models (cl-remove-if-not #'stringp models))
+  (when (and (null error) (null models))
+    (setq error
+          (deslop-error-create
+           :kind 'discovery
+           :message "Provider returned no models")))
+  (let ((entry (and (not no-cache)
+                    (list :models (copy-sequence models)
+                          :details (copy-tree details)
+                          :error error))))
+    (when (and entry (null error))
       (deslop-provider--prune-cache deslop-provider--model-cache)
       (setq entry
-            (list :time (float-time)
-                  :models (copy-sequence models)
-                  :details (copy-tree details)
-                  :error error
-                  :generation (cl-incf deslop-provider--model-generation)))
+            (plist-put entry :time (float-time)))
+      (setq entry
+            (plist-put entry :generation
+                       (cl-incf deslop-provider--model-generation)))
       (puthash key entry deslop-provider--model-cache))
     (remhash key deslop-provider--model-cancellations)
     (let ((callbacks (gethash key deslop-provider--model-inflight)))
@@ -708,6 +718,8 @@ NO-CACHE is used for cancellation, which must not suppress a later retry."
                              (finish models
                                      (plist-get metadata :model-details)
                                      nil)
+                           (remhash (deslop-provider--discovery-key profile)
+                                    deslop-provider--discovery-cache)
                            (finish-error
                             (deslop-error-create
                              :kind 'discovery

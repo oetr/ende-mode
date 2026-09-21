@@ -4169,6 +4169,148 @@ Use COMMAND for the process, or a silent sleep process by default."
         (clrhash deslop-provider--model-inflight)
         (clrhash deslop-provider--model-cancellations)))))
 
+(ert-deftest deslop-test/model-probe-failures-are-retried-and-success-is-cached ()
+  (let ((attempts 0)
+        (first-error nil)
+        (retry-models nil)
+        (retry-error nil)
+        (cached-models nil)
+        (deslop-provider--model-cache (make-hash-table :test #'equal))
+        (deslop-provider--model-inflight (make-hash-table :test #'equal))
+        (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+        (deslop-provider--model-generation 0))
+    (let* ((probe
+            (lambda (callback)
+              (cl-incf attempts)
+              (if (= attempts 1)
+                  (funcall
+                   callback nil
+                   (deslop-error-create
+                    :kind 'discovery
+                    :message "temporary probe failure"))
+                (funcall callback '("remote/first" "remote/second") nil))
+              (lambda () nil)))
+           (profile (list :name 'remote
+                          :url "http://remote.example/v1/chat/completions"
+                          :model-discovery-function probe)))
+      (deslop-provider-probe-models
+       profile
+       (lambda (_models error)
+         (setq first-error error)))
+      (should (= attempts 1))
+      (should (deslop-error-p first-error))
+      (should (string= (deslop-error-message first-error)
+                       "temporary probe failure"))
+      (should-not (deslop-provider-cached-models profile))
+
+      (deslop-provider-probe-models
+       profile
+       (lambda (models error)
+         (setq retry-models models
+               retry-error error)))
+      (should (= attempts 2))
+      (should-not retry-error)
+      (should (equal retry-models
+                     '("remote/first" "remote/second")))
+
+      (deslop-provider-probe-models
+       profile
+       (lambda (models error)
+         (setq cached-models (list models error))))
+      (should (= attempts 2))
+      (should (equal cached-models
+                     (list '("remote/first" "remote/second") nil))))))
+
+(ert-deftest deslop-test/generic-model-probe-retries-after-failure ()
+  (let* ((profile '(:name remote
+                    :url "http://remote.example/v1/chat/completions"))
+         (requests 0)
+         (first-error nil)
+         (retry-models nil)
+         (retry-error nil)
+         (discovery-key (deslop-provider--discovery-key profile))
+         (deslop-provider--discovery-cache (make-hash-table :test #'equal))
+         (deslop-provider--model-cache (make-hash-table :test #'equal))
+         (deslop-provider--model-inflight (make-hash-table :test #'equal))
+         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+         (deslop-provider--model-generation 0))
+    (cl-letf (((symbol-function 'deslop-provider-discover)
+               (lambda (_profile callback)
+                 (cl-incf requests)
+                 (if (= requests 1)
+                     (progn
+                       (puthash discovery-key
+                                (list :time (float-time) :metadata nil)
+                                deslop-provider--discovery-cache)
+                       (funcall callback nil))
+                   (funcall callback '(:models ("remote/first"))))
+                 (lambda () nil))))
+      (deslop-provider-probe-models
+       profile
+       (lambda (_models error)
+         (setq first-error error)))
+      (should (= requests 1))
+      (should (deslop-error-p first-error))
+      (should-not (gethash discovery-key deslop-provider--discovery-cache))
+      (should-not (deslop-provider-cached-models profile))
+
+      (deslop-provider-probe-models
+       profile
+       (lambda (models error)
+         (setq retry-models models
+               retry-error error)))
+      (should (= requests 2))
+      (should-not retry-error)
+      (should (equal retry-models '("remote/first")))
+      (should (equal (plist-get (deslop-provider-cached-models profile)
+                                :models)
+                     '("remote/first"))))))
+
+(ert-deftest deslop-test/selector-retries-failed-model-probe ()
+  (let* ((buffer (generate-new-buffer " *deslop-selector-probe-retry-test*"))
+         (attempts 0)
+         (probe
+          (lambda (callback)
+            (cl-incf attempts)
+            (if (= attempts 1)
+                (funcall
+                 callback nil
+                 (deslop-error-create
+                  :kind 'discovery
+                  :message "temporary probe failure"))
+              (funcall callback '("remote/first") nil))
+            (lambda () nil)))
+         (deslop-providers '(remote))
+         (deslop-provider-profiles
+          (list (list 'remote
+                      :url "http://remote.example/v1/chat/completions"
+                      :model-discovery-function probe)))
+         (deslop-selector--last-selection nil)
+         (deslop-selector--model-validations (make-hash-table :test #'equal))
+         (deslop-provider--model-cache (make-hash-table :test #'equal))
+         (deslop-provider--model-inflight (make-hash-table :test #'equal))
+         (deslop-provider--model-cancellations (make-hash-table :test #'equal))
+         (deslop-provider--model-generation 0))
+    (unwind-protect
+        (with-current-buffer buffer
+          (deslop-selector-mode)
+          (setq deslop-selector--providers '(remote)
+                deslop-selector--provider-index 0)
+          (deslop-selector--set-provider 0)
+          (should (= attempts 1))
+          (should (eq deslop-selector--model-state :error))
+          (should (string-match-p "\\[probe failed\\]" (buffer-string)))
+
+          (deslop-selector--set-provider 0)
+          (should (= attempts 2))
+          (should (eq deslop-selector--model-state :ready))
+          (should (string= (deslop-selector--model-name) "remote/first"))
+
+          (deslop-selector--set-provider 0)
+          (should (= attempts 2)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest deslop-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
                    :url "http://localhost:8080/v1/chat/completions"
