@@ -154,8 +154,6 @@ Supported settings are `:max-concurrency' and `:parallel'."
                     :wire-api 'responses
                     :auth-method 'opencode-oauth
                     :model-discovery-function #'ende-codex-probe-models
-                    :reasoning-effort-discovery-function
-                    #'ende-codex-probe-reasoning-efforts
                     :reasoning-effort-wire-api 'responses
                     :require-sse t
                     :display-name "OpenAI"))
@@ -173,8 +171,6 @@ Supported settings are `:max-concurrency' and `:parallel'."
                    :auth-source-port 443
                    :request-headers
                    (copy-sequence ende-provider--openrouter-request-headers)
-                   :reasoning-effort-discovery-function
-                   #'ende-provider--probe-openrouter-reasoning-efforts
                    :reasoning-effort-wire-api 'openrouter
                    :require-sse t))
             ('openrouter-batch
@@ -191,8 +187,6 @@ Supported settings are `:max-concurrency' and `:parallel'."
                    :auth-source-port 443
                    :request-headers
                    (copy-sequence ende-provider--openrouter-request-headers)
-                   :reasoning-effort-discovery-function
-                   #'ende-provider--probe-openrouter-reasoning-efforts
                    :reasoning-effort-wire-api 'openrouter
                    :require-sse nil))
             (_
@@ -1113,7 +1107,11 @@ the model catalog cache so the returned choices are current."
   "Query PROFILE live for MODEL's supported reasoning efforts.
 CALLBACK receives (EFFORTS DEFAULT ERROR).  Unlike model discovery, this never
 uses or updates a cache."
-  (let ((probe (plist-get profile :reasoning-effort-discovery-function)))
+  (let ((probe
+         (pcase (plist-get profile :name)
+           ('openai #'ende-codex-probe-reasoning-efforts)
+           ((or 'openrouter 'openrouter-batch)
+            #'ende-provider--probe-openrouter-reasoning-efforts))))
     (cond
      ((not ende-provider-discovery-enabled)
       (ende-provider--invoke-reasoning-effort-callback

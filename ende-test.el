@@ -180,6 +180,7 @@ process for cancellation tests."
   (clrhash ende-provider--model-cancellations)
   (setq ende-provider--model-generation 0)
   (clrhash ende-selector--model-validations)
+  (clrhash ende-selector--effort-selections)
   (ende-provider-clear-runtime-settings)
    (clrhash ende-history--entries)
    (ende-tools-clear-change-sets)
@@ -2894,7 +2895,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let* ((source (generate-new-buffer " *ende-selector-source*"))
          (selector (generate-new-buffer " *ende-selector-test*"))
          (ende-providers '(local))
-         (ende-provider-profiles '((local :models ("one" "two"))))
+         (ende-provider-profiles
+          '((local :models ("one" "two")
+                   :reasoning-effort "made-up"
+                   :reasoning-effort-wire-api openrouter)))
          (ende-selector--last-selection nil)
          (queued nil))
     (unwind-protect
@@ -2915,7 +2919,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                (list type instruction profile (current-buffer))))))
                (ende-selector-insert))))
           (should (eq (nth 0 queued) 'insert))
-          (should (string= (plist-get (nth 2 queued) :model) "two"))
+           (should (string= (plist-get (nth 2 queued) :model) "two"))
+           (should-not (plist-get (nth 2 queued) :reasoning-effort))
           (should (equal ende-selector--last-selection
                          '(:provider local :model "two")))
           (should (eq (nth 3 queued) source)))
@@ -3175,8 +3180,156 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                        "remote/default")))
             (should-error (ende-selector-select-model) :type 'user-error))
           (should-not called))
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer)))))
+
+(ert-deftest ende-test/selector-effort-picker-uses-live-values-and-remembers-choice ()
+  (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
+        (calls nil)
+        (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("remote-model")
+                ende-selector--model-index 0
+                ende-selector--model-state :ready)
+          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                     (lambda (profile model callback)
+                       (push (list profile model) calls)
+                       (funcall callback '("high" "low") "low" nil)
+                       (lambda () nil)))
+                    ((symbol-function 'completing-read)
+                     (lambda (prompt collection _predicate require-match
+                                     _initial _history default &rest _)
+                       (should (string= prompt "Reasoning effort: "))
+                       (should (equal collection '("high" "low")))
+                       (should require-match)
+                       (should (string= default "low"))
+                       "high")))
+            (ende-selector-select-effort))
+          (should (= (length calls) 1))
+          (should (string= (cadar calls) "remote-model"))
+          (should (string= ende-selector--effort "high"))
+          (should (eq ende-selector--effort-state :ready))
+          (should ende-selector--effort-validated-p)
+          (should (string=
+                   (gethash '(remote "remote-model")
+                            ende-selector--effort-selections)
+                   "high"))
+          (should (string-match-p "Effort:.*high" (buffer-string))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
+  (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
+        (callback nil)
+        (cancelled 0)
+        (completed nil)
+        (ende-provider-profiles '((remote :model "first")))
+        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("first" "second")
+                ende-selector--model-index 0
+                ende-selector--model-state :ready)
+          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                     (lambda (_profile _model probe-callback)
+                       (setq callback probe-callback)
+                       (lambda () (cl-incf cancelled))))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _)
+                       (setq completed t)
+                       "high")))
+            (ende-selector-select-effort)
+            (should (eq ende-selector--effort-state :loading))
+            (ende-selector-next-model)
+            (should (= cancelled 1))
+            (should (string= (ende-selector--model-name) "second"))
+            (funcall callback '("high") "high" nil)
+            (should-not completed)
+            (should-not ende-selector--effort)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ende-test/selector-validates-remembered-effort-before-dispatch ()
+  (let ((source (generate-new-buffer " *ende-selector-effort-source*"))
+        (selector (generate-new-buffer " *ende-selector-effort-dispatch*"))
+        (probe-callback nil)
+        (queued nil)
+        (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (puthash '(remote "remote-model") "high"
+                   ende-selector--effort-selections)
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (ende-selector--set-effort-context)
+            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                       (lambda (_profile _model callback)
+                         (setq probe-callback callback)
+                         (lambda () nil)))
+                      ((symbol-function 'ende-enqueue-operation)
+                       (lambda (type instruction profile)
+                         (setq queued (list type instruction profile)))))
+              (ende-selector-insert)
+              (should (eq ende-selector--effort-state :loading))
+              (should-not queued)
+              (funcall probe-callback '("high" "low") "low" nil)))
+          (should (equal (take 2 queued) '(insert nil)))
+          (should (string= (plist-get (nth 2 queued) :model) "remote-model"))
+          (should (string= (plist-get (nth 2 queued) :reasoning-effort) "high")))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest ende-test/selector-rejects-effort-removed-by-live-validation ()
+  (let ((source (generate-new-buffer " *ende-selector-effort-stale-source*"))
+        (selector (generate-new-buffer " *ende-selector-effort-stale*"))
+        (queued nil)
+        (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (puthash '(remote "remote-model") "high"
+                   ende-selector--effort-selections)
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (ende-selector--set-effort-context)
+            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                       (lambda (_profile _model callback)
+                         (funcall callback '("low") "low" nil)
+                         (lambda () nil)))
+                      ((symbol-function 'ende-enqueue-operation)
+                       (lambda (&rest _)
+                         (setq queued t))))
+              (ende-selector-insert))
+            (should-not queued)
+            (should-not ende-selector--effort)
+            (should (eq ende-selector--effort-state :error))
+            (should-not (gethash '(remote "remote-model")
+                                 ende-selector--effort-selections))))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest ende-test/selector-uses-bottom-window-and-quits-it-on-close ()
   (let ((source (generate-new-buffer " *ende-selector-window-source*"))
@@ -3245,28 +3398,31 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
-       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
-                      "i  - insert" "I  - insert anywhere"
-                       "w  - write anywhere"
-                       "m  - select/search model"
-                       "s  - summarize"
+       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
+                       "i  - insert" "I  - insert anywhere"
+                        "w  - write anywhere"
+                        "m  - select/search model"
+                        "e  - select reasoning effort"
+                        "s  - summarize"
                        "r  - rubber duck"
                       "RET       - confirm choice"
                       "C-c C-c   - approve all LLM changes"
                       "C-c C-k   - reject all LLM changes"))
          (should (string-match-p (regexp-quote key) (buffer-string))))
-        (should (= (count-lines (point-min) (point-max)) 16)))))
+         (should (= (count-lines (point-min) (point-max)) 19)))))
 
 (ert-deftest ende-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key ende-selector-mode-map (kbd "c")))
-        (original-C (lookup-key ende-selector-mode-map (kbd "C")))
-        (original-P (lookup-key ende-selector-mode-map (kbd "P"))))
+         (original-C (lookup-key ende-selector-mode-map (kbd "C")))
+         (original-P (lookup-key ende-selector-mode-map (kbd "P")))
+         (original-e (lookup-key ende-selector-mode-map (kbd "e"))))
     (unwind-protect
         (progn
           ;; Simulate a keymap retained from before the new bindings existed.
-          (define-key ende-selector-mode-map (kbd "c") nil)
-          (define-key ende-selector-mode-map (kbd "C") nil)
-          (define-key ende-selector-mode-map (kbd "P") nil)
+           (define-key ende-selector-mode-map (kbd "c") nil)
+           (define-key ende-selector-mode-map (kbd "C") nil)
+           (define-key ende-selector-mode-map (kbd "P") nil)
+           (define-key ende-selector-mode-map (kbd "e") nil)
           (with-temp-buffer
             (ende-selector-mode)
             (should (eq (key-binding (kbd "c"))
@@ -3279,8 +3435,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                          #'ende-selector-next-provider))
              (should (eq (key-binding (kbd "p"))
                          #'ende-selector-previous-provider))
-             (should (eq (key-binding (kbd "m"))
-                         #'ende-selector-select-model))
+              (should (eq (key-binding (kbd "m"))
+                          #'ende-selector-select-model))
+              (should (eq (key-binding (kbd "e"))
+                          #'ende-selector-select-effort))
              (should (eq (key-binding (kbd "RET"))
                          #'ende-selector-confirm))
              (should (eq (key-binding (kbd "C-c C-c"))
@@ -3295,9 +3453,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         #'ende-selector-write-anywhere))
             (should (eq (key-binding (kbd "I"))
                         #'ende-selector-insert-anywhere))))
-      (define-key ende-selector-mode-map (kbd "c") original-c)
-       (define-key ende-selector-mode-map (kbd "C") original-C)
-       (define-key ende-selector-mode-map (kbd "P") original-P))))
+       (define-key ende-selector-mode-map (kbd "c") original-c)
+        (define-key ende-selector-mode-map (kbd "C") original-C)
+        (define-key ende-selector-mode-map (kbd "P") original-P)
+        (define-key ende-selector-mode-map (kbd "e") original-e))))
 
 (ert-deftest ende-test/selector-labels-are-single-line-and-display-bounded ()
   (let ((multiline (ende-selector--display-label "provider\nspoof" 24))
@@ -4150,6 +4309,25 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (eq (gethash 'metadata ende-provider--discovery-cache)
                   'unchanged))
       (should (eq (gethash 'models ende-provider--model-cache) 'unchanged)))))
+
+(ert-deftest ende-test/reasoning-effort-discovery-is-limited-to-builtins ()
+  (let ((called nil)
+        (result nil)
+        (ende-provider-discovery-enabled t)
+        (profile
+         (list :name 'remote :reasoning-effort-discovery-function
+               (lambda (&rest _)
+                 (setq called t)))))
+    (ende-provider-probe-reasoning-efforts
+     profile "remote-model"
+     (lambda (efforts default error)
+       (setq result (list efforts default error))))
+    (should-not called)
+    (should-not (nth 0 result))
+    (should-not (nth 1 result))
+    (should (ende-error-p (nth 2 result)))
+    (should (string-match-p "no live reasoning-effort endpoint"
+                            (ende-error-message (nth 2 result))))))
 
 (ert-deftest ende-test/reasoning-effort-is-serialized-only-by-supported-apis ()
   (let* ((messages (list (cons "user" "question")))

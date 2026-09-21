@@ -50,6 +50,9 @@
 (defvar ende-selector--model-validations (make-hash-table :test #'equal)
   "Cached model preference validation results.")
 
+(defvar ende-selector--effort-selections (make-hash-table :test #'equal)
+  "Reasoning efforts remembered by provider and model for this Emacs session.")
+
 (defvar-local ende-selector--source-buffer nil
   "Source buffer associated with the current selector buffer.")
 
@@ -73,6 +76,27 @@
 
 (defvar-local ende-selector--model-selection-generation 0
   "Generation incremented when the user changes the current model.")
+
+(defvar-local ende-selector--effort nil
+  "Reasoning effort selected for the current provider and model.")
+
+(defvar-local ende-selector--effort-state :none
+  "Live validation state of `ende-selector--effort'.")
+
+(defvar-local ende-selector--effort-validated-p nil
+  "Non-nil when the current effort came from a live matching probe.")
+
+(defvar-local ende-selector--effort-cancel nil
+  "Cancellation function for the current reasoning-effort probe.")
+
+(defvar ende-selector--next-effort-probe-generation 0
+  "Next generation identifier assigned to a reasoning-effort probe.")
+
+(defvar-local ende-selector--effort-probe-generation 0
+  "Generation identifier for the current reasoning-effort probe.")
+
+(defvar-local ende-selector--pending-run nil
+  "Action waiting for live reasoning-effort validation, or nil.")
 
 (defvar-local ende-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
@@ -101,6 +125,29 @@
 (defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
   (nth ende-selector--model-index ende-selector--models))
+
+(defun ende-selector--effort-key (&optional provider model)
+  "Return the remembered-effort key for PROVIDER and MODEL, or nil."
+  (let ((provider (or provider (ende-selector--provider-name)))
+        (model (or model (ende-selector--model-name))))
+    (and provider model (list provider model))))
+
+(defun ende-selector--remembered-effort ()
+  "Return the effort remembered for the current provider and model."
+  (let ((key (ende-selector--effort-key)))
+    (and key (gethash key ende-selector--effort-selections))))
+
+(defun ende-selector--remember-effort (effort)
+  "Remember EFFORT for the current provider and model."
+  (let ((key (ende-selector--effort-key)))
+    (when key
+      (puthash key effort ende-selector--effort-selections))))
+
+(defun ende-selector--forget-effort ()
+  "Forget the current provider and model's remembered effort."
+  (let ((key (ende-selector--effort-key)))
+    (when key
+      (remhash key ende-selector--effort-selections))))
 
 (defun ende-selector--remembered-model (provider)
   "Return the remembered model for PROVIDER, or nil."
@@ -219,7 +266,13 @@ the discovered pricing metadata for those model IDs."
             ((or :loading :validating)
              (if model-name " [validating...]" ""))
             (:error " [probe failed]")
-            (_ ""))))
+            (_ "")))
+          (effort
+           (pcase ende-selector--effort-state
+             (:loading "validating...")
+             (:remembered (format "%s [verify]" ende-selector--effort))
+             (:error "(unavailable)")
+             (_ (or ende-selector--effort "(none)")))))
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert (format "Provider:     %s(n/p)\n" provider))
@@ -231,10 +284,12 @@ the discovered pricing metadata for those model IDs."
                       (if (ende-selector--provider-parallel-p)
                           "on"
                         "off")))
+      (insert (format "Effort:       %-24s(e)\n\n" effort))
       (insert "i  - insert\n"
               "I  - insert anywhere\n"
               "w  - write anywhere\n"
               "m  - select/search model\n"
+              "e  - select reasoning effort\n"
               "s  - summarize\n"
               "r  - rubber duck\n\n"
                "RET       - confirm choice\n"
@@ -252,14 +307,79 @@ the discovered pricing metadata for those model IDs."
     (when (functionp cancel)
       (ende-ignore-errors cancel))))
 
+(defun ende-selector--cancel-effort-probe ()
+  "Cancel the current reasoning-effort probe, if any."
+  (let ((cancel ende-selector--effort-cancel))
+    (setq ende-selector--effort-cancel nil
+          ende-selector--effort-probe-generation
+          (cl-incf ende-selector--next-effort-probe-generation))
+    (when (functionp cancel)
+      (ende-ignore-errors cancel))))
+
+(defun ende-selector--set-effort-context ()
+  "Restore the unvalidated remembered effort for the current model."
+  (ende-selector--cancel-effort-probe)
+  (setq ende-selector--effort (ende-selector--remembered-effort)
+        ende-selector--effort-state
+        (if ende-selector--effort :remembered :none)
+        ende-selector--effort-validated-p nil
+        ende-selector--pending-run nil))
+
+(defun ende-selector--effort-error-message (error)
+  "Return a useful human-readable message for effort probe ERROR."
+  (if (ende-error-p error)
+      (ende-error-message error)
+    (format "%s" error)))
+
+(defun ende-selector--probe-efforts (callback)
+  "Query the current model's live efforts and call CALLBACK.
+CALLBACK receives (EFFORTS DEFAULT ERROR).  Stale or cancelled callbacks are
+ignored.  Return non-nil when a probe was started."
+  (let ((model (ende-selector--model-name)))
+    (unless (and (stringp model) (eq ende-selector--model-state :ready))
+      (user-error "ende has no ready model for reasoning-effort discovery"))
+    (ende-selector--cancel-effort-probe)
+    (let* ((provider (ende-selector--provider-name))
+           (profile (ende-selector--provider-profile))
+           (selector-buffer (current-buffer))
+           (generation (cl-incf ende-selector--next-effort-probe-generation))
+           (selection-generation ende-selector--model-selection-generation)
+           (completed nil))
+      (setq ende-selector--effort-probe-generation generation
+            ende-selector--effort-state :loading
+            ende-selector--effort-validated-p nil)
+      (ende-selector--render)
+      (let ((cancel
+             (ende-provider-probe-reasoning-efforts
+              profile model
+              (lambda (efforts default error)
+                (setq completed t)
+                (when (and (buffer-live-p selector-buffer)
+                           (with-current-buffer selector-buffer
+                             (and (= ende-selector--effort-probe-generation
+                                     generation)
+                                  (= ende-selector--model-selection-generation
+                                     selection-generation)
+                                  (eq (ende-selector--provider-name) provider)
+                                  (equal (ende-selector--model-name) model))))
+                  (with-current-buffer selector-buffer
+                    (setq ende-selector--effort-cancel nil)
+                    (funcall callback efforts default error)))))))
+        (when (and (not completed)
+                   (= ende-selector--effort-probe-generation generation))
+          (setq ende-selector--effort-cancel cancel))))))
+
 (defun ende-selector--set-models (models &optional preferred)
   "Set the current provider's MODELS and select PREFERRED when available."
-  (let ((models (cl-remove-if-not #'stringp models)))
+  (let ((models (cl-remove-if-not #'stringp models))
+        (previous-model (ende-selector--model-name)))
     (setq ende-selector--models models
           ende-selector--model-index
           (or (and (stringp preferred)
                    (ende-selector--index-of preferred models))
-              0))))
+              0))
+    (unless (equal previous-model (ende-selector--model-name))
+      (ende-selector--set-effort-context))))
 
 (defun ende-selector--set-provisional-models (profile preferred)
   "Show PROFILE's provisional models while discovery validates PREFERRED."
@@ -338,6 +458,8 @@ PREFERRED is the model selected before discovery started."
 (defun ende-selector--set-provider (index)
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-probe)
+  (ende-selector--cancel-effort-probe)
+  (setq ende-selector--pending-run nil)
   (setq ende-selector--provider-index
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
@@ -366,6 +488,7 @@ PREFERRED is the model selected before discovery started."
      (t
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
+    (ende-selector--set-effort-context)
     (ende-selector--render)))
 
 (defun ende-selector-next-provider ()
@@ -382,11 +505,12 @@ PREFERRED is the model selected before discovery started."
   "Move the selected model by DELTA."
   (if (null ende-selector--models)
       (message "ende: no models available")
-     (setq ende-selector--model-index
-           (mod (+ ende-selector--model-index delta)
-                (length ende-selector--models)))
-     (cl-incf ende-selector--model-selection-generation)
-     (ende-selector--render)))
+    (setq ende-selector--model-index
+          (mod (+ ende-selector--model-index delta)
+               (length ende-selector--models)))
+    (cl-incf ende-selector--model-selection-generation)
+    (ende-selector--set-effort-context)
+    (ende-selector--render)))
 
 (defun ende-selector-next-model ()
   "Select the next model for the current provider."
@@ -436,8 +560,47 @@ performed locally so typing a search term never starts another network request."
             (setq ende-selector--models models
                   ende-selector--model-index index)
             (cl-incf ende-selector--model-selection-generation)
+            (ende-selector--set-effort-context)
             (ende-selector--save-selection)
             (ende-selector--render)))))))
+
+(defun ende-selector--invalidate-effort (message)
+  "Clear the current effort and report MESSAGE after failed live validation."
+  (ende-selector--forget-effort)
+  (setq ende-selector--effort nil
+        ende-selector--effort-state :error
+        ende-selector--effort-validated-p nil
+        ende-selector--pending-run nil)
+  (ende-selector--render)
+  (message "ende: %s" message))
+
+(defun ende-selector-select-effort ()
+  "Choose a reasoning effort advertised live for the selected model."
+  (interactive)
+  (when (eq ende-selector--effort-state :loading)
+    (user-error "ende reasoning-effort discovery is still loading"))
+  (ende-selector--probe-efforts
+   (lambda (efforts default error)
+     (if error
+         (ende-selector--invalidate-effort
+          (format "reasoning-effort discovery failed: %s"
+                  (ende-selector--effort-error-message error)))
+       (let ((effort ende-selector--effort))
+         (unless (member effort efforts)
+           (when effort
+             (ende-selector--forget-effort))
+           (setq effort nil))
+         (setq ende-selector--effort effort
+               ende-selector--effort-state (if effort :ready :none)
+               ende-selector--effort-validated-p (and effort t))
+         (let ((choice
+                (completing-read "Reasoning effort: " efforts nil t nil nil
+                                 (or effort default (car efforts)))))
+           (setq ende-selector--effort choice
+                 ende-selector--effort-state :ready
+                 ende-selector--effort-validated-p t)
+           (ende-selector--remember-effort choice)
+           (ende-selector--render)))))))
 
 (defun ende-selector-set-concurrency ()
   "Set and save the selected provider's session concurrency limit."
@@ -446,8 +609,8 @@ performed locally so typing a search term never starts another network request."
          (current (ende-selector--provider-concurrency))
          (value (read-number "Max concurrent jobs: " current)))
     (ende-provider-set-runtime-setting provider :max-concurrency value)
-    (ende-selector--render)
-    (ende-process-next)))
+     (ende-selector--render)
+     (ende-process-next)))
 
 (defun ende-selector-toggle-parallel ()
   "Toggle and save the selected provider's default parallel setting."
@@ -487,6 +650,8 @@ performed locally so typing a search term never starts another network request."
   "Close the selector without starting a request."
   (interactive)
   (ende-selector--cancel-probe)
+  (ende-selector--cancel-effort-probe)
+  (setq ende-selector--pending-run nil)
   (let ((buffer (current-buffer))
         (window (or (and (window-live-p ende-selector--window)
                          ende-selector--window)
@@ -494,12 +659,14 @@ performed locally so typing a search term never starts another network request."
     (setq ende-selector--window nil)
     (when (window-live-p window)
       (quit-window t window))
-     (when (buffer-live-p buffer)
-       (kill-buffer buffer))))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))))
 
 (defun ende-selector--buffer-killed ()
   "Cancel a selector probe when its buffer is killed externally."
-  (ende-selector--cancel-probe))
+  (ende-selector--cancel-probe)
+  (ende-selector--cancel-effort-probe)
+  (setq ende-selector--pending-run nil))
 
 (defun ende-selector-confirm ()
   "Confirm the current choice and close the selector."
@@ -507,8 +674,8 @@ performed locally so typing a search term never starts another network request."
   (ende-selector--save-selection)
   (ende-selector-close))
 
-(defun ende-selector--run (type &optional instruction)
-  "Run TYPE from the source buffer using the selected provider/model."
+(defun ende-selector--dispatch (type instruction)
+  "Dispatch TYPE and INSTRUCTION using the current live-validated selection."
   (let ((source ende-selector--source-buffer)
         (profile (ende-provider-profile-snapshot
                   (ende-selector--provider-name)))
@@ -517,13 +684,50 @@ performed locally so typing a search term never starts another network request."
       (user-error "ende source buffer no longer exists"))
     (unless (stringp model)
       (user-error "ende has no selected model"))
-    (setq profile (plist-put profile :model model))
+    (setq profile (plist-put profile :model model)
+          profile (plist-put profile :reasoning-effort nil))
+    (when (and ende-selector--effort-validated-p ende-selector--effort)
+      (setq profile
+            (plist-put profile :reasoning-effort ende-selector--effort)))
     (ende-selector--save-selection)
     (ende-selector-close)
     (with-current-buffer source
       (if (eq type 'rubber-duck)
           (ende-rubber-duck instruction profile)
         (ende-enqueue-operation type instruction profile)))))
+
+(defun ende-selector--run (type &optional instruction)
+  "Run TYPE from the source buffer using the selected provider/model.
+
+A remembered reasoning effort is revalidated against the provider immediately
+before dispatch, so queued jobs contain only a live-confirmed value."
+  (when ende-selector--pending-run
+    (user-error "ende is validating the selected reasoning effort"))
+  (when (eq ende-selector--effort-state :loading)
+    (user-error "ende reasoning-effort discovery is still loading"))
+  (if (not ende-selector--effort)
+      (ende-selector--dispatch type instruction)
+    (let ((effort ende-selector--effort))
+      (setq ende-selector--pending-run (list type instruction))
+      (ende-selector--probe-efforts
+       (lambda (efforts _default error)
+         (cond
+          (error
+           (ende-selector--invalidate-effort
+            (format "reasoning-effort validation failed: %s"
+                    (ende-selector--effort-error-message error))))
+          ((not (member effort efforts))
+           (ende-selector--invalidate-effort
+            (format "reasoning effort %s is no longer available"
+                    effort)))
+          (t
+           (setq ende-selector--effort-state :ready
+                 ende-selector--effort-validated-p t)
+           (let ((pending ende-selector--pending-run))
+             (setq ende-selector--pending-run nil)
+             (ende-selector--render)
+             (when pending
+               (ende-selector--dispatch (car pending) (cadr pending)))))))))))
 
 (defun ende-selector-insert ()
   "Run insert using the current selector choice."
@@ -579,6 +783,7 @@ performed locally so typing a search term never starts another network request."
   (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
   (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)
   (define-key ende-selector-mode-map (kbd "m") #'ende-selector-select-model)
+  (define-key ende-selector-mode-map (kbd "e") #'ende-selector-select-effort)
   (define-key ende-selector-mode-map (kbd "s") #'ende-selector-summarize)
   (define-key ende-selector-mode-map (kbd "r") #'ende-selector-rubber-duck)
   (define-key ende-selector-mode-map (kbd "RET") #'ende-selector-confirm)
@@ -611,15 +816,20 @@ performed locally so typing a search term never starts another network request."
          (buffer (get-buffer-create ende-selector-buffer-name)))
     (with-current-buffer buffer
       (ende-selector--cancel-probe)
+      (ende-selector--cancel-effort-probe)
       (ende-selector-mode)
       (setq ende-selector--source-buffer source
             ende-selector--providers providers
             ende-selector--provider-index provider-index
-             ende-selector--models nil
-             ende-selector--model-details nil
-             ende-selector--model-index 0
-             ende-selector--model-selection-generation 0
-             ende-selector--model-state :ready)
+            ende-selector--models nil
+            ende-selector--model-details nil
+            ende-selector--model-index 0
+            ende-selector--model-selection-generation 0
+            ende-selector--model-state :ready
+            ende-selector--effort nil
+            ende-selector--effort-state :none
+            ende-selector--effort-validated-p nil
+            ende-selector--pending-run nil)
       (ende-selector--set-provider provider-index))
     (let ((window
            (display-buffer
