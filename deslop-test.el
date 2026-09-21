@@ -1519,6 +1519,64 @@ process for cancellation tests."
              "overlaps"
              (plist-get (car (plist-get parsed :errors)) :message)))))
 
+(ert-deftest deslop-test/structured-edits-preserve-user-point-by-default ()
+  (should-not deslop-structured-edit-move-point)
+  (dolist (spec '((write-anywhere "replace" "MIDDLE" "left MIDDLE right")
+                  (insert-anywhere "after" "!" "left middle! right")))
+    (pcase-let ((`(,type ,position ,text ,expected) spec))
+      (deslop-test--reset)
+      (let* ((response
+              (format (concat "{\"version\":1,\"edits\":[{\"anchor\":\"middle\","
+                              "\"position\":\"%s\",\"text\":\"%s\"}]}")
+                      position text))
+             (deslop-llm-function
+              (deslop-test--fake-llm (list (list :content response)) t)))
+        (deslop-test--with-buffer "left middle right"
+          (let ((source (current-buffer))
+                (callback-buffer (generate-new-buffer " *deslop-callback*")))
+            (unwind-protect
+                (progn
+                  (deslop-test--select 6 12 12)
+                  (let* ((job (deslop-enqueue-operation type "Change middle"))
+                         (call (car deslop-test--calls)))
+                    (deactivate-mark)
+                    (goto-char 2)
+                    (with-current-buffer callback-buffer
+                      (deslop-test--complete-call call)
+                      (should (eq (current-buffer) callback-buffer)))
+                    (with-current-buffer source
+                      (should (eq (deslop-job-state job) 'completed))
+                      (should (string= (buffer-string) expected))
+                      (should (= (point) 2))
+                      (should-not (buffer-narrowed-p)))))
+              (when (buffer-live-p callback-buffer)
+                (kill-buffer callback-buffer)))))))))
+
+(ert-deftest deslop-test/structured-edits-move-point-when-enabled ()
+  (dolist (spec '((write-anywhere "replace" "MIDDLE" "left MIDDLE right")
+                  (insert-anywhere "after" "!" "left middle! right")))
+    (pcase-let ((`(,type ,position ,text ,expected) spec))
+      (deslop-test--reset)
+      (let* ((deslop-structured-edit-move-point t)
+             (response
+              (format (concat "{\"version\":1,\"edits\":[{\"anchor\":\"middle\","
+                              "\"position\":\"%s\",\"text\":\"%s\"}]}")
+                      position text))
+             (deslop-llm-function
+              (deslop-test--fake-llm (list (list :content response)) t)))
+        (deslop-test--with-buffer "left middle right"
+          (deslop-test--select 6 12 12)
+          (let* ((job (deslop-enqueue-operation type "Change middle"))
+                 (call (car deslop-test--calls)))
+            (deactivate-mark)
+            (goto-char 2)
+            (deslop-test--complete-call call)
+            (let ((review (car (deslop-review--overlays-in-buffer))))
+              (should (eq (deslop-job-state job) 'completed))
+              (should (string= (buffer-string) expected))
+              (should review)
+              (should (= (point) (overlay-end review))))))))))
+
 (ert-deftest deslop-test/structured-edit-orders-adjacent-after-before-replace ()
   (deslop-test--reset)
   (let ((deslop-llm-function

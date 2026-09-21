@@ -161,6 +161,13 @@ Do not use markdown fences, comments, or any keys other than those shown."
   :type 'integer
   :group 'deslop)
 
+(defcustom deslop-structured-edit-move-point nil
+  "Non-nil to move point to the final applied structured edit.
+When nil, structured edits preserve point at the position current when their
+result is applied."
+  :type 'boolean
+  :group 'deslop)
+
 (defun deslop--validate-structured-repair-attempts ()
   "Validate the configured number of structured-edit repair rounds."
   (unless (and (integerp deslop-structured-edit-repair-attempts)
@@ -522,11 +529,12 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
     (unless (buffer-live-p buffer)
       (error "%s target no longer exists" (deslop-job-type job)))
     (with-current-buffer buffer
-      (deslop-target-with-restriction target
-        (list :buffer buffer
-              :start (point-min)
-              :source (buffer-substring-no-properties
-                       (point-min) (point-max)))))))
+      (save-excursion
+        (deslop-target-with-restriction target
+          (list :buffer buffer
+                :start (point-min)
+                :source (buffer-substring-no-properties
+                         (point-min) (point-max))))))))
 
 (defun deslop--structured-edit-pass (job result)
   "Parse and apply one structured RESULT for JOB.
@@ -548,21 +556,27 @@ Return pass data without settling JOB."
          (display (deslop--job-display-metadata job result))
          (key (if (eq type 'insert-anywhere) :offset :start)))
     (with-current-buffer buffer
-      (deslop-target-with-restriction target
-        (barf-if-buffer-read-only)
-        (dolist (edit
-                 (sort (copy-sequence edits)
-                       (lambda (left right)
-                         (deslop--structured-edit-descending-p
-                          left right key))))
-          (condition-case caught
-              (deslop--apply-anchor-edit
-               target buffer source-start edit display)
-            ((error quit)
-             (push (list :index (plist-get edit :index)
-                         :message (error-message-string caught)
-                         :raw (plist-get edit :raw))
-                   application-failures))))))
+      (let ((apply-edits
+             (lambda ()
+               (deslop-target-with-restriction target
+                 (barf-if-buffer-read-only)
+                 (dolist (edit
+                          (sort (copy-sequence edits)
+                                (lambda (left right)
+                                  (deslop--structured-edit-descending-p
+                                   left right key))))
+                   (condition-case caught
+                       (deslop--apply-anchor-edit
+                        target buffer source-start edit display)
+                     ((error quit)
+                      (push (list :index (plist-get edit :index)
+                                  :message (error-message-string caught)
+                                  :raw (plist-get edit :raw))
+                            application-failures))))))))
+        (if deslop-structured-edit-move-point
+            (funcall apply-edits)
+          (save-excursion
+            (funcall apply-edits)))))
     (setq failures (append failures (nreverse application-failures)))
     (list :source source
           :requested (+ (length edits) (length failures))
@@ -797,10 +811,11 @@ PREVIOUS contains failures from the preceding structured pass."
          (unless (and (buffer-live-p buffer) start end)
            (error "write-anywhere target no longer exists"))
          (with-current-buffer buffer
-           (deslop-target-with-restriction target
-             (barf-if-buffer-read-only)
-             (deslop-target-validate-source target start end)
-             (setq source (buffer-substring-no-properties start end))))
+           (save-excursion
+             (deslop-target-with-restriction target
+               (barf-if-buffer-read-only)
+               (deslop-target-validate-source target start end)
+               (setq source (buffer-substring-no-properties start end)))))
          (setf (deslop-job-structured-state job)
                (list :type type
                      :instruction instruction
