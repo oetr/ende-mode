@@ -2,19 +2,199 @@
 #+STARTUP: overview
 
 * Final Design
-Provide a chat workflow inside ende without preventing the user from writing and editing ordinary Org content.
+Provide a chat workflow in ende-mode that allows the user to ask questions.
 Use an ordinary Org buffer for chat, with top-level headings defining independent conversation roots.
-Message ownership is such that sections marked as assistant by properties, are also sent as such to the server.
-Section marked as such, assumes that all of its content is also marked as such.
+We can use *ende-chat* as a buffer for generic questions.
+The user is allowed to write and edit this buffer as he pleases, and anything he messes up is on him.
+
+Message ownership is such that sections marked as "assistant" by an org-mode property are also sent as such to the server.
+Sections marked as such, assume that all of its content is also marked as such.
 Unmarked content is assumed to be user content.
 Content marked as "hidden" are always hidden.
 Content marked as "reasoning" are hidden by default, but user can configure them to be sent.
+So every section must be checked before being sent.
+E.g. a section is marked as assistant, but the underlying two sections one level deeper are marked as user and hidden.
+What does this mean for conversation?
 
-Generated Org content is parsed and normalized before it is inserted, so its headings cannot accidentally change the outer conversation structure.
+Consider this example, where the markers are in the section name, for simplicity reasons.
+There are currently two questions asked and the user is waiting for two answers at the same time.
+The nested case is interesting, because one user question at level 3 has received no answer, and the question was not asked.
 
-# Continue here!
-A generated LLM response is parsed, stripped of reserved control metadata, and inserted beneath one assistant wrapper after uniform heading normalization.
-Plain-text responses are accepted without requiring headings, and malformed or unsafe fragments are retained in a readable inert form with a diagnostic.
+#+begin_src org
+  ,* User Question
+  Question
+  ,** Assistant
+  ,*** Thinking
+  ,*** Answer
+  ,**** Thinking
+  ,*** User Question
+  ,*** Hidden
+  whatever, will never be sent to any LLM
+  ,*** Answer
+  answer to level 3 question
+  ,**** Thinking
+  ,** User Question X
+  ,** A: ... waiting for an answer
+
+  ,* User Question
+  ,** A... waiting for an answer now
+#+end_src
+I am trying to work out how I want it to work.
+E.g. what should happen to it when the question at level 2 is sent to the LLM?
+Hidden content is definetly hidden, no matter what.
+Nested follow-up questions are interesting --- should we send them or not, in the context, when the user wants an answer to "User Question X"?
+
+The answer has to be: no, not until the user explicitly sends them. A section marked "User Question" is only a conversation turn once the user has actually sent it. An unmarked or unasked nested question is reference material, not history. This keeps the rule simple and predictable: the context is the set of turns the user has actually sent, in document order, plus any unmarked reference content that falls within the active root. The nested structure in the Org file is for the user's own navigation and organization; it does not imply a conversation flow until the user acts on it.
+
+
+Ok, now consider this more refined example:
+#+begin_src org
+  ,* Top-level Question
+  ,** Agent Answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+  Answer
+  ,** Follow-up user question
+  ,** Follow-up agent answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+  blabla
+  ,** User Question
+  ,** Agent answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+
+  blabla
+
+  ,* Top-level Question 2
+  ,** Agent Answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+  Answer
+  ,*** Follow-up user question to the first agent answer
+  <USER ASKING THIS QUESTION>
+
+  ,** Follow-up user question
+  ,** Follow-up agent answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+  blabla
+  ,** User Question
+  ,** Agent answer
+  ,#+begin_reasoning
+  Reasoning
+  ,#+end_reasoning
+
+  blabla
+
+#+end_src
+
+We could simply merge that tree back if the user wants to.
+Or not, if he doesn't.
+E.g., we provide a custom variable that by default sends everything before the current question.
+That includes all nested conversations (until the top-level star, which defines true boundaries) so far, all sections before this section.
+Current section includes everything as long as the subsections are not marked as user, hidden, or agent.
+
+The user can also define whether the reasoning blocks will be submitted too, using a variable.
+WDYT?
+I think this is a good default, with one important qualification: “everything before the current question” should mean every *eligible* item before it, not literally every section.
+
+A user-marked section becomes conversation history only after it has been sent.  Therefore an unsent nested follow-up is excluded even when it appears earlier in document order.  Likewise, an assistant section should enter history only after its reply is complete or deliberately accepted.  Hidden content is a hard exclusion in all cases.
+
+The tree does not need to be merged or flattened in the Org buffer.  It can remain the user's organizational structure, while the request is a linear serialization of the active top-level root:
+
+1. Earlier sent user turns and completed assistant turns, in document order.
+2. Eligible unmarked material as clearly delimited reference context.
+3. The current question's own body, excluding independently marked user, assistant, hidden, or otherwise excluded subtrees.
+
+This makes nested conversations useful without making them implicit branches of the conversation.  Once a nested question is explicitly sent, it becomes part of later prefix history; until then, it is only a draft or reference note.
+
+Reasoning should not be controlled by the same rule as hidden content.  =hidden= should always mean “never send.”  =reasoning= should default to “do not send,” with an explicit opt-in configuration or per-section override.  A context-preview command is especially important here: it should show exactly which sections, including reasoning and reference material, will leave the buffer.
+
+The remaining hard part is defining ownership precisely when role-marked sections and unmarked descendants interleave.  That needs durable role/state metadata rather than names such as “Agent Answer,” plus a clear rule for the current question's endpoint and for drafts, failed requests, and retries.
+
+
+Ok, I don't think we can distinguish sent/unsent.
+All we have is the text marking it as such after it was processed.
+Thus, unmarked sections are always sent (provided they hang higher in the tree hierarchy).
+WDYT?
+Yes; that is a much simpler and more honest model.  There is no independent “sent” state for user content.  The user explicitly chooses what to send by invoking the ask command, but otherwise unmarked material is ordinary user-authored context.
+
+The serialization rule can therefore be purely structural:
+
+- Find the active top-level root.
+- Serialize eligible content in document order up to the current question.
+- Treat unmarked content as user content or reference context, depending on its position and enclosing role.
+- Treat explicitly marked assistant sections as assistant messages.
+- Exclude hidden content absolutely.
+- Exclude reasoning by default, unless configured otherwise.
+- Do not include content below the current question that belongs to a deeper, separate user or assistant section.
+
+An earlier unmarked question with no answer is not a special “unsent draft” case; it is simply earlier user text and will be included if it lies in the eligible prefix.  That may occasionally produce context the user did not intend, but it is predictable, visible in a preview, and consistent with ordinary Org editing.  The user can move it, mark it hidden, start a new top-level root, or place it after the current question.
+
+The assistant marker is therefore the only durable evidence that a response was processed.  This also makes retries straightforward: asking the same unmarked section again creates another assistant response, rather than trying to infer whether its user text was previously sent.
+
+** Refined Version
+
+*** Implementation Task: Org-backed Ende Chat
+Implement an ende-mode chat workflow that uses an ordinary Org buffer as the conversation document.
+The buffer remains fully user-editable; the implementation must derive request context from its current structure rather than maintain a separate conversation transcript.
+
+**** Conversation roots and asking
+- Each level-1 heading is an independent conversation root.  A request must never include material from another level-1 root.
+- Provide an interactive ask command that resolves the question heading at point and serializes context from its enclosing level-1 root.
+- If the question heading is empty and has content, it is the agent's task to add a correct section title by analyzing the request and adding a short title to it. If the title exists, the agent will leave it unchanged. We can either ask a cheap agent to summarize (currently only one agent is used) or ask the actual agent to output a "#+TITLE: New title" for this section that will be parsed and inserted as section name, and deleted from the response.
+- Reject attempts to ask from hidden or reasoning-only content, or from content whose effective role is assistant.
+- The default context policy is a root-prefix policy: serialize eligible material in document order before the current question, then serialize the current question's eligible body as the final user turn.
+- Make the context policy customizable.  The default must be root-prefix; a narrower current-section-only policy is useful as a minimum alternate option.
+
+**** Durable metadata and inheritance
+Do not infer roles from heading names such as Agent Answer or User Question.  Define and document durable Org properties for at least these concepts:
+- Conversation role: user or assistant.
+- Visibility: normal, hidden, or reasoning.
+
+An unmarked section has the user role by default.  A role inherited from the nearest role-marked ancestor applies to unmarked descendants, so ordinary content below an assistant section remains assistant content unless a descendant explicitly declares the user role.  An explicit descendant role overrides an inherited role.
+
+Visibility is independent of role:
+- Hidden content is an absolute exclusion.  If a section is hidden, its entire subtree is excluded regardless of role, context policy, or configuration.  No descendant may opt back in.
+- Reasoning content is excluded by default.  Support Org reasoning blocks such as =#+begin_reasoning= as well as reasoning-marked sections.  A user option must allow reasoning to be included deliberately; when included, it retains the enclosing user or assistant role.
+- Normal content is eligible unless excluded by scope or by the current-question boundary rules below.
+
+Use Org parsing and outline APIs rather than heading-name heuristics or ad-hoc regular expressions.
+
+**** Context serialization rules
+Build one ordered sequence of user and assistant message chunks from the active root.
+
+1. Walk eligible material in source order.  Preserve ordering; only merge adjacent chunks when they have the same effective role and no excluded or differently-role-marked content lies between them.
+2. Include all eligible material before the current question.  There is no sent or unsent state for user-authored text: earlier unmarked material is included as user context unless it inherits an assistant role or is explicitly excluded.
+3. Include the current question's own text, including unmarked descendants that are part of its subtree.  Do not include an independently marked user, assistant, hidden, or reasoning subtree as part of the current question's body.  Skip that subtree while continuing to inspect later eligible siblings in the current question's subtree.
+4. Do not include material after the current question merely because it is in the same root.  In particular, a later assistant answer is not part of a retry of the earlier question.
+5. Preserve enough heading/path delimiters in the serialized text to make user-organized reference material intelligible, but never use those labels to determine message ownership.
+6. Treat unmarked organizational notes as user-authored context.  They may be clearly delimited as reference material in the generated payload, but they must not be promoted to assistant messages.
+
+The tree is organizational structure, not implicit conversation flow.  A nested question becomes a separate turn only when the user invokes the ask command at that heading.  Before that, its unmarked text is simply eligible earlier user context when it falls in the selected prefix.
+
+**** Request lifecycle and response insertion
+- Do not store or infer a separate sent flag for user sections.  Invoking ask on the same user question again is a retry/new request and must be allowed.
+- On successful completion, insert the model response in a newly created assistant-marked section immediately after the asked question's subtree.  For a level-1 root question, create the response as a level-2 child; for a nested question, create it as a same-level sibling.
+- Mark the inserted response with the durable assistant role property.  Its body is the assistant response, and any captured reasoning must be marked as reasoning rather than silently mixed into normal answer text.
+- A failed request must not alter the original user content or cause it to become ineligible later.
+- Concurrent requests must remain independent and must not cause temporary placeholders to enter context history. Since the user can configure sequential requests, it is possible to pre-ask follow up questions in advance, and the follow up request context will be built from the buffer when the request actually starts, not when it's queued.
+
+**** Acceptance tests
+Add automated tests covering at least:
+- isolation between two level-1 conversation roots;
+- hidden content nested under user or assistant content, including hidden descendants when reasoning inclusion is enabled;
+- reasoning omitted by default and included only when configured;
+- inherited assistant ownership and an explicitly user-marked descendant that overrides it;
+- earlier unmarked text included in the root-prefix context without any sent-state metadata;
+- exclusion of independently marked child subtrees from the current question body;
+- repeated asks on the same question producing separate assistant responses;
 
 * Refined text
 Each message should have a host-created wrapper with stable turn and reply identifiers, role, origin, lifecycle state, and edited status.
