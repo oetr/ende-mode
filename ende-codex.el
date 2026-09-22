@@ -52,6 +52,12 @@
   :type 'string
   :group 'ende)
 
+(defcustom ende-codex-usage-endpoint
+  "https://chatgpt.com/backend-api/wham/usage"
+  "Account-scoped ChatGPT/Codex quota endpoint."
+  :type 'string
+  :group 'ende)
+
 (defcustom ende-codex-client-version "1.0.0"
   "Client version sent to the ChatGPT/Codex model discovery endpoint."
   :type 'string
@@ -68,6 +74,9 @@
 
 (defconst ende-codex--models-path "/backend-api/codex/models"
   "Official Codex model discovery path.")
+
+(defconst ende-codex--usage-path "/backend-api/wham/usage"
+  "Official ChatGPT/Codex quota path.")
 
 (defconst ende-codex--refresh-path "/oauth/token"
   "Official Codex OAuth refresh path.")
@@ -92,6 +101,9 @@
 
 (defvar ende-codex--model-probe-processes nil
   "In-flight ChatGPT/Codex model discovery processes.")
+
+(defvar ende-codex--quota-probe-processes nil
+  "In-flight ChatGPT/Codex quota discovery processes.")
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--make-session))
@@ -164,6 +176,13 @@
    ende-codex-models-endpoint
    ende-codex--generation-host
    ende-codex--models-path))
+
+(defun ende-codex--validated-usage-url ()
+  "Validate and return the credential-bearing Codex quota URL."
+  (ende-codex--validated-official-url
+   ende-codex-usage-endpoint
+   ende-codex--generation-host
+   ende-codex--usage-path))
 
 (defun ende-codex--validated-refresh-url ()
   "Validate and return the official Codex OAuth refresh URL."
@@ -579,6 +598,98 @@ Return a cancellation function for an asynchronous refresh, or nil."
            when (and (stringp slug) (not (string-empty-p slug)))
            collect slug))
 
+(defun ende-codex--usage-command (url headers-file config-file)
+  "Build a curl GET command for the account-scoped quota URL URL."
+  (append
+   (ende-curl-base-command url)
+   (ende-curl-response-options headers-file)
+   (list "--request" "GET"
+         "--header" "Accept: application/json")
+   (when config-file (list "--config" config-file))
+   (ende-curl-timeout-options ende-request-timeout
+                              ende-provider-max-discovery-bytes)
+   (list "--url" url)))
+
+(defun ende-codex--quota-window (entry)
+  "Return a normalized quota window from JSON object ENTRY, or nil."
+  (when (hash-table-p entry)
+    (let ((used (ende-protocol-json-get "used_percent" entry))
+          (reset (ende-protocol-json-get "reset_at" entry))
+          (window (ende-protocol-json-get "limit_window_seconds" entry)))
+      (when (numberp used)
+        (list :used-percent (max 0 (min 100 used))
+              :reset-at (and (numberp reset) reset)
+              :window-seconds
+              (and (numberp window) (> window 0) window))))))
+
+(defun ende-codex--parse-quota (text)
+  "Return normalized quota windows parsed from usage response TEXT."
+  (let* ((payload (ende-protocol-json-read-string text))
+         (rate-limit (ende-protocol-json-get "rate_limit" payload))
+         (primary (and (hash-table-p rate-limit)
+                       (ende-codex--quota-window
+                        (ende-protocol-json-get "primary_window" rate-limit))))
+         (secondary (and (hash-table-p rate-limit)
+                         (ende-codex--quota-window
+                          (ende-protocol-json-get
+                           "secondary_window" rate-limit)))))
+    (unless (or primary secondary)
+      (error "Codex usage response has no quota windows"))
+    (list :primary primary :secondary secondary)))
+
+(defun ende-codex--duration-string (seconds)
+  "Return a compact human-readable duration for SECONDS."
+  (let* ((seconds (max 0 (floor seconds)))
+         (days (/ seconds 86400))
+         (hours (/ (% seconds 86400) 3600))
+         (minutes (/ (% seconds 3600) 60)))
+    (cond
+     ((> days 0) (format "%dd %dh" days hours))
+     ((> hours 0) (format "%dh%s" hours
+                          (if (> minutes 0) (format " %dm" minutes) "")))
+     ((> minutes 0) (format "%dm" minutes))
+     (t "now"))))
+
+(defun ende-codex--quota-window-label (window now &optional until-reset)
+  "Return a display label for quota WINDOW at NOW.
+When UNTIL-RESET is non-nil, prefer the window's reset countdown."
+  (let ((seconds (if (and until-reset
+                          (numberp (plist-get window :reset-at)))
+                     (- (plist-get window :reset-at) now)
+                   (plist-get window :window-seconds))))
+    (cond
+     ((and (numberp seconds) (>= seconds (* 7 86400))) "weekly")
+     ((numberp seconds) (ende-codex--duration-string seconds))
+     (t "quota"))))
+
+(defun ende-codex-quota-string (quota &optional now)
+  "Return a compact display string for normalized QUOTA.
+NOW is the current time as a Unix timestamp and is injectable for tests."
+  (let* ((now (or now (float-time)))
+         (segments nil)
+         (reset-at nil))
+    (dolist (key '(:primary :secondary))
+      (let ((window (plist-get quota key)))
+        (when window
+          (push (format "%s: %d%% left"
+                        (ende-codex--quota-window-label
+                         window now (eq key :primary))
+                        (round (- 100 (plist-get window :used-percent))))
+                segments)
+          (when (numberp (plist-get window :reset-at))
+            (setq reset-at
+                  (if reset-at
+                      (min reset-at (plist-get window :reset-at))
+                    (plist-get window :reset-at)))))))
+    (setq segments (nreverse segments))
+    (when reset-at
+      (setq segments
+            (append segments
+                    (list (format "reset in %s"
+                                  (ende-codex--duration-string
+                                   (- reset-at now)))))))
+    (mapconcat #'identity segments " · ")))
+
 (defun ende-codex--response-detail (preview)
   "Return a useful error detail parsed from response PREVIEW."
   (condition-case nil
@@ -591,9 +702,13 @@ Return a cancellation function for an asynchronous refresh, or nil."
             (and (stringp error-payload) error-payload)))
     (error nil)))
 
-(defun ende-codex--probe-model-entries (callback)
-  "Probe the authenticated Codex endpoint and call CALLBACK with model objects.
-CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
+(defun ende-codex--probe-json
+    (url request-name command parser callback &optional process-slot)
+  "Probe authenticated JSON URL and call CALLBACK with parsed data.
+COMMAND receives URL, headers-file, and config-file.  PARSER receives the
+complete response body.  CALLBACK receives (VALUE ERROR).  When PROCESS-SLOT
+is non-nil, it names a variable tracking the live request process.  Return a
+cancellation function."
   (let ((response-buffer nil)
         (stderr-buffer nil)
         (stderr-process nil)
@@ -601,15 +716,17 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
         (config-file nil)
         (process nil)
         (auth-cancel nil)
-        (models-url nil)
         (received-bytes 0)
         (finished nil))
     (cl-labels
-        ((finish (models &optional error cancelled)
+        ((remove-process ()
+           (when (and process process-slot)
+             (set process-slot
+                  (delq process (symbol-value process-slot)))))
+         (finish (value &optional error cancelled)
            (unless finished
              (setq finished t)
-             (setq ende-codex--model-probe-processes
-                   (delq process ende-codex--model-probe-processes))
+             (remove-process)
              (when (and (processp process) (process-live-p process))
                (delete-process process))
              (ende-curl-cleanup-resources
@@ -617,11 +734,99 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
               (list headers-file config-file)
               (list stderr-process))
              (unless cancelled
-               (funcall callback models error)))))
+               (funcall callback value error))))
+         (start (auth)
+           (let* ((account-id (ende-codex--account-id auth))
+                  (headers
+                   (append
+                    (list (concat "Authorization: Bearer "
+                                  (plist-get auth :access))
+                          "originator: opencode")
+                    (when account-id
+                      (list (concat "ChatGPT-Account-Id: " account-id)))))
+                  (request
+                   (ende-curl-start-request
+                    :profile (list :url url)
+                    :name request-name
+                    :internal-headers headers
+                    :command
+                    (lambda (url-headers url-config)
+                      (funcall command url url-headers url-config))
+                    :filter
+                    (lambda (_probe-process chunk)
+                      (unless finished
+                        (setq received-bytes
+                              (+ received-bytes (string-bytes chunk)))
+                        (if (and ende-provider-max-discovery-bytes
+                                 (> received-bytes
+                                    ende-provider-max-discovery-bytes))
+                            (finish
+                             nil
+                             (ende-error-create
+                              :kind 'resource
+                              :message
+                              (format
+                               "%s response exceeds ende-provider-max-discovery-bytes"
+                               request-name)))
+                          (when (buffer-live-p response-buffer)
+                            (with-current-buffer response-buffer
+                              (goto-char (point-max))
+                              (insert chunk))))))
+                    :sentinel
+                    (lambda (probe-process event)
+                      (when (memq (process-status probe-process)
+                                  '(exit signal closed))
+                        (if (/= (process-exit-status probe-process) 0)
+                            (finish
+                             nil
+                             (or (process-get probe-process :ende-idle-error)
+                                 (ende-error-create
+                                  :kind 'transport
+                                  :message
+                                  (format "%s failed: %s"
+                                          request-name
+                                          (string-trim event)))))
+                          (condition-case parse-error
+                              (let* ((status
+                                      (car (ende-curl-response-headers
+                                            headers-file)))
+                                     (text
+                                      (with-current-buffer response-buffer
+                                        (buffer-string)))
+                                     (detail
+                                      (ende-codex--response-detail text)))
+                                (if (or (null status) (< status 200)
+                                        (>= status 300))
+                                    (finish
+                                     nil
+                                     (ende-error-create
+                                      :kind 'http
+                                      :message
+                                      (format "HTTP status %s: %s"
+                                              (or status "unknown")
+                                              (or detail
+                                                  (format "%s failed"
+                                                          request-name)))))
+                                  (finish (funcall parser text))))
+                            ((error quit)
+                             (finish
+                              nil
+                              (ende-error-create
+                               :kind 'protocol
+                               :message
+                               (error-message-string parse-error)))))))))))
+             (setq process (plist-get request :process)
+                   response-buffer (plist-get request :response-buffer)
+                   stderr-buffer (plist-get request :stderr-buffer)
+                   stderr-process (plist-get request :stderr-process)
+                   headers-file (plist-get request :headers-file)
+                   config-file (plist-get request :config-file))
+             (when process-slot
+               (set process-slot
+                    (cons process (symbol-value process-slot)))))))
       (condition-case startup-error
           (progn
             (ende-validate-resource-options)
-            (setq models-url (ende-codex--validated-models-url))
             (setq auth-cancel
                   (ende-codex--resolve-auth
                    (lambda (auth-or-error)
@@ -629,118 +834,62 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                        (if (ende-error-p auth-or-error)
                            (finish nil auth-or-error)
                          (condition-case request-error
-                             (let* ((account-id
-                                     (ende-codex--account-id auth-or-error))
-                                    (headers
-                                     (append
-                                      (list
-                                       (concat "Authorization: Bearer "
-                                               (plist-get auth-or-error :access))
-                                       "originator: opencode")
-                                      (when account-id
-                                        (list (concat "ChatGPT-Account-Id: "
-                                                      account-id)))))
-                                    (request
-                                     (ende-curl-start-request
-                                      :profile (list :url models-url)
-                                      :name "ende-codex-model-probe"
-                                      :internal-headers headers
-                                      :command
-                                      (lambda (url-headers url-config)
-                                        (ende-codex--models-command
-                                         models-url
-                                         url-headers url-config))
-                                      :filter
-                                      (lambda (_probe-process chunk)
-                                        (unless finished
-                                          (setq received-bytes
-                                                (+ received-bytes
-                                                   (string-bytes chunk)))
-                                          (if (and ende-provider-max-discovery-bytes
-                                                   (> received-bytes
-                                                      ende-provider-max-discovery-bytes))
-                                              (finish
-                                               nil
-                                               (ende-error-create
-                                                :kind 'resource
-                                                :message
-                                                "Codex model response exceeds ende-provider-max-discovery-bytes"))
-                                            (when (buffer-live-p response-buffer)
-                                              (with-current-buffer response-buffer
-                                                (goto-char (point-max))
-                                                (insert chunk))))))
-                                      :sentinel
-                                      (lambda (probe-process event)
-                                        (when (memq (process-status probe-process)
-                                                    '(exit signal closed))
-                                          (if (/= (process-exit-status probe-process) 0)
-                                              (finish
-                                               nil
-                                               (or (process-get
-                                                    probe-process :ende-idle-error)
-                                                   (ende-error-create
-                                                    :kind 'transport
-                                                    :message
-                                                    (format "Codex model probe failed: %s"
-                                                            (string-trim event)))))
-                                            (let* ((status
-                                                    (car (ende-curl-response-headers
-                                                          headers-file)))
-                                                   (text
-                                                    (with-current-buffer response-buffer
-                                                      (buffer-string)))
-                                                   (detail
-                                                    (ende-codex--response-detail
-                                                     text)))
-                                              (if (or (null status) (< status 200)
-                                                      (>= status 300))
-                                                  (finish
-                                                   nil
-                                                   (ende-error-create
-                                                    :kind 'http
-                                                    :message
-                                                    (format "HTTP status %s: %s"
-                                                            (or status "unknown")
-                                                            (or detail
-                                                                "Codex model probe failed"))))
-                                                (condition-case parse-error
-                                                    (finish (ende-codex--parse-model-entries text))
-                                                  ((error quit)
-                                                   (finish
-                                                    nil
-                                                    (ende-error-create
-                                                     :kind 'protocol
-                                                     :message
-                                                     (error-message-string
-                                                      parse-error)))))))))))))
-                               (setq process (plist-get request :process))
-                               (setq response-buffer
-                                     (plist-get request :response-buffer)
-                                     stderr-buffer
-                                     (plist-get request :stderr-buffer)
-                                     stderr-process
-                                     (plist-get request :stderr-process)
-                                     headers-file
-                                     (plist-get request :headers-file)
-                                     config-file
-                                     (plist-get request :config-file))
-                               (push process ende-codex--model-probe-processes))
+                             (start auth-or-error)
                            ((error quit)
                             (finish
                              nil
                              (ende-error-create
                               :kind 'startup
-                              :message (error-message-string request-error))))))))))
-            )
+                              :message
+                              (error-message-string request-error)))))))))))
         ((error quit)
          (finish
           nil
           (ende-error-create
            :kind 'startup
-           :message (error-message-string startup-error))))
-        (lambda ()
-          (when auth-cancel (funcall auth-cancel))
-          (finish nil nil t))))))
+            :message (error-message-string startup-error)))))
+      (lambda ()
+        (when auth-cancel
+          (funcall auth-cancel))
+        (finish nil nil t)))))
+
+(defun ende-codex--probe-model-entries (callback)
+  "Probe the authenticated Codex endpoint and call CALLBACK with model objects.
+CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
+  (condition-case validation-error
+      (ende-codex--probe-json
+       (ende-codex--validated-models-url)
+       "ende-codex-model-probe"
+       #'ende-codex--models-command
+       #'ende-codex--parse-model-entries
+       callback
+       'ende-codex--model-probe-processes)
+    ((error quit)
+     (funcall callback
+              nil
+              (ende-error-create
+               :kind 'startup
+               :message (error-message-string validation-error)))
+     nil)))
+
+(defun ende-codex-probe-quota (callback)
+  "Probe OpenAI's authenticated quota endpoint and call CALLBACK.
+CALLBACK receives (QUOTA ERROR).  Return a cancellation function."
+  (condition-case validation-error
+      (ende-codex--probe-json
+       (ende-codex--validated-usage-url)
+       "ende-codex-quota-probe"
+       #'ende-codex--usage-command
+       #'ende-codex--parse-quota
+       callback
+       'ende-codex--quota-probe-processes)
+    ((error quit)
+     (funcall callback
+              nil
+              (ende-error-create
+               :kind 'startup
+               :message (error-message-string validation-error)))
+     nil)))
 
 (defun ende-codex-probe-models (callback)
   "Probe the authenticated Codex endpoint and call CALLBACK with model slugs.
