@@ -667,7 +667,8 @@ When UNTIL-RESET is non-nil, prefer the window's reset countdown."
 NOW is the current time as a Unix timestamp and is injectable for tests."
   (let* ((now (or now (float-time)))
          (segments nil)
-         (reset-at nil))
+         (secondary-reset-at
+          (plist-get (plist-get quota :secondary) :reset-at)))
     (dolist (key '(:primary :secondary))
       (let ((window (plist-get quota key)))
         (when window
@@ -675,19 +676,14 @@ NOW is the current time as a Unix timestamp and is injectable for tests."
                         (ende-codex--quota-window-label
                          window now (eq key :primary))
                         (round (- 100 (plist-get window :used-percent))))
-                segments)
-          (when (numberp (plist-get window :reset-at))
-            (setq reset-at
-                  (if reset-at
-                      (min reset-at (plist-get window :reset-at))
-                    (plist-get window :reset-at)))))))
+                segments))))
     (setq segments (nreverse segments))
-    (when reset-at
+    (when (numberp secondary-reset-at)
       (setq segments
             (append segments
                     (list (format "reset in %s"
                                   (ende-codex--duration-string
-                                   (- reset-at now)))))))
+                                   (- secondary-reset-at now)))))))
     (mapconcat #'identity segments " · ")))
 
 (defun ende-codex--response-detail (preview)

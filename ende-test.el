@@ -2912,8 +2912,26 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-codex-quota-string quota now)
       "5h 11m: 72% left · weekly: 41% left · reset in 2h 13m"))
     (should-error
-     (ende-codex--parse-quota
-      "{\"rate_limit\":{\"primary_window\":null,\"secondary_window\":null}}"))))
+      (ende-codex--parse-quota
+       "{\"rate_limit\":{\"primary_window\":null,\"secondary_window\":null}}"))))
+
+(ert-deftest ende-test/openai-quota-display-follows-secondary-reset ()
+  (let ((now 2000000000)
+        (quota
+         '(:primary (:used-percent 10
+                     :reset-at 2000003600
+                     :window-seconds 18000)
+           :secondary (:used-percent 20
+                       :reset-at 2000021600
+                       :window-seconds 604800))))
+    (should
+     (string=
+      (ende-codex-quota-string quota now)
+      "1h: 90% left · weekly: 80% left · reset in 6h"))
+    (should
+     (string=
+      (ende-codex-quota-string (list :primary (plist-get quota :primary)) now)
+      "1h: 90% left"))))
 
 (ert-deftest ende-test/openai-quota-probe-uses-account-scoped-oauth ()
   (let ((captured nil)
