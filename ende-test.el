@@ -2895,6 +2895,149 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (delete-process process))
         (setq ende-codex--model-probe-processes nil)))))
 
+(ert-deftest ende-test/openai-quota-parser-and-display-are-window-aware ()
+  (let* ((now 2000000000)
+         (quota
+          (ende-codex--parse-quota
+           (concat
+            "{\"rate_limit\":{"
+            "\"primary_window\":{\"used_percent\":28,"
+            "\"reset_at\":2000018660,\"limit_window_seconds\":18000},"
+            "\"secondary_window\":{\"used_percent\":59,"
+            "\"reset_at\":2000007980,\"limit_window_seconds\":604800}}}"))))
+    (should (= (plist-get (plist-get quota :primary) :used-percent) 28))
+    (should (= (plist-get (plist-get quota :secondary) :used-percent) 59))
+    (should
+     (string=
+      (ende-codex-quota-string quota now)
+      "5h 11m: 72% left · weekly: 41% left · reset in 2h 13m"))
+    (should-error
+     (ende-codex--parse-quota
+      "{\"rate_limit\":{\"primary_window\":null,\"secondary_window\":null}}"))))
+
+(ert-deftest ende-test/openai-quota-probe-uses-account-scoped-oauth ()
+  (let ((captured nil)
+        (config-text nil)
+        (process nil)
+        (result nil)
+        (failure nil)
+        (real-make-process (symbol-function 'make-process)))
+    (cl-letf (((symbol-function 'ende-codex--resolve-auth)
+               (lambda (callback)
+                 (funcall callback
+                          '(:access "access-token" :account-id "account-id"))
+                 nil))
+              ((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq captured args)
+                 (let ((config
+                        (cadr (member "--config"
+                                      (plist-get args :command)))))
+                   (when config
+                     (with-temp-buffer
+                       (insert-file-contents config)
+                       (setq config-text (buffer-string)))))
+                 (setq process
+                       (funcall real-make-process
+                                :name (plist-get args :name)
+                                :buffer nil
+                                :command '("cat")
+                                :connection-type 'pipe)))))
+      (unwind-protect
+          (progn
+            (ende-codex-probe-quota
+             (lambda (quota error)
+               (setq result quota
+                     failure error)))
+            (let* ((command (plist-get captured :command))
+                   (headers-file
+                    (cadr (member "--dump-header" command))))
+              (with-temp-file headers-file
+                (insert "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"))
+              (funcall
+               (plist-get captured :filter)
+               process
+               "{\"rate_limit\":{\"primary_window\":{\"used_percent\":22}}}")
+              (process-send-eof process)
+              (while (process-live-p process)
+                (accept-process-output process 0.05))
+              (funcall (plist-get captured :sentinel) process "finished\n"))
+            (should result)
+            (should-not failure)
+            (should (string-match-p
+                     "Authorization: Bearer access-token" config-text))
+            (should (string-match-p
+                     "ChatGPT-Account-Id: account-id" config-text))
+            (should (member "Accept: application/json" (plist-get captured :command)))
+            (should-not (member "access-token" (plist-get captured :command)))
+            (should-not ende-codex--quota-probe-processes))
+        (when (and (processp process) (process-live-p process))
+          (delete-process process))))))
+
+(ert-deftest ende-test/selector-quota-is-scoped-and-ignores-stale-results ()
+  (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
+        (quota-callback nil)
+        (cancel-count 0)
+        (ende-providers '(local openai))
+        (ende-provider-profiles
+         '((local :model "test-model" :models ("test-model"))
+           (openai :model "test-model" :auth-method opencode-oauth
+                   :models ("test-model"))))
+        (ende-provider--runtime-settings (make-hash-table :test #'equal))
+        (ende-selector--last-selection nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (ende-selector-mode)
+          (setq ende-selector--providers '(local openai)
+                ende-selector--provider-index 0)
+          (cl-letf (((symbol-function 'ende-provider-probe-models)
+                     (lambda (_profile callback)
+                       (funcall callback '("test-model") nil)
+                       (lambda () nil)))
+                    ((symbol-function 'ende-codex-probe-quota)
+                     (lambda (callback)
+                       (setq quota-callback callback)
+                       (lambda () (cl-incf cancel-count)))))
+            (ende-selector--set-provider 0)
+            (should-not quota-callback)
+            (should (string-match-p "Quota:        unavailable"
+                                    (buffer-string)))
+            (ende-selector--set-provider 1)
+            (should quota-callback)
+            (should (eq ende-selector--quota-state :loading))
+            (should (string-match-p "Quota:        loading\.\.\."
+                                    (buffer-string)))
+            (let ((now (floor (float-time))))
+              (funcall
+               quota-callback
+               (list :primary
+                     (list :used-percent 28
+                           :reset-at (+ now 18660)
+                           :window-seconds 18000)
+                     :secondary
+                     (list :used-percent 59
+                           :reset-at (+ now 7980)
+                           :window-seconds 604800))
+               nil)
+              (should (eq ende-selector--quota-state :ready))
+              (should (string-match-p
+                       "Quota:        5h 1[01]m: 72% left"
+                       (buffer-string)))
+              (ende-selector--set-provider 1)
+              (let ((stale-callback quota-callback))
+                (ende-selector--set-provider 0)
+                (should (= cancel-count 1))
+                (should (eq ende-selector--quota-state :unavailable))
+                (funcall stale-callback
+                         (list :primary
+                               (list :used-percent 1
+                                     :reset-at (+ now 18660)
+                                     :window-seconds 18000))
+                         nil)
+                (should (eq ende-selector--quota-state :unavailable))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest ende-test/selector-runs-from-source-with-selected-profile ()
   (let* ((source (generate-new-buffer " *ende-selector-source*"))
          (selector (generate-new-buffer " *ende-selector-test*"))
@@ -3402,7 +3545,11 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
+      (should (string-match-p "Parallel:.*\nEffort:" (buffer-string)))
+      (should (string-match-p "Effort:.*\n\nQuota:" (buffer-string)))
+      (should (string-match-p "Quota:.*\n\ni  - insert" (buffer-string)))
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
+                     "Quota:        unavailable"
                      "i  - insert" "a  - ask" "I  - insert anywhere"
                      "w  - write anywhere"
                      "m  - select/search model"
@@ -3413,7 +3560,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      "C-c C-c   - approve all LLM changes"
                      "C-c C-k   - reject all LLM changes"))
         (should (string-match-p (regexp-quote key) (buffer-string))))
-      (should (= (count-lines (point-min) (point-max)) 20)))))
+      (should (= (count-lines (point-min) (point-max)) 21)))))
 
 (ert-deftest ende-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key ende-selector-mode-map (kbd "c")))
@@ -3815,12 +3962,17 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (should (string= (ende-codex--validated-generation-url
                     "https://chatgpt.com:443/backend-api/codex/responses")
                    "https://chatgpt.com:443/backend-api/codex/responses"))
+  (should (string= (ende-codex--validated-usage-url)
+                  "https://chatgpt.com/backend-api/wham/usage"))
   (should-error
    (ende-codex--validated-generation-url
     "https://chatgpt.com.attacker.test/backend-api/codex/responses"))
   (should-error
    (ende-codex--validated-generation-url
     "https://chatgpt.com/backend-api/codex/responses?redirect=attacker"))
+  (let ((ende-codex-usage-endpoint
+         "https://chatgpt.com/backend-api/wham/usage?redirect=attacker"))
+    (should-error (ende-codex--validated-usage-url)))
   (let ((ende-codex-issuer "https://auth.openai.com.attacker.test"))
     (should-error (ende-codex--validated-refresh-url))))
 
