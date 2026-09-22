@@ -90,11 +90,26 @@
 (defvar-local ende-selector--effort-cancel nil
   "Cancellation function for the current reasoning-effort probe.")
 
+(defvar-local ende-selector--quota nil
+  "Latest quota snapshot for the selected provider, or nil.")
+
+(defvar-local ende-selector--quota-state :unavailable
+  "Display state of the selected provider's quota snapshot.")
+
+(defvar-local ende-selector--quota-cancel nil
+  "Cancellation function for the current quota probe.")
+
 (defvar ende-selector--next-effort-probe-generation 0
   "Next generation identifier assigned to a reasoning-effort probe.")
 
 (defvar-local ende-selector--effort-probe-generation 0
   "Generation identifier for the current reasoning-effort probe.")
+
+(defvar ende-selector--next-quota-probe-generation 0
+  "Next generation identifier assigned to a quota probe.")
+
+(defvar-local ende-selector--quota-probe-generation 0
+  "Generation identifier for the current quota probe.")
 
 (defvar-local ende-selector--pending-run nil
   "Action waiting for live reasoning-effort validation, or nil.")
@@ -250,6 +265,21 @@ the discovered pricing metadata for those model IDs."
   "Return whether the selected provider defaults to parallel jobs."
   (ende-provider-parallel-enabled-p (ende-selector--provider-profile)))
 
+(defun ende-selector--quota-supported-p ()
+  "Return non-nil when the selected provider has an OAuth quota endpoint."
+  (let ((profile (ende-selector--provider-profile)))
+    (and (eq (ende-selector--provider-name) 'openai)
+         (eq (plist-get profile :auth-method) 'opencode-oauth))))
+
+(defun ende-selector--quota-display ()
+  "Return the selected provider's quota display text."
+  (pcase ende-selector--quota-state
+    (:loading "loading...")
+    (:ready (or (and ende-selector--quota
+                     (ende-codex-quota-string ende-selector--quota))
+                "unavailable"))
+    (_ "unavailable")))
+
 (defun ende-selector--render ()
   "Render the current selector state."
   (let* ((model-name (ende-selector--model-name))
@@ -281,12 +311,14 @@ the discovered pricing metadata for those model IDs."
                       model model-status))
       (insert (format "Concurrency:  %-24d(c/C)\n"
                       (ende-selector--provider-concurrency)))
-      (insert (format "Parallel:     %-24s(P)\n\n"
+      (insert (format "Parallel:     %-24s(P)\n"
                       (if (ende-selector--provider-parallel-p)
                           "on"
                         "off")))
-       (insert (format "Effort:       %-24s(e)\n\n" effort))
-       (insert "i  - insert\n"
+      (insert (format "Effort:       %-24s(e)\n\n" effort))
+      (insert (format "Quota:        %s\n\n"
+                      (ende-selector--quota-display)))
+      (insert "i  - insert\n"
                "a  - ask\n"
                "I  - insert anywhere\n"
                "w  - write anywhere\n"
@@ -317,6 +349,45 @@ the discovered pricing metadata for those model IDs."
           (cl-incf ende-selector--next-effort-probe-generation))
     (when (functionp cancel)
       (ende-ignore-errors cancel))))
+
+(defun ende-selector--cancel-quota-probe ()
+  "Cancel the current quota probe, if any."
+  (let ((cancel ende-selector--quota-cancel))
+    (setq ende-selector--quota-cancel nil
+          ende-selector--quota-probe-generation
+          (cl-incf ende-selector--next-quota-probe-generation))
+    (when (functionp cancel)
+      (ende-ignore-errors cancel))))
+
+(defun ende-selector--probe-quota ()
+  "Probe the selected provider's quota and update the selector display."
+  (ende-selector--cancel-quota-probe)
+  (let* ((provider (ende-selector--provider-name))
+         (selector-buffer (current-buffer))
+         (generation (cl-incf ende-selector--next-quota-probe-generation))
+         (completed nil))
+    (setq ende-selector--quota-probe-generation generation
+          ende-selector--quota-state :loading
+          ende-selector--quota nil)
+    (ende-selector--render)
+    (let ((cancel
+           (ende-codex-probe-quota
+            (lambda (quota error)
+              (setq completed t)
+              (when (and (buffer-live-p selector-buffer)
+                         (with-current-buffer selector-buffer
+                           (and (= ende-selector--quota-probe-generation
+                                   generation)
+                                (eq (ende-selector--provider-name) provider))))
+                (with-current-buffer selector-buffer
+                  (setq ende-selector--quota-cancel nil
+                        ende-selector--quota quota
+                        ende-selector--quota-state
+                        (if error :error :ready))
+                  (ende-selector--render)))))))
+      (when (and (not completed)
+                 (= ende-selector--quota-probe-generation generation))
+        (setq ende-selector--quota-cancel cancel)))))
 
 (defun ende-selector--set-effort-context ()
   "Restore the unvalidated remembered effort for the current model."
@@ -461,6 +532,7 @@ PREFERRED is the model selected before discovery started."
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
+  (ende-selector--cancel-quota-probe)
   (setq ende-selector--pending-run nil)
   (setq ende-selector--provider-index
         (mod index (max 1 (length ende-selector--providers))))
@@ -470,7 +542,9 @@ PREFERRED is the model selected before discovery started."
          (preferred (ende-selector--preferred-model provider profile))
          (catalog (ende-provider-cached-models profile)))
     (setq ende-selector--models nil
-          ende-selector--model-details nil)
+          ende-selector--model-details nil
+          ende-selector--quota nil
+          ende-selector--quota-state :unavailable)
     (cond
      (catalog
       (if (plist-get catalog :error)
@@ -491,6 +565,8 @@ PREFERRED is the model selected before discovery started."
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
     (ende-selector--set-effort-context)
+    (when (ende-selector--quota-supported-p)
+      (ende-selector--probe-quota))
     (ende-selector--render)))
 
 (defun ende-selector-next-provider ()
@@ -653,6 +729,7 @@ performed locally so typing a search term never starts another network request."
   (interactive)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
+  (ende-selector--cancel-quota-probe)
   (setq ende-selector--pending-run nil)
   (let ((buffer (current-buffer))
         (window (or (and (window-live-p ende-selector--window)
@@ -668,6 +745,7 @@ performed locally so typing a search term never starts another network request."
   "Cancel a selector probe when its buffer is killed externally."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
+  (ende-selector--cancel-quota-probe)
   (setq ende-selector--pending-run nil))
 
 (defun ende-selector-confirm ()
@@ -837,6 +915,7 @@ before dispatch, so queued jobs contain only a live-confirmed value."
     (with-current-buffer buffer
       (ende-selector--cancel-probe)
       (ende-selector--cancel-effort-probe)
+      (ende-selector--cancel-quota-probe)
       (ende-selector-mode)
       (setq ende-selector--source-buffer source
             ende-selector--providers providers
@@ -849,6 +928,8 @@ before dispatch, so queued jobs contain only a live-confirmed value."
             ende-selector--effort nil
             ende-selector--effort-state :none
             ende-selector--effort-validated-p nil
+            ende-selector--quota nil
+            ende-selector--quota-state :unavailable
             ende-selector--pending-run nil)
       (ende-selector--set-provider provider-index))
     (let ((window
