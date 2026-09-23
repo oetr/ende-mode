@@ -6430,6 +6430,29 @@ Use COMMAND for the process, or a silent sleep process by default."
   "Return all serialized chat message text in MESSAGES."
   (mapconcat (lambda (message) (cdr message)) messages "\n"))
 
+(defun ende-test--chat-unpartitioned-text (document question)
+  "Return the selected Org content for QUESTION without message boundaries."
+  (let* ((root (ende-chat--root document question))
+         (root-begin (org-element-property :begin root))
+         (root-end (org-element-property :end root))
+         (question-begin (org-element-property :begin question))
+         (prefix
+          (cl-remove-if-not
+           (lambda (headline)
+             (let ((begin (org-element-property :begin headline)))
+               (and (>= begin root-begin)
+                    (< begin question-begin)
+                    (< begin root-end)
+                    (ende-chat--eligible-p document headline))))
+           (ende-chat--document-headlines document)))
+         (current (ende-chat--current-headlines document question)))
+    (concat (mapconcat (lambda (headline)
+                         (ende-chat--section-text document headline))
+                       prefix "")
+            (mapconcat (lambda (headline)
+                         (ende-chat--section-text document headline))
+                       current ""))))
+
 (defun ende-test--chat-response-count ()
   "Return the number of host-created response headlines in the buffer."
   (cl-count-if
@@ -6571,11 +6594,82 @@ Use COMMAND for the process, or a silent sleep process by default."
     (let* ((messages (ende-chat-context-at-point))
            (roles (mapcar #'car messages))
            (text (ende-test--chat-context-text messages)))
-      (should (equal roles '("user" "assistant" "assistant" "user" "user")))
+      (should (equal roles '("user" "assistant" "user" "user")))
       (should (string-match-p "Assistant answer" text))
       (should (string-match-p "Inherited assistant text" text))
       (should (string-match-p "User reference text" text))
+      (should (string-match-p "Inherited assistant text"
+                              (cdr (nth 1 messages))))
       (should (equal (car (car (last messages))) "user")))))
+
+(ert-deftest ende-test/chat-prefix-messages-follow-explicit-role-boundaries ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Topic\n"
+              "Root source.\n"
+              "** Reference\n"
+              "Reference source.\n"
+              "*** Nested reference\n"
+              "Nested reference source.\n"
+              "** Assistant response\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: assistant\n"
+              ":END:\n"
+              "Assistant source.\n"
+              "*** Inherited assistant section\n"
+              "Inherited assistant source.\n"
+              "**** Deeper inherited section\n"
+              "Deeper assistant source.\n"
+              "*** Explicit user section\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: user\n"
+              ":END:\n"
+              "Nested user source.\n"
+              "**** Inherited user section\n"
+              "Inherited user source.\n"
+              "*** Resumed assistant section\n"
+              "Resumed assistant source.\n"
+              "*** Explicit same-role section\n"
+              ":PROPERTIES:\n"
+              ":ENDE_ROLE: assistant\n"
+              ":END:\n"
+              "Same-role boundary source.\n"
+              "**** Inherited from same-role section\n"
+              "Same-role descendant source.\n"
+              "*** Resumed after same-role section\n"
+              "Assistant after nested section source.\n"
+              "** Question\n"
+              "Current question source.\n"
+              "** Later sibling\n"
+              "Later sibling source.\n")
+    (org-mode)
+    (ende-test--chat-goto "** Question")
+    (let* ((document (ende-chat--build-document))
+           (question (ende-chat--headline-at-point document))
+           (messages (ende-chat--serialize document question))
+           (roles (mapcar #'car messages))
+           (contents (mapcar #'cdr messages))
+           (serialized-text (mapconcat #'identity contents "")))
+      (should (equal roles
+                     '("user" "assistant" "user" "assistant"
+                       "assistant" "assistant" "user")))
+      (should (equal serialized-text
+                     (ende-test--chat-unpartitioned-text document question)))
+      (should (string-match-p "Root source" (nth 0 contents)))
+      (should (string-match-p "Nested reference source" (nth 0 contents)))
+      (should-not (string-match-p "Assistant source" (nth 0 contents)))
+      (should (string-match-p "Inherited assistant source" (nth 1 contents)))
+      (should (string-match-p "Deeper assistant source" (nth 1 contents)))
+      (should-not (string-match-p "Nested user source" (nth 1 contents)))
+      (should (string-match-p "Nested user source" (nth 2 contents)))
+      (should (string-match-p "Inherited user source" (nth 2 contents)))
+      (should (string-match-p "Resumed assistant source" (nth 3 contents)))
+      (should (string-match-p "Same-role boundary source" (nth 4 contents)))
+      (should (string-match-p "Same-role descendant source" (nth 4 contents)))
+      (should (string-match-p "Assistant after nested section source"
+                              (nth 5 contents)))
+      (should (string-match-p "Current question source" (nth 6 contents)))
+      (should-not (string-match-p "Later sibling source" serialized-text)))))
 
 (ert-deftest ende-test/chat-current-question-skips-independent-child-subtrees ()
   (ende-test--reset)

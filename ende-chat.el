@@ -411,19 +411,51 @@ that could change that block's structure."
          (ranges (ende-chat--section-exclusions document headline start)))
     (ende-chat--remove-ranges text ranges)))
 
-(defun ende-chat--prefix-headlines (document root question)
-  "Return eligible headlines before QUESTION within ROOT."
+(defun ende-chat--prefix-messages (document root question)
+  "Serialize eligible sections before QUESTION within ROOT.
+
+An explicit role property starts a message.  Unmarked descendants inherit
+their nearest role-marked ancestor and contribute to its message until another
+explicit role property starts a nested message.  When traversal returns to an
+enclosing role, its content starts a new message so source order is preserved."
   (let ((question-begin (org-element-property :begin question))
-        (root-end (org-element-property :end root))
-        result)
-    (dolist (headline (ende-chat--document-headlines document))
-      (when (and (>= (org-element-property :begin headline)
-                     (org-element-property :begin root))
-                 (< (org-element-property :begin headline) question-begin)
-                 (< (org-element-property :begin headline) root-end)
-                 (ende-chat--eligible-p document headline))
-        (push headline result)))
-    (nreverse result)))
+        (messages nil)
+        (parts nil)
+        (message-owner nil)
+        (message-role nil))
+    (cl-labels
+        ((flush ()
+           (when parts
+             (push (ende-chat--message
+                    message-role (mapconcat #'identity (nreverse parts) ""))
+                   messages)
+             (setq parts nil
+                   message-owner nil
+                   message-role nil)))
+         (walk (headline owner role)
+           (let* ((properties (gethash
+                               headline
+                               (ende-chat--document-properties document)))
+                  (role-marked (plist-get properties :role-marked))
+                  (local-role (and role-marked (plist-get properties :role)))
+                  (next-owner (if role-marked headline owner))
+                  (next-role (if role-marked (intern local-role) role)))
+             (when (>= (org-element-property :begin headline) question-begin)
+               (throw 'ende-chat--question-reached nil))
+             (when role-marked
+               (flush))
+             (when (ende-chat--eligible-p document headline)
+               (unless (and parts (eq next-owner message-owner))
+                 (flush)
+                 (setq message-owner next-owner
+                       message-role next-role))
+               (push (ende-chat--section-text document headline) parts))
+             (dolist (child (ende-chat--children document headline))
+               (walk child next-owner next-role)))))
+      (catch 'ende-chat--question-reached
+        (walk root nil 'user))
+      (flush)
+      (nreverse messages))))
 
 (defun ende-chat--current-headlines (document question)
   "Return QUESTION and eligible unmarked descendants in source order."
@@ -450,23 +482,17 @@ that could change that block's structure."
   (let* ((root (ende-chat--root document question))
          (current (ende-chat--current-headlines document question))
          (prefix (and (eq ende-chat-context-policy 'root-prefix)
-                      (ende-chat--prefix-headlines document root question)))
-         (messages nil))
+                      (ende-chat--prefix-messages document root question))))
     (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
       (error "Invalid ende-chat-context-policy: %s"
              ende-chat-context-policy))
-    (dolist (headline prefix)
-      (push (ende-chat--message
-             (ende-chat--effective-role document headline)
-             (ende-chat--section-text document headline))
-            messages))
     (let ((current-text
            (mapconcat (lambda (headline)
                         (ende-chat--section-text document headline))
-                      current "")))
-      (unless (string-blank-p current-text)
-        (push (ende-chat--message 'user current-text) messages)))
-    (nreverse messages)))
+                       current "")))
+      (append prefix
+              (unless (string-blank-p current-text)
+                (list (ende-chat--message 'user current-text)))))))
 
 (defun ende-chat-context-at-point ()
   "Return the serialized chat context for the Org headline at point.
