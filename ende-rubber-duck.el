@@ -168,11 +168,16 @@ Replace the current worksheet, cancelling its pending review if necessary."
          (level (or level (ende-rubber-duck-read-level))))
     (unless (assq level ende-rubber-duck--levels)
       (user-error "Unknown explanation level: %s" level))
-    (let ((exercise (ende-rubber-duck--make-exercise
-                       :original original :source source :mode mode :level level
-                       :profile (copy-tree
-                                 (or profile
-                                      (ende-provider-profile-snapshot))))))
+    (let* ((profile
+            (copy-tree
+             (or profile
+                 (ende-provider-profile-for-buffer (current-buffer) t))))
+           (exercise (ende-rubber-duck--make-exercise
+                      :original original :source source :mode mode :level level
+                      ;; The exercise keeps its request-time selection even if
+                      ;; the source buffer's preference changes before review.
+                      :profile (plist-put profile
+                                          :reasoning-effort-validated-p nil))))
       (deactivate-mark)
       (ende-rubber-duck--open exercise))))
 

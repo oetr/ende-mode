@@ -45,8 +45,15 @@
   "Face used for output prices in the completion picker."
   :group 'ende)
 
-(defvar ende-selector--last-selection nil
-  "Most recently confirmed selector choice as a provider/model plist.")
+(when (and (boundp 'ende-selector--last-selection)
+           (not (eq (indirect-variable 'ende-selector--last-selection)
+                    'ende-model-selection--last-used))
+           (null ende-model-selection--last-used))
+  (setq ende-model-selection--last-used ende-selector--last-selection))
+
+(defvaralias 'ende-selector--last-selection
+  'ende-model-selection--last-used
+  "Compatibility alias for the most recently used model selection.")
 
 (defvar ende-selector--model-validations (make-hash-table :test #'equal)
   "Cached model preference validation results.")
@@ -150,25 +157,47 @@
 
 (defun ende-selector--remembered-effort ()
   "Return the effort remembered for the current provider and model."
-  (let ((key (ende-selector--effort-key)))
-    (and key (gethash key ende-selector--effort-selections))))
+  (let* ((key (ende-selector--effort-key))
+         (selection
+          (ende-model-selection-for-buffer
+           (or ende-selector--source-buffer (current-buffer)))))
+    (and key
+         (if (eq ende-model-selection-scope 'global)
+             (or (gethash key ende-selector--effort-selections)
+                 (and (eq (car key) (plist-get selection :provider))
+                      (equal (cadr key) (plist-get selection :model))
+                      (plist-get selection :reasoning-effort)))
+           (and (eq (car key) (plist-get selection :provider))
+                (equal (cadr key) (plist-get selection :model))
+                (plist-get selection :reasoning-effort))))))
 
-(defun ende-selector--remember-effort (effort)
-  "Remember EFFORT for the current provider and model."
+(defun ende-selector--remember-effort ()
+  "Remember the selected effort for the current provider and model."
   (let ((key (ende-selector--effort-key)))
-    (when key
-      (puthash key effort ende-selector--effort-selections))))
+    (when (and key (eq ende-model-selection-scope 'global))
+      (puthash key ende-selector--effort ende-selector--effort-selections))
+    (ende-selector--save-selection)))
 
 (defun ende-selector--forget-effort ()
   "Forget the current provider and model's remembered effort."
-  (let ((key (ende-selector--effort-key)))
+  (let* ((key (ende-selector--effort-key))
+         (source (or ende-selector--source-buffer (current-buffer)))
+         (selection (ende-model-selection-for-buffer source)))
     (when key
-      (remhash key ende-selector--effort-selections))))
+      (when (eq ende-model-selection-scope 'global)
+        (remhash key ende-selector--effort-selections))
+      (when (and (eq (car key) (plist-get selection :provider))
+                 (equal (cadr key) (plist-get selection :model)))
+        (ende-model-selection-save
+         (list :provider (car key) :model (cadr key)) source)))))
 
 (defun ende-selector--remembered-model (provider)
   "Return the remembered model for PROVIDER, or nil."
-  (and (eq provider (plist-get ende-selector--last-selection :provider))
-       (plist-get ende-selector--last-selection :model)))
+  (let ((selection
+         (ende-model-selection-for-buffer
+          (or ende-selector--source-buffer (current-buffer)))))
+    (and (eq provider (plist-get selection :provider))
+         (plist-get selection :model))))
 
 (defun ende-selector--preferred-model (provider profile)
   "Return the saved or explicitly configured model for PROVIDER PROFILE."
@@ -677,7 +706,7 @@ performed locally so typing a search term never starts another network request."
            (setq ende-selector--effort choice
                  ende-selector--effort-state :ready
                  ende-selector--effort-validated-p t)
-           (ende-selector--remember-effort choice)
+            (ende-selector--remember-effort)
            (ende-selector--render)))))))
 
 (defun ende-selector-set-concurrency ()
@@ -719,10 +748,16 @@ performed locally so typing a search term never starts another network request."
   (ende-selector--review-source #'ende-reject-all-output))
 
 (defun ende-selector--save-selection ()
-  "Save the current provider/model choice."
-  (setq ende-selector--last-selection
-        (list :provider (ende-selector--provider-name)
-              :model (ende-selector--model-name))))
+  "Save the current provider/model/effort choice for the source buffer."
+  (let ((provider (ende-selector--provider-name))
+        (model (ende-selector--model-name))
+        (source (or ende-selector--source-buffer (current-buffer))))
+    (when (and provider (stringp model))
+      (ende-model-selection-save
+       (append (list :provider provider :model model)
+               (when (stringp ende-selector--effort)
+                 (list :reasoning-effort ende-selector--effort)))
+       source))))
 
 (defun ende-selector-close ()
   "Close the selector without starting a request."
@@ -768,7 +803,8 @@ performed locally so typing a search term never starts another network request."
           profile (plist-put profile :reasoning-effort nil))
     (when (and ende-selector--effort-validated-p ende-selector--effort)
       (setq profile
-            (plist-put profile :reasoning-effort ende-selector--effort)))
+            (plist-put profile :reasoning-effort ende-selector--effort)
+            profile (plist-put profile :reasoning-effort-validated-p t)))
     (ende-selector--save-selection)
     (if (eq type 'chat)
         (if (with-current-buffer source
@@ -908,8 +944,10 @@ before dispatch, so queued jobs contain only a live-confirmed value."
   "Open the provider/model selector for the current source buffer."
   (interactive)
   (let* ((source (current-buffer))
+         (_ (ende-model-selection-initialize-buffer source))
          (providers (ende-provider-names))
-         (last-provider (plist-get ende-selector--last-selection :provider))
+         (selection (ende-model-selection-for-buffer source))
+         (last-provider (plist-get selection :provider))
          (provider-index (or (cl-position last-provider providers :test #'eq) 0))
          (buffer (get-buffer-create ende-selector-buffer-name)))
     (with-current-buffer buffer

@@ -252,18 +252,77 @@ result is applied."
              message))
          messages)))))
 
+(defun ende--send-llm (job messages on-done on-error no-begin)
+  "Send prepared MESSAGES for JOB through the configured LLM function."
+  (unless no-begin
+    (ende-job-emit-event job (list :type :begin :messages messages)))
+  (ende--handle-llm-event job '(:type :status :status "Thinking"))
+  (funcall ende-llm-function
+           messages
+           (ende--llm-callbacks job on-done on-error)
+           (ende-job-profile job)))
+
+(defun ende--llm-preflight-error (job on-error error)
+  "Deliver preflight ERROR for JOB through ON-ERROR or settle the job."
+  (when (ende-job-current-p job)
+    (if on-error
+        (funcall on-error error)
+      (ende-job-fail job error))))
+
+(defun ende--validate-effort-and-send
+    (job messages on-done on-error no-begin effort)
+  "Validate EFFORT live for JOB, then send its prepared MESSAGES."
+  (let* ((profile (ende-job-profile job))
+         (model (plist-get profile :model))
+         (completed nil)
+         cancel)
+    (ende--handle-llm-event
+     job '(:type :status :status "Validating reasoning effort"))
+    (setq cancel
+          (ende-provider-probe-reasoning-efforts
+           profile model
+           (lambda (efforts _default error)
+             (setq completed t)
+             (when (ende-job-current-p job)
+               (ende-job-cancellation-set job nil)
+               (cond
+                (error
+                 (ende--llm-preflight-error job on-error error))
+                ((member effort efforts)
+                 (setf (ende-job-profile job)
+                       (plist-put (ende-job-profile job)
+                                  :reasoning-effort-validated-p t))
+                 (ende--send-llm
+                  job messages on-done on-error no-begin))
+                (t
+                 (ende--llm-preflight-error
+                  job on-error
+                  (ende-error-create
+                   :kind 'discovery
+                   :message
+                   (format "reasoning effort %s is no longer available"
+                           effort)))))))))
+    (unless completed
+      (ende-job-cancellation-set job cancel))))
+
 (defun ende--dispatch-llm
     (job messages &optional on-done on-error no-begin)
-  "Add source metadata, validate MESSAGES, record history, and invoke LLM."
-  (let ((messages (ende-operations--add-source-metadata job messages)))
+  "Add source metadata, validate MESSAGES, and invoke the configured LLM.
+
+Remembered reasoning efforts are checked live before a job sends its first
+request.  Selector-confirmed efforts carry a validation marker, while direct
+commands pass through the same preflight here."
+  (let* ((messages (ende-operations--add-source-metadata job messages))
+         (profile (ende-job-profile job))
+         (wire-api (plist-get profile :reasoning-effort-wire-api))
+         (effort (and (memq wire-api '(openrouter responses))
+                      (ende-provider-reasoning-effort profile wire-api))))
     (ende--validate-messages messages)
-    (unless no-begin
-      (ende-job-emit-event job (list :type :begin :messages messages)))
-    (ende--handle-llm-event job '(:type :status :status "Thinking"))
-    (funcall ende-llm-function
-             messages
-             (ende--llm-callbacks job on-done on-error)
-             (ende-job-profile job))))
+    (if (and effort
+             (not (plist-get profile :reasoning-effort-validated-p)))
+        (ende--validate-effort-and-send
+         job messages on-done on-error no-begin effort)
+      (ende--send-llm job messages on-done on-error no-begin))))
 
 (defun ende--validate-messages (messages)
   "Return MESSAGES after enforcing character limits."

@@ -69,6 +69,16 @@ enables parallel jobs by default.  :source-name-disclosure overrides
   :type 'sexp
   :group 'ende)
 
+(defcustom ende-model-selection-scope 'buffer
+  "Scope used to remember the selected provider, model, and effort.
+
+When `buffer', selections are associated with the current buffer name and
+visited file and are remembered for this Emacs session.  When `global', one
+selection is shared by all buffers."
+  :type '(choice (const :tag "Per buffer" buffer)
+                 (const :tag "Global" global))
+  :group 'ende)
+
 (defcustom ende-provider-discovery-enabled t
   "Non-nil to discover metadata from OpenAI-compatible model endpoints."
   :type 'boolean
@@ -103,6 +113,15 @@ When nil, use only the response inactivity timeout."
 
 (defvar ende-provider--runtime-settings (make-hash-table :test #'eq)
   "Session-level provider settings changed from the selector.")
+
+(defvar ende-model-selection--last-used nil
+  "Most recently used provider, model, and optional reasoning-effort plist.")
+
+(defvar ende-model-selection--buffer-selections (make-hash-table :test #'equal)
+  "Selections keyed by buffer name and visited file for this Emacs session.")
+
+(defvar-local ende-model-selection--buffer-selection nil
+  "Selection currently associated with this live buffer.")
 
 (defun ende-provider--runtime-value (name key)
   "Return runtime setting KEY for provider NAME, or `:unset'."
@@ -238,8 +257,7 @@ Supported settings are `:max-concurrency' and `:parallel'."
 
 (defun ende-provider-reasoning-effort (profile wire-api)
   "Return PROFILE's selected effort when WIRE-API supports it.
-The selector is the only code that sets `:reasoning-effort', after a live
-capability check."
+Saved efforts are revalidated before a job sends its first request."
   (let ((effort (plist-get profile :reasoning-effort)))
     (and (eq (plist-get profile :reasoning-effort-wire-api) wire-api)
          (stringp effort)
@@ -278,6 +296,137 @@ Built-in profile defaults are deliberately not preferences."
     (dolist (key '(:token :api-key :secret :authorization :auth-token))
       (setq snapshot (plist-put snapshot key nil)))
     snapshot))
+
+(defun ende-model-selection--file-identity (file)
+  "Return a stable lookup spelling for visited FILE, or nil.
+
+Local paths are resolved through symlinks when possible.  Remote paths are
+kept lexical so recording a preference never initiates a TRAMP connection."
+  (when file
+    (if (file-remote-p file)
+        file
+      (condition-case nil
+          (file-truename file)
+        (error (expand-file-name file))))))
+
+(defun ende-model-selection--buffer-key (&optional buffer)
+  "Return the preference key for BUFFER, or nil if it is not live."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (list (buffer-name)
+              (ende-model-selection--file-identity buffer-file-name))))))
+
+(defun ende-model-selection--normalize (selection)
+  "Return a detached provider/model/effort selection, or nil.
+
+SELECTION must contain a provider symbol and a nonempty model string."
+  (when (listp selection)
+    (let ((provider (plist-get selection :provider))
+          (model (plist-get selection :model))
+          (effort (plist-get selection :reasoning-effort)))
+      (when (and (symbolp provider) provider
+                 (stringp model) (not (string-empty-p model)))
+        (append (list :provider provider :model model)
+                (when (and (stringp effort) (not (string-empty-p effort)))
+                  (list :reasoning-effort effort)))))))
+
+(defun ende-model-selection-initialize-buffer (&optional buffer)
+  "Initialize BUFFER's per-buffer selection when one can be inherited.
+
+An exact identity match takes precedence over the most recently used
+selection.  With neither available, leave the buffer unset so normal provider
+defaults remain authoritative."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (and (buffer-live-p buffer)
+               (eq ende-model-selection-scope 'buffer))
+      (with-current-buffer buffer
+        (let* ((key (ende-model-selection--buffer-key buffer))
+               (selection
+                (or ende-model-selection--buffer-selection
+                    (gethash key ende-model-selection--buffer-selections)
+                    ende-model-selection--last-used)))
+          (when (setq ende-model-selection--buffer-selection
+                      (ende-model-selection--normalize selection))
+            (puthash key
+                     (copy-tree ende-model-selection--buffer-selection)
+                     ende-model-selection--buffer-selections)))))
+    (ende-model-selection-for-buffer buffer)))
+
+(defun ende-model-selection-for-buffer (&optional buffer)
+  "Return the remembered selection applicable to BUFFER, or nil."
+  (let ((buffer (or buffer (current-buffer))))
+    (pcase ende-model-selection-scope
+      ('global (copy-tree
+                (ende-model-selection--normalize
+                 ende-model-selection--last-used)))
+      ('buffer
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (or (copy-tree ende-model-selection--buffer-selection)
+               (copy-tree
+                (gethash (ende-model-selection--buffer-key buffer)
+                         ende-model-selection--buffer-selections))
+               (copy-tree
+                (ende-model-selection--normalize
+                 ende-model-selection--last-used))))))
+      (_ (error "Invalid `ende-model-selection-scope': %s"
+                ende-model-selection-scope)))))
+
+(defun ende-model-selection-save (selection &optional buffer)
+  "Save SELECTION as the most recently used choice for BUFFER.
+
+In per-buffer scope also associate it with BUFFER's name and visited file."
+  (let ((selection (ende-model-selection--normalize selection))
+        (buffer (or buffer (current-buffer))))
+    (unless selection
+      (error "A model selection requires a provider and model"))
+    (unless (memq ende-model-selection-scope '(buffer global))
+      (error "Invalid `ende-model-selection-scope': %s"
+             ende-model-selection-scope))
+    (setq ende-model-selection--last-used (copy-tree selection))
+    (pcase ende-model-selection-scope
+      ('global nil)
+      ('buffer
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq ende-model-selection--buffer-selection
+                 (copy-tree selection))
+           (puthash (ende-model-selection--buffer-key buffer)
+                    (copy-tree selection)
+                    ende-model-selection--buffer-selections))))
+      (_ (error "Invalid `ende-model-selection-scope': %s"
+                ende-model-selection-scope)))
+    (copy-tree selection)))
+
+(defun ende-provider-profile-for-buffer (&optional buffer remember)
+  "Return BUFFER's selected provider profile snapshot.
+
+When REMEMBER is non-nil, record the effective provider/model/effort as used.
+An unset buffer follows the current configured provider defaults."
+  (let* ((buffer (or buffer (current-buffer)))
+         (_ (ende-model-selection-initialize-buffer buffer))
+         (selection (ende-model-selection-for-buffer buffer))
+         (profile (ende-provider-profile-snapshot
+                   (plist-get selection :provider)))
+         (model (or (plist-get selection :model)
+                    (plist-get profile :model))))
+    (when selection
+      (setq profile (plist-put profile :reasoning-effort nil)))
+    (when (stringp model)
+      (setq profile (plist-put profile :model model)))
+    (when (and selection (plist-get selection :reasoning-effort))
+      (setq profile
+            (plist-put profile :reasoning-effort
+                       (plist-get selection :reasoning-effort))))
+    (when (and remember (stringp model))
+      (ende-model-selection-save
+       (append (list :provider (plist-get profile :name) :model model)
+               (let ((effort (plist-get profile :reasoning-effort)))
+                 (when (and (stringp effort) (not (string-empty-p effort)))
+                   (list :reasoning-effort effort))))
+       buffer))
+    profile))
 
 (defun ende-provider-source-name-disclosure-p (profile)
   "Return non-nil when source names may be included for PROFILE."

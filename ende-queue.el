@@ -276,27 +276,31 @@ cannot be bypassed by a later job from that same provider."
   "Create a queued job from REQUEST, a (TYPE . PLIST) value."
   (let* ((type (car request))
          (data (cdr request))
-         (target (plist-get data :target))
-         (profile (copy-tree
-                   (or (plist-get data :profile)
-                       (ende-provider-profile-snapshot
-                        (plist-get data :provider)))))
-          (now (float-time))
-          (job (ende--make-job
-                :id (cl-incf ende--next-job-id)
-                :type type
-                :state 'queued
-                :overlay (plist-get data :overlay)
-                :target target
-                :profile profile
-                :instruction (plist-get data :instruction)
-                :enqueued-at now)))
+         (target (plist-get data :target)))
     (unless (ende-target-p target)
       (error "ende request is missing a target"))
-    (setf (ende-job-profile job)
-          (plist-put (copy-tree (ende-job-profile job))
-                     :job-id (ende-job-id job)))
-    job))
+    (let* ((buffer (ende-target-buffer target))
+           (profile
+            (copy-tree
+             (or (plist-get data :profile)
+                 (and (plist-member data :provider)
+                      (ende-provider-profile-snapshot
+                       (plist-get data :provider)))
+                 (ende-provider-profile-for-buffer buffer t))))
+           (now (float-time))
+           (job (ende--make-job
+                 :id (cl-incf ende--next-job-id)
+                 :type type
+                 :state 'queued
+                 :overlay (plist-get data :overlay)
+                 :target target
+                 :profile profile
+                 :instruction (plist-get data :instruction)
+                 :enqueued-at now)))
+      (setf (ende-job-profile job)
+            (plist-put (copy-tree (ende-job-profile job))
+                       :job-id (ende-job-id job)))
+      job)))
 
 (defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.

@@ -159,6 +159,7 @@ process for cancellation tests."
   (setq ende-test--prompts nil
         ende-test--calls nil
         ende-test--fake-responses nil
+        ende-model-selection--last-used nil
         ende-queue nil
         ende--queue-tail nil
          ende--queue-suspended nil
@@ -181,6 +182,7 @@ process for cancellation tests."
   (setq ende-provider--model-generation 0)
   (clrhash ende-selector--model-validations)
   (clrhash ende-selector--effort-selections)
+  (clrhash ende-model-selection--buffer-selections)
   (ende-provider-clear-runtime-settings)
    (clrhash ende-history--entries)
    (ende-tools-clear-change-sets)
@@ -3056,6 +3058,200 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ende-test/model-selection-restores-by-buffer-identity ()
+  (let* ((name " *ende-model-selection-identity*")
+         (file "/tmp/ende-model-selection-identity.el")
+         (other-file "/tmp/ende-model-selection-other.el")
+         (source nil)
+         (other nil)
+         (reopened nil)
+         (different nil)
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections
+          (make-hash-table :test #'equal))
+         (ende-provider-model "default-model"))
+    (unwind-protect
+        (progn
+          (setq source (get-buffer-create name))
+          (with-current-buffer source
+            (setq buffer-file-name file)
+            (ende-mode 1)
+            (should-not (ende-model-selection-for-buffer source))
+            (should (equal (plist-get
+                            (ende-provider-profile-for-buffer source) :model)
+                           "default-model"))
+            (should (= (hash-table-count
+                        ende-model-selection--buffer-selections)
+                       0))
+            (ende-model-selection-save
+             '(:provider remote :model "file-model"
+                         :reasoning-effort "high")
+             source))
+          (kill-buffer source)
+          (setq source nil
+                other (get-buffer-create " *ende-model-selection-latest*"))
+          (with-current-buffer other
+            (setq buffer-file-name other-file)
+            (ende-model-selection-save
+             '(:provider openrouter :model "latest-model") other))
+          (kill-buffer other)
+          (setq other nil
+                reopened (get-buffer-create name))
+          (with-current-buffer reopened
+            (setq buffer-file-name file)
+            (ende-mode 1)
+            (should (equal (ende-model-selection-for-buffer reopened)
+                           '(:provider remote :model "file-model"
+                                       :reasoning-effort "high")))
+            (should (equal (plist-get
+                            (ende-provider-profile-for-buffer reopened) :model)
+                           "file-model"))
+            (should (equal
+                     (plist-get
+                      (ende-provider-profile-for-buffer reopened)
+                      :reasoning-effort)
+                     "high")))
+          (kill-buffer reopened)
+          (setq reopened nil
+                different (get-buffer-create name))
+          (with-current-buffer different
+            (setq buffer-file-name other-file)
+            (ende-mode 1)
+            (should (equal (ende-model-selection-for-buffer different)
+                           '(:provider openrouter :model "latest-model"))))))
+      (dolist (buffer (list source other reopened different))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+(ert-deftest ende-test/model-selection-global-scope-shares-one-choice ()
+  (let ((ende-model-selection-scope 'global)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (first (generate-new-buffer " *ende-model-selection-global-one*"))
+        (second (generate-new-buffer " *ende-model-selection-global-two*")))
+    (unwind-protect
+        (progn
+          (ende-model-selection-save
+           '(:provider openai :model "shared-model"
+                       :reasoning-effort "medium")
+           first)
+          (should (equal (ende-model-selection-for-buffer second)
+                         '(:provider openai :model "shared-model"
+                                     :reasoning-effort "medium")))
+          (should (= (hash-table-count
+                      ende-model-selection--buffer-selections)
+                     0)))
+      (dolist (buffer (list first second))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest ende-test/direct-request-uses-and-snapshots-buffer-selection ()
+  (ende-test--reset)
+  (let ((ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-providers '(openrouter))
+        (ende-provider-profiles nil)
+        (ende-llm-function (ende-test--fake-llm '("summary")))
+        (probes nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                     (lambda (profile model callback)
+                       (push (list (plist-get profile :name) model) probes)
+                       (funcall callback
+                                (if (equal model "stale-model")
+                                    '("low")
+                                  '("high" "low"))
+                                "low" nil)
+                       (lambda () nil))))
+            (with-temp-buffer
+              (insert "Document to summarize")
+              (ende-model-selection-save
+               '(:provider openrouter :model "source-model"
+                           :reasoning-effort "high"))
+              (let ((ende--queue-suspended t)
+                    job)
+                (setq job (ende-summarize))
+                (ende-model-selection-save
+                 '(:provider local :model "later-model"))
+                (setq ende--queue-suspended nil)
+                (ende-process-next)
+                (should (eq (ende-job-state job) 'completed))
+                (should (eq (plist-get (ende-job-profile job) :name)
+                            'openrouter))
+                (should (equal (plist-get (ende-job-profile job) :model)
+                               "source-model"))
+                (should (equal
+                         (plist-get (ende-job-profile job) :reasoning-effort)
+                         "high"))
+                (should (equal (caar probes) 'openrouter))
+                (should (equal (cadar probes) "source-model"))))
+            (with-temp-buffer
+              (insert "Another document")
+              (ende-model-selection-save
+               '(:provider openrouter :model "stale-model"
+                           :reasoning-effort "high"))
+              (let ((job (ende-summarize)))
+                (should (eq (ende-job-state job) 'failed))
+                (should (= (length ende-test--calls) 1))
+                (should (equal (cadar probes) "stale-model"))))))
+      (ende-test--reset))))
+
+(ert-deftest ende-test/direct-effort-preflight-is-cancellable ()
+  (ende-test--reset)
+  (let ((ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-providers '(openrouter))
+        (ende-provider-profiles nil)
+        (ende-llm-function (ende-test--fake-llm '("unused")))
+        (effort-callback nil)
+        (cancel-count 0))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                     (lambda (_profile _model callback)
+                       (setq effort-callback callback)
+                       (lambda () (cl-incf cancel-count)))))
+            (with-temp-buffer
+              (insert "Document to summarize")
+              (ende-model-selection-save
+               '(:provider openrouter :model "source-model"
+                           :reasoning-effort "high"))
+              (let ((job (ende-summarize)))
+                (should (eq (ende-job-state job) 'running))
+                (should-not ende-test--calls)
+                (ende-abort-queue)
+                (should (eq (ende-job-state job) 'cancelled))
+                (should (= cancel-count 1))
+                (funcall effort-callback '("high") "high" nil)
+                (should-not ende-test--calls)))))
+      (ende-test--reset))))
+
+(ert-deftest ende-test/direct-chat-request-uses-buffer-selection ()
+  (ende-test--reset)
+  (let ((ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-llm-function (ende-test--fake-llm '("Reply"))))
+    (unwind-protect
+        (ende-test--with-buffer "* Root\n** Question\nAsk\n"
+          (org-mode)
+          (ende-test--chat-goto "** Question")
+          (ende-model-selection-save
+           '(:provider openrouter :model "chat-model"))
+          (let ((job (ende-ask)))
+            (should (eq (plist-get (ende-job-profile job) :name) 'openrouter))
+            (should (equal (plist-get (ende-job-profile job) :model)
+                           "chat-model"))))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/selector-runs-from-source-with-selected-profile ()
   (let* ((source (generate-new-buffer " *ende-selector-source*"))
          (selector (generate-new-buffer " *ende-selector-test*"))
@@ -3078,20 +3274,22 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                   ende-selector--models '("one" "two")
                   ende-selector--model-index 0)
             (ende-selector-next-model)
-             (cl-letf (((symbol-function 'ende-enqueue-operation)
+            (cl-letf (((symbol-function 'ende-enqueue-operation)
                        (lambda (type instruction profile)
                          (setq queued
                                (list type instruction profile (current-buffer))))))
-               (ende-selector-insert))))
+              (ende-selector-insert)))
           (should (eq (nth 0 queued) 'insert))
-           (should (string= (plist-get (nth 2 queued) :model) "two"))
-           (should-not (plist-get (nth 2 queued) :reasoning-effort))
+          (should (string= (plist-get (nth 2 queued) :model) "two"))
+          (should-not (plist-get (nth 2 queued) :reasoning-effort))
           (should (equal ende-selector--last-selection
+                         '(:provider local :model "two")))
+          (should (equal (ende-model-selection-for-buffer source)
                          '(:provider local :model "two")))
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
-          (kill-buffer buffer)))))
+          (kill-buffer buffer))))))
 
 (ert-deftest ende-test/selector-model-completion-updates-choice ()
   (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
@@ -3352,6 +3550,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
         (calls nil)
         (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-model-selection-scope 'global)
         (ende-selector--effort-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (with-current-buffer buffer
@@ -3388,12 +3587,59 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ende-test/selector-effort-is-saved-only-for-its-source-buffer ()
+  (let* ((source (generate-new-buffer " *ende-effort-source-one*"))
+         (other-source (generate-new-buffer " *ende-effort-source-two*"))
+         (selector (generate-new-buffer " *ende-effort-source-selector*"))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections
+          (make-hash-table :test #'equal))
+         (ende-provider-profiles '((remote :model "remote-model"))))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (ende-model-selection-save
+             '(:provider remote :model "remote-model")))
+          (with-current-buffer other-source
+            (ende-model-selection-save
+             '(:provider remote :model "remote-model")))
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                       (lambda (_profile _model callback)
+                         (funcall callback '("high" "low") "low" nil)
+                         (lambda () nil)))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) "high")))
+              (ende-selector-select-effort))
+            (should (equal
+                     (plist-get (ende-model-selection-for-buffer source)
+                                :reasoning-effort)
+                     "high"))
+            (should-not
+             (plist-get (ende-model-selection-for-buffer other-source)
+                        :reasoning-effort))
+            (setq ende-selector--source-buffer other-source)
+            (ende-selector--set-effort-context)
+            (should-not ende-selector--effort)))
+      (dolist (buffer (list source other-source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
         (callback nil)
         (cancelled 0)
         (completed nil)
         (ende-provider-profiles '((remote :model "first")))
+        (ende-model-selection-scope 'global)
         (ende-selector--effort-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (with-current-buffer buffer
@@ -3428,6 +3674,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (probe-callback nil)
         (queued nil)
         (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-model-selection-scope 'global)
         (ende-selector--effort-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
@@ -3465,6 +3712,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (selector (generate-new-buffer " *ende-selector-effort-stale*"))
         (queued nil)
         (ende-provider-profiles '((remote :model "remote-model")))
+        (ende-model-selection-scope 'global)
         (ende-selector--effort-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
@@ -3646,6 +3894,10 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((buffer (generate-new-buffer " *ende-selector-probe-test*"))
         (callbacks nil)
         (cancelled 0)
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
         (ende-provider-profiles
          '((remote :url "http://remote.example/v1"
                    :model "configured"))))
@@ -5398,6 +5650,40 @@ Use COMMAND for the process, or a silent sleep process by default."
                 (should (equal (ende-rubber-duck--exercise-source exercise)
                                (format "%s:1" source-name))))))))
     (ende-test--reset)))
+
+(ert-deftest ende-test/rubber-duck-keeps-the-capture-time-model ()
+  (ende-test--reset)
+  (let* ((source (generate-new-buffer " *ende-rubber-duck-model-source*"))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections
+          (make-hash-table :test #'equal))
+         (ende-llm-function
+          (ende-test--fake-llm (list (ende-test--duck-result) t))))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer source
+            (insert "Original material")
+            (ende-model-selection-save
+             '(:provider local :model "capture-model")))
+          (with-current-buffer source
+            (ende-rubber-duck 'overview))
+          (with-current-buffer source
+            (ende-model-selection-save
+             '(:provider openrouter :model "later-model")))
+          (with-current-buffer ende-rubber-duck--buffer
+            (goto-char (point-max))
+            (insert " My explanation")
+            (let ((job (ende-rubber-duck-review)))
+              (should (equal (plist-get (ende-job-profile job) :model)
+                             "capture-model"))
+              (should (equal
+                       (plist-get (plist-get (car ende-test--calls) :options)
+                                  :model)
+                       "capture-model")))))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (ende-test--reset))))
 
 (ert-deftest ende-test/rubber-duck-review-shows-progress ()
   (ende-test--with-duck (list :stall)

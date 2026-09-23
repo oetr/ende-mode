@@ -107,6 +107,8 @@
   "Minor mode for queueing LLM requests."
   :lighter ende--mode-line-string
   :keymap ende-mode-map
+  (when ende-mode
+    (ende-model-selection-initialize-buffer))
   (ende--update-mode-line))
 
 ;;;###autoload
