@@ -10,10 +10,12 @@
 ;; The only in-memory request state is the queue job and its destination marker;
 ;; context is reconstructed from the current Org tree when a job starts.
 ;;
-;; Durable headline properties are ENDE_ROLE (user or assistant) and
-;; ENDE_VISIBILITY (normal, hidden, or reasoning).  Roles inherit from the
-;; nearest marked ancestor; hidden visibility wins over every descendant and
-;; reasoning is sent only when `ende-chat-include-reasoning' is non-nil.
+;; Durable headline properties include ENDE_ROLE (user or assistant) and
+;; ENDE_VISIBILITY (normal, hidden, or reasoning).  Generated response sections
+;; also retain ENDE_MODEL and, when used, ENDE_REASONING_EFFORT.  Roles inherit
+;; from the nearest marked ancestor; hidden visibility wins over every
+;; descendant and reasoning is sent only when
+;; `ende-chat-include-reasoning' is non-nil.
 
 ;;; Code:
 
@@ -78,9 +80,18 @@ keeps the effective user or assistant role of its enclosing section."
 (defconst ende-chat-state-property "ENDE_CHAT_STATE"
   "Org property storing the state of an unfinished chat reply.")
 
+(defconst ende-chat-model-property "ENDE_MODEL"
+  "Org property storing the model used for a chat response.")
+
+(defconst ende-chat-reasoning-effort-property "ENDE_REASONING_EFFORT"
+  "Org property storing the reasoning effort used for a chat response.")
+
 (defconst ende-chat--reserved-properties
-  '("ENDE_ROLE" "ENDE_VISIBILITY" "ENDE_CHAT_ID" "ENDE_CHAT_REPLY_TO"
-    "ENDE_CHAT_REQUEST_ID" "ENDE_CHAT_REASONING_FOR" "ENDE_CHAT_STATE")
+  (list ende-chat-role-property ende-chat-visibility-property
+        ende-chat-id-property ende-chat-reply-to-property
+        ende-chat-request-id-property ende-chat-reasoning-for-property
+        ende-chat-state-property ende-chat-model-property
+        ende-chat-reasoning-effort-property)
   "Control properties that model output may not author.")
 
 (defconst ende-chat--title-key "ENDE_CHAT_TITLE"
@@ -695,6 +706,14 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
   "Return one Org property line for NAME and VALUE."
   (format ":%s: %s\n" name value))
 
+(defun ende-chat--metadata-property (name value)
+  "Return a single-line Org property for nonempty VALUE, or nil."
+  (when (stringp value)
+    (let ((value (string-trim
+                  (replace-regexp-in-string "[\r\n]+" " " value))))
+      (unless (string-empty-p value)
+        (ende-chat--response-property name value)))))
+
 (defun ende-chat--placeholder-text (level question-id request-id)
   "Return a hidden pending response section at LEVEL."
   (let ((stars (make-string level ?*)))
@@ -797,8 +816,23 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
                             (ende-chat--hide-control-drawers))))))))))))
     ((error quit) nil)))
 
-(defun ende-chat--reasoning-text (level question-id request-id normalized)
-  "Return a linked reasoning section at LEVEL from NORMALIZED."
+(defun ende-chat--result-properties (job result)
+  "Return provenance properties for JOB's RESULT."
+  (let* ((profile (ende-job-profile job))
+         (display (ende--job-display-metadata job result))
+         (model (plist-get display :model))
+         (wire-api (plist-get profile :reasoning-effort-wire-api))
+         (effort (and (memq wire-api '(openrouter responses))
+                      (ende-provider-reasoning-effort profile wire-api))))
+    (concat
+     (ende-chat--metadata-property ende-chat-model-property model)
+     (ende-chat--metadata-property ende-chat-reasoning-effort-property
+                                   effort))))
+
+(defun ende-chat--reasoning-text
+    (level question-id request-id result-properties normalized)
+  "Return a linked reasoning section at LEVEL from NORMALIZED.
+RESULT-PROPERTIES are the request's durable metadata lines."
   (let ((body (plist-get normalized :content))
         (stars (make-string level ?*)))
     (unless (string-empty-p body)
@@ -811,21 +845,28 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
                ende-chat-reply-to-property question-id)
               (ende-chat--response-property
                ende-chat-reasoning-for-property request-id)
+              result-properties
               ":END:\n\n"
               body
               "\n\n"))))
 
-(defun ende-chat--assistant-text (level question-id request-id normalized)
-  "Return the host-owned assistant reply wrapper for NORMALIZED."
+(defun ende-chat--assistant-text
+    (level question-id request-id result-properties normalized)
+  "Return the host-owned assistant reply wrapper for NORMALIZED.
+RESULT-PROPERTIES are the request's durable metadata lines."
   (let* ((body (plist-get normalized :content))
          (stars (make-string level ?*)))
     (when (string-empty-p body)
       (error "Chat completion was empty"))
     (concat stars " Agent: Reply\n"
             ":PROPERTIES:\n"
-            (ende-chat--response-property ende-chat-role-property "assistant")
-            (ende-chat--response-property ende-chat-reply-to-property question-id)
-            (ende-chat--response-property ende-chat-request-id-property request-id)
+            (ende-chat--response-property
+             ende-chat-role-property "assistant")
+            (ende-chat--response-property
+             ende-chat-reply-to-property question-id)
+            (ende-chat--response-property
+             ende-chat-request-id-property request-id)
+            result-properties
             ":END:\n\n"
             body
             "\n\n")))
@@ -839,6 +880,8 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
                (instruction (ende-job-instruction job))
                (question-id (plist-get instruction :question-id))
                (request-id (plist-get instruction :request-id))
+               (result-properties
+                (ende-chat--result-properties job result))
                (placeholder (ende-chat--placeholder job)))
           (unless (and (stringp content) (not (string-empty-p content)))
             (error "Chat completion was empty"))
@@ -855,9 +898,11 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
                     (concat
                      (and normalized-thinking
                           (ende-chat--reasoning-text
-                           level question-id request-id normalized-thinking))
+                           level question-id request-id result-properties
+                           normalized-thinking))
                      (ende-chat--assistant-text
-                      level question-id request-id normalized)))
+                      level question-id request-id result-properties
+                      normalized)))
                    (buffer (ende-target-buffer (ende-job-target job)))
                    (question (ende-chat--find-by-property
                               document ende-chat-id-property question-id)))
