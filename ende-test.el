@@ -887,7 +887,7 @@ process for cancellation tests."
     (should (string= (buffer-string) "existing"))))
 
 (ert-deftest ende-test/summarize-requests-org-mode-syntax ()
-  (should (string-match-p "Org mode syntax" ende-summarize-system))
+  (should (string-match-p "Org-mode summary." ende-summarize-system))
   (should (string-match-p "ende-source:LINE" ende-summarize-system)))
 
 (ert-deftest ende-test/summarize-rewrites-file-citations-locally ()
