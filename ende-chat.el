@@ -72,23 +72,16 @@ keeps the effective user or assistant role of its enclosing section."
 (defconst ende-chat-request-id-property "ENDE_CHAT_REQUEST_ID"
   "Org property storing the request identity for a reply.")
 
+(defconst ende-chat-reasoning-for-property "ENDE_CHAT_REASONING_FOR"
+  "Org property linking a reasoning sibling to its unique reply request ID.")
+
 (defconst ende-chat-state-property "ENDE_CHAT_STATE"
   "Org property storing the state of an unfinished chat reply.")
 
 (defconst ende-chat--reserved-properties
   '("ENDE_ROLE" "ENDE_VISIBILITY" "ENDE_CHAT_ID" "ENDE_CHAT_REPLY_TO"
-    "ENDE_CHAT_REQUEST_ID" "ENDE_CHAT_STATE")
+    "ENDE_CHAT_REQUEST_ID" "ENDE_CHAT_REASONING_FOR" "ENDE_CHAT_STATE")
   "Control properties that model output may not author.")
-
-(defconst ende-chat--reasoning-escape-regexp
-  (rx line-start
-      (group (zero-or-more (any " \t")))
-      (group (or (seq (one-or-more (any "*")) " "
-                      (zero-or-more (not (any "\r\n"))))
-                 (seq "#+end_reasoning"
-                      (zero-or-more (any " \t")))))
-      line-end)
-  "Regexp for Org constructs that must be escaped inside reasoning content.")
 
 (defconst ende-chat--title-key "ENDE_CHAT_TITLE"
   "Keyword used by the model to propose an empty question's title.")
@@ -176,6 +169,9 @@ keeps the effective user or assistant role of its enclosing section."
                                         headline ende-chat-reply-to-property)
                              :request-id (ende-chat--local-property
                                           headline ende-chat-request-id-property)
+                             :reasoning-for
+                             (ende-chat--local-property
+                              headline ende-chat-reasoning-for-property)
                              :state (ende-chat--local-property
                                      headline ende-chat-state-property))))
           (when local-role
@@ -214,6 +210,7 @@ keeps the effective user or assistant role of its enclosing section."
      ((equal property ende-chat-id-property) :id)
      ((equal property ende-chat-reply-to-property) :reply-to)
      ((equal property ende-chat-request-id-property) :request-id)
+     ((equal property ende-chat-reasoning-for-property) :reasoning-for)
      ((equal property ende-chat-state-property) :state)
      (t (error "Unknown chat property: %s" property)))))
 
@@ -325,28 +322,12 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
               (goto-char (org-element-property :begin drawer))
               (org-fold-hide-drawer-toggle t t))))))))
 
-(defun ende-chat--hide-reasoning-blocks (headline)
-  "Hide reasoning blocks belonging to HEADLINE without hiding its answer."
+(defun ende-chat--hide-reasoning-section (headline)
+  "Hide HEADLINE's Org subtree without hiding its sibling reply."
   (when (derived-mode-p 'org-mode)
-    (org-element-map headline 'special-block
-      (lambda (block)
-        (when (string= (downcase (or (org-element-property :type block) ""))
-                       "reasoning")
-          (save-excursion
-            (goto-char (org-element-property :begin block))
-            (org-fold-hide-block-toggle t t)))))))
-
-(defun ende-chat--escape-reasoning-content (content)
-  "Escape Org headings and block terminators inside reasoning CONTENT.
-
-The host-owned delimiters remain unescaped so Org can recognize and fold the
-reasoning block.  Escaping is intentionally idempotent and limited to lines
-that could change that block's structure."
-  (let ((case-fold-search t))
-    (replace-regexp-in-string
-     ende-chat--reasoning-escape-regexp
-     "\\1,\\2"
-     content)))
+    (save-excursion
+      (goto-char (org-element-property :begin headline))
+      (org-fold-hide-subtree))))
 
 (defun ende-chat--lineage-headline (element)
   "Return the headline owning ELEMENT, or nil."
@@ -354,7 +335,7 @@ that could change that block's structure."
     (and (eq (org-element-type headline) 'headline) headline)))
 
 (defun ende-chat--collect-section-exclusions (document)
-  "Collect control and reasoning ranges for every headline in DOCUMENT."
+  "Collect control-property ranges for every headline in DOCUMENT."
   (let* ((tree (ende-chat--document-tree document))
          (exclusions (ende-chat--document-exclusions document))
          (removed-drawers (make-hash-table :test #'eq)))
@@ -371,24 +352,14 @@ that could change that block's structure."
                            (gethash headline exclusions))
                      exclusions))))
       nil nil nil)
-    (org-element-map tree '(node-property special-block)
+    (org-element-map tree 'node-property
       (lambda (element)
-        (let* ((type (org-element-type element))
-               (headline (ende-chat--lineage-headline element))
-               (drawer (and (eq type 'node-property)
-                            (org-element-lineage
-                             element '(property-drawer) t)))
-               (remove
-                (or (and (eq type 'node-property)
-                         (ende-chat--reserved-property-p element)
-                         (not (gethash drawer removed-drawers)))
-                    (and (eq type 'special-block)
-                         (string= (downcase
-                                   (or (org-element-property :type element)
-                                       ""))
-                                  "reasoning")
-                         (not ende-chat-include-reasoning)))))
-          (when (and headline remove)
+        (let* ((headline (ende-chat--lineage-headline element))
+               (drawer (org-element-lineage
+                        element '(property-drawer) t)))
+          (when (and headline
+                     (ende-chat--reserved-property-p element)
+                     (not (gethash drawer removed-drawers)))
             (puthash headline
                      (cons (cons (org-element-property :begin element)
                                  (org-element-property :end element))
@@ -600,7 +571,7 @@ Choose a concise title for the request. Otherwise omit this keyword."
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
 
 The returned plist contains `:content' and an optional `:title'.  Actual Org
-headlines are shifted uniformly beneath the host-created assistant wrapper;
+headlines are shifted uniformly beneath the host-created section wrapper;
 stars in literal blocks are left untouched by Org's parser."
   (with-temp-buffer
     (org-mode)
@@ -648,7 +619,7 @@ stars in literal blocks are left untouched by Org's parser."
 (defun ende-chat--placeholder-text (level question-id request-id)
   "Return a hidden pending response section at LEVEL."
   (let ((stars (make-string level ?*)))
-    (concat stars " Ende response\n"
+    (concat stars " Agent: Reply\n"
             ":PROPERTIES:\n"
             (ende-chat--response-property ende-chat-role-property "assistant")
             (ende-chat--response-property ende-chat-visibility-property "hidden")
@@ -747,23 +718,36 @@ stars in literal blocks are left untouched by Org's parser."
                             (ende-chat--hide-control-drawers))))))))))))
     ((error quit) nil)))
 
-(defun ende-chat--assistant-text (level question-id request-id normalized thinking)
-  "Return the host-owned assistant wrapper for NORMALIZED and THINKING."
+(defun ende-chat--reasoning-text (level question-id request-id normalized)
+  "Return a linked reasoning section at LEVEL from NORMALIZED."
+  (let ((body (plist-get normalized :content))
+        (stars (make-string level ?*)))
+    (unless (string-empty-p body)
+      (concat stars " Agent: Reasoning\n"
+              ":PROPERTIES:\n"
+              (ende-chat--response-property ende-chat-role-property "assistant")
+              (ende-chat--response-property
+               ende-chat-visibility-property "reasoning")
+              (ende-chat--response-property
+               ende-chat-reply-to-property question-id)
+              (ende-chat--response-property
+               ende-chat-reasoning-for-property request-id)
+              ":END:\n\n"
+              body
+              "\n\n"))))
+
+(defun ende-chat--assistant-text (level question-id request-id normalized)
+  "Return the host-owned assistant reply wrapper for NORMALIZED."
   (let* ((body (plist-get normalized :content))
          (stars (make-string level ?*)))
     (when (string-empty-p body)
       (error "Chat completion was empty"))
-    (concat stars " Ende response\n"
+    (concat stars " Agent: Reply\n"
             ":PROPERTIES:\n"
             (ende-chat--response-property ende-chat-role-property "assistant")
             (ende-chat--response-property ende-chat-reply-to-property question-id)
             (ende-chat--response-property ende-chat-request-id-property request-id)
             ":END:\n\n"
-            (when (and (stringp thinking) (not (string-empty-p thinking)))
-              (concat "#+begin_reasoning\n"
-                      (ende-chat--escape-reasoning-content
-                       (ende-trim-trailing thinking))
-                      "\n#+end_reasoning\n\n"))
             body
             "\n\n")))
 
@@ -784,8 +768,17 @@ stars in literal blocks are left untouched by Org's parser."
           (pcase-let ((`(,document ,old-headline) placeholder))
             (let* ((level (org-element-property :level old-headline))
                    (normalized (ende-chat--normalize-response content level))
-                   (response (ende-chat--assistant-text
-                              level question-id request-id normalized thinking))
+                   (normalized-thinking
+                    (and (stringp thinking)
+                         (not (string-blank-p thinking))
+                         (ende-chat--normalize-response thinking level)))
+                   (response
+                    (concat
+                     (and normalized-thinking
+                          (ende-chat--reasoning-text
+                           level question-id request-id normalized-thinking))
+                     (ende-chat--assistant-text
+                      level question-id request-id normalized)))
                    (buffer (ende-target-buffer (ende-job-target job)))
                    (question (ende-chat--find-by-property
                               document ende-chat-id-property question-id)))
@@ -811,13 +804,13 @@ stars in literal blocks are left untouched by Org's parser."
                         (goto-char (org-element-property :begin headline))
                         (insert response)
                         (let* ((final (ende-chat--build-document))
-                               (response-headline
+                               (reasoning-headline
                                 (ende-chat--find-by-property
-                                 final ende-chat-request-id-property
+                                 final ende-chat-reasoning-for-property
                                  request-id)))
-                          (when response-headline
-                            (ende-chat--hide-reasoning-blocks
-                             response-headline)))
+                          (when reasoning-headline
+                            (ende-chat--hide-reasoning-section
+                             reasoning-headline)))
                         (ende-chat--hide-control-drawers)))))))
             (ende-job-finish job result)))
       ((error quit)

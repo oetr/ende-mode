@@ -6454,10 +6454,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                        current ""))))
 
 (defun ende-test--chat-response-count ()
-  "Return the number of host-created response headlines in the buffer."
+  "Return the number of generated Agent: Reply headlines in the buffer."
   (cl-count-if
    (lambda (headline)
-     (string= (org-element-property :raw-value headline) "Ende response"))
+     (string= (org-element-property :raw-value headline) "Agent: Reply"))
    (org-element-map (org-element-parse-buffer) 'headline #'identity)))
 
 (defun ende-test--chat-control-drawers ()
@@ -6476,10 +6476,10 @@ Use COMMAND for the process, or a silent sleep process by default."
     (invisible-p (point))))
 
 (defun ende-test--chat-response-headlines ()
-  "Return host-created response headlines in document order."
+  "Return generated Agent: Reply headlines in document order."
   (cl-remove-if-not
    (lambda (headline)
-     (string= (org-element-property :raw-value headline) "Ende response"))
+     (string= (org-element-property :raw-value headline) "Agent: Reply"))
    (org-element-map (org-element-parse-buffer) 'headline #'identity)))
 
 (defun ende-test--chat-response-has-separator-p (headline)
@@ -6489,20 +6489,19 @@ Use COMMAND for the process, or a silent sleep process by default."
     (forward-line -1)
     (looking-at-p "^[[:space:]]*$")))
 
-(defun ende-test--chat-reasoning-blocks (element)
-  "Return reasoning blocks contained in ELEMENT."
+(defun ende-test--chat-reasoning-headlines ()
+  "Return generated Agent: Reasoning headlines in document order."
   (cl-remove-if-not
-   (lambda (block)
-     (string= (downcase (or (org-element-property :type block) ""))
-              "reasoning"))
-   (org-element-map element 'special-block #'identity)))
+   (lambda (headline)
+     (string= (org-element-property :raw-value headline) "Agent: Reasoning"))
+   (org-element-map (org-element-parse-buffer) 'headline #'identity)))
 
-(defun ende-test--chat-block-hidden-p (block)
-  "Return non-nil when the body of BLOCK is folded."
+(defun ende-test--chat-headline-text-hidden-p (headline text)
+  "Return non-nil when TEXT in HEADLINE's subtree is folded."
   (save-excursion
-    (goto-char (org-element-property :begin block))
-    (forward-line 1)
-    (invisible-p (point))))
+    (goto-char (org-element-property :begin headline))
+    (when (search-forward text (org-element-property :end headline) t)
+      (invisible-p (1- (point))))))
 
 (ert-deftest ende-test/chat-context-isolates-level-one-roots ()
   (ende-test--reset)
@@ -6533,9 +6532,6 @@ Use COMMAND for the process, or a silent sleep process by default."
               ":ENDE_ROLE: assistant\n"
               ":END:\n"
               "Answer\n"
-              "#+begin_reasoning\n"
-              "Provider thought\n"
-              "#+end_reasoning\n"
               "*** Hidden assistant descendant\n"
               ":PROPERTIES:\n"
               ":ENDE_VISIBILITY: hidden\n"
@@ -6560,14 +6556,12 @@ Use COMMAND for the process, or a silent sleep process by default."
             (let ((ende-chat-include-reasoning nil))
               (ende-chat-context-at-point)))))
       (should (string-match-p "Answer" without-reasoning))
-      (should-not (string-match-p "Provider thought" without-reasoning))
       (should-not (string-match-p "Section thought" without-reasoning))
       (should-not (string-match-p "Never send this" without-reasoning)))
     (let ((with-reasoning
            (ende-test--chat-context-text
             (let ((ende-chat-include-reasoning t))
               (ende-chat-context-at-point)))))
-      (should (string-match-p "Provider thought" with-reasoning))
       (should (string-match-p "Section thought" with-reasoning))
       (should-not (string-match-p "Never send this" with-reasoning)))))
 
@@ -6732,19 +6726,52 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/chat-ask-marks-question-and-retries-without-sent-state ()
   (ende-test--reset)
-  (let ((ende-llm-function (ende-test--fake-llm '("First answer" "Second answer"))))
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '((:content "First answer" :thinking "First plan")
+            (:content "Second answer" :thinking "Second plan")))))
     (ende-test--with-buffer "* Root\n** Question\nAsk again\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
       (ende-ask)
       (ende-ask)
       (should (= (ende-test--chat-response-count) 2))
+      (should (= (length (ende-test--chat-reasoning-headlines)) 2))
       (should (equal (org-entry-get nil ende-chat-role-property)
                      "user"))
       (should (< (string-match-p "First answer" (buffer-string))
                  (string-match-p "Second answer" (buffer-string))))
+      (let* ((document (ende-chat--build-document))
+             (headlines (ende-chat--document-headlines document))
+             (reasoning
+              (cl-remove-if-not
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Agent: Reasoning"))
+               headlines))
+             (replies
+              (cl-remove-if-not
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Agent: Reply"))
+               headlines)))
+        (should (< (org-element-property :begin (nth 0 reasoning))
+                   (org-element-property :begin (nth 0 replies))))
+        (should (< (org-element-property :begin (nth 0 replies))
+                   (org-element-property :begin (nth 1 reasoning))))
+        (should (< (org-element-property :begin (nth 1 reasoning))
+                   (org-element-property :begin (nth 1 replies))))
+        (dolist (pair (cl-mapcar #'cons reasoning replies))
+          (let ((request-id
+                 (ende-chat--property document (cdr pair) :request-id)))
+            (should (equal (ende-chat--property document (car pair)
+                                                :reasoning-for)
+                           request-id))
+            (should (eq (ende-chat--find-by-property
+                         document ende-chat-request-id-property request-id)
+                        (cdr pair))))))
       (should-not (cl-some #'ende-review-overlay-p
-                           (overlays-in (point-min) (point-max)))))))
+                            (overlays-in (point-min) (point-max)))))))
 
 (ert-deftest ende-test/chat-title-directive-is-applied-and-removed ()
   (ende-test--reset)
@@ -6755,51 +6782,27 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** ")
       (ende-ask)
+      (should-not (ende-test--chat-reasoning-headlines))
       (should (string-match-p "^\\*\\* Explain the request$"
                               (buffer-string)))
       (should-not (string-match-p "ENDE_CHAT_TITLE" (buffer-string)))
       (should (string-match-p "^\\*\\*\\* Generated$"
                               (buffer-string))))))
 
-(ert-deftest ende-test/chat-reasoning-is-marked-and-configurable-in-future-context ()
+(ert-deftest ende-test/chat-reasoning-is-org-structured-folded-and-configurable ()
   (ende-test--reset)
-  (let ((ende-llm-function
-         (ende-test--fake-llm
-          (list (list :content "Answer" :thinking "Private thought")))))
-    (ende-test--with-buffer "* Root\n** Question\nAsk\n** Next\nNext\n"
-      (org-mode)
-      (ende-test--chat-goto "** Question")
-      (ende-ask)
-      (should (string-match-p (regexp-quote "#+begin_reasoning")
-                              (buffer-string)))
-      (should (string-match-p (regexp-quote "#+end_reasoning\n\nAnswer")
-                              (buffer-string)))
-      (ende-test--chat-goto "** Next")
-      (let ((without (ende-test--chat-context-text
-                      (let ((ende-chat-include-reasoning nil))
-                        (ende-chat-context-at-point))))
-            (with (ende-test--chat-context-text
-                   (let ((ende-chat-include-reasoning t))
-                     (ende-chat-context-at-point)))))
-        (should-not (string-match-p "Private thought" without))
-        (should (string-match-p "Private thought" with))))))
-
-(ert-deftest ende-test/chat-reasoning-keeps-org-structure-and-folds-response ()
-  (ende-test--reset)
-  (let* ((thinking (concat "Plan\n"
+  (let* ((thinking (concat "Plan with /ordinary Org emphasis/.\n"
                            "* First thought\n"
                            "** Nested thought\n"
-                           "#+end_reasoning\n"
-                           "Still inside\n"))
+                           "#+begin_src emacs-lisp\n"
+                           "(message \"reasoning source\")\n"
+                           "#+end_src\n"))
          (ende-llm-function
           (ende-test--fake-llm
-           (list (list :content "Answer\n** Actual section"
+           (list (list :content "Answer\n** Reply section"
                         :thinking thinking)))))
     (ende-test--with-buffer
         (concat "* Root\n"
-                "#+begin_reasoning\n"
-                "Existing thought\n"
-                "#+end_reasoning\n"
                 "** Question\n"
                 "Ask\n"
                 "** Next\n"
@@ -6807,50 +6810,105 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** Question")
       (ende-ask)
-      (let* ((tree (org-element-parse-buffer))
-             (headlines (org-element-map tree 'headline #'identity))
-             (response (cl-find-if
-                        (lambda (headline)
-                          (string= (org-element-property :raw-value headline)
-                                   "Ende response"))
-                        headlines))
-             (response-blocks (ende-test--chat-reasoning-blocks response))
-             (all-reasoning (ende-test--chat-reasoning-blocks tree)))
-        (should (= (length response-blocks) 1))
-        (should (= (length all-reasoning) 2))
-        (should (member "Actual section"
-                        (mapcar (lambda (headline)
-                                  (org-element-property :raw-value headline))
-                                headlines)))
-        (should-not (member "First thought"
-                            (mapcar (lambda (headline)
-                                      (org-element-property :raw-value headline))
-                                    headlines)))
-        (should (string-match-p (regexp-quote ",* First thought")
-                                (buffer-string)))
-        (should (string-match-p (regexp-quote ",** Nested thought")
-                                (buffer-string)))
-        (should (string-match-p (regexp-quote ",#+end_reasoning")
-                                (buffer-string)))
-        (should (ende-test--chat-block-hidden-p (car response-blocks)))
-        (should-not (ende-test--chat-block-hidden-p
-                     (car (cl-set-difference all-reasoning response-blocks))))
+      (let* ((document (ende-chat--build-document))
+             (tree (ende-chat--document-tree document))
+             (headlines (ende-chat--document-headlines document))
+             (reasoning
+              (cl-find-if
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Agent: Reasoning"))
+               headlines))
+             (reply
+              (cl-find-if
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Agent: Reply"))
+               headlines))
+             (reasoning-id
+              (ende-chat--property document reasoning :reasoning-for))
+             (reply-id (ende-chat--property document reply :request-id))
+             (first-thought
+              (cl-find-if
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "First thought"))
+               headlines))
+             (nested-thought
+              (cl-find-if
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Nested thought"))
+               headlines))
+             (reply-section
+              (cl-find-if
+               (lambda (headline)
+                 (string= (org-element-property :raw-value headline)
+                          "Reply section"))
+               headlines))
+             (source-blocks
+              (org-element-map reasoning 'src-block #'identity)))
+        (should (equal (org-element-property :raw-value reasoning)
+                       "Agent: Reasoning"))
+        (should (equal (org-element-property :raw-value reply) "Agent: Reply"))
+        (should (= (org-element-property :level reasoning) 2))
+        (should (= (org-element-property :level reply) 2))
+        (should (eq (ende-chat--parent document reasoning)
+                    (ende-chat--parent document reply)))
+        (should (< (org-element-property :begin reasoning)
+                   (org-element-property :begin reply)))
+        (should (eq (ende-chat--effective-role document reasoning) 'assistant))
+        (should (eq (ende-chat--effective-role document reply) 'assistant))
+        (should (eq (ende-chat--effective-visibility document reasoning)
+                    'reasoning))
+        (should (eq (ende-chat--effective-visibility document reply) 'normal))
+        (should (equal reasoning-id reply-id))
+        (should-not (ende-chat--property document reasoning :request-id))
+        (should (eq (ende-chat--find-by-property
+                     document ende-chat-request-id-property reply-id)
+                    reply))
+        (should (equal (org-element-property :raw-value first-thought)
+                       "First thought"))
+        (should (= (org-element-property :level first-thought) 3))
+        (should (= (org-element-property :level nested-thought) 4))
+        (should (eq (ende-chat--parent document first-thought) reasoning))
+        (should (eq (ende-chat--parent document nested-thought) first-thought))
+        (should (= (length source-blocks) 1))
+        (should (equal (org-element-property :language (car source-blocks))
+                       "emacs-lisp"))
+        (should (equal (org-element-property :raw-value reply-section)
+                       "Reply section"))
+        (should (= (org-element-property :level reply-section) 3))
+        (should-not (string-match-p ",\\*" (buffer-string)))
+        (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                          (ende-test--chat-control-drawers)))
+        (should (ende-test--chat-headline-text-hidden-p reasoning "Plan"))
+        (should-not (ende-test--chat-headline-text-hidden-p reply "Answer"))
         (save-excursion
-          (goto-char (org-element-property :begin (car response-blocks)))
-          (org-fold-hide-block-toggle 'off t)
-          (forward-line 1)
-          (should-not (invisible-p (point)))))
+          (goto-char (org-element-property :begin reasoning))
+          (org-fold-show-subtree)
+          (should-not (ende-test--chat-headline-text-hidden-p
+                       reasoning "Plan"))))
       (ende-test--chat-goto "** Next")
-      (let ((without (ende-test--chat-context-text
-                      (let ((ende-chat-include-reasoning nil))
-                        (ende-chat-context-at-point))))
-            (with (ende-test--chat-context-text
-                   (let ((ende-chat-include-reasoning t))
-                     (ende-chat-context-at-point)))))
+      (let* ((without-messages
+              (let ((ende-chat-include-reasoning nil))
+                (ende-chat-context-at-point)))
+             (with-messages
+              (let ((ende-chat-include-reasoning t))
+                (ende-chat-context-at-point)))
+             (without (ende-test--chat-context-text without-messages))
+             (with (ende-test--chat-context-text with-messages)))
         (should-not (string-match-p "First thought" without))
-        (should-not (string-match-p "Still inside" without))
+        (should (string-match-p "Answer" without))
+        (should-not (string-match-p "ENDE_CHAT_REASONING_FOR" without))
         (should (string-match-p "First thought" with))
-        (should (string-match-p (regexp-quote ",#+end_reasoning") with))))))
+        (should (string-match-p "reasoning source" with))
+        (should (string-match-p "Answer" with))
+        (should-not (string-match-p "ENDE_CHAT_REASONING_FOR" with))
+        (should (equal (mapcar #'car without-messages)
+                       '("user" "user" "assistant" "user")))
+        (should (equal (mapcar #'car with-messages)
+                       '("user" "user" "assistant" "assistant" "user")))))))
 
 (ert-deftest ende-test/chat-failure-keeps-question-and-reserves-slot ()
   (ende-test--reset)
@@ -6903,7 +6961,7 @@ Use COMMAND for the process, or a silent sleep process by default."
               (should (cl-every
                        (lambda (text)
                          (and (not (string-match-p "ENDE_CHAT_STATE" text))
-                              (not (string-match-p "Ende response" text))))
+                              (not (string-match-p "Agent: Reply" text))))
                        users))))
           (ende-test--complete-call (nth 1 ende-test--calls))
           (should (eq (ende-job-state second) 'completed))
@@ -7022,7 +7080,7 @@ Use COMMAND for the process, or a silent sleep process by default."
             (should (bound-and-true-p ende-mode))
             (should (= (how-many "^\\* *$" (point-min) (point-max)) 1))
             (should (string-match-p "Reply" (buffer-string)))
-            (should (string-match-p "^\\*\\* Ende response$"
+            (should (string-match-p "^\\*\\* Agent: Reply$"
                                     (buffer-string)))
             (should (string-match-p ":ENDE_ROLE: assistant"
                                     (buffer-string)))
