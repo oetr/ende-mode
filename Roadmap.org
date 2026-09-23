@@ -79,3 +79,17 @@ Maybe we can use the current theme here, so that the numbers are always visible.
 - sanitize "* " - sections in org mode from the LLM output/thinking by replacing it with ",* " (only in the beginning of a line though; elsewhere is unaffected)
 - use the sanitizing function also for the summaries (which are also org mode)
 * Display how much money each request took approximately
+* Chat improvements
+
+The most difficult functions to audit are ~ende-chat--apply-result~, ~ende-chat--mark-failed~, and ~ende-ask~. Their nested buffer, restriction, excursion, transaction, and error scopes obscure the important invariants.
+
+Extract operations such as:
+
+- Locate and validate a pending destination.
+- Check whether its contents are still replaceable.
+- Apply one document transaction.
+- Preserve a result that cannot be applied.
+- Clean up an uncommitted placeholder.
+
+These should encode domain operations, not merely save a few lines of nesting.
+
