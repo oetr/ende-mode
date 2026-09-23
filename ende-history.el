@@ -12,7 +12,6 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'json)
 (require 'outline)
 (require 'subr-x)
 (require 'ende-core)
@@ -238,13 +237,74 @@
             (cl-decf ende-history--entry-count))
         (setq ende-history--entry-count 0)))))
 
-(defun ende-history--value-string (value)
-  "Return VALUE as readable JSON when possible, otherwise printed Lisp."
-  (condition-case nil
-      (if (or (hash-table-p value) (vectorp value) (listp value))
-          (json-encode value)
-        (format "%s" value))
-    (error (format "%S" value))))
+(defun ende-history--usage-get (object key)
+  "Return KEY from provider usage OBJECT.
+KEY is a keyword for plist objects and a string key in JSON hash tables."
+  (cond
+   ((hash-table-p object)
+    (gethash (substring (symbol-name key) 1) object))
+   ((listp object) (plist-get object key))))
+
+(defun ende-history--usage-number (usage &rest keys)
+  "Return the first numeric field in USAGE named by KEYS."
+  (cl-loop for key in keys
+           for value = (ende-history--usage-get usage key)
+           when (numberp value) return value))
+
+(defun ende-history--format-token-count (count)
+  "Return integer COUNT with thousands separators."
+  (let* ((digits (number-to-string (max 0 (truncate count))))
+         (end (length digits))
+         chunks)
+    (while (> end 3)
+      (push (substring digits (- end 3) end) chunks)
+      (setq end (- end 3)))
+    (push (substring digits 0 end) chunks)
+    (mapconcat #'identity chunks ",")))
+
+(defun ende-history--usage-message-summary (usage)
+  "Summarize attributed message counts in provider USAGE, when available."
+  (let* ((attribution (ende-history--usage-get usage :attribution))
+         (items (ende-history--usage-get attribution :items)))
+    (when (hash-table-p items)
+      (let ((messages 0)
+            (input-messages 0)
+            (output-messages 0))
+        (maphash
+         (lambda (id item)
+           (when (and (stringp id) (string-prefix-p "msg_" id))
+             (let ((input (ende-history--usage-number
+                           item :input_tokens))
+                   (output (ende-history--usage-number
+                            item :output_tokens)))
+               (cl-incf messages)
+               (when (and (numberp input) (> input 0))
+                 (cl-incf input-messages))
+               (when (and (numberp output) (> output 0))
+                 (cl-incf output-messages)))))
+         items)
+        (format "Messages: %s (%s input, %s output)"
+                (ende-history--format-token-count messages)
+                (ende-history--format-token-count input-messages)
+                (ende-history--format-token-count output-messages))))))
+
+(defun ende-history--usage-token-summary (usage)
+  "Summarize aggregate token counts in provider USAGE, when available."
+  (let* ((input (ende-history--usage-number
+                 usage :input_tokens :prompt_tokens))
+         (output (ende-history--usage-number
+                  usage :output_tokens :completion_tokens))
+         (total (or (ende-history--usage-number usage :total_tokens)
+                    (and (numberp input) (numberp output)
+                         (+ input output)))))
+    (when (numberp total)
+      (if (and (numberp input) (numberp output))
+          (format "Tokens: %s total (%s input, %s output)"
+                  (ende-history--format-token-count total)
+                  (ende-history--format-token-count input)
+                  (ende-history--format-token-count output))
+        (format "Tokens: %s total"
+                (ende-history--format-token-count total))))))
 
 (defun ende-history--skipped-edit-errors-string (errors)
   "Format skipped structured-edit ERRORS for a history entry."
@@ -269,11 +329,18 @@
   "Return readable usage information from normalized USAGE EVENT."
   (let ((raw (plist-get event :usage)))
     (if raw
-        (format "Stream tokens: %s\nEstimated: %s\nSpeed: %.2f t/s\nProvider usage: %s"
-                (or (plist-get event :tokens) 0)
-                (if (plist-get event :estimated) "yes" "no")
-                (or (plist-get event :speed) 0.0)
-                (ende-history--value-string raw))
+        (mapconcat
+         #'identity
+         (delq nil
+               (list (format "Stream tokens: %s"
+                             (or (plist-get event :tokens) 0))
+                     (format "Estimated: %s"
+                             (if (plist-get event :estimated) "yes" "no"))
+                     (format "Speed: %.2f t/s"
+                             (or (plist-get event :speed) 0.0))
+                     (ende-history--usage-message-summary raw)
+                     (ende-history--usage-token-summary raw)))
+         "\n")
       (format "%S" event))))
 
 (defun ende-history--flush (entry)

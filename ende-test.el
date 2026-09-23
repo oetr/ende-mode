@@ -13,6 +13,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'json)
 (require 'ende-provider)
 (require 'ende)
 
@@ -5209,7 +5210,44 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should-not (string-match-p "Source metadata:" text))
           (should-not (string-match-p "secret source" text)))))))
 
-(ert-deftest ende-test/history-retains-failed-stream-and-raw-usage ()
+(ert-deftest ende-test/history-summarizes-attributed-usage ()
+  (ende-test--reset)
+  (let* ((usage
+          (json-parse-string
+           (concat
+            "{\"input_tokens\":5002,"
+            "\"output_tokens\":1216,"
+            "\"total_tokens\":6218,"
+            "\"attribution\":{\"items\":{"
+            "\"msg_input_a\":{\"input_tokens\":4000,\"output_tokens\":0},"
+            "\"msg_input_b\":{\"input_tokens\":1000,\"output_tokens\":0},"
+            "\"rs_reasoning\":{\"input_tokens\":2,\"output_tokens\":145},"
+            "\"msg_output\":{\"input_tokens\":0,\"output_tokens\":1071}"
+            "}}}")
+           :object-type 'hash-table))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content "result"
+                       :tokens 1216
+                       :speed 38.24
+                       :usage usage)))))
+    (ende-test--with-buffer "base"
+      (goto-char (point-max))
+      (ende-insert-at-cursor)
+      (with-current-buffer ende-history-buffer-name
+        (let ((text (buffer-string)))
+          (should (string-match-p "Stream tokens: 1216" text))
+          (should (string-match-p "Estimated: no" text))
+          (should (string-match-p "Speed: 38.24 t/s" text))
+          (should (string-match-p
+                   "Messages: 3 (2 input, 1 output)" text))
+          (should (string-match-p
+                   "Tokens: 6,218 total (5,002 input, 1,216 output)" text))
+          (should-not (string-match-p "Provider usage:" text))
+          (should-not (string-match-p "msg_" text))
+          (should-not (string-match-p "attribution" text)))))))
+
+(ert-deftest ende-test/history-retains-failed-stream-and-summarizes-usage ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm
@@ -5231,7 +5269,9 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should (string-match-p "base" text))
           (should (string-match-p "Thinking" text))
           (should (string-match-p "reasoning before failure" text))
-          (should (string-match-p "reasoning_tokens" text))
+          (should (string-match-p
+                   "Tokens: 4,108 total (12 input, 4,096 output)" text))
+          (should-not (string-match-p "reasoning_tokens" text))
           (should (string-match-p "empty completion" text))
           (should buffer-read-only)
           (should-error (insert "user edit") :type 'buffer-read-only)
