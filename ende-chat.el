@@ -563,28 +563,104 @@ Choose a concise title for the request. Otherwise omit this keyword."
       nil nil nil)
     (and (not (string-empty-p title)) title)))
 
-(defun ende-chat--remove-response-control (buffer ranges)
-  "Remove response control RANGES from BUFFER."
-  (with-current-buffer buffer
-    (dolist (range (sort (copy-sequence ranges)
-                         (lambda (left right) (> (car left) (car right)))))
-      (delete-region (car range) (cdr range)))))
+(defun ende-chat--block-directive (line)
+  "Return the block directive in LINE as (KIND . NAME), or nil."
+  (let ((case-fold-search t))
+    (cond
+     ((string-match
+       (concat "\\`#\\+begin_\\([[:alnum:]_-]+\\)"
+               "\\(?:[ \t].*\\)?[ \t\r]*\\'")
+       line)
+      (cons 'begin (downcase (match-string 1 line))))
+     ((string-match "\\`#\\+end_\\([[:alnum:]_-]+\\)[ \t\r]*\\'" line)
+      (cons 'end (downcase (match-string 1 line)))))))
+
+(defun ende-chat--org-special-line-p (line)
+  "Return non-nil when LINE needs comma-escaping inside an Org block."
+  (string-match-p "\\`\\(?:\\*\\|#\\+\\|,\\(?:\\*\\|#\\+\\|,\\)\\)"
+                  line))
+
+(defun ende-chat--response-blocks (content)
+  "Return CONTENT repaired and masked for safe Org response parsing.
+
+Only CONTENT is scanned.  Block bodies are comma-escaped and blanked in
+`:parse-content', so their contents cannot become response headlines or control
+directives.  An open block is closed at the end of CONTENT."
+  (with-temp-buffer
+    (insert (or content ""))
+    (let ((open-block nil)
+          (block-start nil)
+          ranges)
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let* ((line-start (point))
+               (line-end (line-end-position))
+               (next-line (min (point-max) (1+ line-end)))
+               (directive
+                (ende-chat--block-directive
+                 (buffer-substring-no-properties line-start line-end))))
+          (if open-block
+              (if (and directive
+                       (eq (car directive) 'end)
+                       (equal (cdr directive) open-block))
+                  (progn
+                    (push (cons block-start next-line) ranges)
+                    (setq open-block nil
+                          block-start nil))
+                (when (ende-chat--org-special-line-p
+                       (buffer-substring-no-properties line-start line-end))
+                  (goto-char line-start)
+                  (insert ",")
+                  (setq next-line (min (point-max) (1+ (line-end-position))))))
+            (when (and directive (eq (car directive) 'begin))
+              (setq open-block (cdr directive)
+                    block-start line-start)))
+          (goto-char next-line)))
+      (when open-block
+        (goto-char (point-max))
+        (unless (bolp)
+          (insert "\n"))
+        (insert (format "#+end_%s\n" open-block))
+        (push (cons block-start (point-max)) ranges))
+      (let* ((repaired (buffer-string))
+             (masked (copy-sequence repaired)))
+        (dolist (range ranges)
+          (let ((index (1- (car range)))
+                (end (1- (cdr range))))
+            (while (< index end)
+              (unless (= (aref masked index) ?\n)
+                (aset masked index ?\s))
+              (setq index (1+ index)))))
+        (list :content repaired :parse-content masked)))))
+
+(defun ende-chat--apply-response-edits (content edits)
+  "Apply response EDITS to CONTENT and return the resulting string.
+
+Each edit is (BEGIN END REPLACEMENT), using Org buffer positions."
+  (with-temp-buffer
+    (insert content)
+    (dolist (edit (sort edits (lambda (left right) (> (car left) (car right)))))
+      (delete-region (nth 0 edit) (nth 1 edit))
+      (goto-char (nth 0 edit))
+      (insert (nth 2 edit)))
+    (buffer-string)))
 
 (defun ende-chat--normalize-response (content wrapper-level)
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
 
 The returned plist contains `:content' and an optional `:title'.  Actual Org
 headlines are shifted uniformly beneath the host-created section wrapper;
-stars in literal blocks are left untouched by Org's parser."
-  (with-temp-buffer
-    (org-mode)
-    (insert (or content ""))
-    (let* ((tree (org-element-parse-buffer))
-           (title (ende-chat--response-title tree))
-           (ranges (ende-chat--response-control-ranges tree)))
-      (ende-chat--remove-response-control (current-buffer) ranges)
-      (goto-char (point-min))
+stars in any `#+begin_...` block are left untouched.  Unterminated blocks
+are closed at the end of CONTENT, never against text elsewhere in the chat."
+  (let* ((blocks (ende-chat--response-blocks content))
+         (content (plist-get blocks :content))
+         (edits nil))
+    (with-temp-buffer
+      (org-mode)
+      (insert (plist-get blocks :parse-content))
       (let* ((tree (org-element-parse-buffer))
+             (title (ende-chat--response-title tree))
+             (ranges (ende-chat--response-control-ranges tree))
              (headlines (org-element-map tree 'headline #'identity))
              (minimum (and headlines
                            (apply #'min
@@ -592,20 +668,20 @@ stars in literal blocks are left untouched by Org's parser."
                                             (org-element-property :level headline))
                                           headlines))))
              (target (and minimum (1+ wrapper-level))))
+        (dolist (range ranges)
+          (push (list (car range) (cdr range) "") edits))
         (when minimum
-          (dolist (headline
-                   (sort (copy-sequence headlines)
-                         (lambda (left right)
-                           (> (org-element-property :begin left)
-                              (org-element-property :begin right)))))
-            (let ((level (org-element-property :level headline))
-                  (new-level (+ (org-element-property :level headline)
-                                (- target minimum))))
-              (goto-char (org-element-property :begin headline))
-              (delete-char level)
-              (insert (make-string new-level ?*)))))
+          (dolist (headline headlines)
+            (let* ((begin (org-element-property :begin headline))
+                   (level (org-element-property :level headline))
+                   (new-level (+ level (- target minimum))))
+              (push (list begin (+ begin level)
+                          (make-string new-level ?*))
+                    edits))))
         (list :title title
-              :content (ende-trim-trailing (buffer-string)))))))
+              :content
+              (ende-trim-trailing
+               (ende-chat--apply-response-edits content edits)))))))
 
 (defun ende-chat--set-headline-title (headline title)
   "Set HEADLINE's title to TITLE using Org's headline editor."

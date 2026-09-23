@@ -6829,6 +6829,106 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (string-match-p "^\\*\\*\\* Generated$"
                               (buffer-string))))))
 
+(ert-deftest ende-test/chat-response-blocks-stay-opaque-and-close-at-boundary ()
+  (let* ((source
+          (concat "* First active heading\n"
+                  "#+begin_src org\n"
+                  "#+ENDE_CHAT_TITLE: literal text\n"
+                  ":PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                  "*** Literal source heading\n"
+                  ",* Previously escaped heading\n"
+                  ",#+end_src\n"
+                  "#+begin_quote\n**** Nested source heading\n#+end_quote\n"
+                  "#+end_src\n"
+                  "** Second active heading\n"
+                  "#+begin_quote\n*** Literal quote heading\n"))
+         (normalized (ende-chat--normalize-response source 2)))
+    (should-not (plist-get normalized :title))
+    (should
+     (equal (plist-get normalized :content)
+            (concat "*** First active heading\n"
+                    "#+begin_src org\n"
+                    ",#+ENDE_CHAT_TITLE: literal text\n"
+                    ":PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                    ",*** Literal source heading\n"
+                    ",,* Previously escaped heading\n"
+                    ",,#+end_src\n"
+                    ",#+begin_quote\n,**** Nested source heading\n,#+end_quote\n"
+                    "#+end_src\n"
+                    "**** Second active heading\n"
+                    "#+begin_quote\n,*** Literal quote heading\n"
+                    "#+end_quote")))))
+
+(ert-deftest ende-test/chat-unclosed-response-block-does-not-swallow-later-replies ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+        (ende-llm-function
+         (ende-test--fake-llm
+          '((:content "First answer\n#+begin_src org\n*** Literal heading"
+             :thinking "Plan\n#+begin_quote\n* Literal thought")
+            "Second answer"
+            "Third answer")
+          t)))
+    (ende-test--with-buffer
+        (concat "* Topic\n"
+                "** First question\nFirst request\n"
+                "** Second question\nSecond request\n"
+                "** Third question\nThird request\n"
+                "** Later section\nKeep this section\n")
+      (org-mode)
+      (ende-test--chat-goto "** First question")
+      (setq ende--queue-suspended t)
+      (let ((first-job (ende-ask)))
+        (ende-test--chat-goto "** Second question")
+        (let ((second-job (ende-ask)))
+          (setq ende--queue-suspended nil)
+          (ende-process-next)
+          (should (= (length ende-test--calls) 2))
+          ;; The lower reply finishes while the earlier request is still open.
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (should (eq (ende-job-state second-job) 'completed))
+          (ende-test--complete-call (nth 0 ende-test--calls))
+          (should (eq (ende-job-state first-job) 'completed))
+          (should (string-match-p (regexp-quote "#+end_src")
+                                  (buffer-string)))
+          (should (string-match-p (regexp-quote "#+end_quote")
+                                  (buffer-string)))
+          (should (string-match-p (regexp-quote ",* Literal thought")
+                                  (buffer-string)))
+          (should (string-match-p
+                   (regexp-quote
+                    "#+begin_src org\n,*** Literal heading\n#+end_src")
+                   (buffer-string)))
+          (let* ((document (ende-chat--build-document))
+                 (headlines (ende-chat--document-headlines document)))
+            (dolist (title '("First question" "Second question"
+                             "Third question" "Later section"))
+              (should (cl-some
+                       (lambda (headline)
+                         (string= (org-element-property :raw-value headline)
+                                  title))
+                       headlines)))
+            (should-not
+             (cl-some
+              (lambda (headline)
+                (member (org-element-property :raw-value headline)
+                        '("Literal heading" "Literal thought")))
+              headlines))
+            (should (= (length (ende-test--chat-response-headlines)) 2)))
+          ;; A fresh request below the repaired response must remain usable.
+          (ende-test--chat-goto "** Third question")
+          (let ((third-job (ende-ask)))
+            (should (= (length ende-test--calls) 3))
+            (ende-test--complete-call (nth 2 ende-test--calls))
+            (should (eq (ende-job-state third-job) 'completed)))
+          (ende-test--chat-goto "** Later section")
+          (let ((context (ende-test--chat-context-text
+                          (ende-chat-context-at-point))))
+            (should (string-match-p "First answer" context))
+            (should (string-match-p "Second answer" context))
+            (should (string-match-p "Third answer" context))
+            (should (string-match-p "Keep this section" context))))))))
+
 (ert-deftest ende-test/chat-reasoning-is-org-structured-folded-and-configurable ()
   (ende-test--reset)
   (let* ((thinking (concat "Plan with /ordinary Org emphasis/.\n"
