@@ -25,36 +25,20 @@
 (require 'ende-queue)
 
 (defconst ende-insert-system
-  "You are an inline code and text completion engine. You will receive a document containing a <CURSOR> marker indicating where your output will be inserted.
+  "Act on the user's intent by inserting useful content at <CURSOR>.
+The document may contain questions, instructions, prose, or code.
+Infer the intended task from the surrounding content, especially near <CURSOR>.
+Answer questions and carry out requests; do not merely continue their wording.
+When no request is apparent, supply the most useful completion for the context.
 
-### Output Constraints
-- Output ONLY the exact text to be inserted at <CURSOR>.\040
-- Never wrap your response in markdown code blocks (```) or add explanatory commentary.
-- Output text VERBATIM. Use real line breaks for multi-line completions, never literal \"\\n\" strings.
-
-### Completion Rules
-1. No Duplication: Do not repeat words, code, or symbols that already exist immediately before or after <CURSOR>.
-2. Comment Awareness: If <CURSOR> sits directly after a comment marker (e.g., `;;`, `//`, `#`), do NOT start your output with another comment marker. If your completion spans multiple lines inside a comment block, prefix only the new subsequent lines with the appropriate comment symbol.
-3. No Empty Responses: Do not return an empty string. If the cursor sits at a natural boundary, insert a single space or a logical continuation phrase.
-
-### Examples
-
-Input:
-;; <CURSOR>refactor this later
-Output:
-TODO:\040
-
-Input:
-// <CURSOR>
-// next line
-Output:
-first line
-
-Input:
-def calculate_total(price, tax):
-    <CURSOR>
-Output:
-return price * (1 + tax)"
+Return ONLY the text to insert at <CURSOR>, without commentary about the
+insertion or added wrappers. The existing document will remain unchanged.
+Read both sides of <CURSOR>; do not repeat content already present.
+Match the document's format, language, and indentation where appropriate.
+Use actual line breaks, not literal \\n sequences.
+If already after a comment prefix, do not repeat it on the current line;
+prefix subsequent comment lines as appropriate.
+If nothing useful should be inserted, return no text."
   "System prompt instructions for cursor completion.")
 
 (defconst ende-improve-system
