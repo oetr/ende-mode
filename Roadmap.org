@@ -67,6 +67,8 @@ I want ot color model names golden.
 
 Maybe we can use the current theme here, so that the numbers are always visible.
 
+* DONE Place the model name and effort into drawer right away
+- so that upon failure, I know which model fucked it up
 * Tighten summary
 - optimize the prompt
 - improve the link format that the model should use
@@ -93,5 +95,3 @@ Extract operations such as:
 
 These should encode domain operations, not merely save a few lines of nesting.
 
-* Place the model name and effort into drawer right away
-- so that upon failure, I know which model fucked it up
