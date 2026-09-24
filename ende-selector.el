@@ -312,53 +312,47 @@ the discovered pricing metadata for those model IDs."
 (defun ende-selector--render ()
   "Render the current selector state."
   (let* ((model-name (ende-selector--model-name))
-         (provider (ende-selector--display-label
-                    (ende-selector--display-provider) 24))
-         (model (ende-selector--display-label
-                 (or model-name
+         (provider (ende-selector--display-provider))
+         (model (or model-name
                      (if (memq ende-selector--model-state
                                '(:loading :validating))
                          "validating..."
-                       "(none available)"))
-                 24))
+                       "none available")))
          (model-status
           (pcase ende-selector--model-state
             ((or :loading :validating)
-             (if model-name " [validating...]" ""))
-            (:error " [probe failed]")
+             (if model-name " validating..." ""))
+            (:error " probe failed")
             (_ "")))
           (effort
            (pcase ende-selector--effort-state
              (:loading "validating...")
-             (:remembered (format "%s [verify]" ende-selector--effort))
-             (:error "(unavailable)")
-             (_ (or ende-selector--effort "(none)")))))
+             (:remembered (format "%s" ende-selector--effort))
+             (:error "unavailable")
+             (_ (or ende-selector--effort "none")))))
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert (format "Provider:     %s(n/p)\n" provider))
-      (insert (format "Model:        %s%s(C-n / C-p)\n"
-                      model model-status))
-      (insert (format "Concurrency:  %-24d(c/C)\n"
-                      (ende-selector--provider-concurrency)))
-      (insert (format "Parallel:     %-24s(P)\n"
+      (insert (format "n/p      - Provider:      %s\n"   provider))
+      (insert (format "C-n/C-p  - Model:         %s%s\n" model-status model))
+      (insert (format "c/C      - Concurrency:   %d\n" (ende-selector--provider-concurrency)))
+      (insert (format "P        - Parallel:      %s\n"
                       (if (ende-selector--provider-parallel-p)
                           "on"
                         "off")))
-      (insert (format "Effort:       %-24s(e)\n\n" effort))
-      (insert (format "Quota:        %s\n\n"
-                      (ende-selector--quota-display)))
-      (insert "i  - insert\n"
-               "a  - ask\n"
-               "I  - insert anywhere\n"
-               "w  - write anywhere\n"
-               "m  - select/search model\n"
-               "e  - select reasoning effort\n"
-               "s  - summarize\n"
-               "r  - rubber duck\n\n"
-               "RET       - confirm choice\n"
-               "C-c C-c   - approve all LLM changes\n"
-               "C-c C-k   - reject all LLM changes\n"
-               "q/ESC     - close\n")
+      (insert (format "e        - Effort:        %s\n\n" effort))
+      (insert (format "Quota: %s\n\n" (ende-selector--quota-display)))
+      (insert "a  - ask\n"
+	      "e  - select reasoning effort\n"
+	      "i  - insert\n"
+              "I  - insert anywhere\n"
+              "m  - select/search model\n"
+	      "r  - rubber duck\n"
+              "s  - summarize\n"
+	      "w  - write anywhere\n\n"
+              "C-c C-c   - approve all LLM changes\n"
+              "C-c C-k   - reject all LLM changes\n"
+	      "RET       - confirm and save selection\n"
+              "q/ESC     - close without saving\n")
       (goto-char (point-min)))))
 
 (defun ende-selector--cancel-probe ()
