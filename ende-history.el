@@ -45,8 +45,8 @@
 
 (cl-defstruct (ende-history--entry
                (:constructor ende-history--make-entry))
-  job type prompt thinking-parts content-parts status metadata usage result
-  partial-result finish-reason error started-at finished-at)
+  job type prompt thinking-parts content-parts diagnostic-parts status metadata
+  usage result partial-result finish-reason error started-at finished-at)
 
 (defvar ende-history--entries (make-hash-table :test #'eq)
   "In-progress history entries keyed by job object.")
@@ -154,6 +154,10 @@
                      ((eq type :metadata)
                       (setf (ende-history--entry-metadata entry)
                             (plist-get event :metadata)))
+                     ((eq type :diagnostic)
+                      (when-let* ((text (plist-get event :text)))
+                        (push text (ende-history--entry-diagnostic-parts
+                                    entry))))
                      ((eq type :done)
                       (let* ((content (plist-get event :content))
                              (result (plist-get event :result))
@@ -357,6 +361,10 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
                                 (nreverse
                                  (ende-history--entry-content-parts entry))
                                 ""))
+           (diagnostics (mapconcat #'identity
+                                   (nreverse
+                                    (ende-history--entry-diagnostic-parts entry))
+                                   "\n"))
            (usage (ende-history--entry-usage entry))
            (metrics-result (or result
                                (ende-history--entry-partial-result entry)))
@@ -364,10 +372,10 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
                               (and (listp metrics-result)
                                    (plist-get metrics-result :finish-reason))))
            (partial-result (ende-history--entry-partial-result entry))
-            (structured-summary
-             (or (ende-history--structured-summary result)
-                 (ende-history--structured-summary partial-result)))
-            (skipped-edit-errors
+           (structured-summary
+            (or (ende-history--structured-summary result)
+                (ende-history--structured-summary partial-result)))
+           (skipped-edit-errors
             (or (and (listp result)
                      (or (plist-get result :write-anywhere-errors)
                          (plist-get result :insert-anywhere-errors)))
@@ -393,6 +401,7 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
                "Prompt" (ende-history--entry-prompt entry))
               (ende-history--insert-section "Thinking" thinking)
               (ende-history--insert-section "Output" content)
+              (ende-history--insert-section "Diagnostics" diagnostics)
                (when skipped-edit-errors
                  (ende-history--insert-section
                   "Skipped edits"

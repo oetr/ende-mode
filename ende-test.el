@@ -763,6 +763,114 @@ process for cancellation tests."
                                 :id)
                      "call-2")))))
 
+(ert-deftest ende-test/openai-tool-diagnostics-are-safe-and-configurable ()
+  (should (eq ende-codex-log-tool-diagnostics t))
+  (let* ((definition
+          (cl-find-if
+           (lambda (candidate)
+             (equal (alist-get :name (alist-get :function candidate))
+                    "read_file"))
+           (ende-tool-definitions)))
+         (body (ende-codex--request-body
+                (list (cons "user" "question"))
+                (list :model "gpt-test"
+                      :tool-definitions (list definition))))
+         (events nil)
+         (session
+          (ende-codex--make-session
+           :profile '(:model "gpt-test")
+           :callbacks (list :on-event
+                            (lambda (event) (push event events)))
+           :tool-calls (make-hash-table :test #'eql))))
+    (ende-codex--diagnose-request session body)
+    (ende-codex--handle-event
+     session
+     (ende-protocol-json-read-string
+      (concat
+       "{\"type\":\"response.completed\",\"response\":{\"output\":["
+       "{\"type\":\"function_call\",\"call_id\":\"call-1\","
+       "\"name\":\"read_file\",\"arguments\":"
+       "\"{\\\"path\\\":\\\"secret.el\\\"}\"}]}}")))
+    (let ((diagnostics
+           (mapcar (lambda (event) (plist-get event :text))
+                   (cl-remove-if-not
+                    (lambda (event)
+                      (eq (plist-get event :type) :diagnostic))
+                    (nreverse events)))))
+      (should (equal diagnostics
+                     '("OpenAI Responses tools sent: read_file"
+                       "OpenAI Responses output items: function_call(read_file)")))
+      (should-not (string-match-p "secret\\.el"
+                                  (mapconcat #'identity diagnostics "\n")))))
+  (let ((ende-codex-log-tool-diagnostics nil)
+        (events nil))
+    (let ((session
+           (ende-codex--make-session
+            :callbacks (list :on-event
+                             (lambda (event) (push event events))))))
+      (ende-codex--diagnose-request session '((:tools . nil)))
+      (should-not events))))
+
+(ert-deftest ende-test/openai-streamed-function-call-is-collected-without-final-output ()
+  (let* ((events nil)
+         (session
+          (ende-codex--make-session
+           :profile '(:model "gpt-test")
+           :callbacks (list :on-event
+                            (lambda (event) (push event events)))
+           :estimated-chars 0)))
+    (dolist
+        (event
+         (list
+          (concat
+           "{\"type\":\"response.output_item.added\","
+           "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
+           "\"type\":\"function_call\",\"call_id\":\"call-1\","
+           "\"name\":\"read_file\",\"arguments\":\"\"}}")
+          (concat
+           "{\"type\":\"response.function_call_arguments.delta\","
+           "\"output_index\":0,\"item_id\":\"fc_1\","
+           "\"delta\":\"{\\\"path\\\":\"}")
+          (concat
+           "{\"type\":\"response.function_call_arguments.delta\","
+           "\"output_index\":0,\"item_id\":\"fc_1\","
+           "\"delta\":\"\\\"ende.el\\\"}\"}")
+          (concat
+           "{\"type\":\"response.function_call_arguments.done\","
+           "\"output_index\":0,\"item_id\":\"fc_1\","
+           "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}")
+          (concat
+           "{\"type\":\"response.output_item.done\","
+           "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
+           "\"type\":\"function_call\",\"call_id\":\"call-1\","
+           "\"name\":\"read_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}}")
+          (concat
+           "{\"type\":\"response.completed\",\"response\":{"
+           "\"output\":[],\"usage\":{\"output_tokens\":40}}}")))
+      (ende-codex--handle-event
+       session (ende-protocol-json-read-string event)))
+    (let* ((call (car (plist-get (ende-codex--result session) :tool-calls)))
+           (diagnostics
+            (mapcar (lambda (event) (plist-get event :text))
+                    (cl-remove-if-not
+                     (lambda (event)
+                       (eq (plist-get event :type) :diagnostic))
+                     (nreverse events)))))
+      (should (equal (plist-get call :id) "call-1"))
+      (should (equal (plist-get call :name) "read_file"))
+      (should (equal (plist-get call :arguments)
+                     "{\"path\":\"ende.el\"}"))
+      (should (member
+               "OpenAI Responses response.output_item.added: function_call(read_file)"
+               diagnostics))
+      (should (member
+               "OpenAI Responses response.output_item.done: function_call(read_file)"
+               diagnostics))
+      (should (member "OpenAI Responses output items: (none)" diagnostics))
+      (should-not (string-match-p "ende\\.el"
+                                  (mapconcat #'identity diagnostics "\n"))))))
+
 (defmacro ende-test--with-buffer (contents &rest body)
   "Evaluate BODY in a temporary buffer containing CONTENTS."
   (declare (indent 1) (debug t))
@@ -5484,6 +5592,27 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should (string-match-p "Source metadata:" text))
           (should (string-match-p "base" text))
           (should (eq buffer-undo-list t)))))))
+
+(ert-deftest ende-test/history-retains-diagnostics ()
+  (ende-test--reset)
+  (let ((job (ende--make-job :id 42 :type 'chat)))
+    (ende-history-event
+     job '(:type :begin :messages (("user" . "question"))))
+    (ende-history-event
+     job '(:type :diagnostic :text "OpenAI Responses tools sent: read_file"))
+    (ende-history-event
+     job '(:type :diagnostic
+           :text "OpenAI Responses output items: function_call(read_file)"))
+    (ende-history-event
+     job '(:type :done :content "answer" :result (:content "answer")))
+    (with-current-buffer ende-history-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-match-p "\\*\\* Diagnostics" text))
+        (should (string-match-p
+                 "OpenAI Responses tools sent: read_file" text))
+        (should (string-match-p
+                 "OpenAI Responses output items: function_call(read_file)"
+                 text))))))
 
 (ert-deftest ende-test/history-omits-source-metadata-without-prompts ()
   (ende-test--reset)

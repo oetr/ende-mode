@@ -63,6 +63,14 @@
   :type 'string
   :group 'ende)
 
+(defcustom ende-codex-log-tool-diagnostics t
+  "Non-nil to retain OpenAI Responses tool diagnostics in job history.
+
+Diagnostics list the tool names sent and output-item types received.  They do
+not include prompts, tool arguments, or response contents."
+  :type 'boolean
+  :group 'ende)
+
 (defconst ende-codex--generation-host "chatgpt.com"
   "Official host allowed for Codex generation and model discovery.")
 
@@ -1017,9 +1025,10 @@ is queried for every call; it does not share the model catalog cache."
          (ende-codex--lifecycle session)
          outcome value
          (when (or (ende-codex--session-content-parts session)
-                   (ende-codex--session-thinking-parts session)
-                   (ende-codex--session-usage session))
-           (ende-codex--result session)))
+                    (ende-codex--session-thinking-parts session)
+                    (ende-codex--session-usage session)
+                    (ende-codex--tool-call-list session))
+            (ende-codex--result session)))
       (ende-codex--cleanup session)
       (setf (ende-codex--session-callbacks session) nil))))
 
@@ -1079,34 +1088,136 @@ is queried for every call; it does not share the model catalog cache."
                               0.0)
                      :usage usage)))))
 
+(defun ende-codex--tool-call-table (session)
+  "Return the function-call table for SESSION, creating it if needed."
+  (or (ende-codex--session-tool-calls session)
+      (let ((table (make-hash-table :test #'eql)))
+        (setf (ende-codex--session-tool-calls session) table)
+        table)))
+
+(defun ende-codex--collect-tool-call-item (session item output-index)
+  "Collect function-call ITEM for SESSION at OUTPUT-INDEX."
+  (when (equal (ende-protocol-json-get "type" item) "function_call")
+    (let* ((table (ende-codex--tool-call-table session))
+           (old (gethash output-index table))
+           (arguments (ende-protocol-json-get "arguments" item)))
+      (puthash
+       output-index
+       (list :id (or (ende-protocol-json-get "call_id" item)
+                     (plist-get old :id))
+             :name (or (ende-protocol-json-get "name" item)
+                       (plist-get old :name))
+             :arguments (if (and (stringp arguments)
+                                 (not (string-empty-p arguments)))
+                            arguments
+                          (plist-get old :arguments)))
+       table))))
+
 (defun ende-codex--collect-tool-calls (session items)
   "Collect Responses API function-call ITEMS for SESSION."
-  (let ((items (cond ((vectorp items) (append items nil))
-                     ((listp items) items)))
-        (table (or (ende-codex--session-tool-calls session)
-                   (let ((table (make-hash-table :test #'eql)))
-                     (setf (ende-codex--session-tool-calls session) table)
-                     table)))
-        (index 0))
-    (dolist (item items)
-      (when (equal (ende-protocol-json-get "type" item) "function_call")
-        (puthash (or (ende-protocol-json-get "output_index" item) index)
-                 (list :id (ende-protocol-json-get "call_id" item)
-                       :name (ende-protocol-json-get "name" item)
-                       :arguments
-                       (ende-protocol-json-get "arguments" item))
-                 table))
+  (let ((index 0))
+    (dolist (item (ende-codex--output-items items))
+      (ende-codex--collect-tool-call-item
+       session item (or (ende-protocol-json-get "output_index" item) index))
       (cl-incf index))))
+
+(defun ende-codex--update-tool-call-arguments
+    (session output-index arguments &optional append)
+  "Update the call at OUTPUT-INDEX with ARGUMENTS.
+When APPEND is non-nil, append the argument delta to the stored value."
+  (let* ((table (ende-codex--session-tool-calls session))
+         (call (and (hash-table-p table) (gethash output-index table))))
+    (when (and call (stringp arguments))
+      (setf (plist-get call :arguments)
+            (if append
+                (concat (or (plist-get call :arguments) "") arguments)
+              arguments))
+      (puthash output-index call table))))
+
+(defun ende-codex--output-items (items)
+  "Return ITEMS as a list from a Responses API JSON array."
+  (cond
+   ((and (vectorp items) (not (stringp items))) (append items nil))
+   ((listp items) items)))
+
+(defun ende-codex--diagnostic-tool-names (tools)
+  "Return a safe summary of tool NAMES from Responses API TOOLS."
+  (if tools
+      (mapconcat (lambda (tool)
+                   (or (alist-get :name tool) "<unknown>"))
+                 tools ", ")
+    "(none)"))
+
+(defun ende-codex--diagnostic-output-items (items)
+  "Return a safe summary of output-item TYPES in ITEMS."
+  (let ((items (ende-codex--output-items items)))
+    (if items
+        (mapconcat
+         (lambda (item)
+           (let ((type (or (ende-protocol-json-get "type" item) "<unknown>"))
+                 (name (ende-protocol-json-get "name" item)))
+             (if (and (equal type "function_call") name)
+                 (format "%s(%s)" type name)
+               type)))
+         items ", ")
+      "(none)")))
+
+(defun ende-codex--emit-diagnostic (session text)
+  "Emit diagnostic TEXT for SESSION when diagnostics are enabled."
+  (when ende-codex-log-tool-diagnostics
+    (ende-codex--emit session (list :type :diagnostic :text text))))
+
+(defun ende-codex--diagnose-request (session body)
+  "Record the tool names in Responses request BODY for SESSION."
+  (ende-codex--emit-diagnostic
+   session
+   (format "OpenAI Responses tools sent: %s"
+           (ende-codex--diagnostic-tool-names (alist-get :tools body)))))
+
+(defun ende-codex--diagnose-output-item (session event-type item)
+  "Record the safe summary of ITEM received in EVENT-TYPE."
+  (ende-codex--emit-diagnostic
+   session
+   (format "OpenAI Responses %s: %s"
+           event-type
+           (ende-codex--diagnostic-output-items (list item)))))
 
 (defun ende-codex--handle-event (session json)
   "Handle one parsed Responses API event JSON object."
   (let* ((type (ende-protocol-json-get "type" json))
          (response (ende-protocol-json-get "response" json))
+         (output (ende-protocol-json-get "output" response))
+         (item (ende-protocol-json-get "item" json))
+         (output-index (ende-protocol-json-get "output_index" json))
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
     (when (member type '("response.completed" "response.done"))
+      (unless (ende-codex--session-terminal-event session)
+        (ende-codex--emit-diagnostic
+         session
+         (format "OpenAI Responses output items: %s"
+                 (ende-codex--diagnostic-output-items output))))
       (ende-codex--collect-tool-calls
-       session (ende-protocol-json-get "output" response)))
+       session output))
+    (when (and item
+               (member type '("response.output_item.added"
+                              "response.output_item.done")))
+      (ende-codex--collect-tool-call-item session item output-index)
+      (ende-codex--diagnose-output-item session type item))
+    (when (member type '("response.function_call_arguments.delta"
+                         "response.function_call_arguments.done"))
+      (let ((arguments (ende-protocol-json-get
+                        (if (string-suffix-p ".delta" type) "delta"
+                          "arguments")
+                        json)))
+        (ende-codex--update-tool-call-arguments
+         session output-index arguments
+         (string-suffix-p ".delta" type)))
+      (when (string-suffix-p ".done" type)
+        (ende-codex--emit-diagnostic
+         session
+         (format "OpenAI Responses %s at output index %s"
+                  type (or output-index "<unknown>")))))
     (when (stringp model)
       (setf (ende-codex--session-actual-model session) model))
     (when (or (stringp model)
@@ -1368,26 +1479,28 @@ is queried for every call; it does not share the model catalog cache."
                (or (plist-get profile :url) ende-codex-endpoint)))
          (account-id (ende-codex--account-id auth))
          (residency (ende-codex--residency auth))
-          (headers (append
-                    (list (concat "Authorization: Bearer "
-                                  (plist-get auth :access))
-                          "originator: opencode"
-                         (concat "session-id: "
-                                 (secure-hash 'sha256
-                                              (format "%s-%s"
-                                                      (float-time) (random)))))
-                   (when account-id
-                     (list (concat "ChatGPT-Account-Id: " account-id)))
-                   (when residency
-                     (list (concat "x-openai-internal-codex-residency: "
-                                   residency)))))
+         (headers
+          (append
+           (list (concat "Authorization: Bearer "
+                         (plist-get auth :access))
+                 "originator: opencode"
+                 (concat "session-id: "
+                         (secure-hash 'sha256
+                                      (format "%s-%s"
+                                              (float-time) (random)))))
+           (when account-id
+             (list (concat "ChatGPT-Account-Id: " account-id)))
+           (when residency
+             (list (concat "x-openai-internal-codex-residency: "
+                           residency)))))
+         (request-body (ende-codex--request-body messages profile))
          (body (encode-coding-string
-                (json-encode (ende-codex--request-body messages profile))
+                (json-encode request-body)
                 'utf-8))
          (request
           (ende-curl-start-request
-            :profile profile
-            :url url
+           :profile profile
+           :url url
            :internal-headers headers
            :name (format "ende-codex-%s"
                          (or (plist-get profile :job-id) "request"))
@@ -1395,19 +1508,20 @@ is queried for every call; it does not share the model catalog cache."
                       (ende-curl-command profile headers-file config-file))
            :filter (apply-partially #'ende-codex--filter session)
            :sentinel (apply-partially #'ende-codex--sentinel session))))
-     (setf (ende-codex--session-process session) (plist-get request :process)
-          (ende-codex--session-process-buffer session)
-          (plist-get request :response-buffer)
-          (ende-codex--session-stderr-buffer session)
-          (plist-get request :stderr-buffer)
-          (ende-codex--session-headers-file session)
-          (plist-get request :headers-file)
-           (ende-codex--session-config-file session)
-           (plist-get request :config-file))
-     (ende-transport-session-set-resources
-      (ende-codex--lifecycle session) request)
-     (process-send-string (ende-codex--session-process session) body)
-    (process-send-eof (ende-codex--session-process session))))
+      (setf (ende-codex--session-process session) (plist-get request :process)
+            (ende-codex--session-process-buffer session)
+             (plist-get request :response-buffer)
+             (ende-codex--session-stderr-buffer session)
+             (plist-get request :stderr-buffer)
+             (ende-codex--session-headers-file session)
+             (plist-get request :headers-file)
+             (ende-codex--session-config-file session)
+             (plist-get request :config-file))
+      (ende-transport-session-set-resources
+       (ende-codex--lifecycle session) request)
+      (ende-codex--diagnose-request session request-body)
+      (process-send-string (ende-codex--session-process session) body)
+      (process-send-eof (ende-codex--session-process session))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
