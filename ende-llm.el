@@ -27,7 +27,9 @@
 (defvar ende-llm-function #'ende-llm-default
   "Function used to dispatch requests to the LLM.
 Called with (MESSAGES CALLBACKS &optional OPTIONS).
-CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
+CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.
+OPTIONS may include :tool-definitions; successful results may then include
+normalized :tool-calls for the chat tool loop.")
 
 (defcustom ende-usage-update-interval 0.1
   "Minimum seconds between estimated streaming usage updates."
@@ -42,6 +44,7 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
   profile callbacks lifecycle discovery-cancel model messages json-data process process-buffer stderr-buffer
   stderr-process
   headers-file config-file sse reasoning content-parts thinking-parts usage
+  tool-calls
   provider-error actual-model actual-provider estimated-chars received-bytes
   response-preview response-preview-parts response-preview-bytes finish-reason
   generation-start last-status last-usage-update terminal)
@@ -253,26 +256,71 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
          (delta (ende-protocol-json-get "delta" choice))
          (message (ende-protocol-json-get "message" choice)))
     (list
-      :finish-reason (ende-protocol-json-get "finish_reason" choice)
+     :finish-reason (ende-protocol-json-get "finish_reason" choice)
      :reasoning (ende-llm--first-json-value
                  (list delta choice)
                  '("reasoning_content" "reasoning"))
      :content (or (ende-llm--first-json-value
-                   (list delta choice)
-                   '("content" "text"))
-                   (ende-protocol-json-get "content" message)))))
+                  (list delta choice)
+                  '("content" "text"))
+                 (ende-protocol-json-get "content" message))
+     :tool-calls (or (ende-protocol-json-get "tool_calls" delta)
+                     (ende-protocol-json-get "tool_calls" message)))))
+
+(defun ende-llm--sequence (value)
+  "Return JSON array VALUE as a list."
+  (cond
+   ((vectorp value) (append value nil))
+   ((listp value) value)))
+
+(defun ende-llm--collect-tool-calls (session calls)
+  "Add streaming OpenAI-compatible CALLS to SESSION."
+  (let ((table (or (ende-llm--session-tool-calls session)
+                   (let ((table (make-hash-table :test #'eql)))
+                     (setf (ende-llm--session-tool-calls session) table)
+                     table))))
+    (dolist (call (ende-llm--sequence calls))
+      (let* ((function (ende-protocol-json-get "function" call))
+             (index (or (ende-protocol-json-get "index" call)
+                        (hash-table-count table)))
+             (previous (gethash index table))
+             (id (or (ende-protocol-json-get "id" call)
+                     (plist-get previous :id)))
+             (name (ende-protocol-json-get "name" function))
+             (arguments (ende-protocol-json-get "arguments" function)))
+        (puthash index
+                 (list :id id
+                       :name (concat (or (plist-get previous :name) "")
+                                     (or name ""))
+                       :arguments
+                       (concat (or (plist-get previous :arguments) "")
+                               (or arguments "")))
+                 table)))))
+
+(defun ende-llm--tool-call-list (session)
+  "Return collected calls from SESSION in provider index order."
+  (let (calls)
+    (when (hash-table-p (ende-llm--session-tool-calls session))
+      (maphash (lambda (index call)
+                 (push (cons index call) calls))
+               (ende-llm--session-tool-calls session)))
+    (mapcar #'cdr
+            (sort calls (lambda (left right) (< (car left) (car right)))))))
 
 (defun ende-llm--handle-json (session json)
   "Handle one parsed streaming JSON object for SESSION."
   (if (ende-protocol-json-has-key-p "error" json)
       (ende-llm--handle-provider-error
-        session (ende-protocol-json-get "error" json))
+       session (ende-protocol-json-get "error" json))
     (ende-llm--handle-metadata session json)
     (unless (ende-llm--session-terminal session)
       (let* ((event (ende-llm--response-event json))
              (finish-reason (plist-get event :finish-reason))
              (reasoning (plist-get event :reasoning))
-             (content (plist-get event :content)))
+             (content (plist-get event :content))
+             (tool-calls (plist-get event :tool-calls)))
+        (when tool-calls
+          (ende-llm--collect-tool-calls session tool-calls))
         (when (stringp finish-reason)
           (setf (ende-llm--session-finish-reason session) finish-reason))
         (ende-llm--handle-usage
@@ -311,36 +359,43 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
                                 4.0)))))
          (started (or (ende-llm--session-generation-start session)
                       (float-time))))
-     (list :content (mapconcat #'identity
+    (list :content (mapconcat #'identity
+                              (reverse
+                               (ende-llm--session-content-parts session)) "")
+          :thinking (mapconcat #'identity
                                (reverse
-                                (ende-llm--session-content-parts session)) "")
-           :thinking (mapconcat #'identity
-                                (reverse
-                                 (ende-llm--session-thinking-parts session)) "")
+                                (ende-llm--session-thinking-parts session)) "")
           :usage usage :tokens tokens :estimated (null reported)
-           :speed (/ (float tokens)
-                     (max 0.001 (- (float-time) started)))
-           :finish-reason (ende-llm--session-finish-reason session)
-           :provider (ende-llm--session-actual-provider session)
+          :speed (/ (float tokens)
+                    (max 0.001 (- (float-time) started)))
+          :finish-reason (ende-llm--session-finish-reason session)
+          :tool-calls (ende-llm--tool-call-list session)
+          :provider (ende-llm--session-actual-provider session)
           :model (or (ende-llm--session-actual-model session)
-                      (ende-llm--session-model session)))))
+                     (ende-llm--session-model session)))))
 
 (defun ende-llm--handoff-to-batch (session)
   "Retry SESSION through OpenRouter Batch after its exact Batch-only error."
-  (let ((callbacks (ende-llm--session-callbacks session))
-        (profile (copy-tree (ende-llm--session-profile session)))
-        (messages (ende-llm--session-messages session)))
-    (setq profile (plist-put profile :transport 'openrouter-batch))
-    (condition-case caught
-        (progn
-          (ende-openrouter-batch-default messages callbacks profile)
-          (setf (ende-llm--session-terminal session) 'handoff)
-          (ende-llm--cleanup-session session))
-      ((error quit)
-       (ende-llm--fail
-        session
-        (ende-error-create
-         :kind 'startup :message (error-message-string caught)))))))
+  (if (plist-get (ende-llm--session-profile session) :tool-definitions)
+      (ende-llm--fail
+       session
+       (ende-error-create
+        :kind 'unsupported
+        :message "Tool calls are unavailable with the OpenRouter batch transport"))
+    (let ((callbacks (ende-llm--session-callbacks session))
+          (profile (copy-tree (ende-llm--session-profile session)))
+          (messages (ende-llm--session-messages session)))
+      (setq profile (plist-put profile :transport 'openrouter-batch))
+      (condition-case caught
+          (progn
+            (ende-openrouter-batch-default messages callbacks profile)
+            (setf (ende-llm--session-terminal session) 'handoff)
+            (ende-llm--cleanup-session session))
+        ((error quit)
+         (ende-llm--fail
+          session
+          (ende-error-create
+           :kind 'startup :message (error-message-string caught))))))))
 
 (defun ende-llm--finish-success (session)
   "Validate and successfully finish SESSION, or settle it with an error."
@@ -503,13 +558,32 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
     (ende-llm--emit-event
      session (list :type :metadata :metadata metadata))))
 
+(defun ende-llm--tool-call-json (call)
+  "Encode normalized tool CALL for a Chat Completions request."
+  `((:id . ,(plist-get call :id))
+    (:type . "function")
+    (:function . ((:name . ,(plist-get call :name))
+                  (:arguments . ,(plist-get call :arguments))))))
+
+(defun ende-llm--message-json (message)
+  "Encode internal MESSAGE for a Chat Completions request."
+  (if (and (consp message) (stringp (car message)))
+      `((:role . ,(car message)) (:content . ,(cdr message)))
+    (let ((role (plist-get message :role))
+          (content (plist-get message :content))
+          (calls (plist-get message :tool-calls))
+          (call-id (plist-get message :tool-call-id)))
+      (append (list (cons :role role) (cons :content content))
+              (when calls
+                (list (cons :tool_calls
+                            (mapcar #'ende-llm--tool-call-json calls))))
+              (when call-id
+                (list (cons :tool_call_id call-id)))))))
+
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
   (let ((body `((:model . ,(plist-get profile :model))
-                (:messages . ,(mapcar (lambda (message)
-                                        `((:role . ,(car message))
-                                          (:content . ,(cdr message))))
-                                      messages))
+                (:messages . ,(mapcar #'ende-llm--message-json messages))
                 (:temperature . ,(plist-get profile :temperature))
                 (:stream . t)
                 (:stream_options . ((:include_usage . t))))))
@@ -519,6 +593,11 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
               (append body
                       (list (cons :reasoning
                                   (list (cons :effort effort))))))))
+    (when (plist-get profile :tool-definitions)
+      (setq body
+            (append body
+                    (list (cons :tools (plist-get profile :tool-definitions))
+                          (cons :tool_choice "auto")))))
     (if (integerp ende-max-output-tokens)
         (append body (list (cons :max_tokens ende-max-output-tokens)))
       body)))
@@ -577,24 +656,26 @@ CALLBACKS is a plist with keys :on-start, :on-event, :on-done, and :on-error.")
    ((eq (plist-get options :wire-api) 'responses)
     (ende-codex-default messages callbacks options))
    (t
-    (let* ((profile (if (plist-get options :name)
-                       options
-                     (ende-plist-merge (ende-provider-profile) options)))
-         (session
-          (ende-llm--make-session
-            :profile profile :callbacks callbacks :model (plist-get profile :model)
-            :sse (ende-protocol-make-sse)
-            :reasoning (ende-protocol-make-reasoning)
-            :estimated-chars 0 :received-bytes 0
-            :response-preview-parts nil :response-preview-bytes 0)))
-    (condition-case startup-error
-        (ende-llm--start-session session messages)
-     ((error quit)
-        (ende-llm--fail
-         session
-         (ende-error-create :kind 'startup
+     (let* ((profile (if (plist-get options :name)
+                        options
+                      (ende-plist-merge (ende-provider-profile) options)))
+            (session
+             (ende-llm--make-session
+              :profile profile :callbacks callbacks
+              :model (plist-get profile :model)
+              :sse (ende-protocol-make-sse)
+              :reasoning (ende-protocol-make-reasoning)
+              :tool-calls (make-hash-table :test #'eql)
+              :estimated-chars 0 :received-bytes 0
+              :response-preview-parts nil :response-preview-bytes 0)))
+       (condition-case startup-error
+           (ende-llm--start-session session messages)
+         ((error quit)
+          (ende-llm--fail
+           session
+           (ende-error-create :kind 'startup
                               :message (error-message-string startup-error)))))
-        (ende-llm--session-process session)))))
+       (ende-llm--session-process session)))))
 
 (provide 'ende-llm)
 

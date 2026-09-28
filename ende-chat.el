@@ -23,6 +23,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'org)
 (require 'org-element)
 (require 'org-fold)
@@ -33,6 +34,7 @@
 (require 'ende-operations)
 (require 'ende-provider)
 (require 'ende-queue)
+(require 'ende-chat-config)
 (require 'ende-target)
 (require 'ende-ui)
 
@@ -71,6 +73,11 @@ Merge earlier summaries with subsequent information, keeping corrections and
 discarding superseded details. Be concise but self-contained."
   "Default compaction instructions when the instruction section has no body."
   :type 'string
+  :group 'ende)
+
+(defcustom ende-chat-max-tool-rounds 8
+  "Maximum model responses that may request tools in one chat job."
+  :type 'integer
   :group 'ende)
 
 (defconst ende-chat--context-fence-title "Agent: Context Fence"
@@ -1163,6 +1170,102 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (error "No chat context to compact"))
     messages))
 
+(defun ende-chat--tool-value (tool-call key)
+  "Return KEY from normalized TOOL-CALL."
+  (if (hash-table-p tool-call)
+      (gethash (substring (symbol-name key) 1) tool-call)
+    (plist-get tool-call key)))
+
+(defun ende-chat--tool-call-list (result)
+  "Return normalized tool calls from LLM RESULT."
+  (let ((calls (plist-get result :tool-calls)))
+    (cond
+     ((null calls) nil)
+     ((vectorp calls) (append calls nil))
+     ((ende-chat-config--proper-list-p calls) calls)
+     (t (error "Malformed tool calls returned by the provider")))))
+
+(defun ende-chat--tool-response (call configuration)
+  "Run normalized tool CALL under CONFIGURATION and return its JSON result."
+  (let* ((id (ende-chat--tool-value call :id))
+         (name (ende-chat--tool-value call :name))
+         (arguments (ende-chat--tool-value call :arguments)))
+    (unless (and (stringp id) (not (string-empty-p id))
+                 (stringp name) (not (string-empty-p name))
+                 (stringp arguments))
+      (error "Malformed provider tool call: %S" call))
+    (let ((parsed
+           (condition-case caught
+               (json-parse-string arguments :object-type 'hash-table)
+             (error
+              (list :invalid-arguments (error-message-string caught))))))
+      (json-encode
+       (if (hash-table-p parsed)
+           (ende-tool-call name parsed (plist-get configuration :root)
+                           configuration)
+         (list :ok nil :tool name
+               :error (format "tool arguments are not a JSON object: %s"
+                              (plist-get parsed :invalid-arguments))))))))
+
+(defun ende-chat--tool-definitions (configuration)
+  "Return provider tool definitions enabled by CONFIGURATION."
+  (let ((active (plist-get configuration :active-tools)))
+    (cl-remove-if-not
+     (lambda (definition)
+       (let* ((function (alist-get :function definition))
+              (name (and function (alist-get :name function))))
+         (and name (memq (intern name) active))))
+     (ende-tool-definitions))))
+
+(defun ende-chat--dispatch-with-tools (job messages configuration)
+  "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
+  (let* ((definitions (ende-chat--tool-definitions configuration))
+         (profile (copy-tree (ende-job-profile job)))
+         (rounds 0)
+         (maximum ende-chat-max-tool-rounds)
+         (messages (ende-operations--add-source-metadata job messages)))
+    (when (and definitions
+               (not (and (integerp maximum) (> maximum 0))))
+      (error "ende-chat-max-tool-rounds must be a positive integer"))
+    (when (and definitions
+               (eq (plist-get profile :transport) 'openrouter-batch))
+      (error "Tool calls are unavailable with the OpenRouter batch transport"))
+    (setq profile (plist-put profile :tool-definitions definitions))
+    (setf (ende-job-profile job) profile)
+    (cl-labels
+        ((on-done (result)
+           (ende--call-with-job-error
+            job
+            (lambda ()
+              (let ((calls (ende-chat--tool-call-list result)))
+                (if (null calls)
+                    (ende-chat--apply-result job result)
+                  (unless definitions
+                    (error "The provider returned an unrequested tool call"))
+                  (when (>= rounds maximum)
+                    (error "Chat exceeded %d tool-call rounds" maximum))
+                  (cl-incf rounds)
+                  (ende--handle-llm-event
+                   job '(:type :status :status "Running tools"))
+                  (setq messages
+                        (append
+                         messages
+                         (list (list :role "assistant"
+                                     :content (plist-get result :content)
+                                     :tool-calls calls))
+                         (mapcar
+                          (lambda (call)
+                            (list :role "tool"
+                                  :tool-call-id
+                                  (ende-chat--tool-value call :id)
+                                  :content
+                                  (ende-chat--tool-response
+                                   call configuration)))
+                          calls)))
+                  (ende--validate-messages messages)
+                  (ende--send-llm job messages #'on-done nil t)))))))
+      (ende--dispatch-llm job messages #'on-done nil nil t))))
+
 (defun ende-chat--run (job)
   "Serialize and dispatch a chat JOB at the moment it starts."
   (ende--call-with-job-error
@@ -1176,35 +1279,45 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
          (save-excursion
            (save-restriction
              (widen)
-             (let* ((document (ende-chat--build-document))
-                    (question (ende-chat--find-by-property
-                               document ende-chat-id-property question-id)))
-               (unless question
-                 (error "Chat question no longer exists"))
-               (unless (or compact
-                           (and (eq (ende-chat--effective-role document question)
-                                    'user)
-                                (eq (ende-chat--effective-visibility
-                                     document question)
-                                    'normal)))
-                 (error "Chat question is no longer eligible"))
-               (let ((messages
-                      (if compact
-                          (ende-chat--compact-messages
-                           document question
-                           (ende-chat--find-by-property
-                            document ende-chat-request-id-property
-                            (plist-get instruction :request-id))
-                           (plist-get instruction :source-fence))
-                        (ende-chat--serialize document question))))
-                 (unless messages
-                   (error "Chat question has no eligible content"))
-                 (ende--dispatch-llm
-                  job
-                  (cons (cons "system" (if compact ende-chat--compact-system
-                                        ende-chat--system))
-                        messages)
-                  (lambda (result) (ende-chat--apply-result job result))))))))))))
+              (let* ((document (ende-chat--build-document))
+                     (question (ende-chat--find-by-property
+                                document ende-chat-id-property question-id)))
+                (unless question
+                  (error "Chat question no longer exists"))
+                (unless (or compact
+                            (and (eq (ende-chat--effective-role document question)
+                                     'user)
+                                 (eq (ende-chat--effective-visibility
+                                      document question)
+                                     'normal)))
+                  (error "Chat question is no longer eligible"))
+                (let* ((tool-configuration
+                        (ende-chat-config-resolve
+                         (ende-chat--document-tree document)
+                         (ende-chat--document-parent document)
+                         question))
+                       (messages
+                        (if compact
+                            (ende-chat--compact-messages
+                             document question
+                             (ende-chat--find-by-property
+                              document ende-chat-request-id-property
+                              (plist-get instruction :request-id))
+                             (plist-get instruction :source-fence))
+                          (ende-chat--serialize document question)))
+                       (request
+                        (cons (cons "system" (if compact
+                                                  ende-chat--compact-system
+                                                ende-chat--system))
+                              messages)))
+                  (unless messages
+                    (error "Chat question has no eligible content"))
+                  (if compact
+                      (ende--dispatch-llm
+                       job request
+                       (lambda (result) (ende-chat--apply-result job result)))
+                    (ende-chat--dispatch-with-tools
+                     job request tool-configuration)))))))))))
 
 (ende-register-job-handler 'chat #'ende-chat--run)
 (ende-register-job-handler 'chat-compact #'ende-chat--run)

@@ -110,8 +110,8 @@
   profile callbacks lifecycle process process-buffer stderr-buffer stderr-process
   headers-file
   config-file auth-cancel sse content-parts thinking-parts usage actual-model
-   actual-provider finish-reason estimated-chars received-bytes preview-parts
-   preview-bytes generation-start terminal terminal-event cancelled)
+  tool-calls actual-provider finish-reason estimated-chars received-bytes preview-parts
+  preview-bytes generation-start terminal terminal-event cancelled)
 
 (defun ende-codex--lifecycle (session)
   "Return the shared lifecycle object for SESSION, creating it if needed."
@@ -970,6 +970,16 @@ is queried for every call; it does not share the model catalog cache."
         (ende-codex--session-auth-cancel session) nil
         (ende-codex--session-lifecycle session) nil))
 
+(defun ende-codex--tool-call-list (session)
+  "Return collected function calls from SESSION in output order."
+  (let (calls)
+    (when (hash-table-p (ende-codex--session-tool-calls session))
+      (maphash (lambda (index call)
+                 (push (cons index call) calls))
+               (ende-codex--session-tool-calls session)))
+    (mapcar #'cdr
+            (sort calls (lambda (left right) (< (car left) (car right)))))))
+
 (defun ende-codex--result (session)
   "Build a normalized result plist for SESSION."
   (let* ((usage (ende-codex--session-usage session))
@@ -988,6 +998,7 @@ is queried for every call; it does not share the model catalog cache."
                                (reverse
                                 (ende-codex--session-thinking-parts session)) "")
           :usage usage :tokens tokens :estimated (null reported)
+          :tool-calls (ende-codex--tool-call-list session)
           :speed (/ (float tokens)
                     (max 0.001 (- (float-time) started)))
           :finish-reason (ende-codex--session-finish-reason session)
@@ -1068,12 +1079,34 @@ is queried for every call; it does not share the model catalog cache."
                               0.0)
                      :usage usage)))))
 
+(defun ende-codex--collect-tool-calls (session items)
+  "Collect Responses API function-call ITEMS for SESSION."
+  (let ((items (cond ((vectorp items) (append items nil))
+                     ((listp items) items)))
+        (table (or (ende-codex--session-tool-calls session)
+                   (let ((table (make-hash-table :test #'eql)))
+                     (setf (ende-codex--session-tool-calls session) table)
+                     table)))
+        (index 0))
+    (dolist (item items)
+      (when (equal (ende-protocol-json-get "type" item) "function_call")
+        (puthash (or (ende-protocol-json-get "output_index" item) index)
+                 (list :id (ende-protocol-json-get "call_id" item)
+                       :name (ende-protocol-json-get "name" item)
+                       :arguments
+                       (ende-protocol-json-get "arguments" item))
+                 table))
+      (cl-incf index))))
+
 (defun ende-codex--handle-event (session json)
   "Handle one parsed Responses API event JSON object."
   (let* ((type (ende-protocol-json-get "type" json))
          (response (ende-protocol-json-get "response" json))
          (metadata (or response json))
-          (model (ende-protocol-json-get "model" metadata)))
+         (model (ende-protocol-json-get "model" metadata)))
+    (when (member type '("response.completed" "response.done"))
+      (ende-codex--collect-tool-calls
+       session (ende-protocol-json-get "output" response)))
     (when (stringp model)
       (setf (ende-codex--session-actual-model session) model))
     (when (or (stringp model)
@@ -1253,17 +1286,60 @@ is queried for every call; it does not share the model catalog cache."
                               "input_text"))
                 (cons :text content)))))
 
+(defun ende-codex--request-messages (messages)
+  "Convert internal MESSAGES to Responses API input objects."
+  (cl-mapcan
+   (lambda (message)
+     (if (and (consp message) (stringp (car message)))
+         (list (list (cons :role (car message))
+                     (cons :content
+                           (ende-codex--message-content
+                            (car message) (cdr message)))))
+       (let ((calls (plist-get message :tool-calls))
+             (content (plist-get message :content))
+             (call-id (plist-get message :tool-call-id)))
+         (cond
+          (calls
+           (append
+            (when (and (stringp content) (not (string-empty-p content)))
+              (list (list (cons :role "assistant")
+                          (cons :content
+                                (ende-codex--message-content
+                                 "assistant" content)))))
+            (mapcar (lambda (call)
+                      (list (cons :type "function_call")
+                            (cons :call_id (plist-get call :id))
+                            (cons :name (plist-get call :name))
+                            (cons :arguments (plist-get call :arguments))))
+                    calls)))
+          (call-id
+           (list (list (cons :type "function_call_output")
+                       (cons :call_id call-id)
+                       (cons :output (plist-get message :content)))))
+          (t
+           (let ((role (plist-get message :role)))
+             (list (list (cons :role role)
+                         (cons :content
+                               (ende-codex--message-content
+                                role (plist-get message :content)))))))))))
+   messages))
+
+(defun ende-codex--tool-definitions (definitions)
+  "Convert Chat Completions DEFINITIONS to Responses API tool definitions."
+  (mapcar
+   (lambda (definition)
+     (let ((function (alist-get :function definition)))
+       (list (cons :type "function")
+             (cons :name (alist-get :name function))
+             (cons :description (alist-get :description function))
+             (cons :parameters (alist-get :parameters function)))))
+   definitions))
+
 (defun ende-codex--request-body (messages profile)
   "Build a Responses API request body for MESSAGES and PROFILE."
   (let ((body
          (list (cons :model (plist-get profile :model))
-               (cons :input
-                     (mapcar (lambda (message)
-                               (list (cons :role (car message))
-                                     (cons :content
-                                           (ende-codex--message-content
-                                            (car message) (cdr message)))))
-                             messages))
+               (cons :input (ende-codex--request-messages messages))
                (cons :store json-false)
                (cons :stream t))))
     (let ((effort (ende-provider-reasoning-effort profile 'responses)))
@@ -1272,6 +1348,13 @@ is queried for every call; it does not share the model catalog cache."
               (append body
                       (list (cons :reasoning
                                   (list (cons :effort effort))))))))
+    (when (plist-get profile :tool-definitions)
+      (setq body
+            (append body
+                    (list (cons :tools
+                                (ende-codex--tool-definitions
+                                 (plist-get profile :tool-definitions)))
+                          (cons :tool_choice "auto")))))
     (if ende-max-output-tokens
         (append body (list (cons :max_output_tokens
                                  ende-max-output-tokens)))
@@ -1350,6 +1433,7 @@ is queried for every call; it does not share the model catalog cache."
           (ende-codex--make-session
            :profile profile :callbacks callbacks
            :sse (ende-protocol-make-sse)
+           :tool-calls (make-hash-table :test #'eql)
            :estimated-chars 0 :received-bytes 0 :preview-parts nil
            :preview-bytes 0)))
     (condition-case startup-error

@@ -273,13 +273,16 @@ result is applied."
       (ende-job-cancellation-set job cancel))))
 
 (defun ende--dispatch-llm
-    (job messages &optional on-done on-error no-begin)
+    (job messages &optional on-done on-error no-begin messages-prepared)
   "Add source metadata, validate MESSAGES, and invoke the configured LLM.
 
 Remembered reasoning efforts are checked live before a job sends its first
 request.  Selector-confirmed efforts carry a validation marker, while direct
-commands pass through the same preflight here."
-  (let* ((messages (ende-operations--add-source-metadata job messages))
+commands pass through the same preflight here.  MESSAGES-PREPARED means source
+metadata has already been added by a multi-turn operation."
+  (let* ((messages (if messages-prepared
+                       messages
+                     (ende-operations--add-source-metadata job messages)))
          (profile (ende-job-profile job))
          (wire-api (plist-get profile :reasoning-effort-wire-api))
          (effort (and (memq wire-api '(openrouter responses))

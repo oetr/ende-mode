@@ -61,24 +61,32 @@ When nil, model edits become pending change sets and must be applied with
 
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
-  name description parameters handler read-only)
+  name description parameters handler read-only requires-resource)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
 
+(defvar ende-tools--access-config nil
+  "Dynamically bound resolved chat access configuration for a tool call.")
+
+(defvar ende-tools--access-tool nil
+  "Tool symbol currently being authorized by a handler.")
+
 (defun ende-tool-register
-    (name description parameters handler &optional read-only)
+    (name description parameters handler &optional read-only resource-policy)
   "Register tool NAME with DESCRIPTION, PARAMETERS, and HANDLER.
 
 HANDLER receives an arguments object and a canonical project root.  NAME is a
 symbol internally and is exposed to model transports as a string.  Pass
-`:write' as READ-ONLY for a mutating tool."
+`:write' as READ-ONLY for a mutating tool.  RESOURCE-POLICY may be
+`:no-resource' for tools that do not access project paths."
   (unless (and (symbolp name) (functionp handler))
     (error "invalid ende tool registration: %s" name))
-    (let ((tool (ende-tool--create
+  (let ((tool (ende-tool--create
                :name name :description description :parameters parameters
-               :handler handler :read-only (not (eq read-only :write)))))
-     (setf (alist-get name ende-tools--registry) tool)
+               :handler handler :read-only (not (eq read-only :write))
+               :requires-resource (not (eq resource-policy :no-resource)))))
+    (setf (alist-get name ende-tools--registry) tool)
     tool))
 
 (defun ende-tool--find (name)
@@ -100,25 +108,85 @@ symbol internally and is exposed to model transports as a string.  Pass
                        (cons :parameters (ende-tool-parameters tool))))))
    (mapcar #'cdr ende-tools--registry)))
 
-(defun ende-tool-call (name arguments &optional root)
+(defun ende-tool-call (name arguments &optional root access-config)
   "Invoke model tool NAME with ARGUMENTS within project ROOT.
 
 Return a JSON-compatible result object.  Tool failures are returned as data so
-an agent can recover from an invalid path, regexp, or stale source version."
+an agent can recover from an invalid path, regexp, or stale source version.
+When ACCESS-CONFIG is non-nil, it must be the normalized chat configuration
+and controls tool activation and path authorization."
   (let ((tool (ende-tool--find name)))
     (if (null tool)
         (list :ok nil :tool (format "%s" name)
               :error (format "unknown ende tool: %s" name))
       (condition-case caught
-          (let ((root (ende-project-normalize-root
-                       (or root (ende-project-root)))))
-            (list :ok t
-                  :tool (symbol-name (ende-tool-name tool))
-                  :result (funcall (ende-tool-handler tool) arguments root)))
+          (let ((tool-name (ende-tool-name tool)))
+            (when access-config
+              (unless (plist-get access-config :root)
+                (error "chat tool configuration has no explicit root"))
+              (unless (memq tool-name (plist-get access-config :active-tools))
+                (error "tool is not active in this chat: %s" tool-name))
+              (when (and (ende-tool-requires-resource tool)
+                         (null (cdr (assq
+                                     tool-name
+                                      (plist-get access-config
+                                                 :tool-resources)))))
+                (error "tool has no assigned resources: %s" tool-name)))
+            (let* ((root (ende-project-normalize-root
+                          (or (and access-config
+                                   (plist-get access-config :root))
+                              root
+                              (ende-project-root))))
+                   (ende-tools--access-config access-config)
+                   (ende-tools--access-tool tool-name))
+              (list :ok t
+                    :tool (symbol-name tool-name)
+                    :result (funcall (ende-tool-handler tool) arguments root))))
         ((error quit)
          (list :ok nil
                :tool (symbol-name (ende-tool-name tool))
                :error (error-message-string caught)))))))
+
+(defun ende-tools--resource-allows-p (relative resource)
+  "Return non-nil when RESOURCE permits project-relative path RELATIVE."
+  (and (cl-some (lambda (regexp) (string-match-p regexp relative))
+                (plist-get resource :include-regexps))
+       (not (cl-some (lambda (regexp) (string-match-p regexp relative))
+                     (plist-get resource :exclude-regexps)))))
+
+(defun ende-tools--path-authorized-p (path root)
+  "Return non-nil when canonical PATH is allowed by the current tool policy."
+  (if (null ende-tools--access-config)
+      t
+    (let* ((root (file-name-as-directory root))
+           (canonical
+            (condition-case nil
+                (if (file-exists-p path)
+                    (file-truename path)
+                  (expand-file-name path root))
+              (error nil)))
+           (relative (and canonical
+                          (file-in-directory-p canonical root)
+                          (file-relative-name canonical root)))
+           (assignments (plist-get ende-tools--access-config
+                                   :tool-resources))
+           (resource-names (cdr (assq ende-tools--access-tool assignments)))
+           (resources (plist-get ende-tools--access-config :resources)))
+      (and relative
+           (not (ende-project--excluded-p relative))
+           (cl-some
+            (lambda (name)
+              (let ((resource (cdr (assq name resources))))
+                (and resource
+                     (ende-tools--resource-allows-p relative resource))))
+            resource-names)))))
+
+(defun ende-tools--assert-path-authorized (path root)
+  "Signal unless PATH is allowed for the current tool in ROOT."
+  (unless (ende-tools--path-authorized-p path root)
+    (error "path is not authorized by this chat's resources: %s"
+           (file-relative-name path root)))
+  path)
 
 ;;;; Arguments and source resolution
 
@@ -167,14 +235,17 @@ unsaved changes take precedence over disk contents."
         (let* ((buffer (ende-project-buffer-for-id buffer-id root))
                (buffer-path (ende-project-buffer-path buffer))
                (relative (file-relative-name buffer-path root)))
+          (ende-tools--assert-path-authorized buffer-path root)
           (list :kind 'buffer :buffer buffer :path buffer-path
                 :relative relative :buffer-id buffer-id))
-      (let* ((canonical (ende-project-path path root))
-             (buffer (ende-project-visiting-buffer path root))
-             (relative (file-relative-name canonical root)))
-        (list :kind (if buffer 'buffer 'file)
-              :buffer buffer :path canonical :relative relative
-              :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
+       (let* ((canonical
+               (ende-tools--assert-path-authorized
+                (ende-project-path path root) root))
+              (buffer (ende-project-visiting-buffer path root))
+              (relative (file-relative-name canonical root)))
+         (list :kind (if buffer 'buffer 'file)
+               :buffer buffer :path canonical :relative relative
+               :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
 
 (defun ende-tools--with-source (source function)
   "Call FUNCTION with current source buffer selected for SOURCE.
@@ -280,9 +351,10 @@ FUNCTION receives no arguments and may return any value."
          (files
           (cl-remove-if-not
            (lambda (path)
-             (or (null glob-regexp)
-                 (string-match-p
-                  glob-regexp (file-relative-name path root))))
+             (and (ende-tools--path-authorized-p path root)
+                  (or (null glob-regexp)
+                      (string-match-p
+                       glob-regexp (file-relative-name path root)))))
            (ende-project-files root)))
          (truncated (> (length files) maximum)))
     (list :files
@@ -294,7 +366,8 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--file-info (arguments root)
   "Return metadata for one project file."
   (let* ((path-value (ende-tools--required-string arguments "path"))
-         (path (ende-project-path path-value root))
+         (path (ende-tools--assert-path-authorized
+                (ende-project-path path-value root) root))
          (attributes (progn
                        (ende-project-assert-readable-file path)
                        (file-attributes path)))
@@ -332,14 +405,20 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--list-project-buffers (_arguments root)
   "List all allowed live visiting buffers below ROOT."
   (list :buffers
-        (mapcar (lambda (buffer)
-                  (with-current-buffer buffer
-                    (append (list :name (buffer-name buffer))
-                            (ende-tools--buffer-record buffer root))))
-                (sort (ende-project-buffers root)
-                      (lambda (left right)
-                        (string< (or (buffer-file-name left) "")
-                                 (or (buffer-file-name right) "")))))))
+        (mapcar
+         (lambda (buffer)
+           (with-current-buffer buffer
+             (append (list :name (buffer-name buffer))
+                     (ende-tools--buffer-record buffer root))))
+         (sort
+          (cl-remove-if-not
+           (lambda (buffer)
+             (ende-tools--path-authorized-p
+              (ende-project-buffer-path buffer) root))
+           (ende-project-buffers root))
+          (lambda (left right)
+            (string< (or (buffer-file-name left) "")
+                     (or (buffer-file-name right) "")))))))
 
 (defun ende-tools--read-buffer (arguments root)
   "Read a bounded range from one allowed visiting buffer."
@@ -425,9 +504,10 @@ FUNCTION receives no arguments and may return any value."
          (files
           (cl-remove-if-not
            (lambda (path)
-             (or (null glob-regexp)
-                 (string-match-p glob-regexp
-                                 (file-relative-name path root))))
+             (and (ende-tools--path-authorized-p path root)
+                  (or (null glob-regexp)
+                      (string-match-p glob-regexp
+                                      (file-relative-name path root)))))
            (ende-project-files root)))
          (matches nil)
          (files-inspected 0)
@@ -717,7 +797,7 @@ return them."
 (ende-tool-register
  'project_info
  "Return the current project root and compact source counts."
- ende-tools--empty-object-schema #'ende-tools--project-info)
+ ende-tools--empty-object-schema #'ende-tools--project-info nil :no-resource)
 
 (ende-tool-register
  'list_project_files
