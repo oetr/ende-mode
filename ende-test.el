@@ -6847,6 +6847,207 @@ Use COMMAND for the process, or a silent sleep process by default."
          (equal (ende-test--chat-context-headings (ende-chat-context-at-point))
                 '("Q1" "Reference")))))))
 
+(ert-deftest ende-test/chat-compaction-preserves-instructions-and-org-layout ()
+  (dolist (level '(2 4))
+    (dolist (input '(("" "")
+                     ("" "Keep the decisions.")
+                     ("My summary" "")
+                     ("My summary" "Keep the decisions.")
+                     ("" "" "A note added during generation.")))
+      (ende-test--reset)
+      (let* ((title (nth 0 input))
+             (body (nth 1 input))
+             (late-note (nth 2 input))
+             (ende-chat-compact-instruction "Keep the essentials.")
+             (ende-llm-function
+              (ende-test--fake-llm
+               '((:content "#+ENDE_CHAT_TITLE: Ignore this title\n* Facts\nSummary"
+                  :thinking "Plan")) t)))
+        (ende-test--with-buffer "* Topic\nEarlier conversation\n"
+          (org-mode)
+          (goto-char (point-max))
+          (cl-loop for depth from 2 below level
+                   do (insert (make-string depth ?*) " Ancestor\n"))
+          (let ((start (point)))
+            (insert (make-string level ?*) " " title "\n" body "\n"
+                    (make-string level ?*) " Next\nContinue\n")
+            (goto-char start)
+            (let* ((job (ende-compact '(:name local :model "compact-model")))
+                   (question-id (plist-get (ende-job-instruction job) :question-id))
+                   (call (car ende-test--calls))
+                   (messages (plist-get call :messages)))
+              (should (eq (ende-job-state job) 'running))
+              (should (string-match-p
+                       (regexp-quote (if (string-empty-p body)
+                                         ende-chat-compact-instruction body))
+                       (cdar (last messages))))
+              (should-not (string-match-p "ENDE_CHAT_TITLE" (cdar messages)))
+              (when late-note
+                (org-end-of-meta-data t)
+                (insert late-note "\n"))
+              (ende-test--complete-call call)
+              (should (eq (ende-job-state job) 'completed))
+              (let* ((document (ende-chat--build-document))
+                     (question (ende-chat--find-by-property
+                                document ende-chat-id-property question-id))
+                     (fence (ende-chat--find-by-property
+                             document ende-chat-request-id-property
+                             (plist-get (ende-job-instruction job) :request-id)))
+                     (reasoning (ende-chat--find-by-property
+                                 document ende-chat-reasoning-for-property
+                                 (plist-get (ende-job-instruction job)
+                                            :request-id))))
+                (should (ende-chat--context-fence-p document fence))
+                (should (= (org-element-property :level fence) level))
+                (should (equal (org-element-property :raw-value fence)
+                               "Agent: Context Fence"))
+                (should (eq (ende-chat--parent document reasoning) fence))
+                (should-not (ende-chat--context-fence-p document reasoning))
+                (should (equal (ende-test--chat-headline-property
+                                fence ende-chat-model-property)
+                               "compact-model"))
+                (if (and (string-empty-p title) (string-empty-p body)
+                         (not late-note))
+                    (should-not question)
+                  (should question)
+                  (should (equal (org-element-property :raw-value question)
+                                 (if (string-empty-p title)
+                                     "User: Context Fence Instructions" title)))
+                  (should (equal (ende-chat--property document question :visibility)
+                                 "hidden"))
+                  (should (= (org-element-property :end question)
+                             (org-element-property :begin fence)))
+                  (should (string-match-p (regexp-quote (or late-note body))
+                                          (buffer-string))))
+                (should-not (string-match-p "Ignore this title" (buffer-string)))
+                (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                                 (ende-test--chat-control-drawers))))
+              (ende-test--chat-goto (concat (make-string level ?*) " Next"))
+              (let ((ende-chat-include-reasoning nil))
+                (should
+                 (equal (ende-test--chat-context-headings
+                         (ende-chat-context-at-point))
+                        '("Agent: Context Fence" "Facts" "Next")))))))))))
+
+(ert-deftest ende-test/chat-compaction-and-asks-share-live-context ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+        (ende-llm-function
+         (ende-test--fake-llm
+          '("First summary" "New answer" "Second summary" "Final answer"
+            "Third summary") t)))
+    (ende-test--with-buffer
+        (concat "* Topic\nOriginal history\n"
+                "** First compaction\nKeep decisions\n"
+                "** Follow up\nNew question\n"
+                "** Second compaction\nKeep commands\n"
+                "** Final question\nContinue\n")
+      (org-mode)
+      (ende-test--chat-goto "** First compaction")
+      (let ((first (ende-compact)))
+        (ende-test--chat-goto "** Follow up")
+        (let ((ask (ende-ask)))
+          (should (eq (ende-job-state ask) 'queued))
+          (ende-test--complete-call (nth 0 ende-test--calls))
+          (should (eq (ende-job-state first) 'completed))
+          (should (eq (ende-job-state ask) 'running))
+          (let ((prompt (ende-test--chat-context-text
+                         (plist-get (nth 1 ende-test--calls) :messages))))
+            (should (string-match-p "First summary" prompt))
+            (should-not (string-match-p "Original history" prompt))
+            (should-not (string-match-p "Keep decisions" prompt)))
+          (ende-test--chat-goto "** Second compaction")
+          (let ((second (ende-compact)))
+            (should (eq (ende-job-state second) 'queued))
+            (ende-test--chat-goto "** Follow up")
+            (org-end-of-meta-data t)
+            (insert "Latest detail\n")
+            (ende-test--complete-call (nth 1 ende-test--calls))
+            (should (eq (ende-job-state second) 'running))
+            (let ((prompt (ende-test--chat-context-text
+                           (plist-get (nth 2 ende-test--calls) :messages))))
+              (dolist (text '("First summary" "New answer" "Latest detail"
+                              "Keep commands"))
+                (should (string-match-p text prompt)))
+              (should-not (string-match-p "Original history" prompt)))
+            (ende-test--chat-goto "** Final question")
+            (let ((final (ende-ask)))
+              (should (eq (ende-job-state final) 'queued))
+              (ende-test--complete-call (nth 2 ende-test--calls))
+              (let ((prompt (ende-test--chat-context-text
+                             (plist-get (nth 3 ende-test--calls) :messages))))
+                (should (string-match-p "Second summary" prompt))
+                (dolist (text '("First summary" "New answer" "Latest detail"
+                                "Keep commands" "Original history"))
+                  (should-not (string-match-p text prompt))))
+              (ende-test--complete-call (nth 3 ende-test--calls))
+              (should (eq (ende-job-state final) 'completed)))
+            ;; Compacting an existing fence summarizes its result, not its
+            ;; archived instructions or the conversation after it.
+            (let* ((document (ende-chat--build-document))
+                   (fence (ende-chat--find-by-property
+                           document ende-chat-request-id-property
+                           (plist-get (ende-job-instruction second) :request-id))))
+              (goto-char (org-element-property :begin fence))
+              (let ((third (ende-compact)))
+                (should
+                 (equal (ende-test--chat-context-headings
+                         (butlast (cdr (plist-get (nth 4 ende-test--calls)
+                                                :messages))))
+                        '("Agent: Context Fence")))
+                (ende-test--complete-call (nth 4 ende-test--calls))
+                (should (eq (ende-job-state third) 'completed)))))))
+      ;; A fresh buffer reconstructs the same context using only durable Org.
+      (let ((text (buffer-string)))
+        (with-temp-buffer
+          (org-mode)
+          (insert text)
+          (ende-test--chat-goto "** Final question")
+          (let* ((messages (ende-chat-context-at-point))
+                 (context (ende-test--chat-context-text messages)))
+            (should (equal (ende-test--chat-context-headings messages)
+                           '("Agent: Context Fence" "Final question")))
+            (should (string-match-p "Third summary" context))
+            (should-not (string-match-p "Second summary" context))))))))
+
+(ert-deftest ende-test/chat-compaction-failures-leave-history-usable ()
+  (dolist (outcome '(:error :empty :title-only :cancelled :deleted))
+    (ende-test--reset)
+    (let ((ende-llm-function
+           (ende-test--fake-llm
+            (list (pcase outcome
+                    (:error :error)
+                    (:empty "")
+                    (:title-only "#+ENDE_CHAT_TITLE: Not a summary\n")
+                    (_ "Summary"))) t)))
+      (ende-test--with-buffer
+          "* Topic\nOriginal history\n** Instructions\nKeep decisions\n** Next\nAsk\n"
+        (org-mode)
+        (ende-test--chat-goto "** Instructions")
+        (let ((job (ende-compact)))
+          (pcase outcome
+            (:cancelled (ende-abort-queue))
+            (:deleted
+             (pcase-let ((`(,_document ,headline) (ende-chat--placeholder job)))
+               (delete-region (org-element-property :begin headline)
+                              (org-element-property :end headline)))))
+          (ende-test--complete-call (car ende-test--calls))
+          (should (eq (ende-job-state job)
+                      (if (eq outcome :cancelled) 'cancelled 'failed)))
+          (should (string-match-p "Keep decisions" (buffer-string)))
+          (let ((document (ende-chat--build-document)))
+            (should-not
+             (cl-some (lambda (headline)
+                        (ende-chat--context-fence-p document headline))
+                      (ende-chat--document-headlines document))))
+          (ende-test--chat-goto "** Next")
+          (let* ((messages (ende-chat-context-at-point))
+                 (context (ende-test--chat-context-text messages)))
+            (should (equal (ende-test--chat-context-headings messages)
+                           '("Topic" "Next")))
+            (should (string-match-p "Original history" context))
+            (should-not (string-match-p "Keep decisions" context))))))))
+
 (ert-deftest ende-test/chat-ask-marks-question-and-retries-without-sent-state ()
   (ende-test--reset)
   (let ((ende-llm-function
@@ -7315,30 +7516,31 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-test--chat-goto "** Question")
       (should-error (ende-ask) :type 'user-error))))
 
-(ert-deftest ende-test/selector-ask-uses-selected-profile-in-org-buffer ()
-  (ende-test--reset)
-  (let ((ende-selector--last-selection nil)
-        (ende-provider-profiles '((remote :model "configured-model")))
-        (ende-llm-function (ende-test--fake-llm '("Reply"))))
-    (ende-test--with-buffer "* Root\n** Question\nAsk\n"
-      (org-mode)
-      (ende-test--chat-goto "** Question")
-      (let ((source (current-buffer)))
-        (with-temp-buffer
-          (ende-selector-mode)
-          (setq ende-selector--source-buffer source
-                ende-selector--providers '(remote)
-                ende-selector--provider-index 0
-                ende-selector--models '("selected-model")
-                ende-selector--model-index 0
-                ende-selector--model-state :ready
-                ende-selector--effort nil)
-          (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
-            (ende-selector-ask)))
-        (let ((profile (plist-get (car ende-test--calls) :options)))
-          (should (eq (plist-get profile :name) 'remote))
-          (should (equal (plist-get profile :model) "selected-model"))
-          (should (string-match-p "Reply" (buffer-string))))))))
+(ert-deftest ende-test/selector-chat-actions-use-selected-profile-in-org-buffer ()
+  (dolist (key '("a" "k"))
+    (ende-test--reset)
+    (let ((ende-selector--last-selection nil)
+          (ende-provider-profiles '((remote :model "configured-model")))
+          (ende-llm-function (ende-test--fake-llm '("Reply"))))
+      (ende-test--with-buffer "* Root\nEarlier context\n** Question\nAsk\n"
+        (org-mode)
+        (ende-test--chat-goto "** Question")
+        (let ((source (current-buffer)))
+          (with-temp-buffer
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("selected-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready
+                  ende-selector--effort nil)
+            (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
+              (call-interactively (lookup-key ende-selector-mode-map (kbd key)))))
+          (let ((profile (plist-get (car ende-test--calls) :options)))
+            (should (eq (plist-get profile :name) 'remote))
+            (should (equal (plist-get profile :model) "selected-model"))
+            (should (string-match-p "Reply" (buffer-string)))))))))
 
 (ert-deftest ende-test/selector-ask-prepares-chat-from-non-org-buffer ()
   (dolist (initial '("" "* Existing\nPrevious material\n"))

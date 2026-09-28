@@ -345,6 +345,7 @@ the discovered pricing metadata for those model IDs."
 	      "e  - select reasoning effort\n"
 	      "i  - insert\n"
               "I  - insert anywhere\n"
+              "k  - compact chat context\n"
               "m  - select/search model\n"
 	      "r  - rubber duck\n"
               "s  - summarize\n"
@@ -812,11 +813,15 @@ performed locally so typing a search term never starts another network request."
             (ende-selector-close)
             (pop-to-buffer buffer)
             (message "ende: chat buffer ready; press C-c e a to ask")))
+      (when (and (eq type 'chat-compact)
+                 (not (with-current-buffer source (derived-mode-p 'org-mode))))
+        (user-error "Chat compaction requires an Org buffer"))
       (ende-selector-close)
       (with-current-buffer source
-        (if (eq type 'rubber-duck)
-            (ende-rubber-duck instruction profile)
-          (ende-enqueue-operation type instruction profile))))))
+        (pcase type
+          ('chat-compact (ende-compact profile))
+          ('rubber-duck (ende-rubber-duck instruction profile))
+          (_ (ende-enqueue-operation type instruction profile)))))))
 
 (defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model.
@@ -860,6 +865,11 @@ before dispatch, so queued jobs contain only a live-confirmed value."
   "Ask the current Org question using the selector choice."
   (interactive)
   (ende-selector--run 'chat))
+
+(defun ende-selector-compact ()
+  "Compact the current chat context using the selector choice."
+  (interactive)
+  (ende-selector--run 'chat-compact))
 
 (defun ende-selector-write-anywhere ()
   "Run a structured multi-edit using the current selector choice."
@@ -908,6 +918,7 @@ before dispatch, so queued jobs contain only a live-confirmed value."
   (define-key ende-selector-mode-map (kbd "P") #'ende-selector-toggle-parallel)
   (define-key ende-selector-mode-map (kbd "i") #'ende-selector-insert)
   (define-key ende-selector-mode-map (kbd "a") #'ende-selector-ask)
+  (define-key ende-selector-mode-map (kbd "k") #'ende-selector-compact)
   (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
   (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)
   (define-key ende-selector-mode-map (kbd "m") #'ende-selector-select-model)
