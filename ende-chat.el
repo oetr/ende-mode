@@ -16,9 +16,9 @@
 ;; from the nearest marked ancestor; hidden visibility wins over every
 ;; descendant and reasoning is sent only when
 ;; `ende-chat-include-reasoning' is non-nil.
-;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  A fence
-;; on the question's ancestor path bounds the request; fences in other branches
-;; replace only their preceding siblings, preserving the enclosing section.
+;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  The
+;; nearest fence on the question's ancestor path bounds the request; fences in
+;; other branches replace preceding siblings only within their own subtrees.
 
 ;;; Code:
 
@@ -320,9 +320,9 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
 (defun ende-chat--context-fence-p (document headline)
   "Return non-nil when HEADLINE locally marks a completed context fence.
 Visibility controls the summary's inclusion, not whether old history returns."
-  (and (equal (downcase (string-trim
-                        (or (ende-chat--property document headline :context-fence)
-                            "")))
+  (and (equal (downcase
+               (string-trim
+                (or (ende-chat--property document headline :context-fence) "")))
               "t")
        (null (ende-chat--property document headline :state))))
 
@@ -476,7 +476,9 @@ whole request; a fence inside another sibling's subtree does not."
 An explicit role property starts a message.  Unmarked descendants inherit
 their nearest role-marked ancestor and contribute to its message until another
 explicit role property starts a nested message.  When traversal returns to an
-enclosing role, its content starts a new message so source order is preserved."
+enclosing role, its content starts a new message so source order is preserved.
+Context fences replace earlier sibling subtrees; the nearest fence on
+QUESTION's ancestor path bounds the whole prefix."
   (let ((question-begin (org-element-property :begin question))
         (start (ende-chat--context-start document root question))
         (messages nil)
@@ -511,9 +513,9 @@ enclosing role, its content starts a new message so source order is preserved."
                  (setq message-owner next-owner
                        message-role next-role))
                (push (ende-chat--section-text document headline) parts))
-             (dolist (child (ende-chat--fenced-siblings
-                             document (ende-chat--children document headline)
-                             question-begin))
+              (dolist (child (ende-chat--fenced-siblings
+                              document (ende-chat--children document headline)
+                              question-begin))
                (walk child next-owner next-role)))))
       (catch 'ende-chat--question-reached
         (walk root nil 'user))
@@ -860,6 +862,27 @@ COMPACT selects the context-fence title."
               (throw 'stop nil))))
         end))))
 
+(defun ende-chat--compact-insertion-position (document question question-id)
+  "Return the position immediately after QUESTION and its compact replies."
+  (let* ((parent (ende-chat--parent document question))
+         (siblings (if parent
+                       (ende-chat--children document parent)
+                     (cl-remove-if-not
+                      (lambda (headline)
+                        (= (org-element-property :level headline) 1))
+                      (ende-chat--document-headlines document))))
+         (end (org-element-property :end question)))
+    (catch 'stop
+      (dolist (sibling
+               (cdr (memq question siblings)))
+        (if (and (string= (org-element-property :raw-value sibling)
+                          ende-chat--context-fence-title)
+                 (equal (ende-chat--property document sibling :reply-to)
+                        question-id))
+            (setq end (org-element-property :end sibling))
+          (throw 'stop nil))))
+    end))
+
 (defun ende-chat--insert-placeholder
     (document question question-id request-id &optional compact)
   "Insert a pending reply for QUESTION and return its heading position.
@@ -868,7 +891,10 @@ COMPACT always places a same-level context-fence sibling."
                          (= (org-element-property :level question) 1))
                     2
                   (org-element-property :level question)))
-         (position (ende-chat--insertion-position document question))
+         (position (if compact
+                       (ende-chat--compact-insertion-position
+                        document question question-id)
+                     (ende-chat--insertion-position document question)))
          (text (ende-chat--placeholder-text level question-id request-id compact)))
     (save-excursion
       (goto-char position)
@@ -992,19 +1018,37 @@ COMPACT marks the completed response as a context fence."
             body
             "\n\n")))
 
-(defun ende-chat--finish-compact-instructions (document question)
-  "Hide and title QUESTION's instructions, or remove a truly empty section."
-  (let ((untitled (string-blank-p (org-element-property :raw-value question))))
+(defun ende-chat--other-compaction-pending-p (job question-id)
+  "Return non-nil when another queued compaction still uses QUESTION-ID."
+  (cl-some
+   (lambda (other)
+     (and (not (eq other job))
+          (eq (ende-job-type other) 'chat-compact)
+          (not (ende-job-terminal-p other))
+          (equal (plist-get (ende-job-instruction other) :question-id)
+                 question-id)))
+   (append (ende-active-jobs) (ende-pending-jobs))))
+
+(defun ende-chat--finish-compact-instructions (document question job)
+  "Hide and title QUESTION's instructions, or remove a truly empty section.
+Keep it while another queued compaction still refers to its durable identity."
+  (let* ((untitled (string-blank-p (org-element-property :raw-value question)))
+         (empty (and untitled
+                     (null (ende-chat--children document question))
+                     (string-blank-p
+                      (ende-chat--instruction-body document question))))
+         (pending (ende-chat--other-compaction-pending-p
+                   job (ende-chat--property document question :id))))
     (goto-char (org-element-property :begin question))
-    (if (and untitled
-             (null (ende-chat--children document question))
-             (string-blank-p (ende-chat--instruction-body document question)))
-        (delete-region (org-element-property :begin question)
-                       (org-element-property :end question))
-      (when untitled
+    (cond
+     ((and empty (not pending))
+      (delete-region (org-element-property :begin question)
+                     (org-element-property :end question)))
+     (t
+      (org-entry-put nil ende-chat-visibility-property "hidden")
+      (when (and untitled (not empty))
         (ende-chat--set-headline-title
-         question ende-chat--compact-instructions-title))
-      (org-entry-put nil ende-chat-visibility-property "hidden"))))
+         question ende-chat--compact-instructions-title))))))
 
 (defun ende-chat--apply-result (job result)
   "Replace JOB's pending reply with a completed assistant response."
@@ -1052,10 +1096,10 @@ COMPACT marks the completed response as a context fence."
                     (atomic-change-group
                       (when question
                         (cond
-                         (compact
-                          (unless (plist-get instruction :source-fence)
+                          (compact
+                           (unless (plist-get instruction :source-fence)
                             (ende-chat--finish-compact-instructions
-                             document question)))
+                             document question job)))
                          ((and (string-blank-p
                                 (org-element-property :raw-value question))
                                (plist-get normalized :title))
@@ -1107,14 +1151,10 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (error "Compaction instructions are no longer hidden")))
   (let* ((body (if source-fence ""
                  (ende-chat--instruction-body document question)))
-         (title (if source-fence ""
-                  (org-element-property :raw-value question)))
          (instructions
           (format "%s %s\n%s"
                   (make-string (org-element-property :level question) ?*)
-                  (if (string-blank-p title)
-                      ende-chat--compact-instructions-title
-                    title)
+                  ende-chat--compact-instructions-title
                   (if (string-blank-p body) ende-chat-compact-instruction body)))
          (messages (ende-chat--serialize
                     document destination instructions

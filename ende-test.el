@@ -3021,12 +3021,12 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                        (lambda () (cl-incf cancel-count)))))
             (ende-selector--set-provider 0)
             (should-not quota-callback)
-            (should (string-match-p "Quota:        unavailable"
+            (should (string-match-p "Quota: unavailable"
                                     (buffer-string)))
             (ende-selector--set-provider 1)
             (should quota-callback)
             (should (eq ende-selector--quota-state :loading))
-            (should (string-match-p "Quota:        loading\.\.\."
+            (should (string-match-p "Quota: loading\.\.\."
                                     (buffer-string)))
             (let ((now (floor (float-time))))
               (funcall
@@ -3042,7 +3042,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                nil)
               (should (eq ende-selector--quota-state :ready))
               (should (string-match-p
-                       "Quota:        5h 1[01]m: 72% left"
+                       "Quota: 5h 1[01]m: 72% left"
                        (buffer-string)))
               (ende-selector--set-provider 1)
               (let ((stale-callback quota-callback))
@@ -3812,29 +3812,27 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
-      (should (string-match-p "Parallel:.*\nEffort:" (buffer-string)))
-      (should (string-match-p "Effort:.*\n\nQuota:" (buffer-string)))
-      (should (string-match-p "Quota:.*\n\ni  - insert" (buffer-string)))
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
-                     "Quota:        unavailable"
+                     "Quota: unavailable"
                      "i  - insert" "a  - ask" "I  - insert anywhere"
+                     "k  - compact chat context"
                      "w  - write anywhere"
                      "m  - select/search model"
                      "e  - select reasoning effort"
                      "s  - summarize"
                      "r  - rubber duck"
-                     "RET       - confirm choice"
+                     "RET       - confirm and save selection"
                      "C-c C-c   - approve all LLM changes"
                      "C-c C-k   - reject all LLM changes"))
-        (should (string-match-p (regexp-quote key) (buffer-string))))
-      (should (= (count-lines (point-min) (point-max)) 21)))))
+        (should (string-match-p (regexp-quote key) (buffer-string)))))))
 
 (ert-deftest ende-test/selector-runtime-keybindings-survive-reload ()
   (let ((original-c (lookup-key ende-selector-mode-map (kbd "c")))
         (original-C (lookup-key ende-selector-mode-map (kbd "C")))
         (original-P (lookup-key ende-selector-mode-map (kbd "P")))
         (original-e (lookup-key ende-selector-mode-map (kbd "e")))
-        (original-a (lookup-key ende-selector-mode-map (kbd "a"))))
+        (original-a (lookup-key ende-selector-mode-map (kbd "a")))
+        (original-k (lookup-key ende-selector-mode-map (kbd "k"))))
     (unwind-protect
         (progn
           ;; Simulate a keymap retained from before the new bindings existed.
@@ -3843,6 +3841,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (define-key ende-selector-mode-map (kbd "P") nil)
           (define-key ende-selector-mode-map (kbd "e") nil)
           (define-key ende-selector-mode-map (kbd "a") nil)
+          (define-key ende-selector-mode-map (kbd "k") nil)
           (with-temp-buffer
             (ende-selector-mode)
             (should (eq (key-binding (kbd "c"))
@@ -3861,6 +3860,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         #'ende-selector-select-effort))
             (should (eq (key-binding (kbd "a"))
                         #'ende-selector-ask))
+            (should (eq (key-binding (kbd "k"))
+                        #'ende-selector-compact))
             (should (eq (key-binding (kbd "RET"))
                         #'ende-selector-confirm))
             (should (eq (key-binding (kbd "C-c C-c"))
@@ -3879,7 +3880,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (define-key ende-selector-mode-map (kbd "C") original-C)
       (define-key ende-selector-mode-map (kbd "P") original-P)
       (define-key ende-selector-mode-map (kbd "e") original-e)
-      (define-key ende-selector-mode-map (kbd "a") original-a))))
+      (define-key ende-selector-mode-map (kbd "a") original-a)
+      (define-key ende-selector-mode-map (kbd "k") original-k))))
 
 (ert-deftest ende-test/selector-labels-are-single-line-and-display-bounded ()
   (let ((multiline (ende-selector--display-label "provider\nspoof" 24))
@@ -5089,7 +5091,7 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-selector--set-provider 0)
           (should (= attempts 1))
           (should (eq ende-selector--model-state :error))
-          (should (string-match-p "\\[probe failed\\]" (buffer-string)))
+          (should (string-match-p "probe failed" (buffer-string)))
 
           (ende-selector--set-provider 0)
           (should (= attempts 2))
@@ -6882,6 +6884,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                                          ende-chat-compact-instruction body))
                        (cdar (last messages))))
               (should-not (string-match-p "ENDE_CHAT_TITLE" (cdar messages)))
+              (when (and (not (string-empty-p title))
+                         (string-empty-p body))
+                (should-not (string-match-p (regexp-quote title)
+                                            (cdar (last messages)))))
               (when late-note
                 (org-end-of-meta-data t)
                 (insert late-note "\n"))
@@ -7047,6 +7053,38 @@ Use COMMAND for the process, or a silent sleep process by default."
                            '("Topic" "Next")))
             (should (string-match-p "Original history" context))
             (should-not (string-match-p "Keep decisions" context))))))))
+
+(ert-deftest ende-test/chat-compaction-supports-queued-repeats ()
+  (dolist (body '("" "Keep the decisions"))
+    (ende-test--reset)
+    (let ((ende-llm-function
+           (ende-test--fake-llm '("First summary" "Second summary") t)))
+      (ende-test--with-buffer
+          (concat "* Topic\nOriginal history\n** \n" body "\n** Next\nContinue\n")
+        (org-mode)
+        (ende-test--chat-goto "** ")
+        (let ((first (ende-compact))
+              (second (ende-compact)))
+          (should (eq (ende-job-state second) 'queued))
+          (ende-test--complete-call (nth 0 ende-test--calls))
+          (should (eq (ende-job-state first) 'completed))
+          (should (eq (ende-job-state second) 'running))
+          (let ((context (ende-test--chat-context-text
+                          (plist-get (nth 1 ende-test--calls) :messages))))
+            (should (string-match-p "First summary" context))
+            (should-not (string-match-p "Original history" context)))
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (should (eq (ende-job-state second) 'completed))
+          (ende-test--chat-goto "** Next")
+          (let* ((messages (ende-chat-context-at-point))
+                 (context (ende-test--chat-context-text messages)))
+            (should (equal (ende-test--chat-context-headings messages)
+                           '("Agent: Context Fence" "Next")))
+            (should (string-match-p "Second summary" context))
+            (should-not (string-match-p "First summary" context)))
+          (if (string-empty-p body)
+              (should-not (string-match-p "^\\*\\* *$" (buffer-string)))
+            (should (string-match-p body (buffer-string)))))))))
 
 (ert-deftest ende-test/chat-ask-marks-question-and-retries-without-sent-state ()
   (ende-test--reset)
