@@ -218,12 +218,20 @@ process for cancellation tests."
     (plist-get call :result)))
 
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
-  (should (= (length (ende-tool-definitions)) 8))
-  (should-not (ende-tool-read-only
-               (ende-tool--find "edit_source")))
-  (should (string-match-p
-           "edit_source"
-           (json-encode (ende-tool-definitions)))))
+  (let ((definitions (ende-tool-definitions)))
+    (should (= (length definitions) 8))
+    (dolist (definition definitions)
+      (let* ((function (alist-get :function definition))
+             (schema
+              (ende-protocol-json-read-string
+               (json-encode (alist-get :parameters function)))))
+        (should (hash-table-p (gethash "properties" schema)))
+        (should (eq (gethash "additionalProperties" schema) :false))))
+    (should-not (ende-tool-read-only
+                 (ende-tool--find "edit_source")))
+    (should (string-match-p
+             "edit_source"
+             (json-encode (ende-tool-definitions))))))
 
 (ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
   (let* ((root (make-temp-file "ende-tools-project-" t))

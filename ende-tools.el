@@ -757,7 +757,9 @@ return them."
 ;;;; Tool schemas and registrations
 
 (defconst ende-tools--empty-object-schema
-  '((:type . "object") (:properties . ()) (:additionalProperties . :false)))
+  (list (cons :type "object")
+        (cons :properties (make-hash-table))
+        (cons :additionalProperties :json-false)))
 
 (defconst ende-tools--path-schema
   '((:type . "object")
@@ -765,7 +767,7 @@ return them."
      . ((:path . ((:type . "string")
                   (:description . "Project-relative file path")))))
     (:required . ("path"))
-    (:additionalProperties . :false)))
+    (:additionalProperties . :json-false)))
 
 (defconst ende-tools--edit-item-schema
   (list
@@ -778,7 +780,7 @@ return them."
           (cons :replacement '((:type . "string")))
           (cons :reason '((:type . "string")))))
    (cons :required '("start" "end" "expected" "replacement"))
-   (cons :additionalProperties :false)))
+   (cons :additionalProperties :json-false)))
 
 (defconst ende-tools--edit-schema
   (list
@@ -793,7 +795,7 @@ return them."
                 (list (cons :type "array")
                       (cons :items ende-tools--edit-item-schema)))))
    (cons :required '("base_digest" "edits"))
-   (cons :additionalProperties :false)))
+   (cons :additionalProperties :json-false)))
 
 (ende-tool-register
  'project_info
@@ -809,7 +811,7 @@ return them."
                  (:description . "Optional project-relative wildcard")))
        (:max_results . ((:type . "integer") (:minimum . 1)))
        (:include_metadata . ((:type . "boolean")))))
-   (:additionalProperties . :false))
+   (:additionalProperties . :json-false))
  #'ende-tools--list-project-files)
 
 (ende-tool-register
@@ -827,7 +829,7 @@ return them."
        (:start_line . ((:type . "integer") (:minimum . 1)))
        (:line_count . ((:type . "integer") (:minimum . 1)))))
    (:required . ("path"))
-   (:additionalProperties . :false))
+   (:additionalProperties . :json-false))
  #'ende-tools--read-file)
 
 (ende-tool-register
@@ -844,7 +846,7 @@ return them."
        (:start_line . ((:type . "integer") (:minimum . 1)))
         (:line_count . ((:type . "integer") (:minimum . 1)))))
    (:required . ("buffer_id"))
-   (:additionalProperties . :false))
+   (:additionalProperties . :json-false))
  #'ende-tools--read-buffer)
 
 (ende-tool-register
@@ -858,7 +860,7 @@ return them."
        (:context_after . ((:type . "integer") (:minimum . 0)))
        (:max_results . ((:type . "integer") (:minimum . 1)))))
    (:required . ("regexp"))
-   (:additionalProperties . :false))
+   (:additionalProperties . :json-false))
  #'ende-tools--search-project)
 
 (ende-tool-register
