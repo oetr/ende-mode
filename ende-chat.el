@@ -16,6 +16,9 @@
 ;; from the nearest marked ancestor; hidden visibility wins over every
 ;; descendant and reasoning is sent only when
 ;; `ende-chat-include-reasoning' is non-nil.
+;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  A fence
+;; on the question's ancestor path bounds the request; fences in other branches
+;; replace only their preceding siblings, preserving the enclosing section.
 
 ;;; Code:
 
@@ -45,6 +48,7 @@
 
 `root-prefix' includes eligible sections before the asked section in the
 active level-one root, followed by the asked section's eligible body.
+Context fences substitute summaries for earlier history in their scopes.
 `current-section-only' includes only that body.  Both policies retain the
 current question as the final user message."
   :type '(choice (const :tag "Root prefix" root-prefix)
@@ -80,6 +84,9 @@ keeps the effective user or assistant role of its enclosing section."
 (defconst ende-chat-state-property "ENDE_CHAT_STATE"
   "Org property storing the state of an unfinished chat reply.")
 
+(defconst ende-chat-context-fence-property "ENDE_CHAT_CONTEXT_FENCE"
+  "Local Org property whose value t marks a completed context summary.")
+
 (defconst ende-chat-model-property "ENDE_MODEL"
   "Org property storing the model used for a chat response.")
 
@@ -90,7 +97,8 @@ keeps the effective user or assistant role of its enclosing section."
   (list ende-chat-role-property ende-chat-visibility-property
         ende-chat-id-property ende-chat-reply-to-property
         ende-chat-request-id-property ende-chat-reasoning-for-property
-        ende-chat-state-property ende-chat-model-property
+        ende-chat-state-property ende-chat-context-fence-property
+        ende-chat-model-property
         ende-chat-reasoning-effort-property)
   "Control properties that model output may not author.")
 
@@ -184,7 +192,10 @@ keeps the effective user or assistant role of its enclosing section."
                              (ende-chat--local-property
                               headline ende-chat-reasoning-for-property)
                              :state (ende-chat--local-property
-                                     headline ende-chat-state-property))))
+                                     headline ende-chat-state-property)
+                             :context-fence (ende-chat--local-property
+                                             headline
+                                             ende-chat-context-fence-property))))
           (when local-role
             (setq values
                   (plist-put values :role
@@ -223,6 +234,7 @@ keeps the effective user or assistant role of its enclosing section."
      ((equal property ende-chat-request-id-property) :request-id)
      ((equal property ende-chat-reasoning-for-property) :reasoning-for)
      ((equal property ende-chat-state-property) :state)
+     ((equal property ende-chat-context-fence-property) :context-fence)
      (t (error "Unknown chat property: %s" property)))))
 
 (defun ende-chat--property (document headline property)
@@ -289,11 +301,60 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
     ('reasoning ende-chat-include-reasoning)
     (_ t)))
 
+(defun ende-chat--context-fence-p (document headline)
+  "Return non-nil when HEADLINE locally marks a completed context fence.
+Visibility controls the summary's inclusion, not whether old history returns."
+  (and (equal (downcase (string-trim
+                        (or (ende-chat--property document headline :context-fence)
+                            "")))
+              "t")
+       (null (ende-chat--property document headline :state))))
+
+(defun ende-chat--fenced-siblings (document siblings before &optional level)
+  "Return SIBLINGS starting at their last completed fence before BEFORE.
+When LEVEL is non-nil, consider only fences at that heading level.
+The returned list shares structure with SIBLINGS."
+  (let ((start siblings))
+    (cl-loop for tail on siblings
+             for headline = (car tail)
+             while (< (org-element-property :begin headline) before)
+             when (and (or (null level)
+                           (= (org-element-property :level headline) level))
+                       (ende-chat--context-fence-p document headline))
+             do (setq start tail))
+    start))
+
+(defun ende-chat--context-start (document root question)
+  "Return QUESTION's context start, bounded by a fence or ROOT.
+Search preceding siblings, then ascend.  The first fence found bounds the
+whole request; a fence inside another sibling's subtree does not."
+  (let ((current question)
+        fence)
+    (while (and current (not fence))
+      (if (ende-chat--context-fence-p document current)
+          (setq fence current)
+        (let* ((parent (ende-chat--parent document current))
+               (siblings (and parent (ende-chat--children document parent)))
+               (start (car (ende-chat--fenced-siblings
+                            document siblings
+                            (org-element-property :begin current)
+                            (org-element-property :level current)))))
+          (when (and start
+                     (< (org-element-property :begin start)
+                        (org-element-property :begin current))
+                     (= (org-element-property :level start)
+                        (org-element-property :level current))
+                     (ende-chat--context-fence-p document start))
+            (setq fence start))
+          (setq current parent))))
+    (org-element-property :begin (or fence root))))
+
 (defun ende-chat--independent-subtree-p (document headline)
   "Return non-nil when HEADLINE explicitly starts a separate subtree."
   (let ((properties (gethash headline
                              (ende-chat--document-properties document))))
     (or (plist-get properties :role-marked)
+        (ende-chat--context-fence-p document headline)
         (and (plist-get properties :visibility-marked)
              (not (equal (plist-get properties :visibility) "normal"))))))
 
@@ -401,6 +462,7 @@ their nearest role-marked ancestor and contribute to its message until another
 explicit role property starts a nested message.  When traversal returns to an
 enclosing role, its content starts a new message so source order is preserved."
   (let ((question-begin (org-element-property :begin question))
+        (start (ende-chat--context-start document root question))
         (messages nil)
         (parts nil)
         (message-owner nil)
@@ -426,13 +488,16 @@ enclosing role, its content starts a new message so source order is preserved."
                (throw 'ende-chat--question-reached nil))
              (when role-marked
                (flush))
-             (when (ende-chat--eligible-p document headline)
+             (when (and (>= (org-element-property :begin headline) start)
+                        (ende-chat--eligible-p document headline))
                (unless (and parts (eq next-owner message-owner))
                  (flush)
                  (setq message-owner next-owner
                        message-role next-role))
                (push (ende-chat--section-text document headline) parts))
-             (dolist (child (ende-chat--children document headline))
+             (dolist (child (ende-chat--fenced-siblings
+                             document (ende-chat--children document headline)
+                             question-begin))
                (walk child next-owner next-role)))))
       (catch 'ende-chat--question-reached
         (walk root nil 'user))

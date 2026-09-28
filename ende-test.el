@@ -6470,6 +6470,14 @@ Use COMMAND for the process, or a silent sleep process by default."
   "Return all serialized chat message text in MESSAGES."
   (mapconcat (lambda (message) (cdr message)) messages "\n"))
 
+(defun ende-test--chat-context-headings (messages)
+  "Return the headings present in serialized MESSAGES, in order."
+  (with-temp-buffer
+    (org-mode)
+    (insert (ende-test--chat-context-text messages))
+    (org-element-map (org-element-parse-buffer) 'headline
+      (lambda (headline) (org-element-property :raw-value headline)))))
+
 (defun ende-test--chat-unpartitioned-text (document question)
   "Return the selected Org content for QUESTION without message boundaries."
   (let* ((root (ende-chat--root document question))
@@ -6769,6 +6777,75 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (string-match-p "Earlier material" root-prefix))
       (should-not (string-match-p "Earlier material" current-only))
       (should (string-match-p "Current material" current-only)))))
+
+(ert-deftest ende-test/chat-context-fences-substitute-history-by-scope ()
+  (ende-test--reset)
+  (let ((ende-chat-context-policy 'root-prefix)
+        (ende-chat-include-reasoning nil))
+    (ende-test--with-buffer
+        (concat "* Q0\nOriginal root context\n"
+                "** R1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "** C0\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+                "** Q01\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "** R01\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "*** Q11\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "*** R11\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "*** C1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+                "**** Summary detail\nRemember this detail\n"
+                "*** Instructions\n:PROPERTIES:\n"
+                ":ENDE_VISIBILITY: hidden\n:END:\nNever send this\n"
+                "*** Q1\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "**** Reference\nCurrent question reference\n"
+                "*** R12\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "** Q2\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "** R02\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "*** Q21\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "**** Q211\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "** C2\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+                "** Q3\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                "* Other\n** Q4\n")
+      (org-mode)
+      ;; These queries exercise a local fence, an ancestor fence, an earlier
+      ;; branch at the same depth, later fences, and an independent root.
+      (dolist (case
+               '(("*** Q11" "C0" "Q01" "R01" "Q11")
+                 ("*** Q1" "C1" "Summary detail" "Q1" "Reference")
+                 ("** Q2" "C0" "Q01" "R01" "C1" "Summary detail"
+                  "Q1" "Reference" "R12" "Q2")
+                 ("*** Q21" "C0" "Q01" "R01" "C1" "Summary detail"
+                  "Q1" "Reference" "R12" "Q2" "R02" "Q21")
+                 ("**** Q211" "C0" "Q01" "R01" "C1" "Summary detail"
+                  "Q1" "Reference" "R12" "Q2" "R02" "Q21" "Q211")
+                 ("** Q3" "C2" "Q3")
+                 ("** Q4" "Other" "Q4")))
+        (ende-test--chat-goto (car case))
+        (let* ((messages (ende-chat-context-at-point))
+               (text (ende-test--chat-context-text messages)))
+          (ert-info ((format "Context at %s" (car case)))
+            (should (equal (ende-test--chat-context-headings messages)
+                           (cdr case)))
+            (should (equal (caar (last messages)) "user"))
+            (should-not (string-match-p "Original root context" text))
+            (should-not (string-match-p "Never send this" text))
+            (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" text)))))
+      ;; An unfinished result cannot replace history, even if it was marked.
+      (dolist (state '("pending" "failed"))
+        (ende-test--chat-goto "** C2")
+        (org-entry-put nil ende-chat-state-property state)
+        (org-entry-put nil ende-chat-visibility-property "hidden")
+        (ende-test--chat-goto "** Q3")
+        (should
+         (equal (ende-test--chat-context-headings (ende-chat-context-at-point))
+                '("C0" "Q01" "R01" "C1" "Summary detail" "Q1" "Reference"
+                  "R12" "Q2" "R02" "Q21" "Q211" "Q3"))))
+      (let ((ende-chat-context-policy 'current-section-only))
+        (ende-test--chat-goto "*** Q1")
+        (should
+         (equal (ende-test--chat-context-headings (ende-chat-context-at-point))
+                '("Q1" "Reference")))))))
 
 (ert-deftest ende-test/chat-ask-marks-question-and-retries-without-sent-state ()
   (ende-test--reset)
@@ -7080,6 +7157,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                            ":PROPERTIES:\n"
                            ":ENDE_MODEL: forged-model\n"
                            ":ENDE_REASONING_EFFORT: forged-effort\n"
+                           ":ENDE_CHAT_CONTEXT_FENCE: t\n"
                            ":END:\n\nAnswer body")
                    :thinking "Private plan")
              (when reported-model
@@ -7109,6 +7187,7 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should (= 1 (ende-test--count-matches
                         "^:ENDE_ROLE: user$" (buffer-string))))
           (should-not (string-match-p "forged-model" (buffer-string)))
+          (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
           (should-not (string-match-p "forged-effort" (buffer-string))))
         (ende-test--chat-goto "** Next")
         (let* ((ende-chat-include-reasoning t)
