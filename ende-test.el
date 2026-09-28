@@ -476,6 +476,285 @@ process for cancellation tests."
        ("replacement" . "Q")))
     "abcXYZ")))
 
+(ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
+  (let* ((root (make-temp-file "ende-chat-config-" t))
+         (child-root (make-temp-file "ende-chat-child-config-" t))
+         (configuration
+          (format
+           (concat
+            "#+begin_ende\n(root %S)\n"
+            "(group inspect project_info list_project_files file_info read_file "
+            "search_project list_project_buffers read_buffer)\n"
+            "(group modify edit_source)\n"
+            "(resource project (include \"**\") (exclude \"private/**\"))\n"
+            "(resource chat (include \"main.el\"))\n"
+            "(tools inspect)\n"
+            "(set-tool-resources inspect :resources project)\n"
+            "#+end_ende\n\n"
+            "* Review\n** Edit\n"
+            "#+begin_ende\n(root %S)\n(tools modify)\n"
+            "(set-tool-resources modify :resources chat)\n"
+            "(set-tool-resources read_file :resources chat)\n"
+            "(add-tool-resources read_file :resources project)\n"
+            "#+end_ende\n*** Inspect only\n"
+            "#+begin_ende\n(clear-tools)\n(tools inspect)\n"
+            "(clear-tool-resources)\n"
+            "(set-tool-resources inspect :resources project)\n"
+            "#+end_ende\n")
+           root child-root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "private" root))
+          (with-temp-buffer
+            (insert configuration)
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (headlines (ende-chat--document-headlines document))
+                   (edit (cl-find-if
+                          (lambda (headline)
+                            (equal (org-element-property :raw-value headline)
+                                   "Edit"))
+                          headlines))
+                   (inspect-only
+                    (cl-find-if
+                     (lambda (headline)
+                       (equal (org-element-property :raw-value headline)
+                              "Inspect only"))
+                     headlines))
+                   (edit-config
+                    (ende-chat-config-resolve
+                     (ende-chat--document-tree document)
+                     (ende-chat--document-parent document) edit))
+                   (inspect-config
+                    (ende-chat-config-resolve
+                     (ende-chat--document-tree document)
+                     (ende-chat--document-parent document) inspect-only)))
+              (should (equal (plist-get edit-config :root)
+                             (ende-project-normalize-root child-root)))
+              (should (memq 'edit_source
+                            (plist-get edit-config :active-tools)))
+              (should (equal (cdr (assq 'edit_source
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat)))
+              (should (equal (cdr (assq 'read_file
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat project)))
+              (should (equal (plist-get inspect-config :active-tools)
+                             '(project_info list_project_files file_info
+                               read_file search_project list_project_buffers
+                               read_buffer)))
+              (should (equal (plist-get inspect-config :root)
+                             (ende-project-normalize-root child-root)))
+              (should-not (memq 'edit_source
+                                (plist-get inspect-config :active-tools)))
+              (should-not (assq 'edit_source
+                                (plist-get inspect-config :tool-resources)))))
+          (let ((ran nil))
+            (should-error
+             (ende-chat-config--read-forms "(#.(setq ran t))"))
+            (should-not ran))
+          (with-temp-buffer
+            (insert "#+begin_ende\n(tools read_file)\n#+end_ende\n* Q\n")
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (question (car (ende-chat--document-headlines document))))
+              (should-error
+               (ende-chat-config-resolve
+                (ende-chat--document-tree document)
+                (ende-chat--document-parent document) question))))
+          (with-temp-buffer
+            (insert
+             (format
+              (concat "#+begin_ende\n(root %S)\n(group inspect read_file)\n"
+                      "#+end_ende\n* A\n** B\n#+begin_ende\n"
+                      "(group inspect project_info)\n#+end_ende\n")
+              root))
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (question (car (last (ende-chat--document-headlines
+                                         document)))))
+              (should-error
+               (ende-chat-config-resolve
+                (ende-chat--document-tree document)
+                (ende-chat--document-parent document) question)))))
+      (delete-directory root t)
+      (delete-directory child-root t))))
+
+(ert-deftest ende-test/chat-tool-loop-filters-search-and-authorizes-calls ()
+  (let* ((root (make-temp-file "ende-chat-tools-" t))
+         (public (expand-file-name "main.el" root))
+         (private-directory (expand-file-name "private" root))
+         (private (expand-file-name "secret.txt" private-directory))
+         (visited nil)
+         (frozen-configuration nil)
+         (original-search (symbol-function #'ende-tools--search-source)))
+    (ende-test--reset)
+    (unwind-protect
+        (progn
+          (make-directory private-directory)
+          (with-temp-file public (insert "public text\n"))
+          (with-temp-file private (insert "classified text\n"))
+          (let ((ende-llm-function
+                 (ende-test--fake-llm
+                  (list
+                   (list :tool-calls
+                         (list (list :id "call-search"
+                                     :name "search_project"
+                                     :arguments "{\"regexp\":\"classified\"}")))
+                   "Search complete")
+                  t)))
+            (with-temp-buffer
+              (insert
+               (format
+                (concat
+                 "#+begin_ende\n(root %S)\n"
+                 "(group inspect project_info list_project_files read_file "
+                 "search_project)\n"
+                 "(resource project (include \"**\") "
+                 "(exclude \"private/**\"))\n"
+                 "(tools inspect)\n"
+                 "(set-tool-resources inspect :resources project)\n"
+                 "#+end_ende\n\n* Find classified text\nSearch now\n")
+                root))
+              (org-mode)
+              (ende-test--chat-goto "* Find classified text")
+              (cl-letf (((symbol-function #'ende-tools--search-source)
+                         (lambda (source regexp before after maximum)
+                           (push (plist-get source :relative) visited)
+                           (funcall original-search source regexp before after
+                                    maximum))))
+                (ende-ask)
+                (let* ((document (ende-chat--build-document))
+                       (question (car (ende-chat--document-headlines document))))
+                  (setq frozen-configuration
+                        (ende-chat-config-resolve
+                         (ende-chat--document-tree document)
+                         (ende-chat--document-parent document) question))
+                  (goto-char (point-min))
+                  (should (search-forward
+                           "(resource project (include \"**\")" nil t))
+                  (replace-match
+                   "(resource project (include \"private/**\")" t t)
+                  (ende-test--complete-call (car ende-test--calls))
+                  (ende-test--complete-call (nth 1 ende-test--calls))))
+              (should (equal (nreverse visited) '("main.el")))
+              (should (string-match-p "Search complete" (buffer-string)))
+              (should (= (length ende-test--calls) 2))
+              (let* ((first-call (car ende-test--calls))
+                     (definitions (plist-get (plist-get first-call :options)
+                                             :tool-definitions))
+                     (second-messages (plist-get (nth 1 ende-test--calls)
+                                                 :messages))
+                     (tool-reply (car (last second-messages))))
+                (should (equal (sort (mapcar (lambda (definition)
+                                               (alist-get
+                                                :name
+                                                (alist-get :function
+                                                           definition)))
+                                             definitions)
+                                     #'string<)
+                               '("list_project_files" "project_info"
+                                 "read_file" "search_project")))
+                (should (equal (plist-get tool-reply :role) "tool"))
+                (should-not (string-match-p "classified"
+                                            (plist-get tool-reply :content)))
+                (let* ((reply (json-parse-string
+                               (plist-get tool-reply :content)
+                               :object-type 'hash-table))
+                       (result (gethash "result" reply)))
+                  (should (= (gethash "files_inspected" result) 1))))
+              (let* ((configuration frozen-configuration)
+                     (denied
+                      (ende-tool-call
+                       "read_file" '(("path" . "private/secret.txt"))
+                       root configuration))
+                      (allowed
+                       (ende-tool-call "read_file" '(("path" . "main.el"))
+                                       root configuration))
+                      (no-resources (copy-tree configuration)))
+                (should (plist-get allowed :ok))
+                (should (string-match-p
+                         "public text"
+                         (plist-get (plist-get allowed :result) :content)))
+                (should-not (plist-get denied :ok))
+                (should (string-match-p "not authorized"
+                                        (plist-get denied :error)))
+                (setf (plist-get no-resources :tool-resources) nil)
+                (should (string-match-p
+                         "no assigned resources"
+                         (plist-get
+                          (ende-tool-call
+                           "read_file" '(("path" . "main.el"))
+                           root no-resources)
+                          :error)))
+                (should (plist-get
+                         (ende-tool-call "project_info" nil root no-resources)
+                         :ok))))))
+      (ende-test--reset)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/tool-protocols-preserve-calls-and-results ()
+  (let* ((definition
+          (cl-find-if
+           (lambda (candidate)
+             (equal (alist-get :name (alist-get :function candidate))
+                    "read_file"))
+           (ende-tool-definitions)))
+         (profile (list :model "model" :tool-definitions (list definition)))
+         (call '(:id "call-1" :name "read_file"
+                 :arguments "{\"path\":\"main.el\"}"))
+         (messages (list (cons "user" "read a file")
+                         (list :role "assistant" :content nil
+                               :tool-calls (list call))
+                         (list :role "tool" :tool-call-id "call-1"
+                               :content "{\"ok\":true}")))
+         (chat-body (ende-llm--request-body messages profile))
+         (responses-body (ende-codex--request-body messages profile)))
+    (should (equal (alist-get :tool_choice chat-body) "auto"))
+    (should (equal (alist-get :tool_choice responses-body) "auto"))
+    (let* ((assistant (nth 1 (alist-get :messages chat-body)))
+           (tool-call (car (alist-get :tool_calls assistant))))
+      (should (equal (alist-get :id tool-call) "call-1"))
+      (should (equal (alist-get :name (alist-get :function tool-call))
+                     "read_file")))
+    (should (equal (alist-get :type (nth 1 (alist-get :input responses-body)))
+                   "function_call"))
+    (should (equal (alist-get :type (nth 2 (alist-get :input responses-body)))
+                   "function_call_output"))
+    (let ((session (ende-llm--make-session
+                    :tool-calls (make-hash-table :test #'eql)
+                    :estimated-chars 0)))
+      (ende-llm--collect-tool-calls
+       session
+       (vector (json-parse-string
+                "{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_\",\"arguments\":\"{\\\"path\\\":\"}}"
+                :object-type 'hash-table)))
+      (ende-llm--collect-tool-calls
+       session
+       (vector (json-parse-string
+                "{\"index\":0,\"function\":{\"name\":\"file\",\"arguments\":\"\\\"main.el\\\"}\"}}"
+                :object-type 'hash-table)))
+      (should (equal (car (ende-llm--result session)) :content))
+      (should (equal (plist-get (car (plist-get (ende-llm--result session)
+                                                 :tool-calls))
+                                :arguments)
+                     "{\"path\":\"main.el\"}")))
+    (let* ((session (ende-codex--make-session
+                     :tool-calls (make-hash-table :test #'eql)
+                     :estimated-chars 0))
+           (event
+            (json-parse-string
+             "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"main.el\\\"}\"}]}}"
+             :object-type 'hash-table)))
+      (ende-codex--handle-event session event)
+      (should (equal (plist-get (car (plist-get (ende-codex--result session)
+                                                :tool-calls))
+                                :id)
+                     "call-2")))))
+
 (defmacro ende-test--with-buffer (contents &rest body)
   "Evaluate BODY in a temporary buffer containing CONTENTS."
   (declare (indent 1) (debug t))
