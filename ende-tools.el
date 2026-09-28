@@ -785,7 +785,8 @@ return them."
    (cons :type "object")
    (cons :properties
          (list
-          (cons :path '((:type . "string")))
+          (cons :path '((:type . "string")
+                        (:description . "Project-relative file path")))
           (cons :buffer_id '((:type . "string")))
           (cons :base_digest '((:type . "string")))
           (cons :edits
@@ -818,12 +819,13 @@ return them."
 
 (ende-tool-register
  'read_file
- "Read a bounded, 1-based line range from a project file or its visiting buffer."
+ "Read a bounded, 1-based line range from a project-relative path or its visiting buffer."
  '((:type . "object")
    (:properties
-    . ((:path . ((:type . "string")))
+    . ((:path . ((:type . "string")
+                 (:description . "Project-relative file path")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
-        (:line_count . ((:type . "integer") (:minimum . 1)))))
+       (:line_count . ((:type . "integer") (:minimum . 1)))))
    (:required . ("path"))
    (:additionalProperties . :false))
  #'ende-tools--read-file)
@@ -861,7 +863,7 @@ return them."
 
 (ende-tool-register
  'edit_source
- "Create validated edits for one project file or visiting buffer. Edits use zero-based character offsets in the complete source, exact expected text, and replacement text."
+ "Create validated edits for one project-relative file path or visiting buffer. Edits use zero-based character offsets in the complete source, exact expected text, and replacement text."
  ende-tools--edit-schema
  #'ende-tools--edit-source :write)
 
