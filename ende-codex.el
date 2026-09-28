@@ -63,14 +63,6 @@
   :type 'string
   :group 'ende)
 
-(defcustom ende-codex-log-tool-diagnostics t
-  "Non-nil to retain OpenAI Responses tool diagnostics in job history.
-
-Diagnostics list the tool names sent and output-item types received.  They do
-not include prompts, tool arguments, or response contents."
-  :type 'boolean
-  :group 'ende)
-
 (defconst ende-codex--generation-host "chatgpt.com"
   "Official host allowed for Codex generation and model discovery.")
 
@@ -1164,7 +1156,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--emit-diagnostic (session text)
   "Emit diagnostic TEXT for SESSION when diagnostics are enabled."
-  (when ende-codex-log-tool-diagnostics
+  (when ende-tool-diagnostics
     (ende-codex--emit session (list :type :diagnostic :text text))))
 
 (defun ende-codex--diagnose-request (session body)

@@ -764,7 +764,7 @@ process for cancellation tests."
                      "call-2")))))
 
 (ert-deftest ende-test/openai-tool-diagnostics-are-safe-and-configurable ()
-  (should (eq ende-codex-log-tool-diagnostics t))
+  (should (eq ende-tool-diagnostics t))
   (let* ((definition
           (cl-find-if
            (lambda (candidate)
@@ -802,13 +802,101 @@ process for cancellation tests."
                        "OpenAI Responses output items: function_call(read_file)")))
       (should-not (string-match-p "secret\\.el"
                                   (mapconcat #'identity diagnostics "\n")))))
-  (let ((ende-codex-log-tool-diagnostics nil)
+  (let ((ende-tool-diagnostics nil)
         (events nil))
-    (let ((session
+    (let ((codex-session
            (ende-codex--make-session
             :callbacks (list :on-event
+                             (lambda (event) (push event events)))))
+          (chat-session
+           (ende-llm--make-session
+            :callbacks (list :on-event
+                             (lambda (event) (push event events)))
+            :tool-calls (make-hash-table :test #'eql))))
+      (ende-codex--diagnose-request codex-session '((:tools . nil)))
+      (ende-llm--diagnose-request chat-session '((:tools . nil)))
+      (ende-codex--diagnose-output-item
+       codex-session "response.output_item.done"
+       (ende-protocol-json-read-string
+        "{\"type\":\"function_call\",\"name\":\"read_file\"}"))
+      (ende-llm--diagnose-result chat-session)
+      (should-not events))))
+
+(ert-deftest ende-test/chat-completions-tool-diagnostics-cover-local-and-openrouter ()
+  (should (eq ende-tool-diagnostics t))
+  (let* ((definition
+          (cl-find-if
+           (lambda (candidate)
+             (equal (alist-get :name (alist-get :function candidate))
+                    "read_file"))
+           (ende-tool-definitions)))
+         (tool-event
+          (ende-protocol-json-read-string
+           (concat
+            "{\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"index\":0,\"id\":\"call-1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read_file\","
+            "\"arguments\":\"{\\\"path\\\":\\\"secret.el\\\"}\"}}]}}]}"))))
+    (dolist (provider '(local openrouter))
+      (let* ((profile (list :name provider :model "test-model"
+                            :tool-definitions (list definition)))
+             (body (ende-llm--request-body
+                    (list (cons "user" "read the file")) profile))
+             (events nil)
+             (session
+              (ende-llm--make-session
+               :profile profile
+               :callbacks (list :on-event
+                                (lambda (event) (push event events)))
+               :tool-calls (make-hash-table :test #'eql))))
+        (ende-llm--diagnose-request session body)
+        (ende-llm--handle-json session tool-event)
+        (ende-llm--diagnose-result session)
+        (let ((diagnostics
+               (mapcar (lambda (event) (plist-get event :text))
+                       (cl-remove-if-not
+                        (lambda (event)
+                          (eq (plist-get event :type) :diagnostic))
+                        (nreverse events)))))
+          (should (equal diagnostics
+                         '("Chat Completions tools sent: read_file"
+                           "Chat Completions output items: tool_call(read_file)")))
+          (should-not (string-match-p
+                       "secret\\.el"
+                       (mapconcat #'identity diagnostics "\n"))))))))
+
+(ert-deftest ende-test/openrouter-batch-tool-diagnostics-use-shared-setting ()
+  (should (eq ende-tool-diagnostics t))
+  (let* ((events nil)
+         (request
+          (ende-openrouter-batch--make-request
+           :callbacks (list :on-event
+                            (lambda (event) (push event events)))))
+         (body
+          (ende-protocol-json-read-string
+           (concat
+            "{\"choices\":[{\"message\":{\"content\":\"answer\","
+            "\"tool_calls\":[{\"function\":{\"name\":\"read_file\","
+            "\"arguments\":\"{\\\"path\\\":\\\"secret.el\\\"}\"}}]}}]}"))))
+    (ende-openrouter-batch--diagnose-request request)
+    (ende-openrouter-batch--diagnose-result request body)
+    (let ((diagnostics (mapcar (lambda (event) (plist-get event :text))
+                               (nreverse events))))
+      (should (equal diagnostics
+                     '("OpenRouter Batch request tools: (none)"
+                       "OpenRouter Batch output items: message, tool_call(read_file)")))
+      (should-not (string-match-p
+                   "secret\\.el"
+                   (mapconcat #'identity diagnostics "\n")))))
+  (let ((ende-tool-diagnostics nil)
+        (events nil))
+    (let ((request
+           (ende-openrouter-batch--make-request
+            :callbacks (list :on-event
                              (lambda (event) (push event events))))))
-      (ende-codex--diagnose-request session '((:tools . nil)))
+      (ende-openrouter-batch--diagnose-request request)
+      (ende-openrouter-batch--diagnose-result
+       request (ende-protocol-json-read-string "{\"choices\":[]}"))
       (should-not events))))
 
 (ert-deftest ende-test/openai-streamed-function-call-is-collected-without-final-output ()

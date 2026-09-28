@@ -211,6 +211,43 @@
               (ende-openrouter-batch--request-settled request))
     (ende-openrouter-batch--invoke request :on-event event)))
 
+(defun ende-openrouter-batch--diagnostic (request text)
+  "Emit diagnostic TEXT for REQUEST when tool diagnostics are enabled."
+  (when ende-tool-diagnostics
+    (ende-openrouter-batch--emit
+     request (list :type :diagnostic :text text))))
+
+(defun ende-openrouter-batch--diagnose-request (request)
+  "Record the tools present in REQUEST's Batch API body."
+  (ende-openrouter-batch--diagnostic
+   request "OpenRouter Batch request tools: (none)"))
+
+(defun ende-openrouter-batch--diagnostic-output-items (body)
+  "Return a safe summary of completion output item types in BODY."
+  (let* ((choice (ende-openrouter-batch--choice body))
+         (message (ende-protocol-json-get "message" choice))
+         (calls (ende-protocol-json-get "tool_calls" message))
+         (calls (cond
+                 ((and (vectorp calls) (not (stringp calls)))
+                  (append calls nil))
+                 ((listp calls) calls)))
+         (items (when (stringp (ende-protocol-json-get "content" message))
+                  (list "message"))))
+    (dolist (call calls)
+      (let* ((function (ende-protocol-json-get "function" call))
+             (name (ende-protocol-json-get "name" function)))
+        (push (if name (format "tool_call(%s)" name) "tool_call") items)))
+    (if items
+        (mapconcat #'identity (nreverse items) ", ")
+      "(none)")))
+
+(defun ende-openrouter-batch--diagnose-result (request body)
+  "Record the output item types in Batch completion BODY for REQUEST."
+  (ende-openrouter-batch--diagnostic
+   request
+   (format "OpenRouter Batch output items: %s"
+           (ende-openrouter-batch--diagnostic-output-items body))))
+
 (defun ende-openrouter-batch--status (group status)
   "Emit STATUS to all live requests in GROUP."
   (setf (ende-openrouter-batch--group-status group) status)
@@ -607,6 +644,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
           (ende-openrouter-batch--status group "Submitting batch")
           (setf (ende-openrouter-batch--group-body group)
                 (ende-openrouter-batch--body group))
+          (dolist (request (ende-openrouter-batch--active-requests group))
+            (ende-openrouter-batch--diagnose-request request))
           (ende-openrouter-batch--start-stage
            group "POST"
            (plist-get (ende-openrouter-batch--group-profile group)
@@ -810,6 +849,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
             (if error
                 (ende-openrouter-batch--settle-request
                  request 'failure nil error)
+              (ende-openrouter-batch--diagnose-result request body)
               (condition-case caught
                   (let ((normalized
                          (ende-openrouter-batch--normalize-result

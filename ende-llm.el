@@ -118,6 +118,45 @@ normalized :tool-calls for the chat tool loop.")
   (unless (ende-llm--session-terminal session)
     (ende-llm--invoke-callback session :on-event event)))
 
+(defun ende-llm--emit-diagnostic (session text)
+  "Emit diagnostic TEXT for SESSION when tool diagnostics are enabled."
+  (when ende-tool-diagnostics
+    (ende-llm--emit-event session (list :type :diagnostic :text text))))
+
+(defun ende-llm--diagnostic-tool-names (tools)
+  "Return tool names from Chat Completions TOOLS."
+  (if tools
+      (mapconcat (lambda (tool)
+                   (or (alist-get :name (alist-get :function tool))
+                       "<unknown>"))
+                 tools ", ")
+    "(none)"))
+
+(defun ende-llm--diagnose-request (session body)
+  "Record the tools in Chat Completions request BODY for SESSION."
+  (ende-llm--emit-diagnostic
+   session
+   (format "Chat Completions tools sent: %s"
+           (ende-llm--diagnostic-tool-names (alist-get :tools body)))))
+
+(defun ende-llm--diagnostic-output-items (session)
+  "Return a safe summary of SESSION's Chat Completions output items."
+  (let ((items (when (ende-llm--session-content-parts session)
+                 (list "message"))))
+    (dolist (call (ende-llm--tool-call-list session))
+      (push (format "tool_call(%s)" (or (plist-get call :name) "<unknown>"))
+            items))
+    (if items
+        (mapconcat #'identity (nreverse items) ", ")
+      "(none)")))
+
+(defun ende-llm--diagnose-result (session)
+  "Record the response item types collected for SESSION."
+  (ende-llm--emit-diagnostic
+   session
+   (format "Chat Completions output items: %s"
+           (ende-llm--diagnostic-output-items session))))
+
 (defun ende-llm--emit-status (session status)
   "Emit a changed STATUS for SESSION."
   (unless (equal status (ende-llm--session-last-status session))
@@ -449,6 +488,7 @@ normalized :tool-calls for the chat tool loop.")
                   (ende-llm--fail
                    session (ende-llm--session-provider-error session)))
                  (t
+                  (ende-llm--diagnose-result session)
                   (ende-llm--settle
                    session 'success (ende-llm--result session)))))))))
       ((error quit)
@@ -605,12 +645,13 @@ normalized :tool-calls for the chat tool loop.")
 (defun ende-llm--start-session (session messages)
   "Allocate and start SESSION for MESSAGES."
   (ende-validate-resource-options)
-  (let ((default-directory (ende-curl-local-directory))
-        (profile (ende-llm--session-profile session)))
+  (let* ((default-directory (ende-curl-local-directory))
+         (profile (ende-llm--session-profile session))
+         (request-body (ende-llm--request-body messages profile))
+         (json-data (encode-coding-string
+                     (json-encode request-body) 'utf-8)))
     (setf (ende-llm--session-messages session) messages)
-    (setf (ende-llm--session-json-data session)
-          (encode-coding-string
-           (json-encode (ende-llm--request-body messages profile)) 'utf-8))
+    (setf (ende-llm--session-json-data session) json-data)
     (let ((request
            (ende-curl-start-request
             :profile profile
@@ -638,6 +679,7 @@ normalized :tool-calls for the chat tool loop.")
         (ende-llm--lifecycle session) request))
     (ende-llm--invoke-callback
      session :on-start (apply-partially #'ende-llm--cancel session))
+    (ende-llm--diagnose-request session request-body)
     (when (and (not (ende-llm--session-terminal session))
                ende-provider-discovery-enabled)
        (setf (ende-llm--session-discovery-cancel session)

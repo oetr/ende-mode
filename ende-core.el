@@ -18,6 +18,16 @@
   :prefix "ende-"
   :group 'convenience)
 
+(defcustom ende-tool-diagnostics t
+  "Non-nil to retain tool diagnostics in job history for every provider.
+
+Diagnostics show the tool names sent and response item types.  They omit tool
+arguments and response content."
+  :type 'boolean
+  :group 'ende)
+
+(defvaralias 'ende-codex-log-tool-diagnostics 'ende-tool-diagnostics)
+
 (defconst ende-client-name "ende-mode"
   "Client name advertised in outbound HTTP requests.")
 
