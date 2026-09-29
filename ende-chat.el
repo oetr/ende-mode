@@ -722,9 +722,11 @@ title.\n\n"
       (lambda (element)
         (cond
          ((ende-chat--title-keyword-p element)
-          (push (cons (org-element-property :begin element)
-                      (org-element-property :end element))
-                ranges))
+          (let ((begin (org-element-property :begin element)))
+            (save-excursion
+              (goto-char begin)
+              (push (cons begin (min (point-max) (1+ (line-end-position))))
+                    ranges))))
          ((and (eq (org-element-type element) 'node-property)
                (member (upcase (or (org-element-property :key element) ""))
                        ende-chat--reserved-properties))
@@ -761,6 +763,26 @@ title.\n\n"
   "Return non-nil when LINE needs comma-escaping inside an Org block."
   (string-match-p "\\`\\(?:\\*\\|#\\+\\|,\\(?:\\*\\|#\\+\\|,\\)\\)"
                   line))
+
+(defun ende-chat--mask-ranges (text ranges)
+  "Replace non-newline characters in TEXT at buffer-position RANGES.
+
+RANGES contains (BEGIN . END) pairs of Org buffer positions.  Newlines and
+character positions are preserved so parse positions remain valid for edits to
+the original text."
+  (let ((offset 0)
+        (parts nil))
+    (dolist (range (sort (copy-sequence ranges)
+                         (lambda (left right) (< (car left) (car right)))))
+      (let ((start (1- (car range)))
+            (end (1- (cdr range))))
+        (push (substring text offset start) parts)
+        (push (replace-regexp-in-string
+               "[^\n]" " " (substring text start end))
+              parts)
+        (setq offset end)))
+    (push (substring text offset) parts)
+    (apply #'concat (nreverse parts))))
 
 (defun ende-chat--response-blocks (content)
   "Return CONTENT repaired and masked for safe Org response parsing.
@@ -804,16 +826,9 @@ directives.  An open block is closed at the end of CONTENT."
           (insert "\n"))
         (insert (format "#+end_%s\n" open-block))
         (push (cons block-start (point-max)) ranges))
-      (let* ((repaired (buffer-string))
-             (masked (copy-sequence repaired)))
-        (dolist (range ranges)
-          (let ((index (1- (car range)))
-                (end (1- (cdr range))))
-            (while (< index end)
-              (unless (= (aref masked index) ?\n)
-                (aset masked index ?\s))
-              (setq index (1+ index)))))
-        (list :content repaired :parse-content masked)))))
+      (let ((repaired (buffer-string)))
+        (list :content repaired
+              :parse-content (ende-chat--mask-ranges repaired ranges))))))
 
 (defun ende-chat--apply-response-edits (content edits)
   "Apply response EDITS to CONTENT and return the resulting string.

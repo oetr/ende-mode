@@ -7658,15 +7658,23 @@ Use COMMAND for the process, or a silent sleep process by default."
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm
-          '("#+ENDE_CHAT_TITLE: Explain the request\n\nAnswer\n* Generated"))))
+          (list (concat "#+ENDE_CHAT_TITLE: Explain the request\n\n"
+                        "#+begin_example\n"
+                        "Instructions → User question — café\n"
+                        "#+end_example\n\n"
+                        "Answer\n* Generated")))))
     (ende-test--with-buffer "* Root\n** \nRequest body\n"
       (org-mode)
       (ende-test--chat-goto "** ")
-      (ende-ask)
+      (let ((job (ende-ask)))
+        (should (eq (ende-job-state job) 'completed)))
       (should-not (ende-test--chat-reasoning-headlines))
       (should (string-match-p "^\\*\\* Explain the request$"
                               (buffer-string)))
       (should-not (string-match-p "ENDE_CHAT_TITLE" (buffer-string)))
+      (should (string-match-p "Answer" (buffer-string)))
+      (should (string-match-p
+               "Instructions → User question — café" (buffer-string)))
       (should (string-match-p "^\\*\\*\\* Generated$"
                               (buffer-string))))))
 
@@ -7677,6 +7685,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                   "#+ENDE_CHAT_TITLE: literal text\n"
                   ":PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
                   "*** Literal source heading\n"
+                  "Unicode: café → “quoted”.\n"
                   ",* Previously escaped heading\n"
                   ",#+end_src\n"
                   "#+begin_quote\n**** Nested source heading\n#+end_quote\n"
@@ -7692,6 +7701,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                     ",#+ENDE_CHAT_TITLE: literal text\n"
                     ":PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
                     ",*** Literal source heading\n"
+                    "Unicode: café → “quoted”.\n"
                     ",,* Previously escaped heading\n"
                     ",,#+end_src\n"
                     ",#+begin_quote\n,**** Nested source heading\n,#+end_quote\n"
