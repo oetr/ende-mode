@@ -6972,6 +6972,21 @@ Use COMMAND for the process, or a silent sleep process by default."
   (search-forward (concat heading "\n"))
   (org-back-to-heading t))
 
+(defun ende-test--selector-ask-from-buffer (source)
+  "Run the selector's ask action for SOURCE with the test model."
+  (with-temp-buffer
+    (ende-selector-mode)
+    (setq ende-selector--source-buffer source
+          ende-selector--providers '(remote)
+          ende-selector--provider-index 0
+          ende-selector--models '("selected-model")
+          ende-selector--model-index 0
+          ende-selector--model-state :ready
+          ende-selector--effort nil)
+    (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
+      (call-interactively
+       (lookup-key ende-selector-mode-map (kbd "a"))))))
+
 (defun ende-test--chat-context-text (messages)
   "Return all serialized chat message text in MESSAGES."
   (mapconcat (lambda (message) (cdr message)) messages "\n"))
@@ -8045,15 +8060,145 @@ Use COMMAND for the process, or a silent sleep process by default."
               (should (eq (ende-job-state job)
                           (if (eq response :error) 'failed 'completed))))))))))
 
-(ert-deftest ende-test/chat-rejects-ineligible-questions ()
+(ert-deftest ende-test/chat-ask-promotes-the-selected-headline-to-user ()
+  (dolist (local-role '(nil "assistant"))
+    (ende-test--reset)
+    (let ((ende-llm-function (ende-test--fake-llm '("Answer"))))
+      (ende-test--with-buffer
+          (concat "* Root\n"
+                  "** Agent: Reply\n"
+                  ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                  "Prior assistant answer.\n"
+                  "*** Follow-up\n"
+                  (if local-role
+                      (format ":PROPERTIES:\n:ENDE_ROLE: %s\n:END:\n"
+                              local-role)
+                    "")
+                  "Question from this node.\n")
+        (org-mode)
+        (ende-test--chat-goto "*** Follow-up")
+        (let* ((job (ende-ask))
+               (document (ende-chat--build-document))
+               (question
+                (ende-chat--find-by-property
+                 document ende-chat-id-property
+                 (plist-get (ende-job-instruction job) :question-id)))
+               (parent (ende-chat--parent document question))
+               (messages (plist-get (car ende-test--calls) :messages))
+               (assistant-text
+                (mapconcat
+                 (lambda (message)
+                   (if (equal (car message) "assistant")
+                       (cdr message)
+                     ""))
+                 messages "\n"))
+               (final-message (car (last messages))))
+          (should (eq (ende-job-state job) 'completed))
+          (should (equal (ende-chat--property document question :role)
+                         "user"))
+          (should (equal (ende-chat--property document parent :role)
+                         "assistant"))
+          (should-not (ende-chat--property document question :visibility))
+          (should (string-match-p "Prior assistant answer" assistant-text))
+          (should-not (string-match-p "Question from this node" assistant-text))
+          (should (equal (car final-message) "user"))
+          (should (string-match-p "Question from this node"
+                                  (cdr final-message))))))))
+
+(ert-deftest ende-test/selector-ask-includes-only-reasoning-ancestors ()
+  (dolist (policy '(root-prefix current-section-only))
+    (ende-test--reset)
+    (let ((ende-chat-context-policy policy)
+          (ende-chat-include-reasoning nil)
+          (ende-provider-profiles '((remote :model "configured-model")))
+          (ende-llm-function (ende-test--fake-llm '("Answer"))))
+      (ende-test--with-buffer
+          (concat "* Root\n"
+                  "** Reasoning cousin\n"
+                  ":PROPERTIES:\n"
+                  ":ENDE_ROLE: assistant\n"
+                  ":ENDE_VISIBILITY: reasoning\n"
+                  ":END:\nCousin reasoning text.\n"
+                  "** Agent: Reasoning\n"
+                  ":PROPERTIES:\n"
+                  ":ENDE_ROLE: assistant\n"
+                  ":ENDE_VISIBILITY: reasoning\n"
+                  ":END:\nOuter reasoning context.\n"
+                  "*** Reasoning aunt\n"
+                  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+                  "Aunt reasoning text.\n"
+                  "*** Nested reasoning\n"
+                  "Nested reasoning context.\n"
+                  "**** Reasoning sibling\n"
+                  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+                  "Sibling reasoning text.\n"
+                  "**** Follow-up\nQuestion from reasoning.\n")
+        (org-mode)
+        (ende-test--chat-goto "**** Follow-up")
+        (let ((source (current-buffer)))
+          (ende-test--selector-ask-from-buffer source))
+        (let* ((call (car ende-test--calls))
+               (messages (plist-get call :messages))
+               (assistant-text
+                (mapconcat
+                 (lambda (message)
+                   (if (equal (car message) "assistant")
+                       (cdr message)
+                     ""))
+                 messages "\n"))
+               (final-message (car (last messages)))
+               (document (ende-chat--build-document)))
+          (should (equal (plist-get (plist-get call :options) :model)
+                         "selected-model"))
+          (should (string-match-p "Answer" (buffer-string)))
+          (should (string-match-p "Outer reasoning context" assistant-text))
+          (should (string-match-p "Nested reasoning context" assistant-text))
+          (dolist (excluded '("Cousin reasoning text"
+                              "Aunt reasoning text"
+                              "Sibling reasoning text"))
+            (should-not (string-match-p (regexp-quote excluded)
+                                        assistant-text)))
+          (should (equal (car final-message) "user"))
+          (should (string-match-p "Question from reasoning"
+                                  (cdr final-message)))
+          (let* ((question (ende-chat--headline-at-point document))
+                 (parent (ende-chat--parent document question)))
+            (should (equal (ende-chat--property document question :role)
+                           "user"))
+            (should-not (ende-chat--property document question :visibility))
+            (should (eq (ende-chat--effective-visibility document parent)
+                        'reasoning))))))))
+
+(ert-deftest ende-test/selector-ask-rejects-hidden-ancestors ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((remote :model "configured-model")))
+        (ende-llm-function (ende-test--fake-llm '("Must not run"))))
+    (ende-test--with-buffer
+        (concat "* Root\n"
+                "** Hidden assistant context\n"
+                ":PROPERTIES:\n"
+                ":ENDE_ROLE: assistant\n"
+                ":ENDE_VISIBILITY: hidden\n"
+                ":END:\n"
+                "*** Follow-up\nQuestion inside hidden context.\n")
+      (org-mode)
+      (ende-test--chat-goto "*** Follow-up")
+      (let ((source (current-buffer)))
+        (should-error (ende-test--selector-ask-from-buffer source)
+                      :type 'user-error))
+      (ende-test--chat-goto "*** Follow-up")
+      (should-not (org-entry-get nil ende-chat-role-property nil))
+      (should-not (org-entry-get nil ende-chat-id-property nil))
+      (should-not ende-test--calls))))
+
+(ert-deftest ende-test/chat-ask-rejects-hidden-nodes-and-reasoning-roots ()
   (dolist (property
-           '((":ENDE_ROLE: assistant" . "assistant-owned")
-             (":ENDE_VISIBILITY: hidden" . "hidden")
-             (":ENDE_VISIBILITY: reasoning" . "reasoning")))
+           '(":ENDE_VISIBILITY: hidden"
+             ":ENDE_VISIBILITY: reasoning"))
     (ende-test--reset)
     (ende-test--with-buffer
         (format "* Root\n** Question\n:PROPERTIES:\n%s\n:END:\nAsk\n"
-                (car property))
+                property)
       (org-mode)
       (ende-test--chat-goto "** Question")
       (should-error (ende-ask) :type 'user-error))))

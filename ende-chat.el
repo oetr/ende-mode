@@ -14,8 +14,9 @@
 ;; ENDE_VISIBILITY (normal, hidden, or reasoning).  Generated response sections
 ;; also retain ENDE_MODEL and, when used, ENDE_REASONING_EFFORT.  Roles inherit
 ;; from the nearest marked ancestor; hidden visibility wins over every
-;; descendant and reasoning is sent only when
-;; `ende-chat-include-reasoning' is non-nil.
+;; descendant.  Reasoning is normally sent only when
+;; `ende-chat-include-reasoning' is non-nil, except that a question asked from
+;; within a reasoning subtree includes its reasoning ancestors as context.
 ;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  The
 ;; nearest fence on the question's ancestor path bounds the request; fences in
 ;; other branches replace preceding siblings only within their own subtrees.
@@ -51,8 +52,9 @@
 `root-prefix' includes eligible sections before the asked section in the
 active level-one root, followed by the asked section's eligible body.
 Context fences substitute summaries for earlier history in their scopes.
-`current-section-only' includes only that body.  Both policies retain the
-current question as the final user message."
+`current-section-only' includes only the current body.  Both policies also
+include reasoning ancestors when asked from within a reasoning subtree, and
+retain the current question as the final user message."
   :type '(choice (const :tag "Root prefix" root-prefix)
                  (const :tag "Current section only" current-section-only))
   :group 'ende)
@@ -60,8 +62,10 @@ current question as the final user message."
 (defcustom ende-chat-include-reasoning nil
   "Non-nil to include reasoning-marked Org content in chat requests.
 
-Hidden content remains excluded even when this is non-nil.  Included reasoning
-keeps the effective user or assistant role of its enclosing section."
+Hidden content remains excluded even when this is non-nil.  When a question is
+asked from within a reasoning subtree, its reasoning ancestors are included
+regardless of this setting.  Included reasoning keeps the effective user or
+assistant role of its enclosing section."
   :type 'boolean
   :group 'ende)
 
@@ -317,6 +321,27 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
             current (ende-chat--parent document current)))
     (intern (or role "user"))))
 
+(defun ende-chat--reasoning-ancestors (document headline)
+  "Return reasoning ancestors of HEADLINE in document order."
+  (let ((current (ende-chat--parent document headline))
+        ancestors)
+    (while current
+      (when (eq (ende-chat--effective-visibility document current) 'reasoning)
+        (push current ancestors))
+      (setq current (ende-chat--parent document current)))
+    (nreverse ancestors)))
+
+(defun ende-chat--askable-p (document question)
+  "Return non-nil when QUESTION is visible enough to ask from.
+
+Hidden content is never askable.  A reasoning-only section may be asked from
+only when QUESTION is below a reasoning ancestor; the selected node itself is
+then treated as the user's question without changing its visibility."
+  (let ((visibility (ende-chat--effective-visibility document question)))
+    (and (not (eq visibility 'hidden))
+         (or (not (eq visibility 'reasoning))
+             (ende-chat--reasoning-ancestors document question)))))
+
 (defun ende-chat--eligible-p (document headline)
   "Return non-nil when HEADLINE's section may enter context."
   (pcase (ende-chat--effective-visibility document headline)
@@ -477,7 +502,8 @@ whole request; a fence inside another sibling's subtree does not."
          (ranges (ende-chat--section-exclusions document headline start)))
     (ende-chat--remove-ranges text ranges)))
 
-(defun ende-chat--prefix-messages (document root question)
+(defun ende-chat--prefix-messages
+    (document root question &optional reasoning-ancestors-only)
   "Serialize eligible sections before QUESTION within ROOT.
 
 An explicit role property starts a message.  Unmarked descendants inherit
@@ -485,9 +511,13 @@ their nearest role-marked ancestor and contribute to its message until another
 explicit role property starts a nested message.  When traversal returns to an
 enclosing role, its content starts a new message so source order is preserved.
 Context fences replace earlier sibling subtrees; the nearest fence on
-QUESTION's ancestor path bounds the whole prefix."
+QUESTION's ancestor path bounds the whole prefix.  REASONING-ANCESTORS-ONLY
+limits the result to reasoning sections on QUESTION's ancestor path.  Those
+ancestors are included even when ordinary reasoning context is disabled."
   (let ((question-begin (org-element-property :begin question))
         (start (ende-chat--context-start document root question))
+        (reasoning-ancestors
+         (ende-chat--reasoning-ancestors document question))
         (messages nil)
         (parts nil)
         (message-owner nil)
@@ -514,46 +544,59 @@ QUESTION's ancestor path bounds the whole prefix."
              (when role-marked
                (flush))
              (when (and (>= (org-element-property :begin headline) start)
-                        (ende-chat--eligible-p document headline))
+                        (if reasoning-ancestors-only
+                            (memq headline reasoning-ancestors)
+                          (or (ende-chat--eligible-p document headline)
+                              (memq headline reasoning-ancestors))))
                (unless (and parts (eq next-owner message-owner))
                  (flush)
                  (setq message-owner next-owner
                        message-role next-role))
                (push (ende-chat--section-text document headline) parts))
-              (dolist (child (ende-chat--fenced-siblings
-                              document (ende-chat--children document headline)
-                              question-begin))
+             (dolist (child (ende-chat--fenced-siblings
+                             document (ende-chat--children document headline)
+                             question-begin))
                (walk child next-owner next-role)))))
       (catch 'ende-chat--question-reached
         (walk root nil 'user))
       (flush)
       (nreverse messages))))
 
-(defun ende-chat--current-headlines (document question &optional instructions)
+(defun ende-chat--current-headlines
+    (document question &optional instructions include-reasoning)
   "Return QUESTION and eligible unmarked descendants in source order.
 INSTRUCTIONS reads the current section even when archived as hidden;
-independently marked descendants remain excluded."
+independently marked descendants remain excluded.  INCLUDE-REASONING includes
+all non-hidden sections within the current question subtree."
   (let ((result nil))
     (cl-labels
-        ((walk (headline root)
+        ((included-p (headline)
+           (or instructions
+               (ende-chat--eligible-p document headline)
+               (and include-reasoning
+                    (not (ende-chat--hidden-p document headline)))))
+         (walk (headline root)
            (when (or (eq headline root)
                      (and (not (ende-chat--independent-subtree-p
                                 document headline))
-                           (or instructions
-                               (ende-chat--eligible-p document headline))))
-             (when (or instructions (ende-chat--eligible-p document headline))
+                          (included-p headline)))
+             (when (included-p headline)
                (push headline result))
              (dolist (child (ende-chat--children document headline))
                (walk child root)))))
       (walk question question))
     (nreverse result)))
 
-(defun ende-chat--current-text (document question &optional instructions)
+(defun ende-chat--current-text
+    (document question &optional instructions include-reasoning)
   "Return QUESTION's selected text in DOCUMENT.
-INSTRUCTIONS has the same meaning as in `ende-chat--current-headlines'."
+INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
+`ende-chat--current-headlines'."
   (mapconcat (lambda (headline)
                (ende-chat--section-text document headline))
-             (ende-chat--current-headlines document question instructions) ""))
+             (ende-chat--current-headlines
+              document question instructions include-reasoning)
+             ""))
 
 (defun ende-chat--instruction-body (document question)
   "Return QUESTION's instruction content, excluding its headline."
@@ -571,14 +614,21 @@ INSTRUCTIONS has the same meaning as in `ende-chat--current-headlines'."
 CURRENT-TEXT, when supplied, replaces the final user message.
 ROOT supplies the source scope when the destination is a new root sibling."
   (let* ((root (or root (ende-chat--root document question)))
+         (reasoning-ancestors
+          (ende-chat--reasoning-ancestors document question))
          (prefix (and (eq ende-chat-context-policy 'root-prefix)
-                      (ende-chat--prefix-messages document root question))))
+                      (ende-chat--prefix-messages document root question)))
+         (reasoning-prefix
+          (and (eq ende-chat-context-policy 'current-section-only)
+               reasoning-ancestors
+               (ende-chat--prefix-messages document root question t))))
     (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
       (error "Invalid ende-chat-context-policy: %s"
              ende-chat-context-policy))
     (let ((current-text (or current-text
-                           (ende-chat--current-text document question))))
-      (append prefix
+                            (ende-chat--current-text
+                             document question nil reasoning-ancestors))))
+      (append (or prefix reasoning-prefix)
               (unless (string-blank-p current-text)
                 (list (ende-chat--message 'user current-text)))))))
 
@@ -1287,9 +1337,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                 (unless (or compact
                             (and (eq (ende-chat--effective-role document question)
                                      'user)
-                                 (eq (ende-chat--effective-visibility
-                                      document question)
-                                     'normal)))
+                                 (ende-chat--askable-p document question)))
                   (error "Chat question is no longer eligible"))
                 (let* ((tool-configuration
                         (ende-chat-config-resolve
@@ -1336,10 +1384,10 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                          (ende-chat--new-id "question"))))
     (when (eq (ende-chat--effective-visibility document question) 'hidden)
       (user-error "Cannot ask from hidden chat content"))
-    (when (eq (ende-chat--effective-visibility document question) 'reasoning)
-      (user-error "Cannot ask from reasoning-only chat content"))
-    (when (eq (ende-chat--effective-role document question) 'assistant)
-      (user-error "Cannot ask from assistant-owned chat content"))
+    (when (and (eq (ende-chat--effective-visibility document question)
+                   'reasoning)
+               (null (ende-chat--reasoning-ancestors document question)))
+      (user-error "Ask from a descendant of a reasoning section"))
     (list :question-id question-id)))
 
 (defun ende-chat--compact-data (document question)
@@ -1364,8 +1412,7 @@ COMPACT requests a context fence and archives the instruction section."
          (source-fence (plist-get data :source-fence))
          (type (if compact 'chat-compact 'chat))
          (request-id (ende-chat--new-id "request"))
-         (role-was-marked
-          (ende-chat--property document question :role))
+         (local-role (ende-chat--property document question :role))
          (position nil)
          (target nil)
          (overlay nil)
@@ -1376,7 +1423,7 @@ COMPACT requests a context fence and archives the instruction section."
         (goto-char (org-element-property :begin question))
         (when (and compact (not source-fence))
           (org-entry-put nil ende-chat-visibility-property "hidden"))
-        (when (or (not role-was-marked) (and compact (not source-fence)))
+        (unless (and compact source-fence local-role)
           (org-entry-put nil ende-chat-role-property "user"))
         (unless (ende-chat--property document question :id)
           (org-entry-put nil ende-chat-id-property question-id))
@@ -1432,8 +1479,9 @@ COMPACT requests a context fence and archives the instruction section."
 
 (defun ende-ask (&optional profile)
   "Ask the Org headline at point using PROFILE.
-The question receives `ENDE_ROLE: user' when first asked.  Context is serialized
-when its queue job starts, not when this function is invoked."
+The selected headline is marked `ENDE_ROLE: user'.  Hidden ancestry prevents
+asking; reasoning context is included when the question is inside a reasoning
+subtree.  Context is serialized when the job starts."
   (let* ((document (ende-chat--build-document))
          (question (ende-chat--headline-at-point document)))
     (ende-chat--enqueue document question profile)))
