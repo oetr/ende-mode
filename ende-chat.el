@@ -79,7 +79,7 @@ discarding superseded details. Be concise but self-contained."
   :type 'string
   :group 'ende)
 
-(defcustom ende-chat-max-tool-rounds 8
+(defcustom ende-chat-max-tool-rounds 100000
   "Maximum model responses that may request tools in one chat job."
   :type 'integer
   :group 'ende)
