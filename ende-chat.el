@@ -1465,11 +1465,13 @@ COMPACT always places a same-level context-fence sibling."
                            (org-element-property :end headline))
                          sections))))
 
-(defun ende-chat--persist-request-section (job text)
-  "Persist TEXT after JOB's existing protocol sections or replace its placeholder."
+(defun ende-chat--persist-request-section (job text &optional fold)
+  "Persist TEXT after JOB's protocol sections or replace its placeholder.
+When FOLD is non-nil, fold only the newly inserted section's body."
   (let* ((instruction (ende-job-instruction job))
          (request-id (plist-get instruction :request-id))
-         (buffer (ende-target-buffer (ende-job-target job))))
+         (buffer (ende-target-buffer (ende-job-target job)))
+         (inserted-position nil))
     (unless (buffer-live-p buffer)
       (error "Chat response destination no longer exists"))
     (with-current-buffer buffer
@@ -1489,8 +1491,10 @@ COMPACT always places a same-level context-fence sibling."
                           (end (org-element-property :end anchor)))
                       (delete-region begin end)
                       (goto-char begin)
+                      (setq inserted-position begin)
                       (insert text))
                   (goto-char (ende-chat--request-end document request-id))
+                  (setq inserted-position (point))
                   (insert text))
               (let* ((updated (ende-chat--build-document))
                      (reply
@@ -1507,7 +1511,10 @@ COMPACT always places a same-level context-fence sibling."
                            (not (ende-chat--property updated reply :state)))
                   (goto-char (org-element-property :begin reply))
                   (org-entry-put nil ende-chat-state-property "pending")))
-              (ende-chat--hide-control-drawers)))))))))
+              (ende-chat--hide-control-drawers)
+              (when (and fold inserted-position (derived-mode-p 'org-mode))
+                (goto-char inserted-position)
+                (org-fold-hide-subtree))))))))))
 
 (defun ende-chat--finish-request (job)
   "Remove JOB's pending marker after its final assistant response is stored."
@@ -2154,7 +2161,8 @@ Assistant calls must be followed by matching tool results in order."
                               (ende-chat--persist-request-section
                                job
                                (ende-chat--tool-result-text
-                                level request-id call tool-content))
+                                level request-id call tool-content)
+                               t)
                               (setq round-messages
                                     (append
                                      round-messages

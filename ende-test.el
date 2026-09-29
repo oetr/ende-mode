@@ -7395,11 +7395,15 @@ Use COMMAND for the process, or a silent sleep process by default."
             (let ((job (ende-ask)))
               (ende-test--complete-call (nth 0 ende-test--calls))
               (should (= (length ende-test--calls) 2))
-              (ende-test--complete-call (nth 1 ende-test--calls))
-              (should (= (length ende-test--calls) 3))
-              (ende-test--complete-call (nth 2 ende-test--calls))
-              (should (eq (ende-job-state job) 'completed)))
-            (let* ((first-round
+               (ende-test--complete-call (nth 1 ende-test--calls))
+               (should (= (length ende-test--calls) 3))
+               (ende-test--complete-call (nth 2 ende-test--calls))
+               (should (eq (ende-job-state job) 'completed)))
+             (ende-test--chat-goto "** Follow-up")
+             (beginning-of-line)
+             (insert "** Tool Result: read_file\n"
+                     "This is a user-authored note.\n\n")
+             (let* ((first-round
                     (last (plist-get (nth 1 ende-test--calls) :messages) 3))
                    (second-round
                     (last (plist-get (nth 2 ende-test--calls) :messages) 2))
@@ -7417,19 +7421,27 @@ Use COMMAND for the process, or a silent sleep process by default."
                       (lambda (headline)
                         (or (equal (org-element-property :raw-value headline)
                                    "Agent: Reply")
-                            (ende-chat--protocol-title-p headline "Tool Call:")
+                            (and (ende-chat--protocol-title-p
+                                  headline "Tool Call:")
+                                 (ende-chat--tool-call-protocol-p
+                                  document headline))
                             (ende-chat--tool-result-protocol-p document headline)))
                       headlines))
                     (calls
                      (cl-remove-if-not
                       (lambda (headline)
-                        (ende-chat--protocol-title-p headline "Tool Call:"))
+                        (and (ende-chat--protocol-title-p
+                              headline "Tool Call:")
+                             (ende-chat--tool-call-protocol-p
+                              document headline)))
                       headlines))
                     (results
                      (cl-remove-if-not
                       (lambda (headline)
-                        (ende-chat--protocol-title-p
-                         headline "Tool Result:"))
+                        (and (ende-chat--protocol-title-p
+                              headline "Tool Result:")
+                             (ende-chat--tool-result-protocol-p
+                              document headline)))
                       headlines)))
                (should reply)
                (should-not (cl-some
@@ -7466,6 +7478,21 @@ Use COMMAND for the process, or a silent sleep process by default."
                                          document headline :tool-call-id))
                                       results)
                               '("call-A" "call-B" "call-C")))
+               (should
+                (ende-test--chat-headline-text-hidden-p
+                 (car results) "FOO_SOURCE_TOKEN"))
+               (let ((user-note
+                      (cl-find-if
+                       (lambda (headline)
+                         (and (equal (org-element-property :raw-value headline)
+                                     "Tool Result: read_file")
+                               (null (ende-chat--property
+                                      document headline :tool-call-id))))
+                       headlines)))
+                 (should user-note)
+                 (should-not
+                  (ende-test--chat-headline-text-hidden-p
+                   user-note "This is a user-authored note.")))
              (ende-test--chat-goto "** Follow-up")
              (let* ((messages (ende-chat-context-at-point))
                    (protocol (ende-test--chat-protocol-messages messages))
