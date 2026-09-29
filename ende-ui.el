@@ -158,7 +158,7 @@ When APPEARANCE is `badge-only', do not apply a face to the covered text."
           (:speed  (overlay-put ov 'speed val))
           (:estimated (overlay-put ov 'estimated val)))))
     (let ((spinner (aref ende-ui--spinner-frames ende-ui--spinner-index)))
-       (ende-ui--put-badge ov spinner))))
+      (ende-ui--put-badge ov spinner))))
 
 (defun ende-ui-job-event (job event)
   "Update JOB's indicator in response to lifecycle EVENT.

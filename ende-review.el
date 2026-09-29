@@ -293,8 +293,8 @@ the inserted characters are tinted using the review overlay's face."
                overlay 'face
                (list :foreground (car style)
                      :background (cdr style))))
-             (setq complete t)
-             overlay)
+            (setq complete t)
+            overlay)
         (unless complete
           (when overlay
             (delete-overlay overlay))))

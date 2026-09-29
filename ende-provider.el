@@ -169,13 +169,13 @@ Supported settings are `:max-concurrency' and `:parallel'."
                          ende-codex-client-version
                          (expand-file-name ende-codex-auth-file))
                    :max-concurrency 4
-                    :parallel nil
-                    :wire-api 'responses
-                    :auth-method 'opencode-oauth
-                    :model-discovery-function #'ende-codex-probe-models
-                    :reasoning-effort-wire-api 'responses
-                    :require-sse t
-                    :display-name "OpenAI"))
+                   :parallel nil
+                   :wire-api 'responses
+                   :auth-method 'opencode-oauth
+                   :model-discovery-function #'ende-codex-probe-models
+                   :reasoning-effort-wire-api 'responses
+                   :require-sse t
+                   :display-name "OpenAI"))
             ('openrouter
              (list :url "https://openrouter.ai/api/v1/chat/completions"
                    :batch-url "https://openrouter.ai/api/v1/batches"
@@ -635,26 +635,26 @@ selection without starting another model-list request."
          (requested (plist-get profile :model))
          (match (cl-find-if
                  (lambda (entry)
-                    (or (null requested)
-                        (equal (ende-protocol-json-get "id" entry)
-                               requested)))
+                   (or (null requested)
+                       (equal (ende-protocol-json-get "id" entry)
+                              requested)))
                  entries))
-          (provider (or (ende-protocol-json-get "provider" payload)
-                        (ende-protocol-json-get "server" payload)))
-          (model (or (and match (ende-protocol-json-get "id" match))
+         (provider (or (ende-protocol-json-get "provider" payload)
+                       (ende-protocol-json-get "server" payload)))
+         (model (or (and match (ende-protocol-json-get "id" match))
                     requested))
-          (metadata (list :source :discovery
-                          :model model
-                          :models models
-                          :model-details details)))
+         (metadata (list :source :discovery
+                         :model model
+                         :models models
+                         :model-details details)))
     (when (or match (stringp provider) models)
       (when (stringp provider)
         (setq metadata (plist-put metadata :provider provider)))
       (when (and match
-                  (stringp (ende-protocol-json-get "owned_by" match)))
+                 (stringp (ende-protocol-json-get "owned_by" match)))
         (setq metadata
               (plist-put metadata :owner
-                          (ende-protocol-json-get "owned_by" match))))
+                         (ende-protocol-json-get "owned_by" match))))
       (when (or match (stringp provider))
         (setq metadata
               (plist-put metadata :client
@@ -728,9 +728,9 @@ selection without starting another model-list request."
       (maphash
        (lambda (key entry)
          (when (>= (- now (plist-get entry :time))
-                    ende-provider-discovery-ttl)
-            (push key expired)))
-        cache))
+                   ende-provider-discovery-ttl)
+           (push key expired)))
+       cache))
     (dolist (key expired)
       (remhash key cache))
     (when ende-provider-discovery-cache-size

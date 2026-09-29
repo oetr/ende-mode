@@ -27,7 +27,7 @@
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile instruction
-   metadata metadata-rank result error structured-state
+  metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
@@ -206,9 +206,9 @@ HANDLER receives one `ende-job' object."
         (lambda (active)
           (and (ende--write-job-p active)
                (ende--same-buffer-p job active)
-                (or (ende-operation-whole-buffer-p (ende-job-type job))
-                    (ende-operation-whole-buffer-p
-                     (ende-job-type active)))))
+               (or (ende-operation-whole-buffer-p (ende-job-type job))
+                   (ende-operation-whole-buffer-p
+                    (ende-job-type active)))))
         ende--active-jobs)))
 
 (defun ende--fence-applies-p (fence job)
@@ -262,14 +262,14 @@ cannot be bypassed by a later job from that same provider."
   (let ((seen-providers nil))
     (catch 'found
       (cl-loop for cell on ende-queue do
-        (let* ((job (car cell))
-               (profile (ende-job-profile job))
-               (provider (or (plist-get profile :name)
-                             (plist-get profile :url))))
-           (unless (member provider seen-providers)
-            (push provider seen-providers)
-            (when (ende--job-admissible-p job)
-              (throw 'found cell)))))
+               (let* ((job (car cell))
+		      (profile (ende-job-profile job))
+		      (provider (or (plist-get profile :name)
+				    (plist-get profile :url))))
+		 (unless (member provider seen-providers)
+		   (push provider seen-providers)
+		   (when (ende--job-admissible-p job)
+		     (throw 'found cell)))))
       nil)))
 
 (defun ende--job-from-request (request)
@@ -367,8 +367,8 @@ When RESULT is non-nil, retain it for history and job inspection."
   (when (ende-job-current-p job)
     (let ((id (ende-job-id job)))
       (ende--job-settle job 'skipped nil
-                          (ende-error-create :kind 'skipped
-                                               :message message))
+                        (ende-error-create :kind 'skipped
+                                           :message message))
       (message "ende: skipped job %d (%s)" id message))))
 
 (defun ende--dispatch-job (job)
@@ -395,9 +395,9 @@ When RESULT is non-nil, retain it for history and job inspection."
             (ende-target-activate
              target
              (lambda (message)
-                (ende-job-fail
-                 job (ende-error-create :kind 'target :message message)))
-              (ende-operation-allows-source-changes-p type))
+               (ende-job-fail
+                job (ende-error-create :kind 'target :message message)))
+             (ende-operation-allows-source-changes-p type))
             (ende-target-assert-available target)
             (funcall handler job))
         ((error quit)

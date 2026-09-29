@@ -91,15 +91,15 @@
   (when ende-history-enabled
     (condition-case nil
         (puthash job
-                  (ende-history--make-entry
-                   :job job
-                   :type (ende-job-type job)
-                   :prompt (and ende-history-retain-prompts
-                                (ende-history--prompt-string messages))
+                 (ende-history--make-entry
+                  :job job
+                  :type (ende-job-type job)
+                  :prompt (and ende-history-retain-prompts
+                               (ende-history--prompt-string messages))
                   :status "Queued"
                   :started-at (float-time))
                  ende-history--entries)
-       ((error quit) nil))))
+      ((error quit) nil))))
 
 (defun ende-history--finish-entry (entry status &optional result error)
   "Set terminal fields on ENTRY, flush it, and return nil."
@@ -211,9 +211,9 @@
   "Return the history buffer, configuring outline folding once."
   (setq ende-history--buffer-object
         (ende-owned-buffer ende-history--buffer-object
-                              ende-history-buffer-name
-                              'ende-history--owned-buffer
-                              #'ende-history-mode))
+                           ende-history-buffer-name
+                           'ende-history--owned-buffer
+                           #'ende-history-mode))
   (with-current-buffer ende-history--buffer-object
     (setq-local buffer-read-only t))
   ende-history--buffer-object)
@@ -234,9 +234,9 @@
           (let ((start (line-beginning-position))
                 (end (save-excursion
                        (forward-line 1)
-                     (if (re-search-forward "^\\* Job " nil t)
-                         (line-beginning-position)
-                        (point-max)))))
+                       (if (re-search-forward "^\\* Job " nil t)
+                           (line-beginning-position)
+                         (point-max)))))
             (delete-region start end)
             (cl-decf ende-history--entry-count))
         (setq ende-history--entry-count 0)))))
@@ -358,9 +358,9 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
                                  (ende-history--entry-thinking-parts entry))
                                 ""))
            (content (mapconcat #'identity
-                                (nreverse
-                                 (ende-history--entry-content-parts entry))
-                                ""))
+                               (nreverse
+                                (ende-history--entry-content-parts entry))
+                               ""))
            (diagnostics (mapconcat #'identity
                                    (nreverse
                                     (ende-history--entry-diagnostic-parts entry))
@@ -402,16 +402,16 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
               (ende-history--insert-section "Thinking" thinking)
               (ende-history--insert-section "Output" content)
               (ende-history--insert-section "Diagnostics" diagnostics)
-               (when skipped-edit-errors
-                 (ende-history--insert-section
-                  "Skipped edits"
-                  (ende-history--skipped-edit-errors-string
-                   skipped-edit-errors)))
-               (when structured-summary
-                 (ende-history--insert-section
-                  "Structured edits"
-                  (ende-history--structured-summary-string
-                   structured-summary)))
+              (when skipped-edit-errors
+                (ende-history--insert-section
+                 "Skipped edits"
+                 (ende-history--skipped-edit-errors-string
+                  skipped-edit-errors)))
+              (when structured-summary
+                (ende-history--insert-section
+                 "Structured edits"
+                 (ende-history--structured-summary-string
+                  structured-summary)))
               (when metadata
                 (ende-history--insert-section
                  "Provider"

@@ -328,16 +328,16 @@ not invalidate it.  The target buffer being killed remains fatal."
                (funcall on-invalid "target buffer was killed")))
             (before-hook
              (lambda (beg end)
-                (when (not (ende-target-applying target))
-                    (when (and (not allow-source-changes)
-                               (ende-target--change-overlaps-p target beg end))
-                     (setf (ende-target-invalidated target) t)))))
-             (after-hook
-              (lambda (&rest _)
-                (when (and (not allow-source-changes)
-                           (ende-target-invalidated target))
-                  (funcall on-invalid
-                           "selected source changed during generation")))))
+               (when (not (ende-target-applying target))
+                 (when (and (not allow-source-changes)
+                            (ende-target--change-overlaps-p target beg end))
+                   (setf (ende-target-invalidated target) t)))))
+            (after-hook
+             (lambda (&rest _)
+               (when (and (not allow-source-changes)
+                          (ende-target-invalidated target))
+                 (funcall on-invalid
+                          "selected source changed during generation")))))
         (setf (ende-target-kill-buffer-hook target) kill-hook
               (ende-target-before-change-hook target) before-hook
               (ende-target-after-change-hook target) after-hook)

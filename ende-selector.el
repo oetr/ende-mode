@@ -314,22 +314,22 @@ the discovered pricing metadata for those model IDs."
   (let* ((model-name (ende-selector--model-name))
          (provider (ende-selector--display-provider))
          (model (or model-name
-                     (if (memq ende-selector--model-state
-                               '(:loading :validating))
-                         "validating..."
-                       "none available")))
+                    (if (memq ende-selector--model-state
+                              '(:loading :validating))
+                        "validating..."
+                      "none available")))
          (model-status
           (pcase ende-selector--model-state
             ((or :loading :validating)
              (if model-name " validating..." ""))
             (:error " probe failed")
             (_ "")))
-          (effort
-           (pcase ende-selector--effort-state
-             (:loading "validating...")
-             (:remembered (format "%s" ende-selector--effort))
-             (:error "unavailable")
-             (_ (or ende-selector--effort "none")))))
+         (effort
+          (pcase ende-selector--effort-state
+            (:loading "validating...")
+            (:remembered (format "%s" ende-selector--effort))
+            (:error "unavailable")
+            (_ (or ende-selector--effort "none")))))
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert (format "n/p      - Provider:      %s\n"   provider))
@@ -581,10 +581,10 @@ PREFERRED is the model selected before discovery started."
          (plist-get catalog :details)
          (plist-get catalog :generation)
          preferred)))
-      ((ende-provider-model-discovery-available-p profile)
-       (ende-selector--set-provisional-models profile preferred)
-       (setq ende-selector--model-state :validating)
-       (ende-selector--probe-current-provider preferred))
+     ((ende-provider-model-discovery-available-p profile)
+      (ende-selector--set-provisional-models profile preferred)
+      (setq ende-selector--model-state :validating)
+      (ende-selector--probe-current-provider preferred))
      (t
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
@@ -639,32 +639,32 @@ performed locally so typing a search term never starts another network request."
      (let ((models (cl-remove-if-not #'stringp ende-selector--models)))
        (unless models
          (user-error "ende has no models available for this provider"))
-        (let* ((candidates (ende-selector--model-candidates))
-               (candidate-names (mapcar #'car candidates))
-               (current (ende-selector--candidate-for-model
-                         (ende-selector--model-name) candidates))
-               (details ende-selector--model-details)
-               (completion-extra-properties
-                (list
-                 :affixation-function
-                 (lambda (completions)
-                   (ende-selector--model-affixations
-                    completions candidates details))))
-               (completion-ignore-case t)
-               (completion-styles '(substring))
-               (choice (completing-read "Model: " candidate-names
-                                        nil t nil nil current))
-               (selected-model
-                (cdr (cl-find choice candidates
-                              :key #'car :test #'string=)))
-               (index (cl-position selected-model models :test #'equal)))
-          (when (and selected-model index)
-            (setq ende-selector--models models
-                  ende-selector--model-index index)
-            (cl-incf ende-selector--model-selection-generation)
-            (ende-selector--set-effort-context)
-            (ende-selector--save-selection)
-            (ende-selector--render)))))))
+       (let* ((candidates (ende-selector--model-candidates))
+              (candidate-names (mapcar #'car candidates))
+              (current (ende-selector--candidate-for-model
+                        (ende-selector--model-name) candidates))
+              (details ende-selector--model-details)
+              (completion-extra-properties
+               (list
+                :affixation-function
+                (lambda (completions)
+                  (ende-selector--model-affixations
+                   completions candidates details))))
+              (completion-ignore-case t)
+              (completion-styles '(substring))
+              (choice (completing-read "Model: " candidate-names
+                                       nil t nil nil current))
+              (selected-model
+               (cdr (cl-find choice candidates
+                             :key #'car :test #'string=)))
+              (index (cl-position selected-model models :test #'equal)))
+         (when (and selected-model index)
+           (setq ende-selector--models models
+                 ende-selector--model-index index)
+           (cl-incf ende-selector--model-selection-generation)
+           (ende-selector--set-effort-context)
+           (ende-selector--save-selection)
+           (ende-selector--render)))))))
 
 (defun ende-selector--invalidate-effort (message)
   "Clear the current effort and report MESSAGE after failed live validation."
@@ -701,7 +701,7 @@ performed locally so typing a search term never starts another network request."
            (setq ende-selector--effort choice
                  ende-selector--effort-state :ready
                  ende-selector--effort-validated-p t)
-            (ende-selector--remember-effort)
+           (ende-selector--remember-effort)
            (ende-selector--render)))))))
 
 (defun ende-selector-set-concurrency ()
@@ -711,8 +711,8 @@ performed locally so typing a search term never starts another network request."
          (current (ende-selector--provider-concurrency))
          (value (read-number "Max concurrent jobs: " current)))
     (ende-provider-set-runtime-setting provider :max-concurrency value)
-     (ende-selector--render)
-     (ende-process-next)))
+    (ende-selector--render)
+    (ende-process-next)))
 
 (defun ende-selector-toggle-parallel ()
   "Toggle and save the selected provider's default parallel setting."
@@ -720,8 +720,8 @@ performed locally so typing a search term never starts another network request."
   (let* ((provider (ende-selector--provider-name))
          (enabled (not (ende-selector--provider-parallel-p))))
     (ende-provider-set-runtime-setting provider :parallel enabled)
-     (ende-selector--render)
-     (ende-process-next)))
+    (ende-selector--render)
+    (ende-process-next)))
 
 (defun ende-selector--review-source (function)
   "Call review FUNCTION for the selector's source buffer and close selector."
@@ -978,9 +978,9 @@ before dispatch, so queued jobs contain only a live-confirmed value."
     (let ((window
            (display-buffer
             buffer
-              `((display-buffer-at-bottom)
-                (window-height . ende-selector--fit-window)
-                (window-min-height . ,ende-selector-window-min-height)))))
+            `((display-buffer-at-bottom)
+              (window-height . ende-selector--fit-window)
+              (window-min-height . ,ende-selector-window-min-height)))))
       (with-current-buffer buffer
         (setq ende-selector--window window))
       (when (window-live-p window)

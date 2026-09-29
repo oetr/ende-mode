@@ -31,7 +31,7 @@ not intended to limit ordinary product usage."
   :group 'ende)
 
 (define-error 'ende-edit-resource-error
-  "Structured edit resource limit exceeded")
+	      "Structured edit resource limit exceeded")
 
 (defun ende-edit--validate-limits ()
   "Validate raw and normalized structured-edit limits."
@@ -53,7 +53,7 @@ not intended to limit ordinary product usage."
 (defun ende-edit--parse-document (content operation)
   "Parse JSON CONTENT for OPERATION and return its document hash table."
   (condition-case caught
-       (ende-protocol-json-read-string content)
+      (ende-protocol-json-read-string content)
     (error
      (error "%s result is not valid JSON: %s"
             operation (error-message-string caught)))))
@@ -63,7 +63,7 @@ not intended to limit ordinary product usage."
 When ALLOW-EMPTY is non-nil, accept an empty edits array."
   (ende-edit--validate-limits)
   (unless (and (hash-table-p document)
-                (equal (ende-protocol-json-get "version" document) 1))
+               (equal (ende-protocol-json-get "version" document) 1))
     (error "%s result has an unsupported protocol version" operation))
   (let ((edits (ende-protocol-json-get "edits" document)))
     (unless (vectorp edits)
@@ -90,12 +90,12 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
         (right-start (plist-get right :start))
         (right-end (plist-get right :end)))
     (cond
-      ((and (= left-start left-end) (= right-start right-end))
-       (= left-start right-start))
-      ((= left-start left-end)
-       (and (<= right-start left-start) (< left-start right-end)))
-      ((= right-start right-end)
-       (and (<= left-start right-start) (< right-start left-end)))
+     ((and (= left-start left-end) (= right-start right-end))
+      (= left-start right-start))
+     ((= left-start left-end)
+      (and (<= right-start left-start) (< left-start right-end)))
+     ((= right-start right-end)
+      (and (<= left-start right-start) (< right-start left-end)))
      (t (and (< left-start right-end) (< right-start left-end))))))
 
 (defun ende-edit--anchor-offsets (source anchor &optional limit)
@@ -117,25 +117,25 @@ When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
 POSITIONS lists the accepted values for the edit's position field.
 NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
   (let* ((anchor (and (hash-table-p raw)
-                       (ende-protocol-json-get "anchor" raw)))
+                      (ende-protocol-json-get "anchor" raw)))
          (position (and (hash-table-p raw)
-                         (ende-protocol-json-get "position" raw)))
-           (occurrence-present (and (hash-table-p raw)
-                                   (ende-protocol-json-has-key-p
-                                    "occurrence" raw)))
-           (occurrence (and occurrence-present
-                            (ende-protocol-json-get "occurrence" raw)))
-           (all-present (and (hash-table-p raw)
-                             (ende-protocol-json-has-key-p "all" raw)))
-           (all-value (and all-present
-                           (ende-protocol-json-get "all" raw)))
-          (all (eq all-value t))
-          (text (and (hash-table-p raw)
-                      (ende-protocol-json-get "text" raw))))
-     (unless (and (hash-table-p raw)
-                  (ende-protocol-json-has-key-p "anchor" raw)
-                  (ende-protocol-json-has-key-p "position" raw)
-                  (ende-protocol-json-has-key-p "text" raw))
+                        (ende-protocol-json-get "position" raw)))
+         (occurrence-present (and (hash-table-p raw)
+                                  (ende-protocol-json-has-key-p
+                                   "occurrence" raw)))
+         (occurrence (and occurrence-present
+                          (ende-protocol-json-get "occurrence" raw)))
+         (all-present (and (hash-table-p raw)
+                           (ende-protocol-json-has-key-p "all" raw)))
+         (all-value (and all-present
+                         (ende-protocol-json-get "all" raw)))
+         (all (eq all-value t))
+         (text (and (hash-table-p raw)
+                    (ende-protocol-json-get "text" raw))))
+    (unless (and (hash-table-p raw)
+                 (ende-protocol-json-has-key-p "anchor" raw)
+                 (ende-protocol-json-has-key-p "position" raw)
+                 (ende-protocol-json-has-key-p "text" raw))
       (error "missing required anchor, position, or text field"))
     (unless (and (stringp anchor) (not (string-empty-p anchor)))
       (error "anchor must be a non-empty string"))
@@ -180,12 +180,12 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
                                (+ offset (length anchor))
                              offset)))
            (list :index index :offset offset
-                :anchor-length (length anchor)
-                :position position :text text :raw raw
-                :start edit-start
-                :end (if (equal position "replace")
-                         (+ offset (length anchor))
-                       edit-start))))
+                 :anchor-length (length anchor)
+                 :position position :text text :raw raw
+                 :start edit-start
+                 :end (if (equal position "replace")
+                          (+ offset (length anchor))
+			edit-start))))
        selected-offsets))))
 
 (defun ende-edit-parse-insertions (content source &optional allow-empty)
@@ -280,22 +280,22 @@ Return a plist containing valid `:edits' and individual `:errors'."
                        (format "overlaps edit %d"
                                (1+ (plist-get edit :index)))
                        conflict-messages)))
-           (when (and replace
-                      last-zero-edit
-                      (= start last-zero-start)
-                      (equal (plist-get last-zero-edit :position) "before"))
-             (unless (gethash (plist-get edit :index) conflict-messages)
-               (puthash (plist-get edit :index)
-                        (format "overlaps edit %d"
-                                (1+ (plist-get last-zero-edit :index)))
-                        conflict-messages))
-             (unless (gethash (plist-get last-zero-edit :index)
-                              conflict-messages)
-               (puthash (plist-get last-zero-edit :index)
-                        (format "overlaps edit %d"
-                                (1+ (plist-get edit :index)))
-                        conflict-messages)))
-           (when (and (not replace) max-edit
+          (when (and replace
+                     last-zero-edit
+                     (= start last-zero-start)
+                     (equal (plist-get last-zero-edit :position) "before"))
+            (unless (gethash (plist-get edit :index) conflict-messages)
+              (puthash (plist-get edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get last-zero-edit :index)))
+                       conflict-messages))
+            (unless (gethash (plist-get last-zero-edit :index)
+                             conflict-messages)
+              (puthash (plist-get last-zero-edit :index)
+                       (format "overlaps edit %d"
+                               (1+ (plist-get edit :index)))
+                       conflict-messages)))
+          (when (and (not replace) max-edit
                      (< (plist-get max-edit :start) start)
                      (> max-end start))
             (unless (gethash (plist-get edit :index) conflict-messages)

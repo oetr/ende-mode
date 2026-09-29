@@ -45,8 +45,8 @@
   "Previous header as (LOCAL-P . VALUE), or nil when not installed.")
 
 (dolist (variable '(ende-rubber-duck-mode ende-rubber-duck--exercise
-                    ende-rubber-duck--job ende-rubber-duck--reviewed
-                    ende-rubber-duck--saved-header))
+					  ende-rubber-duck--job ende-rubber-duck--reviewed
+					  ende-rubber-duck--saved-header))
   (put variable 'permanent-local t))
 
 (defun ende-rubber-duck-read-level ()
@@ -244,7 +244,7 @@ Put the assessment only in the assessment object; it will be appended for you."
          (correctness (and (hash-table-p assessment)
                            (ende-protocol-json-get "correctness" assessment)))
          (coverage (and (hash-table-p assessment)
-                       (ende-protocol-json-get "coverage" assessment))))
+			(ende-protocol-json-get "coverage" assessment))))
     (unless (and (integerp score) (<= 1 score 4)
                  (stringp correctness) (not (string-blank-p correctness))
                  (stringp coverage) (not (string-blank-p coverage)))

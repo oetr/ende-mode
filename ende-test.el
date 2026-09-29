@@ -46,49 +46,49 @@
        call :on-error
        (ende-error-create :kind 'mock :message "mock failure")))
      ((stringp response)
-       (ende-test--callback call :on-event
-                              (list :type :status :status "Generating"))
-       (ende-test--callback call :on-event
-                              (list :type :delta :channel :content
-                                    :text response))
-       (ende-test--callback call :on-event
-                              (list :type :usage :tokens 10 :speed 50.0))
-       (ende-test--callback call :on-done response))
-      ((and (listp response) response)
-       (when (or (plist-get response :reported-model)
-                 (plist-get response :reported-provider))
-         (ende-test--callback
-          call :on-event
-          (list :type :metadata
-                :metadata
-                (list :source :response
-                      :model (plist-get response :reported-model)
-                      :provider (plist-get response :reported-provider)))))
-       (when (stringp (plist-get response :thinking))
-         (ende-test--callback
-          call :on-event
-          (list :type :delta :channel :thinking
-                :text (plist-get response :thinking))))
-       (when (stringp (plist-get response :content))
-         (ende-test--callback
-          call :on-event
-          (list :type :delta :channel :content
-                :text (plist-get response :content))))
-       (when (plist-member response :usage)
-         (ende-test--callback
-          call :on-event
-          (list :type :usage
-                :tokens (plist-get response :tokens)
-                :speed (plist-get response :speed)
-                :usage (plist-get response :usage))))
-       (when (listp (plist-get response :partial))
-         (ende-test--callback
-          call :on-event
-          (list :type :partial-result :result (plist-get response :partial))))
-       (ende-test--callback call :on-done response))
+      (ende-test--callback call :on-event
+                           (list :type :status :status "Generating"))
+      (ende-test--callback call :on-event
+                           (list :type :delta :channel :content
+                                 :text response))
+      (ende-test--callback call :on-event
+                           (list :type :usage :tokens 10 :speed 50.0))
+      (ende-test--callback call :on-done response))
+     ((and (listp response) response)
+      (when (or (plist-get response :reported-model)
+                (plist-get response :reported-provider))
+        (ende-test--callback
+         call :on-event
+         (list :type :metadata
+               :metadata
+               (list :source :response
+                     :model (plist-get response :reported-model)
+                     :provider (plist-get response :reported-provider)))))
+      (when (stringp (plist-get response :thinking))
+        (ende-test--callback
+         call :on-event
+         (list :type :delta :channel :thinking
+               :text (plist-get response :thinking))))
+      (when (stringp (plist-get response :content))
+        (ende-test--callback
+         call :on-event
+         (list :type :delta :channel :content
+               :text (plist-get response :content))))
+      (when (plist-member response :usage)
+        (ende-test--callback
+         call :on-event
+         (list :type :usage
+               :tokens (plist-get response :tokens)
+               :speed (plist-get response :speed)
+               :usage (plist-get response :usage))))
+      (when (listp (plist-get response :partial))
+        (ende-test--callback
+         call :on-event
+         (list :type :partial-result :result (plist-get response :partial))))
+      (ende-test--callback call :on-done response))
      (t
       (ende-test--callback call :on-error
-                             (format "unknown mock response: %S" response))))))
+                           (format "unknown mock response: %S" response))))))
 
 (defun ende-test--fake-llm (responses &optional asynchronous process-factory)
   "Return a mock LLM dispatcher for RESPONSES.
@@ -163,16 +163,16 @@ process for cancellation tests."
         ende-model-selection--last-used nil
         ende-queue nil
         ende--queue-tail nil
-         ende--queue-suspended nil
-         ende--current-job nil
-         ende--active-jobs nil
-         ende--fences nil
-         ende--aborting nil
-         ende--dispatching nil
-         ende--next-job-id 0
-         ende-openrouter-batch--next-request-id 0
-         ende-openrouter-batch--known-groups nil
-         ende-summary--next-source-id 0)
+        ende--queue-suspended nil
+        ende--current-job nil
+        ende--active-jobs nil
+        ende--fences nil
+        ende--aborting nil
+        ende--dispatching nil
+        ende--next-job-id 0
+        ende-openrouter-batch--next-request-id 0
+        ende-openrouter-batch--known-groups nil
+        ende-summary--next-source-id 0)
   (when (boundp 'ende-openrouter-batch--groups)
     (clrhash ende-openrouter-batch--groups))
   (clrhash ende-provider--discovery-cache)
@@ -185,21 +185,21 @@ process for cancellation tests."
   (clrhash ende-selector--effort-selections)
   (clrhash ende-model-selection--buffer-selections)
   (ende-provider-clear-runtime-settings)
-   (clrhash ende-history--entries)
-   (ende-tools-clear-change-sets)
-   (setq ende-tools--next-change-set-id 0)
-   (when (buffer-live-p ende-history--buffer-object)
+  (clrhash ende-history--entries)
+  (ende-tools-clear-change-sets)
+  (setq ende-tools--next-change-set-id 0)
+  (when (buffer-live-p ende-history--buffer-object)
     (kill-buffer ende-history--buffer-object))
   (setq ende-history--buffer-object nil)
-   (when (buffer-live-p ende-summary--buffer-object)
-     (kill-buffer ende-summary--buffer-object))
-   (setq ende-summary--buffer-object nil)
-   (clrhash ende-summary--source-buffers)
-   (when (buffer-live-p ende-chat--buffer-object)
-     (kill-buffer ende-chat--buffer-object))
-   (setq ende-chat--buffer-object nil
-         ende-chat--next-id 0)
-   (ende-ui-clear-all))
+  (when (buffer-live-p ende-summary--buffer-object)
+    (kill-buffer ende-summary--buffer-object))
+  (setq ende-summary--buffer-object nil)
+  (clrhash ende-summary--source-buffers)
+  (when (buffer-live-p ende-chat--buffer-object)
+    (kill-buffer ende-chat--buffer-object))
+  (setq ende-chat--buffer-object nil
+        ende-chat--next-id 0)
+  (ende-ui-clear-all))
 
 (ert-deftest ende-test/queue-snapshots-do-not-expose-list-state ()
   (let ((ende--active-jobs (list :active))
@@ -362,9 +362,9 @@ process for cancellation tests."
                                (insert-file-contents path)
                                (buffer-string))
                              "hello world\n"))
-             (ende-tools-apply-change-set change-set-id)
-             (should-error (ende-tools-change-set change-set-id))
-             (should (string= (with-temp-buffer
+            (ende-tools-apply-change-set change-set-id)
+            (should-error (ende-tools-change-set change-set-id))
+            (should (string= (with-temp-buffer
                                (insert-file-contents path)
                                (buffer-string))
                              "hello Emacs\n")))
@@ -388,24 +388,24 @@ process for cancellation tests."
                                           (cons "expected" "Emacs")
                                           (cons "replacement" "Lisp")))))
                             root)))
-             (let ((change-set-id (plist-get proposal :change_set_id)))
-               (ende-tools-apply-change-set change-set-id)
-               (should-error (ende-tools-change-set change-set-id)))
-             (with-current-buffer buffer
+            (let ((change-set-id (plist-get proposal :change_set_id)))
+              (ende-tools-apply-change-set change-set-id)
+              (should-error (ende-tools-change-set change-set-id)))
+            (with-current-buffer buffer
               (should (string= (buffer-string) "hello Lisp\n"))
               (should (cl-some #'ende-review-overlay-p
                                (overlays-in (point-min) (point-max)))))))
-          (let ((failure
-                 (ende-tool-call
-                  "edit_source"
-                  '(("path" . "main.el")
-                    ("base_digest" . "stale")
-                    ("edits" . ((("start" . 0)
-                                  ("end" . 5)
-                                  ("expected" . "hello")
-                                  ("replacement" . "bye")))))
-                  root)))
-            (should-not (plist-get failure :ok)))
+      (let ((failure
+             (ende-tool-call
+              "edit_source"
+              '(("path" . "main.el")
+                ("base_digest" . "stale")
+                ("edits" . ((("start" . 0)
+                             ("end" . 5)
+                             ("expected" . "hello")
+                             ("replacement" . "bye")))))
+              root)))
+        (should-not (plist-get failure :ok)))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -440,8 +440,8 @@ process for cancellation tests."
                                (insert-file-contents path)
                                (buffer-string))
                              "new\n"))))
-       (when (file-directory-p root)
-         (delete-directory root t)))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/project-tools-retain-failed-change-sets-until-settled ()
   (let* ((root (make-temp-file "ende-tools-pending-project-" t))
@@ -472,8 +472,8 @@ process for cancellation tests."
             (should (ende-change-set-p (ende-tools-change-set id)))
             (ende-tools-reject-change-set id)
             (should-error (ende-tools-change-set id))))
-       (when (file-directory-p root)
-         (delete-directory root t)))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/project-tools-reject-ambiguous-boundary-edits ()
   (should-error
@@ -551,8 +551,8 @@ process for cancellation tests."
                              '(chat project)))
               (should (equal (plist-get inspect-config :active-tools)
                              '(project_info list_project_files file_info
-                               read_file search_project list_project_buffers
-                               read_buffer)))
+					    read_file search_project list_project_buffers
+					    read_buffer)))
               (should (equal (plist-get inspect-config :root)
                              (ende-project-normalize-root child-root)))
               (should-not (memq 'edit_source
@@ -678,10 +678,10 @@ process for cancellation tests."
                       (ende-tool-call
                        "read_file" '(("path" . "private/secret.txt"))
                        root configuration))
-                      (allowed
-                       (ende-tool-call "read_file" '(("path" . "main.el"))
-                                       root configuration))
-                      (no-resources (copy-tree configuration)))
+                     (allowed
+                      (ende-tool-call "read_file" '(("path" . "main.el"))
+                                      root configuration))
+                     (no-resources (copy-tree configuration)))
                 (should (plist-get allowed :ok))
                 (should (string-match-p
                          "public text"
@@ -713,7 +713,7 @@ process for cancellation tests."
            (ende-tool-definitions)))
          (profile (list :model "model" :tool-definitions (list definition)))
          (call '(:id "call-1" :name "read_file"
-                 :arguments "{\"path\":\"main.el\"}"))
+                     :arguments "{\"path\":\"main.el\"}"))
          (messages (list (cons "user" "read a file")
                          (list :role "assistant" :content nil
                                :tool-calls (list call))
@@ -747,7 +747,7 @@ process for cancellation tests."
                 :object-type 'hash-table)))
       (should (equal (car (ende-llm--result session)) :content))
       (should (equal (plist-get (car (plist-get (ende-llm--result session)
-                                                 :tool-calls))
+                                                :tool-calls))
                                 :arguments)
                      "{\"path\":\"main.el\"}")))
     (let* ((session (ende-codex--make-session
@@ -971,37 +971,37 @@ process for cancellation tests."
     (setq-local buffer-file-name "/ssh:user@example:/path/to/example.el")
     (setq-local major-mode 'emacs-lisp-mode)
     (let ((target (ende-target-create
-                   :buffer (current-buffer)
-                   :start (point-min)
-                   :end (point-max)
-                   :cursor (point-min)
-                   :selected t)))
+		   :buffer (current-buffer)
+		   :start (point-min)
+		   :end (point-max)
+		   :cursor (point-min)
+		   :selected t)))
       (unwind-protect
-          (let ((metadata (ende-target-source-metadata target)))
-            (should (string= (plist-get metadata :name) "example.el"))
-            (should (string= (plist-get metadata :type) "file"))
-            (should (string= (plist-get metadata :major-mode)
-                             "emacs-lisp-mode"))
-            (should-not (string-match-p "/" (plist-get metadata :name))))
-        (ende-target-release target)))))
+	  (let ((metadata (ende-target-source-metadata target)))
+	    (should (string= (plist-get metadata :name) "example.el"))
+	    (should (string= (plist-get metadata :type) "file"))
+	    (should (string= (plist-get metadata :major-mode)
+			     "emacs-lisp-mode"))
+	    (should-not (string-match-p "/" (plist-get metadata :name))))
+	(ende-target-release target)))))
 
 (ert-deftest ende-test/source-metadata-bounds-buffer-names ()
   (ende-test--with-buffer "source"
     (rename-buffer (concat "scratch\n" (make-string 300 ?x)) t)
     (setq-local major-mode 'text-mode)
     (let ((target (ende-target-create
-                   :buffer (current-buffer)
-                   :start (point-min)
-                   :end (point-max)
-                   :cursor (point-min))))
+		   :buffer (current-buffer)
+		   :start (point-min)
+		   :end (point-max)
+		   :cursor (point-min))))
       (unwind-protect
-          (let ((name (plist-get (ende-target-source-metadata target)
-                                 :name)))
-            (should (string-prefix-p "scratch " name))
-            (should (<= (length name)
-                        ende-target--source-metadata-field-max-length))
-            (should-not (string-match-p "[[:cntrl:]]" name)))
-        (ende-target-release target)))))
+	  (let ((name (plist-get (ende-target-source-metadata target)
+				 :name)))
+	    (should (string-prefix-p "scratch " name))
+	    (should (<= (length name)
+			ende-target--source-metadata-field-max-length))
+	    (should-not (string-match-p "[[:cntrl:]]" name)))
+	(ende-target-release target)))))
 
 (ert-deftest ende-test/all-operations-include-source-metadata ()
   (dolist (type '(insert improve summarize write-anywhere insert-anywhere))
@@ -1020,24 +1020,24 @@ process for cancellation tests."
            (ende-llm-function
             (ende-test--fake-llm (list response))))
       (ende-test--with-buffer "test"
-        (setq-local buffer-file-name "/tmp/example.el")
-        (setq-local major-mode 'emacs-lisp-mode)
-        (goto-char (point-max))
-        (pcase type
-          ('insert (ende-insert-at-cursor))
-          ('improve (ende-improve-at-cursor "Improve it"))
-          ('summarize (ende-summarize))
-          ('write-anywhere (ende-write-anywhere "Change it"))
-          ('insert-anywhere (ende-insert-anywhere "Insert it")))
-        (let ((user-message
-               (ende-test--user-message (car ende-test--prompts))))
-          (should (string-prefix-p "Source metadata:\n" user-message))
-          (should (string-match-p "Name: example\\.el" user-message))
-          (should (string-match-p "Type: file" user-message))
-          (should (string-match-p "Major mode: emacs-lisp-mode"
-                                  user-message))
-          (should (= 1 (ende-test--count-matches
-                        "Source metadata:" user-message))))))))
+	(setq-local buffer-file-name "/tmp/example.el")
+	(setq-local major-mode 'emacs-lisp-mode)
+	(goto-char (point-max))
+	(pcase type
+	  ('insert (ende-insert-at-cursor))
+	  ('improve (ende-improve-at-cursor "Improve it"))
+	  ('summarize (ende-summarize))
+	  ('write-anywhere (ende-write-anywhere "Change it"))
+	  ('insert-anywhere (ende-insert-anywhere "Insert it")))
+	(let ((user-message
+	       (ende-test--user-message (car ende-test--prompts))))
+	  (should (string-prefix-p "Source metadata:\n" user-message))
+	  (should (string-match-p "Name: example\\.el" user-message))
+	  (should (string-match-p "Type: file" user-message))
+	  (should (string-match-p "Major mode: emacs-lisp-mode"
+				  user-message))
+	  (should (= 1 (ende-test--count-matches
+			"Source metadata:" user-message))))))))
 
 (ert-deftest ende-test/source-name-disclosure-can-be-overridden ()
   (ende-test--reset)
@@ -1048,15 +1048,15 @@ process for cancellation tests."
       (setq-local major-mode 'python-mode)
       (ende-enqueue-operation 'insert)
       (let ((without-name
-             (ende-test--user-message (car ende-test--prompts))))
-        (should-not (string-match-p "Name:" without-name))
-        (should (string-match-p "Type: buffer" without-name))
-        (should (string-match-p "Major mode: python-mode" without-name)))
+	     (ende-test--user-message (car ende-test--prompts))))
+	(should-not (string-match-p "Name:" without-name))
+	(should (string-match-p "Type: buffer" without-name))
+	(should (string-match-p "Major mode: python-mode" without-name)))
       (ende-approve-all-output)
       (ende-enqueue-operation 'insert nil '(:source-name-disclosure t))
       (let ((with-name
-             (ende-test--user-message (car ende-test--prompts))))
-        (should (string-match-p "Name: private-buffer" with-name))))))
+	     (ende-test--user-message (car ende-test--prompts))))
+	(should (string-match-p "Name: private-buffer" with-name))))))
 
 (ert-deftest ende-test/source-metadata-counts-toward-request-budget ()
   (ende-test--reset)
@@ -1065,24 +1065,24 @@ process for cancellation tests."
       (setq-local buffer-file-name "/tmp/example.el")
       (setq-local major-mode 'emacs-lisp-mode)
       (let* ((target (ende-target-create
-                      :buffer (current-buffer)
-                      :start (point-min)
-                      :end (point-max)
-                      :cursor (point-min)))
-             (job (ende--make-job :type 'insert
-                                    :target target
-                                    :profile nil))
-             (messages (list (cons "system" "system")
-                             (cons "user" "Document:\nsource")))
-             (base-size
-              (cl-loop for message in messages
-                       sum (+ (length (format "%s" (car message)))
-                              (length (format "%s" (cdr message)))))))
-        (unwind-protect
-            (let ((ende-max-request-chars base-size))
-              (should-error (ende--dispatch-llm job messages))
-              (should-not ende-test--calls))
-          (ende-target-release target))))))
+		      :buffer (current-buffer)
+		      :start (point-min)
+		      :end (point-max)
+		      :cursor (point-min)))
+	     (job (ende--make-job :type 'insert
+				  :target target
+				  :profile nil))
+	     (messages (list (cons "system" "system")
+			     (cons "user" "Document:\nsource")))
+	     (base-size
+	      (cl-loop for message in messages
+		       sum (+ (length (format "%s" (car message)))
+			      (length (format "%s" (cdr message)))))))
+	(unwind-protect
+	    (let ((ende-max-request-chars base-size))
+	      (should-error (ende--dispatch-llm job messages))
+	      (should-not ende-test--calls))
+	  (ende-target-release target))))))
 
 (ert-deftest ende-test/reset-does-not-kill-unowned-named-buffers ()
   (let* ((ende-history-buffer-name " *ende-unowned-history*")
@@ -1091,8 +1091,8 @@ process for cancellation tests."
          (summary (get-buffer-create ende-summary-buffer-name)))
     (unwind-protect
         (progn
-           (setq ende-history--buffer-object nil
-                 ende-summary--buffer-object nil)
+          (setq ende-history--buffer-object nil
+                ende-summary--buffer-object nil)
           (ende-test--reset)
           (should (buffer-live-p history))
           (should (buffer-live-p summary)))
@@ -1109,10 +1109,10 @@ process for cancellation tests."
     (ende-test--with-buffer "hello world"
       (goto-char 6)
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "hello there world"))
-        (let ((user-msg (cdr (cadr (car ende-test--prompts)))))
-          (should (string-match "hello<CURSOR> world" user-msg)))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "hello there world"))
+	(let ((user-msg (cdr (cadr (car ende-test--prompts)))))
+	  (should (string-match "hello<CURSOR> world" user-msg)))))))
 
 (ert-deftest ende-test/insert-at-buffer-boundaries ()
   (ende-test--reset)
@@ -1139,23 +1139,23 @@ process for cancellation tests."
       (ende-test--complete-call (nth 0 ende-test--calls))
       (ende-test--complete-call (nth 1 ende-test--calls))
       (should (string= (buffer-string)
-                       "HEADER\nalpha beta\nFOOTER")))))
+		       "HEADER\nalpha beta\nFOOTER")))))
 
 (ert-deftest ende-test/insert-does-not-mutate-selected-characters ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("MIDDLE"))))
     (ende-test--with-buffer "foobar"
       (let ((overlay (ende-ui-create-overlay (current-buffer) 1 7 "Queued"))
-            (request nil))
-        (setq request
-              (list 'insert
-                    :target
-                    (ende-target-create
-                     :buffer (current-buffer) :start 1 :end 7 :cursor 4
-                     :selected t :placement :inside :offset 3
-                     :source-snapshot "foobar")
-                    :overlay overlay))
-      (ende-enqueue request))
+	    (request nil))
+	(setq request
+	      (list 'insert
+		    :target
+		    (ende-target-create
+		     :buffer (current-buffer) :start 1 :end 7 :cursor 4
+		     :selected t :placement :inside :offset 3
+		     :source-snapshot "foobar")
+		    :overlay overlay))
+	(ende-enqueue request))
       (should (string= (buffer-string) "foo\nMIDDLE\nbar")))))
 
 (ert-deftest ende-test/insert-large-context-elision ()
@@ -1164,18 +1164,18 @@ process for cancellation tests."
         (ende-target-window-chars 10)
         (ende-llm-function (ende-test--fake-llm '("X"))))
     (ende-test--with-buffer
-        (concat (make-string 20 ?A) (make-string 20 ?B))
+	(concat (make-string 20 ?A) (make-string 20 ?B))
       (goto-char 21)
       (ende-insert-at-cursor)
       (let ((user-msg (cdr (cadr (car ende-test--prompts)))))
-        (should (string-match-p "characters elided" user-msg))
-        (should (string-match "AAAA<CURSOR>BBBB" user-msg))))))
+	(should (string-match-p "characters elided" user-msg))
+	(should (string-match "AAAA<CURSOR>BBBB" user-msg))))))
 
 (ert-deftest ende-test/target-context-window-enforces-source-budget ()
   (let* ((ende-target-max-context-chars 30)
          (ende-target-window-chars 100)
          (context (ende-target-string-marker-context
-                    (concat (make-string 50 ?A) (make-string 50 ?B)) 50))
+                   (concat (make-string 50 ?A) (make-string 50 ?B)) 50))
          (source-chars (+ (cl-count ?A context) (cl-count ?B context))))
     (should (<= source-chars ende-target-max-context-chars))
     (should (string-match-p "<CURSOR>" context))
@@ -1198,9 +1198,9 @@ process for cancellation tests."
         (ende-llm-function (ende-test--fake-llm '("never"))))
     (ende-test--with-buffer "base"
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende-test--calls)
-        (should (string= (buffer-string) "base"))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende-test--calls)
+	(should (string= (buffer-string) "base"))))))
 
 (ert-deftest ende-test/custom-transport-output-is-bounded ()
   (ende-test--reset)
@@ -1209,8 +1209,8 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-         (should (eq (ende-job-state job) 'failed))
-         (should (string= (buffer-string) "base"))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "base"))))))
 
 (ert-deftest ende-test/custom-transport-output-can-be-unbounded ()
   (ende-test--reset)
@@ -1219,8 +1219,8 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "basefour"))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "basefour"))))))
 
 (ert-deftest ende-test/improve-replaces-selection ()
   (ende-test--reset)
@@ -1228,10 +1228,10 @@ process for cancellation tests."
     (ende-test--with-buffer "old text"
       (ende-test--select 1 9 9)
       (let ((job (ende-improve-at-cursor "make it better")))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "improved"))
-        (should (cl-some #'ende-review-overlay-p
-                         (overlays-in (point-min) (point-max))))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "improved"))
+	(should (cl-some #'ende-review-overlay-p
+			 (overlays-in (point-min) (point-max))))))))
 
 (ert-deftest ende-test/summarize-opens-buffer ()
   (ende-test--reset)
@@ -1245,21 +1245,21 @@ process for cancellation tests."
               ((symbol-function 'format-time-string)
                (lambda (&rest _) "2026-09-18 11:10:07")))
       (ende-test--with-buffer "long source"
-        (rename-buffer "*summary-source*" t)
-        (let ((job (ende-summarize)))
-          (should (eq (ende-job-state job) 'completed))
-          (should (eq displayed (get-buffer ende-summary-buffer-name)))
-          (with-current-buffer ende-summary-buffer-name
-            (should (eq major-mode 'org-mode))
-            (should (string=
-                      (buffer-string)
-                       (concat "* **summary-source** - "
-                               "2026-09-18 11:10:07\n"
-                               "File: [[ende-buffer:s1::1][*summary-source*]]\n"
-                               "Model: gpt-5.6-luna\n"
-                               "\n"
-                               "** Key point\n- short summary")))
-            (should-not (ende-review--overlays-in-buffer))))))))
+	(rename-buffer "*summary-source*" t)
+	(let ((job (ende-summarize)))
+	  (should (eq (ende-job-state job) 'completed))
+	  (should (eq displayed (get-buffer ende-summary-buffer-name)))
+	  (with-current-buffer ende-summary-buffer-name
+	    (should (eq major-mode 'org-mode))
+	    (should (string=
+		     (buffer-string)
+		     (concat "* **summary-source** - "
+			     "2026-09-18 11:10:07\n"
+			     "File: [[ende-buffer:s1::1][*summary-source*]]\n"
+			     "Model: gpt-5.6-luna\n"
+			     "\n"
+			     "** Key point\n- short summary")))
+	    (should-not (ende-review--overlays-in-buffer))))))))
 
 (ert-deftest ende-test/summary-entries-are-appended-as-org-headings ()
   (ende-test--reset)
@@ -1279,34 +1279,34 @@ process for cancellation tests."
   (with-current-buffer ende-summary-buffer-name
     (should (string=
              (buffer-string)
-               (concat "* *first.org* - 2026-09-18 11:10:07\n"
-                       "File: [[ende-buffer:s1::1][first.org]]\n"
-                       "Model: one\n"
-                       "\n"
-                       "First summary\n\n"
-                       "* *second.org* - 2026-09-18 11:10:07\n"
-                       "File: [[ende-buffer:s2::1][second.org]]\n"
-                       "Model: two\n"
-                       "\n"
-                       "Second summary")))))
+             (concat "* *first.org* - 2026-09-18 11:10:07\n"
+                     "File: [[ende-buffer:s1::1][first.org]]\n"
+                     "Model: one\n"
+                     "\n"
+                     "First summary\n\n"
+                     "* *second.org* - 2026-09-18 11:10:07\n"
+                     "File: [[ende-buffer:s2::1][second.org]]\n"
+                     "Model: two\n"
+                     "\n"
+                     "Second summary")))))
 
 (ert-deftest ende-test/summarize-reports-progress-and-points-at-new-entry ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("summary") t)))
-     (with-current-buffer (ende-summary-buffer)
+    (with-current-buffer (ende-summary-buffer)
       (insert "existing")
       (goto-char (point-min)))
     (ende-test--with-buffer "source"
       (let* ((job (ende-summarize))
-             (call (car ende-test--calls))
-             (overlay (ende-job-overlay job)))
-        (ende-test--callback
-         call :on-event '(:type :status :status "Generating"))
-        (ende-test--callback
-         call :on-event '(:type :usage :tokens 12 :speed 34.0))
-        (should (string= (overlay-get overlay 'status) "Generating"))
-        (should (= (overlay-get overlay 'tokens) 12))
-        (ende-test--complete-call call)))
+	     (call (car ende-test--calls))
+	     (overlay (ende-job-overlay job)))
+	(ende-test--callback
+	 call :on-event '(:type :status :status "Generating"))
+	(ende-test--callback
+	 call :on-event '(:type :usage :tokens 12 :speed 34.0))
+	(should (string= (overlay-get overlay 'status) "Generating"))
+	(should (= (overlay-get overlay 'tokens) 12))
+	(ende-test--complete-call call)))
     (with-current-buffer ende-summary-buffer-name
       (should (= (point)
                  (save-excursion
@@ -1319,18 +1319,18 @@ process for cancellation tests."
   (let ((ende-llm-function (ende-test--fake-llm '("summary") t)))
     (ende-test--with-buffer "source"
       (let* ((job (ende-summarize))
-             (call (car ende-test--calls)))
-        (goto-char (point-min))
-        (delete-char 1)
-        (insert "S")
-        (should (eq (ende-job-state job) 'running))
-        (should (string= (buffer-string) "Source"))
-        (should (string-match-p
-                 "Line-numbered text to summarize:\n1 | source"
-                 (ende-test--user-message
-                  (car ende-test--prompts))))
-        (ende-test--complete-call call)
-        (should (eq (ende-job-state job) 'completed))))
+	     (call (car ende-test--calls)))
+	(goto-char (point-min))
+	(delete-char 1)
+	(insert "S")
+	(should (eq (ende-job-state job) 'running))
+	(should (string= (buffer-string) "Source"))
+	(should (string-match-p
+		 "Line-numbered text to summarize:\n1 | source"
+		 (ende-test--user-message
+		  (car ende-test--prompts))))
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'completed))))
     (with-current-buffer ende-summary-buffer-name
       (should (string-match-p "summary" (buffer-string))))))
 
@@ -1358,7 +1358,7 @@ process for cancellation tests."
                                    "summary")
                            source-name
                            source-name)
-                    (buffer-string))))))))
+                   (buffer-string))))))))
 
 (ert-deftest ende-test/summary-append-is-atomic ()
   (ende-test--reset)
@@ -1383,10 +1383,10 @@ process for cancellation tests."
       (ende-test--select 9 (point-max) (point-max))
       (ende-summarize)
       (let ((prompt (ende-test--user-message
-                     (car ende-test--prompts))))
-        (should (string-match-p "Source lines: 2-3" prompt))
-        (should (string-match-p "2 | first\n3 | second" prompt))
-        (should-not (string-match-p "/tmp/ende source\\.org" prompt)))))
+		     (car ende-test--prompts))))
+	(should (string-match-p "Source lines: 2-3" prompt))
+	(should (string-match-p "2 | first\n3 | second" prompt))
+	(should-not (string-match-p "/tmp/ende source\\.org" prompt)))))
   (with-current-buffer ende-summary-buffer-name
     (should
      (string-match-p
@@ -1414,8 +1414,8 @@ process for cancellation tests."
       (ende-summarize)
       (should-not
        (string-match-p
-        "ssh:user@example"
-        (ende-test--user-message (car ende-test--prompts))))))
+	"ssh:user@example"
+	(ende-test--user-message (car ende-test--prompts))))))
   (with-current-buffer ende-summary-buffer-name
     (should
      (string-match-p
@@ -1471,20 +1471,20 @@ process for cancellation tests."
         (ende-llm-function
          (ende-test--fake-llm
           '((:content "summary"
-             :reported-model "actual-model"
-             :reported-provider "llama.cpp")))))
+		      :reported-model "actual-model"
+		      :reported-provider "llama.cpp")))))
     (cl-letf (((symbol-function 'format-time-string)
                (lambda (&rest _) "2026-09-18 11:10:07")))
       (ende-test--with-buffer "source"
-        (rename-buffer "reported-source" t)
-        (let ((job (ende-summarize)))
-          (should (eq (ende-job-state job) 'completed)))))
+	(rename-buffer "reported-source" t)
+	(let ((job (ende-summarize)))
+	  (should (eq (ende-job-state job) 'completed)))))
     (with-current-buffer ende-summary-buffer-name
-       (should (string-prefix-p
-                (concat "* *reported-source* - 2026-09-18 11:10:07\n"
-                        "File: [[ende-buffer:s1::1][reported-source]]\n"
-                        "Model: actual-model\n\n")
-                (buffer-string))))))
+      (should (string-prefix-p
+               (concat "* *reported-source* - 2026-09-18 11:10:07\n"
+                       "File: [[ende-buffer:s1::1][reported-source]]\n"
+                       "Model: actual-model\n\n")
+               (buffer-string))))))
 
 (ert-deftest ende-test/output-remains-marked-until-approved ()
   (ende-test--reset)
@@ -1494,39 +1494,39 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let* ((job (ende-insert-at-cursor))
-             (queued-overlay (ende-job-overlay job)))
-        (should (string-match-p "test-model"
-                                (ende-test--overlay-label queued-overlay)))
-        (should (string-match-p "localhost"
-                                (ende-test--overlay-label queued-overlay)))
-        (ende-test--complete-call (car ende-test--calls))
-        (let ((review (cl-find-if
-                       #'ende-review-overlay-p
-                       (overlays-in (point-min) (point-max)))))
-          (should review)
-          (should (string= (overlay-get review 'model) "test-model"))
-          (should (string= (overlay-get review 'client) "localhost"))
-          (should (string-match-p "test-model"
-                                  (ende-test--overlay-label review)))
-           (should (string-match-p "localhost"
-                                   (ende-test--overlay-label review)))
-            (dolist (key '("RET" "C-m" "DEL" "<backspace>" "C-d"))
-              (should-not (lookup-key (overlay-get review 'keymap)
-                                      (kbd key))))
-            (should (eq (lookup-key (overlay-get review 'keymap)
-                                    (kbd "C-c C-c"))
-                        #'ende-approve-output))
-            (should (eq (lookup-key (overlay-get review 'keymap)
-                                    (kbd "C-c C-k"))
-                        #'ende-reject-output))
-           (goto-char (overlay-end review))
-           (should-not (eq (key-binding (kbd "RET"))
-                           #'ende-approve-output))
-           (goto-char (1+ (overlay-start review)))
-           (insert "edited ")
-           (should (ende-review-overlay-p review))
-           (ende-approve-output)
-           (should-not (ende-review-overlay-p review)))))))
+	     (queued-overlay (ende-job-overlay job)))
+	(should (string-match-p "test-model"
+				(ende-test--overlay-label queued-overlay)))
+	(should (string-match-p "localhost"
+				(ende-test--overlay-label queued-overlay)))
+	(ende-test--complete-call (car ende-test--calls))
+	(let ((review (cl-find-if
+		       #'ende-review-overlay-p
+		       (overlays-in (point-min) (point-max)))))
+	  (should review)
+	  (should (string= (overlay-get review 'model) "test-model"))
+	  (should (string= (overlay-get review 'client) "localhost"))
+	  (should (string-match-p "test-model"
+				  (ende-test--overlay-label review)))
+	  (should (string-match-p "localhost"
+				  (ende-test--overlay-label review)))
+	  (dolist (key '("RET" "C-m" "DEL" "<backspace>" "C-d"))
+	    (should-not (lookup-key (overlay-get review 'keymap)
+				    (kbd key))))
+	  (should (eq (lookup-key (overlay-get review 'keymap)
+				  (kbd "C-c C-c"))
+		      #'ende-approve-output))
+	  (should (eq (lookup-key (overlay-get review 'keymap)
+				  (kbd "C-c C-k"))
+		      #'ende-reject-output))
+	  (goto-char (overlay-end review))
+	  (should-not (eq (key-binding (kbd "RET"))
+			  #'ende-approve-output))
+	  (goto-char (1+ (overlay-start review)))
+	  (insert "edited ")
+	  (should (ende-review-overlay-p review))
+	  (ende-approve-output)
+	  (should-not (ende-review-overlay-p review)))))))
 
 (ert-deftest ende-test/enter-works-after-editing-past-review-output ()
   (ende-test--reset)
@@ -1535,46 +1535,46 @@ process for cancellation tests."
       (goto-char (point-max))
       (ende-insert-at-cursor)
       (let ((call (car ende-test--calls)))
-        (ende-test--complete-call call)
-        (let ((review (cl-find-if
-                       #'ende-review-overlay-p
-                       (overlays-in (point-min) (point-max)))))
-          (goto-char (overlay-end review))
-          (newline)
-          (insert "typed")
-          (should-not (eq (key-binding (kbd "RET"))
-                          #'ende-approve-output))
-          (funcall (key-binding (kbd "RET")))
-          (should (string= (buffer-string) "base generated\ntyped\n"))
-          (should (ende-review-overlay-p review)))))))
+	(ende-test--complete-call call)
+	(let ((review (cl-find-if
+		       #'ende-review-overlay-p
+		       (overlays-in (point-min) (point-max)))))
+	  (goto-char (overlay-end review))
+	  (newline)
+	  (insert "typed")
+	  (should-not (eq (key-binding (kbd "RET"))
+			  #'ende-approve-output))
+	  (funcall (key-binding (kbd "RET")))
+	  (should (string= (buffer-string) "base generated\ntyped\n"))
+	  (should (ende-review-overlay-p review)))))))
 
 (ert-deftest ende-test/task-cannot-start-inside-pending-review ()
   (ende-test--reset)
   (let ((ende-review-conflict-policy 'block))
     (ende-test--with-buffer "generated text"
       (let ((review (ende-review-create-overlay
-                     (current-buffer) 1 (point-max) nil nil "")))
-        (goto-char 5)
-        (should-error (ende-insert-at-cursor) :type 'user-error)
-        (ende-test--select 2 6 6)
-        (should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
-        (should-not ende-queue)
-        (ende-review-delete-overlay review)))))
+		     (current-buffer) 1 (point-max) nil nil "")))
+	(goto-char 5)
+	(should-error (ende-insert-at-cursor) :type 'user-error)
+	(ende-test--select 2 6 6)
+	(should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
+	(should-not ende-queue)
+	(ende-review-delete-overlay review)))))
 
 (ert-deftest ende-test/summary-runs-over-pending-review ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("summary"))))
     (ende-test--with-buffer "generated text"
       (let ((review (ende-review-create-overlay
-                     (current-buffer) 1 (point-max) nil nil "")))
-        (let ((job (ende-summarize)))
-          (should (eq (ende-job-state job) 'completed))
-          (should (ende-review-overlay-p review))
-          (should (string-match-p
-                   "generated text"
-                   (ende-test--user-message (car ende-test--prompts))))
-          (with-current-buffer ende-summary-buffer-name
-            (should (string-match-p "summary" (buffer-string)))))))))
+		     (current-buffer) 1 (point-max) nil nil "")))
+	(let ((job (ende-summarize)))
+	  (should (eq (ende-job-state job) 'completed))
+	  (should (ende-review-overlay-p review))
+	  (should (string-match-p
+		   "generated text"
+		   (ende-test--user-message (car ende-test--prompts))))
+	  (with-current-buffer ende-summary-buffer-name
+	    (should (string-match-p "summary" (buffer-string)))))))))
 
 (ert-deftest ende-test/overlapping-write-asks-before-approving-reviews ()
   (ende-test--reset)
@@ -1582,24 +1582,24 @@ process for cancellation tests."
         (ende-llm-function (ende-test--fake-llm '("!"))))
     (ende-test--with-buffer "old text"
       (let ((conflict (ende-review-create-overlay
-                       (current-buffer) 1 4 nil nil "old"))
-            (unrelated (ende-review-create-overlay
-                        (current-buffer) 5 (point-max) nil nil "text")))
-        (goto-char 2)
-        (cl-letf (((symbol-function 'yes-or-no-p)
-                   (lambda (&rest _) nil)))
-          (should-error (ende-insert-at-cursor) :type 'user-error))
-        (should (ende-review-overlay-p conflict))
-        (should (ende-review-overlay-p unrelated))
-        (should-not ende-queue)
-        (cl-letf (((symbol-function 'yes-or-no-p)
-                   (lambda (&rest _) t)))
-          (let ((job (ende-insert-at-cursor)))
-            (should (eq (ende-job-state job) 'completed))))
-        (should-not (ende-review-overlay-p conflict))
-        (should (ende-review-overlay-p unrelated))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))
-        (should (string= (buffer-string) "o!ld text"))))))
+		       (current-buffer) 1 4 nil nil "old"))
+	    (unrelated (ende-review-create-overlay
+			(current-buffer) 5 (point-max) nil nil "text")))
+	(goto-char 2)
+	(cl-letf (((symbol-function 'yes-or-no-p)
+		   (lambda (&rest _) nil)))
+	  (should-error (ende-insert-at-cursor) :type 'user-error))
+	(should (ende-review-overlay-p conflict))
+	(should (ende-review-overlay-p unrelated))
+	(should-not ende-queue)
+	(cl-letf (((symbol-function 'yes-or-no-p)
+		   (lambda (&rest _) t)))
+	  (let ((job (ende-insert-at-cursor)))
+	    (should (eq (ende-job-state job) 'completed))))
+	(should-not (ende-review-overlay-p conflict))
+	(should (ende-review-overlay-p unrelated))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))
+	(should (string= (buffer-string) "o!ld text"))))))
 
 (ert-deftest ende-test/automatic-review-conflict-approval-is-local ()
   (ende-test--reset)
@@ -1607,17 +1607,17 @@ process for cancellation tests."
         (ende-llm-function (ende-test--fake-llm '("!"))))
     (ende-test--with-buffer "old text"
       (let ((conflict (ende-review-create-overlay
-                       (current-buffer) 1 4 nil nil "old"))
-            (unrelated (ende-review-create-overlay
-                        (current-buffer) 5 (point-max) nil nil "text")))
-        (goto-char 2)
-        (cl-letf (((symbol-function 'yes-or-no-p)
-                   (lambda (&rest _) (error "confirmation was not expected"))))
-          (let ((job (ende-insert-at-cursor)))
-            (should (eq (ende-job-state job) 'completed))))
-        (should-not (ende-review-overlay-p conflict))
-        (should (ende-review-overlay-p unrelated))
-        (should (string= (buffer-string) "o!ld text"))))))
+		       (current-buffer) 1 4 nil nil "old"))
+	    (unrelated (ende-review-create-overlay
+			(current-buffer) 5 (point-max) nil nil "text")))
+	(goto-char 2)
+	(cl-letf (((symbol-function 'yes-or-no-p)
+		   (lambda (&rest _) (error "confirmation was not expected"))))
+	  (let ((job (ende-insert-at-cursor)))
+	    (should (eq (ende-job-state job) 'completed))))
+	(should-not (ende-review-overlay-p conflict))
+	(should (ende-review-overlay-p unrelated))
+	(should (string= (buffer-string) "o!ld text"))))))
 
 (ert-deftest ende-test/queued-task-cannot-dispatch-into-new-review ()
   (ende-test--reset)
@@ -1626,13 +1626,13 @@ process for cancellation tests."
       (goto-char 3)
       (setq ende--queue-suspended t)
       (let ((job (ende-insert-at-cursor))
-            (review (ende-review-create-overlay
-                     (current-buffer) 1 (point-max) nil nil "")))
-        (setq ende--queue-suspended nil)
-        (ende-process-next)
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende-test--calls)
-        (ende-review-delete-overlay review)))))
+	    (review (ende-review-create-overlay
+		     (current-buffer) 1 (point-max) nil nil "")))
+	(setq ende--queue-suspended nil)
+	(ende-process-next)
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende-test--calls)
+	(ende-review-delete-overlay review)))))
 
 (ert-deftest ende-test/review-creation-failure-leaves-no-overlay ()
   (ende-test--reset)
@@ -1649,24 +1649,24 @@ process for cancellation tests."
         (ende-llm-function
          (ende-test--fake-llm
           '((:content " generated"
-             :reported-model "actual-model"
-             :reported-provider "llama.cpp"))
+		      :reported-model "actual-model"
+		      :reported-provider "llama.cpp"))
           t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-        (ende-test--complete-call (car ende-test--calls))
-        (let ((review (cl-find-if
-                       #'ende-review-overlay-p
-                       (overlays-in (point-min) (point-max)))))
-          (should review)
-          (should (string= (overlay-get review 'model) "actual-model"))
-          (should (string= (overlay-get review 'client) "llama.cpp"))
-          (should (string-match-p "actual-model"
-                                  (ende-test--overlay-label review)))
-          (should-not (string-match-p "configured-model"
-                                      (ende-test--overlay-label review)))
-          (should (eq (ende-job-state job) 'completed)))))))
+	(ende-test--complete-call (car ende-test--calls))
+	(let ((review (cl-find-if
+		       #'ende-review-overlay-p
+		       (overlays-in (point-min) (point-max)))))
+	  (should review)
+	  (should (string= (overlay-get review 'model) "actual-model"))
+	  (should (string= (overlay-get review 'client) "llama.cpp"))
+	  (should (string-match-p "actual-model"
+				  (ende-test--overlay-label review)))
+	  (should-not (string-match-p "configured-model"
+				      (ende-test--overlay-label review)))
+	  (should (eq (ende-job-state job) 'completed)))))))
 
 (ert-deftest ende-test/response-metadata-cannot-be-overwritten-by-discovery ()
   (ende-test--reset)
@@ -1674,19 +1674,19 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let* ((job (ende-insert-at-cursor))
-             (call (car ende-test--calls)))
-        (ende-test--callback
-         call :on-event
-         '(:type :metadata :metadata
-           (:source :response :model "response-model" :provider "llama.cpp")))
-        (ende-test--callback
-         call :on-event
-         '(:type :metadata :metadata
-           (:source :discovery :model "stale-model" :provider "stale")))
-        (should (string= (overlay-get (ende-job-overlay job) 'model)
-                         "response-model"))
-        (should (string= (overlay-get (ende-job-overlay job) 'client)
-                         "llama.cpp"))))))
+	     (call (car ende-test--calls)))
+	(ende-test--callback
+	 call :on-event
+	 '(:type :metadata :metadata
+		 (:source :response :model "response-model" :provider "llama.cpp")))
+	(ende-test--callback
+	 call :on-event
+	 '(:type :metadata :metadata
+		 (:source :discovery :model "stale-model" :provider "stale")))
+	(should (string= (overlay-get (ende-job-overlay job) 'model)
+			 "response-model"))
+	(should (string= (overlay-get (ende-job-overlay job) 'client)
+			 "llama.cpp"))))))
 
 (ert-deftest ende-test/reject-restores-properties-and-saving-remains-allowed ()
   (ende-test--reset)
@@ -1711,22 +1711,22 @@ process for cancellation tests."
         (kill-ring-yank-pointer nil))
     (ende-test--with-buffer "XY"
       (let ((first (ende-review-create-overlay
-                    (current-buffer) 1 2 nil nil "A"))
-            (second (ende-review-create-overlay
-                     (current-buffer) 2 3 nil nil "B")))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))
-        (ende-reject-all-output)
-        (should (string= (buffer-string) "AB"))
-        (should (equal kill-ring '("X" "Y")))
-        (should-not (ende-review--overlays-in-buffer))
-        (should-not (ende-review-overlay-p first))
-        (should-not (ende-review-overlay-p second))
-        (ende-review-create-overlay
-         (current-buffer) 1 2 nil nil "A")
-        (ende-review-create-overlay
-         (current-buffer) 2 3 nil nil "B")
-        (ende-approve-all-output)
-        (should-not (ende-review--overlays-in-buffer))))))
+		    (current-buffer) 1 2 nil nil "A"))
+	    (second (ende-review-create-overlay
+		     (current-buffer) 2 3 nil nil "B")))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))
+	(ende-reject-all-output)
+	(should (string= (buffer-string) "AB"))
+	(should (equal kill-ring '("X" "Y")))
+	(should-not (ende-review--overlays-in-buffer))
+	(should-not (ende-review-overlay-p first))
+	(should-not (ende-review-overlay-p second))
+	(ende-review-create-overlay
+	 (current-buffer) 1 2 nil nil "A")
+	(ende-review-create-overlay
+	 (current-buffer) 2 3 nil nil "B")
+	(ende-approve-all-output)
+	(should-not (ende-review--overlays-in-buffer))))))
 
 (ert-deftest ende-test/write-anywhere-creates-independent-reviews ()
   (ende-test--reset)
@@ -1736,43 +1736,43 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)))))
     (ende-test--with-buffer "one two"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-         (should (string= (buffer-string) "Aone TWO"))
-        (should-not buffer-read-only)
-        (let ((reviews (ende-review--overlays-in-buffer)))
-          (should (= (length reviews) 2))
-          (goto-char (overlay-start (car reviews)))
-          (ende-approve-output)
-          (should (= (length (ende-review--overlays-in-buffer)) 1))
-          (let ((remaining (car (ende-review--overlays-in-buffer))))
-            (goto-char (overlay-start remaining))
-            (ende-reject-output))
-           (should (string= (buffer-string) "Aone two")))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "Aone TWO"))
+	(should-not buffer-read-only)
+	(let ((reviews (ende-review--overlays-in-buffer)))
+	  (should (= (length reviews) 2))
+	  (goto-char (overlay-start (car reviews)))
+	  (ende-approve-output)
+	  (should (= (length (ende-review--overlays-in-buffer)) 1))
+	  (let ((remaining (car (ende-review--overlays-in-buffer))))
+	    (goto-char (overlay-start remaining))
+	    (ende-reject-output))
+	  (should (string= (buffer-string) "Aone two")))))))
 
 (ert-deftest ende-test/write-anywhere-applies-valid-edits-around-invalid-ones ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"text\":\"ONE\"},{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"},{\"anchor\":\"two\",\"position\":\"after\",\"text\":\"!\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"text\":\"ONE\"},{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"},{\"anchor\":\"two\",\"position\":\"after\",\"text\":\"!\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
-          (ende-llm-function
-           (ende-test--fake-llm
-            (list (list :content response)
-                  (list :content repair-response)))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content response)
+                 (list :content repair-response)))))
     (ende-test--with-buffer "one two"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "ONE two!"))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))
-        (with-current-buffer ende-history--buffer-object
-           (let ((history (buffer-string)))
-             (should (string-match-p "Skipped edits" history))
-             (should (string-match-p "COMPLETED WITH WARNINGS" history))
-             (should (string-match-p "Requested: 3" history))
-             (should (string-match-p "Edit 2: anchor was not found" history))
-            (should (string-match-p
-                     (regexp-quote "{\"anchor\":\"missing\"")
-                     history))))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "ONE two!"))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))
+	(with-current-buffer ende-history--buffer-object
+	  (let ((history (buffer-string)))
+	    (should (string-match-p "Skipped edits" history))
+	    (should (string-match-p "COMPLETED WITH WARNINGS" history))
+	    (should (string-match-p "Requested: 3" history))
+	    (should (string-match-p "Edit 2: anchor was not found" history))
+	    (should (string-match-p
+		     (regexp-quote "{\"anchor\":\"missing\"")
+		     history))))))))
 
 (ert-deftest ende-test/write-anywhere-supports-occurrence-and-all-anchors ()
   (ende-test--reset)
@@ -1782,32 +1782,32 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)))))
     (ende-test--with-buffer "one\none"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "ONE\nONE"))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "ONE\nONE"))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))))))
 
 (ert-deftest ende-test/write-anywhere-retains-all-skipped-edits-on-failure ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"replace\",\"text\":\"bad\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"}]}" )
-          (ende-llm-function
-           (ende-test--fake-llm
-            (list (list :content response)
-                  (list :content repair-response)))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content response)
+                 (list :content repair-response)))))
     (ende-test--with-buffer "test"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'failed))
-        (should (string= (buffer-string) "test"))
-        (should-not (ende-review--overlays-in-buffer))
-        (with-current-buffer ende-history--buffer-object
-          (let ((history (buffer-string)))
-            (should (string-match-p "Skipped edits" history))
-            (should (string-match-p "Edit 1: anchor was not found" history))
-            (should (string-match-p
-                     (regexp-quote "{\"anchor\":\"missing\"")
-                     history))))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "test"))
+	(should-not (ende-review--overlays-in-buffer))
+	(with-current-buffer ende-history--buffer-object
+	  (let ((history (buffer-string)))
+	    (should (string-match-p "Skipped edits" history))
+	    (should (string-match-p "Edit 1: anchor was not found" history))
+	    (should (string-match-p
+		     (regexp-quote "{\"anchor\":\"missing\"")
+		     history))))))))
 
 (ert-deftest ende-test/anywhere-matches-only-selected-source ()
   (dolist (type '(insert-anywhere write-anywhere))
@@ -1820,17 +1820,17 @@ process for cancellation tests."
              (ende-llm-function
               (ende-test--fake-llm (list (list :content response)))))
         (ende-test--with-buffer "outside same|same|same outside"
-          (ende-test--select 14 18 18)
-          (let ((job (ende-enqueue-operation type "Edit the target")))
-            (should (eq (ende-job-state job) 'completed))
-            (should (string-suffix-p
-                     "Document:\nsame"
-                     (ende-test--user-message (car ende-test--prompts))))
-            (should (string= (buffer-string)
-                             (if (eq type 'write-anywhere)
-                                 "outside same|!|same outside"
-                               "outside same|same!|same outside")))
-            (should-not (buffer-narrowed-p))))))))
+	  (ende-test--select 14 18 18)
+	  (let ((job (ende-enqueue-operation type "Edit the target")))
+	    (should (eq (ende-job-state job) 'completed))
+	    (should (string-suffix-p
+		     "Document:\nsame"
+		     (ende-test--user-message (car ende-test--prompts))))
+	    (should (string= (buffer-string)
+			     (if (eq type 'write-anywhere)
+				 "outside same|!|same outside"
+			       "outside same|same!|same outside")))
+	    (should-not (buffer-narrowed-p))))))))
 
 (ert-deftest ende-test/anywhere-rejects-anchors-outside-selection ()
   (dolist (type '(insert-anywhere write-anywhere))
@@ -1843,14 +1843,14 @@ process for cancellation tests."
            (ende-llm-function
             (ende-test--fake-llm (list (list :content response)))))
       (ende-test--with-buffer "outside|same|outside"
-        (ende-test--select 9 13 13)
-        (let ((job (ende-enqueue-operation type)))
-          (should (eq (ende-job-state job) 'failed))
-          (should (string= (buffer-string) "outside|same|outside"))
-          (should (= (plist-get (ende--structured-summary
-                                (ende-job-structured-state job))
-                               :skipped)
-                     3)))))))
+	(ende-test--select 9 13 13)
+	(let ((job (ende-enqueue-operation type)))
+	  (should (eq (ende-job-state job) 'failed))
+	  (should (string= (buffer-string) "outside|same|outside"))
+	  (should (= (plist-get (ende--structured-summary
+				 (ende-job-structured-state job))
+				:skipped)
+		     3)))))))
 
 (ert-deftest ende-test/anywhere-repair-keeps-moving-selection-and-edge-insertions ()
   (dolist (type '(insert-anywhere write-anywhere))
@@ -1864,24 +1864,24 @@ process for cancellation tests."
             (ende-test--fake-llm
              (list (list :content response) (list :content repair)) t)))
       (ende-test--with-buffer "outside|same|outside"
-        (ende-test--select 9 13 13)
-        (let ((job (ende-enqueue-operation type)))
-          (should-not (buffer-narrowed-p))
-          (deactivate-mark)
-          (goto-char (point-min))
-          (insert "user ")
-          (ende-test--complete-call (car ende-test--calls))
-          (should (eq (ende-job-state job) 'running))
-          (should (string-suffix-p
-                   "Current document:\nAsameZ"
-                   (ende-test--user-message (car ende-test--prompts))))
-          (goto-char (point-min))
-          (insert "more ")
-          (ende-test--complete-call (nth 1 ende-test--calls))
-          (should (eq (ende-job-state job) 'completed))
-          (should (string= (buffer-string)
-                           "more user outside|AsameZ!|outside"))
-          (should-not (buffer-narrowed-p)))))))
+	(ende-test--select 9 13 13)
+	(let ((job (ende-enqueue-operation type)))
+	  (should-not (buffer-narrowed-p))
+	  (deactivate-mark)
+	  (goto-char (point-min))
+	  (insert "user ")
+	  (ende-test--complete-call (car ende-test--calls))
+	  (should (eq (ende-job-state job) 'running))
+	  (should (string-suffix-p
+		   "Current document:\nAsameZ"
+		   (ende-test--user-message (car ende-test--prompts))))
+	  (goto-char (point-min))
+	  (insert "more ")
+	  (ende-test--complete-call (nth 1 ende-test--calls))
+	  (should (eq (ende-job-state job) 'completed))
+	  (should (string= (buffer-string)
+			   "more user outside|AsameZ!|outside"))
+	  (should-not (buffer-narrowed-p)))))))
 
 (ert-deftest ende-test/anywhere-without-selection-respects-narrowing ()
   (dolist (type '(insert-anywhere write-anywhere))
@@ -1891,13 +1891,13 @@ process for cancellation tests."
            (ende-llm-function
             (ende-test--fake-llm (list (list :content response)))))
       (ende-test--with-buffer "same|same|same"
-        (narrow-to-region 6 10)
-        (let ((job (ende-enqueue-operation type)))
-          (should (eq (ende-job-state job) 'completed))
-          (should (buffer-narrowed-p))
-          (should (string= (buffer-string) "same!"))
-          (widen)
-          (should (string= (buffer-string) "same|same!|same")))))))
+	(narrow-to-region 6 10)
+	(let ((job (ende-enqueue-operation type)))
+	  (should (eq (ende-job-state job) 'completed))
+	  (should (buffer-narrowed-p))
+	  (should (string= (buffer-string) "same!"))
+	  (widen)
+	  (should (string= (buffer-string) "same|same!|same")))))))
 
 (ert-deftest ende-test/insert-anywhere-rejects-character-offsets ()
   (ende-test--reset)
@@ -1907,24 +1907,24 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)))))
     (ende-test--with-buffer "test"
       (let ((job (ende-insert-anywhere)))
-        (should (eq (ende-job-state job) 'failed))
-        (should (string= (buffer-string) "test"))
-         (should-not (ende-review--overlays-in-buffer))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "test"))
+	(should-not (ende-review--overlays-in-buffer))))))
 
 (ert-deftest ende-test/insert-anywhere-reports-missing-fields ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"position\":\"before\",\"text\":\"X\"}]}" )
+          "{\"version\":1,\"edits\":[{\"position\":\"before\",\"text\":\"X\"}]}" )
          (repair-response response)
-          (ende-llm-function
-           (ende-test--fake-llm
-            (list (list :content response)
-                  (list :content repair-response)))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content response)
+                 (list :content repair-response)))))
     (ende-test--with-buffer "test"
       (let ((job (ende-insert-anywhere)))
-        (should (eq (ende-job-state job) 'failed))
-        (should (string-match-p "missing required anchor, position, or text field"
-                               (ende-error-message (ende-job-error job))))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should (string-match-p "missing required anchor, position, or text field"
+				(ende-error-message (ende-job-error job))))))))
 
 (ert-deftest ende-test/insert-anywhere-creates-independent-insertions ()
   (ende-test--reset)
@@ -1934,54 +1934,54 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)))))
     (ende-test--with-buffer "test"
       (let ((job (ende-insert-anywhere
-                  "Add a marker at every appropriate position")))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "AtestB"))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))
-        (let ((messages (car ende-test--prompts)))
-          (should (string-match-p "INSERT-ANYWHERE"
-                                  (cdr (cadr messages))))
-          (should (string-match-p
-                   "Add a marker at every appropriate position"
-                   (cdr (cadr messages))))
-           (should (string-match-p "Multiple insertions"
-                                   (cdr (car messages)))))))))
+		  "Add a marker at every appropriate position")))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "AtestB"))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))
+	(let ((messages (car ende-test--prompts)))
+	  (should (string-match-p "INSERT-ANYWHERE"
+				  (cdr (cadr messages))))
+	  (should (string-match-p
+		   "Add a marker at every appropriate position"
+		   (cdr (cadr messages))))
+	  (should (string-match-p "Multiple insertions"
+				  (cdr (car messages)))))))))
 
 (ert-deftest ende-test/insert-anywhere-applies-valid-edits-around-invalid-ones ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"anchor\":\"aa\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"},{\"anchor\":\"bb\",\"position\":\"after\",\"text\":\"B\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"aa\",\"position\":\"before\",\"text\":\"A\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"},{\"anchor\":\"bb\",\"position\":\"after\",\"text\":\"B\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"bad\"}]}" )
-          (ende-llm-function
-           (ende-test--fake-llm
-            (list (list :content response)
-                  (list :content repair-response)))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content response)
+                 (list :content repair-response)))))
     (ende-test--with-buffer "aa\nbb"
       (let ((job (ende-insert-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "Aaa\nbbB"))
-        (should (= (length (ende-review--overlays-in-buffer)) 2))
-        (should (string-match-p
-                 "Skipped edits"
-                 (with-current-buffer ende-history--buffer-object
-                   (buffer-string))))
-        (should (string-match-p
-                 "Edit 2: anchor was not found"
-                 (with-current-buffer ende-history--buffer-object
-                   (buffer-string))))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "Aaa\nbbB"))
+	(should (= (length (ende-review--overlays-in-buffer)) 2))
+	(should (string-match-p
+		 "Skipped edits"
+		 (with-current-buffer ende-history--buffer-object
+		   (buffer-string))))
+	(should (string-match-p
+		 "Edit 2: anchor was not found"
+		 (with-current-buffer ende-history--buffer-object
+		   (buffer-string))))))))
 
 (ert-deftest ende-test/insert-anywhere-supports-occurrence-and-all-anchors ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"occurrence\":1,\"text\":\"A\"},{\"anchor\":\"one\",\"position\":\"after\",\"all\":true,\"text\":\"B\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"occurrence\":1,\"text\":\"A\"},{\"anchor\":\"one\",\"position\":\"after\",\"all\":true,\"text\":\"B\"}]}" )
          (ende-llm-function
           (ende-test--fake-llm (list (list :content response)))))
     (ende-test--with-buffer "one\none"
       (let ((job (ende-insert-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-         (should (string= (buffer-string) "AoneB\noneB"))
-         (should (= (length (ende-review--overlays-in-buffer)) 3))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "AoneB\noneB"))
+	(should (= (length (ende-review--overlays-in-buffer)) 3))))))
 
 (ert-deftest ende-test/structured-edit-normalized-expansion-is-bounded ()
   (let ((ende-max-normalized-edits 2))
@@ -2023,25 +2023,25 @@ process for cancellation tests."
              (ende-llm-function
               (ende-test--fake-llm (list (list :content response)) t)))
         (ende-test--with-buffer "left middle right"
-          (let ((source (current-buffer))
-                (callback-buffer (generate-new-buffer " *ende-callback*")))
-            (unwind-protect
-                (progn
-                  (ende-test--select 6 12 12)
-                  (let* ((job (ende-enqueue-operation type "Change middle"))
-                         (call (car ende-test--calls)))
-                    (deactivate-mark)
-                    (goto-char 2)
-                    (with-current-buffer callback-buffer
-                      (ende-test--complete-call call)
-                      (should (eq (current-buffer) callback-buffer)))
-                    (with-current-buffer source
-                      (should (eq (ende-job-state job) 'completed))
-                      (should (string= (buffer-string) expected))
-                      (should (= (point) 2))
-                      (should-not (buffer-narrowed-p)))))
-              (when (buffer-live-p callback-buffer)
-                (kill-buffer callback-buffer)))))))))
+	  (let ((source (current-buffer))
+		(callback-buffer (generate-new-buffer " *ende-callback*")))
+	    (unwind-protect
+		(progn
+		  (ende-test--select 6 12 12)
+		  (let* ((job (ende-enqueue-operation type "Change middle"))
+			 (call (car ende-test--calls)))
+		    (deactivate-mark)
+		    (goto-char 2)
+		    (with-current-buffer callback-buffer
+		      (ende-test--complete-call call)
+		      (should (eq (current-buffer) callback-buffer)))
+		    (with-current-buffer source
+		      (should (eq (ende-job-state job) 'completed))
+		      (should (string= (buffer-string) expected))
+		      (should (= (point) 2))
+		      (should-not (buffer-narrowed-p)))))
+	      (when (buffer-live-p callback-buffer)
+		(kill-buffer callback-buffer)))))))))
 
 (ert-deftest ende-test/structured-edits-move-point-when-enabled ()
   (dolist (spec '((write-anywhere "replace" "MIDDLE" "left MIDDLE right")
@@ -2056,17 +2056,17 @@ process for cancellation tests."
              (ende-llm-function
               (ende-test--fake-llm (list (list :content response)) t)))
         (ende-test--with-buffer "left middle right"
-          (ende-test--select 6 12 12)
-          (let* ((job (ende-enqueue-operation type "Change middle"))
-                 (call (car ende-test--calls)))
-            (deactivate-mark)
-            (goto-char 2)
-            (ende-test--complete-call call)
-            (let ((review (car (ende-review--overlays-in-buffer))))
-              (should (eq (ende-job-state job) 'completed))
-              (should (string= (buffer-string) expected))
-              (should review)
-              (should (= (point) (overlay-end review))))))))))
+	  (ende-test--select 6 12 12)
+	  (let* ((job (ende-enqueue-operation type "Change middle"))
+		 (call (car ende-test--calls)))
+	    (deactivate-mark)
+	    (goto-char 2)
+	    (ende-test--complete-call call)
+	    (let ((review (car (ende-review--overlays-in-buffer))))
+	      (should (eq (ende-job-state job) 'completed))
+	      (should (string= (buffer-string) expected))
+	      (should review)
+	      (should (= (point) (overlay-end review))))))))))
 
 (ert-deftest ende-test/structured-edit-orders-adjacent-after-before-replace ()
   (ende-test--reset)
@@ -2077,8 +2077,8 @@ process for cancellation tests."
                  "{\"version\":1,\"edits\":[{\"anchor\":\"XYZ\",\"position\":\"replace\",\"text\":\"Q\"},{\"anchor\":\"abc\",\"position\":\"after\",\"text\":\"!\"}]}")))))
     (ende-test--with-buffer "abcXYZ"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "abc!Q"))))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "abc!Q"))))))
 
 (ert-deftest ende-test/structured-edit-repairs-failed-edits ()
   (ende-test--reset)
@@ -2094,23 +2094,23 @@ process for cancellation tests."
       (setq-local buffer-file-name "/tmp/example.el")
       (setq-local major-mode 'emacs-lisp-mode)
       (let* ((job (ende-write-anywhere "Fix every item"))
-             (summary (plist-get (ende-job-result job)
-                                 :structured-summary))
-             (repair-user (cdr (cadr (car ende-test--prompts)))))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "ONE TWO"))
-        (should (= (plist-get summary :requested) 2))
-        (should (= (plist-get summary :first-pass-applied) 1))
-        (should (= (plist-get summary :repaired) 1))
-        (should (= (plist-get summary :skipped) 0))
-        (should (= (plist-get summary :repair-attempts) 1))
-        (should (string-match-p "Name: example\\.el" repair-user))
-        (should (string-match-p "Fix every item" repair-user))
-        (should (string-match-p "occurrence 2 is not present" repair-user))
-        (should (string-match-p "Current document:\nONE two" repair-user))
-        (with-current-buffer ende-history--buffer-object
-          (should (string-match-p "Structured edits" (buffer-string)))
-          (should (string-match-p "Repaired: 1" (buffer-string))))))))
+	     (summary (plist-get (ende-job-result job)
+				 :structured-summary))
+	     (repair-user (cdr (cadr (car ende-test--prompts)))))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "ONE TWO"))
+	(should (= (plist-get summary :requested) 2))
+	(should (= (plist-get summary :first-pass-applied) 1))
+	(should (= (plist-get summary :repaired) 1))
+	(should (= (plist-get summary :skipped) 0))
+	(should (= (plist-get summary :repair-attempts) 1))
+	(should (string-match-p "Name: example\\.el" repair-user))
+	(should (string-match-p "Fix every item" repair-user))
+	(should (string-match-p "occurrence 2 is not present" repair-user))
+	(should (string-match-p "Current document:\nONE two" repair-user))
+	(with-current-buffer ende-history--buffer-object
+	  (should (string-match-p "Structured edits" (buffer-string)))
+	  (should (string-match-p "Repaired: 1" (buffer-string))))))))
 
 (ert-deftest ende-test/structured-edit-rejects-read-only-before-dispatch ()
   (ende-test--reset)
@@ -2119,11 +2119,11 @@ process for cancellation tests."
     (ende-test--with-buffer "test"
       (setq buffer-read-only t)
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende-test--calls)
-        (should (string-match-p "read-only"
-                                (error-message-string
-                                 (ende-job-error job))))))))
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende-test--calls)
+	(should (string-match-p "read-only"
+				(error-message-string
+				 (ende-job-error job))))))))
 
 (ert-deftest ende-test/structured-edit-rejects-read-only-before-application ()
   (ende-test--reset)
@@ -2133,31 +2133,31 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)) t)))
     (ende-test--with-buffer "test"
       (let ((job (ende-write-anywhere)))
-        (setq buffer-read-only t)
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state job) 'failed))
-        (should (string= (buffer-string) "test"))
-        (should-not (ende-review--overlays-in-buffer))))))
+	(setq buffer-read-only t)
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "test"))
+	(should-not (ende-review--overlays-in-buffer))))))
 
 (ert-deftest ende-test/write-anywhere-leaves-buffer-writable-while-running ()
   (ende-test--reset)
   (let* ((response
-         "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"replace\",\"text\":\"TEST\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"replace\",\"text\":\"TEST\"}]}" )
          (ende-llm-function
           (ende-test--fake-llm (list (list :content response)) t)))
     (ende-test--with-buffer "test"
       (let ((job (ende-write-anywhere)))
-        (should (eq (ende-job-state job) 'running))
-        (should-not buffer-read-only)
-        (run-hooks 'before-save-hook)
-        (goto-char (point-min))
-        (insert "user\n")
-        (should (string= (buffer-string) "user\ntest"))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "user\nTEST"))
-        (ende-abort-queue)
-        (should-not buffer-read-only)))))
+	(should (eq (ende-job-state job) 'running))
+	(should-not buffer-read-only)
+	(run-hooks 'before-save-hook)
+	(goto-char (point-min))
+	(insert "user\n")
+	(should (string= (buffer-string) "user\ntest"))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "user\nTEST"))
+	(ende-abort-queue)
+	(should-not buffer-read-only)))))
 
 (ert-deftest ende-test/insert-anywhere-leaves-buffer-writable-while-running ()
   (ende-test--reset)
@@ -2167,61 +2167,61 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)) t)))
     (ende-test--with-buffer "test"
       (let ((job (ende-insert-anywhere)))
-        (should (eq (ende-job-state job) 'running))
-        (let ((overlay (ende-job-overlay job)))
-          (should (= (overlay-start overlay) (point-min)))
-          (should (= (overlay-end overlay) (point-max)))
-          (should (overlay-get overlay 'before-string))
-          (should-not (overlay-get overlay 'face))
-          (should (string-match-p
-                   "Thinking" (ende-test--overlay-label overlay))))
-        (should-not buffer-read-only)
-        (ende-abort-queue)
-        (should-not (ende-job-overlay job))
-        (should-not buffer-read-only)))))
+	(should (eq (ende-job-state job) 'running))
+	(let ((overlay (ende-job-overlay job)))
+	  (should (= (overlay-start overlay) (point-min)))
+	  (should (= (overlay-end overlay) (point-max)))
+	  (should (overlay-get overlay 'before-string))
+	  (should-not (overlay-get overlay 'face))
+	  (should (string-match-p
+		   "Thinking" (ende-test--overlay-label overlay))))
+	(should-not buffer-read-only)
+	(ende-abort-queue)
+	(should-not (ende-job-overlay job))
+	(should-not buffer-read-only)))))
 
 (ert-deftest ende-test/anywhere-progress-precedes-selected-region ()
   (dolist (type '(insert-anywhere write-anywhere))
     (ende-test--reset)
     (let ((ende-llm-function (ende-test--fake-llm (list :stall) t)))
       (ende-test--with-buffer "before target after"
-        (ende-test--select 8 14 14)
-        (let* ((job (ende-enqueue-operation type))
-               (overlay (ende-job-overlay job)))
-          (should (= (overlay-start overlay) 8))
-          (should (= (overlay-end overlay) 14))
-          (should (overlay-get overlay 'before-string))
-          (should-not (overlay-get overlay 'after-string))
-          (should-not (overlay-get overlay 'face))
-          (should (string-match-p
-                   "Thinking" (ende-test--overlay-label overlay)))
-          (ende-abort-queue)
-          (should-not (overlay-buffer overlay)))))))
+	(ende-test--select 8 14 14)
+	(let* ((job (ende-enqueue-operation type))
+	       (overlay (ende-job-overlay job)))
+	  (should (= (overlay-start overlay) 8))
+	  (should (= (overlay-end overlay) 14))
+	  (should (overlay-get overlay 'before-string))
+	  (should-not (overlay-get overlay 'after-string))
+	  (should-not (overlay-get overlay 'face))
+	  (should (string-match-p
+		   "Thinking" (ende-test--overlay-label overlay)))
+	  (ende-abort-queue)
+	  (should-not (overlay-buffer overlay)))))))
 
 (ert-deftest ende-test/mode-line-reports-buffer-job-count ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm (list :stall :stall) t)))
     (ende-test--with-buffer "test"
-       (ende-mode 1)
+      (ende-mode 1)
       (should (string= ende--mode-line-string " ende[0]"))
       (let ((first (ende-write-anywhere))
-            (second nil))
-        (should (eq (ende-job-state first) 'running))
-        (should (string= ende--mode-line-string " ende[1]"))
-        (setq second (ende-write-anywhere))
-        (should (eq (ende-job-state second) 'queued))
-        (should (string= ende--mode-line-string " ende[2]"))
-        (should (string-match-p
-                 "Thinking"
-                 (ende-test--overlay-label (ende-job-overlay first))))
-        (should (string-match-p
-                 "Queued"
-                 (ende-test--overlay-label (ende-job-overlay second))))
-        (ende-abort-queue)
-        (should-not (ende-job-overlay first))
-        (should-not (ende-job-overlay second))
-        (should (string= ende--mode-line-string " ende[0]"))))))
+	    (second nil))
+	(should (eq (ende-job-state first) 'running))
+	(should (string= ende--mode-line-string " ende[1]"))
+	(setq second (ende-write-anywhere))
+	(should (eq (ende-job-state second) 'queued))
+	(should (string= ende--mode-line-string " ende[2]"))
+	(should (string-match-p
+		 "Thinking"
+		 (ende-test--overlay-label (ende-job-overlay first))))
+	(should (string-match-p
+		 "Queued"
+		 (ende-test--overlay-label (ende-job-overlay second))))
+	(ende-abort-queue)
+	(should-not (ende-job-overlay first))
+	(should-not (ende-job-overlay second))
+	(should (string= ende--mode-line-string " ende[0]"))))))
 
 (ert-deftest ende-test/mode-line-reports-pending-review-count ()
   (ende-test--reset)
@@ -2229,7 +2229,7 @@ process for cancellation tests."
     (ende-mode 1)
     (should (string= ende--mode-line-string " ende[0]"))
     (let ((review (ende-review-create-overlay
-                   (current-buffer) 1 2 nil nil "t")))
+		   (current-buffer) 1 2 nil nil "t")))
       (should (string= ende--mode-line-string " ende[0|1]"))
       (ende-approve-all-output)
       (should (string= ende--mode-line-string " ende[0]"))
@@ -2243,28 +2243,28 @@ process for cancellation tests."
 (ert-deftest ende-test/insert-anywhere-reconciles-against-current-buffer ()
   (ende-test--reset)
   (let* ((response
-           "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
+          "{\"version\":1,\"edits\":[{\"anchor\":\"test\",\"position\":\"after\",\"text\":\"!\"},{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
          (repair-response
           "{\"version\":1,\"edits\":[{\"anchor\":\"missing\",\"position\":\"before\",\"text\":\"?\"}]}" )
-          (ende-llm-function
-           (ende-test--fake-llm
-            (list (list :content response)
-                  (list :content repair-response)) t)))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content response)
+                 (list :content repair-response)) t)))
     (ende-test--with-buffer "test"
       (let ((job (ende-insert-anywhere)))
-        (goto-char (point-min))
-        (insert "user\n")
-         (should (eq (ende-job-state job) 'running))
-         (ende-test--complete-call (car ende-test--calls))
-         (should (eq (ende-job-state job) 'running))
-         (ende-test--complete-call (nth 1 ende-test--calls))
-         (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "user\ntest!"))
-        (should (= (length (ende-review--overlays-in-buffer)) 1))
-        (should (string-match-p
-                 "Skipped edits"
-                 (with-current-buffer ende-history--buffer-object
-                   (buffer-string))))))))
+	(goto-char (point-min))
+	(insert "user\n")
+	(should (eq (ende-job-state job) 'running))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'running))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "user\ntest!"))
+	(should (= (length (ende-review--overlays-in-buffer)) 1))
+	(should (string-match-p
+		 "Skipped edits"
+		 (with-current-buffer ende-history--buffer-object
+		   (buffer-string))))))))
 
 (ert-deftest ende-test/write-anywhere-applies-from-another-current-buffer ()
   (ende-test--reset)
@@ -2274,16 +2274,16 @@ process for cancellation tests."
           (ende-test--fake-llm (list (list :content response)) t)))
     (ende-test--with-buffer "test"
       (let ((job (ende-write-anywhere))
-            (callback-buffer (generate-new-buffer " *ende-callback*")))
-        (unwind-protect
-            (with-current-buffer callback-buffer
-              (ende-test--complete-call (car ende-test--calls)))
-          (when (buffer-live-p callback-buffer)
-            (kill-buffer callback-buffer)))
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "Atest"))
-        (should-not buffer-read-only)
-        (should (= (length (ende-review--overlays-in-buffer)) 1))))))
+	    (callback-buffer (generate-new-buffer " *ende-callback*")))
+	(unwind-protect
+	    (with-current-buffer callback-buffer
+	      (ende-test--complete-call (car ende-test--calls)))
+	  (when (buffer-live-p callback-buffer)
+	    (kill-buffer callback-buffer)))
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "Atest"))
+	(should-not buffer-read-only)
+	(should (= (length (ende-review--overlays-in-buffer)) 1))))))
 
 ;;;; Queue lifecycle
 
@@ -2311,20 +2311,20 @@ process for cancellation tests."
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '(:stall "never") t
-                                #'ende-test--sleep-process)))
+                              #'ende-test--sleep-process)))
     (ende-test--with-buffer "content"
       (let ((job (ende-insert-at-cursor)))
-        (ende-insert-at-cursor)
-        (let ((call (car ende-test--calls)))
-          (should ende--current-job)
-          (ende-abort-queue)
-          (should (eq (ende-job-state job) 'cancelled))
-          (should-not ende--current-job)
-          (should (null ende-queue))
-          (should-not (process-live-p (plist-get call :process)))
-          ;; A late transport callback must be inert.
-          (ende-test--callback call :on-done "orphan")
-          (should (string= (buffer-string) "content")))))))
+	(ende-insert-at-cursor)
+	(let ((call (car ende-test--calls)))
+	  (should ende--current-job)
+	  (ende-abort-queue)
+	  (should (eq (ende-job-state job) 'cancelled))
+	  (should-not ende--current-job)
+	  (should (null ende-queue))
+	  (should-not (process-live-p (plist-get call :process)))
+	  ;; A late transport callback must be inert.
+	  (ende-test--callback call :on-done "orphan")
+	  (should (string= (buffer-string) "content")))))))
 
 (ert-deftest ende-test/stale-callback-cannot-settle-next-job ()
   (ende-test--reset)
@@ -2338,14 +2338,14 @@ process for cancellation tests."
       (setq ende--queue-suspended nil)
       (ende-process-next)
       (let ((first (nth 0 ende-test--calls)))
-        (ende-test--complete-call first)
-        (let ((second (nth 1 ende-test--calls)))
-          (should second)
-          (should (eq (ende-job-state ende--current-job) 'running))
-          (ende-test--callback first :on-done " stale")
-          (ende-test--callback first :on-error "stale error")
-          (should (eq (ende-job-state ende--current-job) 'running))
-          (ende-test--complete-call second)))
+	(ende-test--complete-call first)
+	(let ((second (nth 1 ende-test--calls)))
+	  (should second)
+	  (should (eq (ende-job-state ende--current-job) 'running))
+	  (ende-test--callback first :on-done " stale")
+	  (ende-test--callback first :on-error "stale error")
+	  (should (eq (ende-job-state ende--current-job) 'running))
+	  (ende-test--complete-call second)))
       (should (string= (buffer-string) "base A B")))))
 
 (ert-deftest ende-test/duplicate-completion-is-idempotent ()
@@ -2354,13 +2354,13 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (ende-test--complete-call call)
-        (ende-test--callback call :on-done " X")
-        (should (eq (ende-job-state job) 'completed))
-        (should (string= (buffer-string) "base X"))
-        (should-not ende--current-job)))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(ende-test--complete-call call)
+	(ende-test--callback call :on-done " X")
+	(should (eq (ende-job-state job) 'completed))
+	(should (string= (buffer-string) "base X"))
+	(should-not ende--current-job)))))
 
 (ert-deftest ende-test/deleted-pending-overlay-cannot-fail-committed-insert ()
   (ende-test--reset)
@@ -2369,15 +2369,15 @@ process for cancellation tests."
       (goto-char (point-max))
       (setq ende--queue-suspended t)
       (let ((first (ende-insert-at-cursor))
-            (second (ende-insert-at-cursor)))
-        (delete-overlay (ende-job-overlay second))
-        (setq ende--queue-suspended nil)
-        (ende-process-next)
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (should (eq (ende-job-state first) 'completed))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (should (eq (ende-job-state second) 'completed))
-        (should (string= (buffer-string) "base A B"))))))
+	    (second (ende-insert-at-cursor)))
+	(delete-overlay (ende-job-overlay second))
+	(setq ende--queue-suspended nil)
+	(ende-process-next)
+	(ende-test--complete-call (nth 0 ende-test--calls))
+	(should (eq (ende-job-state first) 'completed))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(should (eq (ende-job-state second) 'completed))
+	(should (string= (buffer-string) "base A B"))))))
 
 (ert-deftest ende-test/malformed-structured-error-cannot-wedge-queue ()
   (ende-test--reset)
@@ -2387,23 +2387,23 @@ process for cancellation tests."
                     (ende-error-create :kind 'provider :message 123)))))
     (ende-test--with-buffer "base"
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende--current-job)
-        (should-not ende--current-job)))))
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende--current-job)
+	(should-not ende--current-job)))))
 
 (ert-deftest ende-test/synchronous-failure-backlog-is-iterative ()
   (ende-test--reset)
   (ende-test--with-buffer "base"
     (let ((ende--queue-suspended t)
-          (max-lisp-eval-depth 100))
+	  (max-lisp-eval-depth 100))
       (dotimes (_ 500)
-        (ende-enqueue
-         (list 'unknown
-               :target (ende-target-create
-                        :buffer (current-buffer) :start 1 :end 1 :cursor 1))))
+	(ende-enqueue
+	 (list 'unknown
+	       :target (ende-target-create
+			:buffer (current-buffer) :start 1 :end 1 :cursor 1))))
       (setq ende--queue-suspended nil)
       (cl-letf (((symbol-function 'message) #'ignore))
-        (ende-process-next))
+	(ende-process-next))
       (should-not ende--current-job)
       (should-not ende-queue))))
 
@@ -2414,32 +2414,32 @@ process for cancellation tests."
      'quit-test (lambda (_job) (signal 'quit nil)))
     (ende-test--with-buffer "base"
       (let ((job (ende-enqueue
-                  (list 'quit-test
-                        :target (ende-target-create
-                                 :buffer (current-buffer)
-                                 :start 1 :end 1 :cursor 1)))))
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende--current-job))))
+		  (list 'quit-test
+			:target (ende-target-create
+				 :buffer (current-buffer)
+				 :start 1 :end 1 :cursor 1)))))
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende--current-job))))
   (ende-test--reset)
   (let ((ende--job-handlers (copy-tree ende--job-handlers)))
     (ende-register-job-handler
      'cleanup-test (lambda (job) (ende-job-finish job "ok")))
     (ende-test--with-buffer "base"
       (let* ((overlay (ende-ui-create-overlay
-                       (current-buffer) 1 1 "Queued"))
-             (job nil))
-        (cl-letf (((symbol-function 'ende-ui-delete-overlay)
-                   (lambda (_) (error "cleanup failed"))))
-          (setq job
-                 (ende-enqueue
-                  (list 'cleanup-test
-                        :target (ende-target-create
-                                 :buffer (current-buffer)
-                                 :start 1 :end 1 :cursor 1)
-                        :overlay overlay))))
-        (should (eq (ende-job-state job) 'completed))
-        (should-not ende--current-job)
-        (delete-overlay overlay)))))
+		       (current-buffer) 1 1 "Queued"))
+	     (job nil))
+	(cl-letf (((symbol-function 'ende-ui-delete-overlay)
+		   (lambda (_) (error "cleanup failed"))))
+	  (setq job
+		(ende-enqueue
+		 (list 'cleanup-test
+		       :target (ende-target-create
+				:buffer (current-buffer)
+				:start 1 :end 1 :cursor 1)
+		       :overlay overlay))))
+	(should (eq (ende-job-state job) 'completed))
+	(should-not ende--current-job)
+	(delete-overlay overlay)))))
 
 ;;;; Target failure paths
 
@@ -2452,9 +2452,9 @@ process for cancellation tests."
     (unwind-protect
         (progn
           (with-current-buffer buffer
-             (insert "base")
-             (goto-char (point-max))
-             (setq active (ende-insert-at-cursor)))
+            (insert "base")
+            (goto-char (point-max))
+            (setq active (ende-insert-at-cursor)))
           (let ((ende--queue-suspended t))
             (with-current-buffer buffer
               (setq pending (ende-insert-at-cursor))))
@@ -2467,7 +2467,7 @@ process for cancellation tests."
           (should-not ende-queue)
           (ende-test--callback (car ende-test--calls) :on-done "late")
           (should (eq (ende-job-state active) 'cancelled)))
-       (when (buffer-live-p buffer) (kill-buffer buffer)))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest ende-test/source-buffer-cancellation-preserves-outer-abort ()
   (ende-test--reset)
@@ -2518,13 +2518,13 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (setq buffer-read-only t)
-        (ende-test--complete-call call)
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende--current-job)
-        (should (string= (buffer-string) "base"))))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(setq buffer-read-only t)
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende--current-job)
+	(should (string= (buffer-string) "base"))))))
 
 (ert-deftest ende-test/narrowed-target-settles-job ()
   (ende-test--reset)
@@ -2532,12 +2532,12 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (narrow-to-region (point-min) (1- (point-max)))
-        (ende-test--complete-call call)
-         (should (eq (ende-job-state job) 'failed))
-         (should-not ende--current-job)))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(narrow-to-region (point-min) (1- (point-max)))
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende--current-job)))))
 
 (ert-deftest ende-test/widening-does-not-expand-queued-context ()
   (ende-test--reset)
@@ -2551,9 +2551,9 @@ process for cancellation tests."
       (setq ende--queue-suspended nil)
       (ende-process-next)
       (let ((user-message
-             (cdr (cadr (plist-get (car ende-test--calls) :messages)))))
-        (should (string-match-p "sa<CURSOR>fe" user-message))
-        (should-not (string-match-p "SECRET" user-message))))))
+	     (cdr (cadr (plist-get (car ende-test--calls) :messages)))))
+	(should (string-match-p "sa<CURSOR>fe" user-message))
+	(should-not (string-match-p "SECRET" user-message))))))
 
 (ert-deftest ende-test/modification-hook-settles-job ()
   (ende-test--reset)
@@ -2561,14 +2561,14 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (add-hook 'before-change-functions
-                  (lambda (&rest _) (error "blocked")) nil t)
-        (ende-test--complete-call call)
-        (should (eq (ende-job-state job) 'failed))
-        (should (string= (buffer-string) "base"))
-        (should-not ende--current-job)))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(add-hook 'before-change-functions
+		  (lambda (&rest _) (error "blocked")) nil t)
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "base"))
+	(should-not ende--current-job)))))
 
 (ert-deftest ende-test/empty-result-does-not-insert-separators ()
   (ende-test--reset)
@@ -2576,11 +2576,11 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (ende-test--complete-call call)
-        (should (eq (ende-job-state job) 'failed))
-        (should (string= (buffer-string) "base"))))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'failed))
+	(should (string= (buffer-string) "base"))))))
 
 ;;;; Anchor ordering and conflicts
 
@@ -2595,28 +2595,28 @@ process for cancellation tests."
       (setq ende--queue-suspended nil)
       (ende-process-next)
       (ende-test--complete-call (nth 0 ende-test--calls))
-       (ende-test--complete-call (nth 1 ende-test--calls))
-       (should (string= (buffer-string) "alpha\nA\nB")))))
+      (ende-test--complete-call (nth 1 ende-test--calls))
+      (should (string= (buffer-string) "alpha\nA\nB")))))
 
 (ert-deftest ende-test/parallel-same-endpoint-preserves-enqueue-order ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '("A" "B") t))
         (profile '(:name remote :model "remote-model"
-                   :max-concurrency 2 :parallel t)))
+			 :max-concurrency 2 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((ende--queue-suspended t)
-            (target (ende-target-create
-                     :buffer (current-buffer) :start 5 :end 5 :cursor 5)))
-        (ende-enqueue (list 'insert :target target :profile profile))
-        (ende-enqueue
-         (list 'insert
-               :target (ende-target-create
-                        :buffer (current-buffer) :start 5 :end 5 :cursor 5)
-               :profile profile))
-        (setq ende--queue-suspended nil)
-        (ende-process-next))
+	    (target (ende-target-create
+		     :buffer (current-buffer) :start 5 :end 5 :cursor 5)))
+	(ende-enqueue (list 'insert :target target :profile profile))
+	(ende-enqueue
+	 (list 'insert
+	       :target (ende-target-create
+			:buffer (current-buffer) :start 5 :end 5 :cursor 5)
+	       :profile profile))
+	(setq ende--queue-suspended nil)
+	(ende-process-next))
       (should (= (length ende--active-jobs) 2))
       (ende-test--complete-call (nth 1 ende-test--calls))
       (ende-test--complete-call (nth 0 ende-test--calls))
@@ -2627,156 +2627,156 @@ process for cancellation tests."
   (let ((ende-llm-function
          (ende-test--fake-llm '("A" "B") t))
         (profile '(:name remote :model "remote-model"
-                   :max-concurrency 1 :parallel t)))
+			 :max-concurrency 1 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first (ende-enqueue
-                    (list 'insert
-                          :target (ende-target-create
-                                   :buffer (current-buffer)
-                                   :start 5 :end 5 :cursor 5)
-                          :profile profile)))
-            (second nil))
-        (setq second
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile profile)))
-        (should (eq (ende-job-state first) 'running))
-        (should (eq (ende-job-state second) 'queued))
-        (should (plist-get (ende-job-profile second) :parallel))
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (should (eq (ende-job-state second) 'running))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (should (string= (buffer-string) "baseAB"))))))
+		    (list 'insert
+			  :target (ende-target-create
+				   :buffer (current-buffer)
+				   :start 5 :end 5 :cursor 5)
+			  :profile profile)))
+	    (second nil))
+	(setq second
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile profile)))
+	(should (eq (ende-job-state first) 'running))
+	(should (eq (ende-job-state second) 'queued))
+	(should (plist-get (ende-job-profile second) :parallel))
+	(ende-test--complete-call (nth 0 ende-test--calls))
+	(should (eq (ende-job-state second) 'running))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(should (string= (buffer-string) "baseAB"))))))
 
 (ert-deftest ende-test/parallel-job-uses-free-slot-alongside-serial-job ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '("A" "B") t))
         (serial-profile '(:name remote :model "serial"
-                          :max-concurrency 4 :parallel nil))
+				:max-concurrency 4 :parallel nil))
         (parallel-profile '(:name remote :model "parallel"
-                            :max-concurrency 4 :parallel t)))
+				  :max-concurrency 4 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first
-             (ende-enqueue
-              (list 'insert
-                    :target (ende-target-create
-                             :buffer (current-buffer)
-                             :start 5 :end 5 :cursor 5)
-                    :profile serial-profile)))
-            (second nil))
-        (let ((ende--queue-suspended t))
-          (setq second
-                (ende-enqueue
-                 (list 'insert
-                       :target (ende-target-create
-                                :buffer (current-buffer)
-                                :start 5 :end 5 :cursor 5)
-                       :profile parallel-profile))))
-        (should (eq (ende-job-state first) 'running))
-        (should (eq (ende-job-state second) 'queued))
-        (ende-process-next)
-        (should (eq (ende-job-state second) 'running))
-        (should (= (length ende--active-jobs) 2))
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (should (string= (buffer-string) "baseAB"))))))
+	     (ende-enqueue
+	      (list 'insert
+		    :target (ende-target-create
+			     :buffer (current-buffer)
+			     :start 5 :end 5 :cursor 5)
+		    :profile serial-profile)))
+	    (second nil))
+	(let ((ende--queue-suspended t))
+	  (setq second
+		(ende-enqueue
+		 (list 'insert
+		       :target (ende-target-create
+				:buffer (current-buffer)
+				:start 5 :end 5 :cursor 5)
+		       :profile parallel-profile))))
+	(should (eq (ende-job-state first) 'running))
+	(should (eq (ende-job-state second) 'queued))
+	(ende-process-next)
+	(should (eq (ende-job-state second) 'running))
+	(should (= (length ende--active-jobs) 2))
+	(ende-test--complete-call (nth 0 ende-test--calls))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(should (string= (buffer-string) "baseAB"))))))
 
 (ert-deftest ende-test/global-fence-waits-for-existing-jobs ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '("A" "B" "C") t))
         (profile '(:name remote :model "remote-model"
-                   :max-concurrency 4 :parallel t)))
+			 :max-concurrency 4 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first (ende-enqueue
-                    (list 'insert
-                          :target (ende-target-create
-                                   :buffer (current-buffer)
-                                   :start 5 :end 5 :cursor 5)
-                          :profile profile)))
-            (second (ende-enqueue
-                     (list 'insert
-                           :target (ende-target-create
-                                    :buffer (current-buffer)
-                                    :start 5 :end 5 :cursor 5)
-                           :profile profile)))
-            (third nil))
-        (ende-fence-all)
-        (setq third
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile profile)))
-        (should (eq (ende-job-state first) 'running))
-        (should (eq (ende-job-state second) 'running))
-        (should (eq (ende-job-state third) 'queued))
-        (should (= (length ende--fences) 1))
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (should (eq (ende-job-state third) 'queued))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (should (eq (ende-job-state third) 'running))
-        (should-not ende--fences)
-        (ende-test--complete-call (nth 2 ende-test--calls))
-        (should (string= (buffer-string) "baseABC"))))))
+		    (list 'insert
+			  :target (ende-target-create
+				   :buffer (current-buffer)
+				   :start 5 :end 5 :cursor 5)
+			  :profile profile)))
+	    (second (ende-enqueue
+		     (list 'insert
+			   :target (ende-target-create
+				    :buffer (current-buffer)
+				    :start 5 :end 5 :cursor 5)
+			   :profile profile)))
+	    (third nil))
+	(ende-fence-all)
+	(setq third
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile profile)))
+	(should (eq (ende-job-state first) 'running))
+	(should (eq (ende-job-state second) 'running))
+	(should (eq (ende-job-state third) 'queued))
+	(should (= (length ende--fences) 1))
+	(ende-test--complete-call (nth 0 ende-test--calls))
+	(should (eq (ende-job-state third) 'queued))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(should (eq (ende-job-state third) 'running))
+	(should-not ende--fences)
+	(ende-test--complete-call (nth 2 ende-test--calls))
+	(should (string= (buffer-string) "baseABC"))))))
 
 (ert-deftest ende-test/provider-fence-does-not-block-other-providers ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '("A1" "B1" "A2" "B2") t))
         (first-profile '(:name first :model "first-model"
-                         :max-concurrency 4 :parallel t))
+                               :max-concurrency 4 :parallel t))
         (second-profile '(:name second :model "second-model"
-                          :max-concurrency 4 :parallel t)))
+				:max-concurrency 4 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first (ende-enqueue
-                    (list 'insert
-                          :target (ende-target-create
-                                   :buffer (current-buffer)
-                                   :start 5 :end 5 :cursor 5)
-                          :profile first-profile)))
-            (second (ende-enqueue
-                     (list 'insert
-                           :target (ende-target-create
-                                    :buffer (current-buffer)
-                                    :start 5 :end 5 :cursor 5)
-                           :profile second-profile)))
-            (third nil)
-            (fourth nil))
-        (ende-fence-provider 'first)
-        (setq third
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile first-profile)))
-        (setq fourth
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile second-profile)))
-        (should (eq (ende-job-state first) 'running))
-        (should (eq (ende-job-state second) 'running))
-        (should (eq (ende-job-state third) 'queued))
-        (should (eq (ende-job-state fourth) 'running))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (ende-test--complete-call (nth 0 ende-test--calls))
-        (should (eq (ende-job-state third) 'running))
-        (ende-test--complete-call (nth 3 ende-test--calls))
-        (ende-test--complete-call (nth 2 ende-test--calls))
-        (should (string= (buffer-string) "baseA1B1B2A2"))))))
+		    (list 'insert
+			  :target (ende-target-create
+				   :buffer (current-buffer)
+				   :start 5 :end 5 :cursor 5)
+			  :profile first-profile)))
+	    (second (ende-enqueue
+		     (list 'insert
+			   :target (ende-target-create
+				    :buffer (current-buffer)
+				    :start 5 :end 5 :cursor 5)
+			   :profile second-profile)))
+	    (third nil)
+	    (fourth nil))
+	(ende-fence-provider 'first)
+	(setq third
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile first-profile)))
+	(setq fourth
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile second-profile)))
+	(should (eq (ende-job-state first) 'running))
+	(should (eq (ende-job-state second) 'running))
+	(should (eq (ende-job-state third) 'queued))
+	(should (eq (ende-job-state fourth) 'running))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(ende-test--complete-call (nth 0 ende-test--calls))
+	(should (eq (ende-job-state third) 'running))
+	(ende-test--complete-call (nth 3 ende-test--calls))
+	(ende-test--complete-call (nth 2 ende-test--calls))
+	(should (string= (buffer-string) "baseA1B1B2A2"))))))
 
 (ert-deftest ende-test/equal-provider-identities-share-free-slots ()
   (ende-test--reset)
@@ -2795,76 +2795,76 @@ process for cancellation tests."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((active (ende-enqueue
-                     (list 'insert
-                           :target (ende-target-create
-                                    :buffer (current-buffer)
-                                    :start 5 :end 5 :cursor 5)
-                           :profile active-profile)))
-            (serial nil)
-            (parallel nil))
-        (let ((ende--queue-suspended t))
-          (setq serial
-                (ende-enqueue
-                 (list 'insert
-                       :target (ende-target-create
-                                :buffer (current-buffer)
-                                :start 5 :end 5 :cursor 5)
-                       :profile serial-profile))
-                parallel
-                (ende-enqueue
-                 (list 'insert
-                       :target (ende-target-create
-                                :buffer (current-buffer)
-                                :start 5 :end 5 :cursor 5)
-                       :profile parallel-profile))))
-        (should (eq (ende-job-state active) 'running))
-        (should (eq (ende-job-state serial) 'queued))
-        (should (eq (ende-job-state parallel) 'queued))
-        (should (= (length ende-test--calls) 1))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state serial) 'running))
-        (should (eq (ende-job-state parallel) 'running))
-        (ende-test--complete-call (nth 1 ende-test--calls))
-        (ende-test--complete-call (nth 2 ende-test--calls))
-        (should (string= (buffer-string) "baseXAB"))))))
+		     (list 'insert
+			   :target (ende-target-create
+				    :buffer (current-buffer)
+				    :start 5 :end 5 :cursor 5)
+			   :profile active-profile)))
+	    (serial nil)
+	    (parallel nil))
+	(let ((ende--queue-suspended t))
+	  (setq serial
+		(ende-enqueue
+		 (list 'insert
+		       :target (ende-target-create
+				:buffer (current-buffer)
+				:start 5 :end 5 :cursor 5)
+		       :profile serial-profile))
+		parallel
+		(ende-enqueue
+		 (list 'insert
+		       :target (ende-target-create
+				:buffer (current-buffer)
+				:start 5 :end 5 :cursor 5)
+		       :profile parallel-profile))))
+	(should (eq (ende-job-state active) 'running))
+	(should (eq (ende-job-state serial) 'queued))
+	(should (eq (ende-job-state parallel) 'queued))
+	(should (= (length ende-test--calls) 1))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state serial) 'running))
+	(should (eq (ende-job-state parallel) 'running))
+	(ende-test--complete-call (nth 1 ende-test--calls))
+	(ende-test--complete-call (nth 2 ende-test--calls))
+	(should (string= (buffer-string) "baseXAB"))))))
 
 (ert-deftest ende-test/parallel-slots-are-scoped-per-provider ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm '("A1" "B1" "A2") t))
         (first-profile '(:name first :model "first-model"
-                         :max-concurrency 1 :parallel t))
+                               :max-concurrency 1 :parallel t))
         (second-profile '(:name second :model "second-model"
-                          :max-concurrency 1 :parallel t)))
+				:max-concurrency 1 :parallel t)))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((first (ende-enqueue
-                    (list 'insert
-                          :target (ende-target-create
-                                   :buffer (current-buffer)
-                                   :start 5 :end 5 :cursor 5)
-                          :profile first-profile)))
-            (second nil)
-            (third nil))
-        (setq second
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile first-profile)))
-        (setq third
-              (ende-enqueue
-               (list 'insert
-                     :target (ende-target-create
-                              :buffer (current-buffer)
-                              :start 5 :end 5 :cursor 5)
-                     :profile second-profile)))
-        (should (eq (ende-job-state first) 'running))
-        (should (eq (ende-job-state second) 'queued))
-        (should (eq (ende-job-state third) 'running))
-        (should (= (length ende--active-jobs) 2))
-        (ende-abort-queue)))))
+		    (list 'insert
+			  :target (ende-target-create
+				   :buffer (current-buffer)
+				   :start 5 :end 5 :cursor 5)
+			  :profile first-profile)))
+	    (second nil)
+	    (third nil))
+	(setq second
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile first-profile)))
+	(setq third
+	      (ende-enqueue
+	       (list 'insert
+		     :target (ende-target-create
+			      :buffer (current-buffer)
+			      :start 5 :end 5 :cursor 5)
+		     :profile second-profile)))
+	(should (eq (ende-job-state first) 'running))
+	(should (eq (ende-job-state second) 'queued))
+	(should (eq (ende-job-state third) 'running))
+	(should (= (length ende--active-jobs) 2))
+	(ende-abort-queue)))))
 
 (ert-deftest ende-test/changed-selection-is-skipped ()
   (ende-test--reset)
@@ -2872,14 +2872,14 @@ process for cancellation tests."
     (ende-test--with-buffer "original"
       (ende-test--select 1 9 9)
       (let ((job (ende-insert-at-cursor))
-            (call nil))
-        (setq call (car ende-test--calls))
-        (goto-char 3)
-        (delete-char 1)
-        (insert "X")
-        (ende-test--complete-call call)
-        (should (eq (ende-job-state job) 'failed))
-        (should-not ende--current-job)))))
+	    (call nil))
+	(setq call (car ende-test--calls))
+	(goto-char 3)
+	(delete-char 1)
+	(insert "X")
+	(ende-test--complete-call call)
+	(should (eq (ende-job-state job) 'failed))
+	(should-not ende--current-job)))))
 
 ;;;; Incremental reasoning parser
 
@@ -2930,7 +2930,7 @@ process for cancellation tests."
   (let ((parser (ende-protocol-make-reasoning)))
     (ende-protocol-reasoning-feed parser "<think>secret" (list :on-delta #'ignore))
     (should (ende-error-p
-              (ende-protocol-reasoning-finish parser (list :on-delta #'ignore))))))
+             (ende-protocol-reasoning-finish parser (list :on-delta #'ignore))))))
 
 ;;;; SSE parser
 
@@ -2939,11 +2939,11 @@ process for cancellation tests."
         (events nil))
     (setq events
           (append events
-                   (ende-protocol-sse-feed
+                  (ende-protocol-sse-feed
                    parser "data: {\"choices\":[{\"delta\":{\"content\":\"hi")))
     (setq events
           (append events
-                   (ende-protocol-sse-feed
+                  (ende-protocol-sse-feed
                    parser " there\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n")))
     (should (= (length events) 2))
     (should (eq (plist-get (nth 0 events) :type) :json))
@@ -2951,13 +2951,13 @@ process for cancellation tests."
                       "content"
                       (ende-protocol-json-get
                        "delta"
-                        (aref (ende-protocol-json-get
+                       (aref (ende-protocol-json-get
                               "choices"
                               (plist-get (nth 0 events) :value))
                              0)))
                      "hi there"))
     (should (eq (plist-get (nth 1 events) :type) :done))
-     (should-not (ende-protocol-sse-finish parser))))
+    (should-not (ende-protocol-sse-finish parser))))
 
 (ert-deftest ende-test/sse-parser-rejects-malformed-and-ignores-late-data ()
   (let ((parser (ende-protocol-make-sse)))
@@ -2994,18 +2994,18 @@ process for cancellation tests."
          (config-file (make-temp-file "ende-test-config-"))
          (events 0)
          (done 0)
-          (errors 0)
-          (discovery-cancelled nil)
-          (session
-           (ende-llm--make-session
+         (errors 0)
+         (discovery-cancelled nil)
+         (session
+          (ende-llm--make-session
            :callbacks
            (list :on-event (lambda (_event)
                              (setq events (1+ events))
                              (error "callback failed"))
-                  :on-done (lambda (_result) (setq done (1+ done)))
-                  :on-error (lambda (_error) (setq errors (1+ errors))))
-            :discovery-cancel (lambda () (setq discovery-cancelled t))
-            :process-buffer process-buffer :stderr-buffer stderr-buffer
+                 :on-done (lambda (_result) (setq done (1+ done)))
+                 :on-error (lambda (_error) (setq errors (1+ errors))))
+           :discovery-cancel (lambda () (setq discovery-cancelled t))
+           :process-buffer process-buffer :stderr-buffer stderr-buffer
            :headers-file headers-file :config-file config-file)))
     (ende-llm--fail
      session (ende-error-create :kind 'transport :message "failed"))
@@ -3015,20 +3015,20 @@ process for cancellation tests."
     (should (eq (ende-llm--session-terminal session) 'failure))
     (should (= events 1))
     (should (= done 0))
-     (should (= errors 1))
-     (should discovery-cancelled)
-     (should-not (ende-llm--session-discovery-cancel session))
-     (should-not (ende-llm--session-callbacks session))
-     (should-not (ende-llm--session-process session))
-     (should-not (ende-llm--session-process-buffer session))
-     (should-not (ende-llm--session-stderr-buffer session))
-     (should-not (ende-llm--session-stderr-process session))
-     (should-not (ende-llm--session-headers-file session))
-     (should-not (ende-llm--session-config-file session))
-     (should-not (buffer-live-p process-buffer))
+    (should (= errors 1))
+    (should discovery-cancelled)
+    (should-not (ende-llm--session-discovery-cancel session))
+    (should-not (ende-llm--session-callbacks session))
+    (should-not (ende-llm--session-process session))
+    (should-not (ende-llm--session-process-buffer session))
+    (should-not (ende-llm--session-stderr-buffer session))
+    (should-not (ende-llm--session-stderr-process session))
+    (should-not (ende-llm--session-headers-file session))
+    (should-not (ende-llm--session-config-file session))
+    (should-not (buffer-live-p process-buffer))
     (should-not (buffer-live-p stderr-buffer))
-     (should-not (file-exists-p headers-file))
-     (should-not (file-exists-p config-file))))
+    (should-not (file-exists-p headers-file))
+    (should-not (file-exists-p config-file))))
 
 (ert-deftest ende-test/codex-session-clears-resource-slots ()
   (let ((process-buffer (generate-new-buffer " *ende-test-codex-process*"))
@@ -3064,9 +3064,9 @@ process for cancellation tests."
           (ende-provider--discovery-inflight (make-hash-table :test #'equal))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (auth '(:access "test-access" :refresh "test-refresh"
-                  :expires 9999999999999))
+			  :expires 9999999999999))
           (profile '(:name test :url "https://example.test/v1/chat/completions"
-                     :model "test-model" :temperature 0.2))
+			   :model "test-model" :temperature 0.2))
           (cancel nil) (process nil) (failure nil)
           (process-count 0) (pipe-count 0) (send-count 0) (files nil)
           (real-process (symbol-function 'make-process))
@@ -3162,16 +3162,16 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
   (let ((captured nil)
         (process nil)
         (result nil)
-         (failure nil)
-         (done-count 0)
-         (error-count 0)
-         (cancel-function nil)
-         (events nil)
+        (failure nil)
+        (done-count 0)
+        (error-count 0)
+        (cancel-function nil)
+        (events nil)
         (ende-provider-discovery-enabled nil)
         (real-make-process (symbol-function 'make-process))
-         (profile (list :name 'test
-                        :job-id 1
-                        :url "https://example.test/v1"
+        (profile (list :name 'test
+                       :job-id 1
+                       :url "https://example.test/v1"
                        :model "test-model"
                        :temperature 0.2
                        :require-sse t)))
@@ -3180,50 +3180,50 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                  (setq captured args)
                  (setq process
                        (funcall real-make-process
-                        :name
-                        (plist-get args :name)
-                        :buffer
-                        (plist-get args :buffer)
-                        :command (list "cat")
-                        :connection-type 'pipe)))))
+				:name
+				(plist-get args :name)
+				:buffer
+				(plist-get args :buffer)
+				:command (list "cat")
+				:connection-type 'pipe)))))
       (unwind-protect
           (progn
             (ende-llm-default
              (list (cons "user" "body"))
-               (list :on-start (lambda (cancel)
-                                 (setq cancel-function cancel))
-                     :on-event (lambda (event)
-                                 (push event events))
-                     :on-done (lambda (value)
-                               (setq done-count (1+ done-count))
-                               (setq result value))
-                    :on-error (lambda (value)
-                                (setq error-count (1+ error-count))
-                                (setq failure value)))
-              profile)
+             (list :on-start (lambda (cancel)
+                               (setq cancel-function cancel))
+                   :on-event (lambda (event)
+                               (push event events))
+                   :on-done (lambda (value)
+                              (setq done-count (1+ done-count))
+                              (setq result value))
+                   :on-error (lambda (value)
+                               (setq error-count (1+ error-count))
+                               (setq failure value)))
+             profile)
             (let* ((command (plist-get captured :command))
                    (headers-file (nth (1+ (cl-position "--dump-header"
-                                                      command :test #'string=))
+                                                       command :test #'string=))
                                       command))
                    (filter (plist-get captured :filter))
                    (sentinel (plist-get captured :sentinel)))
               (with-temp-file headers-file
                 (insert header))
-               (funcall filter process response)
+              (funcall filter process response)
               (when (process-live-p process)
                 (process-send-eof process))
               (while (process-live-p process)
                 (accept-process-output process 0.05))
-               (funcall sentinel process "finished\n")
-                (list result failure command done-count error-count
-                      cancel-function events)))
+              (funcall sentinel process "finished\n")
+              (list result failure command done-count error-count
+                    cancel-function events)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))))))
 
 (ert-deftest ende-test/default-transport-completes-valid-sse ()
   (let ((out (ende-test--run-default-transport
-               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-               "data: {\"model\":\"actual-model\",\"provider\":\"llama.cpp\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")))
+              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+              "data: {\"model\":\"actual-model\",\"provider\":\"llama.cpp\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")))
     (should-not (nth 1 out))
     (should (string= (plist-get (nth 0 out) :content) "hello"))
     (should (string= (plist-get (nth 0 out) :model) "actual-model"))
@@ -3239,8 +3239,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest ende-test/default-transport-accepts-text-completion-deltas ()
   (let ((out (ende-test--run-default-transport
-               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-               "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
+              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+              "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
     (should-not (nth 1 out))
     (should (string= (plist-get (nth 0 out) :content) "legacy"))))
 
@@ -3298,9 +3298,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
                "data: [DONE]\n\n"
                "data: malformed trailing bytes\n\n"))))
-     (should (string= (plist-get (nth 0 out) :content) "ok"))
-     (should-not (nth 1 out))
-     (should (= (nth 3 out) 1))))
+    (should (string= (plist-get (nth 0 out) :content) "ok"))
+    (should-not (nth 1 out))
+    (should (= (nth 3 out) 1))))
 
 (ert-deftest ende-test/openai-profile-uses-opencode-oauth ()
   (let ((profile (ende-provider-profile 'openai)))
@@ -3314,8 +3314,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should-not (plist-get (ende-provider-profile-snapshot 'openai) :refresh)))
   (let ((ende-codex-model "gpt-configured"))
     (should (string= (ende-provider-configured-model
-                     (ende-provider-profile 'openai))
-                    "gpt-configured"))))
+                      (ende-provider-profile 'openai))
+                     "gpt-configured"))))
 
 (ert-deftest ende-test/provider-list-and-configured-models-are-selectable ()
   (let ((ende-providers '(openai local))
@@ -3398,18 +3398,18 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
       (ende-codex-quota-string quota now)
       "5h 11m: 72% left · weekly: 41% left · reset in 2h 13m"))
     (should-error
-      (ende-codex--parse-quota
-       "{\"rate_limit\":{\"primary_window\":null,\"secondary_window\":null}}"))))
+     (ende-codex--parse-quota
+      "{\"rate_limit\":{\"primary_window\":null,\"secondary_window\":null}}"))))
 
 (ert-deftest ende-test/openai-quota-display-follows-secondary-reset ()
   (let ((now 2000000000)
         (quota
          '(:primary (:used-percent 10
-                     :reset-at 2000003600
-                     :window-seconds 18000)
-           :secondary (:used-percent 20
-                       :reset-at 2000021600
-                       :window-seconds 604800))))
+				   :reset-at 2000003600
+				   :window-seconds 18000)
+		    :secondary (:used-percent 20
+					      :reset-at 2000021600
+					      :window-seconds 604800))))
     (should
      (string=
       (ende-codex-quota-string quota now)
@@ -3604,9 +3604,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             (ende-mode 1)
             (should (equal (ende-model-selection-for-buffer different)
                            '(:provider openrouter :model "latest-model"))))))
-      (dolist (buffer (list source other reopened different))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer)))))
+    (dolist (buffer (list source other reopened different))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest ende-test/model-selection-global-scope-shares-one-choice ()
   (let ((ende-model-selection-scope 'global)
@@ -3726,14 +3726,14 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (ende-llm-function (ende-test--fake-llm '("Reply"))))
     (unwind-protect
         (ende-test--with-buffer "* Root\n** Question\nAsk\n"
-          (org-mode)
-          (ende-test--chat-goto "** Question")
-          (ende-model-selection-save
-           '(:provider openrouter :model "chat-model"))
-          (let ((job (ende-ask)))
-            (should (eq (plist-get (ende-job-profile job) :name) 'openrouter))
-            (should (equal (plist-get (ende-job-profile job) :model)
-                           "chat-model"))))
+	  (org-mode)
+	  (ende-test--chat-goto "** Question")
+	  (ende-model-selection-save
+	   '(:provider openrouter :model "chat-model"))
+	  (let ((job (ende-ask)))
+	    (should (eq (plist-get (ende-job-profile job) :name) 'openrouter))
+	    (should (equal (plist-get (ende-job-profile job) :model)
+			   "chat-model"))))
       (ende-test--reset))))
 
 (ert-deftest ende-test/selector-runs-from-source-with-selected-profile ()
@@ -3788,9 +3788,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                 '("remote/alpha" "remote/beta" "other/gamma")
                 ende-selector--model-details
                 '((:id "remote/alpha" :name "Alpha Model"
-                   :pricing (:prompt "0.000003" :completion "0.000009"
-                             :input-cache-read "0.000001"
-                             :input-cache-write "0.000004"))
+                       :pricing (:prompt "0.000003" :completion "0.000009"
+					 :input-cache-read "0.000001"
+					 :input-cache-write "0.000004"))
                   (:id "remote/beta" :name "Beta Model")
                   (:id "other/gamma" :name "Gamma Model"))
                 ende-selector--model-index 0
@@ -3798,64 +3798,64 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (prompt collection predicate require-match
                                      initial-input history default &rest _)
-                        (setq completion-call
-                              (list :prompt prompt
-                                    :collection collection
-                                    :predicate predicate
-                                    :require-match require-match
-                                    :initial-input initial-input
-                                    :history history
-                                    :default default
-                                    :extra-properties completion-extra-properties
-                                    :styles completion-styles
-                                    :ignore-case completion-ignore-case))
-                        "remote/beta")))
-             (ende-selector-select-model))
-           (should (equal (plist-get completion-call :prompt) "Model: "))
-           (should (equal (plist-get completion-call :collection)
-                          '("remote/alpha" "remote/beta" "other/gamma")))
-           (should-not (member "input" (plist-get completion-call :collection)))
-           (should (plist-get completion-call :require-match))
-           (should-not (plist-get completion-call :initial-input))
-           (should (equal (plist-get completion-call :default)
-                          "remote/alpha"))
-           (let* ((properties (plist-get completion-call :extra-properties))
-                  (affixation (plist-get properties :affixation-function))
-                  (affixed (funcall affixation
-                                    (plist-get completion-call :collection)))
-                  (priced (car affixed))
-                  (unpriced (cadr affixed))
-                  (priced-model (car priced))
-                  (priced-suffix (nth 2 priced)))
-             (should (functionp affixation))
-             (should-not (plist-get properties :annotation-function))
-             (should (string= (substring-no-properties priced-model)
-                              "remote/alpha"))
-             (should (eq (get-text-property 0 'face priced-model)
-                         'ende-selector-model-face))
-             (should
-              (string=
-               (substring-no-properties priced-suffix)
-               "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
-             (should (eq (get-text-property (string-match "in:" priced-suffix)
-                                            'face priced-suffix)
-                         'ende-selector-price-muted-face))
-             (should (eq (get-text-property (string-match "out:" priced-suffix)
-                                            'face priced-suffix)
-                         'ende-selector-price-output-face))
-             (should (eq (get-text-property
-                          (string-match "cache-read:" priced-suffix)
-                          'face priced-suffix)
-                         'ende-selector-price-muted-face))
-             (should (equal (mapcar #'substring-no-properties
-                                    (list (car unpriced) (nth 2 unpriced)))
-                            '("remote/beta" ""))))
-            (should (equal (plist-get completion-call :styles) '(substring)))
-            (should (plist-get completion-call :ignore-case))
-            (should (= ende-selector--model-index 1))
-            (should (string= (ende-selector--model-name) "remote/beta"))
-            (should (equal ende-selector--last-selection
-                           '(:provider remote :model "remote/beta"))))
+                       (setq completion-call
+                             (list :prompt prompt
+                                   :collection collection
+                                   :predicate predicate
+                                   :require-match require-match
+                                   :initial-input initial-input
+                                   :history history
+                                   :default default
+                                   :extra-properties completion-extra-properties
+                                   :styles completion-styles
+                                   :ignore-case completion-ignore-case))
+                       "remote/beta")))
+            (ende-selector-select-model))
+          (should (equal (plist-get completion-call :prompt) "Model: "))
+          (should (equal (plist-get completion-call :collection)
+                         '("remote/alpha" "remote/beta" "other/gamma")))
+          (should-not (member "input" (plist-get completion-call :collection)))
+          (should (plist-get completion-call :require-match))
+          (should-not (plist-get completion-call :initial-input))
+          (should (equal (plist-get completion-call :default)
+                         "remote/alpha"))
+          (let* ((properties (plist-get completion-call :extra-properties))
+                 (affixation (plist-get properties :affixation-function))
+                 (affixed (funcall affixation
+                                   (plist-get completion-call :collection)))
+                 (priced (car affixed))
+                 (unpriced (cadr affixed))
+                 (priced-model (car priced))
+                 (priced-suffix (nth 2 priced)))
+            (should (functionp affixation))
+            (should-not (plist-get properties :annotation-function))
+            (should (string= (substring-no-properties priced-model)
+                             "remote/alpha"))
+            (should (eq (get-text-property 0 'face priced-model)
+                        'ende-selector-model-face))
+            (should
+             (string=
+              (substring-no-properties priced-suffix)
+              "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
+            (should (eq (get-text-property (string-match "in:" priced-suffix)
+                                           'face priced-suffix)
+                        'ende-selector-price-muted-face))
+            (should (eq (get-text-property (string-match "out:" priced-suffix)
+                                           'face priced-suffix)
+                        'ende-selector-price-output-face))
+            (should (eq (get-text-property
+                         (string-match "cache-read:" priced-suffix)
+                         'face priced-suffix)
+                        'ende-selector-price-muted-face))
+            (should (equal (mapcar #'substring-no-properties
+                                   (list (car unpriced) (nth 2 unpriced)))
+                           '("remote/beta" ""))))
+          (should (equal (plist-get completion-call :styles) '(substring)))
+          (should (plist-get completion-call :ignore-case))
+          (should (= ende-selector--model-index 1))
+          (should (string= (ende-selector--model-name) "remote/beta"))
+          (should (equal ende-selector--last-selection
+                         '(:provider remote :model "remote/beta"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -3885,13 +3885,13 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      '("remote/default" "remote/remembered") nil)
             (should (string= (ende-selector--model-name)
                              "remote/remembered"))))
-       (when (buffer-live-p buffer)
-         (kill-buffer buffer)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest ende-test/selector-uses-cached-models-before-rendering ()
   (let* ((buffer (generate-new-buffer " *ende-selector-cached-models-test*"))
          (profile '(:name remote
-                    :url "http://remote.example/v1/chat/completions"))
+			  :url "http://remote.example/v1/chat/completions"))
          (ende-providers '(remote))
          (ende-provider-profiles
           '((remote :url "http://remote.example/v1/chat/completions")))
@@ -4027,8 +4027,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                        "remote/default")))
             (should-error (ende-selector-select-model) :type 'user-error))
           (should-not called))
-       (when (buffer-live-p buffer)
-         (kill-buffer buffer)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest ende-test/selector-effort-picker-uses-live-values-and-remembers-choice ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
@@ -4240,14 +4240,14 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                      (lambda (buffer action)
                        (setq display-action (list buffer action))
                        (selected-window)))
-                     ((symbol-function 'quit-window)
-                      (lambda (kill window)
-                        (setq quit-window-call (list kill window))))
-                     ((symbol-function 'ende-provider-probe-models)
-                      (lambda (profile callback)
-                        (setq probe-profile profile)
-                        (funcall callback '("local-model") nil)
-                        (lambda () nil))))
+                    ((symbol-function 'quit-window)
+                     (lambda (kill window)
+                       (setq quit-window-call (list kill window))))
+                    ((symbol-function 'ende-provider-probe-models)
+                     (lambda (profile callback)
+                       (setq probe-profile profile)
+                       (funcall callback '("local-model") nil)
+                       (lambda () nil))))
             (let ((ende-providers '(local))
                   (ende-provider-profiles
                    '((local :model "local-model"))))
@@ -4420,9 +4420,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                         (cons "user" "question")
                         (cons "assistant" "answer"))
                   '(:model "gpt-test")))))
-          (input (ende-protocol-json-get "input" body))
+         (input (ende-protocol-json-get "input" body))
          (user (aref input 1))
-          (user-content (aref (ende-protocol-json-get "content" user) 0))
+         (user-content (aref (ende-protocol-json-get "content" user) 0))
          (assistant (aref input 2))
          (assistant-content
           (aref (ende-protocol-json-get "content" assistant) 0)))
@@ -4630,7 +4630,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (make-process-count 0)
          (real-make-process (symbol-function 'make-process))
          (auth '(:access "old-access" :refresh "old-refresh"
-                 :expires 0 :account-id "account-id")))
+			 :expires 0 :account-id "account-id")))
     (unwind-protect
         (progn
           (with-temp-file auth-file
@@ -4641,8 +4641,8 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "\"accountId\":\"account-id\"}}"))
           (cl-letf (((symbol-function 'make-process)
                      (lambda (&rest args)
-                        (setq make-process-count (1+ make-process-count))
-                        (setq captured args)
+                       (setq make-process-count (1+ make-process-count))
+                       (setq captured args)
                        (setq process
                              (funcall real-make-process
                                       :name (plist-get args :name)
@@ -4651,18 +4651,18 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                       :command (list "cat")
                                       :connection-type 'pipe
                                       :noquery t)))))
-             (ende-codex--refresh-auth auth
-                                         (lambda (value) (setq refreshed value)))
-             (ende-codex--refresh-auth
-              auth (lambda (value) (setq refreshed-again value)))
-             (should (= make-process-count 1))
-             (let* ((command (plist-get captured :command))
+            (ende-codex--refresh-auth auth
+                                      (lambda (value) (setq refreshed value)))
+            (ende-codex--refresh-auth
+             auth (lambda (value) (setq refreshed-again value)))
+            (should (= make-process-count 1))
+            (let* ((command (plist-get captured :command))
                    (headers-file
                     (cadr (member "--dump-header" command)))
                    (filter (plist-get captured :filter))
                    (sentinel (plist-get captured :sentinel)))
               (should-not (member "old-refresh" command))
-             (with-temp-file headers-file
+              (with-temp-file headers-file
                 (insert "HTTP/1.1 200 OK\r\n\r\n"))
               (with-current-buffer (plist-get captured :buffer)
                 (erase-buffer))
@@ -4677,15 +4677,15 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                                "\"refresh_token\":\"new-refresh\","
                                "\"expires_in\":3600}"))
               (funcall sentinel process "finished\n")
-               (should (string= (plist-get refreshed :access) "new-access"))
-               (should (string= (plist-get refreshed :refresh) "new-refresh"))
-               (should (equal refreshed-again refreshed))
-               (should (string= (plist-get (ende-codex--auth-entry) :refresh)
-                                "new-refresh")))))
+              (should (string= (plist-get refreshed :access) "new-access"))
+              (should (string= (plist-get refreshed :refresh) "new-refresh"))
+              (should (equal refreshed-again refreshed))
+              (should (string= (plist-get (ende-codex--auth-entry) :refresh)
+                               "new-refresh")))))
       (when (and (processp process) (process-live-p process))
         (delete-process process))
-       (when (file-exists-p auth-file)
-          (delete-file auth-file)))))
+      (when (file-exists-p auth-file)
+        (delete-file auth-file)))))
 
 (ert-deftest ende-test/openai-refresh-startup-failure-does-not-wedge-flight ()
   (let* ((key '(ende-test-refresh))
@@ -4719,7 +4719,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "https://chatgpt.com:443/backend-api/codex/responses")
                    "https://chatgpt.com:443/backend-api/codex/responses"))
   (should (string= (ende-codex--validated-usage-url)
-                  "https://chatgpt.com/backend-api/wham/usage"))
+                   "https://chatgpt.com/backend-api/wham/usage"))
   (should-error
    (ende-codex--validated-generation-url
     "https://chatgpt.com.attacker.test/backend-api/codex/responses"))
@@ -4759,9 +4759,9 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
          (file (expand-file-name "auth.json" directory))
          (ende-codex-auth-file file)
          (old '(:access "old-access" :refresh "old-refresh"
-                :expires 0 :account-id "account-id"))
+			:expires 0 :account-id "account-id"))
          (new '(:access "new-access" :refresh "new-refresh"
-                :expires 9999999999999 :account-id "account-id")))
+			:expires 9999999999999 :account-id "account-id")))
     (unwind-protect
         (progn
           (with-temp-file file
@@ -4779,37 +4779,37 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
            (ende-codex--store-auth
             old (ende-codex--auth-version
                  '(:access "other" :refresh "other" :expires 0
-                   :account-id "account-id")))))
+			   :account-id "account-id")))))
       (when (file-directory-p directory)
         (delete-directory directory t)))))
 
 (ert-deftest ende-test/openai-responses-events-normalize-to-ende-result ()
-          (let* ((events nil)
-          (result nil)
+  (let* ((events nil)
+         (result nil)
          (failure nil)
          (session
-         (ende-codex--make-session
-          :profile '(:model "gpt-test")
-          :callbacks (list :on-event (lambda (event) (push event events))
-                           :on-done (lambda (value) (setq result value))
-                           :on-error (lambda (value) (setq failure value)))
-          :sse (ende-protocol-make-sse)
-          :estimated-chars 0)))
+          (ende-codex--make-session
+           :profile '(:model "gpt-test")
+           :callbacks (list :on-event (lambda (event) (push event events))
+                            :on-done (lambda (value) (setq result value))
+                            :on-error (lambda (value) (setq failure value)))
+           :sse (ende-protocol-make-sse)
+           :estimated-chars 0)))
     (ende-codex--handle-event
      session
-      (ende-protocol-json-read-string
+     (ende-protocol-json-read-string
       "{\"type\":\"response.created\",\"response\":{\"model\":\"gpt-actual\"}}"))
     (ende-codex--handle-event
      session
-      (ende-protocol-json-read-string
+     (ende-protocol-json-read-string
       "{\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}"))
     (ende-codex--handle-event
      session
-      (ende-protocol-json-read-string
+     (ende-protocol-json-read-string
       "{\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}"))
     (ende-codex--handle-event
      session
-      (ende-protocol-json-read-string
+     (ende-protocol-json-read-string
       "{\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-actual\",\"usage\":{\"output_tokens\":7}}}"))
     (setq result (ende-codex--result session))
     (should-not failure)
@@ -4829,19 +4829,19 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-        (setq ende-provider-endpoint "http://two.example/v1")
-        (should (string= (plist-get (ende-job-profile job) :url)
-                         "http://one.example/v1"))))))
+	(setq ende-provider-endpoint "http://two.example/v1")
+	(should (string= (plist-get (ende-job-profile job) :url)
+			 "http://one.example/v1"))))))
 
 (ert-deftest ende-test/auth-and-body-are-not-command-arguments ()
   (let* ((token "secret-token")
          (profile (list :name 'remote
                         :url "https://example.test/v1"
                         :model "model"
-                         :temperature 0.2
-                         :auth-source-host "example.test"
-                         :auth-source-user "ende"
-                         :auth-source-port 443))
+                        :temperature 0.2
+                        :auth-source-host "example.test"
+                        :auth-source-user "ende"
+                        :auth-source-port 443))
          (config nil))
     (cl-letf (((symbol-function 'auth-source-search)
                (lambda (&rest _) (list (list :secret token)))))
@@ -4852,7 +4852,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
             (should-not (member token command))
             (should-not (member "body" command))
             (should-not (member "--fail-with-body" command)))
-         (when (file-exists-p config) (delete-file config))))))
+        (when (file-exists-p config) (delete-file config))))))
 
 (ert-deftest ende-test/unbounded-output-omits-provider-token-limit ()
   (let ((ende-max-output-tokens nil))
@@ -4864,7 +4864,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest ende-test/curl-config-escapes-and-rejects-unsafe-headers ()
   (let* ((profile '(:url "https://example.test/v1"
-                    :request-headers ("X-Title: a\"b\\c")))
+			 :request-headers ("X-Title: a\"b\\c")))
          (config (ende-curl--config profile)))
     (unwind-protect
         (with-temp-buffer
@@ -4881,7 +4881,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                     "Accept: application/json"
                     "Content-Length: 0"))
     (should-error
-      (ende-curl--config
+     (ende-curl--config
       (list :url "https://example.test/v1"
             :request-headers (list header))))))
 
@@ -4905,15 +4905,15 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
 
 (ert-deftest ende-test/provider-url-and-curl-command-are-hardened ()
   (should-error
-    (ende-curl--validated-url '(:url "http://127.attacker.test/v1")))
+   (ende-curl--validated-url '(:url "http://127.attacker.test/v1")))
   (should-error
-    (ende-curl--validated-url '(:url "https://example.test/v1?key=secret")))
+   (ende-curl--validated-url '(:url "https://example.test/v1?key=secret")))
   (should-error
-    (ende-curl--validated-url
+   (ende-curl--validated-url
     '(:url "https://other.test/v1"
-      :auth-source-host "example.test"
-      :auth-source-user "ende"
-      :auth-source-port 443)))
+	   :auth-source-host "example.test"
+	   :auth-source-user "ende"
+	   :auth-source-port 443)))
   (let ((command
          (ende-curl-command
           '(:url "https://example.test/v1") "/tmp/headers" nil)))
@@ -4922,7 +4922,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
     (should (member "--noproxy" command))
     (should (equal (cadr (member "--user-agent" command))
                    ende-client-name))
-     (should (member "--url" command))))
+    (should (member "--url" command))))
 
 (ert-deftest ende-test/curl-command-leaves-idle-timeout-to-elisp ()
   (let ((ende-request-timeout nil)
@@ -5130,7 +5130,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/provider-discovery-parses-model-metadata ()
   (let* ((profile '(:url "http://localhost:8080/v1/chat/completions"
-                    :model "llama3"))
+			 :model "llama3"))
          (metadata
           (ende-provider--discovery-metadata
            profile
@@ -5154,11 +5154,11 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (string= (plist-get detail :name) "Llama 3"))
       (should (equal (plist-get detail :pricing)
                      '(:prompt "0.000003"
-                       :completion "0.000015"
-                       :internal-reasoning "0"
-                       :input-cache-read "0.000001"
-                       :input-cache-write "0.000004"
-                       :input-cache-write-1h "0.000005"))))
+			       :completion "0.000015"
+			       :internal-reasoning "0"
+			       :input-cache-read "0.000001"
+			       :input-cache-write "0.000004"
+			       :input-cache-write-1h "0.000005"))))
     (should (string= (plist-get metadata :model) "llama3"))
     (should (string= (plist-get metadata :owner) "llama.cpp"))
     (should (string= (plist-get metadata :client) "llama.cpp"))))
@@ -5280,36 +5280,36 @@ Use COMMAND for the process, or a silent sleep process by default."
   (should
    (string=
     (ende-provider-model-price-annotation
-      '(:pricing (:prompt "0" :completion "0.000015"
-                          :input-cache-read "not-a-price"
-                          :input-cache-write-1h "0.000005")))
-     "  in: free  out: $15  cache-write-1h: $5")))
+     '(:pricing (:prompt "0" :completion "0.000015"
+                         :input-cache-read "not-a-price"
+                         :input-cache-write-1h "0.000005")))
+    "  in: free  out: $15  cache-write-1h: $5")))
 
 (ert-deftest ende-test/provider-model-price-annotation-formats-small-values ()
   (should
    (string=
     (ende-provider-model-price-annotation
      '(:pricing (:prompt "0.000003"
-                 :completion "0.000015"
-                 :input-cache-read "0.0000003")))
+			 :completion "0.000015"
+			 :input-cache-read "0.0000003")))
     "  in: $3  out: $15  cache-read: $0.30")))
 
 (ert-deftest ende-test/provider-discovery-does-not-borrow-unrelated-owner ()
   (let* ((profile '(:url "https://example.test/v1/chat/completions"
-                    :model "requested"))
+			 :model "requested"))
          (metadata
           (ende-provider--discovery-metadata
            profile
-            (ende-protocol-json-read-string
-             "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
+           (ende-protocol-json-read-string
+            "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
     (should (equal (plist-get metadata :models) '("other")))
     (should-not (plist-get metadata :owner))
     (should-not (plist-get metadata :client))))
 
 (ert-deftest ende-test/provider-discovery-is-async-and-cached ()
   (let ((profile '(:name local
-                   :url "http://localhost:8080/v1/chat/completions"
-                   :model "llama3"))
+			 :url "http://localhost:8080/v1/chat/completions"
+			 :model "llama3"))
         (captured nil)
         (process nil)
         (values nil)
@@ -5498,7 +5498,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/generic-model-probe-retries-after-failure ()
   (let* ((profile '(:name remote
-                    :url "http://remote.example/v1/chat/completions"))
+			  :url "http://remote.example/v1/chat/completions"))
          (requests 0)
          (first-error nil)
          (retry-models nil)
@@ -5588,8 +5588,8 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
-                   :url "http://localhost:8080/v1/chat/completions"
-                   :model "llama3"))
+			 :url "http://localhost:8080/v1/chat/completions"
+			 :model "llama3"))
         (process nil)
         (value nil)
         (real-make-process (symbol-function 'make-process)))
@@ -5611,24 +5611,24 @@ Use COMMAND for the process, or a silent sleep process by default."
             (funcall cancel)
             (should-not value)
             (should-not (process-live-p process))
-             (should-not (gethash key ende-provider--discovery-inflight))
-             (should-not (gethash key ende-provider--discovery-cache))
-             (should-not ende-provider--discovery-processes)
-             (let* ((probe-value nil)
-                    (probe-error nil)
-                    (probe-cancel
+            (should-not (gethash key ende-provider--discovery-inflight))
+            (should-not (gethash key ende-provider--discovery-cache))
+            (should-not ende-provider--discovery-processes)
+            (let* ((probe-value nil)
+                   (probe-error nil)
+                   (probe-cancel
                     (ende-provider-probe-models
                      profile
                      (lambda (models error)
                        (setq probe-value models
                              probe-error error)))))
-               (should (process-live-p process))
-               (funcall probe-cancel)
-               (should-not probe-value)
-               (should-not probe-error)
-               (should-not (process-live-p process))
-               (should-not (gethash key ende-provider--discovery-inflight))
-               (should-not ende-provider--discovery-processes)))
+              (should (process-live-p process))
+              (funcall probe-cancel)
+              (should-not probe-value)
+              (should-not probe-error)
+              (should-not (process-live-p process))
+              (should-not (gethash key ende-provider--discovery-inflight))
+              (should-not ende-provider--discovery-processes)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
         (clrhash ende-provider--discovery-cache)
@@ -5637,8 +5637,8 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/provider-discovery-response-is-bounded ()
   (let ((profile '(:name local
-                   :url "http://localhost:8080/v1/chat/completions"
-                   :model "llama3"))
+			 :url "http://localhost:8080/v1/chat/completions"
+			 :model "llama3"))
         (ende-provider-max-discovery-bytes 4)
         (captured nil)
         (process nil)
@@ -5674,12 +5674,12 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (ende-insert-at-cursor)
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should (string-match-p "Output" text))
-          (should (= (ende-test--count-matches "result" text) 1))
-          (should (string-match-p "Source metadata:" text))
-          (should (string-match-p "base" text))
-          (should (eq buffer-undo-list t)))))))
+	(let ((text (buffer-string)))
+	  (should (string-match-p "Output" text))
+	  (should (= (ende-test--count-matches "result" text) 1))
+	  (should (string-match-p "Source metadata:" text))
+	  (should (string-match-p "base" text))
+	  (should (eq buffer-undo-list t)))))))
 
 (ert-deftest ende-test/history-retains-diagnostics ()
   (ende-test--reset)
@@ -5690,7 +5690,7 @@ Use COMMAND for the process, or a silent sleep process by default."
      job '(:type :diagnostic :text "OpenAI Responses tools sent: read_file"))
     (ende-history-event
      job '(:type :diagnostic
-           :text "OpenAI Responses output items: function_call(read_file)"))
+		 :text "OpenAI Responses output items: function_call(read_file)"))
     (ende-history-event
      job '(:type :done :content "answer" :result (:content "answer")))
     (with-current-buffer ende-history-buffer-name
@@ -5712,9 +5712,9 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (ende-insert-at-cursor)
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should-not (string-match-p "Source metadata:" text))
-          (should-not (string-match-p "secret source" text)))))))
+	(let ((text (buffer-string)))
+	  (should-not (string-match-p "Source metadata:" text))
+	  (should-not (string-match-p "secret source" text)))))))
 
 (ert-deftest ende-test/history-summarizes-attributed-usage ()
   (ende-test--reset)
@@ -5741,72 +5741,72 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (ende-insert-at-cursor)
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should (string-match-p "Stream tokens: 1216" text))
-          (should (string-match-p "Estimated: no" text))
-          (should (string-match-p "Speed: 38.24 t/s" text))
-          (should (string-match-p
-                   "Messages: 3 (2 input, 1 output)" text))
-          (should (string-match-p
-                   "Tokens: 6,218 total (5,002 input, 1,216 output)" text))
-          (should-not (string-match-p "Provider usage:" text))
-          (should-not (string-match-p "msg_" text))
-          (should-not (string-match-p "attribution" text)))))))
+	(let ((text (buffer-string)))
+	  (should (string-match-p "Stream tokens: 1216" text))
+	  (should (string-match-p "Estimated: no" text))
+	  (should (string-match-p "Speed: 38.24 t/s" text))
+	  (should (string-match-p
+		   "Messages: 3 (2 input, 1 output)" text))
+	  (should (string-match-p
+		   "Tokens: 6,218 total (5,002 input, 1,216 output)" text))
+	  (should-not (string-match-p "Provider usage:" text))
+	  (should-not (string-match-p "msg_" text))
+	  (should-not (string-match-p "attribution" text)))))))
 
 (ert-deftest ende-test/history-retains-failed-stream-and-summarizes-usage ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm
           '((:thinking "reasoning before failure"
-             :content ""
-             :tokens 4096
-             :speed 58.4
-             :usage (:prompt_tokens 12
-                     :completion_tokens 4096
-                     :reasoning_tokens 4000
-                     :total_tokens 4108))))))
+		       :content ""
+		       :tokens 4096
+		       :speed 58.4
+		       :usage (:prompt_tokens 12
+					      :completion_tokens 4096
+					      :reasoning_tokens 4000
+					      :total_tokens 4108))))))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'failed)))
+	(should (eq (ende-job-state job) 'failed)))
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should (string-match-p "Prompt" text))
-          (should (string-match-p "base" text))
-          (should (string-match-p "Thinking" text))
-          (should (string-match-p "reasoning before failure" text))
-          (should (string-match-p
-                   "Tokens: 4,108 total (12 input, 4,096 output)" text))
-          (should-not (string-match-p "reasoning_tokens" text))
-          (should (string-match-p "empty completion" text))
-          (should buffer-read-only)
-          (should-error (insert "user edit") :type 'buffer-read-only)
-          (let ((buffer-read-only nil))
-            (should-error (insert "user edit") :type 'user-error)))))))
+	(let ((text (buffer-string)))
+	  (should (string-match-p "Prompt" text))
+	  (should (string-match-p "base" text))
+	  (should (string-match-p "Thinking" text))
+	  (should (string-match-p "reasoning before failure" text))
+	  (should (string-match-p
+		   "Tokens: 4,108 total (12 input, 4,096 output)" text))
+	  (should-not (string-match-p "reasoning_tokens" text))
+	  (should (string-match-p "empty completion" text))
+	  (should buffer-read-only)
+	  (should-error (insert "user edit") :type 'buffer-read-only)
+	  (let ((buffer-read-only nil))
+	    (should-error (insert "user edit") :type 'user-error)))))))
 
 (ert-deftest ende-test/history-retains-joined-partial-result-on-failure ()
   (ende-test--reset)
   (let ((ende-llm-function
          (ende-test--fake-llm
           '((:content ""
-             :partial (:content ""
-                       :thinking "Subheadings: ** TODO"
-                       :tokens 4096
-                       :speed 57.1
-                       :finish-reason "length"))))))
+		      :partial (:content ""
+					 :thinking "Subheadings: ** TODO"
+					 :tokens 4096
+					 :speed 57.1
+					 :finish-reason "length"))))))
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let ((job (ende-insert-at-cursor)))
-        (should (eq (ende-job-state job) 'failed)))
+	(should (eq (ende-job-state job) 'failed)))
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should (string-match-p "Thinking" text))
-          (should (string-match-p (regexp-quote "Subheadings: ** TODO")
-                                  text))
-          (should (string-match-p "Tokens: 4096" text))
-          (should (string-match-p "Finish reason: length" text))
-          (should-not (string-match-p "\\(^\\|\\n\\)[[:space:]]*data:"
-                                      text)))))))
+	(let ((text (buffer-string)))
+	  (should (string-match-p "Thinking" text))
+	  (should (string-match-p (regexp-quote "Subheadings: ** TODO")
+				  text))
+	  (should (string-match-p "Tokens: 4096" text))
+	  (should (string-match-p "Finish reason: length" text))
+	  (should-not (string-match-p "\\(^\\|\\n\\)[[:space:]]*data:"
+				      text)))))))
 
 (ert-deftest ende-test/history-command-displays-buffer ()
   (ende-test--reset)
@@ -5826,7 +5826,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-insert-at-cursor)
       (should (= (hash-table-count ende-history--entries) 1))
       (let ((ende-history-enabled nil))
-        (ende-test--complete-call (car ende-test--calls)))
+	(ende-test--complete-call (car ende-test--calls)))
       (should (= (hash-table-count ende-history--entries) 0))))
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '(" result") t)))
@@ -5834,8 +5834,8 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (ende-insert-at-cursor)
       (with-current-buffer (ende-history--buffer)
-        (add-hook 'before-change-functions
-                  (lambda (&rest _) (error "history blocked")) nil t))
+	(add-hook 'before-change-functions
+		  (lambda (&rest _) (error "history blocked")) nil t))
       (ende-test--complete-call (car ende-test--calls))
       (should (= (hash-table-count ende-history--entries) 0)))))
 
@@ -5847,14 +5847,14 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (dotimes (_ 3)
-        (ende-insert-at-cursor)
-        (ende-review-delete-overlay
-         (cl-find-if #'ende-review-overlay-p
-                     (overlays-in (point-min) (point-max)))))
+	(ende-insert-at-cursor)
+	(ende-review-delete-overlay
+	 (cl-find-if #'ende-review-overlay-p
+		     (overlays-in (point-min) (point-max)))))
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-           (should (= (ende-test--count-matches "^\\* Job " text) 2))
-           (should-not (string-match-p "^\\* fake heading" text)))))))
+	(let ((text (buffer-string)))
+	  (should (= (ende-test--count-matches "^\\* Job " text) 2))
+	  (should-not (string-match-p "^\\* fake heading" text)))))))
 
 (ert-deftest ende-test/history-replaces-oldest-entries-at-default-limit ()
   (ende-test--reset)
@@ -5866,16 +5866,16 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (dotimes (_ 103)
-        (ende-insert-at-cursor)
-        (ende-review-delete-overlay
-         (cl-find-if #'ende-review-overlay-p
-                     (overlays-in (point-min) (point-max)))))
+	(ende-insert-at-cursor)
+	(ende-review-delete-overlay
+	 (cl-find-if #'ende-review-overlay-p
+		     (overlays-in (point-min) (point-max)))))
       (with-current-buffer ende-history-buffer-name
-        (let ((text (buffer-string)))
-          (should (= (ende-test--count-matches "^\\* Job " text) 100))
-          (should-not (string-match-p "^\\* Job 1:" text))
-          (should-not (string-match-p "^\\* Job 3:" text))
-          (should (string-match-p "^\\* Job 103:" text)))))))
+	(let ((text (buffer-string)))
+	  (should (= (ende-test--count-matches "^\\* Job " text) 100))
+	  (should-not (string-match-p "^\\* Job 1:" text))
+	  (should-not (string-match-p "^\\* Job 3:" text))
+	  (should (string-match-p "^\\* Job 103:" text)))))))
 
 ;;;; Overlay lifecycle
 
@@ -5885,22 +5885,22 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--with-buffer "base"
       (goto-char (point-max))
       (let* ((job (ende-insert-at-cursor))
-             (call (car ende-test--calls))
-             (overlay (ende-job-overlay job)))
-        (dotimes (_ 5)
-          (insert "\n"))
-        (should (= (overlay-start overlay) 5))
-        (should (= (ende-target-cursor (ende-job-target job))
-                   5))
-        (ende-test--complete-call call)
-        (should (string= (buffer-string) "base X\n\n\n\n\n"))))))
+	     (call (car ende-test--calls))
+	     (overlay (ende-job-overlay job)))
+	(dotimes (_ 5)
+	  (insert "\n"))
+	(should (= (overlay-start overlay) 5))
+	(should (= (ende-target-cursor (ende-job-target job))
+		   5))
+	(ende-test--complete-call call)
+	(should (string= (buffer-string) "base X\n\n\n\n\n"))))))
 
 (ert-deftest ende-test/zero-width-overlay-boundary-behavior ()
   (ende-test--reset)
   (ende-test--with-buffer "abc"
     (goto-char (point-max))
     (let ((ov (ende-ui-create-overlay (current-buffer) (point) (point)
-                                        "Queued")))
+				      "Queued")))
       (insert "\n")
       (should (= (overlay-start ov) 4))
       (should (= (overlay-end ov) 4))
@@ -5931,9 +5931,9 @@ Use COMMAND for the process, or a silent sleep process by default."
   (ende-test--reset)
   (ende-test--with-buffer "first second"
     (let ((first (ende-review-create-overlay
-                  (current-buffer) 1 6 nil nil ""))
-          (second (ende-review-create-overlay
-                   (current-buffer) 7 13 nil nil "")))
+		  (current-buffer) 1 6 nil nil ""))
+	  (second (ende-review-create-overlay
+		   (current-buffer) 7 13 nil nil "")))
       (narrow-to-region 1 6)
       (ende-review-delete-overlay first)
       (should (= (length (ende-review--overlays-in-buffer)) 1))
@@ -5948,12 +5948,12 @@ Use COMMAND for the process, or a silent sleep process by default."
         (progn
           (set-default 'ende-review-show-badges nil)
           (ende-test--with-buffer "generated"
-            (let ((review (ende-review-create-overlay
-                           (current-buffer) 1 2 "model" "client" "")))
-              (should-not (local-variable-p 'ende-review-show-badges))
-              (should-not (overlay-get review 'before-string))
-              (should (ende-review-overlay-p review))
-              (ende-review-delete-overlay review))))
+	    (let ((review (ende-review-create-overlay
+			   (current-buffer) 1 2 "model" "client" "")))
+	      (should-not (local-variable-p 'ende-review-show-badges))
+	      (should-not (overlay-get review 'before-string))
+	      (should (ende-review-overlay-p review))
+	      (ende-review-delete-overlay review))))
       (set-default 'ende-review-show-badges default))))
 
 (ert-deftest ende-test/review-badge-toggle-preserves-review-highlight ()
@@ -5965,23 +5965,23 @@ Use COMMAND for the process, or a silent sleep process by default."
       (add-text-properties 1 6 '(face font-lock-keyword-face))
       (setq-local ende-review-show-badges nil)
       (let* ((review (ende-review-create-overlay
-                      (current-buffer) 6 9 "model" "client" ""))
-             (face (overlay-get review 'face)))
-        (should (ende-review-overlay-p review))
-        (should-not (overlay-get review 'before-string))
-        (should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
-        (ende-toggle-review-badges)
-        (should ende-review-show-badges)
-        (should (string-match-p "client model"
-                                (ende-test--overlay-label review)))
-        (should (equal (overlay-get review 'face) face))
-        (ende-toggle-review-badges)
-        (should-not ende-review-show-badges)
-        (should-not (overlay-get review 'before-string))
-        (should (equal (overlay-get review 'face) face))
-        (goto-char (1+ (overlay-start review)))
-        (ende-approve-output)
-        (should-not (ende-review-overlay-p review))))))
+		      (current-buffer) 6 9 "model" "client" ""))
+	     (face (overlay-get review 'face)))
+	(should (ende-review-overlay-p review))
+	(should-not (overlay-get review 'before-string))
+	(should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
+	(ende-toggle-review-badges)
+	(should ende-review-show-badges)
+	(should (string-match-p "client model"
+				(ende-test--overlay-label review)))
+	(should (equal (overlay-get review 'face) face))
+	(ende-toggle-review-badges)
+	(should-not ende-review-show-badges)
+	(should-not (overlay-get review 'before-string))
+	(should (equal (overlay-get review 'face) face))
+	(goto-char (1+ (overlay-start review)))
+	(ende-approve-output)
+	(should-not (ende-review-overlay-p review))))))
 
 (ert-deftest ende-test/review-badge-global-toggle-respects-local-values ()
   (ende-test--reset)
@@ -6069,23 +6069,23 @@ Use COMMAND for the process, or a silent sleep process by default."
   (ende-test--with-buffer "defun x"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (should (equal (ende-review--style (current-buffer) 6)
-                   '("#0000ff" . "#d9d9ff")))))
+		   '("#0000ff" . "#d9d9ff")))))
 
 (ert-deftest ende-test/review-highlight-style-default-fallback ()
   (set-face-foreground 'default "#111111")
   (set-face-background 'default "#222222")
   (ende-test--with-buffer "plain x"
     (should (equal (ende-review--style (current-buffer) 6)
-                   '("#111111" . "#1f1f1f")))
+		   '("#111111" . "#1f1f1f")))
     (should (equal (ende-review--style (current-buffer) 1)
-                   '("#111111" . "#1f1f1f")))))
+		   '("#111111" . "#1f1f1f")))))
 
 (ert-deftest ende-test/review-highlight-dark-background-light-foreground ()
   (set-face-foreground 'default "#e6e6e6")
   (set-face-background 'default "#1e1e1e")
   (ende-test--with-buffer "plain text"
     (should (equal (ende-review--style (current-buffer) 6)
-                   '("#e6e6e6" . "#3c3c3c")))))
+		   '("#e6e6e6" . "#3c3c3c")))))
 
 (ert-deftest ende-test/review-highlight-overlay-sets-face ()
   (ende-test--reset)
@@ -6094,10 +6094,10 @@ Use COMMAND for the process, or a silent sleep process by default."
   (ende-test--with-buffer "defunLLM"
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (let ((overlay (ende-review-create-overlay
-                    (current-buffer) 6 9 nil nil "")))
+		    (current-buffer) 6 9 nil nil "")))
       (should (overlayp overlay))
       (should (equal (overlay-get overlay 'face)
-                     '(:foreground "#0000ff" :background "#d9d9ff")))
+		     '(:foreground "#0000ff" :background "#d9d9ff")))
       (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
       (should (null (get-char-property 3 'foreground-color)))
       (ende-review-delete-overlay overlay)
@@ -6109,8 +6109,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (add-text-properties 1 6 '(face font-lock-keyword-face))
     (let ((ende-review-highlight nil))
       (let ((overlay (ende-review-create-overlay
-                      (current-buffer) 6 9 nil nil "")))
-        (should (null (overlay-get overlay 'face)))))))
+		      (current-buffer) 6 9 nil nil "")))
+	(should (null (overlay-get overlay 'face)))))))
 
 (ert-deftest ende-test/review-highlight-approval-cleans-properties ()
   (ende-test--reset)
@@ -6123,14 +6123,14 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-insert-at-cursor)
       (should (string= (buffer-string) "kwLLM rest"))
       (let ((review (cl-find-if #'ende-review-overlay-p
-                                (overlays-in (point-min) (point-max)))))
-        (should review)
-        (should (equal (overlay-get review 'face)
-                       '(:foreground "#0000ff" :background "#d9d9ff")))
-        (goto-char 4)
-        (ende-approve-output)
-        (should (string= (buffer-string) "kwLLM rest"))
-        (should-not (ende-review-overlay-p review))))))
+				(overlays-in (point-min) (point-max)))))
+	(should review)
+	(should (equal (overlay-get review 'face)
+		       '(:foreground "#0000ff" :background "#d9d9ff")))
+	(goto-char 4)
+	(ende-approve-output)
+	(should (string= (buffer-string) "kwLLM rest"))
+	(should-not (ende-review-overlay-p review))))))
 
 (ert-deftest ende-test/review-highlight-rejection-preserves-original-properties ()
   (ende-test--reset)
@@ -6142,14 +6142,14 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-improve-at-cursor "rewrite")
       (should (string= (buffer-string) "new"))
       (let ((review (cl-find-if #'ende-review-overlay-p
-                                (overlays-in (point-min) (point-max)))))
-        (should review)
-        (goto-char 2)
-        (ende-reject-output)
-        (should (string= (buffer-string) "old text"))
-        (should (eq (get-char-property 1 'face) 'font-lock-string-face))
-        (should (string= (get-char-property 1 'foreground-color) "#123456"))
-        (should (null (get-char-property 1 'background-color)))))))
+				(overlays-in (point-min) (point-max)))))
+	(should review)
+	(goto-char 2)
+	(ende-reject-output)
+	(should (string= (buffer-string) "old text"))
+	(should (eq (get-char-property 1 'face) 'font-lock-string-face))
+	(should (string= (get-char-property 1 'foreground-color) "#123456"))
+	(should (null (get-char-property 1 'background-color)))))))
 
 ;;;; Rubber-duck exercises
 
@@ -6236,14 +6236,14 @@ Use COMMAND for the process, or a silent sleep process by default."
     (erase-buffer)
     (insert "My explanation")
     (let* ((job (ende-rubber-duck-review))
-           (overlay (ende-job-overlay job)))
+	   (overlay (ende-job-overlay job)))
       (should (eq (ende-job-state job) 'running))
       (should (= (overlay-start overlay) (point-min)))
       (should (= (overlay-end overlay) (point-max)))
       (should (overlay-get overlay 'before-string))
       (should-not (overlay-get overlay 'face))
       (should (string-match-p
-               "Thinking" (ende-test--overlay-label overlay)))
+	       "Thinking" (ende-test--overlay-label overlay)))
       (ende-abort-queue)
       (should (eq (ende-job-state job) 'cancelled))
       (should-not (ende-job-overlay job))
@@ -6257,7 +6257,7 @@ Use COMMAND for the process, or a silent sleep process by default."
     (insert "first explanation\nlast")
     (let* ((submission (buffer-string))
            (ende-history-enabled t)
-          (job (ende-rubber-duck-review)))
+           (job (ende-rubber-duck-review)))
       (should-error (ende-rubber-duck-review) :type 'user-error)
       (ende-test--complete-call (car ende-test--calls))
       (should (eq (ende-job-state job) 'completed))
@@ -6272,8 +6272,8 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should-not (ende-history--entry job))
       (should (buffer-live-p ende-history--buffer-object))
       (with-current-buffer ende-history--buffer-object
-        (should (string-match-p "AI: one" (buffer-string)))
-        (should (string-match-p "Accurate main idea" (buffer-string))))
+	(should (string-match-p "AI: one" (buffer-string)))
+	(should (string-match-p "Accurate main idea" (buffer-string))))
       (ende-reject-all-output)
       (should (equal submission (buffer-string)))
       ;; Rejecting feedback does not turn the exercise into a retry session.
@@ -6292,7 +6292,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (eq (ende-job-state job) 'completed))
       (widen)
       (should (string-match-p "Demonstrated understanding: 3/4 — Mostly sound"
-                              (buffer-string)))
+			      (buffer-string)))
       (should (= 1 (length (ende-review--overlays-in-buffer)))))))
 
 (ert-deftest ende-test/rubber-duck-invalid-response-is-atomic ()
@@ -6307,12 +6307,12 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (insert " explanation")
       (let ((submission (buffer-string))
-            (job (ende-rubber-duck-review)))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state job) 'failed))
-        (should (equal submission (buffer-string)))
-        (should-not (ende-review--overlays-in-buffer))
-        (should-not ende-rubber-duck--reviewed)))))
+	    (job (ende-rubber-duck-review)))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'failed))
+	(should (equal submission (buffer-string)))
+	(should-not (ende-review--overlays-in-buffer))
+	(should-not ende-rubber-duck--reviewed)))))
 
 (ert-deftest ende-test/rubber-duck-application-failure-rolls-back-overlays ()
   (ende-test--with-duck
@@ -6329,7 +6329,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                    (if (= (cl-incf count) 2)
                        (error "Mock overlay failure")
                      (apply create args)))))
-        (ende-test--complete-call (car ende-test--calls)))
+	(ende-test--complete-call (car ende-test--calls)))
       (should (eq (ende-job-state job) 'failed))
       (should (equal submission (buffer-string)))
       (should-not (ende-review--overlays-in-buffer)))))
@@ -6340,13 +6340,13 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (insert " explanation")
       (let ((job (ende-rubber-duck-review)))
-        (goto-char position)
-        (insert "user edit")
-        (let ((changed (buffer-string)))
-          (ende-test--complete-call (car ende-test--calls))
-          (should (eq (ende-job-state job) 'failed))
-          (should (equal changed (buffer-string)))
-          (should-not (ende-review--overlays-in-buffer)))))))
+	(goto-char position)
+	(insert "user edit")
+	(let ((changed (buffer-string)))
+	  (ende-test--complete-call (car ende-test--calls))
+	  (should (eq (ende-job-state job) 'failed))
+	  (should (equal changed (buffer-string)))
+	  (should-not (ende-review--overlays-in-buffer)))))))
 
 (ert-deftest ende-test/rubber-duck-replacement-cancels-and-ignores-late-response ()
   (ende-test--with-duck (list (ende-test--duck-result))
@@ -6354,32 +6354,32 @@ Use COMMAND for the process, or a silent sleep process by default."
       (goto-char (point-max))
       (insert " explanation")
       (let ((job (ende-rubber-duck-review))
-            (cancelled nil))
-        (ende-test--callback (car ende-test--calls) :on-start
-                              (lambda () (setq cancelled t)))
-        (emacs-lisp-mode)
-        (ende-rubber-duck-mode -1)
-        (with-temp-buffer
-          (insert "second")
-          (ende-test--select 1 (point-max) (point-max))
-          (ende-rubber-duck 'overview))
-        (should cancelled)
-        (should (eq (ende-job-state job) 'cancelled))
-        (should-not (buffer-live-p old))
-        (ende-test--complete-call (car ende-test--calls))
-        (with-current-buffer ende-rubber-duck--buffer
-          (should (equal (buffer-string) "second"))
-          (should-not (ende-review--overlays-in-buffer))
-          (should-not ende-rubber-duck--reviewed))
-        (kill-buffer ende-rubber-duck--buffer)
-        (should-not ende-rubber-duck--buffer)))))
+	    (cancelled nil))
+	(ende-test--callback (car ende-test--calls) :on-start
+			     (lambda () (setq cancelled t)))
+	(emacs-lisp-mode)
+	(ende-rubber-duck-mode -1)
+	(with-temp-buffer
+	  (insert "second")
+	  (ende-test--select 1 (point-max) (point-max))
+	  (ende-rubber-duck 'overview))
+	(should cancelled)
+	(should (eq (ende-job-state job) 'cancelled))
+	(should-not (buffer-live-p old))
+	(ende-test--complete-call (car ende-test--calls))
+	(with-current-buffer ende-rubber-duck--buffer
+	  (should (equal (buffer-string) "second"))
+	  (should-not (ende-review--overlays-in-buffer))
+	  (should-not ende-rubber-duck--reviewed))
+	(kill-buffer ende-rubber-duck--buffer)
+	(should-not ende-rubber-duck--buffer)))))
 
 (ert-deftest ende-test/rubber-duck-queued-review-disposed-before-dispatch ()
   (ende-test--with-duck (list (ende-test--duck-result))
     (goto-char (point-max))
     (insert " explanation")
     (let* ((ende--queue-suspended t)
-           (job (ende-rubber-duck-review)))
+	   (job (ende-rubber-duck-review)))
       (should (eq (ende-job-state job) 'queued))
       (emacs-lisp-mode)
       (kill-buffer (current-buffer))
@@ -6438,15 +6438,15 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal header-line-format '(:eval (ende-rubber-duck--header))))
       (should (eq (key-binding (kbd "C-c C-r")) #'ende-rubber-duck-review))
       (let ((job (ende-rubber-duck-review)))
-        (emacs-lisp-mode)
-        (should (eq job ende-rubber-duck--job))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state job) 'completed))
-        (text-mode)
-        (should ende-rubber-duck--reviewed)
-        (should-error (ende-rubber-duck-review) :type 'user-error)
-        (ende-reject-all-output)
-        (should (equal (buffer-string) "original explanation"))))))
+	(emacs-lisp-mode)
+	(should (eq job ende-rubber-duck--job))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'completed))
+	(text-mode)
+	(should ende-rubber-duck--reviewed)
+	(should-error (ende-rubber-duck-review) :type 'user-error)
+	(ende-reject-all-output)
+	(should (equal (buffer-string) "original explanation"))))))
 
 (ert-deftest ende-test/rubber-duck-mode-switch-preserves-change-monitoring ()
   (ende-test--with-duck (list (ende-test--duck-result))
@@ -6459,19 +6459,19 @@ Use COMMAND for the process, or a silent sleep process by default."
       (insert "changed")
       (should (eq (ende-job-state job) 'failed))
       (let ((submission (buffer-string)))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (equal submission (buffer-string)))))))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (equal submission (buffer-string)))))))
 
 (ert-deftest ende-test/rubber-duck-failed-replacement-retains-draft ()
   (ende-test--with-duck nil
     (let ((old (current-buffer))
-          (exercise ende-rubber-duck--exercise))
+	  (exercise ende-rubber-duck--exercise))
       (with-temp-buffer
-        (insert "second")
-        (ende-test--select 1 (point-max) (point-max))
-        (cl-letf (((symbol-function 'fundamental-mode)
-                   (lambda () (error "Mock initialization failure"))))
-          (should-error (ende-rubber-duck 'overview))))
+	(insert "second")
+	(ende-test--select 1 (point-max) (point-max))
+	(cl-letf (((symbol-function 'fundamental-mode)
+		   (lambda () (error "Mock initialization failure"))))
+	  (should-error (ende-rubber-duck 'overview))))
       (should (eq old ende-rubber-duck--buffer))
       (should (buffer-live-p old))
       (should (eq exercise ende-rubber-duck--exercise)))))
@@ -6487,10 +6487,10 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-rubber-duck 'overview)
       (should-not (buffer-live-p old))
       (with-current-buffer ende-rubber-duck--buffer
-        (should (equal (buffer-string) "original"))
-        (should-not ende-rubber-duck--reviewed))
+	(should (equal (buffer-string) "original"))
+	(should-not ende-rubber-duck--reviewed))
       (with-current-buffer ende-history--buffer-object
-        (should (string-match-p "Accurate main idea" (buffer-string)))))))
+	(should (string-match-p "Accurate main idea" (buffer-string)))))))
 
 (ert-deftest ende-test/openrouter-batch-profile-has-separate-endpoints ()
   (let ((profile (ende-provider-profile 'openrouter-batch)))
@@ -6502,12 +6502,12 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (string= (plist-get profile :batch-endpoint)
                      "/v1/chat/completions"))
     (should (equal (plist-get (ende-provider-profile 'openrouter)
-                             :transport)
+                              :transport)
                    'auto))
     (should-error
      (ende-openrouter-batch--validate-options
       (plist-put (copy-sequence profile)
-                  :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
+                 :batch-url "https://openrouter.ai/api/v1/chat/completions")))))
 
 (ert-deftest ende-test/openrouter-profiles-advertise-ende-mode ()
   (dolist (name '(openrouter openrouter-batch))
@@ -6640,7 +6640,7 @@ Use COMMAND for the process, or a silent sleep process by default."
               "https://openrouter.ai/api/v1/batches/batch-1789766830-OF6zb6TiexdSIEpfCv8N")
              (ende-error-message failure)))
     (should (string-match-p "ever being observed"
-                           (ende-error-message failure)))
+                            (ende-error-message failure)))
     (should (ende-openrouter-batch--group-terminal group))))
 
 (ert-deftest ende-test/openrouter-batch-404-after-visibility-is-terminal ()
@@ -6667,7 +6667,7 @@ Use COMMAND for the process, or a silent sleep process by default."
        group 404 "{\"error\":{\"message\":\"not found\"}}" nil))
     (should (ende-error-p failure))
     (should (string-match-p "previously visible"
-                           (ende-error-message failure)))
+                            (ende-error-message failure)))
     (should (ende-openrouter-batch--group-terminal group))))
 
 (ert-deftest ende-test/openrouter-batch-body-is-non-streaming-and-ordered ()
@@ -6693,10 +6693,10 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (string= (ende-protocol-json-get "endpoint" body)
                        "/v1/chat/completions"))
       (should (string= (ende-protocol-json-get "custom_id"
-                                                 (aref
-                                                  (ende-protocol-json-get
-                                                   "requests" body)
-                                                  0))
+                                               (aref
+                                                (ende-protocol-json-get
+                                                 "requests" body)
+                                                0))
                        "ende-job-1"))
       (should-not (ende-protocol-json-has-key-p "stream" request-body))
       (should-not (ende-protocol-json-has-key-p "model" request-body))
@@ -6723,7 +6723,7 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-openrouter-batch--make-request
            :custom-id "ende-job-2"
            :profile profile
-                 :callbacks
+           :callbacks
            (list :on-event (lambda (event) (push event events))
                  :on-done (lambda (value) (setq result value))
                  :on-error (lambda (value) (setq failure value)))))
@@ -6802,9 +6802,9 @@ Use COMMAND for the process, or a silent sleep process by default."
   (let ((command
          (ende-curl-json-command
           '(:url "https://openrouter.ai/api/v1/chat/completions"
-            :auth-source-host "openrouter.ai"
-            :auth-source-user "ende"
-            :auth-source-port 443)
+		 :auth-source-host "openrouter.ai"
+		 :auth-source-user "ende"
+		 :auth-source-port 443)
           "/tmp/headers" nil "GET" "application/json" nil
           "https://openrouter.ai/api/v1/batches/batch_1")))
     (should (member "Accept: application/json" command))
@@ -6925,8 +6925,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                             (funcall (plist-get (nth 0 stages) :command)
                                      "/tmp/headers" nil)))
             (should-not (member "--data-binary"
-                               (funcall (plist-get (nth 1 stages) :command)
-                                        "/tmp/headers" nil))))
+				(funcall (plist-get (nth 1 stages) :command)
+                                         "/tmp/headers" nil))))
         (ende-openrouter-batch-abort)
         (dolist (process processes)
           (when (process-live-p process)
@@ -6952,15 +6952,15 @@ Use COMMAND for the process, or a silent sleep process by default."
             (let ((session
                    (ende-llm--make-session
                     :profile '(:transport auto
-                               :batch-url "https://openrouter.ai/api/v1/batches")
+					  :batch-url "https://openrouter.ai/api/v1/batches")
                     :messages '(("user" . "question"))
                     :headers-file headers-file
                     :response-preview-parts
                     '("{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}"))))
               (ende-llm--finish-success session)
               (should handoff)
-               (should (eq (plist-get (nth 2 handoff) :transport)
-                           'openrouter-batch)))))
+              (should (eq (plist-get (nth 2 handoff) :transport)
+                          'openrouter-batch)))))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
@@ -7031,34 +7031,34 @@ Use COMMAND for the process, or a silent sleep process by default."
                                   :arguments "{\"path\":\"third.el\"}")))
                 (list :role "tool" :tool-call-id "call-3"
                       :content "{\"text\":\"third result\"}")))
-          (encoded
-           (json-encode
-            (list
-             (cons :version 1)
-             (cons :messages
-                   (vconcat
-                    (mapcar
-                     (lambda (message)
-                       (pcase (plist-get message :role)
-                         ("assistant"
-                          (list (cons :role "assistant")
-                                (cons :content (plist-get message :content))
-                                (cons :tool_calls
-                                      (vconcat
-                                       (mapcar
-                                        (lambda (call)
-                                          (list
-                                           (cons :id (plist-get call :id))
-                                           (cons :name (plist-get call :name))
-                                           (cons :arguments
-                                                 (plist-get call :arguments))))
-                                         (plist-get message :tool-calls))))))
-                         ("tool"
-                          (list (cons :role "tool")
-                                (cons :tool_call_id
-                                      (plist-get message :tool-call-id))
-                                (cons :content (plist-get message :content))))))
-                     transcript))))))
+         (encoded
+          (json-encode
+           (list
+            (cons :version 1)
+            (cons :messages
+                  (vconcat
+                   (mapcar
+                    (lambda (message)
+                      (pcase (plist-get message :role)
+                        ("assistant"
+                         (list (cons :role "assistant")
+                               (cons :content (plist-get message :content))
+                               (cons :tool_calls
+                                     (vconcat
+                                      (mapcar
+                                       (lambda (call)
+                                         (list
+                                          (cons :id (plist-get call :id))
+                                          (cons :name (plist-get call :name))
+                                          (cons :arguments
+                                                (plist-get call :arguments))))
+                                       (plist-get message :tool-calls))))))
+                        ("tool"
+                         (list (cons :role "tool")
+                               (cons :tool_call_id
+                                     (plist-get message :tool-call-id))
+                               (cons :content (plist-get message :content))))))
+                    transcript))))))
          (decoded (ende-chat--decode-tool-context encoded))
          (chat-assistant (ende-llm--message-json (car decoded)))
          (chat-tool (ende-llm--message-json (nth 1 decoded)))
@@ -7082,8 +7082,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (equal (alist-get :output (nth 6 responses))
                    (plist-get (nth 4 decoded) :content)))
     (should-error
-      (ende-chat--validate-tool-context
-       '((:role "tool" :tool-call-id "orphan" :content "result")))
+     (ende-chat--validate-tool-context
+      '((:role "tool" :tool-call-id "orphan" :content "result")))
      :type 'error)
     (let ((failure
            (condition-case caught
@@ -7122,10 +7122,10 @@ Use COMMAND for the process, or a silent sleep process by default."
              (reply (cl-position-if
                      (lambda (message)
                        (and (equal (ende-test--chat-message-role message)
-                                    "assistant")
-                             (stringp (cdr message))
-                             (string-match-p "Final answer" (cdr message))))
-                      messages)))
+                                   "assistant")
+                            (stringp (cdr message))
+                            (string-match-p "Final answer" (cdr message))))
+                     messages)))
         (should (= (length protocol) 2))
         (should (equal (mapcar #'ende-test--chat-message-role messages)
                        '("user" "assistant" "tool" "assistant" "user")))
@@ -7161,9 +7161,9 @@ Use COMMAND for the process, or a silent sleep process by default."
             2 "question-roundtrip" request-id ""
             (list :content assistant-one) first-calls)
            (ende-chat--tool-result-text 2 request-id (nth 0 first-calls)
-                                       result-one)
+					result-one)
            (ende-chat--tool-result-text 2 request-id (nth 1 first-calls)
-                                       result-two)
+					result-two)
            (ende-chat--assistant-protocol-text
             2 "question-roundtrip" request-id ""
             (list :content assistant-two) (list second-call))
@@ -7317,20 +7317,20 @@ Use COMMAND for the process, or a silent sleep process by default."
                    "Unsupported ENDE_CHAT_TOOL_CONTEXT version")))
     (ende-test--reset)
     (ende-test--with-buffer
-        (format
-         (concat "* Topic\n"
-                 "** Agent: Reply\n"
-                 ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                 ":%s:\n%s\n:END:\n\nAnswer\n"
-                 "** Follow-up\nAsk\n")
-         ende-chat--tool-context-drawer (car case))
+	(format
+	 (concat "* Topic\n"
+		 "** Agent: Reply\n"
+		 ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		 ":%s:\n%s\n:END:\n\nAnswer\n"
+		 "** Follow-up\nAsk\n")
+	 ende-chat--tool-context-drawer (car case))
       (org-mode)
       (ende-test--chat-goto "** Follow-up")
       (let ((failure
              (condition-case caught
                  (progn (ende-chat-context-at-point) nil)
                (error (error-message-string caught)))))
-        (should (string-match-p (cadr case) failure))))))
+	(should (string-match-p (cadr case) failure))))))
 
 (ert-deftest ende-test/chat-tool-context-drawer-is-not-user-protocol-history ()
   (ende-test--reset)
@@ -7353,19 +7353,19 @@ Use COMMAND for the process, or a silent sleep process by default."
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("A plain answer.") t)))
     (ende-test--with-buffer
-        "* Topic\n** Question\nAnswer this.\n"
+	"* Topic\n** Question\nAnswer this.\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
       (let ((job (ende-ask)))
-        (ende-test--complete-call (car ende-test--calls))
-        (should (eq (ende-job-state job) 'completed)))
+	(ende-test--complete-call (car ende-test--calls))
+	(should (eq (ende-job-state job) 'completed)))
       (let* ((document (ende-chat--build-document))
              (headlines (ende-chat--document-headlines document)))
-        (should-not
+	(should-not
          (cl-some (lambda (headline)
                     (ende-chat--work-section-p document headline))
                   headlines))
-        (should (= (cl-count-if
+	(should (= (cl-count-if
                     (lambda (headline)
                       (and (equal (org-element-property :raw-value headline)
                                   "Agent: Reply")
@@ -7393,11 +7393,11 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should work)
       (should-not (ende-chat--work-section-p document work))
       (let ((work-message (car (last messages 2))))
-        (should (string-match-p "Agent: Work"
-                                (ende-test--chat-context-text
+	(should (string-match-p "Agent: Work"
+				(ende-test--chat-context-text
                                  (list work-message))))
-        (should (string-match-p "These are ordinary user notes"
-                                (ende-test--chat-context-text
+	(should (string-match-p "These are ordinary user notes"
+				(ende-test--chat-context-text
                                  (list work-message))))))))
 
 (ert-deftest ende-test/chat-work-validation-rejects-duplicate-request-containers ()
@@ -7458,214 +7458,214 @@ Use COMMAND for the process, or a silent sleep process by default."
                    "Follow-up answer without another lookup."
                    "Compact summary only.")
                   t)))
-           (ende-test--with-buffer
-              (format
-               (concat
-                "#+begin_ende\n(root %S)\n"
-                "(group inspect project_info list_project_files read_file search_project)\n"
-                "(resource project (include \"**\"))\n"
-                "(tools inspect)\n"
-                "(set-tool-resources inspect :resources project)\n"
-                "#+end_ende\n\n"
-                "* Topic\n"
-                "** Question\nRead foo.el and bar.el.\n"
-                "** Follow-up\nWhat would happen if foo received nil?\n"
-                "** Compact\nKeep the important source behavior.\n"
-                "** Later\nContinue from the summary.\n")
-               root)
-            (org-mode)
-            (ende-test--chat-goto "** Question")
-            (let ((job (ende-ask)))
-              (ende-test--complete-call (nth 0 ende-test--calls))
-              (should (= (length ende-test--calls) 2))
-              (ende-test--complete-call (nth 1 ende-test--calls))
-              (should (= (length ende-test--calls) 3))
-              (ende-test--complete-call (nth 2 ende-test--calls))
-              (should (eq (ende-job-state job) 'completed)))
-            (ende-test--chat-goto "** Follow-up")
-            (beginning-of-line)
-            (insert "** Tool Result: read_file\n"
-                    "This is a user-authored note.\n\n"
-                    "** Agent: Work\n"
-                    "This heading is user-authored.\n\n")
-            (let* ((first-round
-                    (last (plist-get (nth 1 ende-test--calls) :messages) 3))
-                   (second-round
-                    (last (plist-get (nth 2 ende-test--calls) :messages) 2))
-                    (expected-transcript (append first-round second-round))
-                    (document (ende-chat--build-document))
-                    (headlines (ende-chat--document-headlines document))
-                    (reply
-                     (cl-find-if
-                      (lambda (headline)
-                        (and (equal (org-element-property :raw-value headline)
-                                    "Agent: Reply")
-                             (null (ende-chat--work-ancestor
-                                    document headline))))
-                      headlines))
-                    (works
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (ende-chat--work-section-p document headline))
-                      headlines))
-                    (work (car works))
-                    (protocol-headlines
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (or (equal (org-element-property :raw-value headline)
-                                   "Agent: Reply")
-                            (and (ende-chat--protocol-title-p
-                                  headline "Tool Call:")
-                                 (ende-chat--tool-call-protocol-p
-                                  document headline))
-                            (ende-chat--tool-result-protocol-p document headline)))
-                      headlines))
-                    (calls
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (and (ende-chat--protocol-title-p
-                              headline "Tool Call:")
-                             (ende-chat--tool-call-protocol-p
-                              document headline)))
-                      headlines))
-                    (results
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (and (ende-chat--protocol-title-p
-                              headline "Tool Result:")
-                             (ende-chat--tool-result-protocol-p
-                              document headline)))
-                      headlines)))
-               (should reply)
-               (should (= (length works) 1))
-               (should (equal (ende-chat--property document work :request-id)
-                              (ende-chat--property document reply :request-id)))
-               (should (eq (ende-chat--parent document work)
-                           (ende-chat--parent document reply)))
-               (should (= (org-element-property :level work)
-                          (org-element-property :level reply)))
-               (should (< (org-element-property :begin work)
-                          (org-element-property :begin reply)))
-               (should
-                (eq reply
-                    (cadr (memq work
-                                (ende-chat--children
-                                 document (ende-chat--parent document work))))))
-               (dolist (child (ende-chat--children document work))
-                 (should (equal (ende-chat--property document child :request-id)
-                                (ende-chat--property document work :request-id))))
-               (should-not (cl-some
-                            (lambda (drawers) drawers)
-                            (hash-table-values
-                             (ende-chat--document-tool-context-drawers
-                              document))))
-               (should
-                (equal (mapcar (lambda (headline)
-                                 (org-element-property :raw-value headline))
-                               protocol-headlines)
-                       '("Agent: Reply"
-                         "Tool Call: read_file" "Tool Call: read_file"
-                         "Tool Result: read_file" "Tool Result: read_file"
-                         "Agent: Reply" "Tool Call: read_file"
-                         "Tool Result: read_file" "Agent: Reply")))
-               (should (equal
-                        (mapcar (lambda (message)
-                                  (if (equal (plist-get message :role) "tool")
-                                     (plist-get message :tool-call-id)
-                                   (mapcar (lambda (call)
-                                             (plist-get call :id))
-                                            (plist-get message :tool-calls))))
-                         expected-transcript)
-                        '(("call-A" "call-B") "call-A" "call-B"
-                          ("call-C") "call-C")))
-               (should (equal (mapcar (lambda (headline)
-                                        (ende-chat--property
-                                         document headline :tool-call-id))
-                                      calls)
-                              '("call-A" "call-B" "call-C")))
-               (should (equal (mapcar (lambda (headline)
-                                        (ende-chat--property
-                                         document headline :tool-call-id))
-                                      results)
-                              '("call-A" "call-B" "call-C")))
-               (should
-                (ende-test--chat-headline-text-hidden-p
-                 work "FOO_SOURCE_TOKEN"))
-               (should-not
-                (ende-test--chat-headline-text-hidden-p
-                 reply "Final answer about the source."))
-               (let ((user-note
+            (ende-test--with-buffer
+		(format
+		 (concat
+		  "#+begin_ende\n(root %S)\n"
+		  "(group inspect project_info list_project_files read_file search_project)\n"
+		  "(resource project (include \"**\"))\n"
+		  "(tools inspect)\n"
+		  "(set-tool-resources inspect :resources project)\n"
+		  "#+end_ende\n\n"
+		  "* Topic\n"
+		  "** Question\nRead foo.el and bar.el.\n"
+		  "** Follow-up\nWhat would happen if foo received nil?\n"
+		  "** Compact\nKeep the important source behavior.\n"
+		  "** Later\nContinue from the summary.\n")
+		 root)
+              (org-mode)
+              (ende-test--chat-goto "** Question")
+              (let ((job (ende-ask)))
+		(ende-test--complete-call (nth 0 ende-test--calls))
+		(should (= (length ende-test--calls) 2))
+		(ende-test--complete-call (nth 1 ende-test--calls))
+		(should (= (length ende-test--calls) 3))
+		(ende-test--complete-call (nth 2 ende-test--calls))
+		(should (eq (ende-job-state job) 'completed)))
+              (ende-test--chat-goto "** Follow-up")
+              (beginning-of-line)
+              (insert "** Tool Result: read_file\n"
+                      "This is a user-authored note.\n\n"
+                      "** Agent: Work\n"
+                      "This heading is user-authored.\n\n")
+              (let* ((first-round
+                      (last (plist-get (nth 1 ende-test--calls) :messages) 3))
+                     (second-round
+                      (last (plist-get (nth 2 ende-test--calls) :messages) 2))
+                     (expected-transcript (append first-round second-round))
+                     (document (ende-chat--build-document))
+                     (headlines (ende-chat--document-headlines document))
+                     (reply
                       (cl-find-if
                        (lambda (headline)
                          (and (equal (org-element-property :raw-value headline)
-                                     "Tool Result: read_file")
+                                     "Agent: Reply")
+                              (null (ende-chat--work-ancestor
+                                     document headline))))
+                       headlines))
+                     (works
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (ende-chat--work-section-p document headline))
+                       headlines))
+                     (work (car works))
+                     (protocol-headlines
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (or (equal (org-element-property :raw-value headline)
+                                    "Agent: Reply")
+                             (and (ende-chat--protocol-title-p
+                                   headline "Tool Call:")
+                                  (ende-chat--tool-call-protocol-p
+                                   document headline))
+                             (ende-chat--tool-result-protocol-p document headline)))
+                       headlines))
+                     (calls
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (and (ende-chat--protocol-title-p
+                               headline "Tool Call:")
+                              (ende-chat--tool-call-protocol-p
+                               document headline)))
+                       headlines))
+                     (results
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (and (ende-chat--protocol-title-p
+                               headline "Tool Result:")
+                              (ende-chat--tool-result-protocol-p
+                               document headline)))
+                       headlines)))
+		(should reply)
+		(should (= (length works) 1))
+		(should (equal (ende-chat--property document work :request-id)
+                               (ende-chat--property document reply :request-id)))
+		(should (eq (ende-chat--parent document work)
+                            (ende-chat--parent document reply)))
+		(should (= (org-element-property :level work)
+                           (org-element-property :level reply)))
+		(should (< (org-element-property :begin work)
+                           (org-element-property :begin reply)))
+		(should
+                 (eq reply
+                     (cadr (memq work
+                                 (ende-chat--children
+                                  document (ende-chat--parent document work))))))
+		(dolist (child (ende-chat--children document work))
+                  (should (equal (ende-chat--property document child :request-id)
+                                 (ende-chat--property document work :request-id))))
+		(should-not (cl-some
+                             (lambda (drawers) drawers)
+                             (hash-table-values
+                              (ende-chat--document-tool-context-drawers
+                               document))))
+		(should
+                 (equal (mapcar (lambda (headline)
+                                  (org-element-property :raw-value headline))
+				protocol-headlines)
+			'("Agent: Reply"
+                          "Tool Call: read_file" "Tool Call: read_file"
+                          "Tool Result: read_file" "Tool Result: read_file"
+                          "Agent: Reply" "Tool Call: read_file"
+                          "Tool Result: read_file" "Agent: Reply")))
+		(should (equal
+                         (mapcar (lambda (message)
+                                   (if (equal (plist-get message :role) "tool")
+                                       (plist-get message :tool-call-id)
+                                     (mapcar (lambda (call)
+                                               (plist-get call :id))
+                                             (plist-get message :tool-calls))))
+				 expected-transcript)
+                         '(("call-A" "call-B") "call-A" "call-B"
+                           ("call-C") "call-C")))
+		(should (equal (mapcar (lambda (headline)
+                                         (ende-chat--property
+                                          document headline :tool-call-id))
+                                       calls)
+                               '("call-A" "call-B" "call-C")))
+		(should (equal (mapcar (lambda (headline)
+                                         (ende-chat--property
+                                          document headline :tool-call-id))
+                                       results)
+                               '("call-A" "call-B" "call-C")))
+		(should
+                 (ende-test--chat-headline-text-hidden-p
+                  work "FOO_SOURCE_TOKEN"))
+		(should-not
+                 (ende-test--chat-headline-text-hidden-p
+                  reply "Final answer about the source."))
+		(let ((user-note
+                       (cl-find-if
+			(lambda (headline)
+                          (and (equal (org-element-property :raw-value headline)
+                                      "Tool Result: read_file")
                                (null (ende-chat--property
                                       document headline :tool-call-id))))
-                       headlines)))
-                 (should user-note)
-                 (should-not
-                  (ende-test--chat-headline-text-hidden-p
-                   user-note "This is a user-authored note.")))
-             (ende-test--chat-goto "** Follow-up")
-             (let* ((messages (ende-chat-context-at-point))
-                   (protocol (ende-test--chat-protocol-messages messages))
-                   (reply-index
-                    (cl-position-if
-                     (lambda (message)
-                       (and (consp message) (stringp (car message))
-                            (equal (car message) "assistant")
-                            (string-match-p "Final answer about the source"
-                                            (cdr message))))
-                     messages)))
-              (should (equal protocol expected-transcript))
-               (should (= reply-index (1+ (cl-position (car (last protocol))
-                                                        messages :test #'equal))))
-               (should (equal (ende-test--chat-message-role (car (last messages)))
-                              "user"))
-               (should
-                (cl-some
-                 (lambda (message)
-                   (and (consp message) (stringp (car message))
-                        (string-match-p "This heading is user-authored"
-                                        (cdr message))))
-                 messages))
-               (should
-                (equal (mapcar #'ende-test--chat-message-role messages)
-                       '("user" "user" "assistant" "tool" "tool"
-                         "assistant" "tool" "assistant" "user" "user")))
-               (ende-test--chat-goto "** Agent: Work")
-               (org-fold-show-subtree)
-               (ende-test--chat-goto "** Follow-up")
-               (should (equal messages (ende-chat-context-at-point)))
-               (ende-test--chat-goto "** Agent: Work")
-               (org-fold-hide-subtree)
-               (ende-test--chat-goto "** Follow-up")
-               (let ((follow-up (ende-ask)))
-                 (should (eq (ende-job-state follow-up) 'running))
-                 (ende-test--complete-call (nth 3 ende-test--calls))
-                 (should (eq (ende-job-state follow-up) 'completed)))
-               (should-not
-                (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
-            (ende-test--chat-goto "** Compact")
-            (let ((compaction (ende-compact)))
-              (should (= (length ende-test--calls) 5))
-              (let ((compaction-protocol
-                     (ende-test--chat-protocol-messages
-                      (plist-get (nth 4 ende-test--calls) :messages))))
-                (should
-                 (equal compaction-protocol expected-transcript)))
-              (ende-test--complete-call (nth 4 ende-test--calls))
-              (should (eq (ende-job-state compaction) 'completed)))
-            (ende-test--chat-goto "** Later")
-            (let* ((messages (ende-chat-context-at-point))
-                   (text (ende-test--chat-context-text messages)))
-              (should (string-match-p "Compact summary only" text))
-              (should-not (ende-test--chat-protocol-messages messages))
-              (should-not (string-match-p "FOO_SOURCE_TOKEN" text))
-              (should-not (string-match-p "call-A" text)))))))
+			headlines)))
+                  (should user-note)
+                  (should-not
+                   (ende-test--chat-headline-text-hidden-p
+                    user-note "This is a user-authored note.")))
+		(ende-test--chat-goto "** Follow-up")
+		(let* ((messages (ende-chat-context-at-point))
+                       (protocol (ende-test--chat-protocol-messages messages))
+                       (reply-index
+			(cl-position-if
+			 (lambda (message)
+			   (and (consp message) (stringp (car message))
+				(equal (car message) "assistant")
+				(string-match-p "Final answer about the source"
+						(cdr message))))
+			 messages)))
+		  (should (equal protocol expected-transcript))
+		  (should (= reply-index (1+ (cl-position (car (last protocol))
+                                                          messages :test #'equal))))
+		  (should (equal (ende-test--chat-message-role (car (last messages)))
+				 "user"))
+		  (should
+                   (cl-some
+                    (lambda (message)
+                      (and (consp message) (stringp (car message))
+                           (string-match-p "This heading is user-authored"
+                                           (cdr message))))
+                    messages))
+		  (should
+                   (equal (mapcar #'ende-test--chat-message-role messages)
+			  '("user" "user" "assistant" "tool" "tool"
+                            "assistant" "tool" "assistant" "user" "user")))
+		  (ende-test--chat-goto "** Agent: Work")
+		  (org-fold-show-subtree)
+		  (ende-test--chat-goto "** Follow-up")
+		  (should (equal messages (ende-chat-context-at-point)))
+		  (ende-test--chat-goto "** Agent: Work")
+		  (org-fold-hide-subtree)
+		  (ende-test--chat-goto "** Follow-up")
+		  (let ((follow-up (ende-ask)))
+                    (should (eq (ende-job-state follow-up) 'running))
+                    (ende-test--complete-call (nth 3 ende-test--calls))
+                    (should (eq (ende-job-state follow-up) 'completed)))
+		  (should-not
+                   (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
+		(ende-test--chat-goto "** Compact")
+		(let ((compaction (ende-compact)))
+		  (should (= (length ende-test--calls) 5))
+		  (let ((compaction-protocol
+			 (ende-test--chat-protocol-messages
+			  (plist-get (nth 4 ende-test--calls) :messages))))
+                    (should
+                     (equal compaction-protocol expected-transcript)))
+		  (ende-test--complete-call (nth 4 ende-test--calls))
+		  (should (eq (ende-job-state compaction) 'completed)))
+		(ende-test--chat-goto "** Later")
+		(let* ((messages (ende-chat-context-at-point))
+                       (text (ende-test--chat-context-text messages)))
+		  (should (string-match-p "Compact summary only" text))
+		  (should-not (ende-test--chat-protocol-messages messages))
+		  (should-not (string-match-p "FOO_SOURCE_TOKEN" text))
+		  (should-not (string-match-p "call-A" text)))))))
       (ende-test--reset)
       (when (file-directory-p root)
-       (delete-directory root t)))))
+	(delete-directory root t)))))
 
 (ert-deftest ende-test/chat-tool-failure-keeps-completed-protocol-history ()
   (let ((root (make-temp-file "ende-chat-partial-tools-" t)))
@@ -7679,8 +7679,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                                    :arguments "{\"path\":\"a.el\"}")
                              (list :id "call-B" :name "read_file"
                                    :arguments "{\"path\":\"b.el\"}")))
-                  "This must not be requested")
-                  t)))
+                 "This must not be requested")
+                t)))
           (ende-test--with-buffer
               (format (concat "#+begin_ende\n(root %S)\n"
                               "(group inspect read_file)\n"
@@ -7700,8 +7700,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                     (lambda (call _configuration)
                       (if (equal (ende-chat--tool-value call :id) "call-A")
                           (progn (setq completed t) "result-A")
-                        (error "second tool failed")))))
-                (ende-test--complete-call (car ende-test--calls)))
+			(error "second tool failed")))))
+		(ende-test--complete-call (car ende-test--calls)))
               (should completed)
               (should (eq (ende-job-state job) 'failed))
               (let* ((document (ende-chat--build-document))
@@ -7740,26 +7740,26 @@ Use COMMAND for the process, or a silent sleep process by default."
                        (ende-chat--document-headlines document)))
                      (message
                       (ende-chat--protocol-assistant-message document intermediate)))
-                (should work)
-                (should-not reply)
-                (should (equal (ende-chat--property document work :state)
+		(should work)
+		(should-not reply)
+		(should (equal (ende-chat--property document work :state)
                                "failed"))
-                (should (equal (mapcar (lambda (call)
+		(should (equal (mapcar (lambda (call)
                                          (ende-chat--property
                                           document call :tool-call-id))
                                        calls)
                                '("call-A" "call-B")))
-                (should (equal (mapcar (lambda (result)
+		(should (equal (mapcar (lambda (result)
                                          (ende-chat--property
                                           document result :tool-call-id))
                                        results)
                                '("call-A")))
-                (should (equal (plist-get message :tool-calls)
+		(should (equal (plist-get message :tool-calls)
                                '((:id "call-A" :name "read_file"
-                                  :arguments "{\"path\":\"a.el\"}")
+                                      :arguments "{\"path\":\"a.el\"}")
                                  (:id "call-B" :name "read_file"
-                                  :arguments "{\"path\":\"b.el\"}"))))
-                (should-not
+                                      :arguments "{\"path\":\"b.el\"}"))))
+		(should-not
                  (string-match-p "This must not be requested" (buffer-string)))))))
       (ende-test--reset)
       (when (file-directory-p root)
@@ -8055,11 +8055,11 @@ Use COMMAND for the process, or a silent sleep process by default."
     (org-mode)
     (ende-test--chat-goto "** Question")
     (let ((root-prefix (ende-test--chat-context-text
-                        (let ((ende-chat-context-policy 'root-prefix))
+			(let ((ende-chat-context-policy 'root-prefix))
                           (ende-chat-context-at-point))))
           (current-only (ende-test--chat-context-text
                          (let ((ende-chat-context-policy
-                                'current-section-only))
+				'current-section-only))
                            (ende-chat-context-at-point)))))
       (should (string-match-p "Earlier material" root-prefix))
       (should-not (string-match-p "Earlier material" current-only))
@@ -8070,35 +8070,35 @@ Use COMMAND for the process, or a silent sleep process by default."
   (let ((ende-chat-context-policy 'root-prefix)
         (ende-chat-include-reasoning nil))
     (ende-test--with-buffer
-        (concat "* Q0\nOriginal root context\n"
-                "** R1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                "** C0\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
-                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
-                "** Q01\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "** R01\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                "*** Q11\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "*** R11\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                "*** C1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
-                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
-                "**** Summary detail\nRemember this detail\n"
-                "*** Instructions\n:PROPERTIES:\n"
-                ":ENDE_VISIBILITY: hidden\n:END:\nNever send this\n"
-                "*** Q1\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "**** Reference\nCurrent question reference\n"
-                "*** R12\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                "** Q2\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "** R02\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                "*** Q21\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "**** Q211\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "** C2\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
-                ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
-                "** Q3\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-                "* Other\n** Q4\n")
+	(concat "* Q0\nOriginal root context\n"
+		"** R1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		"** C0\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+		":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+		"** Q01\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"** R01\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		"*** Q11\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"*** R11\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		"*** C1\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+		":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+		"**** Summary detail\nRemember this detail\n"
+		"*** Instructions\n:PROPERTIES:\n"
+		":ENDE_VISIBILITY: hidden\n:END:\nNever send this\n"
+		"*** Q1\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"**** Reference\nCurrent question reference\n"
+		"*** R12\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		"** Q2\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"** R02\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		"*** Q21\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"**** Q211\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"** C2\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+		":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+		"** Q3\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+		"* Other\n** Q4\n")
       (org-mode)
       ;; These queries exercise a local fence, an ancestor fence, an earlier
       ;; branch at the same depth, later fences, and an independent root.
       (dolist (case
-               '(("*** Q11" "C0" "Q01" "R01" "Q11")
+	       '(("*** Q11" "C0" "Q01" "R01" "Q11")
                  ("*** Q1" "C1" "Summary detail" "Q1" "Reference")
                  ("** Q2" "C0" "Q01" "R01" "C1" "Summary detail"
                   "Q1" "Reference" "R12" "Q2")
@@ -8108,8 +8108,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                   "Q1" "Reference" "R12" "Q2" "R02" "Q21" "Q211")
                  ("** Q3" "C2" "Q3")
                  ("** Q4" "Other" "Q4")))
-        (ende-test--chat-goto (car case))
-        (let* ((messages (ende-chat-context-at-point))
+	(ende-test--chat-goto (car case))
+	(let* ((messages (ende-chat-context-at-point))
                (text (ende-test--chat-context-text messages)))
           (ert-info ((format "Context at %s" (car case)))
             (should (equal (ende-test--chat-context-headings messages)
@@ -8120,19 +8120,19 @@ Use COMMAND for the process, or a silent sleep process by default."
             (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" text)))))
       ;; An unfinished result cannot replace history, even if it was marked.
       (dolist (state '("pending" "failed"))
-        (ende-test--chat-goto "** C2")
-        (org-entry-put nil ende-chat-state-property state)
-        (org-entry-put nil ende-chat-visibility-property "hidden")
-        (ende-test--chat-goto "** Q3")
-        (should
+	(ende-test--chat-goto "** C2")
+	(org-entry-put nil ende-chat-state-property state)
+	(org-entry-put nil ende-chat-visibility-property "hidden")
+	(ende-test--chat-goto "** Q3")
+	(should
          (equal (ende-test--chat-context-headings (ende-chat-context-at-point))
-                '("C0" "Q01" "R01" "C1" "Summary detail" "Q1" "Reference"
+		'("C0" "Q01" "R01" "C1" "Summary detail" "Q1" "Reference"
                   "R12" "Q2" "R02" "Q21" "Q211" "Q3"))))
       (let ((ende-chat-context-policy 'current-section-only))
-        (ende-test--chat-goto "*** Q1")
-        (should
+	(ende-test--chat-goto "*** Q1")
+	(should
          (equal (ende-test--chat-context-headings (ende-chat-context-at-point))
-                '("Q1" "Reference")))))))
+		'("Q1" "Reference")))))))
 
 (ert-deftest ende-test/chat-compaction-preserves-instructions-and-org-layout ()
   (dolist (level '(2 4))
@@ -8149,76 +8149,76 @@ Use COMMAND for the process, or a silent sleep process by default."
              (ende-llm-function
               (ende-test--fake-llm
                '((:content "#+ENDE_CHAT_TITLE: Ignore this title\n* Facts\nSummary"
-                  :thinking "Plan")) t)))
+			   :thinking "Plan")) t)))
         (ende-test--with-buffer "* Topic\nEarlier conversation\n"
-          (org-mode)
-          (goto-char (point-max))
-          (cl-loop for depth from 2 below level
-                   do (insert (make-string depth ?*) " Ancestor\n"))
-          (let ((start (point)))
-            (insert (make-string level ?*) " " title "\n" body "\n"
-                    (make-string level ?*) " Next\nContinue\n")
-            (goto-char start)
-            (let* ((job (ende-compact '(:name local :model "compact-model")))
-                   (question-id (plist-get (ende-job-instruction job) :question-id))
-                   (call (car ende-test--calls))
-                   (messages (plist-get call :messages)))
-              (should (eq (ende-job-state job) 'running))
-              (should (string-match-p
-                       (regexp-quote (if (string-empty-p body)
-                                         ende-chat-compact-instruction body))
-                       (cdar (last messages))))
-              (should-not (string-match-p "ENDE_CHAT_TITLE" (cdar messages)))
-              (when (and (not (string-empty-p title))
-                         (string-empty-p body))
-                (should-not (string-match-p (regexp-quote title)
-                                            (cdar (last messages)))))
-              (when late-note
-                (org-end-of-meta-data t)
-                (insert late-note "\n"))
-              (ende-test--complete-call call)
-              (should (eq (ende-job-state job) 'completed))
-              (let* ((document (ende-chat--build-document))
-                     (question (ende-chat--find-by-property
-                                document ende-chat-id-property question-id))
-                     (fence (ende-chat--find-by-property
-                             document ende-chat-request-id-property
-                             (plist-get (ende-job-instruction job) :request-id)))
-                     (reasoning (ende-chat--find-by-property
-                                 document ende-chat-reasoning-for-property
-                                 (plist-get (ende-job-instruction job)
-                                            :request-id))))
-                (should (ende-chat--context-fence-p document fence))
-                (should (= (org-element-property :level fence) level))
-                (should (equal (org-element-property :raw-value fence)
-                               "Agent: Context Fence"))
-                (should (eq (ende-chat--parent document reasoning) fence))
-                (should-not (ende-chat--context-fence-p document reasoning))
-                (should (equal (ende-test--chat-headline-property
-                                fence ende-chat-model-property)
-                               "compact-model"))
-                (if (and (string-empty-p title) (string-empty-p body)
-                         (not late-note))
-                    (should-not question)
-                  (should question)
-                  (should (equal (org-element-property :raw-value question)
-                                 (if (string-empty-p title)
-                                     "User: Context Fence Instructions" title)))
-                  (should (equal (ende-chat--property document question :visibility)
-                                 "hidden"))
-                  (should (= (org-element-property :end question)
-                             (org-element-property :begin fence)))
-                  (should (string-match-p (regexp-quote (or late-note body))
-                                          (buffer-string))))
-                (should-not (string-match-p "Ignore this title" (buffer-string)))
-                (should (cl-every #'ende-test--chat-control-drawer-hidden-p
-                                 (ende-test--chat-control-drawers))))
-              (ende-test--chat-goto (concat (make-string level ?*) " Next"))
-              (let ((ende-chat-include-reasoning nil))
-                (should
-                 (equal (ende-test--chat-context-headings
-                         (ende-chat-context-at-point))
-                        '("Agent: Context Fence" "Facts" "Next")))))))))))
+	  (org-mode)
+	  (goto-char (point-max))
+	  (cl-loop for depth from 2 below level
+		   do (insert (make-string depth ?*) " Ancestor\n"))
+	  (let ((start (point)))
+	    (insert (make-string level ?*) " " title "\n" body "\n"
+		    (make-string level ?*) " Next\nContinue\n")
+	    (goto-char start)
+	    (let* ((job (ende-compact '(:name local :model "compact-model")))
+		   (question-id (plist-get (ende-job-instruction job) :question-id))
+		   (call (car ende-test--calls))
+		   (messages (plist-get call :messages)))
+	      (should (eq (ende-job-state job) 'running))
+	      (should (string-match-p
+		       (regexp-quote (if (string-empty-p body)
+					 ende-chat-compact-instruction body))
+		       (cdar (last messages))))
+	      (should-not (string-match-p "ENDE_CHAT_TITLE" (cdar messages)))
+	      (when (and (not (string-empty-p title))
+			 (string-empty-p body))
+		(should-not (string-match-p (regexp-quote title)
+					    (cdar (last messages)))))
+	      (when late-note
+		(org-end-of-meta-data t)
+		(insert late-note "\n"))
+	      (ende-test--complete-call call)
+	      (should (eq (ende-job-state job) 'completed))
+	      (let* ((document (ende-chat--build-document))
+		     (question (ende-chat--find-by-property
+				document ende-chat-id-property question-id))
+		     (fence (ende-chat--find-by-property
+			     document ende-chat-request-id-property
+			     (plist-get (ende-job-instruction job) :request-id)))
+		     (reasoning (ende-chat--find-by-property
+				 document ende-chat-reasoning-for-property
+				 (plist-get (ende-job-instruction job)
+					    :request-id))))
+		(should (ende-chat--context-fence-p document fence))
+		(should (= (org-element-property :level fence) level))
+		(should (equal (org-element-property :raw-value fence)
+			       "Agent: Context Fence"))
+		(should (eq (ende-chat--parent document reasoning) fence))
+		(should-not (ende-chat--context-fence-p document reasoning))
+		(should (equal (ende-test--chat-headline-property
+				fence ende-chat-model-property)
+			       "compact-model"))
+		(if (and (string-empty-p title) (string-empty-p body)
+			 (not late-note))
+		    (should-not question)
+		  (should question)
+		  (should (equal (org-element-property :raw-value question)
+				 (if (string-empty-p title)
+				     "User: Context Fence Instructions" title)))
+		  (should (equal (ende-chat--property document question :visibility)
+				 "hidden"))
+		  (should (= (org-element-property :end question)
+			     (org-element-property :begin fence)))
+		  (should (string-match-p (regexp-quote (or late-note body))
+					  (buffer-string))))
+		(should-not (string-match-p "Ignore this title" (buffer-string)))
+		(should (cl-every #'ende-test--chat-control-drawer-hidden-p
+				  (ende-test--chat-control-drawers))))
+	      (ende-test--chat-goto (concat (make-string level ?*) " Next"))
+	      (let ((ende-chat-include-reasoning nil))
+		(should
+		 (equal (ende-test--chat-context-headings
+			 (ende-chat-context-at-point))
+			'("Agent: Context Fence" "Facts" "Next")))))))))))
 
 (ert-deftest ende-test/chat-compaction-and-asks-share-live-context ()
   (ende-test--reset)
@@ -8228,16 +8228,16 @@ Use COMMAND for the process, or a silent sleep process by default."
           '("First summary" "New answer" "Second summary" "Final answer"
             "Third summary") t)))
     (ende-test--with-buffer
-        (concat "* Topic\nOriginal history\n"
-                "** First compaction\nKeep decisions\n"
-                "** Follow up\nNew question\n"
-                "** Second compaction\nKeep commands\n"
-                "** Final question\nContinue\n")
+	(concat "* Topic\nOriginal history\n"
+		"** First compaction\nKeep decisions\n"
+		"** Follow up\nNew question\n"
+		"** Second compaction\nKeep commands\n"
+		"** Final question\nContinue\n")
       (org-mode)
       (ende-test--chat-goto "** First compaction")
       (let ((first (ende-compact)))
-        (ende-test--chat-goto "** Follow up")
-        (let ((ask (ende-ask)))
+	(ende-test--chat-goto "** Follow up")
+	(let ((ask (ende-ask)))
           (should (eq (ende-job-state ask) 'queued))
           (ende-test--complete-call (nth 0 ende-test--calls))
           (should (eq (ende-job-state first) 'completed))
@@ -8259,7 +8259,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                            (plist-get (nth 2 ende-test--calls) :messages))))
               (dolist (text '("First summary" "New answer" "Latest detail"
                               "Keep commands"))
-                (should (string-match-p text prompt)))
+		(should (string-match-p text prompt)))
               (should-not (string-match-p "Original history" prompt)))
             (ende-test--chat-goto "** Final question")
             (let ((final (ende-ask)))
@@ -8267,9 +8267,9 @@ Use COMMAND for the process, or a silent sleep process by default."
               (ende-test--complete-call (nth 2 ende-test--calls))
               (let ((prompt (ende-test--chat-context-text
                              (plist-get (nth 3 ende-test--calls) :messages))))
-                (should (string-match-p "Second summary" prompt))
-                (dolist (text '("First summary" "New answer" "Latest detail"
-                                "Keep commands" "Original history"))
+		(should (string-match-p "Second summary" prompt))
+		(dolist (text '("First summary" "New answer" "Latest detail"
+				"Keep commands" "Original history"))
                   (should-not (string-match-p text prompt))))
               (ende-test--complete-call (nth 3 ende-test--calls))
               (should (eq (ende-job-state final) 'completed)))
@@ -8281,16 +8281,16 @@ Use COMMAND for the process, or a silent sleep process by default."
                            (plist-get (ende-job-instruction second) :request-id))))
               (goto-char (org-element-property :begin fence))
               (let ((third (ende-compact)))
-                (should
+		(should
                  (equal (ende-test--chat-context-headings
                          (butlast (cdr (plist-get (nth 4 ende-test--calls)
-                                                :messages))))
-                        '("Agent: Context Fence")))
-                (ende-test--complete-call (nth 4 ende-test--calls))
-                (should (eq (ende-job-state third) 'completed)))))))
+                                                  :messages))))
+			'("Agent: Context Fence")))
+		(ende-test--complete-call (nth 4 ende-test--calls))
+		(should (eq (ende-job-state third) 'completed)))))))
       ;; A fresh buffer reconstructs the same context using only durable Org.
       (let ((text (buffer-string)))
-        (with-temp-buffer
+	(with-temp-buffer
           (org-mode)
           (insert text)
           (ende-test--chat-goto "** Final question")
@@ -8312,10 +8312,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                     (:title-only "#+ENDE_CHAT_TITLE: Not a summary\n")
                     (_ "Summary"))) t)))
       (ende-test--with-buffer
-          "* Topic\nOriginal history\n** Instructions\nKeep decisions\n** Next\nAsk\n"
-        (org-mode)
-        (ende-test--chat-goto "** Instructions")
-        (let ((job (ende-compact)))
+	  "* Topic\nOriginal history\n** Instructions\nKeep decisions\n** Next\nAsk\n"
+	(org-mode)
+	(ende-test--chat-goto "** Instructions")
+	(let ((job (ende-compact)))
           (pcase outcome
             (:cancelled (ende-abort-queue))
             (:deleted
@@ -8329,7 +8329,7 @@ Use COMMAND for the process, or a silent sleep process by default."
           (let ((document (ende-chat--build-document)))
             (should-not
              (cl-some (lambda (headline)
-                        (ende-chat--context-fence-p document headline))
+			(ende-chat--context-fence-p document headline))
                       (ende-chat--document-headlines document))))
           (ende-test--chat-goto "** Next")
           (let* ((messages (ende-chat-context-at-point))
@@ -8345,10 +8345,10 @@ Use COMMAND for the process, or a silent sleep process by default."
     (let ((ende-llm-function
            (ende-test--fake-llm '("First summary" "Second summary") t)))
       (ende-test--with-buffer
-          (concat "* Topic\nOriginal history\n** \n" body "\n** Next\nContinue\n")
-        (org-mode)
-        (ende-test--chat-goto "** ")
-        (let ((first (ende-compact))
+	  (concat "* Topic\nOriginal history\n** \n" body "\n** Next\nContinue\n")
+	(org-mode)
+	(ende-test--chat-goto "** ")
+	(let ((first (ende-compact))
               (second (ende-compact)))
           (should (eq (ende-job-state second) 'queued))
           (ende-test--complete-call (nth 0 ende-test--calls))
@@ -8385,40 +8385,40 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (= (ende-test--chat-response-count) 2))
       (should (= (length (ende-test--chat-reasoning-headlines)) 2))
       (should (equal (org-entry-get nil ende-chat-role-property)
-                     "user"))
+		     "user"))
       (should (< (string-match-p "First answer" (buffer-string))
-                 (string-match-p "Second answer" (buffer-string))))
+		 (string-match-p "Second answer" (buffer-string))))
       (let* ((document (ende-chat--build-document))
-             (headlines (ende-chat--document-headlines document))
-             (reasoning
-              (cl-remove-if-not
-               (lambda (headline)
-                 (string= (org-element-property :raw-value headline)
-                          "Agent: Reasoning"))
-               headlines))
-             (replies
-              (cl-remove-if-not
-               (lambda (headline)
-                 (string= (org-element-property :raw-value headline)
-                          "Agent: Reply"))
-               headlines)))
-        (should (< (org-element-property :begin (nth 0 reasoning))
-                   (org-element-property :begin (nth 0 replies))))
-        (should (< (org-element-property :begin (nth 0 replies))
-                   (org-element-property :begin (nth 1 reasoning))))
-        (should (< (org-element-property :begin (nth 1 reasoning))
-                   (org-element-property :begin (nth 1 replies))))
-        (dolist (pair (cl-mapcar #'cons reasoning replies))
-          (let ((request-id
-                 (ende-chat--property document (cdr pair) :request-id)))
-            (should (equal (ende-chat--property document (car pair)
-                                                :reasoning-for)
-                           request-id))
-            (should (eq (ende-chat--find-by-property
-                         document ende-chat-request-id-property request-id)
-                        (cdr pair))))))
+	     (headlines (ende-chat--document-headlines document))
+	     (reasoning
+	      (cl-remove-if-not
+	       (lambda (headline)
+		 (string= (org-element-property :raw-value headline)
+			  "Agent: Reasoning"))
+	       headlines))
+	     (replies
+	      (cl-remove-if-not
+	       (lambda (headline)
+		 (string= (org-element-property :raw-value headline)
+			  "Agent: Reply"))
+	       headlines)))
+	(should (< (org-element-property :begin (nth 0 reasoning))
+		   (org-element-property :begin (nth 0 replies))))
+	(should (< (org-element-property :begin (nth 0 replies))
+		   (org-element-property :begin (nth 1 reasoning))))
+	(should (< (org-element-property :begin (nth 1 reasoning))
+		   (org-element-property :begin (nth 1 replies))))
+	(dolist (pair (cl-mapcar #'cons reasoning replies))
+	  (let ((request-id
+		 (ende-chat--property document (cdr pair) :request-id)))
+	    (should (equal (ende-chat--property document (car pair)
+						:reasoning-for)
+			   request-id))
+	    (should (eq (ende-chat--find-by-property
+			 document ende-chat-request-id-property request-id)
+			(cdr pair))))))
       (should-not (cl-some #'ende-review-overlay-p
-                            (overlays-in (point-min) (point-max)))))))
+			   (overlays-in (point-min) (point-max)))))))
 
 (ert-deftest ende-test/chat-title-directive-is-applied-and-removed ()
   (ende-test--reset)
@@ -8433,16 +8433,16 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** ")
       (let ((job (ende-ask)))
-        (should (eq (ende-job-state job) 'completed)))
+	(should (eq (ende-job-state job) 'completed)))
       (should-not (ende-test--chat-reasoning-headlines))
       (should (string-match-p "^\\*\\* Explain the request$"
-                              (buffer-string)))
+			      (buffer-string)))
       (should-not (string-match-p "ENDE_CHAT_TITLE" (buffer-string)))
       (should (string-match-p "Answer" (buffer-string)))
       (should (string-match-p
-               "Instructions → User question — café" (buffer-string)))
+	       "Instructions → User question — café" (buffer-string)))
       (should (string-match-p "^\\*\\*\\* Generated$"
-                              (buffer-string))))))
+			      (buffer-string))))))
 
 (ert-deftest ende-test/chat-response-blocks-stay-opaque-and-close-at-boundary ()
   (let* ((source
@@ -8482,22 +8482,22 @@ Use COMMAND for the process, or a silent sleep process by default."
         (ende-llm-function
          (ende-test--fake-llm
           '((:content "First answer\n#+begin_src org\n*** Literal heading"
-             :thinking "Plan\n#+begin_quote\n* Literal thought")
+		      :thinking "Plan\n#+begin_quote\n* Literal thought")
             "Second answer"
             "Third answer")
           t)))
     (ende-test--with-buffer
-        (concat "* Topic\n"
-                "** First question\nFirst request\n"
-                "** Second question\nSecond request\n"
-                "** Third question\nThird request\n"
-                "** Later section\nKeep this section\n")
+	(concat "* Topic\n"
+		"** First question\nFirst request\n"
+		"** Second question\nSecond request\n"
+		"** Third question\nThird request\n"
+		"** Later section\nKeep this section\n")
       (org-mode)
       (ende-test--chat-goto "** First question")
       (setq ende--queue-suspended t)
       (let ((first-job (ende-ask)))
-        (ende-test--chat-goto "** Second question")
-        (let ((second-job (ende-ask)))
+	(ende-test--chat-goto "** Second question")
+	(let ((second-job (ende-ask)))
           (setq ende--queue-suspended nil)
           (ende-process-next)
           (should (= (length ende-test--calls) 2))
@@ -8528,8 +8528,8 @@ Use COMMAND for the process, or a silent sleep process by default."
             (should-not
              (cl-some
               (lambda (headline)
-                (member (org-element-property :raw-value headline)
-                        '("Literal heading" "Literal thought")))
+		(member (org-element-property :raw-value headline)
+			'("Literal heading" "Literal thought")))
               headlines))
             (should (= (length (ende-test--chat-response-headlines)) 2)))
           ;; A fresh request below the repaired response must remain usable.
@@ -8542,15 +8542,15 @@ Use COMMAND for the process, or a silent sleep process by default."
           (let ((context (ende-test--chat-context-text
                           (ende-chat-context-at-point))))
             (should (string-match-p "First answer" context))
-             (should (string-match-p "Second answer" context))
-             (should (string-match-p "Third answer" context))
-             (should
-              (string-match-p
-               (regexp-quote
-                "First answer\n#+begin_src org\n*** Literal heading")
-               context))
-             (should-not (string-match-p (regexp-quote "#+end_src") context))
-             (should (string-match-p "Keep this section" context))))))))
+            (should (string-match-p "Second answer" context))
+            (should (string-match-p "Third answer" context))
+            (should
+             (string-match-p
+              (regexp-quote
+               "First answer\n#+begin_src org\n*** Literal heading")
+              context))
+            (should-not (string-match-p (regexp-quote "#+end_src") context))
+            (should (string-match-p "Keep this section" context))))))))
 
 (ert-deftest ende-test/chat-reasoning-is-org-structured-folded-and-configurable ()
   (ende-test--reset)
@@ -8563,13 +8563,13 @@ Use COMMAND for the process, or a silent sleep process by default."
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :content "Answer\n** Reply section"
-                        :thinking thinking)))))
+                       :thinking thinking)))))
     (ende-test--with-buffer
-        (concat "* Root\n"
-                "** Question\n"
-                "Ask\n"
-                "** Next\n"
-                "Next\n")
+	(concat "* Root\n"
+		"** Question\n"
+		"Ask\n"
+		"** Next\n"
+		"Next\n")
       (org-mode)
       (ende-test--chat-goto "** Question")
       (ende-ask)
@@ -8611,43 +8611,43 @@ Use COMMAND for the process, or a silent sleep process by default."
                headlines))
              (source-blocks
               (org-element-map reasoning 'src-block #'identity)))
-        (should (equal (org-element-property :raw-value reasoning)
+	(should (equal (org-element-property :raw-value reasoning)
                        "Agent: Reasoning"))
-        (should (equal (org-element-property :raw-value reply) "Agent: Reply"))
-        (should (= (org-element-property :level reasoning) 2))
-        (should (= (org-element-property :level reply) 2))
-        (should (eq (ende-chat--parent document reasoning)
+	(should (equal (org-element-property :raw-value reply) "Agent: Reply"))
+	(should (= (org-element-property :level reasoning) 2))
+	(should (= (org-element-property :level reply) 2))
+	(should (eq (ende-chat--parent document reasoning)
                     (ende-chat--parent document reply)))
-        (should (< (org-element-property :begin reasoning)
+	(should (< (org-element-property :begin reasoning)
                    (org-element-property :begin reply)))
-        (should (eq (ende-chat--effective-role document reasoning) 'assistant))
-        (should (eq (ende-chat--effective-role document reply) 'assistant))
-        (should (eq (ende-chat--effective-visibility document reasoning)
+	(should (eq (ende-chat--effective-role document reasoning) 'assistant))
+	(should (eq (ende-chat--effective-role document reply) 'assistant))
+	(should (eq (ende-chat--effective-visibility document reasoning)
                     'reasoning))
-        (should (eq (ende-chat--effective-visibility document reply) 'normal))
-        (should (equal reasoning-id reply-id))
-        (should-not (ende-chat--property document reasoning :request-id))
-        (should (eq (ende-chat--find-by-property
+	(should (eq (ende-chat--effective-visibility document reply) 'normal))
+	(should (equal reasoning-id reply-id))
+	(should-not (ende-chat--property document reasoning :request-id))
+	(should (eq (ende-chat--find-by-property
                      document ende-chat-request-id-property reply-id)
                     reply))
-        (should (equal (org-element-property :raw-value first-thought)
+	(should (equal (org-element-property :raw-value first-thought)
                        "First thought"))
-        (should (= (org-element-property :level first-thought) 3))
-        (should (= (org-element-property :level nested-thought) 4))
-        (should (eq (ende-chat--parent document first-thought) reasoning))
-        (should (eq (ende-chat--parent document nested-thought) first-thought))
-        (should (= (length source-blocks) 1))
-        (should (equal (org-element-property :language (car source-blocks))
+	(should (= (org-element-property :level first-thought) 3))
+	(should (= (org-element-property :level nested-thought) 4))
+	(should (eq (ende-chat--parent document first-thought) reasoning))
+	(should (eq (ende-chat--parent document nested-thought) first-thought))
+	(should (= (length source-blocks) 1))
+	(should (equal (org-element-property :language (car source-blocks))
                        "emacs-lisp"))
-        (should (equal (org-element-property :raw-value reply-section)
+	(should (equal (org-element-property :raw-value reply-section)
                        "Reply section"))
-        (should (= (org-element-property :level reply-section) 3))
-        (should-not (string-match-p ",\\*" (buffer-string)))
-        (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+	(should (= (org-element-property :level reply-section) 3))
+	(should-not (string-match-p ",\\*" (buffer-string)))
+	(should (cl-every #'ende-test--chat-control-drawer-hidden-p
                           (ende-test--chat-control-drawers)))
-        (should (ende-test--chat-headline-text-hidden-p reasoning "Plan"))
-        (should-not (ende-test--chat-headline-text-hidden-p reply "Answer"))
-        (save-excursion
+	(should (ende-test--chat-headline-text-hidden-p reasoning "Plan"))
+	(should-not (ende-test--chat-headline-text-hidden-p reply "Answer"))
+	(save-excursion
           (goto-char (org-element-property :begin reasoning))
           (org-fold-show-subtree)
           (should-not (ende-test--chat-headline-text-hidden-p
@@ -8655,34 +8655,34 @@ Use COMMAND for the process, or a silent sleep process by default."
       (ende-test--chat-goto "** Next")
       (let* ((without-messages
               (let ((ende-chat-include-reasoning nil))
-                (ende-chat-context-at-point)))
+		(ende-chat-context-at-point)))
              (with-messages
               (let ((ende-chat-include-reasoning t))
-                (ende-chat-context-at-point)))
+		(ende-chat-context-at-point)))
              (without (ende-test--chat-context-text without-messages))
-         (with (ende-test--chat-context-text with-messages)))
-         (should (equal (cdr (assoc "assistant" without-messages))
-                        "Answer\n** Reply section"))
-         (should-not (string-match-p "First thought" without))
-        (should (string-match-p "Answer" without))
-        (should-not (string-match-p "ENDE_CHAT_REASONING_FOR" without))
-        (should (string-match-p "First thought" with))
-        (should (string-match-p "reasoning source" with))
-        (should (string-match-p "Answer" with))
-        (should-not (string-match-p "ENDE_CHAT_REASONING_FOR" with))
-        (should (equal (mapcar #'car without-messages)
+             (with (ende-test--chat-context-text with-messages)))
+	(should (equal (cdr (assoc "assistant" without-messages))
+                       "Answer\n** Reply section"))
+	(should-not (string-match-p "First thought" without))
+	(should (string-match-p "Answer" without))
+	(should-not (string-match-p "ENDE_CHAT_REASONING_FOR" without))
+	(should (string-match-p "First thought" with))
+	(should (string-match-p "reasoning source" with))
+	(should (string-match-p "Answer" with))
+	(should-not (string-match-p "ENDE_CHAT_REASONING_FOR" with))
+	(should (equal (mapcar #'car without-messages)
                        '("user" "user" "assistant" "user")))
-        (should (equal (mapcar #'car with-messages)
+	(should (equal (mapcar #'car with-messages)
                        '("user" "user" "assistant" "assistant" "user")))))))
 
 (ert-deftest ende-test/chat-response-provenance-is-durable-and-private ()
   (dolist (scenario
            '((:request-model "requested-model"
-              :reported-model "actual-model\n:ENDE_ROLE: user"
-              :expected-model "actual-model :ENDE_ROLE: user"
-              :effort "high")
+			     :reported-model "actual-model\n:ENDE_ROLE: user"
+			     :expected-model "actual-model :ENDE_ROLE: user"
+			     :effort "high")
              (:request-model "requested-fallback"
-              :expected-model "requested-fallback")))
+			     :expected-model "requested-fallback")))
     (ende-test--reset)
     (let* ((reported-model (plist-get scenario :reported-model))
            (effort (plist-get scenario :effort))
@@ -8706,12 +8706,12 @@ Use COMMAND for the process, or a silent sleep process by default."
                (list :reported-model reported-model))))
            (ende-llm-function (ende-test--fake-llm (list response))))
       (ende-test--with-buffer
-          "* Root\n** Question\nAsk\n** Next\nFollow up\n"
-        (org-mode)
-        (ende-test--chat-goto "** Question")
-        (let ((job (ende-ask profile)))
+	  "* Root\n** Question\nAsk\n** Next\nFollow up\n"
+	(org-mode)
+	(ende-test--chat-goto "** Question")
+	(let ((job (ende-ask profile)))
           (should (eq (ende-job-state job) 'completed)))
-        (let ((reasoning (car (ende-test--chat-reasoning-headlines)))
+	(let ((reasoning (car (ende-test--chat-reasoning-headlines)))
               (reply (car (ende-test--chat-response-headlines))))
           (should reasoning)
           (should reply)
@@ -8727,16 +8727,16 @@ Use COMMAND for the process, or a silent sleep process by default."
           (should (cl-every #'ende-test--chat-control-drawer-hidden-p
                             (ende-test--chat-control-drawers)))
           (should (= 1 (ende-test--count-matches
-                        "^:ENDE_ROLE: user$" (buffer-string))))
+			"^:ENDE_ROLE: user$" (buffer-string))))
           (should-not (string-match-p "forged-model" (buffer-string)))
           (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
           (should-not (string-match-p "ENDE_CHAT_TOOL_CONTEXT"
                                       (buffer-string)))
           (should-not (string-match-p "forged-effort" (buffer-string))))
-        (ende-test--chat-goto "** Next")
-        (let* ((ende-chat-include-reasoning t)
+	(ende-test--chat-goto "** Next")
+	(let* ((ende-chat-include-reasoning t)
                (context
-                (ende-test--chat-context-text
+		(ende-test--chat-context-text
                  (ende-chat-context-at-point))))
           (should (string-match-p "Private plan" context))
           (should (string-match-p "Answer body" context))
@@ -8756,7 +8756,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** Question")
       (let ((job (ende-ask)))
-        (should (eq (ende-job-state job) 'failed)))
+	(should (eq (ende-job-state job) 'failed)))
       (should (string-match-p "Original text" (buffer-string)))
       (should (string-match-p ":ENDE_CHAT_STATE: failed" (buffer-string)))
       (should (string-match-p ":ENDE_VISIBILITY: hidden" (buffer-string))))))
@@ -8769,64 +8769,64 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (ende-test--chat-goto "** Question")
       (let ((point-before (point)))
-        (setq ende--queue-suspended t)
-        (let ((first (ende-ask))
-              (second (ende-ask)))
-          (should (= (point) point-before))
-          (let ((drawers (ende-test--chat-control-drawers)))
-            (should (= (length drawers) 3))
-            (should (cl-every #'ende-test--chat-control-drawer-hidden-p
-                              drawers)))
-          (let ((headlines (ende-test--chat-response-headlines)))
-            (should (= (length headlines) 2))
-            (should (cl-every #'ende-test--chat-response-has-separator-p
-                              headlines))
-            (dolist (job (list first second))
-              (should
-               (cl-some
-                (lambda (headline)
-                  (= (overlay-start (ende-job-overlay job))
-                     (1- (org-element-property :begin headline))))
-                headlines))))
-          (setq ende--queue-suspended nil)
-          (ende-process-next)
-          (should (= (length ende-test--calls) 2))
-          (dolist (messages ende-test--prompts)
-            (let ((users (mapcar #'cdr
-                                 (cl-remove-if-not
-                                  (lambda (message)
-                                    (equal (car message) "user"))
-                                  messages))))
-              (should (cl-every
-                       (lambda (text)
-                         (and (not (string-match-p "ENDE_CHAT_STATE" text))
-                              (not (string-match-p "Agent: Reply" text))))
-                       users))))
-          (ende-test--complete-call (nth 1 ende-test--calls))
-          (should (eq (ende-job-state second) 'completed))
-          (should (eq (ende-job-state first) 'running))
-          (should (string-match-p "Second" (buffer-string)))
-          (should (cl-every #'ende-test--chat-control-drawer-hidden-p
-                            (ende-test--chat-control-drawers)))
-          (should (string-match-p "ENDE_CHAT_STATE: pending" (buffer-string)))
-          (ende-test--complete-call (nth 0 ende-test--calls))
-          (should (eq (ende-job-state first) 'completed))
-          (should (< (string-match-p "First" (buffer-string))
-                     (string-match-p "Second" (buffer-string))))
-          (should (cl-every #'ende-test--chat-control-drawer-hidden-p
-                            (ende-test--chat-control-drawers)))
-          (should (cl-every #'ende-test--chat-response-has-separator-p
-                            (ende-test--chat-response-headlines))))))))
+	(setq ende--queue-suspended t)
+	(let ((first (ende-ask))
+	      (second (ende-ask)))
+	  (should (= (point) point-before))
+	  (let ((drawers (ende-test--chat-control-drawers)))
+	    (should (= (length drawers) 3))
+	    (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+			      drawers)))
+	  (let ((headlines (ende-test--chat-response-headlines)))
+	    (should (= (length headlines) 2))
+	    (should (cl-every #'ende-test--chat-response-has-separator-p
+			      headlines))
+	    (dolist (job (list first second))
+	      (should
+	       (cl-some
+		(lambda (headline)
+		  (= (overlay-start (ende-job-overlay job))
+		     (1- (org-element-property :begin headline))))
+		headlines))))
+	  (setq ende--queue-suspended nil)
+	  (ende-process-next)
+	  (should (= (length ende-test--calls) 2))
+	  (dolist (messages ende-test--prompts)
+	    (let ((users (mapcar #'cdr
+				 (cl-remove-if-not
+				  (lambda (message)
+				    (equal (car message) "user"))
+				  messages))))
+	      (should (cl-every
+		       (lambda (text)
+			 (and (not (string-match-p "ENDE_CHAT_STATE" text))
+			      (not (string-match-p "Agent: Reply" text))))
+		       users))))
+	  (ende-test--complete-call (nth 1 ende-test--calls))
+	  (should (eq (ende-job-state second) 'completed))
+	  (should (eq (ende-job-state first) 'running))
+	  (should (string-match-p "Second" (buffer-string)))
+	  (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+			    (ende-test--chat-control-drawers)))
+	  (should (string-match-p "ENDE_CHAT_STATE: pending" (buffer-string)))
+	  (ende-test--complete-call (nth 0 ende-test--calls))
+	  (should (eq (ende-job-state first) 'completed))
+	  (should (< (string-match-p "First" (buffer-string))
+		     (string-match-p "Second" (buffer-string))))
+	  (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+			    (ende-test--chat-control-drawers)))
+	  (should (cl-every #'ende-test--chat-response-has-separator-p
+			    (ende-test--chat-response-headlines))))))))
 
 (ert-deftest ende-test/chat-preserves-point-through-async-lifecycle ()
   (dolist (response '("Answer" :error))
     (ende-test--reset)
     (let ((ende-llm-function (ende-test--fake-llm (list response) t)))
       (ende-test--with-buffer
-          "* Root\n** Question\nAsk\n** Work\nKeep editing\n"
-        (org-mode)
-        (ende-test--chat-goto "** Question")
-        (let ((question-point (point)))
+	  "* Root\n** Question\nAsk\n** Work\nKeep editing\n"
+	(org-mode)
+	(ende-test--chat-goto "** Question")
+	(let ((question-point (point)))
           (setq ende--queue-suspended t)
           (let ((job (ende-ask)))
             (should (= (point) question-point))
@@ -8851,28 +8851,28 @@ Use COMMAND for the process, or a silent sleep process by default."
     (ende-test--reset)
     (let ((ende-llm-function (ende-test--fake-llm '("Answer"))))
       (ende-test--with-buffer
-          (concat "* Root\n"
-                  "** Agent: Reply\n"
-                  ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-                  "Prior assistant answer.\n"
-                  "*** Follow-up\n"
-                  (if local-role
+	  (concat "* Root\n"
+		  "** Agent: Reply\n"
+		  ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+		  "Prior assistant answer.\n"
+		  "*** Follow-up\n"
+		  (if local-role
                       (format ":PROPERTIES:\n:ENDE_ROLE: %s\n:END:\n"
                               local-role)
                     "")
-                  "Question from this node.\n")
-        (org-mode)
-        (ende-test--chat-goto "*** Follow-up")
-        (let* ((job (ende-ask))
+		  "Question from this node.\n")
+	(org-mode)
+	(ende-test--chat-goto "*** Follow-up")
+	(let* ((job (ende-ask))
                (document (ende-chat--build-document))
                (question
-                (ende-chat--find-by-property
+		(ende-chat--find-by-property
                  document ende-chat-id-property
                  (plist-get (ende-job-instruction job) :question-id)))
                (parent (ende-chat--parent document question))
                (messages (plist-get (car ende-test--calls) :messages))
                (assistant-text
-                (mapconcat
+		(mapconcat
                  (lambda (message)
                    (if (equal (car message) "assistant")
                        (cdr message)
@@ -8899,34 +8899,34 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-provider-profiles '((remote :model "configured-model")))
           (ende-llm-function (ende-test--fake-llm '("Answer"))))
       (ende-test--with-buffer
-          (concat "* Root\n"
-                  "** Reasoning cousin\n"
-                  ":PROPERTIES:\n"
-                  ":ENDE_ROLE: assistant\n"
-                  ":ENDE_VISIBILITY: reasoning\n"
-                  ":END:\nCousin reasoning text.\n"
-                  "** Agent: Reasoning\n"
-                  ":PROPERTIES:\n"
-                  ":ENDE_ROLE: assistant\n"
-                  ":ENDE_VISIBILITY: reasoning\n"
-                  ":END:\nOuter reasoning context.\n"
-                  "*** Reasoning aunt\n"
-                  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
-                  "Aunt reasoning text.\n"
-                  "*** Nested reasoning\n"
-                  "Nested reasoning context.\n"
-                  "**** Reasoning sibling\n"
-                  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
-                  "Sibling reasoning text.\n"
-                  "**** Follow-up\nQuestion from reasoning.\n")
-        (org-mode)
-        (ende-test--chat-goto "**** Follow-up")
-        (let ((source (current-buffer)))
+	  (concat "* Root\n"
+		  "** Reasoning cousin\n"
+		  ":PROPERTIES:\n"
+		  ":ENDE_ROLE: assistant\n"
+		  ":ENDE_VISIBILITY: reasoning\n"
+		  ":END:\nCousin reasoning text.\n"
+		  "** Agent: Reasoning\n"
+		  ":PROPERTIES:\n"
+		  ":ENDE_ROLE: assistant\n"
+		  ":ENDE_VISIBILITY: reasoning\n"
+		  ":END:\nOuter reasoning context.\n"
+		  "*** Reasoning aunt\n"
+		  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+		  "Aunt reasoning text.\n"
+		  "*** Nested reasoning\n"
+		  "Nested reasoning context.\n"
+		  "**** Reasoning sibling\n"
+		  ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+		  "Sibling reasoning text.\n"
+		  "**** Follow-up\nQuestion from reasoning.\n")
+	(org-mode)
+	(ende-test--chat-goto "**** Follow-up")
+	(let ((source (current-buffer)))
           (ende-test--selector-ask-from-buffer source))
-        (let* ((call (car ende-test--calls))
+	(let* ((call (car ende-test--calls))
                (messages (plist-get call :messages))
                (assistant-text
-                (mapconcat
+		(mapconcat
                  (lambda (message)
                    (if (equal (car message) "assistant")
                        (cdr message)
@@ -8943,7 +8943,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                               "Aunt reasoning text"
                               "Sibling reasoning text"))
             (should-not (string-match-p (regexp-quote excluded)
-                                        assistant-text)))
+					assistant-text)))
           (should (equal (car final-message) "user"))
           (should (string-match-p "Question from reasoning"
                                   (cdr final-message)))
@@ -8953,24 +8953,24 @@ Use COMMAND for the process, or a silent sleep process by default."
                            "user"))
             (should-not (ende-chat--property document question :visibility))
             (should (eq (ende-chat--effective-visibility document parent)
-                        'reasoning))))))))
+			'reasoning))))))))
 
 (ert-deftest ende-test/selector-ask-rejects-hidden-ancestors ()
   (ende-test--reset)
   (let ((ende-provider-profiles '((remote :model "configured-model")))
         (ende-llm-function (ende-test--fake-llm '("Must not run"))))
     (ende-test--with-buffer
-        (concat "* Root\n"
-                "** Hidden assistant context\n"
-                ":PROPERTIES:\n"
-                ":ENDE_ROLE: assistant\n"
-                ":ENDE_VISIBILITY: hidden\n"
-                ":END:\n"
-                "*** Follow-up\nQuestion inside hidden context.\n")
+	(concat "* Root\n"
+		"** Hidden assistant context\n"
+		":PROPERTIES:\n"
+		":ENDE_ROLE: assistant\n"
+		":ENDE_VISIBILITY: hidden\n"
+		":END:\n"
+		"*** Follow-up\nQuestion inside hidden context.\n")
       (org-mode)
       (ende-test--chat-goto "*** Follow-up")
       (let ((source (current-buffer)))
-        (should-error (ende-test--selector-ask-from-buffer source)
+	(should-error (ende-test--selector-ask-from-buffer source)
                       :type 'user-error))
       (ende-test--chat-goto "*** Follow-up")
       (should-not (org-entry-get nil ende-chat-role-property nil))
@@ -8983,8 +8983,8 @@ Use COMMAND for the process, or a silent sleep process by default."
              ":ENDE_VISIBILITY: reasoning"))
     (ende-test--reset)
     (ende-test--with-buffer
-        (format "* Root\n** Question\n:PROPERTIES:\n%s\n:END:\nAsk\n"
-                property)
+	(format "* Root\n** Question\n:PROPERTIES:\n%s\n:END:\nAsk\n"
+		property)
       (org-mode)
       (ende-test--chat-goto "** Question")
       (should-error (ende-ask) :type 'user-error))))
@@ -8996,24 +8996,24 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-provider-profiles '((remote :model "configured-model")))
           (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "* Root\nEarlier context\n** Question\nAsk\n"
-        (org-mode)
-        (ende-test--chat-goto "** Question")
-        (let ((source (current-buffer)))
-          (with-temp-buffer
-            (ende-selector-mode)
-            (setq ende-selector--source-buffer source
-                  ende-selector--providers '(remote)
-                  ende-selector--provider-index 0
-                  ende-selector--models '("selected-model")
-                  ende-selector--model-index 0
-                  ende-selector--model-state :ready
-                  ende-selector--effort nil)
-            (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
-              (call-interactively (lookup-key ende-selector-mode-map (kbd key)))))
-          (let ((profile (plist-get (car ende-test--calls) :options)))
-            (should (eq (plist-get profile :name) 'remote))
-            (should (equal (plist-get profile :model) "selected-model"))
-            (should (string-match-p "Reply" (buffer-string)))))))))
+	(org-mode)
+	(ende-test--chat-goto "** Question")
+	(let ((source (current-buffer)))
+	  (with-temp-buffer
+	    (ende-selector-mode)
+	    (setq ende-selector--source-buffer source
+		  ende-selector--providers '(remote)
+		  ende-selector--provider-index 0
+		  ende-selector--models '("selected-model")
+		  ende-selector--model-index 0
+		  ende-selector--model-state :ready
+		  ende-selector--effort nil)
+	    (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
+	      (call-interactively (lookup-key ende-selector-mode-map (kbd key)))))
+	  (let ((profile (plist-get (car ende-test--calls) :options)))
+	    (should (eq (plist-get profile :name) 'remote))
+	    (should (equal (plist-get profile :model) "selected-model"))
+	    (should (string-match-p "Reply" (buffer-string)))))))))
 
 (ert-deftest ende-test/selector-ask-prepares-chat-from-non-org-buffer ()
   (dolist (initial '("" "* Existing\nPrevious material\n"))
@@ -9021,42 +9021,42 @@ Use COMMAND for the process, or a silent sleep process by default."
     (let ((ende-selector--last-selection nil)
           (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "source text"
-        (let ((source (current-buffer))
-              (shown nil)
-              (chat (ende-chat--ensure-buffer)))
-          (with-current-buffer chat
-            (insert initial))
-          (with-temp-buffer
-            (ende-selector-mode)
-            (setq ende-selector--source-buffer source
-                  ende-selector--providers '(local)
-                  ende-selector--provider-index 0
-                  ende-selector--models '("local-model")
-                  ende-selector--model-index 0
-                  ende-selector--model-state :ready
-                  ende-selector--effort nil)
-            (cl-letf (((symbol-function 'ende-selector-close) #'ignore)
-                      ((symbol-function 'pop-to-buffer)
-                       (lambda (buffer) (setq shown buffer))))
-              (ende-selector-ask)
-              (with-current-buffer chat
-                (goto-char (point-max))
-                (insert "Question\n"))
-              (setq ende-selector--source-buffer chat)
-              (ende-selector-ask)))
-          (should (eq shown chat))
-          (with-current-buffer chat
-            (should (derived-mode-p 'org-mode))
-            (should (bound-and-true-p ende-mode))
-            (should (= (how-many "^\\* *$" (point-min) (point-max)) 1))
-            (should (string-match-p "Reply" (buffer-string)))
-            (should (string-match-p "^\\*\\* Agent: Reply$"
-                                    (buffer-string)))
-            (should (string-match-p ":ENDE_ROLE: assistant"
-                                    (buffer-string)))
-            (when (not (string-empty-p initial))
-              (should (string-match-p "Previous material"
-                                      (buffer-string))))))))))
+	(let ((source (current-buffer))
+	      (shown nil)
+	      (chat (ende-chat--ensure-buffer)))
+	  (with-current-buffer chat
+	    (insert initial))
+	  (with-temp-buffer
+	    (ende-selector-mode)
+	    (setq ende-selector--source-buffer source
+		  ende-selector--providers '(local)
+		  ende-selector--provider-index 0
+		  ende-selector--models '("local-model")
+		  ende-selector--model-index 0
+		  ende-selector--model-state :ready
+		  ende-selector--effort nil)
+	    (cl-letf (((symbol-function 'ende-selector-close) #'ignore)
+		      ((symbol-function 'pop-to-buffer)
+		       (lambda (buffer) (setq shown buffer))))
+	      (ende-selector-ask)
+	      (with-current-buffer chat
+		(goto-char (point-max))
+		(insert "Question\n"))
+	      (setq ende-selector--source-buffer chat)
+	      (ende-selector-ask)))
+	  (should (eq shown chat))
+	  (with-current-buffer chat
+	    (should (derived-mode-p 'org-mode))
+	    (should (bound-and-true-p ende-mode))
+	    (should (= (how-many "^\\* *$" (point-min) (point-max)) 1))
+	    (should (string-match-p "Reply" (buffer-string)))
+	    (should (string-match-p "^\\*\\* Agent: Reply$"
+				    (buffer-string)))
+	    (should (string-match-p ":ENDE_ROLE: assistant"
+				    (buffer-string)))
+	    (when (not (string-empty-p initial))
+	      (should (string-match-p "Previous material"
+				      (buffer-string))))))))))
 
 (provide 'ende-test)
 

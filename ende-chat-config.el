@@ -116,14 +116,14 @@
   (let ((blocks (make-hash-table :test #'eq)))
     (org-element-map tree 'special-block
       (lambda (block)
-        (let* ((section (org-element-property :parent block))
-               (node (and (eq (org-element-type section) 'section)
-                          (org-element-property :parent section))))
-          (when (and node
-                     (memq (org-element-type node) '(org-data headline))
-                     (string= (downcase (or (org-element-property :type block) ""))
-                              "ende"))
-            (puthash node (cons block (gethash node blocks)) blocks))))
+	(let* ((section (org-element-property :parent block))
+	       (node (and (eq (org-element-type section) 'section)
+			  (org-element-property :parent section))))
+	  (when (and node
+		     (memq (org-element-type node) '(org-data headline))
+		     (string= (downcase (or (org-element-property :type block) ""))
+			      "ende"))
+	    (puthash node (cons block (gethash node blocks)) blocks))))
       nil nil nil)
     blocks))
 
@@ -297,7 +297,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 (defun ende-chat-config--empty ()
   "Return an empty inherited configuration."
   '(:root nil :groups nil :resources nil :active-tools nil
-    :tool-resources nil))
+	  :tool-resources nil))
 
 (defun ende-chat-config--apply-blocks (blocks inherited)
   "Apply BLOCKS over INHERITED and return the resulting configuration."

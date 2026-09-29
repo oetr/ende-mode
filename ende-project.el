@@ -82,7 +82,7 @@ the project from BUFFER or the current buffer."
                        (and project (project-root project))))))))
     (unless project-root
       (user-error "ende: current buffer is not in a project"))
-     (ende-project-normalize-root project-root)))
+    (ende-project-normalize-root project-root)))
 
 (defun ende-project--excluded-p (relative-path)
   "Return non-nil when RELATIVE-PATH is excluded from tool access."
@@ -158,9 +158,9 @@ existing project directory."
   (let* ((root (or root (ende-project-root buffer)))
          (path (ende-project-buffer-path buffer)))
     (and path
-          (file-in-directory-p path (ende-project-normalize-root root))
+         (file-in-directory-p path (ende-project-normalize-root root))
          (not (ende-project--excluded-p
-                (file-relative-name path (ende-project-normalize-root root)))))))
+               (file-relative-name path (ende-project-normalize-root root)))))))
 
 (defun ende-project-visiting-buffer (path &optional root)
   "Return the live buffer visiting PATH below ROOT, or nil."

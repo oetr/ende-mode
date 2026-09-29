@@ -234,7 +234,7 @@ The claims are used only for routing metadata such as account and residency."
             (let* ((encoded (replace-regexp-in-string
                              "-" "+"
                              (replace-regexp-in-string "_" "/"
-                                                        (nth 1 parts))))
+                                                       (nth 1 parts))))
                    (padding (mod (- 4 (mod (length encoded) 4)) 4))
                    (decoded (base64-decode-string
                              (concat encoded (make-string padding ?=)))))
@@ -246,8 +246,8 @@ The claims are used only for routing metadata such as account and residency."
   "Return claim KEY from CLAIMS, including namespaced auth claims."
   (or (ende-protocol-json-get key claims)
       (ende-protocol-json-get key
-                                 (ende-protocol-json-get
-                                  "https://api.openai.com/auth" claims))))
+                              (ende-protocol-json-get
+                               "https://api.openai.com/auth" claims))))
 
 (defun ende-codex--account-id (auth)
   "Return the ChatGPT account id in AUTH or its access token."
@@ -258,7 +258,7 @@ The claims are used only for routing metadata such as account and residency."
                    (ende-protocol-json-get "organizations" claims)))
               (and (vectorp organizations)
                    (> (length organizations) 0)
-                    (ende-protocol-json-get
+                   (ende-protocol-json-get
                     "id" (aref organizations 0))))))))
 
 (defun ende-codex--residency (auth)
@@ -292,12 +292,12 @@ since the refresh began."
                  (when (file-remote-p file)
                    (user-error "Ende requires a local Codex credential file"))
                  (ende-codex--read-json-file file)))
-          (old (ende-protocol-json-get "openai" data))
+         (old (ende-protocol-json-get "openai" data))
          (entry (if (hash-table-p old)
                     (copy-hash-table old)
-          (make-hash-table :test #'equal)))
-          (temporary nil)
-          (complete nil))
+		  (make-hash-table :test #'equal)))
+         (temporary nil)
+         (complete nil))
     (when (and expected-version
                (not (equal expected-version
                            (ende-codex--entry-version old))))
@@ -311,11 +311,11 @@ since the refresh began."
     (puthash "openai" entry data)
     (unwind-protect
         (progn
-           (setq temporary
-                 (make-temp-file
-                  (expand-file-name ".ende-openai-auth-"
-                                    (or (file-name-directory file)
-                                        default-directory))))
+          (setq temporary
+                (make-temp-file
+                 (expand-file-name ".ende-openai-auth-"
+                                   (or (file-name-directory file)
+                                       default-directory))))
           (set-file-modes temporary #o600)
           (with-temp-file temporary
             (insert (json-encode data) "\n"))
@@ -331,12 +331,12 @@ since the refresh began."
   (append
    (ende-curl-base-command url)
    (ende-curl-response-options headers-file)
-    (list "--request" "POST"
-          "--header" "Content-Type: application/x-www-form-urlencoded"
-          "--data-binary" "@-")
-    (ende-curl-timeout-options ende-request-timeout
-                                  ende-max-oauth-refresh-bytes)
-    (list "--url" url)))
+   (list "--request" "POST"
+         "--header" "Content-Type: application/x-www-form-urlencoded"
+         "--data-binary" "@-")
+   (ende-curl-timeout-options ende-request-timeout
+                              ende-max-oauth-refresh-bytes)
+   (list "--url" url)))
 
 (defun ende-codex--refresh-finish (flight result &optional cancelled)
   "Finish FLIGHT and notify its remaining waiters with RESULT."
@@ -357,8 +357,8 @@ since the refresh began."
       (ende-curl-cleanup-resources
        (list (ende-codex--refresh-flight-response-buffer flight)
              (ende-codex--refresh-flight-stderr-buffer flight))
-        (list (ende-codex--refresh-flight-headers-file flight))
-        (list (ende-codex--refresh-flight-stderr-process flight)))
+       (list (ende-codex--refresh-flight-headers-file flight))
+       (list (ende-codex--refresh-flight-stderr-process flight)))
       (unless cancelled
         (dolist (waiter waiters)
           (unless (ende-codex--refresh-waiter-cancelled waiter)
@@ -420,10 +420,10 @@ since the refresh began."
                  (buffer (ende-codex--refresh-flight-response-buffer flight))
                  (payload
                   (with-current-buffer buffer
-                   (ende-protocol-json-read-string (buffer-string))))
-                  (access (ende-protocol-json-get "access_token" payload))
-                  (refresh (ende-protocol-json-get "refresh_token" payload))
-                  (expires-in (ende-protocol-json-get "expires_in" payload)))
+                    (ende-protocol-json-read-string (buffer-string))))
+                 (access (ende-protocol-json-get "access_token" payload))
+                 (refresh (ende-protocol-json-get "refresh_token" payload))
+                 (expires-in (ende-protocol-json-get "expires_in" payload)))
             (if (or (null status) (< status 200) (>= status 300))
                 (ende-codex--refresh-finish
                  flight
@@ -472,8 +472,8 @@ since the refresh began."
          (ende-codex--refresh-finish
           flight
           (ende-error-create
-            :kind 'auth
-            :message (error-message-string parse-error)))))))
+           :kind 'auth
+           :message (error-message-string parse-error)))))))
   )
 
 (defun ende-codex--start-refresh-flight (flight)
@@ -566,7 +566,7 @@ Return a cancellation function for an asynchronous refresh, or nil."
               (ende-error-create
                :kind 'auth
                :message (error-message-string load-error)))
-      nil)))
+     nil)))
 
 ;;;; Model discovery
 
@@ -578,10 +578,10 @@ Return a cancellation function for an asynchronous refresh, or nil."
    (list "--get"
          "--data-urlencode"
          (concat "client_version=" ende-codex-client-version))
-    (when config-file (list "--config" config-file))
-    (ende-curl-timeout-options ende-request-timeout
-                                  ende-provider-max-discovery-bytes)
-    (list "--url" url)))
+   (when config-file (list "--config" config-file))
+   (ende-curl-timeout-options ende-request-timeout
+                              ende-provider-max-discovery-bytes)
+   (list "--url" url)))
 
 (defun ende-codex--parse-model-entries (text)
   "Return model objects parsed from a Codex model-list response TEXT."
@@ -843,7 +843,7 @@ cancellation function."
           nil
           (ende-error-create
            :kind 'startup
-            :message (error-message-string startup-error)))))
+           :message (error-message-string startup-error)))))
       (lambda ()
         (when auth-cancel
           (funcall auth-cancel))
@@ -1017,10 +1017,10 @@ is queried for every call; it does not share the model catalog cache."
          (ende-codex--lifecycle session)
          outcome value
          (when (or (ende-codex--session-content-parts session)
-                    (ende-codex--session-thinking-parts session)
-                    (ende-codex--session-usage session)
-                    (ende-codex--tool-call-list session))
-            (ende-codex--result session)))
+                   (ende-codex--session-thinking-parts session)
+                   (ende-codex--session-usage session)
+                   (ende-codex--tool-call-list session))
+           (ende-codex--result session)))
       (ende-codex--cleanup session)
       (setf (ende-codex--session-callbacks session) nil))))
 
@@ -1209,7 +1209,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-codex--emit-diagnostic
          session
          (format "OpenAI Responses %s at output index %s"
-                  type (or output-index "<unknown>")))))
+                 type (or output-index "<unknown>")))))
     (when (stringp model)
       (setf (ende-codex--session-actual-model session) model))
     (when (or (stringp model)
@@ -1225,24 +1225,24 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (ende-codex--emit
        session '(:type :status :status "Generating"))
       (ende-codex--emit-delta
-        session :content (ende-protocol-json-get "delta" json)))
+       session :content (ende-protocol-json-get "delta" json)))
      ((string= type "response.reasoning_summary_text.delta")
       (ende-codex--emit
        session '(:type :status :status "Thinking"))
       (ende-codex--emit-delta
-        session :thinking (ende-protocol-json-get "delta" json)))
-      ((member type '("response.completed" "response.done"))
-       (ende-codex--handle-usage
-         session (ende-protocol-json-get "usage" response))
-       (setf (ende-codex--session-finish-reason session) "stop")
-       (setf (ende-codex--session-terminal-event session) json))
-      ((string= type "response.incomplete")
-       (ende-codex--handle-usage
-         session (ende-protocol-json-get "usage" response))
-       (setf (ende-codex--session-finish-reason session) "incomplete")
-       (setf (ende-codex--session-terminal-event session) json))
+       session :thinking (ende-protocol-json-get "delta" json)))
+     ((member type '("response.completed" "response.done"))
+      (ende-codex--handle-usage
+       session (ende-protocol-json-get "usage" response))
+      (setf (ende-codex--session-finish-reason session) "stop")
+      (setf (ende-codex--session-terminal-event session) json))
+     ((string= type "response.incomplete")
+      (ende-codex--handle-usage
+       session (ende-protocol-json-get "usage" response))
+      (setf (ende-codex--session-finish-reason session) "incomplete")
+      (setf (ende-codex--session-terminal-event session) json))
      ((member type '("response.failed" "error"))
-       (let ((error (or (ende-protocol-json-get "error" json) json)))
+      (let ((error (or (ende-protocol-json-get "error" json) json)))
         (ende-codex--fail
          session
          (ende-error-create
@@ -1250,8 +1250,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
           :message (format "%s"
                            (or (ende-protocol-json-get "message" error)
                                (ende-protocol-json-get "code" error)
-                              "ChatGPT request failed"))
-           :details error)))))))
+                               "ChatGPT request failed"))
+          :details error)))))))
 
 (defun ende-codex--append-preview (session chunk)
   "Append a bounded prefix of CHUNK to SESSION's error preview."
@@ -1260,7 +1260,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                          (- ende-max-error-body-bytes used)))
          (prefix (if remaining
                      (and (> remaining 0)
-                           (ende-transport-byte-prefix chunk remaining))
+                          (ende-transport-byte-prefix chunk remaining))
                    chunk)))
     (when prefix
       (push prefix (ende-codex--session-preview-parts session))
@@ -1275,19 +1275,19 @@ When APPEND is non-nil, append the argument delta to the stored value."
 (defun ende-codex--http-error (session)
   "Return a structured HTTP error for SESSION."
   (let* ((status (condition-case nil
-                      (car (ende-curl-response-headers
-                            (ende-codex--session-headers-file session)))
-                    (error nil)))
-          (preview (ende-codex--preview-text session))
-          (detail (ende-transport-error-detail preview)))
+                     (car (ende-curl-response-headers
+                           (ende-codex--session-headers-file session)))
+                   (error nil)))
+         (preview (ende-codex--preview-text session))
+         (detail (ende-transport-error-detail preview)))
     (ende-error-create
      :kind 'http
      :message (format "HTTP status %s: %s"
-                       (or status "unknown")
-                       (or detail
-                           (and (not (string-empty-p (string-trim preview)))
-                                (string-trim preview))
-                           "ChatGPT request failed")))))
+                      (or status "unknown")
+                      (or detail
+                          (and (not (string-empty-p (string-trim preview)))
+                               (string-trim preview))
+                          "ChatGPT request failed")))))
 
 (defun ende-codex--filter (session _process chunk)
   "Consume curl output CHUNK for SESSION."
@@ -1298,8 +1298,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (remaining (and ende-max-response-bytes
                            (- ende-max-response-bytes received)))
            (processable (if (and ende-max-response-bytes
-                                  (> total ende-max-response-bytes))
-                             (ende-transport-byte-prefix chunk (max 0 remaining))
+                                 (> total ende-max-response-bytes))
+                            (ende-transport-byte-prefix chunk (max 0 remaining))
                           chunk)))
       (setf (ende-codex--session-received-bytes session) total)
       (ende-codex--append-preview session chunk)
@@ -1316,21 +1316,21 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (ende-codex--fail
           session
           (ende-error-create :kind 'protocol
-                                :message (error-message-string filter-error)))))
-        (when (and ende-max-response-bytes
-                   (> total ende-max-response-bytes)
-                   (not (ende-codex--session-terminal session)))
-          (ende-codex--fail
-           session
-           (ende-error-create
-            :kind 'resource
-             :message "response exceeds ende-max-response-bytes"))))))
+                             :message (error-message-string filter-error)))))
+      (when (and ende-max-response-bytes
+                 (> total ende-max-response-bytes)
+                 (not (ende-codex--session-terminal session)))
+        (ende-codex--fail
+         session
+         (ende-error-create
+          :kind 'resource
+          :message "response exceeds ende-max-response-bytes"))))))
 
 (defun ende-codex--sentinel (session process event)
   "Handle terminal PROCESS EVENT for SESSION."
   (when (and (not (ende-codex--session-terminal session))
              (memq (process-status process) '(exit signal closed)))
-     (if (/= (process-exit-status process) 0)
+    (if (/= (process-exit-status process) 0)
         (ende-codex--fail
          session
          (or (process-get process :ende-idle-error)
@@ -1339,46 +1339,46 @@ When APPEND is non-nil, append the argument delta to the stored value."
               :message (format "curl exited with status %d (%s)"
                                (process-exit-status process)
                                (string-trim event)))))
-       (condition-case finish-error
-           (let* ((headers
-                   (ende-curl-response-headers
-                    (ende-codex--session-headers-file session)))
-                  (status (car headers))
-                  (content-type (cdr headers)))
-             (cond
-              ((or (null status) (< status 200) (>= status 300))
-               (ende-codex--fail session (ende-codex--http-error session)))
-              ((and content-type
-                    (not (ende-curl-event-stream-p content-type)))
-               (ende-codex--fail
-                session
-                (ende-error-create
-                 :kind 'protocol
-                 :message (format "expected text/event-stream, got %s"
-                                  (or content-type "unknown")))))
-              (t
-               (dolist (event
-                        (ende-protocol-sse-flush
-                         (ende-codex--session-sse session)))
-                 (when (and (not (ende-codex--session-terminal session))
-                            (eq (plist-get event :type) :json))
-                   (ende-codex--handle-event
-                    session (plist-get event :value))))
-               (unless (ende-codex--session-terminal session)
-                 (if (ende-codex--session-terminal-event session)
-                     (ende-codex--settle
-                      session 'success (ende-codex--result session))
-                   (ende-codex--fail
-                    session
-                    (ende-error-create
-                     :kind 'protocol
-                     :message "Codex stream ended without a terminal response event")))))))
-         ((error quit)
-          (ende-codex--fail
-           session
-           (ende-error-create
-            :kind 'protocol
-            :message (error-message-string finish-error))))))))
+      (condition-case finish-error
+          (let* ((headers
+                  (ende-curl-response-headers
+                   (ende-codex--session-headers-file session)))
+                 (status (car headers))
+                 (content-type (cdr headers)))
+            (cond
+             ((or (null status) (< status 200) (>= status 300))
+              (ende-codex--fail session (ende-codex--http-error session)))
+             ((and content-type
+                   (not (ende-curl-event-stream-p content-type)))
+              (ende-codex--fail
+               session
+               (ende-error-create
+                :kind 'protocol
+                :message (format "expected text/event-stream, got %s"
+                                 (or content-type "unknown")))))
+             (t
+              (dolist (event
+                       (ende-protocol-sse-flush
+                        (ende-codex--session-sse session)))
+                (when (and (not (ende-codex--session-terminal session))
+                           (eq (plist-get event :type) :json))
+                  (ende-codex--handle-event
+                   session (plist-get event :value))))
+              (unless (ende-codex--session-terminal session)
+                (if (ende-codex--session-terminal-event session)
+                    (ende-codex--settle
+                     session 'success (ende-codex--result session))
+                  (ende-codex--fail
+                   session
+                   (ende-error-create
+                    :kind 'protocol
+                    :message "Codex stream ended without a terminal response event")))))))
+        ((error quit)
+         (ende-codex--fail
+          session
+          (ende-error-create
+           :kind 'protocol
+           :message (error-message-string finish-error))))))))
 
 (defun ende-codex--message-content (role content)
   "Return CONTENT in the Responses shape required for ROLE."
@@ -1500,20 +1500,20 @@ When APPEND is non-nil, append the argument delta to the stored value."
                       (ende-curl-command profile headers-file config-file))
            :filter (apply-partially #'ende-codex--filter session)
            :sentinel (apply-partially #'ende-codex--sentinel session))))
-      (setf (ende-codex--session-process session) (plist-get request :process)
-            (ende-codex--session-process-buffer session)
-             (plist-get request :response-buffer)
-             (ende-codex--session-stderr-buffer session)
-             (plist-get request :stderr-buffer)
-             (ende-codex--session-headers-file session)
-             (plist-get request :headers-file)
-             (ende-codex--session-config-file session)
-             (plist-get request :config-file))
-      (ende-transport-session-set-resources
-       (ende-codex--lifecycle session) request)
-      (ende-codex--diagnose-request session request-body)
-      (process-send-string (ende-codex--session-process session) body)
-      (process-send-eof (ende-codex--session-process session))))
+    (setf (ende-codex--session-process session) (plist-get request :process)
+          (ende-codex--session-process-buffer session)
+          (plist-get request :response-buffer)
+          (ende-codex--session-stderr-buffer session)
+          (plist-get request :stderr-buffer)
+          (ende-codex--session-headers-file session)
+          (plist-get request :headers-file)
+          (ende-codex--session-config-file session)
+          (plist-get request :config-file))
+    (ende-transport-session-set-resources
+     (ende-codex--lifecycle session) request)
+    (ende-codex--diagnose-request session request-body)
+    (process-send-string (ende-codex--session-process session) body)
+    (process-send-eof (ende-codex--session-process session))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
@@ -1544,9 +1544,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
            :preview-bytes 0)))
     (condition-case startup-error
         (progn
-           (ende-validate-resource-options)
-           (ende-codex--validated-generation-url
-            (plist-get profile :url))
+          (ende-validate-resource-options)
+          (ende-codex--validated-generation-url
+           (plist-get profile :url))
           (ende-codex--invoke-callback
            session :on-start (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--session-terminal session)

@@ -321,10 +321,10 @@ non-nil, also reject read-only targets before reading the source."
       (error "%s target no longer exists" operation))
     (with-current-buffer buffer
       (ende-target-with-restriction target
-        (when writable
-          (barf-if-buffer-read-only))
-        (ende-target-ensure-size start end operation)
-        (ende-target-selected-source target start end)))))
+	(when writable
+	  (barf-if-buffer-read-only))
+	(ende-target-ensure-size start end operation)
+	(ende-target-selected-source target start end)))))
 
 (defun ende--run-selected-operation
     (job system-prompt prompt-function on-done &optional writable)
@@ -389,17 +389,17 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
       (error "target buffer no longer exists"))
     (with-current-buffer buffer
       (ende-target-with-restriction target
-        (barf-if-buffer-read-only)
-        (ende-target-with-application target
-          (atomic-change-group
-            (funcall mutation)))))))
+	(barf-if-buffer-read-only)
+	(ende-target-with-application target
+	  (atomic-change-group
+	    (funcall mutation)))))))
 
 (defun ende--result-content (result)
   "Extract and validate completion content from RESULT or a legacy string."
   (let ((content (if (stringp result) result (plist-get result :content))))
-     (when (and ende-max-output-chars
-                (stringp content)
-                (> (length content) ende-max-output-chars))
+    (when (and ende-max-output-chars
+               (stringp content)
+               (> (length content) ende-max-output-chars))
       (error "completion exceeds ende-max-output-chars"))
     content))
 
@@ -408,9 +408,9 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
   (if (ende-error-p error)
       error
     (ende-error-create :kind 'application
-                         :message (if (stringp error)
-                                      error
-                                    (error-message-string error)))))
+                       :message (if (stringp error)
+                                    error
+                                  (error-message-string error)))))
 
 (defun ende--apply-result (job result apply-function &optional skip-review)
   "Apply RESULT for JOB with APPLY-FUNCTION and settle JOB.
@@ -422,76 +422,76 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
                          (or (ende--result-content result) "")))
                (display (ende--job-display-metadata job result))
                (review-overlay nil))
-           (when (string-empty-p content)
-             (let ((finish-reason (and (listp result)
-                                       (plist-get result :finish-reason))))
-               (if finish-reason
-                   (error "empty completion (provider stopped: %s)"
-                          finish-reason)
-                 (error "empty completion"))))
+          (when (string-empty-p content)
+            (let ((finish-reason (and (listp result)
+                                      (plist-get result :finish-reason))))
+              (if finish-reason
+                  (error "empty completion (provider stopped: %s)"
+                         finish-reason)
+                (error "empty completion"))))
           (setq review-overlay (funcall apply-function content display))
           (unless (or skip-review
                       (ende-review-overlay-p review-overlay))
             (error "generated output could not be marked for review"))
           (ende-job-finish job result))
-       ((error quit)
-        (ende-job-fail job (ende--application-error failure))))))
+      ((error quit)
+       (ende-job-fail job (ende--application-error failure))))))
 
 (defun ende--apply-insert-result (job result)
   "Apply RESULT for insert JOB atomically and settle JOB."
   (ende--apply-result
    job result
    (lambda (content display)
-      (let* ((target (ende-job-target job))
-             (buffer (ende-target-buffer target))
-             ins-start ins-end review-overlay)
-        (setq review-overlay
-              (ende--mutate-target
-               target
-               (lambda ()
-                 (let* ((selected (ende-target-selected target))
-                        (start (ende-target-start target))
-                        (end (ende-target-end target))
-                        (cursor (ende-target-cursor target)))
-                   (unless cursor
-                     (error "cursor anchor no longer exists"))
-                   (when (and selected
-                              (or (null start) (null end) (> start end)))
-                     (error "selection anchors no longer exist"))
-                   (unless (ende-target-restriction-valid-p
-                            target (or start cursor) (or end cursor))
-                     (error "target is outside the original restriction"))
-                   (when selected
-                     (ende-target-validate-source target start end))
-                   (setq ins-start cursor)
-                   (save-excursion
-                     (goto-char cursor)
-                     (pcase (ende-target-placement target)
-                       (:before (insert content "\n"))
-                       (:after  (insert "\n" content))
-                       (:inside (insert "\n" content "\n"))
-                       (_       (insert content)))
-                     (setq ins-end (point))
-                     (ende--create-review-overlay
-                      buffer ins-start ins-end display ""))))))
-         (dolist (other-job (append (ende-active-jobs)
-                                    (ende-pending-jobs)))
-           (let ((other-target (ende-job-target other-job)))
-             (when (and (not (eq other-job job))
-                        (> (ende-job-id other-job) (ende-job-id job))
-                         (eq (ende-job-type other-job) 'insert)
-                        (eq (ende-target-buffer other-target) buffer))
-               (ende-ignore-errors
-                #'ende-target-advance-queued-anchors
-                (list other-target) buffer ins-start ins-end
-                (lambda (_target)
-                  (let ((overlay (ende-job-overlay other-job)))
-                    (when (and (overlayp overlay) (overlay-buffer overlay)
-                               (numberp (overlay-start overlay))
-                               (numberp (overlay-end overlay))
-                               (= (overlay-start overlay) ins-start)
-                               (= (overlay-end overlay) ins-start))
-                      (move-overlay overlay ins-end ins-end buffer))))))))
+     (let* ((target (ende-job-target job))
+            (buffer (ende-target-buffer target))
+            ins-start ins-end review-overlay)
+       (setq review-overlay
+             (ende--mutate-target
+              target
+              (lambda ()
+                (let* ((selected (ende-target-selected target))
+                       (start (ende-target-start target))
+                       (end (ende-target-end target))
+                       (cursor (ende-target-cursor target)))
+                  (unless cursor
+                    (error "cursor anchor no longer exists"))
+                  (when (and selected
+                             (or (null start) (null end) (> start end)))
+                    (error "selection anchors no longer exist"))
+                  (unless (ende-target-restriction-valid-p
+                           target (or start cursor) (or end cursor))
+                    (error "target is outside the original restriction"))
+                  (when selected
+                    (ende-target-validate-source target start end))
+                  (setq ins-start cursor)
+                  (save-excursion
+                    (goto-char cursor)
+                    (pcase (ende-target-placement target)
+                      (:before (insert content "\n"))
+                      (:after  (insert "\n" content))
+                      (:inside (insert "\n" content "\n"))
+                      (_       (insert content)))
+                    (setq ins-end (point))
+                    (ende--create-review-overlay
+                     buffer ins-start ins-end display ""))))))
+       (dolist (other-job (append (ende-active-jobs)
+                                  (ende-pending-jobs)))
+         (let ((other-target (ende-job-target other-job)))
+           (when (and (not (eq other-job job))
+                      (> (ende-job-id other-job) (ende-job-id job))
+                      (eq (ende-job-type other-job) 'insert)
+                      (eq (ende-target-buffer other-target) buffer))
+             (ende-ignore-errors
+              #'ende-target-advance-queued-anchors
+              (list other-target) buffer ins-start ins-end
+              (lambda (_target)
+                (let ((overlay (ende-job-overlay other-job)))
+                  (when (and (overlayp overlay) (overlay-buffer overlay)
+                             (numberp (overlay-start overlay))
+                             (numberp (overlay-end overlay))
+                             (= (overlay-start overlay) ins-start)
+                             (= (overlay-end overlay) ins-start))
+                    (move-overlay overlay ins-end ins-end buffer))))))))
        (ende-ignore-errors
         #'message "ende: inserted %d chars in %s"
         (length content) (buffer-name buffer))
@@ -507,8 +507,8 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
      target
      (lambda ()
        (let ((original (if replace
-                          (buffer-substring-no-properties start end)
-                        "")))
+                           (buffer-substring-no-properties start end)
+                         "")))
          (goto-char start)
          (when replace
            (delete-region start end))
@@ -560,10 +560,10 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
     (with-current-buffer buffer
       (save-excursion
         (ende-target-with-restriction target
-          (list :buffer buffer
-                :start (point-min)
-                :source (buffer-substring-no-properties
-                         (point-min) (point-max))))))))
+	  (list :buffer buffer
+		:start (point-min)
+		:source (buffer-substring-no-properties
+			 (point-min) (point-max))))))))
 
 (defun ende--structured-edit-pass (job result)
   "Parse and apply one structured RESULT for JOB.
@@ -588,20 +588,20 @@ Return pass data without settling JOB."
       (let ((apply-edits
              (lambda ()
                (ende-target-with-restriction target
-                 (barf-if-buffer-read-only)
-                 (dolist (edit
-                          (sort (copy-sequence edits)
-                                (lambda (left right)
-                                  (ende--structured-edit-descending-p
-                                   left right key))))
-                   (condition-case caught
-                       (ende--apply-anchor-edit
-                        target buffer source-start edit display)
-                     ((error quit)
-                      (push (list :index (plist-get edit :index)
-                                  :message (error-message-string caught)
-                                  :raw (plist-get edit :raw))
-                            application-failures))))))))
+		 (barf-if-buffer-read-only)
+		 (dolist (edit
+			  (sort (copy-sequence edits)
+				(lambda (left right)
+				  (ende--structured-edit-descending-p
+				   left right key))))
+		   (condition-case caught
+		       (ende--apply-anchor-edit
+			target buffer source-start edit display)
+		     ((error quit)
+		      (push (list :index (plist-get edit :index)
+				  :message (error-message-string caught)
+				  :raw (plist-get edit :raw))
+			    application-failures))))))))
         (if ende-structured-edit-move-point
             (funcall apply-edits)
           (save-excursion
@@ -632,8 +632,8 @@ PREVIOUS contains failures from the preceding structured pass."
            failure
          (let ((annotated (copy-sequence failure))
                (origin (pop remaining)))
-            (plist-put annotated :index (plist-get origin :index)))))
-      failures)))
+           (plist-put annotated :index (plist-get origin :index)))))
+     failures)))
 
 (defun ende--structured-annotate-result (result state)
   "Return RESULT annotated with structured STATE summary and failures."
@@ -796,84 +796,84 @@ PREVIOUS contains failures from the preceding structured pass."
          (signal 'error '("target anchor no longer exists")))
        (with-current-buffer buffer
          (ende-target-with-restriction target
-           (barf-if-buffer-read-only)
-           (if selected
-               (let ((offset (or (ende-target-offset target) 0)))
-                 (ende-target-validate-source target start end)
-                 (setq context
-                        (ende-target-buffer-marker-context
-                         start end (+ start offset))))
-             (unless (ende-target-restriction-valid-p target cursor cursor)
-               (error "cursor is outside the original restriction"))
-             (setq context
-                    (ende-target-buffer-marker-context
-                     (point-min) (point-max) cursor)))))
+	   (barf-if-buffer-read-only)
+	   (if selected
+	       (let ((offset (or (ende-target-offset target) 0)))
+		 (ende-target-validate-source target start end)
+		 (setq context
+		       (ende-target-buffer-marker-context
+			start end (+ start offset))))
+	     (unless (ende-target-restriction-valid-p target cursor cursor)
+	       (error "cursor is outside the original restriction"))
+	     (setq context
+		   (ende-target-buffer-marker-context
+		    (point-min) (point-max) cursor)))))
        (ende--dispatch-llm
         job
         (list (cons "system" ende-insert-system)
               (cons "user"
                     (format "Task: %s\n\nDocument:\n%s"
                             ende-insert-instruction context)))
-         (lambda (result) (ende--apply-insert-result job result)))))))
+        (lambda (result) (ende--apply-insert-result job result)))))))
 
 (defun ende-operations--run-structured-edit (job)
   "Execute a structured-edit JOB using its operation specification."
   (ende--call-with-job-error
    job
    (lambda ()
-      (let* ((type (ende-job-type job))
-             (target (ende-job-target job))
-             (buffer (ende-target-buffer target))
-             (start (ende-target-start target))
-             (end (ende-target-end target))
-             (insertion-only
-              (eq (ende-operation-structured-result type) 'insertion))
-             (instruction (or (ende-job-instruction job)
-                              (pcase type
-                                ('write-anywhere ende-write-anywhere-instruction)
-                                ('insert-anywhere ende-insert-anywhere-instruction))))
-              (system-prompt (pcase type
-                                ('write-anywhere ende-write-anywhere-system)
-                                ('insert-anywhere ende-insert-anywhere-system)))
-              source)
-         (ende--validate-structured-repair-attempts)
-         (unless (and (buffer-live-p buffer) start end)
-           (error "write-anywhere target no longer exists"))
-         (with-current-buffer buffer
-           (save-excursion
-             (ende-target-with-restriction target
-               (barf-if-buffer-read-only)
-               (ende-target-validate-source target start end)
-               (setq source (buffer-substring-no-properties start end)))))
-         (setf (ende-job-structured-state job)
-               (list :type type
-                     :instruction instruction
-                     :system-prompt system-prompt
-                     :pass-count 0
-                     :requested nil
-                     :first-pass-applied 0
-                     :repaired 0
-                     :repair-attempts 0
-                     :failures nil
-                     :last-result nil
-                     :source nil))
-         (ende--dispatch-llm
-         job
-         (list (cons "system" system-prompt)
-               (cons "user"
-                     (format "Task: %s\n\nOperation: %s\n%s\nDocument:\n%s"
-                             instruction
-                             (if insertion-only
-                                 "INSERT-ANYWHERE"
-                               "WRITE-ANYWHERE")
-                             (if insertion-only
-                                 "Find every appropriate insertion point within the provided document. Multiple separate insertions are expected when the task applies in multiple places."
-                               "Make all appropriate insertions and replacements within the provided document.")
-                             source)))
-          (lambda (result)
-            (if insertion-only
-                (ende--apply-insert-anywhere-result job result)
-              (ende--apply-write-anywhere-result job result))))))))
+     (let* ((type (ende-job-type job))
+            (target (ende-job-target job))
+            (buffer (ende-target-buffer target))
+            (start (ende-target-start target))
+            (end (ende-target-end target))
+            (insertion-only
+             (eq (ende-operation-structured-result type) 'insertion))
+            (instruction (or (ende-job-instruction job)
+                             (pcase type
+                               ('write-anywhere ende-write-anywhere-instruction)
+                               ('insert-anywhere ende-insert-anywhere-instruction))))
+            (system-prompt (pcase type
+                             ('write-anywhere ende-write-anywhere-system)
+                             ('insert-anywhere ende-insert-anywhere-system)))
+            source)
+       (ende--validate-structured-repair-attempts)
+       (unless (and (buffer-live-p buffer) start end)
+         (error "write-anywhere target no longer exists"))
+       (with-current-buffer buffer
+         (save-excursion
+           (ende-target-with-restriction target
+	     (barf-if-buffer-read-only)
+	     (ende-target-validate-source target start end)
+	     (setq source (buffer-substring-no-properties start end)))))
+       (setf (ende-job-structured-state job)
+             (list :type type
+                   :instruction instruction
+                   :system-prompt system-prompt
+                   :pass-count 0
+                   :requested nil
+                   :first-pass-applied 0
+                   :repaired 0
+                   :repair-attempts 0
+                   :failures nil
+                   :last-result nil
+                   :source nil))
+       (ende--dispatch-llm
+        job
+        (list (cons "system" system-prompt)
+              (cons "user"
+                    (format "Task: %s\n\nOperation: %s\n%s\nDocument:\n%s"
+                            instruction
+                            (if insertion-only
+                                "INSERT-ANYWHERE"
+                              "WRITE-ANYWHERE")
+                            (if insertion-only
+                                "Find every appropriate insertion point within the provided document. Multiple separate insertions are expected when the task applies in multiple places."
+                              "Make all appropriate insertions and replacements within the provided document.")
+                            source)))
+        (lambda (result)
+          (if insertion-only
+              (ende--apply-insert-anywhere-result job result)
+            (ende--apply-write-anywhere-result job result))))))))
 
 (defun ende--run-improve (job)
   "Execute an improvement JOB that replaces its target atomically."
@@ -892,27 +892,27 @@ PREVIOUS contains failures from the preceding structured pass."
         (lambda (content display)
           (let* ((latest-start (ende-target-start target))
                  (latest-end (ende-target-end target))
-                  original-source review-overlay)
-             (setq review-overlay
-                   (ende--mutate-target
-                    target
-                    (lambda ()
-                      (unless (and latest-start latest-end)
-                        (error "improvement target no longer exists"))
-                      (ende-target-validate-source
-                       target latest-start latest-end)
-                      (setq original-source
-                            (buffer-substring latest-start latest-end))
-                      (save-excursion
-                        (delete-region latest-start latest-end)
-                        (goto-char latest-start)
-                        (let ((review-start (point)))
-                          (insert content)
-                          (ende--create-review-overlay
-                           buffer review-start (point)
-                           display original-source))))))
-             review-overlay))))
-      t)))
+                 original-source review-overlay)
+            (setq review-overlay
+                  (ende--mutate-target
+                   target
+                   (lambda ()
+                     (unless (and latest-start latest-end)
+                       (error "improvement target no longer exists"))
+                     (ende-target-validate-source
+                      target latest-start latest-end)
+                     (setq original-source
+                           (buffer-substring latest-start latest-end))
+                     (save-excursion
+                       (delete-region latest-start latest-end)
+                       (goto-char latest-start)
+                       (let ((review-start (point)))
+                         (insert content)
+                         (ende--create-review-overlay
+                          buffer review-start (point)
+                          display original-source))))))
+            review-overlay))))
+     t)))
 
 (defun ende--run-summarize (job)
   "Execute a summarize JOB and write its result to a separate buffer."

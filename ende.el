@@ -62,7 +62,7 @@
   "Return the number of active or queued jobs targeting BUFFER."
   (cl-count-if
    (lambda (job) (ende--job-targets-buffer-p job buffer))
-    (append (ende-active-jobs) (ende-pending-jobs))))
+   (append (ende-active-jobs) (ende-pending-jobs))))
 
 (defun ende--buffer-review-count (buffer)
   "Return the number of pending reviews in BUFFER."
@@ -118,18 +118,18 @@
   (ende-abort-queue)
   (let* ((dir (or (file-name-directory (locate-library "ende.el"))
                   (user-error "ende.el not found on load-path")))
-          (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
-                   "ende-transport.el" "ende-curl.el" "ende-provider.el"
-                   "ende-codex.el"
-                   "ende-review.el" "ende-project.el" "ende-target.el"
-                   "ende-ui.el"
-                   "ende-openrouter-batch.el" "ende-llm.el"
-                   "ende-queue.el" "ende-edit.el"
-                   "ende-tools.el"
-                   "ende-chat-config.el"
-                   "ende-summary.el" "ende-operations.el"
-                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
-                   "ende-history.el"
+         (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
+                  "ende-transport.el" "ende-curl.el" "ende-provider.el"
+                  "ende-codex.el"
+                  "ende-review.el" "ende-project.el" "ende-target.el"
+                  "ende-ui.el"
+                  "ende-openrouter-batch.el" "ende-llm.el"
+                  "ende-queue.el" "ende-edit.el"
+                  "ende-tools.el"
+                  "ende-chat-config.el"
+                  "ende-summary.el" "ende-operations.el"
+                  "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
+                  "ende-history.el"
                   "ende-selector.el" "ende.el")))
     (dolist (f files) (load (expand-file-name f dir)))
     (setq ende-mode-map (ende--make-mode-map))

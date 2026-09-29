@@ -330,16 +330,16 @@
                                `((:role . ,(car message))
                                  (:content . ,(cdr message))))
                              messages))
-               ,@(when (numberp (plist-get profile :temperature))
-                   (list (cons :temperature
-                               (plist-get profile :temperature))))
-               ,@(let ((effort (ende-provider-reasoning-effort
-                                profile 'openrouter)))
-                   (when effort
-                     (list (cons :reasoning
-                                 (list (cons :effort effort))))))
-               ,@(when (integerp ende-max-output-tokens)
-                   (list (cons :max_tokens ende-max-output-tokens)))))))
+              ,@(when (numberp (plist-get profile :temperature))
+                  (list (cons :temperature
+                              (plist-get profile :temperature))))
+              ,@(let ((effort (ende-provider-reasoning-effort
+                               profile 'openrouter)))
+                  (when effort
+                    (list (cons :reasoning
+                                (list (cons :effort effort))))))
+              ,@(when (integerp ende-max-output-tokens)
+                  (list (cons :max_tokens ende-max-output-tokens)))))))
 
 (defun ende-openrouter-batch--body (group)
   "Build the ordered JSON object submitted for GROUP."
@@ -481,7 +481,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                    profile :batch-poll-max-delay
                    ende-openrouter-batch-poll-max-delay))
          (attempt (or attempt
-                       (ende-openrouter-batch--group-poll-attempt group)))
+                      (ende-openrouter-batch--group-poll-attempt group)))
          (base (min maximum (* initial (expt 2 attempt))))
          (jitter (ende-openrouter-batch--profile-value
                   profile :batch-poll-jitter
@@ -665,7 +665,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
     (remhash (ende-openrouter-batch--group-key group)
              ende-openrouter-batch--groups)
     (setf (ende-openrouter-batch--group-timer group) nil)
-     (if (ende-openrouter-batch--active-requests group)
+    (if (ende-openrouter-batch--active-requests group)
         (ende-openrouter-batch--submit group)
       (ende-openrouter-batch--group-cleanup group)
       (ende-openrouter-batch--unregister-group group))))

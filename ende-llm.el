@@ -272,7 +272,7 @@ normalized :tool-calls for the chat tool loop.")
                      :speed (if (numberp reported-tokens)
                                 (/ (float tokens) elapsed)
                               0.0)
-                      :usage usage)))))
+                     :usage usage)))))
 
 (defun ende-llm--first-choice (choices)
   "Return the first choice from parsed JSON CHOICES."
@@ -285,7 +285,7 @@ normalized :tool-calls for the chat tool loop.")
   "Return the first non-nil value for KEYS across JSON OBJECTS."
   (cl-loop for object in objects
            thereis (cl-loop for key in keys
-                             for value = (ende-protocol-json-get key object)
+                            for value = (ende-protocol-json-get key object)
                             when value return value)))
 
 (defun ende-llm--response-event (json)
@@ -300,9 +300,9 @@ normalized :tool-calls for the chat tool loop.")
                  (list delta choice)
                  '("reasoning_content" "reasoning"))
      :content (or (ende-llm--first-json-value
-                  (list delta choice)
-                  '("content" "text"))
-                 (ende-protocol-json-get "content" message))
+                   (list delta choice)
+                   '("content" "text"))
+                  (ende-protocol-json-get "content" message))
      :tool-calls (or (ende-protocol-json-get "tool_calls" delta)
                      (ende-protocol-json-get "tool_calls" message)))))
 
@@ -391,7 +391,7 @@ normalized :tool-calls for the chat tool loop.")
   "Build the normalized result plist for SESSION."
   (let* ((usage (ende-llm--session-usage session))
          (reported (and usage
-                         (ende-protocol-json-get "completion_tokens" usage)))
+                        (ende-protocol-json-get "completion_tokens" usage)))
          (tokens (or reported
                      (max 0 (floor
                              (/ (ende-llm--session-estimated-chars session)
@@ -495,7 +495,7 @@ normalized :tool-calls for the chat tool loop.")
        (ende-llm--fail
         session
         (ende-error-create :kind 'protocol
-                             :message (error-message-string finish-error)))))))
+                           :message (error-message-string finish-error)))))))
 
 (defun ende-llm--finish-process-error (session process event)
   "Settle SESSION for failed PROCESS with sentinel EVENT."
@@ -507,13 +507,13 @@ normalized :tool-calls for the chat tool loop.")
       :kind (if (= status 28) 'timeout 'transport)
       :message
       (or (and (buffer-live-p stderr-buffer)
-                (with-current-buffer stderr-buffer
-                  (let ((text (string-trim
-                               (substring (buffer-string) 0
-                                          (if ende-max-error-body-bytes
-                                              (min (buffer-size)
-                                                   ende-max-error-body-bytes)
-                                            (buffer-size))))))
+               (with-current-buffer stderr-buffer
+                 (let ((text (string-trim
+                              (substring (buffer-string) 0
+                                         (if ende-max-error-body-bytes
+                                             (min (buffer-size)
+                                                  ende-max-error-body-bytes)
+                                           (buffer-size))))))
                    (unless (string-empty-p text) text))))
           (format "curl exited with status %d (%s)"
                   status (string-trim event)))))))
@@ -532,7 +532,7 @@ normalized :tool-calls for the chat tool loop.")
                          (- ende-max-error-body-bytes used)))
          (prefix (if remaining
                      (and (> remaining 0)
-                           (ende-transport-byte-prefix chunk remaining))
+                          (ende-transport-byte-prefix chunk remaining))
                    chunk)))
     (when prefix
       (push prefix (ende-llm--session-response-preview-parts session))
@@ -548,8 +548,8 @@ normalized :tool-calls for the chat tool loop.")
            (remaining (and ende-max-response-bytes
                            (- ende-max-response-bytes received)))
            (processable (if (and ende-max-response-bytes
-                                  (> total ende-max-response-bytes))
-                             (ende-transport-byte-prefix chunk (max 0 remaining))
+                                 (> total ende-max-response-bytes))
+                            (ende-transport-byte-prefix chunk (max 0 remaining))
                           chunk)))
       (setf (ende-llm--session-received-bytes session) total)
       (ende-llm--append-response-preview session chunk)
@@ -560,8 +560,8 @@ normalized :tool-calls for the chat tool loop.")
              (ende-protocol-sse-feed
               (ende-llm--session-sse session) processable)))
         ((error quit)
-          (if (and ende-max-response-bytes
-                   (> total ende-max-response-bytes))
+         (if (and ende-max-response-bytes
+                  (> total ende-max-response-bytes))
              (ende-llm--fail
               session
               (ende-error-create
@@ -570,16 +570,16 @@ normalized :tool-calls for the chat tool loop.")
            (ende-llm--fail
             session
             (ende-error-create :kind 'protocol
-                                 :message
-                                 (error-message-string filter-error))))))
-       (when (and ende-max-response-bytes
-                  (> total ende-max-response-bytes)
-                  (not (ende-llm--session-terminal session)))
+                               :message
+                               (error-message-string filter-error))))))
+      (when (and ende-max-response-bytes
+                 (> total ende-max-response-bytes)
+                 (not (ende-llm--session-terminal session)))
         (ende-llm--fail
-          session
-          (ende-error-create
-           :kind 'resource
-           :message "response exceeds ende-max-response-bytes"))))))
+         session
+         (ende-error-create
+          :kind 'resource
+          :message "response exceeds ende-max-response-bytes"))))))
 
 (defun ende-llm--process-sentinel (session process event)
   "Handle PROCESS terminal EVENT for SESSION."
@@ -663,28 +663,28 @@ normalized :tool-calls for the chat tool loop.")
                         profile headers-file config-file))
             :filter (apply-partially #'ende-llm--process-filter session)
             :sentinel (apply-partially #'ende-llm--process-sentinel session))))
-     (setf (ende-llm--session-process session)
+      (setf (ende-llm--session-process session)
             (plist-get request :process)
             (ende-llm--session-process-buffer session)
             (plist-get request :response-buffer)
-             (ende-llm--session-stderr-buffer session)
-             (plist-get request :stderr-buffer)
-             (ende-llm--session-stderr-process session)
-             (plist-get request :stderr-process)
-             (ende-llm--session-headers-file session)
-             (plist-get request :headers-file)
-             (ende-llm--session-config-file session)
-             (plist-get request :config-file))
-       (ende-transport-session-set-resources
-        (ende-llm--lifecycle session) request))
+            (ende-llm--session-stderr-buffer session)
+            (plist-get request :stderr-buffer)
+            (ende-llm--session-stderr-process session)
+            (plist-get request :stderr-process)
+            (ende-llm--session-headers-file session)
+            (plist-get request :headers-file)
+            (ende-llm--session-config-file session)
+            (plist-get request :config-file))
+      (ende-transport-session-set-resources
+       (ende-llm--lifecycle session) request))
     (ende-llm--invoke-callback
      session :on-start (apply-partially #'ende-llm--cancel session))
     (ende-llm--diagnose-request session request-body)
     (when (and (not (ende-llm--session-terminal session))
                ende-provider-discovery-enabled)
-       (setf (ende-llm--session-discovery-cancel session)
-             (ende-provider-discover
-              profile (apply-partially #'ende-llm--discovery-result session))))
+      (setf (ende-llm--session-discovery-cancel session)
+            (ende-provider-discover
+             profile (apply-partially #'ende-llm--discovery-result session))))
     (unless (ende-llm--session-terminal session)
       (process-send-string (ende-llm--session-process session)
                            (ende-llm--session-json-data session))
@@ -698,26 +698,26 @@ normalized :tool-calls for the chat tool loop.")
    ((eq (plist-get options :wire-api) 'responses)
     (ende-codex-default messages callbacks options))
    (t
-     (let* ((profile (if (plist-get options :name)
+    (let* ((profile (if (plist-get options :name)
                         options
                       (ende-plist-merge (ende-provider-profile) options)))
-            (session
-             (ende-llm--make-session
-              :profile profile :callbacks callbacks
-              :model (plist-get profile :model)
-              :sse (ende-protocol-make-sse)
-              :reasoning (ende-protocol-make-reasoning)
-              :tool-calls (make-hash-table :test #'eql)
-              :estimated-chars 0 :received-bytes 0
-              :response-preview-parts nil :response-preview-bytes 0)))
-       (condition-case startup-error
-           (ende-llm--start-session session messages)
-         ((error quit)
-          (ende-llm--fail
-           session
-           (ende-error-create :kind 'startup
-                              :message (error-message-string startup-error)))))
-       (ende-llm--session-process session)))))
+           (session
+            (ende-llm--make-session
+             :profile profile :callbacks callbacks
+             :model (plist-get profile :model)
+             :sse (ende-protocol-make-sse)
+             :reasoning (ende-protocol-make-reasoning)
+             :tool-calls (make-hash-table :test #'eql)
+             :estimated-chars 0 :received-bytes 0
+             :response-preview-parts nil :response-preview-bytes 0)))
+      (condition-case startup-error
+          (ende-llm--start-session session messages)
+        ((error quit)
+         (ende-llm--fail
+          session
+          (ende-error-create :kind 'startup
+                             :message (error-message-string startup-error)))))
+      (ende-llm--session-process session)))))
 
 (provide 'ende-llm)
 

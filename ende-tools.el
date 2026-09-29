@@ -95,7 +95,7 @@ symbol internally and is exposed to model transports as a string.  Pass
     (cdr (cl-find-if
           (lambda (entry)
             (string= name (symbol-name (car entry))))
-     ende-tools--registry))))
+	  ende-tools--registry))))
 
 (defun ende-tool-definitions ()
   "Return registered tools in OpenAI-compatible function-tool shape."
@@ -129,8 +129,8 @@ and controls tool activation and path authorization."
               (when (and (ende-tool-requires-resource tool)
                          (null (cdr (assq
                                      tool-name
-                                      (plist-get access-config
-                                                 :tool-resources)))))
+                                     (plist-get access-config
+                                                :tool-resources)))))
                 (error "tool has no assigned resources: %s" tool-name)))
             (let* ((root (ende-project-normalize-root
                           (or (and access-config
@@ -238,14 +238,14 @@ unsaved changes take precedence over disk contents."
           (ende-tools--assert-path-authorized buffer-path root)
           (list :kind 'buffer :buffer buffer :path buffer-path
                 :relative relative :buffer-id buffer-id))
-       (let* ((canonical
-               (ende-tools--assert-path-authorized
-                (ende-project-path path root) root))
-              (buffer (ende-project-visiting-buffer path root))
-              (relative (file-relative-name canonical root)))
-         (list :kind (if buffer 'buffer 'file)
-               :buffer buffer :path canonical :relative relative
-               :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
+      (let* ((canonical
+              (ende-tools--assert-path-authorized
+               (ende-project-path path root) root))
+             (buffer (ende-project-visiting-buffer path root))
+             (relative (file-relative-name canonical root)))
+        (list :kind (if buffer 'buffer 'file)
+              :buffer buffer :path canonical :relative relative
+              :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
 
 (defun ende-tools--with-source (source function)
   "Call FUNCTION with current source buffer selected for SOURCE.
@@ -291,7 +291,7 @@ FUNCTION receives no arguments and may return any value."
                   (format-time-string
                    "%Y-%m-%dT%H:%M:%S%z"
                    (file-attribute-modification-time
-                     (file-attributes path)))))))))
+                    (file-attributes path)))))))))
 
 (defun ende-tools--line-slice (start-line line-count)
   "Return a bounded line slice from the current source buffer."
@@ -448,9 +448,9 @@ FUNCTION receives no arguments and may return any value."
      source
      (lambda ()
        (goto-char (point-min))
-        (while (and (not finished)
-                    (< (length matches) maximum)
-                    (re-search-forward regexp nil t))
+       (while (and (not finished)
+                   (< (length matches) maximum)
+                   (re-search-forward regexp nil t))
          (let* ((match-start (match-beginning 0))
                 (line (line-number-at-pos match-start))
                 (column (save-excursion
@@ -478,11 +478,11 @@ FUNCTION receives no arguments and may return any value."
                        :line line :column column
                        :match match-line :context context)
                  matches))
-          ;; Ensure a zero-width regexp cannot keep the search at one point.
-          (when (= (point) (match-beginning 0))
-            (if (= (point) (point-max))
-                (setq finished t)
-              (forward-char 1))))))
+         ;; Ensure a zero-width regexp cannot keep the search at one point.
+         (when (= (point) (match-beginning 0))
+           (if (= (point) (point-max))
+               (setq finished t)
+             (forward-char 1))))))
     (nreverse matches)))
 
 (defun ende-tools--search-project (arguments root)
@@ -517,7 +517,7 @@ FUNCTION receives no arguments and may return any value."
     (catch 'finished
       (dolist (path (cl-subseq
                      files 0 (min ende-tools-max-search-files
-                                   (length files))))
+                                  (length files))))
         (cl-incf files-inspected)
         (let* ((relative (file-relative-name path root))
                (buffer (ende-project-visiting-buffer relative root))
@@ -592,11 +592,11 @@ FUNCTION receives no arguments and may return any value."
         (cl-incf index))
       (setq edits (nreverse edits))
       (cl-loop for tail on edits do
-        (dolist (right (cdr tail))
-          (when (ende-edit-replacement-overlaps-p (car tail) right)
-            (error "edits %d and %d overlap"
-                   (1+ (plist-get (car tail) :index))
-                   (1+ (plist-get right :index))))))
+               (dolist (right (cdr tail))
+		 (when (ende-edit-replacement-overlaps-p (car tail) right)
+		   (error "edits %d and %d overlap"
+			  (1+ (plist-get (car tail) :index))
+			  (1+ (plist-get right :index))))))
       edits)))
 
 (defun ende-tools--change-set-result (change-set)
@@ -634,11 +634,11 @@ FUNCTION receives no arguments and may return any value."
                 :edits (ende-tools--validate-edits edits-argument content)
                 :status "pending"
                 :created-at (float-time)))
-          (puthash (ende-change-set-id change-set) change-set
-                   ende-tools--change-sets))))
-     (if ende-tools-direct-write
-         (ende-tools--apply-change-set-object change-set)
-       (ende-tools--change-set-result change-set))))
+         (puthash (ende-change-set-id change-set) change-set
+                  ende-tools--change-sets))))
+    (if ende-tools-direct-write
+        (ende-tools--apply-change-set-object change-set)
+      (ende-tools--change-set-result change-set))))
 
 (defun ende-tools--apply-edits-in-buffer (edits &optional review)
   "Apply normalized descending EDITS in the current buffer.
@@ -712,10 +712,10 @@ return them."
                     (list :new_digest (ende-tools--source-digest)
                           :applied_edits
                           (length (ende-change-set-edits change-set))))))))
-           (setf (ende-change-set-status change-set) "applied"
-                 (ende-change-set-overlays change-set) created-overlays)
-           (remhash (ende-change-set-id change-set) ende-tools--change-sets)
-           (append (ende-tools--change-set-result change-set) result))
+          (setf (ende-change-set-status change-set) "applied"
+                (ende-change-set-overlays change-set) created-overlays)
+          (remhash (ende-change-set-id change-set) ende-tools--change-sets)
+          (append (ende-tools--change-set-result change-set) result))
       ((error quit)
        (dolist (overlay created-overlays)
          (ende-ignore-errors #'ende-review-delete-overlay overlay))
@@ -741,12 +741,12 @@ return them."
   "Reject pending change set ID."
   (interactive (list (read-string "Reject ende change set: ")))
   (let ((change-set (ende-tools-change-set id)))
-     (unless (string= (ende-change-set-status change-set) "pending")
-       (user-error "change set %s is already %s"
-                   id (ende-change-set-status change-set)))
-     (setf (ende-change-set-status change-set) "rejected")
-     (remhash id ende-tools--change-sets)
-     (message "ende: rejected %s" id)
+    (unless (string= (ende-change-set-status change-set) "pending")
+      (user-error "change set %s is already %s"
+                  id (ende-change-set-status change-set)))
+    (setf (ende-change-set-status change-set) "rejected")
+    (remhash id ende-tools--change-sets)
+    (message "ende: rejected %s" id)
     (ende-tools--change-set-result change-set)))
 
 (defun ende-tools-clear-change-sets ()
@@ -844,7 +844,7 @@ return them."
    (:properties
     . ((:buffer_id . ((:type . "string")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
-        (:line_count . ((:type . "integer") (:minimum . 1)))))
+       (:line_count . ((:type . "integer") (:minimum . 1)))))
    (:required . ("buffer_id"))
    (:additionalProperties . :json-false))
  #'ende-tools--read-buffer)

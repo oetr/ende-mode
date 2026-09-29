@@ -164,9 +164,9 @@ PATH must have the form SOURCE-ID::LINE."
   "Return a non-file-visiting summary buffer owned by ende."
   (setq ende-summary--buffer-object
         (ende-owned-buffer ende-summary--buffer-object
-                              ende-summary-buffer-name
-                              'ende-summary--owned-buffer
-                              #'org-mode)))
+                           ende-summary-buffer-name
+                           'ende-summary--owned-buffer
+                           #'org-mode)))
 
 (defun ende-summary--single-line (text)
   "Replace line breaks in display TEXT with spaces."

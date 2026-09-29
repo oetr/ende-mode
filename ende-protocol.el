@@ -145,7 +145,7 @@ Thinking and content deltas are emitted through CALLBACKS."
             (setf (ende-protocol--sse-done parser) t)
             '(:type :done))
         (let ((json (condition-case err
-                         (ende-protocol-json-read-string payload)
+                        (ende-protocol-json-read-string payload)
                       ((error quit)
                        (signal 'error
                                (list (format "malformed SSE JSON: %s"
@@ -170,8 +170,8 @@ Thinking and content deltas are emitted through CALLBACKS."
       (let ((bytes (+ (or (ende-protocol--sse-data-bytes parser) 0)
                       (if (ende-protocol--sse-data-lines parser) 1 0)
                       (string-bytes value))))
-         (when (and ende-max-sse-event-bytes
-                    (> bytes ende-max-sse-event-bytes))
+        (when (and ende-max-sse-event-bytes
+                   (> bytes ende-max-sse-event-bytes))
           (error "SSE event exceeds ende-max-sse-event-bytes"))
         (setf (ende-protocol--sse-data-bytes parser) bytes))
       (push value (ende-protocol--sse-data-lines parser)))
@@ -196,9 +196,9 @@ Errors are signaled so the transport can turn them into protocol failures."
           (+ (or (ende-protocol--sse-buffer-bytes parser) 0)
              (string-bytes (or chunk ""))))
     (if (not (string-match-p "\n" (or chunk "")))
-           (when (and ende-max-sse-event-bytes
-                      (> (ende-protocol--sse-buffer-bytes parser)
-                         ende-max-sse-event-bytes))
+        (when (and ende-max-sse-event-bytes
+                   (> (ende-protocol--sse-buffer-bytes parser)
+                      ende-max-sse-event-bytes))
           (error "SSE line exceeds ende-max-sse-event-bytes"))
       (let* ((input (apply #'concat (nreverse parts)))
              (start 0)
