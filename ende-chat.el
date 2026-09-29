@@ -507,11 +507,11 @@ whole request; a fence inside another sibling's subtree does not."
     (save-excursion
       (let ((tree (org-element-parse-buffer)))
         (org-element-map tree 'property-drawer
-	  (lambda (drawer)
-	    (when (cl-every #'ende-chat--reserved-property-p
-			    (org-element-map drawer 'node-property #'identity))
-	      (goto-char (org-element-property :begin drawer))
-	      (org-fold-hide-drawer-toggle t t))))))))
+			 (lambda (drawer)
+			   (when (cl-every #'ende-chat--reserved-property-p
+					   (org-element-map drawer 'node-property #'identity))
+			     (goto-char (org-element-property :begin drawer))
+			     (org-fold-hide-drawer-toggle t t))))))))
 
 (defun ende-chat--hide-reasoning-section (headline)
   "Hide HEADLINE's Org subtree without hiding its sibling reply."
@@ -531,51 +531,51 @@ whole request; a fence inside another sibling's subtree does not."
          (exclusions (ende-chat--document-exclusions document))
          (removed-drawers (make-hash-table :test #'eq)))
     (org-element-map tree 'property-drawer
-      (lambda (drawer)
-	(let ((properties (org-element-map drawer 'node-property #'identity))
-	      (headline (ende-chat--lineage-headline drawer)))
-	  (when (and headline (cl-every #'ende-chat--reserved-property-p
-					properties))
-	    (puthash drawer t removed-drawers)
-	    (puthash headline
-		     (cons (cons (org-element-property :begin drawer)
-				 (org-element-property :end drawer))
-			   (gethash headline exclusions))
-		     exclusions))))
-      nil nil nil)
+		     (lambda (drawer)
+		       (let ((properties (org-element-map drawer 'node-property #'identity))
+			     (headline (ende-chat--lineage-headline drawer)))
+			 (when (and headline (cl-every #'ende-chat--reserved-property-p
+						       properties))
+			   (puthash drawer t removed-drawers)
+			   (puthash headline
+				    (cons (cons (org-element-property :begin drawer)
+						(org-element-property :end drawer))
+					  (gethash headline exclusions))
+				    exclusions))))
+		     nil nil nil)
     (org-element-map tree 'drawer
-      (lambda (drawer)
-	(when (equal (upcase (or (org-element-property :drawer-name drawer) ""))
-		     ende-chat--tool-context-drawer)
-	  (let ((headline (ende-chat--lineage-headline drawer)))
-	    (when headline
-	      (puthash headline
-		       (cons drawer
-			     (gethash
-			      headline
-			      (ende-chat--document-tool-context-drawers
-			       document)))
-		       (ende-chat--document-tool-context-drawers document))
-	      (puthash headline
-		       (cons (cons (org-element-property :begin drawer)
-				   (org-element-property :end drawer))
-			     (gethash headline exclusions))
-		       exclusions)))))
-      nil nil nil)
+		     (lambda (drawer)
+		       (when (equal (upcase (or (org-element-property :drawer-name drawer) ""))
+				    ende-chat--tool-context-drawer)
+			 (let ((headline (ende-chat--lineage-headline drawer)))
+			   (when headline
+			     (puthash headline
+				      (cons drawer
+					    (gethash
+					     headline
+					     (ende-chat--document-tool-context-drawers
+					      document)))
+				      (ende-chat--document-tool-context-drawers document))
+			     (puthash headline
+				      (cons (cons (org-element-property :begin drawer)
+						  (org-element-property :end drawer))
+					    (gethash headline exclusions))
+				      exclusions)))))
+		     nil nil nil)
     (org-element-map tree 'node-property
-      (lambda (element)
-	(let* ((headline (ende-chat--lineage-headline element))
-	       (drawer (org-element-lineage
-			element '(property-drawer) t)))
-	  (when (and headline
-		     (ende-chat--reserved-property-p element)
-		     (not (gethash drawer removed-drawers)))
-	    (puthash headline
-		     (cons (cons (org-element-property :begin element)
-				 (org-element-property :end element))
-			   (gethash headline exclusions))
-		     exclusions))))
-      nil nil nil)
+		     (lambda (element)
+		       (let* ((headline (ende-chat--lineage-headline element))
+			      (drawer (org-element-lineage
+				       element '(property-drawer) t)))
+			 (when (and headline
+				    (ende-chat--reserved-property-p element)
+				    (not (gethash drawer removed-drawers)))
+			   (puthash headline
+				    (cons (cons (org-element-property :begin element)
+						(org-element-property :end element))
+					  (gethash headline exclusions))
+				    exclusions))))
+		     nil nil nil)
     document))
 
 (defun ende-chat--section-exclusions (document headline start)
@@ -1031,7 +1031,7 @@ final Agent: Reply for ordering and sequence validation."
       (insert text)
       (let (edits)
         (dolist (headline (org-element-map (org-element-parse-buffer)
-			      'headline #'identity))
+					   'headline #'identity))
           (let* ((begin (org-element-property :begin headline))
                  (level (org-element-property :level headline))
                  (new-level (- level shift)))
@@ -1332,32 +1332,32 @@ title.\n\n"
   "Return response ranges for private title and control properties."
   (let (ranges)
     (org-element-map tree '(keyword node-property)
-      (lambda (element)
-	(cond
-	 ((ende-chat--title-keyword-p element)
-	  (let ((begin (org-element-property :begin element)))
-	    (save-excursion
-	      (goto-char begin)
-	      (push (cons begin (min (point-max) (1+ (line-end-position))))
-		    ranges))))
-	 ((and (eq (org-element-type element) 'node-property)
-	       (member (upcase (or (org-element-property :key element) ""))
-		       ende-chat--reserved-properties))
-	  (push (cons (org-element-property :begin element)
-		      (org-element-property :end element))
-		ranges))))
-      nil nil nil)
+		     (lambda (element)
+		       (cond
+			((ende-chat--title-keyword-p element)
+			 (let ((begin (org-element-property :begin element)))
+			   (save-excursion
+			     (goto-char begin)
+			     (push (cons begin (min (point-max) (1+ (line-end-position))))
+				   ranges))))
+			((and (eq (org-element-type element) 'node-property)
+			      (member (upcase (or (org-element-property :key element) ""))
+				      ende-chat--reserved-properties))
+			 (push (cons (org-element-property :begin element)
+				     (org-element-property :end element))
+			       ranges))))
+		     nil nil nil)
     ranges))
 
 (defun ende-chat--response-title (tree)
   "Return the first private title value in response TREE."
   (let (title)
     (org-element-map tree 'keyword
-      (lambda (element)
-	(when (and (null title) (ende-chat--title-keyword-p element))
-	  (setq title (string-trim
-		       (or (org-element-property :value element) "")))))
-      nil nil nil)
+		     (lambda (element)
+		       (when (and (null title) (ende-chat--title-keyword-p element))
+			 (setq title (string-trim
+				      (or (org-element-property :value element) "")))))
+		     nil nil nil)
     (and (not (string-empty-p title)) title)))
 
 (defun ende-chat--block-directive (line)

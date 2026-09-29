@@ -321,10 +321,10 @@ non-nil, also reject read-only targets before reading the source."
       (error "%s target no longer exists" operation))
     (with-current-buffer buffer
       (ende-target-with-restriction target
-	(when writable
-	  (barf-if-buffer-read-only))
-	(ende-target-ensure-size start end operation)
-	(ende-target-selected-source target start end)))))
+				    (when writable
+				      (barf-if-buffer-read-only))
+				    (ende-target-ensure-size start end operation)
+				    (ende-target-selected-source target start end)))))
 
 (defun ende--run-selected-operation
     (job system-prompt prompt-function on-done &optional writable)
@@ -389,10 +389,10 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
       (error "target buffer no longer exists"))
     (with-current-buffer buffer
       (ende-target-with-restriction target
-	(barf-if-buffer-read-only)
-	(ende-target-with-application target
-	  (atomic-change-group
-	    (funcall mutation)))))))
+				    (barf-if-buffer-read-only)
+				    (ende-target-with-application target
+								  (atomic-change-group
+								    (funcall mutation)))))))
 
 (defun ende--result-content (result)
   "Extract and validate completion content from RESULT or a legacy string."
@@ -560,10 +560,10 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
     (with-current-buffer buffer
       (save-excursion
         (ende-target-with-restriction target
-	  (list :buffer buffer
-		:start (point-min)
-		:source (buffer-substring-no-properties
-			 (point-min) (point-max))))))))
+				      (list :buffer buffer
+					    :start (point-min)
+					    :source (buffer-substring-no-properties
+						     (point-min) (point-max))))))))
 
 (defun ende--structured-edit-pass (job result)
   "Parse and apply one structured RESULT for JOB.
@@ -588,20 +588,20 @@ Return pass data without settling JOB."
       (let ((apply-edits
              (lambda ()
                (ende-target-with-restriction target
-		 (barf-if-buffer-read-only)
-		 (dolist (edit
-			  (sort (copy-sequence edits)
-				(lambda (left right)
-				  (ende--structured-edit-descending-p
-				   left right key))))
-		   (condition-case caught
-		       (ende--apply-anchor-edit
-			target buffer source-start edit display)
-		     ((error quit)
-		      (push (list :index (plist-get edit :index)
-				  :message (error-message-string caught)
-				  :raw (plist-get edit :raw))
-			    application-failures))))))))
+					     (barf-if-buffer-read-only)
+					     (dolist (edit
+						      (sort (copy-sequence edits)
+							    (lambda (left right)
+							      (ende--structured-edit-descending-p
+							       left right key))))
+					       (condition-case caught
+						   (ende--apply-anchor-edit
+						    target buffer source-start edit display)
+						 ((error quit)
+						  (push (list :index (plist-get edit :index)
+							      :message (error-message-string caught)
+							      :raw (plist-get edit :raw))
+							application-failures))))))))
         (if ende-structured-edit-move-point
             (funcall apply-edits)
           (save-excursion
@@ -796,18 +796,18 @@ PREVIOUS contains failures from the preceding structured pass."
          (signal 'error '("target anchor no longer exists")))
        (with-current-buffer buffer
          (ende-target-with-restriction target
-	   (barf-if-buffer-read-only)
-	   (if selected
-	       (let ((offset (or (ende-target-offset target) 0)))
-		 (ende-target-validate-source target start end)
-		 (setq context
-		       (ende-target-buffer-marker-context
-			start end (+ start offset))))
-	     (unless (ende-target-restriction-valid-p target cursor cursor)
-	       (error "cursor is outside the original restriction"))
-	     (setq context
-		   (ende-target-buffer-marker-context
-		    (point-min) (point-max) cursor)))))
+				       (barf-if-buffer-read-only)
+				       (if selected
+					   (let ((offset (or (ende-target-offset target) 0)))
+					     (ende-target-validate-source target start end)
+					     (setq context
+						   (ende-target-buffer-marker-context
+						    start end (+ start offset))))
+					 (unless (ende-target-restriction-valid-p target cursor cursor)
+					   (error "cursor is outside the original restriction"))
+					 (setq context
+					       (ende-target-buffer-marker-context
+						(point-min) (point-max) cursor)))))
        (ende--dispatch-llm
         job
         (list (cons "system" ende-insert-system)
@@ -842,9 +842,9 @@ PREVIOUS contains failures from the preceding structured pass."
        (with-current-buffer buffer
          (save-excursion
            (ende-target-with-restriction target
-	     (barf-if-buffer-read-only)
-	     (ende-target-validate-source target start end)
-	     (setq source (buffer-substring-no-properties start end)))))
+					 (barf-if-buffer-read-only)
+					 (ende-target-validate-source target start end)
+					 (setq source (buffer-substring-no-properties start end)))))
        (setf (ende-job-structured-state job)
              (list :type type
                    :instruction instruction

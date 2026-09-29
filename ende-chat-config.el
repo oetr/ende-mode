@@ -115,16 +115,16 @@
   "Map Org nodes in TREE to their direct `ende' configuration blocks."
   (let ((blocks (make-hash-table :test #'eq)))
     (org-element-map tree 'special-block
-      (lambda (block)
-	(let* ((section (org-element-property :parent block))
-	       (node (and (eq (org-element-type section) 'section)
-			  (org-element-property :parent section))))
-	  (when (and node
-		     (memq (org-element-type node) '(org-data headline))
-		     (string= (downcase (or (org-element-property :type block) ""))
-			      "ende"))
-	    (puthash node (cons block (gethash node blocks)) blocks))))
-      nil nil nil)
+		     (lambda (block)
+		       (let* ((section (org-element-property :parent block))
+			      (node (and (eq (org-element-type section) 'section)
+					 (org-element-property :parent section))))
+			 (when (and node
+				    (memq (org-element-type node) '(org-data headline))
+				    (string= (downcase (or (org-element-property :type block) ""))
+					     "ende"))
+			   (puthash node (cons block (gethash node blocks)) blocks))))
+		     nil nil nil)
     blocks))
 
 (defun ende-chat-config--block-source (block)
