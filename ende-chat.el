@@ -446,6 +446,16 @@ whole request; a fence inside another sibling's subtree does not."
               (goto-char (org-element-property :begin drawer))
               (org-fold-hide-drawer-toggle t t))))))))
 
+(defun ende-chat--hide-tool-context-drawers (document headline)
+  "Hide tool-context drawers belonging to HEADLINE in DOCUMENT."
+  (when (and (derived-mode-p 'org-mode) headline)
+    (save-excursion
+      (dolist (drawer
+               (gethash headline
+                        (ende-chat--document-tool-context-drawers document)))
+        (goto-char (org-element-property :begin drawer))
+        (org-fold-hide-drawer-toggle t t)))))
+
 (defun ende-chat--hide-reasoning-section (headline)
   "Hide HEADLINE's Org subtree without hiding its sibling reply."
   (when (derived-mode-p 'org-mode)
@@ -1243,10 +1253,16 @@ TOOL-TRANSCRIPT contains protocol messages from its tool rounds."
                         (goto-char (org-element-property :begin headline))
                         (insert response)
                         (let* ((final (ende-chat--build-document))
+                               (reply-headline
+                                (ende-chat--find-by-property
+                                 final ende-chat-request-id-property request-id))
                                (reasoning-headline
                                 (ende-chat--find-by-property
                                  final ende-chat-reasoning-for-property
                                  request-id)))
+                          (when reply-headline
+                            (ende-chat--hide-tool-context-drawers
+                             final reply-headline))
                           (when reasoning-headline
                             (ende-chat--hide-reasoning-section
                              reasoning-headline)))

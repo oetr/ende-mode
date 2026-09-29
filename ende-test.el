@@ -7217,6 +7217,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                     (ende-chat--section-tool-context document reply)))
               (should reply)
               (should drawer)
+              (should (ende-test--chat-tool-context-drawer-hidden-p drawer))
               (should-not (string-match-p "\n" stored-json))
               (should (equal stored-transcript expected-transcript))
               (should (string-match-p "Final answer about the source"
@@ -7249,10 +7250,31 @@ Use COMMAND for the process, or a silent sleep process by default."
                                                        messages :test #'equal))))
               (should (equal (ende-test--chat-message-role (car (last messages)))
                              "user"))
+              (save-excursion
+                (goto-char (org-element-property :begin drawer))
+                (org-fold-hide-drawer-toggle 'off t))
+              (should-not
+               (ende-test--chat-tool-context-drawer-hidden-p drawer))
               (let ((follow-up (ende-ask)))
                 (should (eq (ende-job-state follow-up) 'running))
                 (ende-test--complete-call (nth 3 ende-test--calls))
-                (should (eq (ende-job-state follow-up) 'completed))))
+                (should (eq (ende-job-state follow-up) 'completed)))
+              (let* ((updated (ende-chat--build-document))
+                     (original-reply
+                      (cl-find-if
+                       (lambda (headline)
+                         (equal (org-element-property :raw-value headline)
+                                "Agent: Reply"))
+                       (ende-chat--document-headlines updated)))
+                     (original-drawer
+                      (car (gethash
+                            original-reply
+                            (ende-chat--document-tool-context-drawers
+                              updated)))))
+                (should original-drawer)
+                (should-not
+                 (ende-test--chat-tool-context-drawer-hidden-p
+                  original-drawer))))
             (ende-test--chat-goto "** Compact")
             (let ((compaction (ende-compact)))
               (should (= (length ende-test--calls) 5))
@@ -7317,6 +7339,12 @@ Use COMMAND for the process, or a silent sleep process by default."
   (save-excursion
     (goto-char (org-element-property :begin drawer))
     (forward-line 1)
+    (invisible-p (point))))
+
+(defun ende-test--chat-tool-context-drawer-hidden-p (drawer)
+  "Return non-nil when DRAWER's contents are folded."
+  (save-excursion
+    (goto-char (org-element-property :contents-begin drawer))
     (invisible-p (point))))
 
 (defun ende-test--chat-response-headlines ()
