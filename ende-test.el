@@ -7349,6 +7349,89 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should-not (string-match-p "not JSON" text))
       (should-not (ende-test--chat-protocol-messages messages)))))
 
+(ert-deftest ende-test/chat-work-container-is-only-created-for-tool-loops ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("A plain answer.") t)))
+    (ende-test--with-buffer
+        "* Topic\n** Question\nAnswer this.\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (let ((job (ende-ask)))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state job) 'completed)))
+      (let* ((document (ende-chat--build-document))
+             (headlines (ende-chat--document-headlines document)))
+        (should-not
+         (cl-some (lambda (headline)
+                    (ende-chat--work-section-p document headline))
+                  headlines))
+        (should (= (cl-count-if
+                    (lambda (headline)
+                      (and (equal (org-element-property :raw-value headline)
+                                  "Agent: Reply")
+                           (equal (ende-chat--property document headline :role)
+                                  "assistant")))
+                    headlines)
+                   1))))))
+
+(ert-deftest ende-test/chat-user-authored-agent-work-heading-is-ordinary-content ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+      (concat "* Topic\n"
+              "** User\nA question.\n"
+              "** Agent: Work\nThese are ordinary user notes.\n"
+              "** Follow-up\nContinue.\n")
+    (org-mode)
+    (ende-test--chat-goto "** Follow-up")
+    (let* ((document (ende-chat--build-document))
+           (work (cl-find-if
+                  (lambda (headline)
+                    (equal (org-element-property :raw-value headline)
+                           "Agent: Work"))
+                  (ende-chat--document-headlines document)))
+           (messages (ende-chat-context-at-point)))
+      (should work)
+      (should-not (ende-chat--work-section-p document work))
+      (let ((work-message (car (last messages 2))))
+        (should (string-match-p "Agent: Work"
+                                (ende-test--chat-context-text
+                                 (list work-message))))
+        (should (string-match-p "These are ordinary user notes"
+                                (ende-test--chat-context-text
+                                 (list work-message))))))))
+
+(ert-deftest ende-test/chat-work-validation-rejects-duplicate-request-containers ()
+  (let* ((request-id "request-duplicate-work")
+         (question-id "question-duplicate-work")
+         (first-call '(:id "call-first" :name "read_file" :arguments "{}"))
+         (second-call '(:id "call-second" :name "read_file" :arguments "{}"))
+         (protocol
+          (concat
+           (ende-chat--work-text 2 question-id request-id)
+           (ende-chat--assistant-protocol-text
+            3 question-id request-id "" '(:content "First round")
+            (list first-call))
+           (ende-chat--tool-result-text 3 request-id first-call "First result")
+           (ende-chat--work-text 2 question-id request-id)
+           (ende-chat--assistant-protocol-text
+            3 question-id request-id "" '(:content "Second round")
+            (list second-call))
+           (ende-chat--tool-result-text 3 request-id second-call "Second result")
+           (ende-chat--assistant-protocol-text
+            2 question-id request-id "" '(:content "Final") nil nil 'org))))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Topic\n** User\nQuestion\n")
+      (insert protocol)
+      (insert "** Follow-up\nContinue\n")
+      (ende-test--chat-goto "** Follow-up")
+      (let ((failure
+             (condition-case caught
+                 (progn (ende-chat-context-at-point) nil)
+               (error (error-message-string caught)))))
+        (should (string-match-p "Multiple generated Agent: Work sections"
+                                failure))))))
+
 (ert-deftest ende-test/chat-tool-history-survives-follow-up-and-compaction ()
   (let ((root (make-temp-file "ende-chat-history-" t)))
     (ende-test--reset)
@@ -7395,27 +7478,37 @@ Use COMMAND for the process, or a silent sleep process by default."
             (let ((job (ende-ask)))
               (ende-test--complete-call (nth 0 ende-test--calls))
               (should (= (length ende-test--calls) 2))
-               (ende-test--complete-call (nth 1 ende-test--calls))
-               (should (= (length ende-test--calls) 3))
-               (ende-test--complete-call (nth 2 ende-test--calls))
-               (should (eq (ende-job-state job) 'completed)))
-             (ende-test--chat-goto "** Follow-up")
-             (beginning-of-line)
-             (insert "** Tool Result: read_file\n"
-                     "This is a user-authored note.\n\n")
-             (let* ((first-round
+              (ende-test--complete-call (nth 1 ende-test--calls))
+              (should (= (length ende-test--calls) 3))
+              (ende-test--complete-call (nth 2 ende-test--calls))
+              (should (eq (ende-job-state job) 'completed)))
+            (ende-test--chat-goto "** Follow-up")
+            (beginning-of-line)
+            (insert "** Tool Result: read_file\n"
+                    "This is a user-authored note.\n\n"
+                    "** Agent: Work\n"
+                    "This heading is user-authored.\n\n")
+            (let* ((first-round
                     (last (plist-get (nth 1 ende-test--calls) :messages) 3))
                    (second-round
                     (last (plist-get (nth 2 ende-test--calls) :messages) 2))
                     (expected-transcript (append first-round second-round))
                     (document (ende-chat--build-document))
-                    (reply
-                    (cl-find-if
-                      (lambda (headline)
-                        (equal (org-element-property :raw-value headline)
-                               "Agent: Reply"))
-                      (ende-chat--document-headlines document)))
                     (headlines (ende-chat--document-headlines document))
+                    (reply
+                     (cl-find-if
+                      (lambda (headline)
+                        (and (equal (org-element-property :raw-value headline)
+                                    "Agent: Reply")
+                             (null (ende-chat--work-ancestor
+                                    document headline))))
+                      headlines))
+                    (works
+                     (cl-remove-if-not
+                      (lambda (headline)
+                        (ende-chat--work-section-p document headline))
+                      headlines))
+                    (work (car works))
                     (protocol-headlines
                      (cl-remove-if-not
                       (lambda (headline)
@@ -7444,6 +7537,23 @@ Use COMMAND for the process, or a silent sleep process by default."
                               document headline)))
                       headlines)))
                (should reply)
+               (should (= (length works) 1))
+               (should (equal (ende-chat--property document work :request-id)
+                              (ende-chat--property document reply :request-id)))
+               (should (eq (ende-chat--parent document work)
+                           (ende-chat--parent document reply)))
+               (should (= (org-element-property :level work)
+                          (org-element-property :level reply)))
+               (should (< (org-element-property :begin work)
+                          (org-element-property :begin reply)))
+               (should
+                (eq reply
+                    (cadr (memq work
+                                (ende-chat--children
+                                 document (ende-chat--parent document work))))))
+               (dolist (child (ende-chat--children document work))
+                 (should (equal (ende-chat--property document child :request-id)
+                                (ende-chat--property document work :request-id))))
                (should-not (cl-some
                             (lambda (drawers) drawers)
                             (hash-table-values
@@ -7480,7 +7590,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                               '("call-A" "call-B" "call-C")))
                (should
                 (ende-test--chat-headline-text-hidden-p
-                 (car results) "FOO_SOURCE_TOKEN"))
+                 work "FOO_SOURCE_TOKEN"))
+               (should-not
+                (ende-test--chat-headline-text-hidden-p
+                 reply "Final answer about the source."))
                (let ((user-note
                       (cl-find-if
                        (lambda (headline)
@@ -7509,6 +7622,24 @@ Use COMMAND for the process, or a silent sleep process by default."
                                                         messages :test #'equal))))
                (should (equal (ende-test--chat-message-role (car (last messages)))
                               "user"))
+               (should
+                (cl-some
+                 (lambda (message)
+                   (and (consp message) (stringp (car message))
+                        (string-match-p "This heading is user-authored"
+                                        (cdr message))))
+                 messages))
+               (should
+                (equal (mapcar #'ende-test--chat-message-role messages)
+                       '("user" "user" "assistant" "tool" "tool"
+                         "assistant" "tool" "assistant" "user" "user")))
+               (ende-test--chat-goto "** Agent: Work")
+               (org-fold-show-subtree)
+               (ende-test--chat-goto "** Follow-up")
+               (should (equal messages (ende-chat-context-at-point)))
+               (ende-test--chat-goto "** Agent: Work")
+               (org-fold-hide-subtree)
+               (ende-test--chat-goto "** Follow-up")
                (let ((follow-up (ende-ask)))
                  (should (eq (ende-job-state follow-up) 'running))
                  (ende-test--complete-call (nth 3 ende-test--calls))
@@ -7574,15 +7705,27 @@ Use COMMAND for the process, or a silent sleep process by default."
               (should completed)
               (should (eq (ende-job-state job) 'failed))
               (let* ((document (ende-chat--build-document))
+                     (work
+                      (cl-find-if
+                       (lambda (headline)
+                         (ende-chat--work-section-p document headline))
+                       (ende-chat--document-headlines document)))
                      (reply
                       (cl-find-if
                        (lambda (headline)
                          (and (equal (org-element-property :raw-value headline)
                                      "Agent: Reply")
-                              (equal (ende-chat--property
-                                      document headline :request-id)
-                                     (plist-get (ende-job-instruction job)
-                                                :request-id))))
+                              (equal (ende-chat--property document headline :request-id)
+                                     (plist-get (ende-job-instruction job) :request-id))
+                              (null (ende-chat--work-ancestor document headline))))
+                       (ende-chat--document-headlines document)))
+                     (intermediate
+                      (cl-find-if
+                       (lambda (headline)
+                         (and (equal (org-element-property :raw-value headline)
+                                     "Agent: Reply")
+                              (eq (ende-chat--work-ancestor document headline)
+                                  work)))
                        (ende-chat--document-headlines document)))
                      (calls
                       (cl-remove-if-not
@@ -7596,9 +7739,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                           headline "Tool Result:"))
                        (ende-chat--document-headlines document)))
                      (message
-                      (ende-chat--protocol-assistant-message document reply)))
-                (should reply)
-                (should (equal (ende-chat--property document reply :state)
+                      (ende-chat--protocol-assistant-message document intermediate)))
+                (should work)
+                (should-not reply)
+                (should (equal (ende-chat--property document work :state)
                                "failed"))
                 (should (equal (mapcar (lambda (call)
                                          (ende-chat--property
