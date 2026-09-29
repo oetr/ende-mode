@@ -87,6 +87,9 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat--context-fence-title "Agent: Context Fence"
   "Host-owned title for a compaction result.")
 
+(defconst ende-chat--tool-context-drawer "ENDE_CHAT_TOOL_CONTEXT"
+  "Org drawer storing protocol messages for an assistant tool transcript.")
+
 (defconst ende-chat--compact-instructions-title "User: Context Fence Instructions"
   "Title given to untitled, nonempty compaction instructions.")
 
@@ -143,7 +146,7 @@ discarding superseded details. Be concise but self-contained."
 
 (cl-defstruct (ende-chat--document (:constructor ende-chat--make-document))
   "Parsed Org document and its headline relationships."
-  tree headlines parent children properties exclusions)
+  tree headlines parent children properties exclusions tool-context-drawers)
 
 ;;;; Org document model
 
@@ -245,7 +248,8 @@ discarding superseded details. Be concise but self-contained."
     (let ((document
            (ende-chat--make-document
             :tree tree :headlines sorted :parent parent :children children
-            :properties properties :exclusions (make-hash-table :test #'eq))))
+            :properties properties :exclusions (make-hash-table :test #'eq)
+            :tool-context-drawers (make-hash-table :test #'eq))))
       (ende-chat--collect-section-exclusions document)
       document)))
 
@@ -455,7 +459,7 @@ whole request; a fence inside another sibling's subtree does not."
     (and (eq (org-element-type headline) 'headline) headline)))
 
 (defun ende-chat--collect-section-exclusions (document)
-  "Collect control-property ranges for every headline in DOCUMENT."
+  "Collect host-metadata ranges for every headline in DOCUMENT."
   (let* ((tree (ende-chat--document-tree document))
          (exclusions (ende-chat--document-exclusions document))
          (removed-drawers (make-hash-table :test #'eq)))
@@ -471,6 +475,25 @@ whole request; a fence inside another sibling's subtree does not."
                                  (org-element-property :end drawer))
                            (gethash headline exclusions))
                      exclusions))))
+      nil nil nil)
+    (org-element-map tree 'drawer
+      (lambda (drawer)
+        (when (equal (upcase (or (org-element-property :drawer-name drawer) ""))
+                     ende-chat--tool-context-drawer)
+          (let ((headline (ende-chat--lineage-headline drawer)))
+            (when headline
+              (puthash headline
+                       (cons drawer
+                             (gethash
+                              headline
+                              (ende-chat--document-tool-context-drawers
+                               document)))
+                       (ende-chat--document-tool-context-drawers document))
+              (puthash headline
+                       (cons (cons (org-element-property :begin drawer)
+                                   (org-element-property :end drawer))
+                             (gethash headline exclusions))
+                       exclusions)))))
       nil nil nil)
     (org-element-map tree 'node-property
       (lambda (element)
@@ -502,6 +525,21 @@ whole request; a fence inside another sibling's subtree does not."
          (ranges (ende-chat--section-exclusions document headline start)))
     (ende-chat--remove-ranges text ranges)))
 
+(defun ende-chat--section-tool-context (document headline)
+  "Decode HEADLINE's tool-context drawer, or return nil when it has none."
+  (let ((drawers (gethash headline
+                          (ende-chat--document-tool-context-drawers document))))
+    (when (> (length drawers) 1)
+      (error "Multiple %s drawers on one assistant section"
+             ende-chat--tool-context-drawer))
+    (when-let* ((drawer (car drawers)))
+      (let ((begin (org-element-property :contents-begin drawer))
+            (end (org-element-property :contents-end drawer)))
+        (unless (and begin end)
+          (error "Empty %s drawer" ende-chat--tool-context-drawer))
+        (ende-chat--decode-tool-context
+         (string-trim (buffer-substring-no-properties begin end)))))))
+
 (defun ende-chat--prefix-messages
     (document root question &optional reasoning-ancestors-only)
   "Serialize eligible sections before QUESTION within ROOT.
@@ -531,31 +569,39 @@ ancestors are included even when ordinary reasoning context is disabled."
              (setq parts nil
                    message-owner nil
                    message-role nil)))
-         (walk (headline owner role)
-           (let* ((properties (gethash
-                               headline
-                               (ende-chat--document-properties document)))
-                  (role-marked (plist-get properties :role-marked))
-                  (local-role (and role-marked (plist-get properties :role)))
-                  (next-owner (if role-marked headline owner))
-                  (next-role (if role-marked (intern local-role) role)))
-             (when (>= (org-element-property :begin headline) question-begin)
-               (throw 'ende-chat--question-reached nil))
-             (when role-marked
-               (flush))
-             (when (and (>= (org-element-property :begin headline) start)
-                        (if reasoning-ancestors-only
-                            (memq headline reasoning-ancestors)
-                          (or (ende-chat--eligible-p document headline)
-                              (memq headline reasoning-ancestors))))
-               (unless (and parts (eq next-owner message-owner))
-                 (flush)
-                 (setq message-owner next-owner
-                       message-role next-role))
-               (push (ende-chat--section-text document headline) parts))
-             (dolist (child (ende-chat--fenced-siblings
-                             document (ende-chat--children document headline)
-                             question-begin))
+          (walk (headline owner role)
+            (let* ((properties (gethash
+                                headline
+                                (ende-chat--document-properties document)))
+                   (role-marked (plist-get properties :role-marked))
+                   (local-role (and role-marked (plist-get properties :role)))
+                   (next-owner (if role-marked headline owner))
+                   (next-role (if role-marked (intern local-role) role))
+                   (selected
+                    (and (>= (org-element-property :begin headline) start)
+                         (if reasoning-ancestors-only
+                             (memq headline reasoning-ancestors)
+                           (or (ende-chat--eligible-p document headline)
+                               (memq headline reasoning-ancestors))))))
+              (when (>= (org-element-property :begin headline) question-begin)
+                (throw 'ende-chat--question-reached nil))
+              (when role-marked
+                (flush))
+              (when (and selected role-marked (equal local-role "assistant"))
+                (let ((tool-context
+                       (ende-chat--section-tool-context document headline)))
+                  (when tool-context
+                    (setq messages
+                          (nconc (reverse tool-context) messages)))))
+              (when selected
+                (unless (and parts (eq next-owner message-owner))
+                  (flush)
+                  (setq message-owner next-owner
+                        message-role next-role))
+                (push (ende-chat--section-text document headline) parts))
+              (dolist (child (ende-chat--fenced-siblings
+                              document (ende-chat--children document headline)
+                              question-begin))
                (walk child next-owner next-role)))))
       (catch 'ende-chat--question-reached
         (walk root nil 'user))
@@ -1066,11 +1112,15 @@ RESULT-PROPERTIES are the request's durable metadata lines."
               "\n\n"))))
 
 (defun ende-chat--assistant-text
-    (level question-id request-id result-properties normalized &optional compact)
+    (level question-id request-id result-properties normalized
+           &optional compact tool-transcript)
   "Return the host-owned assistant reply wrapper for NORMALIZED.
 RESULT-PROPERTIES are the request's durable metadata lines.
-COMPACT marks the completed response as a context fence."
+COMPACT marks the completed response as a context fence.
+TOOL-TRANSCRIPT stores the protocol messages preceding the visible answer."
   (let* ((body (plist-get normalized :content))
+         (tool-context (and tool-transcript
+                            (ende-chat--encode-tool-context tool-transcript)))
          (stars (make-string level ?*)))
     (when (string-blank-p body)
       (error "Chat completion was empty"))
@@ -1086,7 +1136,11 @@ COMPACT marks the completed response as a context fence."
             (when compact
               (ende-chat--response-property ende-chat-context-fence-property "t"))
             result-properties
-            ":END:\n\n"
+            ":END:\n"
+            (when tool-context
+              (concat ":" ende-chat--tool-context-drawer ":\n"
+                      tool-context "\n:END:\n"))
+            "\n"
             body
             "\n\n")))
 
@@ -1122,8 +1176,9 @@ Keep it while another queued compaction still refers to its durable identity."
         (ende-chat--set-headline-title
          question ende-chat--compact-instructions-title))))))
 
-(defun ende-chat--apply-result (job result)
-  "Replace JOB's pending reply with a completed assistant response."
+(defun ende-chat--apply-result (job result &optional tool-transcript)
+  "Replace JOB's pending reply with a completed assistant response.
+TOOL-TRANSCRIPT contains protocol messages from its tool rounds."
   (when (ende-job-current-p job)
     (condition-case failure
         (let* ((content (ende--result-content result))
@@ -1154,7 +1209,7 @@ Keep it while another queued compaction still refers to its durable identity."
                           normalized-thinking)))
                    (answer (ende-chat--assistant-text
                             level question-id request-id result-properties
-                            normalized compact))
+                            normalized compact tool-transcript))
                    (response (if compact
                                  (concat answer reasoning)
                                (concat reasoning answer)))
@@ -1241,6 +1296,185 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (gethash (substring (symbol-name key) 1) tool-call)
     (plist-get tool-call key)))
 
+(defun ende-chat--tool-context-calls (calls)
+  "Return CALLS as a list, or signal when it is not an array-like value."
+  (cond
+   ((and (vectorp calls) (not (stringp calls))) (append calls nil))
+   ((ende-chat-config--proper-list-p calls) calls)
+   (t (error "Malformed chat tool transcript: invalid tool-call array"))))
+
+(defun ende-chat--validate-tool-context (messages)
+  "Validate protocol MESSAGES and return them unchanged.
+Assistant calls must be followed by matching tool results in order."
+  (unless (and messages (ende-chat-config--proper-list-p messages))
+    (error "Malformed chat tool transcript: messages must be a nonempty list"))
+  (let ((pending nil))
+    (dolist (message messages)
+      (unless (and (ende-chat-config--proper-list-p message)
+                   (plist-member message :role))
+        (error "Malformed chat tool transcript: invalid message"))
+      (pcase (plist-get message :role)
+        ("assistant"
+         (when pending
+           (error "Malformed chat tool transcript: missing tool result for %s"
+                  (car pending)))
+         (unless (and (plist-member message :content)
+                      (let ((content (plist-get message :content)))
+                        (or (null content) (stringp content))))
+           (error "Malformed chat tool transcript: invalid assistant content"))
+         (let ((calls
+                (ende-chat--tool-context-calls
+                 (plist-get message :tool-calls))))
+           (unless (and (plist-member message :tool-calls) calls)
+             (error "Malformed chat tool transcript: assistant has no tool calls"))
+           (setq pending
+                 (mapcar
+                  (lambda (call)
+                    (unless (or (hash-table-p call)
+                                (ende-chat-config--proper-list-p call))
+                      (error "Malformed chat tool transcript: invalid tool call"))
+                    (let ((id (ende-chat--tool-value call :id))
+                          (name (ende-chat--tool-value call :name))
+                          (arguments (ende-chat--tool-value call :arguments)))
+                      (unless (and (stringp id) (not (string-empty-p id))
+                                   (stringp name) (not (string-empty-p name))
+                                   (stringp arguments))
+                        (error "Malformed chat tool transcript: invalid tool call"))
+                      id))
+                  calls))))
+        ("tool"
+         (let ((call-id (plist-get message :tool-call-id))
+               (content (plist-get message :content)))
+           (unless (and pending
+                        (stringp call-id) (not (string-empty-p call-id))
+                        (equal call-id (car pending))
+                        (plist-member message :content)
+                        (stringp content))
+             (error "Malformed chat tool transcript: unmatched tool result"))
+           (setq pending (cdr pending))))
+        (_ (error "Malformed chat tool transcript: invalid message role"))))
+    (when pending
+      (error "Malformed chat tool transcript: missing tool result for %s"
+             (car pending))))
+  messages)
+
+(defun ende-chat--tool-context-json-message (message)
+  "Return MESSAGE as a JSON-compatible alist."
+  (pcase (plist-get message :role)
+    ("assistant"
+     (list (cons :role "assistant")
+           (cons :content (plist-get message :content))
+           (cons :tool_calls
+                 (vconcat
+                  (mapcar
+                   (lambda (call)
+                     (list (cons :id (ende-chat--tool-value call :id))
+                           (cons :name (ende-chat--tool-value call :name))
+                           (cons :arguments
+                                 (ende-chat--tool-value call :arguments))))
+                   (ende-chat--tool-context-calls
+                    (plist-get message :tool-calls)))))))
+    ("tool"
+     (list (cons :role "tool")
+           (cons :tool_call_id (plist-get message :tool-call-id))
+           (cons :content (plist-get message :content))))))
+
+(defun ende-chat--encode-tool-context (messages)
+  "Encode validated protocol MESSAGES as compact versioned JSON."
+  (ende-chat--validate-tool-context messages)
+  (json-encode
+   (list (cons :version 1)
+         (cons :messages
+               (vconcat (mapcar #'ende-chat--tool-context-json-message
+                                messages))))))
+
+(defun ende-chat--tool-context-field (object key)
+  "Return KEY from JSON OBJECT, signaling when it is absent."
+  (unless (and (hash-table-p object) (hash-table-contains-p key object))
+    (error "Malformed %s: missing %s" ende-chat--tool-context-drawer key))
+  (gethash key object))
+
+(defun ende-chat--decode-tool-context (json)
+  "Decode versioned JSON into validated internal protocol messages."
+  (unless (stringp json)
+    (error "Malformed %s: expected JSON text" ende-chat--tool-context-drawer))
+  (let ((object
+         (condition-case failure
+             (json-parse-string json :object-type 'hash-table
+                                :array-type 'array :null-object :null
+                                :false-object :false)
+           (error
+            (error "Invalid %s JSON: %s"
+                   ende-chat--tool-context-drawer
+                   (error-message-string failure))))))
+    (let ((version (ende-chat--tool-context-field object "version")))
+      (unless (eql version 1)
+        (if (integerp version)
+            (error "Unsupported %s version: %d"
+                   ende-chat--tool-context-drawer version)
+          (error "Malformed %s: version must be an integer"
+                 ende-chat--tool-context-drawer))))
+    (let ((encoded-messages
+           (ende-chat--tool-context-field object "messages")))
+      (unless (and (vectorp encoded-messages) (not (stringp encoded-messages))
+                   (> (length encoded-messages) 0))
+        (error "Malformed %s: messages must be a nonempty array"
+               ende-chat--tool-context-drawer))
+      (ende-chat--validate-tool-context
+       (mapcar
+        (lambda (encoded)
+          (let ((role (ende-chat--tool-context-field encoded "role")))
+            (unless (stringp role)
+              (error "Malformed %s: message role must be a string"
+                     ende-chat--tool-context-drawer))
+            (pcase role
+              ("assistant"
+               (let* ((content (ende-chat--tool-context-field
+                               encoded "content"))
+                      (encoded-calls (ende-chat--tool-context-field
+                                      encoded "tool_calls")))
+                 (unless (or (eq content :null) (stringp content))
+                   (error "Malformed %s: assistant content must be a string or null"
+                          ende-chat--tool-context-drawer))
+                 (unless (and (vectorp encoded-calls)
+                              (not (stringp encoded-calls))
+                              (> (length encoded-calls) 0))
+                   (error "Malformed %s: tool_calls must be a nonempty array"
+                          ende-chat--tool-context-drawer))
+                 (list :role "assistant"
+                       :content (unless (eq content :null) content)
+                       :tool-calls
+                       (mapcar
+                        (lambda (call)
+                          (let ((id (ende-chat--tool-context-field call "id"))
+                                (name (ende-chat--tool-context-field call "name"))
+                                (arguments
+                                 (ende-chat--tool-context-field
+                                  call "arguments")))
+                            (unless (and (stringp id)
+                                         (not (string-empty-p id))
+                                         (stringp name)
+                                         (not (string-empty-p name))
+                                         (stringp arguments))
+                              (error "Malformed %s: invalid tool call"
+                                     ende-chat--tool-context-drawer))
+                            (list :id id :name name :arguments arguments)))
+                        (append encoded-calls nil)))))
+              ("tool"
+               (let ((call-id (ende-chat--tool-context-field
+                              encoded "tool_call_id"))
+                     (content (ende-chat--tool-context-field
+                               encoded "content")))
+                 (unless (and (stringp call-id)
+                              (not (string-empty-p call-id))
+                              (stringp content))
+                   (error "Malformed %s: invalid tool result"
+                          ende-chat--tool-context-drawer))
+                 (list :role "tool" :tool-call-id call-id :content content)))
+               (_ (error "Malformed %s: invalid message role %S"
+                         ende-chat--tool-context-drawer role)))))
+        (append encoded-messages nil))))))
+
 (defun ende-chat--tool-call-list (result)
   "Return normalized tool calls from LLM RESULT."
   (let ((calls (plist-get result :tool-calls)))
@@ -1286,6 +1520,8 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
   (let* ((definitions (ende-chat--tool-definitions configuration))
          (profile (copy-tree (ende-job-profile job)))
+         (tool-transcript nil)
+         (tool-transcript-tail nil)
          (rounds 0)
          (maximum ende-chat-max-tool-rounds)
          (messages (ende-operations--add-source-metadata job messages)))
@@ -1298,38 +1534,43 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
     (setq profile (plist-put profile :tool-definitions definitions))
     (setf (ende-job-profile job) profile)
     (cl-labels
-        ((on-done (result)
-           (ende--call-with-job-error
-            job
-            (lambda ()
-              (let ((calls (ende-chat--tool-call-list result)))
-                (if (null calls)
-                    (ende-chat--apply-result job result)
-                  (unless definitions
-                    (error "The provider returned an unrequested tool call"))
-                  (when (>= rounds maximum)
-                    (error "Chat exceeded %d tool-call rounds" maximum))
-                  (cl-incf rounds)
-                  (ende--handle-llm-event
-                   job '(:type :status :status "Running tools"))
-                  (setq messages
-                        (append
-                         messages
-                         (list (list :role "assistant"
-                                     :content (plist-get result :content)
-                                     :tool-calls calls))
-                         (mapcar
-                          (lambda (call)
-                            (list :role "tool"
-                                  :tool-call-id
-                                  (ende-chat--tool-value call :id)
-                                  :content
-                                  (ende-chat--tool-response
-                                   call configuration)))
-                          calls)))
-                  (ende--validate-messages messages)
-                  (ende--send-llm job messages #'on-done nil t)))))))
-      (ende--dispatch-llm job messages #'on-done nil nil t))))
+         ((on-done (result)
+            (ende--call-with-job-error
+             job
+             (lambda ()
+               (let ((calls (ende-chat--tool-call-list result)))
+                 (if (null calls)
+                     (ende-chat--apply-result job result tool-transcript)
+                   (unless definitions
+                     (error "The provider returned an unrequested tool call"))
+                   (when (>= rounds maximum)
+                     (error "Chat exceeded %d tool-call rounds" maximum))
+                   (cl-incf rounds)
+                   (ende--handle-llm-event
+                    job '(:type :status :status "Running tools"))
+                   (let* ((round-messages
+                           (cons (list :role "assistant"
+                                       :content (plist-get result :content)
+                                       :tool-calls calls)
+                                 (mapcar
+                                  (lambda (call)
+                                    (list :role "tool"
+                                          :tool-call-id
+                                          (ende-chat--tool-value call :id)
+                                          :content
+                                          (ende-chat--tool-response
+                                           call configuration)))
+                                  calls)))
+                          (transcript-round
+                           (copy-sequence round-messages)))
+                     (setq messages (append messages round-messages))
+                     (if tool-transcript-tail
+                         (setcdr tool-transcript-tail transcript-round)
+                       (setq tool-transcript transcript-round))
+                     (setq tool-transcript-tail (last transcript-round)))
+                   (ende--validate-messages messages)
+                   (ende--send-llm job messages #'on-done nil t)))))))
+       (ende--dispatch-llm job messages #'on-done nil nil t))))
 
 (defun ende-chat--run (job)
   "Serialize and dispatch a chat JOB at the moment it starts."
