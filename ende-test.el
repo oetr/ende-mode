@@ -217,6 +217,19 @@ process for cancellation tests."
     (should (plist-get call :ok))
     (plist-get call :result)))
 
+(defun ende-test--anchor-edit (anchor position text &rest properties)
+  "Build an anchor edit with optional additional PROPERTIES."
+  (append (list (cons "anchor" anchor)
+                (cons "position" position)
+                (cons "text" text))
+          properties))
+
+(defun ende-test--edit-file-call (path edits root)
+  "Call `edit_file' for PATH with anchor EDITS under ROOT."
+  (ende-tool-call "edit_file"
+                  (list (cons "path" path) (cons "edits" edits))
+                  root))
+
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
     (should (= (length definitions) 8))
@@ -227,11 +240,40 @@ process for cancellation tests."
                (json-encode (alist-get :parameters function)))))
         (should (hash-table-p (gethash "properties" schema)))
         (should (eq (gethash "additionalProperties" schema) :false))))
-    (should-not (ende-tool-read-only
-                 (ende-tool--find "edit_source")))
-    (should (string-match-p
-             "edit_source"
-             (json-encode (ende-tool-definitions))))))
+    (should-not (ende-tool-read-only (ende-tool--find "edit_file")))
+    (should-not (ende-tool--find "edit_source"))
+    (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
+    (should (string-match-p "edit_file" (json-encode definitions)))
+    (should-not (string-match-p "edit_source" (json-encode definitions)))
+    (let* ((definition
+            (cl-find-if
+             (lambda (candidate)
+               (equal (alist-get :name (alist-get :function candidate))
+                      "edit_file"))
+             definitions))
+           (schema (ende-protocol-json-read-string
+                    (json-encode
+                     (alist-get :parameters (alist-get :function definition)))))
+           (properties (gethash "properties" schema))
+           (item (gethash "items" (gethash "edits" properties)))
+           (item-properties (gethash "properties" item)))
+      (should (equal (append (gethash "required" schema) nil)
+                     '("path" "edits")))
+      (should (eq (gethash "additionalProperties" schema) :false))
+      (should-not (gethash "buffer_id" properties))
+      (should-not (gethash "base_digest" properties))
+      (should (= (gethash "minItems" (gethash "edits" properties)) 1))
+      (should (equal (append (gethash "required" item) nil)
+                     '("anchor" "position" "text")))
+      (should (eq (gethash "additionalProperties" item) :false))
+      (should (equal (append (gethash "enum" (gethash "position"
+                                                       item-properties))
+                             nil)
+                     '("before" "after" "replace")))
+      (should (= (gethash "minLength" (gethash "anchor" item-properties)) 1))
+      (should-not (gethash "minLength" (gethash "text" item-properties)))
+      (should (= (gethash "minimum" (gethash "occurrence" item-properties))
+                 1)))))
 
 (ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
   (let* ((root (make-temp-file "ende-tools-project-" t))
@@ -333,31 +375,29 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest ende-test/project-tools-edit-requires-digest-and-is-reviewable ()
+(ert-deftest ende-test/project-tools-edit-file-pending-and-visiting-buffer ()
   (let* ((root (make-temp-file "ende-tools-edit-project-" t))
          (path (expand-file-name "main.el" root))
          (buffer nil))
     (unwind-protect
         (progn
+          (ende-tools-clear-change-sets)
           (with-temp-file path
             (insert "hello world\n"))
           (let* ((ende-project-root-directory root)
-                 (info (ende-test--tool-result
-                        "file_info" '(("path" . "main.el")) root))
                  (proposal (ende-test--tool-result
-                            "edit_source"
+                            "edit_file"
                             (list
                              (cons "path" "main.el")
-                             (cons "base_digest" (plist-get info :digest))
                              (cons "edits"
-                                   (list
-                                    (list (cons "start" 6)
-                                          (cons "end" 11)
-                                          (cons "expected" "world")
-                                          (cons "replacement" "Emacs")))))
+                                   (list (ende-test--anchor-edit
+                                          "world" "replace" "Emacs"))))
                             root))
                  (change-set-id (plist-get proposal :change_set_id)))
             (should (string= (plist-get proposal :status) "pending"))
+            (should (= (plist-get proposal :edit_count) 1))
+            (should-not (plist-member proposal :base_digest))
+            (should-not (plist-member proposal :edits))
             (should (string= (with-temp-buffer
                                (insert-file-contents path)
                                (buffer-string))
@@ -369,46 +409,34 @@ process for cancellation tests."
                                (buffer-string))
                              "hello Emacs\n")))
           (setq buffer (find-file-noselect path))
+          (with-current-buffer buffer
+            (erase-buffer)
+            (insert "unsaved Emacs\n")
+            (set-buffer-modified-p t))
           (let* ((ende-project-root-directory root)
-                 (listed (ende-test--tool-result
-                          "list_project_buffers" nil root))
-                 (buffer-id (plist-get
-                             (car (plist-get listed :buffers)) :buffer_id))
-                 (info (ende-test--tool-result
-                        "file_info" '(("path" . "main.el")) root))
                  (proposal (ende-test--tool-result
-                            "edit_source"
+                            "edit_file"
                             (list
-                             (cons "buffer_id" buffer-id)
-                             (cons "base_digest" (plist-get info :digest))
+                             (cons "path" "main.el")
                              (cons "edits"
-                                   (list
-                                    (list (cons "start" 6)
-                                          (cons "end" 11)
-                                          (cons "expected" "Emacs")
-                                          (cons "replacement" "Lisp")))))
+                                    (list (ende-test--anchor-edit
+                                           "Emacs" "replace" "Lisp"))))
                             root)))
             (let ((change-set-id (plist-get proposal :change_set_id)))
               (ende-tools-apply-change-set change-set-id)
               (should-error (ende-tools-change-set change-set-id)))
             (with-current-buffer buffer
-              (should (string= (buffer-string) "hello Lisp\n"))
+              (should (string= (buffer-string) "unsaved Lisp\n"))
               (should (cl-some #'ende-review-overlay-p
-                               (overlays-in (point-min) (point-max)))))))
-      (let ((failure
-             (ende-tool-call
-              "edit_source"
-              '(("path" . "main.el")
-                ("base_digest" . "stale")
-                ("edits" . ((("start" . 0)
-                             ("end" . 5)
-                             ("expected" . "hello")
-                             ("replacement" . "bye")))))
-              root)))
-        (should-not (plist-get failure :ok)))
+                               (overlays-in (point-min) (point-max)))))
+            (should (string= (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                              "hello Emacs\n"))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
+      (ende-tools-clear-change-sets)
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -421,21 +449,18 @@ process for cancellation tests."
           (with-temp-file path
             (insert "old\n"))
           (let* ((ende-tools-direct-write t)
-                 (info (ende-test--tool-result
-                        "file_info" '(("path" . "main.el")) root))
                  (result (ende-test--tool-result
-                          "edit_source"
+                          "edit_file"
                           (list
                            (cons "path" "main.el")
-                           (cons "base_digest" (plist-get info :digest))
                            (cons "edits"
-                                 (list
-                                  (list (cons "start" 0)
-                                        (cons "end" 3)
-                                        (cons "expected" "old")
-                                        (cons "replacement" "new")))))
+                                 (list (ende-test--anchor-edit
+                                        "old" "replace" "new"))))
                           root)))
             (should (string= (plist-get result :status) "applied"))
+            (should-not (plist-member result :base_digest))
+            (should-not (plist-member result :new_digest))
+            (should-not (plist-member result :edits))
             (should (string= (with-temp-buffer
                                (insert-file-contents path)
                                (buffer-string))
@@ -443,27 +468,22 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest ende-test/project-tools-retain-failed-change-sets-until-settled ()
+(ert-deftest ende-test/project-tools-edit-file-refuses-stale-pending-source ()
   (let* ((root (make-temp-file "ende-tools-pending-project-" t))
          (path (expand-file-name "main.el" root))
          (ende-project-root-directory root))
     (unwind-protect
         (progn
+          (ende-tools-clear-change-sets)
           (with-temp-file path
             (insert "old\n"))
-          (let* ((info (ende-test--tool-result
-                        "file_info" '(("path" . "main.el")) root))
-                 (proposal (ende-test--tool-result
-                            "edit_source"
+          (let* ((proposal (ende-test--tool-result
+                            "edit_file"
                             (list
                              (cons "path" "main.el")
-                             (cons "base_digest" (plist-get info :digest))
                              (cons "edits"
-                                   (list
-                                    (list (cons "start" 0)
-                                          (cons "end" 3)
-                                          (cons "expected" "old")
-                                          (cons "replacement" "new")))))
+                                   (list (ende-test--anchor-edit
+                                          "old" "replace" "new"))))
                             root))
                  (id (plist-get proposal :change_set_id)))
             (with-temp-file path
@@ -473,16 +493,210 @@ process for cancellation tests."
             (ende-tools-reject-change-set id)
             (should-error (ende-tools-change-set id))))
       (when (file-directory-p root)
+        (ende-tools-clear-change-sets)
         (delete-directory root t)))))
 
-(ert-deftest ende-test/project-tools-reject-ambiguous-boundary-edits ()
-  (should-error
-   (ende-tools--validate-edits
-    '((("start" . 3) ("end" . 3) ("expected" . "")
-       ("replacement" . "!"))
-      (("start" . 3) ("end" . 6) ("expected" . "XYZ")
-       ("replacement" . "Q")))
-    "abcXYZ")))
+(ert-deftest ende-test/project-tools-edit-file-rejects-invalid-batches-atomically ()
+  (let* ((root (make-temp-file "ende-tools-invalid-edits-" t))
+         (path (expand-file-name "main.txt" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (with-temp-file path (insert "one one"))
+          (dolist (request
+                   (list
+                    (list (cons "path" "main.txt")
+                          (cons "edits"
+                                (list (ende-test--anchor-edit
+                                       "one" "replace" "two"))))
+                    (list (cons "path" "main.txt")
+                          (cons "edits"
+                                (list (ende-test--anchor-edit
+                                       "missing" "replace" "two"))))
+                    (list (cons "path" "main.txt")
+                          (cons "edits"
+                                (list (ende-test--anchor-edit
+                                       "one" "replace" "two")
+                                      (ende-test--anchor-edit
+                                       "absent" "after" "!"))))
+                    (list (cons "path" "main.txt")
+                          (cons "buffer_id" "not-accepted")
+                          (cons "base_digest" "not-accepted")
+                          (cons "edits" nil))
+                    (list (cons "edits"
+                                (list (ende-test--anchor-edit
+                                       "one" "replace" "two"))))
+                    (list (cons "path" "main.txt")
+                          (cons "edits" nil))
+                    (list (cons "path" "main.txt")
+                          (cons "edits"
+                                (list (append
+                                       (ende-test--anchor-edit
+                                        "one" "replace" "two")
+                                       '(("reason" . "unknown"))))))))
+            (should-not (plist-get (ende-tool-call "edit_file" request root)
+                                   :ok))
+            (should (= (hash-table-count ende-tools--change-sets) 0))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "one one")))
+          (with-temp-file path (insert "abcdef"))
+          (let ((overlap
+                 (ende-test--edit-file-call
+                  "main.txt"
+                  (list (ende-test--anchor-edit
+                         "abc" "replace" "A")
+                        (ende-test--anchor-edit
+                         "bcd" "replace" "B"))
+                  root)))
+            (should-not (plist-get overlap :ok))
+            (should (= (hash-table-count ende-tools--change-sets) 0))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "abcdef"))))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-edit-file-anchor-positions-and-selection ()
+  (let* ((root (make-temp-file "ende-tools-anchors-" t))
+         (path (expand-file-name "main.txt" root))
+         (ende-project-root-directory root)
+         (ende-tools-direct-write t))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (with-temp-file path (insert "hello world\n"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit "world" "before" "[")
+                          (ende-test--anchor-edit "world" "after" "]"))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "hello [world]\n"))
+          (with-temp-file path (insert "ab"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit "a" "after" "!")
+                          (ende-test--anchor-edit "b" "replace" "B"))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "a!B"))
+          (with-temp-file path (insert "one one"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit
+                           "one" "replace" "two" '("occurrence" . 2)))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "one two"))
+          (with-temp-file path (insert "one one"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit
+                           "one" "replace" "ONE" '("all" . t)))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "ONE ONE"))
+          (with-temp-file path (insert "remove this keep"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit
+                           "remove this " "replace" ""))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "keep"))
+          (with-temp-file path (insert "first middle last"))
+          (should (plist-get
+                   (ende-test--edit-file-call
+                    "main.txt"
+                    (list (ende-test--anchor-edit
+                           "first" "replace" "a much longer first")
+                          (ende-test--anchor-edit
+                           "last" "replace" "end"))
+                    root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "a much longer first middle end"))
+          (with-temp-file path (insert "Hello"))
+          (should-not (plist-get
+                       (ende-test--edit-file-call
+                        "main.txt"
+                        (list (ende-test--anchor-edit
+                               "hello" "replace" "bye"))
+                        root)
+                       :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "Hello")))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-edit-file-honors-edit-expansion-limits ()
+  (let* ((root (make-temp-file "ende-tools-edit-limits-" t))
+         (path (expand-file-name "main.txt" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (with-temp-file path (insert "a b"))
+          (let* ((ende-tools-max-edits 1)
+                 (too-many
+                  (ende-test--edit-file-call
+                   "main.txt"
+                   (list (ende-test--anchor-edit "a" "replace" "A")
+                         (ende-test--anchor-edit "b" "replace" "B"))
+                   root)))
+            (should-not (plist-get too-many :ok))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "a b"))
+            (should (= (hash-table-count ende-tools--change-sets) 0)))
+          (with-temp-file path (insert "x x"))
+          (let* ((ende-max-normalized-edits 1)
+                 (expansion
+                  (ende-test--edit-file-call
+                   "main.txt"
+                   (list (ende-test--anchor-edit
+                          "x" "replace" "X" '("all" . t)))
+                   root)))
+            (should-not (plist-get expansion :ok))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "x x"))
+            (should (= (hash-table-count ende-tools--change-sets) 0))))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
   (let* ((root (make-temp-file "ende-chat-config-" t))
@@ -493,7 +707,7 @@ process for cancellation tests."
             "#+begin_ende\n(root %S)\n"
             "(group inspect project_info list_project_files file_info read_file "
             "search_project list_project_buffers read_buffer)\n"
-            "(group modify edit_source)\n"
+            "(group modify edit_file)\n"
             "(resource project (include \"**\") (exclude \"private/**\"))\n"
             "(resource chat (include \"main.el\"))\n"
             "(tools inspect)\n"
@@ -513,6 +727,11 @@ process for cancellation tests."
     (unwind-protect
         (progn
           (make-directory (expand-file-name "private" root))
+          (make-directory (expand-file-name "private" child-root))
+          (with-temp-file (expand-file-name "main.el" child-root)
+            (insert "hello"))
+          (with-temp-file (expand-file-name "private/secret.txt" child-root)
+            (insert "secret"))
           (with-temp-buffer
             (insert configuration)
             (org-mode)
@@ -539,9 +758,9 @@ process for cancellation tests."
                      (ende-chat--document-parent document) inspect-only)))
               (should (equal (plist-get edit-config :root)
                              (ende-project-normalize-root child-root)))
-              (should (memq 'edit_source
+              (should (memq 'edit_file
                             (plist-get edit-config :active-tools)))
-              (should (equal (cdr (assq 'edit_source
+              (should (equal (cdr (assq 'edit_file
                                         (plist-get edit-config
                                                    :tool-resources)))
                              '(chat)))
@@ -555,10 +774,32 @@ process for cancellation tests."
 					    read_buffer)))
               (should (equal (plist-get inspect-config :root)
                              (ende-project-normalize-root child-root)))
-              (should-not (memq 'edit_source
+              (should-not (memq 'edit_file
                                 (plist-get inspect-config :active-tools)))
-              (should-not (assq 'edit_source
-                                (plist-get inspect-config :tool-resources)))))
+              (should-not (assq 'edit_file
+                                (plist-get inspect-config :tool-resources)))
+              (let ((allowed
+                     (ende-tool-call
+                      "edit_file"
+                      (list (cons "path" "main.el")
+                            (cons "edits"
+                                  (list (ende-test--anchor-edit
+                                         "hello" "replace" "updated"))))
+                      child-root edit-config)))
+                (should (plist-get allowed :ok))
+                (ende-tools-reject-change-set
+                 (plist-get (plist-get allowed :result) :change_set_id)))
+              (let ((denied
+                     (ende-tool-call
+                      "edit_file"
+                      (list (cons "path" "private/secret.txt")
+                            (cons "edits"
+                                  (list (ende-test--anchor-edit
+                                         "secret" "replace" "changed"))))
+                      child-root edit-config)))
+                (should-not (plist-get denied :ok))
+                (should (string-match-p "not authorized"
+                                        (plist-get denied :error))))))
           (let ((ran nil))
             (should-error
              (ende-chat-config--read-forms "(#.(setq ran t))"))

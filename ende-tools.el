@@ -45,12 +45,12 @@
   :group 'ende)
 
 (defcustom ende-tools-max-edits 100
-  "Maximum edits accepted by one `edit_source' call."
+  "Maximum edits accepted by one `edit_file' call."
   :type 'integer
   :group 'ende)
 
 (defcustom ende-tools-direct-write nil
-  "Non-nil to apply `edit_source' proposals immediately.
+  "Non-nil to apply `edit_file' proposals immediately.
 
 When nil, model edits become pending change sets and must be applied with
 `ende-tools-apply-change-set'."
@@ -542,7 +542,8 @@ FUNCTION receives no arguments and may return any value."
 
 (cl-defstruct (ende-change-set (:constructor ende-change-set--create))
   "Validated edits waiting to be applied to one project source."
-  id root source-kind path buffer-id base-digest edits status created-at overlays)
+  id root source-kind path buffer-id base-digest anchor-edits edits status
+  created-at overlays)
 
 (defvar ende-tools--next-change-set-id 0
   "Next numeric identifier assigned to a pending change set.")
@@ -553,51 +554,89 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--sequence (value)
   "Return VALUE as a list when it is a JSON array or Lisp sequence."
   (cond
-   ((vectorp value) (append value nil))
+   ((and (vectorp value) (not (stringp value))) (append value nil))
    ((listp value) value)
    (t nil)))
 
-(defun ende-tools--edit-value (edit name)
-  "Return NAME from edit object EDIT."
-  (ende-tools--argument edit name))
+(defun ende-tools--object-keys (object)
+  "Return property names from JSON OBJECT, alist, or plist."
+  (cond
+   ((hash-table-p object)
+    (let (keys)
+      (maphash (lambda (key _value) (push key keys)) object)
+      keys))
+   ((and (listp object) (cl-every #'consp object))
+    (mapcar #'car object))
+   ((and (listp object) (zerop (% (length object) 2)))
+    (cl-loop for (key _value) on object by #'cddr collect key))
+   (t
+    (error "tool argument must be an object"))))
 
-(defun ende-tools--validate-edits (raw-edits source)
-  "Validate RAW-EDITS against complete SOURCE and return normalized edits."
-  (let ((raw-edits (ende-tools--sequence raw-edits)))
-    (unless raw-edits
-      (error "edit_source requires a non-empty edits array"))
-    (when (> (length raw-edits) ende-tools-max-edits)
-      (error "edit_source contains too many edits"))
-    (let ((edits nil)
-          (source-length (length source))
-          (index 0))
-      (dolist (raw raw-edits)
-        (let ((start (ende-tools--edit-value raw "start"))
-              (end (ende-tools--edit-value raw "end"))
-              (expected (ende-tools--edit-value raw "expected"))
-              (replacement (or (ende-tools--edit-value raw "replacement")
-                               (ende-tools--edit-value raw "text")))
-              (reason (ende-tools--edit-value raw "reason")))
-          (unless (and (integerp start) (integerp end)
-                       (<= 0 start end source-length)
-                       (stringp expected) (stringp replacement))
-            (error "edit %d has invalid start, end, expected, or replacement"
-                   (1+ index)))
-          (unless (string= expected (substring source start end))
-            (error "edit %d does not match its expected text" (1+ index)))
-          (push (list :index index :start start :end end
-                      :expected expected :replacement replacement
-                      :reason reason)
-                edits))
-        (cl-incf index))
-      (setq edits (nreverse edits))
-      (cl-loop for tail on edits do
-               (dolist (right (cdr tail))
-		 (when (ende-edit-replacement-overlaps-p (car tail) right)
-		   (error "edits %d and %d overlap"
-			  (1+ (plist-get (car tail) :index))
-			  (1+ (plist-get right :index))))))
-      edits)))
+(defun ende-tools--property-name (key)
+  "Return KEY as a string property name."
+  (cond
+   ((stringp key) key)
+   ((keywordp key) (substring (symbol-name key) 1))
+   ((symbolp key) (symbol-name key))
+   (t (format "%s" key))))
+
+(defun ende-tools--assert-properties (object allowed context)
+  "Signal when OBJECT has a property outside ALLOWED for CONTEXT."
+  (dolist (key (ende-tools--object-keys object))
+    (let ((name (ende-tools--property-name key)))
+      (unless (member name allowed)
+        (error "%s has unknown property %s" context name)))))
+
+(defun ende-tools--json-object (object properties)
+  "Copy PROPERTIES from OBJECT into a JSON-compatible hash table."
+  (let ((keys (mapcar #'ende-tools--property-name
+                      (ende-tools--object-keys object)))
+        (copy (make-hash-table :test #'equal)))
+    (dolist (name properties)
+      (when (member name keys)
+        (puthash name (ende-tools--argument object name) copy)))
+    copy))
+
+(defun ende-tools--anchor-edits (raw-edits)
+  "Validate and copy RAW-EDITS into a vector of JSON-compatible objects."
+  (let ((edits (ende-tools--sequence raw-edits)))
+    (unless edits
+      (error "edit_file requires a non-empty edits array"))
+    (when (> (length edits) ende-tools-max-edits)
+      (error "edit_file contains too many edits"))
+    (vconcat
+     (mapcar (lambda (edit)
+               (let ((keys (mapcar #'ende-tools--property-name
+                                   (ende-tools--object-keys edit))))
+                 (ende-tools--assert-properties
+                  edit '("anchor" "position" "text" "occurrence" "all")
+                  "edit item")
+                 (when (and (member "all" keys)
+                            (not (memq (ende-tools--argument edit "all")
+                                       '(t :false))))
+                   (error "edit item property all must be a boolean"))
+                  (ende-tools--json-object
+                   edit '("anchor" "position" "text" "occurrence" "all"))))
+              edits))))
+
+(defun ende-tools--normalize-anchor-edits (raw-edits source)
+  "Resolve RAW-EDITS against SOURCE into validated change-set edits."
+  (let* ((parsed (ende-edit-parse-tool-replacements
+                  raw-edits source ende-tools-max-edits))
+         (failures (plist-get parsed :errors)))
+    (when failures
+      (error "edit_file failed validation: %s"
+             (ende-edit-format-failures failures)))
+    (mapcar (lambda (edit)
+              (let ((start (plist-get edit :start))
+                    (end (plist-get edit :end)))
+                (list :index (plist-get edit :index)
+                      :start start
+                      :end end
+                      :expected (substring-no-properties source start end)
+                      :replacement (plist-get edit :text)
+                      :position (plist-get edit :position))))
+            (plist-get parsed :edits))))
 
 (defun ende-tools--change-set-result (change-set)
   "Return a JSON-compatible summary of CHANGE-SET."
@@ -605,23 +644,25 @@ FUNCTION receives no arguments and may return any value."
         :status (ende-change-set-status change-set)
         :source_kind (ende-change-set-source-kind change-set)
         :path (ende-change-set-path change-set)
-        :buffer_id (ende-change-set-buffer-id change-set)
-        :base_digest (ende-change-set-base-digest change-set)
-        :edits (ende-change-set-edits change-set)))
+        :edit_count (length (ende-change-set-edits change-set))))
 
-(defun ende-tools--edit-source (arguments root)
-  "Validate an edit proposal for one project source."
-  (let* ((source (ende-tools--resolve-source arguments root))
-         (base-digest (ende-tools--required-string arguments "base_digest"))
-         (edits-argument (ende-tools--argument arguments "edits"))
+(defun ende-tools--edit-file (arguments root)
+  "Create an atomic anchor-based change set for a project-relative path."
+  (ende-tools--assert-properties arguments '("path" "edits") "edit_file")
+  (let* ((path (ende-tools--required-string arguments "path"))
+         (anchor-edits (ende-tools--anchor-edits
+                        (ende-tools--argument arguments "edits")))
+         (source (ende-tools--resolve-source
+                  (list (cons "path" path)) root))
          (change-set nil))
     (ende-tools--with-source
      source
      (lambda ()
-       (let ((current-digest (ende-tools--source-digest))
-             (content (buffer-string)))
-         (unless (string= base-digest current-digest)
-           (error "source digest no longer matches the supplied base_digest"))
+       (let* ((content (buffer-substring-no-properties
+                        (point-min) (point-max)))
+              (base-digest (ende-tools--source-digest))
+              (edits (ende-tools--normalize-anchor-edits
+                      anchor-edits content)))
          (setq change-set
                (ende-change-set--create
                 :id (format "change-set-%d"
@@ -631,7 +672,8 @@ FUNCTION receives no arguments and may return any value."
                 :path (plist-get source :relative)
                 :buffer-id (plist-get source :buffer-id)
                 :base-digest base-digest
-                :edits (ende-tools--validate-edits edits-argument content)
+                :anchor-edits anchor-edits
+                :edits edits
                 :status "pending"
                 :created-at (float-time)))
          (puthash (ende-change-set-id change-set) change-set
@@ -648,8 +690,15 @@ return them."
   (let ((overlays nil))
     (dolist (edit (sort (copy-sequence edits)
                         (lambda (left right)
-                          (> (plist-get left :start)
-                             (plist-get right :start)))))
+                          (let ((left-start (plist-get left :start))
+                                (right-start (plist-get right :start)))
+                            (or (> left-start right-start)
+                                (and (= left-start right-start)
+                                     (equal (plist-get left :position)
+                                            "replace")
+                                     (not (equal
+                                           (plist-get right :position)
+                                           "replace"))))))))
       (let* ((start (+ (point-min) (plist-get edit :start)))
              (end (+ (point-min) (plist-get edit :end)))
              (expected (plist-get edit :expected))
@@ -689,29 +738,32 @@ return them."
                (ende-tools--with-source
                 source
                 (lambda ()
-                  (let ((content (buffer-string)))
-                    (unless (string=
-                             (ende-change-set-base-digest change-set)
-                             (ende-tools--source-digest))
-                      (error "source changed since the change set was created"))
-                    (ende-tools--validate-edits
-                     (ende-change-set-edits change-set) content)
-                    (when buffer
-                      (ende-review-assert-available
-                       buffer (point-min) (point-max))
-                      (barf-if-buffer-read-only)
-                      (let ((inhibit-read-only nil))
-                        (atomic-change-group
-                          (setq created-overlays
-                                (ende-tools--apply-edits-in-buffer
-                                 (ende-change-set-edits change-set) t)))))
-                    (unless buffer
-                      (ende-tools--apply-edits-in-buffer
-                       (ende-change-set-edits change-set))
-                      (write-region (point-min) (point-max) path nil 'silent))
-                    (list :new_digest (ende-tools--source-digest)
-                          :applied_edits
-                          (length (ende-change-set-edits change-set))))))))
+                  (unless (string=
+                           (ende-change-set-base-digest change-set)
+                           (ende-tools--source-digest))
+                    (error "source changed since the change set was created"))
+                  (unless (equal
+                           (ende-tools--normalize-anchor-edits
+                            (ende-change-set-anchor-edits change-set)
+                            (buffer-substring-no-properties
+                             (point-min) (point-max)))
+                           (ende-change-set-edits change-set))
+                    (error "change set edits no longer match the source"))
+                  (when buffer
+                    (ende-review-assert-available
+                     buffer (point-min) (point-max))
+                    (barf-if-buffer-read-only)
+                    (let ((inhibit-read-only nil))
+                      (atomic-change-group
+                        (setq created-overlays
+                              (ende-tools--apply-edits-in-buffer
+                               (ende-change-set-edits change-set) t)))))
+                  (unless buffer
+                    (ende-tools--apply-edits-in-buffer
+                     (ende-change-set-edits change-set))
+                    (write-region (point-min) (point-max) path nil 'silent))
+                  (list :applied_edits
+                        (length (ende-change-set-edits change-set)))))))
           (setf (ende-change-set-status change-set) "applied"
                 (ende-change-set-overlays change-set) created-overlays)
           (remhash (ende-change-set-id change-set) ende-tools--change-sets)
@@ -774,27 +826,29 @@ return them."
    (cons :type "object")
    (cons :properties
          (list
-          (cons :start '((:type . "integer") (:minimum . 0)))
-          (cons :end '((:type . "integer") (:minimum . 0)))
-          (cons :expected '((:type . "string")))
-          (cons :replacement '((:type . "string")))
-          (cons :reason '((:type . "string")))))
-   (cons :required '("start" "end" "expected" "replacement"))
+          (cons :anchor '((:type . "string") (:minLength . 1)))
+          (cons :position
+                '((:type . "string")
+                  (:enum . ("before" "after" "replace"))))
+          (cons :text '((:type . "string")))
+          (cons :occurrence '((:type . "integer") (:minimum . 1)))
+          (cons :all '((:type . "boolean")))))
+   (cons :required '("anchor" "position" "text"))
    (cons :additionalProperties :json-false)))
 
-(defconst ende-tools--edit-schema
+(defconst ende-tools--edit-file-schema
   (list
    (cons :type "object")
    (cons :properties
          (list
-          (cons :path '((:type . "string")
-                        (:description . "Project-relative file path")))
-          (cons :buffer_id '((:type . "string")))
-          (cons :base_digest '((:type . "string")))
-          (cons :edits
-                (list (cons :type "array")
-                      (cons :items ende-tools--edit-item-schema)))))
-   (cons :required '("base_digest" "edits"))
+           (cons :path '((:type . "string")
+                         (:minLength . 1)
+                         (:description . "Project-relative file path")))
+           (cons :edits
+                 (list (cons :type "array")
+                       (cons :minItems 1)
+                       (cons :items ende-tools--edit-item-schema)))))
+   (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
 
 (ende-tool-register
@@ -864,10 +918,10 @@ return them."
  #'ende-tools--search-project)
 
 (ende-tool-register
- 'edit_source
- "Create validated edits for one project-relative file path or visiting buffer. Edits use zero-based character offsets in the complete source, exact expected text, and replacement text."
- ende-tools--edit-schema
- #'ende-tools--edit-source :write)
+ 'edit_file
+ "Edit a project file by locating exact text anchors in the current source."
+ ende-tools--edit-file-schema
+ #'ende-tools--edit-file :write)
 
 (provide 'ende-tools)
 

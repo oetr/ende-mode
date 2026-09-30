@@ -58,9 +58,11 @@ not intended to limit ordinary product usage."
      (error "%s result is not valid JSON: %s"
             operation (error-message-string caught)))))
 
-(defun ende-edit--validate-document (document operation &optional allow-empty)
+(defun ende-edit--validate-document
+    (document operation &optional allow-empty maximum)
   "Validate the common protocol envelope in DOCUMENT for OPERATION.
-When ALLOW-EMPTY is non-nil, accept an empty edits array."
+When ALLOW-EMPTY is non-nil, accept an empty edits array.  MAXIMUM overrides
+`ende-max-write-anywhere-edits' when non-nil."
   (ende-edit--validate-limits)
   (unless (and (hash-table-p document)
                (equal (ende-protocol-json-get "version" document) 1))
@@ -70,8 +72,8 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
       (error "%s result must contain an edits array" operation))
     (when (and (not allow-empty) (zerop (length edits)))
       (error "%s result contains no edits" operation))
-    (when (and ende-max-write-anywhere-edits
-               (> (length edits) ende-max-write-anywhere-edits))
+    (when (and (or maximum ende-max-write-anywhere-edits)
+               (> (length edits) (or maximum ende-max-write-anywhere-edits)))
       (error "%s result contains too many edits" operation))
     edits))
 
@@ -82,21 +84,6 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
         (lambda (field)
           (ende-protocol-json-has-key-p field object))
         fields)))
-
-(defun ende-edit-replacement-overlaps-p (left right)
-  "Return non-nil when replacement edits LEFT and RIGHT overlap."
-  (let ((left-start (plist-get left :start))
-        (left-end (plist-get left :end))
-        (right-start (plist-get right :start))
-        (right-end (plist-get right :end)))
-    (cond
-     ((and (= left-start left-end) (= right-start right-end))
-      (= left-start right-start))
-     ((= left-start left-end)
-      (and (<= right-start left-start) (< left-start right-end)))
-     ((= right-start right-end)
-      (and (<= left-start right-start) (< right-start left-end)))
-     (t (and (< left-start right-end) (< right-start left-end))))))
 
 (defun ende-edit--anchor-offsets (source anchor &optional limit)
   "Return zero-based SOURCE offsets at which ANCHOR occurs.
@@ -112,10 +99,11 @@ When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
     (nreverse offsets)))
 
 (defun ende-edit--parse-anchor-edits
-    (index raw source positions &optional normalized-limit)
+    (index raw source positions &optional normalized-limit allow-empty-text)
   "Parse one anchor-based RAW edit at INDEX against SOURCE.
 POSITIONS lists the accepted values for the edit's position field.
-NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
+NORMALIZED-LIMIT is the remaining expansion budget for this raw edit.
+When ALLOW-EMPTY-TEXT is non-nil, accept an empty `text' value."
   (let* ((anchor (and (hash-table-p raw)
                       (ende-protocol-json-get "anchor" raw)))
          (position (and (hash-table-p raw)
@@ -142,8 +130,10 @@ NORMALIZED-LIMIT is the remaining expansion budget for this raw edit."
     (unless (member position positions)
       (error "position must be one of: %s"
              (mapconcat #'identity positions ", ")))
-    (unless (and (stringp text) (not (string-empty-p text)))
-      (error "text must be a non-empty string"))
+    (unless (and (stringp text)
+                 (or allow-empty-text (not (string-empty-p text))))
+      (error "text must be a %sstring"
+             (if allow-empty-text "" "non-empty ")))
     (when (and all-present (not (or (eq all-value t)
                                     (eq all-value :false)
                                     (null all-value))))
@@ -217,11 +207,29 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
     (setq errors (nreverse errors))
     (list :edits edits :errors errors)))
 
-(defun ende-edit-parse-replacements (content source)
+(defun ende-edit-parse-replacements
+    (content source &optional allow-empty-text maximum operation)
   "Parse anchor-based replacement edits from CONTENT against SOURCE.
-Return a plist containing valid `:edits' and individual `:errors'."
-  (let* ((document (ende-edit--parse-document content "write-anywhere"))
-         (raw-edits (ende-edit--validate-document document "write-anywhere"))
+Return valid `:edits' and individual `:errors'.  ALLOW-EMPTY-TEXT permits
+empty replacement text.  MAXIMUM overrides the normal raw-edit limit.
+OPERATION names the source in diagnostics, defaulting to `write-anywhere'.
+CONTENT may also be a vector of already parsed edit objects."
+  (let* ((operation (or operation "write-anywhere"))
+         (raw-edits
+          (if (stringp content)
+              (ende-edit--validate-document
+               (ende-edit--parse-document content operation)
+               operation nil maximum)
+            (progn
+              (ende-edit--validate-limits)
+              (unless (and (vectorp content) (not (stringp content)))
+                (error "%s edits must be an array" operation))
+              (when (zerop (length content))
+                (error "%s result contains no edits" operation))
+              (let ((limit (or maximum ende-max-write-anywhere-edits)))
+                (when (and limit (> (length content) limit))
+                  (error "%s result contains too many edits" operation)))
+              content)))
          (edits nil)
          (errors nil))
     (dotimes (index (length raw-edits))
@@ -232,7 +240,8 @@ Return a plist containing valid `:edits' and individual `:errors'."
                   '("before" "after" "replace")
                   (and ende-max-normalized-edits
                        (- ende-max-normalized-edits
-                          (length edits))))))
+                          (length edits)))
+                  allow-empty-text)))
             (setq edits (nconc edits parsed)))
         (ende-edit-resource-error
          (signal (car caught) (cdr caught)))
@@ -340,6 +349,18 @@ Return a plist containing valid `:edits' and individual `:errors'."
                       :raw (aref raw-edits index))
                 errors))))
     (list :edits edits :errors errors)))
+
+(defun ende-edit-parse-tool-replacements (raw-edits source maximum)
+  "Parse tool RAW-EDITS against SOURCE with raw-edit limit MAXIMUM.
+RAW-EDITS must be a vector of JSON-compatible edit objects.  Matching is
+case-sensitive and empty replacement text is accepted.  Return the same
+partial-result shape as `ende-edit-parse-replacements'; callers should reject
+the complete request if `:errors' is non-nil."
+  (unless (and (vectorp raw-edits) (not (stringp raw-edits)))
+    (error "edit_file edits must be an array"))
+  (let ((case-fold-search nil))
+    (ende-edit-parse-replacements
+     raw-edits source t maximum "edit_file")))
 
 (defun ende-edit-format-failures (failures &optional separator)
   "Format edit FAILURES using SEPARATOR, defaulting to a newline."
