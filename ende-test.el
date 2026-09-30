@@ -7605,6 +7605,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                             "\"disabled\":false,\"missing\":null,"
                             "\"items\":[1,\"x\"],\"flags\":{\"ok\":true}}")
                    "read_file: path=\"ende.el\", \"odd key\"=\"v\", start_line=1, line_count=180, active=true, disabled=false, missing=null, items=[1,\"x\"], flags={\"ok\":true}")
+                  ("{\"options\":{\":mode\":\"fast\"}}"
+                   "read_file: options={\":mode\":\"fast\"}")
                   (,escaped-arguments "read_file")
                   ("[]" "read_file")
                   (,long-arguments nil)))
@@ -9387,6 +9389,127 @@ Use COMMAND for the process, or a silent sleep process by default."
                       '("user" "user" "assistant" "user")))
        (should (equal (mapcar #'car with-messages)
                       '("user" "user" "assistant" "assistant" "user")))))))
+
+(ert-deftest ende-test/chat-tool-only-round-preserves-call-provenance ()
+  (let ((root (make-temp-file "ende-chat-tool-provenance-" t)))
+    (ende-test--reset)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "one.el" root)
+            (insert "SOURCE_ONE\n"))
+          (with-temp-file (expand-file-name "two.el" root)
+            (insert "SOURCE_TWO\n"))
+          (let* ((calls
+                  (list (list :id "tool-call-one" :name "read_file"
+                              :arguments "{\"path\":\"one.el\"}")
+                        (list :id "tool-call-two" :name "read_file"
+                              :arguments "{\"path\":\"two.el\"}")))
+                 (ende-llm-function
+                  (ende-test--fake-llm
+                   (list (list :content "" :reported-model "tool-model"
+                               :tool-calls calls)
+                         (list :content "Answer from another model."
+                               :reported-model "answer-model"))
+                   t))
+                 (profile
+                  '(:name local :model "requested-model"
+                    :reasoning-effort-wire-api openrouter
+                    :reasoning-effort-validated-p t
+                    :reasoning-effort "high")))
+            (ende-test--with-buffer
+             (format (concat "#+begin_ende\n(root %S)\n"
+                             "(group inspect read_file)\n"
+                             "(resource project (include \"**\"))\n"
+                             "(tools inspect)\n"
+                             "(set-tool-resources inspect :resources project)\n"
+                             "#+end_ende\n\n"
+                             "* Topic\n** Question\nRead both files.\n"
+                             "** Follow-up\nContinue from those files.\n")
+                     root)
+             (org-mode)
+             (ende-test--chat-goto "** Question")
+             (let ((job (ende-ask profile)))
+               (ende-test--complete-call (car ende-test--calls))
+               (should (= (length ende-test--calls) 2))
+               (ende-test--complete-call (cadr ende-test--calls))
+               (should (eq (ende-job-state job) 'completed)))
+             (let* ((document (ende-chat--build-document))
+                    (headlines (ende-chat--document-headlines document))
+                    (work (cl-find-if
+                           (lambda (headline)
+                             (ende-chat--work-section-p document headline))
+                           headlines))
+                    (tool-calls
+                     (cl-remove-if-not
+                      (lambda (headline)
+                        (ende-chat--tool-call-protocol-p document headline))
+                      headlines))
+                    (tool-results
+                     (cl-remove-if-not
+                      (lambda (headline)
+                        (ende-chat--tool-result-protocol-p document headline))
+                      headlines))
+                    (final-reply
+                     (cl-find-if
+                      (lambda (headline)
+                        (and (ende-chat--assistant-protocol-p document headline)
+                             (null (ende-chat--work-ancestor document headline))))
+                      headlines)))
+               (should work)
+               (should (= (length tool-calls) 2))
+               (should (= (length tool-results) 2))
+               (should final-reply)
+               (should-not
+                (cl-some (lambda (headline)
+                           (and (ende-chat--assistant-protocol-p document headline)
+                                (ende-chat--work-ancestor document headline)))
+                         headlines))
+               (should (< (org-element-property :begin (cadr tool-calls))
+                          (org-element-property :begin (car tool-results))))
+               (should (equal
+                        (mapcar (lambda (call)
+                                  (ende-chat--protocol-body-string call nil t))
+                                tool-calls)
+                        '("{\"path\":\"one.el\"}"
+                          "{\"path\":\"two.el\"}")))
+               (dolist (call tool-calls)
+                 (should (eq (ende-chat--parent document call) work))
+                 (should (equal
+                          (ende-test--chat-headline-property
+                           call ende-chat-model-property)
+                          "tool-model"))
+                 (should (equal
+                          (ende-test--chat-headline-property
+                           call ende-chat-reasoning-effort-property)
+                          "high"))
+                 (should-not
+                  (string-match-p
+                   "ENDE_MODEL\\|ENDE_REASONING_EFFORT\\|tool-model\\|high"
+                   (ende-chat--protocol-body-string call nil t))))
+               (should (equal
+                        (ende-test--chat-headline-property
+                         final-reply ende-chat-model-property)
+                        "answer-model"))
+               (should (equal
+                        (ende-test--chat-headline-property
+                         final-reply ende-chat-reasoning-effort-property)
+                        "high"))
+               (should (cl-every #'ende-test--chat-control-drawer-hidden-p
+                                 (ende-test--chat-control-drawers))))
+             (ende-test--chat-goto "** Follow-up")
+             (let ((context (ende-test--chat-context-text
+                             (ende-chat-context-at-point))))
+               (should (string-match-p "SOURCE_ONE" context))
+               (should (string-match-p "SOURCE_TWO" context))
+               (dolist (private-value
+                        (list "tool-model" "answer-model" "high"
+                              ende-chat-model-property
+                              ende-chat-reasoning-effort-property))
+                 (should-not (string-match-p (regexp-quote private-value)
+                                             context)))))))
+      (ende-test--reset)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/chat-response-provenance-is-durable-and-private ()
   (dolist (scenario

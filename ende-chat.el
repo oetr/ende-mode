@@ -2091,8 +2091,8 @@ COMPACT marks the completed response as a context fence."
    (ende-chat--response-property ende-chat-tool-name-property tool-name)
    (ende-chat--response-property ende-chat-tool-kind-property kind)))
 
-(defun ende-chat--tool-call-text (level request-id call)
-  "Render normalized tool CALL as a section at LEVEL."
+(defun ende-chat--tool-call-text (level request-id call &optional result-properties)
+  "Render normalized tool CALL at LEVEL with optional RESULT-PROPERTIES."
   (let ((id (ende-chat--tool-value call :id))
         (name (ende-chat--tool-value call :name))
         (arguments (ende-chat--tool-value call :arguments)))
@@ -2104,6 +2104,7 @@ COMPACT marks the completed response as a context fence."
             (ende-chat--truncate-tool-heading (concat "--> " name) level) "\n"
             ":PROPERTIES:\n"
             (ende-chat--tool-section-properties request-id id name "call")
+            result-properties
             ":END:\n\n"
             (ende-chat--org-literal-text arguments)
             "\n\n")))
@@ -2129,7 +2130,8 @@ COMPACT marks the completed response as a context fence."
              normalized nil (not (eq format 'org)))))
          (call-sections
           (mapconcat (lambda (call)
-                       (ende-chat--tool-call-text level request-id call))
+                       (ende-chat--tool-call-text
+                        level request-id call result-properties))
                      calls "")))
     (concat reply call-sections)))
 
