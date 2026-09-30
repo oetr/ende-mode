@@ -8798,6 +8798,102 @@ Use COMMAND for the process, or a silent sleep process by default."
      (should (string-match-p "Mixed drawer content remains visible"
                              (buffer-string))))))
 
+(ert-deftest ende-test/chat-completion-reduces-whole-transcript-parsing ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     "* Root\n** Question\nAsk\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (target (current-buffer))
+            (whole-transcript-parses 0)
+            (scoped-target-parses 0)
+            (other-buffer-parses 0)
+            (parse-buffer (symbol-function 'org-element-parse-buffer)))
+       (cl-letf (((symbol-function 'org-element-parse-buffer)
+                  (lambda (&rest arguments)
+                    (if (eq (current-buffer) target)
+                        (if (and (= (point-min) 1)
+                                 (= (point-max) (1+ (buffer-size))))
+                            (cl-incf whole-transcript-parses)
+                          (cl-incf scoped-target-parses))
+                      (cl-incf other-buffer-parses))
+                    (apply parse-buffer arguments))))
+         (ende-test--complete-call (car ende-test--calls)))
+       (should (eq (ende-job-state job) 'completed))
+       (should (= whole-transcript-parses 0))
+       (should (> scoped-target-parses 0))
+       (should (> other-buffer-parses 0))))))
+
+(ert-deftest ende-test/chat-completion-rejects-an-edited-destination ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Generated answer") t)))
+    (ende-test--with-buffer
+     "* Root\n** Question\nAsk\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let ((job (ende-ask)))
+       (pcase-let ((`(,_document ,placeholder)
+                    (ende-chat--placeholder job)))
+         (goto-char (org-element-property :begin placeholder))
+         (org-edit-headline "User-edited destination"))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'failed))
+       (should (string-match-p "User-edited destination" (buffer-string)))
+       (should-not (string-match-p "Generated answer" (buffer-string)))
+       (should (string-match-p "destination was edited or moved"
+                               (buffer-string)))))))
+
+(ert-deftest ende-test/chat-persistence-failure-restores-the-pending-slot ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     "* Root\n** Question\nAsk\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (instruction (ende-job-instruction job))
+            (target-marker (ende-target-cursor-marker (ende-job-target job)))
+            (position (marker-position target-marker))
+            (before (buffer-string))
+            (response (ende-chat--assistant-text
+                       2 (plist-get instruction :question-id)
+                       (plist-get instruction :request-id) ""
+                       '(:content "Generated answer"))))
+       (cl-letf (((symbol-function 'ende-chat--hide-control-drawers-in-region)
+                  (lambda (&rest _arguments)
+                    (error "Injected drawer-folding failure"))))
+         (should-error
+          (ende-chat--persist-request-section job response nil nil t)))
+       (should (equal before (buffer-string)))
+       (should (= position (marker-position target-marker)))
+       (should (ende-chat--placeholder job))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))))))
+
+(ert-deftest ende-test/chat-request-markers-are-released-on-settlement ()
+  (dolist (outcome '(completed failed cancelled))
+    (ende-test--reset)
+    (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+      (ende-test--with-buffer
+       "* Root\n** Question\nAsk\n"
+       (org-mode)
+       (ende-test--chat-goto "** Question")
+       (let* ((job (ende-ask))
+              (question-marker
+               (plist-get (ende-job-instruction job) :question-marker)))
+         (should (eq (marker-buffer question-marker) (current-buffer)))
+         (pcase outcome
+           ('completed (ende-test--complete-call (car ende-test--calls)))
+           ('failed (ende-job-fail job "Injected failure"))
+           ('cancelled (ende-abort-queue)))
+         (should (eq (ende-job-state job) outcome))
+         (should-not (marker-buffer question-marker))
+         (should-not (plist-get (ende-job-instruction job) :question-marker))
+         (should-not (plist-get (ende-job-instruction job)
+                               :request-end-marker)))))))
+
 (ert-deftest ende-test/chat-user-authored-agent-work-heading-is-ordinary-content ()
   (ende-test--reset)
   (ende-test--with-buffer
