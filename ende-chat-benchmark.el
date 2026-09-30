@@ -80,7 +80,8 @@
 (defun ende-chat-benchmark--measure (label buffer function)
   "Measure FUNCTION as LABEL in target BUFFER and print parse/GC details."
   (garbage-collect)
-  (let ((target-parses 0)
+  (let ((whole-target-parses 0)
+        (scoped-target-parses 0)
         (other-parses 0)
         (parse-function (symbol-function 'org-element-parse-buffer))
         (gc-count-before gcs-done)
@@ -89,17 +90,20 @@
     (cl-letf (((symbol-function 'org-element-parse-buffer)
                (lambda (&rest arguments)
                  (if (eq (current-buffer) buffer)
-                     (cl-incf target-parses)
+                     (if (and (= (point-min) 1)
+                              (= (point-max) (1+ (buffer-size))))
+                         (cl-incf whole-target-parses)
+                       (cl-incf scoped-target-parses))
                    (cl-incf other-parses))
                  (apply parse-function arguments))))
       (funcall function))
     (princ
-     (format "%s: elapsed=%.3fs gc-count=%d gc-time=%.3fs target-parses=%d other-buffer-parses=%d\n"
+     (format "%s: elapsed=%.3fs gc-count=%d gc-time=%.3fs whole-target-parses=%d scoped-target-parses=%d other-buffer-parses=%d\n"
              label
              (float-time (time-since started))
              (- gcs-done gc-count-before)
              (- gc-elapsed gc-time-before)
-             target-parses other-parses))))
+             whole-target-parses scoped-target-parses other-parses))))
 
 (defun ende-chat-benchmark--with-transcript (section-count function)
   "Call FUNCTION in a fresh Org buffer containing SECTION-COUNT exchanges."

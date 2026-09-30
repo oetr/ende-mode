@@ -8755,7 +8755,48 @@ Use COMMAND for the process, or a silent sleep process by default."
                           (equal (ende-chat--property document headline :role)
                                  "assistant")))
                    headlines)
-                  1))))))
+                   1))))))
+
+(ert-deftest ende-test/chat-persistence-preserves-unrelated-drawer-folding ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     (concat "* Root\n"
+             "** Existing assistant metadata\n"
+             ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+             "Existing section remains open.\n"
+             "** Mixed metadata\n"
+             ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+             ":BENCHMARK_CUSTOM: keep-visible\n:END:\n"
+             "Mixed drawer content remains visible.\n"
+             "** Question\nAsk\n")
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let ((job (ende-ask)))
+       (let ((existing-drawer (car (ende-test--chat-control-drawers))))
+         (should existing-drawer)
+         (should (ende-test--chat-control-drawer-hidden-p existing-drawer))
+         (save-excursion
+           (goto-char (org-element-property :begin existing-drawer))
+           (org-fold-hide-drawer-toggle 'off t))
+         (should-not
+          (ende-test--chat-control-drawer-hidden-p existing-drawer)))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed)))
+     (let ((control-drawers (ende-test--chat-control-drawers)))
+       (should (= (length control-drawers) 3))
+       (should-not (ende-test--chat-control-drawer-hidden-p
+                    (car control-drawers)))
+       (should (ende-test--chat-control-drawer-hidden-p
+                (car (last control-drawers)))))
+     (save-excursion
+       (ende-test--chat-goto "** Mixed metadata")
+       (forward-line 2)
+       (should-not (invisible-p (point))))
+     (should (string-match-p ":BENCHMARK_CUSTOM: keep-visible"
+                             (buffer-string)))
+     (should (string-match-p "Mixed drawer content remains visible"
+                             (buffer-string))))))
 
 (ert-deftest ende-test/chat-user-authored-agent-work-heading-is-ordinary-content ()
   (ende-test--reset)

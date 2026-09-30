@@ -517,12 +517,50 @@ whole request; a fence inside another sibling's subtree does not."
   (when (derived-mode-p 'org-mode)
     (save-excursion
       (let ((tree (org-element-parse-buffer 'element)))
-        (org-element-map tree 'property-drawer
-			 (lambda (drawer)
-			   (when (cl-every #'ende-chat--reserved-property-p
-					   (org-element-map drawer 'node-property #'identity))
-			     (goto-char (org-element-property :begin drawer))
-			     (org-fold-hide-drawer-toggle t t))))))))
+        (ende-chat--hide-control-drawers-in-tree tree)))))
+
+(defun ende-chat--hide-control-drawers-in-tree (tree)
+  "Hide all-control property drawers represented in Org element TREE."
+  (org-element-map
+   tree 'property-drawer
+   (lambda (drawer)
+     (when (cl-every #'ende-chat--reserved-property-p
+                     (org-element-map drawer 'node-property #'identity))
+       (goto-char (org-element-property :begin drawer))
+       (org-fold-hide-drawer-toggle t t)))
+   nil nil nil))
+
+(defun ende-chat--hide-control-drawers-in-region (begin end)
+  "Hide all-control drawers in complete Ende-generated Org sections BEGIN..END.
+
+BEGIN and END may be positions or markers.  The region must start at a
+headline and contain complete inserted sections; callers pass bounds captured
+around rendered chat sections, not arbitrary text slices."
+  (when (derived-mode-p 'org-mode)
+    (let ((begin (if (markerp begin) (marker-position begin) begin))
+          (end (if (markerp end) (marker-position end) end)))
+      (unless (and (integer-or-marker-p begin)
+                   (integer-or-marker-p end)
+                   (< begin end))
+        (error "Invalid chat section bounds for drawer hiding"))
+      (save-excursion
+        (save-restriction
+          (widen)
+          (unless (and (<= (point-min) begin)
+                       (<= end (point-max)))
+            (error "Chat section bounds are outside the Org buffer"))
+          (narrow-to-region begin end)
+          (goto-char (point-min))
+          (unless (looking-at "\\*+[ \t]+")
+            (error "Chat drawer scope does not start at an Org headline"))
+          (let* ((tree (org-element-parse-buffer 'element))
+                 (first-headline
+                  (car (org-element-map tree 'headline #'identity))))
+            (unless (and first-headline
+                         (= (org-element-property :begin first-headline)
+                            (point-min)))
+              (error "Chat drawer scope is not a complete Org section"))
+            (ende-chat--hide-control-drawers-in-tree tree)))))))
 
 (defun ende-chat--hide-reasoning-section (headline)
   "Hide HEADLINE's Org subtree without hiding its sibling reply."
@@ -1824,81 +1862,105 @@ messages; FINAL places the terminal assistant reply after that container."
          (request-id (plist-get instruction :request-id))
          (question-id (plist-get instruction :question-id))
          (buffer (ende-target-buffer (ende-job-target job)))
-         (inserted-marker nil))
+         (inserted-marker nil)
+         (inserted-end-marker nil)
+         (work-start-marker nil)
+         (work-end-marker nil))
     (unless (buffer-live-p buffer)
       (error "Chat response destination no longer exists"))
     (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (let ((inhibit-read-only t))
-            (atomic-change-group
-              (let* ((document (ende-chat--build-document))
-                     (anchor (ende-chat--request-state-headline
-                              document request-id "pending"))
-                     (work (ende-chat--request-work-section
-                            document request-id))
-                     (anchor-level (and anchor
-                                        (org-element-property :level anchor))))
-                (unless anchor
-                  (error "Chat response destination no longer exists"))
-                (when (and work (not (eq work anchor)))
-                  (error "Chat request pending marker is not its Agent: Work section"))
-                (cond
-                 ((and protocol (not work))
-                  (let ((begin (org-element-property :begin anchor))
-                        (end (org-element-property :end anchor)))
-                    (delete-region begin end)
-                    (goto-char begin)
-                    (setq inserted-marker (copy-marker (point)))
-                    (insert (ende-chat--work-text
-                             anchor-level question-id request-id))
-                    (insert text)))
-                 ((or work protocol)
-                  (goto-char (ende-chat--request-end document request-id))
-                  (setq inserted-marker (copy-marker (point)))
-                  (insert text))
-                 ((equal (ende-chat--property document anchor :visibility)
-                         "hidden")
-                  (let ((begin (org-element-property :begin anchor))
-                        (end (org-element-property :end anchor)))
-                    (delete-region begin end)
-                    (goto-char begin)
-                    (setq inserted-marker (copy-marker (point)))
-                    (insert text)))
-                 (t
-                  (goto-char (ende-chat--request-end document request-id))
-                  (setq inserted-marker (copy-marker (point)))
-                  (insert text)))
-                (when (and final work)
-                  (goto-char (org-element-property :begin work))
-                  (org-entry-delete nil ende-chat-state-property))
-                (when final
-                  (let* ((updated (ende-chat--build-document))
-                         (reply
-                          (cl-find-if
-                           (lambda (headline)
-                             (and (>= (org-element-property :begin headline)
-                                      (marker-position inserted-marker))
-                                  (equal (org-element-property :raw-value headline)
-                                         "Agent: Reply")
-                                  (equal (ende-chat--property
-                                          updated headline :request-id)
-                                         request-id)
-                                  (equal (ende-chat--property
-                                          updated headline :role)
-                                         "assistant")
-                                  (null (ende-chat--work-ancestor
-                                         updated headline))))
-                           (ende-chat--document-headlines updated))))
-                    (unless reply
-                      (error "Generated final Agent: Reply was not inserted"))
-                    (goto-char (org-element-property :begin reply))
-                    (org-entry-put nil ende-chat-state-property "pending")))
-                (ende-chat--hide-control-drawers)
-                (when (and fold (derived-mode-p 'org-mode))
-                  (goto-char (marker-position inserted-marker))
-                  (org-fold-hide-subtree))))))))))
+      (unwind-protect
+          (save-excursion
+            (save-restriction
+              (widen)
+              (let ((inhibit-read-only t))
+                (atomic-change-group
+                  (let* ((document (ende-chat--build-document))
+                         (anchor (ende-chat--request-state-headline
+                                  document request-id "pending"))
+                         (work (ende-chat--request-work-section
+                                document request-id))
+                         (anchor-level
+                          (and anchor (org-element-property :level anchor))))
+                    (unless anchor
+                      (error "Chat response destination no longer exists"))
+                    (when (and work (not (eq work anchor)))
+                      (error "Chat request pending marker is not its Agent: Work section"))
+                    (cond
+                     ((and protocol (not work))
+                      (let ((begin (org-element-property :begin anchor))
+                            (end (org-element-property :end anchor)))
+                        (delete-region begin end)
+                        (goto-char begin)
+                        (setq inserted-marker (copy-marker (point)))
+                        (insert (ende-chat--work-text
+                                 anchor-level question-id request-id))
+                        (insert text)
+                        (setq inserted-end-marker (copy-marker (point)))))
+                     ((or work protocol)
+                      (goto-char (ende-chat--request-end document request-id))
+                      (setq inserted-marker (copy-marker (point)))
+                      (insert text)
+                      (setq inserted-end-marker (copy-marker (point))))
+                     ((equal (ende-chat--property document anchor :visibility)
+                             "hidden")
+                      (let ((begin (org-element-property :begin anchor))
+                            (end (org-element-property :end anchor)))
+                        (delete-region begin end)
+                        (goto-char begin)
+                        (setq inserted-marker (copy-marker (point)))
+                        (insert text)
+                        (setq inserted-end-marker (copy-marker (point)))))
+                     (t
+                      (goto-char (ende-chat--request-end document request-id))
+                      (setq inserted-marker (copy-marker (point)))
+                      (insert text)
+                      (setq inserted-end-marker (copy-marker (point)))))
+                    (when (and final work)
+                      (setq work-start-marker
+                            (copy-marker (org-element-property :begin work))
+                            work-end-marker
+                            (copy-marker (org-element-property :end work)))
+                      (goto-char (org-element-property :begin work))
+                      (org-entry-delete nil ende-chat-state-property))
+                    (when final
+                      (let* ((updated (ende-chat--build-document))
+                             (reply
+                              (cl-find-if
+                               (lambda (headline)
+                                 (and (>= (org-element-property :begin headline)
+                                          (marker-position inserted-marker))
+                                      (equal (org-element-property :raw-value headline)
+                                             "Agent: Reply")
+                                      (equal (ende-chat--property
+                                              updated headline :request-id)
+                                             request-id)
+                                      (equal (ende-chat--property
+                                              updated headline :role)
+                                             "assistant")
+                                      (null (ende-chat--work-ancestor
+                                             updated headline))))
+                               (ende-chat--document-headlines updated))))
+                        (unless reply
+                          (error "Generated final Agent: Reply was not inserted"))
+                        (goto-char (org-element-property :begin reply))
+                        (org-entry-put nil ende-chat-state-property "pending")))
+                    (when work-start-marker
+                      (ende-chat--hide-control-drawers-in-region
+                       work-start-marker work-end-marker))
+                    (ende-chat--hide-control-drawers-in-region
+                     inserted-marker inserted-end-marker)
+                    (when (and fold (derived-mode-p 'org-mode))
+                      (goto-char (marker-position inserted-marker))
+                      (org-fold-hide-subtree)))))))
+        (when inserted-marker
+          (set-marker inserted-marker nil))
+        (when inserted-end-marker
+          (set-marker inserted-end-marker nil))
+        (when work-start-marker
+          (set-marker work-start-marker nil))
+        (when work-end-marker
+          (set-marker work-end-marker nil))))))
 
 (defun ende-chat--finish-request (job)
   "Remove JOB's pending marker after its final assistant response is stored."
@@ -1913,9 +1975,18 @@ messages; FINAL places the terminal assistant reply after that container."
                           document request-id "pending")))
             (unless anchor
               (error "Chat request lost its pending marker"))
-            (goto-char (org-element-property :begin anchor))
-            (org-entry-delete nil ende-chat-state-property)
-            (ende-chat--hide-control-drawers)))))))
+            (let ((start-marker
+                   (copy-marker (org-element-property :begin anchor)))
+                  (end-marker
+                   (copy-marker (org-element-property :end anchor))))
+              (unwind-protect
+                  (progn
+                    (goto-char (marker-position start-marker))
+                    (org-entry-delete nil ende-chat-state-property)
+                    (ende-chat--hide-control-drawers-in-region
+                     start-marker end-marker))
+                (set-marker start-marker nil)
+                (set-marker end-marker nil)))))))))
 
 (defun ende-chat--placeholder (job)
   "Return JOB's current pending reply headline, or nil."
@@ -2273,29 +2344,40 @@ Keep it while another queued compaction still refers to its durable identity."
                       (save-restriction
                         (widen)
                         (atomic-change-group
-                          (let* ((updated (ende-chat--build-document))
-                                 (pending
-                                  (ende-chat--request-state-headline
-                                   updated request-id "pending")))
-                            (unless pending
-                              (error "Chat response destination no longer exists"))
-                            (delete-region (org-element-property :begin pending)
-                                           (org-element-property :end pending))
-                            (goto-char (org-element-property :begin pending))
-                            (insert response)
-                            (ende-chat--hide-control-drawers))))))
-                (ende-chat--persist-request-section job response nil nil t)
-                (ende-chat--finish-request job))
+                          (let ((start-marker nil)
+                                (end-marker nil))
+                            (unwind-protect
+                                (let* ((updated (ende-chat--build-document))
+                                       (pending
+                                        (ende-chat--request-state-headline
+                                         updated request-id "pending")))
+                                  (unless pending
+                                    (error "Chat response destination no longer exists"))
+                                  (delete-region
+                                   (org-element-property :begin pending)
+                                   (org-element-property :end pending))
+                                  (goto-char (org-element-property :begin pending))
+                                  (setq start-marker (copy-marker (point)))
+                                  (insert response)
+                                  (setq end-marker (copy-marker (point)))
+                                  (ende-chat--hide-control-drawers-in-region
+                                   start-marker end-marker))
+                              (when start-marker
+                                (set-marker start-marker nil))
+                              (when end-marker
+                                (set-marker end-marker nil))))))))
+                  (ende-chat--persist-request-section job response nil nil t)
+                  (ende-chat--finish-request job))
               (with-current-buffer buffer
                 (let* ((final (ende-chat--build-document))
                        (reasoning-headline
                         (ende-chat--find-by-property
                          final ende-chat-reasoning-for-property request-id)))
-                  (when reasoning-headline
-                    (ende-chat--hide-reasoning-section reasoning-headline))))))
-          (ende-job-finish job result))
-      ((error quit)
-       (ende-job-fail job (ende--application-error failure))))))
+                    (when reasoning-headline
+                      (ende-chat--hide-reasoning-section reasoning-headline)))))
+           (ende-job-finish job result)))
+       ((error quit)
+        (ende-job-fail job (ende--application-error failure))))))
 
 ;;;; Queue execution and commands
 
