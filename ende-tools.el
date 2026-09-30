@@ -7,8 +7,8 @@
 ;;; Commentary:
 
 ;; A provider-independent registry and implementation of project-scoped read
-;; tools plus validated source edits.  The agent/transport layer can use the
-;; registry later without having to know how Emacs buffers are resolved.
+;; tools, source edits, and new-file proposals.  The agent/transport layer can
+;; use the registry without having to know how Emacs buffers are resolved.
 
 ;;; Code:
 
@@ -50,10 +50,10 @@
   :group 'ende)
 
 (defcustom ende-tools-direct-write nil
-  "Non-nil to apply `edit_file' proposals immediately.
+  "Non-nil to apply `edit_file' and `create_file' proposals immediately.
 
-When nil, model edits become pending change sets and must be applied with
-`ende-tools-apply-change-set'."
+When nil, model edits and file creations become pending change sets and must
+be applied with `ende-tools-apply-change-set'."
   :type 'boolean
   :group 'ende)
 
@@ -538,12 +538,12 @@ FUNCTION receives no arguments and may return any value."
     (list :matches matches :files_inspected files-inspected
           :truncated truncated)))
 
-;;;; Change sets and editing
+;;;; Change sets and writes
 
 (cl-defstruct (ende-change-set (:constructor ende-change-set--create))
-  "Validated edits waiting to be applied to one project source."
-  id root source-kind path buffer-id base-digest anchor-edits edits status
-  created-at overlays)
+  "A validated edit or file creation waiting to be applied."
+  id operation root source-kind path buffer-id base-digest anchor-edits edits
+  content status created-at overlays)
 
 (defvar ende-tools--next-change-set-id 0
   "Next numeric identifier assigned to a pending change set.")
@@ -640,11 +640,19 @@ FUNCTION receives no arguments and may return any value."
 
 (defun ende-tools--change-set-result (change-set)
   "Return a JSON-compatible summary of CHANGE-SET."
-  (list :change_set_id (ende-change-set-id change-set)
-        :status (ende-change-set-status change-set)
-        :source_kind (ende-change-set-source-kind change-set)
-        :path (ende-change-set-path change-set)
-        :edit_count (length (ende-change-set-edits change-set))))
+  (let* ((operation (or (ende-change-set-operation change-set) 'edit))
+         (result
+          (list :change_set_id (ende-change-set-id change-set)
+                :operation (symbol-name operation)
+                :status (ende-change-set-status change-set)
+                :source_kind (ende-change-set-source-kind change-set)
+                :path (ende-change-set-path change-set))))
+    (when (eq operation 'edit)
+      (setq result
+            (append result
+                    (list :edit_count
+                          (length (ende-change-set-edits change-set))))))
+    result))
 
 (defun ende-tools--edit-file (arguments root)
   "Create an atomic anchor-based change set for a project-relative path."
@@ -667,6 +675,7 @@ FUNCTION receives no arguments and may return any value."
                (ende-change-set--create
                 :id (format "change-set-%d"
                             (cl-incf ende-tools--next-change-set-id))
+                :operation 'edit
                 :root root
                 :source-kind (if (plist-get source :buffer) "buffer" "file")
                 :path (plist-get source :relative)
@@ -681,6 +690,53 @@ FUNCTION receives no arguments and may return any value."
     (if ende-tools-direct-write
         (ende-tools--apply-change-set-object change-set)
       (ende-tools--change-set-result change-set))))
+
+(defun ende-tools--create-file-path (path root)
+  "Return the canonical authorized creation PATH below ROOT."
+  (ende-tools--assert-path-authorized
+   (ende-project-path path root t)
+   root))
+
+(defun ende-tools--assert-new-file-path (path root)
+  "Signal if PATH already names a filesystem entry."
+  (when (or (file-exists-p path) (file-symlink-p path))
+    (error "file already exists; use edit_file to modify it: %s"
+           (file-relative-name path root)))
+  path)
+
+(defun ende-tools--write-new-file (content path)
+  "Write CONTENT to new PATH, failing if the filesystem entry exists."
+  (with-temp-buffer
+    (insert content)
+    (write-region (point-min) (point-max) path nil 'silent nil 'excl)))
+
+(defun ende-tools--create-file (arguments root)
+  "Create a pending or immediately applied project file change set."
+  (ende-tools--assert-properties arguments '("path" "content") "create_file")
+  (let* ((path (ende-tools--required-string arguments "path"))
+         (content (ende-tools--argument arguments "content")))
+    (unless (stringp content)
+      (error "tool argument content must be a string"))
+    (let* ((canonical (ende-tools--create-file-path path root))
+           (relative (file-relative-name canonical root))
+           (change-set nil))
+      (ende-tools--assert-new-file-path canonical root)
+      (setq change-set
+            (ende-change-set--create
+             :id (format "change-set-%d"
+                         (cl-incf ende-tools--next-change-set-id))
+             :operation 'create
+             :root root
+             :source-kind "file"
+             :path relative
+             :content content
+             :status "pending"
+             :created-at (float-time)))
+      (puthash (ende-change-set-id change-set) change-set
+               ende-tools--change-sets)
+      (if ende-tools-direct-write
+          (ende-tools--apply-change-set-object change-set)
+        (ende-tools--change-set-result change-set)))))
 
 (defun ende-tools--apply-edits-in-buffer (edits &optional review)
   "Apply normalized descending EDITS in the current buffer.
@@ -727,8 +783,25 @@ return them."
      (list :path (ende-change-set-path change-set))
      (ende-change-set-root change-set))))
 
+(defun ende-tools--apply-create-change-set-object (change-set)
+  "Apply new-file CHANGE-SET without replacing an existing filesystem entry."
+  (let* ((root (ende-change-set-root change-set))
+         (path (ende-tools--create-file-path
+                (ende-change-set-path change-set) root)))
+    (ende-tools--assert-new-file-path path root)
+    (ende-tools--write-new-file (ende-change-set-content change-set) path)
+    (setf (ende-change-set-status change-set) "applied")
+    (remhash (ende-change-set-id change-set) ende-tools--change-sets)
+    (ende-tools--change-set-result change-set)))
+
 (defun ende-tools--apply-change-set-object (change-set)
-  "Apply CHANGE-SET after revalidating its source and every edit."
+  "Apply CHANGE-SET through its operation-specific validation path."
+  (if (eq (ende-change-set-operation change-set) 'create)
+      (ende-tools--apply-create-change-set-object change-set)
+    (ende-tools--apply-edit-change-set-object change-set)))
+
+(defun ende-tools--apply-edit-change-set-object (change-set)
+  "Apply edit CHANGE-SET after revalidating its source and every edit."
   (let* ((source (ende-tools--current-change-set-source change-set))
          (buffer (plist-get source :buffer))
          (path (plist-get source :path))
@@ -819,6 +892,17 @@ return them."
      . ((:path . ((:type . "string")
                   (:description . "Project-relative file path")))))
     (:required . ("path"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--create-file-schema
+  '((:type . "object")
+    (:properties
+     . ((:path . ((:type . "string")
+                  (:minLength . 1)
+                  (:description . "Project-relative file path")))
+        (:content . ((:type . "string")
+                     (:description . "Complete file contents; may be empty")))))
+    (:required . ("path" "content"))
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--edit-item-schema
@@ -922,6 +1006,12 @@ return them."
  "Edit a project file by locating exact text anchors in the current source."
  ende-tools--edit-file-schema
  #'ende-tools--edit-file :write)
+
+(ende-tool-register
+ 'create_file
+ "Create a new project-relative file in an existing directory; fail if it exists."
+ ende-tools--create-file-schema
+ #'ende-tools--create-file :write)
 
 (provide 'ende-tools)
 

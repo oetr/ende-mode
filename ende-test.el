@@ -230,9 +230,15 @@ process for cancellation tests."
                   (list (cons "path" path) (cons "edits" edits))
                   root))
 
+(defun ende-test--create-file-call (path content root)
+  "Call `create_file' for PATH with CONTENT under ROOT."
+  (ende-tool-call "create_file"
+                  (list (cons "path" path) (cons "content" content))
+                  root))
+
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
-    (should (= (length definitions) 8))
+    (should (= (length definitions) 9))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))
              (schema
@@ -241,6 +247,7 @@ process for cancellation tests."
         (should (hash-table-p (gethash "properties" schema)))
         (should (eq (gethash "additionalProperties" schema) :false))))
     (should-not (ende-tool-read-only (ende-tool--find "edit_file")))
+    (should-not (ende-tool-read-only (ende-tool--find "create_file")))
     (should-not (ende-tool--find "edit_source"))
     (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
     (should (string-match-p "edit_file" (json-encode definitions)))
@@ -273,7 +280,24 @@ process for cancellation tests."
       (should (= (gethash "minLength" (gethash "anchor" item-properties)) 1))
       (should-not (gethash "minLength" (gethash "text" item-properties)))
       (should (= (gethash "minimum" (gethash "occurrence" item-properties))
-                 1)))))
+                 1)))
+    (let* ((definition
+            (cl-find-if
+             (lambda (candidate)
+               (equal (alist-get :name (alist-get :function candidate))
+                      "create_file"))
+             definitions))
+           (schema (ende-protocol-json-read-string
+                    (json-encode
+                     (alist-get :parameters (alist-get :function definition)))))
+           (properties (gethash "properties" schema)))
+      (should (equal (append (gethash "required" schema) nil)
+                     '("path" "content")))
+      (should (eq (gethash "additionalProperties" schema) :false))
+      (should (= (gethash "minLength" (gethash "path" properties)) 1))
+      (should (equal (gethash "type" (gethash "content" properties))
+                     "string"))
+      (should-not (gethash "minLength" (gethash "content" properties))))))
 
 (ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
   (let* ((root (make-temp-file "ende-tools-project-" t))
@@ -395,6 +419,7 @@ process for cancellation tests."
                             root))
                  (change-set-id (plist-get proposal :change_set_id)))
             (should (string= (plist-get proposal :status) "pending"))
+            (should (equal (plist-get proposal :operation) "edit"))
             (should (= (plist-get proposal :edit_count) 1))
             (should-not (plist-member proposal :base_digest))
             (should-not (plist-member proposal :edits))
@@ -698,6 +723,170 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
+(ert-deftest ende-test/project-tools-create-file-uses-pending-change-sets ()
+  (let* ((root (make-temp-file "ende-tools-create-project-" t))
+         (directory (expand-file-name "src" root))
+         (path (expand-file-name "new.el" directory))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (make-directory directory)
+          (let* ((proposal
+                  (ende-test--tool-result
+                   "create_file"
+                   '(("path" . "src/new.el")
+                     ("content" . ";;; new.el --- sample\n(provide 'new)\n"))
+                   root))
+                 (id (plist-get proposal :change_set_id))
+                 (change-set (ende-tools-change-set id)))
+            (should (equal (plist-get proposal :operation) "create"))
+            (should (equal (plist-get proposal :status) "pending"))
+            (should (equal (plist-get proposal :path) "src/new.el"))
+            (should-not (plist-member proposal :content))
+            (should-not (plist-member proposal :base_digest))
+            (should-not (plist-member proposal :edits))
+            (should-not (plist-member proposal :edit_count))
+            (should (eq (ende-change-set-operation change-set) 'create))
+            (should (equal (ende-change-set-content change-set)
+                           ";;; new.el --- sample\n(provide 'new)\n"))
+            (should-not (ende-change-set-base-digest change-set))
+            (should-not (ende-change-set-edits change-set))
+            (should-not (ende-change-set-buffer-id change-set))
+            (should-not (file-exists-p path))
+            (let ((applied (ende-tools-apply-change-set id)))
+              (should (equal (plist-get applied :operation) "create"))
+              (should (equal (plist-get applied :status) "applied")))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           ";;; new.el --- sample\n(provide 'new)\n"))
+            (should-error (ende-tools-change-set id)))
+          (let* ((proposal
+                  (ende-test--tool-result
+                   "create_file"
+                   '(("path" . "src/empty.el") ("content" . ""))
+                   root))
+                 (id (plist-get proposal :change_set_id))
+                 (empty-path (expand-file-name "empty.el" directory)))
+            (should-not (file-exists-p empty-path))
+            (ende-tools-apply-change-set id)
+            (should (file-exists-p empty-path))
+            (should (= (file-attribute-size (file-attributes empty-path)) 0))))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-create-file-direct-write-and-existing-target ()
+  (let* ((root (make-temp-file "ende-tools-create-direct-" t))
+         (existing (expand-file-name "existing.el" root))
+         (new (expand-file-name "new.el" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (with-temp-file existing (insert "original"))
+          (let ((failure
+                 (ende-test--create-file-call "existing.el" "overwrite" root)))
+            (should-not (plist-get failure :ok))
+            (should (string-match-p "already exists; use edit_file"
+                                    (plist-get failure :error)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents existing)
+                             (buffer-string))
+                           "original"))
+            (should (= (hash-table-count ende-tools--change-sets) 0)))
+          (let* ((ende-tools-direct-write t)
+                 (result (ende-test--tool-result
+                          "create_file"
+                          '(("path" . "new.el") ("content" . "created\n"))
+                          root)))
+            (should (equal (plist-get result :operation) "create"))
+            (should (equal (plist-get result :status) "applied"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents new)
+                             (buffer-string))
+                           "created\n"))
+            (should (= (hash-table-count ende-tools--change-sets) 0))))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-create-file-never-overwrites-late-paths ()
+  (let* ((root (make-temp-file "ende-tools-create-race-" t))
+         (late (expand-file-name "late.el" root))
+         (exclusive (expand-file-name "exclusive.el" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (let* ((proposal (ende-test--tool-result
+                            "create_file"
+                            '(("path" . "late.el") ("content" . "proposal"))
+                            root))
+                 (id (plist-get proposal :change_set_id)))
+            (with-temp-file late (insert "arrived later"))
+            (should-error (ende-tools-apply-change-set id))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents late)
+                             (buffer-string))
+                           "arrived later"))
+            (should (ende-change-set-p (ende-tools-change-set id)))
+            (ende-tools-reject-change-set id))
+          (let* ((proposal (ende-test--tool-result
+                            "create_file"
+                            '(("path" . "exclusive.el")
+                              ("content" . "proposal"))
+                            root))
+                 (id (plist-get proposal :change_set_id))
+                 (original (symbol-function
+                            #'ende-tools--assert-new-file-path)))
+            (cl-letf (((symbol-function #'ende-tools--assert-new-file-path)
+                       (lambda (path project-root)
+                         (funcall original path project-root)
+                         (with-temp-file path (insert "won the race"))
+                         path)))
+              (should-error (ende-tools-apply-change-set id)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents exclusive)
+                             (buffer-string))
+                           "won the race"))
+            (should (ende-change-set-p (ende-tools-change-set id)))
+            (ende-tools-reject-change-set id)))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-create-file-validates-path-and-symlinks ()
+  (let* ((root (make-temp-file "ende-tools-create-paths-" t))
+         (outside (make-temp-file "ende-tools-create-outside-" t))
+         (link (expand-file-name "dangling-link" root))
+         (absolute (expand-file-name "absolute-target" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (ende-tools-clear-change-sets)
+          (make-symbolic-link "missing-target" link)
+          (make-symbolic-link outside (expand-file-name "outside-dir" root))
+          (dolist (path (list "missing-dir/new.el"
+                              "../outside.el"
+                              "outside-dir/escaped.el"
+                              absolute
+                              ".env"
+                              "dangling-link"))
+            (should-not (plist-get
+                         (ende-test--create-file-call path "content" root)
+                         :ok))
+            (should (= (hash-table-count ende-tools--change-sets) 0)))
+          (should (file-symlink-p link))
+          (should-not (file-exists-p (expand-file-name "missing-dir" root)))
+          (should-not (file-exists-p absolute)))
+      (ende-tools-clear-change-sets)
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-directory-p outside)
+        (delete-directory outside t)))))
+
 (ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
   (let* ((root (make-temp-file "ende-chat-config-" t))
          (child-root (make-temp-file "ende-chat-child-config-" t))
@@ -707,9 +896,9 @@ process for cancellation tests."
             "#+begin_ende\n(root %S)\n"
             "(group inspect project_info list_project_files file_info read_file "
             "search_project list_project_buffers read_buffer)\n"
-            "(group modify edit_file)\n"
+            "(group modify edit_file create_file)\n"
             "(resource project (include \"**\") (exclude \"private/**\"))\n"
-            "(resource chat (include \"main.el\"))\n"
+            "(resource chat (include \"main.el\") (include \"new.el\"))\n"
             "(tools inspect)\n"
             "(set-tool-resources inspect :resources project)\n"
             "#+end_ende\n\n"
@@ -760,7 +949,13 @@ process for cancellation tests."
                              (ende-project-normalize-root child-root)))
               (should (memq 'edit_file
                             (plist-get edit-config :active-tools)))
+              (should (memq 'create_file
+                            (plist-get edit-config :active-tools)))
               (should (equal (cdr (assq 'edit_file
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat)))
+              (should (equal (cdr (assq 'create_file
                                         (plist-get edit-config
                                                    :tool-resources)))
                              '(chat)))
@@ -789,13 +984,24 @@ process for cancellation tests."
                 (should (plist-get allowed :ok))
                 (ende-tools-reject-change-set
                  (plist-get (plist-get allowed :result) :change_set_id)))
+              (let* ((created
+                      (ende-tool-call
+                       "create_file"
+                       '(("path" . "new.el") ("content" . ""))
+                       child-root edit-config))
+                     (result (plist-get created :result)))
+                (should (plist-get created :ok))
+                (should (equal (plist-get result :operation) "create"))
+                (should (equal (plist-get result :status) "pending"))
+                (should-not (file-exists-p (expand-file-name "new.el"
+                                                              child-root)))
+                (ende-tools-reject-change-set
+                 (plist-get result :change_set_id)))
               (let ((denied
                      (ende-tool-call
-                      "edit_file"
-                      (list (cons "path" "private/secret.txt")
-                            (cons "edits"
-                                  (list (ende-test--anchor-edit
-                                         "secret" "replace" "changed"))))
+                      "create_file"
+                      '(("path" . "private/secret.txt")
+                        ("content" . "changed"))
                       child-root edit-config)))
                 (should-not (plist-get denied :ok))
                 (should (string-match-p "not authorized"
