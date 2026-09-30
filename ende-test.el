@@ -330,33 +330,144 @@ process for cancellation tests."
       (when (file-exists-p outside)
         (delete-file outside)))))
 
-(ert-deftest ende-test/project-tools-prefer-unsaved-visiting-buffers ()
+(ert-deftest ende-test/project-tools-edit-file-enforces-resource-scope ()
+  (let* ((root (make-temp-file "ende-tools-edit-scope-" t))
+         (allowed (expand-file-name "public.el" root))
+         (blocked (expand-file-name "private.el" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file allowed (insert "public source\n"))
+          (with-temp-file blocked (insert "private source\n"))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (group writer edit_file)
+                (resource public (include "public.el"))
+                (tools writer)
+                (set-tool-resources writer :resources public)))
+             "* Conversation\n** Edit\n")
+            (let* ((document (ende-chat--build-document))
+                   (configuration
+                    (ende-test--chat-config-at document "Edit"))
+                   (allowed-call
+                    (ende-tool-call
+                     'edit_file
+                     (list :path "public.el"
+                           :edits (list (ende-test--anchor-edit
+                                         "source" "replace" "edited")))
+                     root configuration))
+                   (blocked-call
+                    (ende-tool-call
+                     'edit_file
+                     (list :path "private.el"
+                           :edits (list (ende-test--anchor-edit
+                                         "source" "replace" "edited")))
+                     root configuration))
+                   (outside-call
+                    (ende-tool-call
+                     'edit_file
+                     (list :path "../outside.el"
+                           :edits (list (ende-test--anchor-edit
+                                         "source" "replace" "edited")))
+                     root configuration)))
+              (should (plist-get allowed-call :ok))
+              (should (equal (plist-get (plist-get allowed-call :result)
+                                        :source_kind)
+                             "file"))
+              (should-not (plist-get blocked-call :ok))
+              (should (string-match-p "not authorized"
+                                      (plist-get blocked-call :error)))
+              (should-not (plist-get outside-call :ok))
+              (should (string-match-p "outside the project"
+                                      (plist-get outside-call :error)))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents allowed)
+                               (buffer-string))
+                             "public edited\n"))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents blocked)
+                               (buffer-string))
+                             "private source\n")))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-separate-disk-and-buffer-sources ()
   (let* ((root (make-temp-file "ende-tools-buffer-project-" t))
          (path (expand-file-name "main.el" root))
          (buffer nil))
     (unwind-protect
         (progn
           (with-temp-file path
-            (insert "disk\nsecond\n"))
+            (insert "DISK_TOKEN from disk\nsecond disk\n"))
           (setq buffer (find-file-noselect path))
           (with-current-buffer buffer
-            (goto-char (point-min))
-            (insert "unsaved\n")
+            (erase-buffer)
+            (insert "BUFFER_TOKEN unsaved\nsecond buffer\nthird buffer\n")
             (set-buffer-modified-p t))
           (let* ((ende-project-root-directory root)
                  (listed (ende-test--tool-result
                           "list_project_buffers" nil root))
                  (record (car (plist-get listed :buffers)))
                  (buffer-id (plist-get record :buffer_id))
-                 (read (ende-test--tool-result
-                        "read_buffer"
-                        (list (cons "buffer_id" buffer-id)
-                              (cons "start_line" 1)
-                              (cons "line_count" 1))
-                        root)))
-            (should (string= (plist-get read :source_kind) "buffer"))
-            (should (string= (plist-get read :content) "unsaved\n"))
-            (should (string= (plist-get read :path) "main.el"))))
+                 (buffer-read
+                  (ende-test--tool-result
+                   "read_buffer"
+                   (list (cons "buffer_id" buffer-id)
+                         (cons "start_line" 1)
+                         (cons "line_count" 1))
+                   root))
+                 (file-read
+                  (ende-test--tool-result
+                   "read_file"
+                   '(("path" . "main.el")
+                     ("start_line" . 1)
+                     ("line_count" . 1))
+                   root))
+                 (info (ende-test--tool-result
+                        "file_info" '(("path" . "main.el")) root))
+                 (files (ende-test--tool-result
+                         "list_project_files"
+                         '(("include_metadata" . t)) root))
+                 (disk-search
+                  (ende-test--tool-result
+                   "search_project"
+                   '(("regexp" . "DISK_TOKEN")) root))
+                 (buffer-search
+                  (ende-test--tool-result
+                   "search_project"
+                   '(("regexp" . "BUFFER_TOKEN")) root)))
+            (should (string= (plist-get buffer-read :source_kind) "buffer"))
+            (should (string= (plist-get buffer-read :content)
+                             "BUFFER_TOKEN unsaved\n"))
+            (should (string= (plist-get buffer-read :path) "main.el"))
+            (should (string= (plist-get file-read :source_kind) "file"))
+            (should (string= (plist-get file-read :content)
+                             "DISK_TOKEN from disk\n"))
+            (should (string= (plist-get file-read :digest)
+                             (plist-get info :digest)))
+            (should (= (plist-get info :line_count) 2))
+            (should-not (equal
+                         (plist-get file-read :digest)
+                         (with-current-buffer buffer
+                           (secure-hash 'sha256 (current-buffer)
+                                        (point-min) (point-max)))))
+            (should (= (plist-get info :byte_count)
+                       (string-bytes "DISK_TOKEN from disk\nsecond disk\n")))
+            (should (plist-get info :visiting_buffer))
+            (should (eq (plist-get info :visiting_buffer_modified) t))
+            (should (string= (plist-get
+                              (car (plist-get files :files)) :source_kind)
+                             "file"))
+            (should (string= (plist-get
+                              (car (plist-get files :files)) :digest)
+                             (plist-get info :digest)))
+            (should (= (length (plist-get disk-search :matches)) 1))
+            (should (string= (plist-get
+                              (car (plist-get disk-search :matches)) :source_kind)
+                             "file"))
+            (should-not (plist-get buffer-search :matches))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -397,57 +508,165 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest ende-test/project-tools-edit-file-applies-and-reviews-immediately ()
-  (let* ((root (make-temp-file "ende-tools-edit-project-" t))
+(ert-deftest ende-test/project-tools-edit-file-writes-disk-and-preserves-buffers ()
+  (dolist (state '(no-buffer clean-buffer modified-buffer))
+    (let* ((root (make-temp-file "ende-tools-edit-project-" t))
+           (path (expand-file-name "main.el" root))
+           (buffer nil))
+      (unwind-protect
+          (progn
+            (with-temp-file path
+              (insert "hello world\nkeep\n"))
+            (unless (eq state 'no-buffer)
+              (setq buffer (find-file-noselect path)))
+            (when buffer
+              (with-current-buffer buffer
+                (when (eq state 'modified-buffer)
+                  (erase-buffer)
+                  (insert "unsaved buffer contents\n")
+                  (set-buffer-modified-p t))
+                (goto-char (+ (point-min) 3))
+                (narrow-to-region (point-min) (+ (point-min) 8))
+                (goto-char (+ (point-min) 2))))
+            (let* ((snapshot
+                    (and buffer
+                         (with-current-buffer buffer
+                           (list :text
+                                 (save-restriction
+                                   (widen)
+                                   (buffer-substring-no-properties
+                                    (point-min) (point-max)))
+                                 :modified (buffer-modified-p)
+                                 :point (point)
+                                 :minimum (point-min)
+                                 :maximum (point-max)
+                                 :undo-list buffer-undo-list))))
+                   (ende-project-root-directory root)
+                   (result
+                    (ende-test--tool-result
+                     "edit_file"
+                     (list (cons "path" "main.el")
+                           (cons "edits"
+                                 (list (ende-test--anchor-edit
+                                        "world" "replace" "Emacs"))))
+                     root)))
+              (should (equal (plist-get result :operation) "edit"))
+              (should (equal (plist-get result :status) "applied"))
+              (should (equal (plist-get result :source_kind) "file"))
+              (should (equal (plist-get result :write_target) "disk_file"))
+              (should (= (plist-get result :edit_count) 1))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "hello Emacs\nkeep\n"))
+              (if buffer
+                  (with-current-buffer buffer
+                    (should (equal
+                             (save-restriction
+                               (widen)
+                               (buffer-substring-no-properties
+                                (point-min) (point-max)))
+                             (plist-get snapshot :text)))
+                    (should (eq (buffer-modified-p)
+                                (plist-get snapshot :modified)))
+                    (should (= (point) (plist-get snapshot :point)))
+                    (should (= (point-min) (plist-get snapshot :minimum)))
+                    (should (= (point-max) (plist-get snapshot :maximum)))
+                    (should (eq buffer-undo-list
+                                (plist-get snapshot :undo-list)))
+                    (should (stringp
+                             (plist-get result :visiting_buffer_warning)))
+                    (should (eq (plist-get result :visiting_buffer_modified)
+                                (eq state 'modified-buffer)))
+                    (should (plist-get result :visiting_buffer))
+                    (when (eq state 'modified-buffer)
+                      (should (string-match-p
+                               "saving.*overwrite"
+                               (plist-get result :visiting_buffer_warning)))))
+                (progn
+                  (should-not (get-file-buffer path))
+                  (should-not (plist-get result :visiting_buffer))
+                  (should-not (plist-get result :visiting_buffer_warning))))))
+        (when (buffer-live-p buffer)
+          (set-buffer-modified-p nil)
+          (kill-buffer buffer))
+        (when (file-directory-p root)
+          (delete-directory root t))))))
+
+(ert-deftest ende-test/project-tools-edit-file-ignores-and-preserves-reviews ()
+  (let* ((root (make-temp-file "ende-tools-review-project-" t))
          (path (expand-file-name "main.el" root))
-         (buffer nil))
+         (buffer nil)
+         (review nil))
     (unwind-protect
         (progn
-          (with-temp-file path
-            (insert "hello world\n"))
-          (let* ((ende-project-root-directory root)
-                 (result (ende-test--tool-result
-                          "edit_file"
-                          (list (cons "path" "main.el")
-                                (cons "edits"
-                                      (list (ende-test--anchor-edit
-                                             "world" "replace" "Emacs"))))
-                          root)))
-            (should (equal (plist-get result :operation) "edit"))
-            (should (equal (plist-get result :status) "applied"))
-            (should (= (plist-get result :edit_count) 1))
-            (should-not (plist-member result :change_set_id))
-            (should-not (plist-member result :base_digest))
-            (should-not (plist-member result :edits))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
-                           "hello Emacs\n")))
+          (with-temp-file path (insert "hello world\n"))
           (setq buffer (find-file-noselect path))
           (with-current-buffer buffer
             (erase-buffer)
-            (insert "unsaved Emacs\n")
-            (set-buffer-modified-p t))
+            (insert "unsaved buffer contents\n")
+            (set-buffer-modified-p t)
+            (setq review (ende-review-create-overlay
+                          buffer 1 8 "model" "client" "unsaved")))
           (let* ((ende-project-root-directory root)
-                 (result (ende-test--tool-result
-                          "edit_file"
-                          (list (cons "path" "main.el")
-                                (cons "edits"
-                                      (list (ende-test--anchor-edit
-                                             "Emacs" "replace" "Lisp"))))
-                          root)))
+                 (ende-review-conflict-policy 'block)
+                 (overlays-before
+                  (with-current-buffer buffer
+                    (overlays-in (point-min) (point-max))))
+                 (result
+                  (ende-test--tool-result
+                   "edit_file"
+                   (list (cons "path" "main.el")
+                         (cons "edits"
+                               (list (ende-test--anchor-edit
+                                      "world" "replace" "Emacs"))))
+                   root)))
             (should (equal (plist-get result :status) "applied"))
+            (should (equal (plist-get result :source_kind) "file"))
             (with-current-buffer buffer
-              (should (string= (buffer-string) "unsaved Lisp\n"))
-              (should (cl-some #'ende-review-overlay-p
-                               (overlays-in (point-min) (point-max)))))
-            (should (string= (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
-                             "hello Emacs\n"))))
+              (should (equal overlays-before
+                             (overlays-in (point-min) (point-max))))
+              (should (ende-review-overlay-p review))
+              (should (string= (buffer-string)
+                               "unsaved buffer contents\n")))
+             (should (string= (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string))
+                              "hello Emacs\n"))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-edit-file-preserves-encoding-and-line-endings ()
+  (let* ((root (make-temp-file "ende-tools-encoding-project-" t))
+         (path (expand-file-name "main.txt" root)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert "café\nkeep\n")
+            (let ((coding-system-for-write 'utf-8-dos))
+              (write-region (point-min) (point-max) path nil nil)))
+          (let ((result
+                 (ende-test--tool-result
+                  "edit_file"
+                  (list (cons "path" "main.txt")
+                        (cons "edits"
+                              (list (ende-test--anchor-edit
+                                     "café" "replace" "naïve"))))
+                  root)))
+            (should (equal (plist-get result :source_kind) "file"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "naïve\nkeep\n"))
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally path)
+              (should (equal (buffer-string)
+                              (encode-coding-string
+                               "naïve\nkeep\n" 'utf-8-dos))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -479,7 +698,7 @@ process for cancellation tests."
       (when (file-directory-p root)
         (delete-directory root t)))))
 
-(ert-deftest ende-test/project-tools-edit-file-rejects-invalid-batches-atomically ()
+(ert-deftest ende-test/project-tools-edit-file-leaves-disk-unchanged-on-invalid-batches ()
   (let* ((root (make-temp-file "ende-tools-invalid-edits-" t))
          (path (expand-file-name "main.txt" root))
          (ende-project-root-directory root))

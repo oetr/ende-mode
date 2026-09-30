@@ -7,8 +7,8 @@
 ;;; Commentary:
 
 ;; A provider-independent registry and implementation of project-scoped read
-;; tools, source edits, and file creation.  The agent/transport layer can
-;; use the registry without having to know how Emacs buffers are resolved.
+;; tools, disk-file edits, and file creation.  Path-based tools use disk
+;; contents; buffer tools explicitly use visiting-buffer contents.
 
 ;;; Code:
 
@@ -17,7 +17,6 @@
 (require 'ende-core)
 (require 'ende-edit)
 (require 'ende-project)
-(require 'ende-review)
 
 (defcustom ende-tools-max-listed-files 200
   "Maximum files returned by one `list_project_files' call."
@@ -214,8 +213,8 @@ and controls tool activation and path authorization."
   "Resolve one path or buffer_id in ARGUMENTS below ROOT.
 
 Return a plist containing `:kind', `:path', `:relative', and optionally
-`:buffer'.  A path that has a visiting buffer resolves to that buffer so
-unsaved changes take precedence over disk contents."
+`:buffer'.  This resolver is for buffer-oriented access; path-based file tools
+use `ende-tools--resolve-disk-source' instead."
   (let* ((path (ende-tools--argument arguments "path"))
          (buffer-id (ende-tools--argument arguments "buffer_id"))
          (has-path (and (stringp path) (not (string-empty-p path))))
@@ -235,25 +234,72 @@ unsaved changes take precedence over disk contents."
                (ende-project-path path root) root))
              (buffer (ende-project-visiting-buffer path root))
              (relative (file-relative-name canonical root)))
-        (list :kind (if buffer 'buffer 'file)
-              :buffer buffer :path canonical :relative relative
-              :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
+         (list :kind (if buffer 'buffer 'file)
+               :buffer buffer :path canonical :relative relative
+               :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
+
+(defun ende-tools--resolve-disk-source (arguments root)
+  "Resolve an authorized project file in ARGUMENTS below ROOT.
+
+The returned source always reads from disk, even when a visiting buffer
+exists.  Visiting-buffer state is retained only as separate metadata."
+  (let* ((path-value (ende-tools--required-string arguments "path"))
+         (path (ende-tools--assert-path-authorized
+                (ende-project-path path-value root) root))
+         (relative (file-relative-name path root)))
+    (ende-project-assert-readable-file path)
+    (list :kind 'file :path path :relative relative
+          :visiting-buffer (ende-project-visiting-buffer relative root))))
+
+(defun ende-tools--source-kind-name (source)
+  "Return the public source-kind name for SOURCE."
+  (if (eq (plist-get source :kind) 'buffer) "buffer" "file"))
+
+(defun ende-tools--source-visiting-buffer (source)
+  "Return the buffer associated with SOURCE, if any."
+  (if (eq (plist-get source :kind) 'buffer)
+      (plist-get source :buffer)
+    (plist-get source :visiting-buffer)))
+
+(defun ende-tools--source-buffer-metadata (source)
+  "Return visiting-buffer status for SOURCE without using its contents."
+  (let* ((buffer (ende-tools--source-visiting-buffer source))
+         (modified (and buffer
+                        (with-current-buffer buffer
+                          (buffer-modified-p)))))
+    (if (eq (plist-get source :kind) 'buffer)
+        (list :buffer_id (and buffer (ende-project-buffer-id buffer))
+              :buffer_modified modified)
+      (list :visiting_buffer (and buffer t)
+            :visiting_buffer_modified modified))))
+
+(defun ende-tools--with-disk-source (source function)
+  "Call FUNCTION with detected coding system in a temporary disk buffer.
+
+SOURCE must be a disk source.  The temporary buffer does not visit the file or
+activate a major mode."
+  (let ((path (plist-get source :path)))
+    (ende-project-assert-readable-file path)
+    (with-temp-buffer
+      (let ((coding-system-for-read 'undecided))
+        (insert-file-contents path))
+      (funcall function (or last-coding-system-used 'utf-8-unix)))))
 
 (defun ende-tools--with-source (source function)
   "Call FUNCTION with current source buffer selected for SOURCE.
 
 For a disk source, a temporary buffer is used and the file is not visited.
 FUNCTION receives no arguments and may return any value."
-  (let ((buffer (plist-get source :buffer))
-        (path (plist-get source :path)))
-    (if buffer
+  (if (eq (plist-get source :kind) 'buffer)
+      (let ((buffer (plist-get source :buffer)))
+        (unless (buffer-live-p buffer)
+          (error "project buffer is no longer available"))
         (with-current-buffer buffer
           (save-restriction
             (widen)
-            (funcall function)))
-      (ende-project-assert-readable-file path)
-      (with-temp-buffer
-        (insert-file-contents path)
+            (funcall function))))
+    (ende-tools--with-disk-source source
+      (lambda (_coding-system)
         (funcall function)))))
 
 (defun ende-tools--source-digest ()
@@ -266,24 +312,27 @@ FUNCTION receives no arguments and may return any value."
 
 (defun ende-tools--source-metadata (source)
   "Return metadata for SOURCE using its current contents."
-  (let ((path (plist-get source :path))
-        (buffer (plist-get source :buffer)))
+  (let* ((path (plist-get source :path))
+         (disk-source (eq (plist-get source :kind) 'file))
+         (attributes (and disk-source (file-attributes path)))
+         (buffer-metadata (ende-tools--source-buffer-metadata source)))
     (ende-tools--with-source
      source
      (lambda ()
-       (list :path (plist-get source :relative)
-             :source_kind (if buffer "buffer" "file")
-             :buffer_id (and buffer (ende-project-buffer-id buffer))
-             :line_count (ende-tools--source-line-count)
-             :byte_count (string-bytes (buffer-string))
-             :digest (ende-tools--source-digest)
-             :buffer_modified (and buffer (buffer-modified-p))
-             :disk_mtime
-             (and (file-exists-p path)
-                  (format-time-string
-                   "%Y-%m-%dT%H:%M:%S%z"
-                   (file-attribute-modification-time
-                    (file-attributes path)))))))))
+       (append
+        (list :path (plist-get source :relative)
+              :source_kind (ende-tools--source-kind-name source)
+              :line_count (ende-tools--source-line-count)
+              :byte_count (if disk-source
+                             (file-attribute-size attributes)
+                           (string-bytes (buffer-string)))
+              :digest (ende-tools--source-digest)
+              :disk_mtime
+              (and attributes
+                   (format-time-string
+                    "%Y-%m-%dT%H:%M:%S%z"
+                    (file-attribute-modification-time attributes))))
+        buffer-metadata)))))
 
 (defun ende-tools--line-slice (start-line line-count)
   "Return a bounded line slice from the current source buffer."
@@ -318,17 +367,14 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--file-record (path root include-metadata)
   "Return a compact project file record for PATH below ROOT."
   (let* ((relative (file-relative-name path root))
+         (source (ende-tools--resolve-disk-source
+                  (list :path relative) root))
          (attributes (file-attributes path))
-         (buffer (ende-project-visiting-buffer relative root))
-         (record (list :path relative
-                       :byte_count (file-attribute-size attributes)
-                       :buffer_id (and buffer (ende-project-buffer-id buffer))
-                       :buffer_modified (and buffer (buffer-modified-p)))))
+         (record (append (list :path relative :source_kind "file"
+                               :byte_count (file-attribute-size attributes))
+                         (ende-tools--source-buffer-metadata source))))
     (if include-metadata
-        (ende-tools--source-metadata
-         (list :kind (if buffer 'buffer 'file) :buffer buffer :path path
-               :relative relative :buffer-id
-               (and buffer (ende-project-buffer-id buffer))))
+        (ende-tools--source-metadata source)
       record)))
 
 (defun ende-tools--list-project-files (arguments root)
@@ -356,21 +402,17 @@ FUNCTION receives no arguments and may return any value."
           :truncated truncated)))
 
 (defun ende-tools--file-info (arguments root)
-  "Return metadata for one project file."
+  "Return disk-derived metadata and separate visiting-buffer state."
   (let* ((path-value (ende-tools--required-string arguments "path"))
-         (path (ende-tools--assert-path-authorized
-                (ende-project-path path-value root) root))
-         (attributes (progn
-                       (ende-project-assert-readable-file path)
-                       (file-attributes path)))
-         (source (ende-tools--resolve-source
+         (source (ende-tools--resolve-disk-source
                   (list :path path-value) root))
+         (attributes (file-attributes (plist-get source :path)))
          (metadata (ende-tools--source-metadata source)))
     (plist-put metadata :disk_byte_count (file-attribute-size attributes))))
 
 (defun ende-tools--read-file (arguments root)
-  "Read a bounded range from one project file."
-  (let* ((source (ende-tools--resolve-source arguments root))
+  "Read a bounded range from disk, regardless of visiting-buffer contents."
+  (let* ((source (ende-tools--resolve-disk-source arguments root))
          (start-line (ende-tools--bounded-integer
                       arguments "start_line" 1 most-positive-fixnum))
          (line-count (ende-tools--bounded-integer
@@ -379,11 +421,10 @@ FUNCTION receives no arguments and may return any value."
     (ende-tools--with-source
      source
      (lambda ()
-       (append (list :path (plist-get source :relative)
-                     :source_kind (if (plist-get source :buffer)
-                                      "buffer" "file")
-                     :buffer_id (plist-get source :buffer-id)
-                     :digest (ende-tools--source-digest))
+        (append (list :path (plist-get source :relative)
+                      :source_kind "file"
+                      :digest (ende-tools--source-digest))
+               (ende-tools--source-buffer-metadata source)
                (ende-tools--line-slice start-line line-count))))))
 
 (defun ende-tools--buffer-record (buffer root)
@@ -436,49 +477,50 @@ FUNCTION receives no arguments and may return any value."
   "Search SOURCE for REGEXP and return at most MAXIMUM matches."
   (let ((matches nil)
         (finished nil))
-    (ende-tools--with-source
-     source
-     (lambda ()
-       (goto-char (point-min))
-       (while (and (not finished)
-                   (< (length matches) maximum)
-                   (re-search-forward regexp nil t))
-         (let* ((match-start (match-beginning 0))
-                (line (line-number-at-pos match-start))
-                (column (save-excursion
-                          (goto-char match-start)
-                          (current-column)))
-                (match-line
-                 (save-excursion
-                   (goto-char match-start)
-                   (buffer-substring-no-properties
-                    (line-beginning-position) (line-end-position))))
-                (context
-                 (save-excursion
-                   (goto-char match-start)
-                   (beginning-of-line)
-                   (forward-line (- context-before))
-                   (let ((context-start (point)))
+    (let ((buffer-metadata (ende-tools--source-buffer-metadata source)))
+      (ende-tools--with-source
+       source
+       (lambda ()
+         (goto-char (point-min))
+         (while (and (not finished)
+                     (< (length matches) maximum)
+                     (re-search-forward regexp nil t))
+           (let* ((match-start (match-beginning 0))
+                  (line (line-number-at-pos match-start))
+                  (column (save-excursion
+                            (goto-char match-start)
+                            (current-column)))
+                  (match-line
+                   (save-excursion
                      (goto-char match-start)
-                     (forward-line context-after)
                      (buffer-substring-no-properties
-                      context-start (line-end-position))))))
-           (push (list :path (plist-get source :relative)
-                       :source_kind (if (plist-get source :buffer)
-                                        "buffer" "file")
-                       :buffer_id (plist-get source :buffer-id)
-                       :line line :column column
-                       :match match-line :context context)
-                 matches))
-         ;; Ensure a zero-width regexp cannot keep the search at one point.
-         (when (= (point) (match-beginning 0))
-           (if (= (point) (point-max))
-               (setq finished t)
-             (forward-char 1))))))
+                      (line-beginning-position) (line-end-position))))
+                  (context
+                   (save-excursion
+                     (goto-char match-start)
+                     (beginning-of-line)
+                     (forward-line (- context-before))
+                     (let ((context-start (point)))
+                       (goto-char match-start)
+                       (forward-line context-after)
+                       (buffer-substring-no-properties
+                        context-start (line-end-position))))))
+             (push (append (list :path (plist-get source :relative)
+                                 :source_kind
+                                 (ende-tools--source-kind-name source)
+                                 :line line :column column
+                                 :match match-line :context context)
+                           buffer-metadata)
+                   matches))
+           ;; Ensure a zero-width regexp cannot keep the search at one point.
+           (when (= (point) (match-beginning 0))
+             (if (= (point) (point-max))
+                 (setq finished t)
+               (forward-char 1)))))))
     (nreverse matches)))
 
 (defun ende-tools--search-project (arguments root)
-  "Search allowed project files and current visiting buffers."
+  "Search allowed project files on disk with an Emacs regexp."
   (let* ((regexp (ende-tools--required-string arguments "regexp"))
          (glob (ende-tools--argument arguments "glob"))
          (context-before
@@ -512,11 +554,8 @@ FUNCTION receives no arguments and may return any value."
                                   (length files))))
         (cl-incf files-inspected)
         (let* ((relative (file-relative-name path root))
-               (buffer (ende-project-visiting-buffer relative root))
-               (source (list :kind (if buffer 'buffer 'file)
-                             :buffer buffer :path path :relative relative
-                             :buffer-id
-                             (and buffer (ende-project-buffer-id buffer)))))
+               (source (ende-tools--resolve-disk-source
+                        (list :path relative) root)))
           (setq matches
                 (append matches
                         (ende-tools--search-source
@@ -534,7 +573,7 @@ FUNCTION receives no arguments and may return any value."
 
 (cl-defstruct (ende-change-set (:constructor ende-change-set--create))
   "A validated project change being applied immediately."
-  operation root source-kind path buffer-id base-digest anchor-edits edits
+  operation root source-kind path base-digest anchor-edits edits
   content)
 
 (defun ende-tools--sequence (value)
@@ -639,31 +678,30 @@ FUNCTION receives no arguments and may return any value."
     result))
 
 (defun ende-tools--edit-file (arguments root)
-  "Apply an atomic anchor-based edit to a project-relative path."
+  "Apply validated anchor edits directly to a project file on disk."
   (ende-tools--assert-properties arguments '("path" "edits") "edit_file")
   (let* ((path (ende-tools--required-string arguments "path"))
          (anchor-edits (ende-tools--anchor-edits
-                        (ende-tools--argument arguments "edits")))
-         (source (ende-tools--resolve-source
+                         (ende-tools--argument arguments "edits")))
+         (source (ende-tools--resolve-disk-source
                   (list (cons "path" path)) root))
          (change-set
-          (ende-tools--with-source
-           source
+           (ende-tools--with-source
+            source
            (lambda ()
              (let* ((content (buffer-substring-no-properties
                               (point-min) (point-max)))
                     (base-digest (ende-tools--source-digest))
                     (edits (ende-tools--normalize-anchor-edits
                             anchor-edits content)))
-               (ende-change-set--create
-                :operation 'edit
-                :root root
-                :source-kind (if (plist-get source :buffer) "buffer" "file")
-                :path (plist-get source :relative)
-                :buffer-id (plist-get source :buffer-id)
-                :base-digest base-digest
-                :anchor-edits anchor-edits
-                :edits edits))))))
+                (ende-change-set--create
+                 :operation 'edit
+                 :root root
+                 :source-kind "file"
+                 :path (plist-get source :relative)
+                 :base-digest base-digest
+                 :anchor-edits anchor-edits
+                 :edits edits))))))
     (ende-tools--apply-change-set-object change-set)))
 
 (defun ende-tools--create-file-path (path root)
@@ -703,50 +741,39 @@ FUNCTION receives no arguments and may return any value."
         :path relative
         :content content)))))
 
-(defun ende-tools--apply-edits-in-buffer (edits &optional review)
+(defun ende-tools--apply-edits-in-buffer (edits)
   "Apply normalized descending EDITS in the current buffer.
 
-When REVIEW is non-nil, create review overlays for generated replacements and
-return them."
-  (let ((overlays nil))
-    (dolist (edit (sort (copy-sequence edits)
-                        (lambda (left right)
-                          (let ((left-start (plist-get left :start))
-                                (right-start (plist-get right :start)))
-                            (or (> left-start right-start)
-                                (and (= left-start right-start)
-                                     (equal (plist-get left :position)
-                                            "replace")
-                                     (not (equal
-                                           (plist-get right :position)
-                                           "replace"))))))))
-      (let* ((start (+ (point-min) (plist-get edit :start)))
-             (end (+ (point-min) (plist-get edit :end)))
-             (expected (plist-get edit :expected))
-             (replacement (plist-get edit :replacement)))
-        (unless (string= expected
-                         (buffer-substring-no-properties start end))
-          (error "source changed while applying edit %d"
-                 (1+ (plist-get edit :index))))
-        (goto-char start)
-        (delete-region start end)
-        (let ((review-start (point)))
-          (insert replacement)
-          (when review
-            (push (ende-review-create-overlay
-                   (current-buffer) review-start (point) nil nil expected)
-                  overlays)))))
-    overlays))
+No visiting buffer or review state is involved in this operation."
+  (dolist (edit (sort (copy-sequence edits)
+                      (lambda (left right)
+                        (let ((left-start (plist-get left :start))
+                              (right-start (plist-get right :start)))
+                          (or (> left-start right-start)
+                              (and (= left-start right-start)
+                                   (equal (plist-get left :position)
+                                          "replace")
+                                   (not (equal
+                                         (plist-get right :position)
+                                         "replace"))))))))
+    (let* ((start (+ (point-min) (plist-get edit :start)))
+           (end (+ (point-min) (plist-get edit :end)))
+           (expected (plist-get edit :expected))
+           (replacement (plist-get edit :replacement)))
+      (unless (string= expected
+                       (buffer-substring-no-properties start end))
+        (error "source changed while applying edit %d"
+               (1+ (plist-get edit :index))))
+      (goto-char start)
+      (delete-region start end)
+      (insert replacement)))
+  t)
 
 (defun ende-tools--current-change-set-source (change-set)
-  "Resolve the current source represented by CHANGE-SET."
-  (if (ende-change-set-buffer-id change-set)
-      (ende-tools--resolve-source
-       (list :buffer_id (ende-change-set-buffer-id change-set))
-       (ende-change-set-root change-set))
-    (ende-tools--resolve-source
-     (list :path (ende-change-set-path change-set))
-     (ende-change-set-root change-set))))
+  "Resolve the current disk source represented by CHANGE-SET."
+  (ende-tools--resolve-disk-source
+   (list :path (ende-change-set-path change-set))
+   (ende-change-set-root change-set)))
 
 (defun ende-tools--apply-create-change-set-object (change-set)
   "Apply new-file CHANGE-SET without replacing an existing filesystem entry."
@@ -764,47 +791,67 @@ return them."
     (ende-tools--apply-edit-change-set-object change-set)))
 
 (defun ende-tools--apply-edit-change-set-object (change-set)
-  "Apply edit CHANGE-SET after revalidating its source and every edit."
+  "Apply disk-file CHANGE-SET after revalidating its source and every edit."
   (let* ((source (ende-tools--current-change-set-source change-set))
-         (buffer (plist-get source :buffer))
          (path (plist-get source :path))
-         (created-overlays nil))
-    (condition-case failure
-        (let ((result
-               (ende-tools--with-source
-                source
-                (lambda ()
-                  (unless (string=
-                           (ende-change-set-base-digest change-set)
-                           (ende-tools--source-digest))
-                    (error "source changed since the change set was created"))
-                  (unless (equal
-                           (ende-tools--normalize-anchor-edits
-                            (ende-change-set-anchor-edits change-set)
-                            (buffer-substring-no-properties
-                             (point-min) (point-max)))
-                           (ende-change-set-edits change-set))
-                    (error "change set edits no longer match the source"))
-                  (when buffer
-                    (ende-review-assert-available
-                     buffer (point-min) (point-max))
-                    (barf-if-buffer-read-only)
-                    (let ((inhibit-read-only nil))
-                      (atomic-change-group
-                        (setq created-overlays
-                              (ende-tools--apply-edits-in-buffer
-                               (ende-change-set-edits change-set) t)))))
-                  (unless buffer
-                    (ende-tools--apply-edits-in-buffer
-                     (ende-change-set-edits change-set))
-                    (write-region (point-min) (point-max) path nil 'silent))
-                  (list :applied_edits
-                        (length (ende-change-set-edits change-set)))))))
-          (append (ende-tools--change-set-result change-set) result))
-      ((error quit)
-       (dolist (overlay created-overlays)
-         (ende-ignore-errors #'ende-review-delete-overlay overlay))
-       (signal (car failure) (cdr failure))))))
+         (coding-system nil)
+         (application
+          (ende-tools--with-source
+           source
+           (lambda ()
+             (setq coding-system last-coding-system-used)
+             (unless (string=
+                      (ende-change-set-base-digest change-set)
+                      (ende-tools--source-digest))
+               (error "source changed since the change set was created"))
+             (unless (equal
+                      (ende-tools--normalize-anchor-edits
+                       (ende-change-set-anchor-edits change-set)
+                       (buffer-substring-no-properties
+                        (point-min) (point-max)))
+                      (ende-change-set-edits change-set))
+               (error "change set edits no longer match the source"))
+             (ende-tools--apply-edits-in-buffer
+              (ende-change-set-edits change-set))
+             ;; Re-read immediately before writing, so a concurrent disk
+             ;; change during edit application is not overwritten.
+             (let ((current (ende-tools--current-change-set-source change-set)))
+               (unless (string=
+                        (ende-change-set-base-digest change-set)
+                        (ende-tools--with-source
+                         current #'ende-tools--source-digest))
+                 (error "source changed while preparing the disk edit")))
+             (let ((coding-system-for-write
+                    (or coding-system 'utf-8-unix))
+                   (inhibit-message t))
+               (write-region (point-min) (point-max) path nil nil nil))
+             (list :applied_edits
+                   (length (ende-change-set-edits change-set))))))
+         (visiting-buffer
+          (ende-project-visiting-buffer
+           (ende-change-set-path change-set)
+           (ende-change-set-root change-set)))
+         (visiting-modified
+          (and visiting-buffer
+               (with-current-buffer visiting-buffer
+                 (buffer-modified-p))))
+         (result
+          (append (ende-tools--change-set-result change-set)
+                  application
+                  (list :write_target "disk_file"
+                        :visiting_buffer (and visiting-buffer t)
+                        :visiting_buffer_modified visiting-modified
+                        :visiting_buffer_warning
+                        (and visiting-buffer
+                             (if visiting-modified
+                                 (concat
+                                  "The visiting buffer was left unchanged. "
+                                  "It has unsaved changes; saving that old "
+                                  "buffer later could overwrite this disk edit.")
+                               (concat
+                                 "The visiting buffer was left unchanged and "
+                                 "may not reflect this disk edit.")))))))
+    result))
 
 ;;;; Tool schemas and registrations
 
@@ -869,7 +916,7 @@ return them."
 
 (ende-tool-register
  'list_project_files
- "List allowed regular files below the project root."
+ "List allowed regular files on disk below the project root."
  '((:type . "object")
    (:properties
     . ((:glob . ((:type . "string")
@@ -881,12 +928,12 @@ return them."
 
 (ende-tool-register
  'file_info
- "Return line count, size, digest, and visiting-buffer state for a project file."
+ "Return disk-derived file metadata and separate visiting-buffer state."
  ende-tools--path-schema #'ende-tools--file-info)
 
 (ende-tool-register
  'read_file
- "Read a bounded, 1-based line range from a project-relative path or its visiting buffer."
+ "Read a bounded, 1-based line range from an authorized project file on disk."
  '((:type . "object")
    (:properties
     . ((:path . ((:type . "string")
@@ -899,12 +946,12 @@ return them."
 
 (ende-tool-register
  'list_project_buffers
- "List live visiting buffers whose files belong to the project."
+ "List live visiting buffers whose files belong to the project; this reports buffers, not disk contents."
  ende-tools--empty-object-schema #'ende-tools--list-project-buffers)
 
 (ende-tool-register
  'read_buffer
- "Read a bounded, 1-based line range from an allowed visiting buffer."
+ "Read a bounded, 1-based line range from a visiting buffer, including unsaved contents."
  '((:type . "object")
    (:properties
     . ((:buffer_id . ((:type . "string")))
@@ -916,7 +963,7 @@ return them."
 
 (ende-tool-register
  'search_project
- "Search allowed project files and current visiting buffers with an Emacs regexp."
+ "Search allowed project files on disk with an Emacs regexp."
  '((:type . "object")
    (:properties
     . ((:regexp . ((:type . "string")))
@@ -930,13 +977,13 @@ return them."
 
 (ende-tool-register
  'edit_file
- "Edit a project file by locating exact text anchors in the current source."
+ "Apply exact-anchor edits directly to an authorized disk file without changing visiting buffers."
  ende-tools--edit-file-schema
  #'ende-tools--edit-file :write)
 
 (ende-tool-register
  'create_file
- "Create a new project-relative file in an existing directory; fail if it exists."
+ "Create a new disk file at an authorized project-relative path; fail if it exists."
  ende-tools--create-file-schema
  #'ende-tools--create-file :write)
 
