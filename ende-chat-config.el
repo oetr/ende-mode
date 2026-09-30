@@ -17,9 +17,16 @@
 (require 'ende-project)
 (require 'ende-tools)
 
+(defvar ende-chat-config--block-line nil
+  "Line of the configuration block currently being applied, if any.")
+
 (defun ende-chat-config--error (format-string &rest arguments)
   "Signal a configuration error formatted with FORMAT-STRING and ARGUMENTS."
-  (error "ende chat config: %s" (apply #'format format-string arguments)))
+  (error "ende chat config: %s%s"
+         (apply #'format format-string arguments)
+         (if ende-chat-config--block-line
+             (format " (block at line %d)" ende-chat-config--block-line)
+           "")))
 
 (defun ende-chat-config--reject-reader-dispatch (source)
   "Reject Emacs reader dispatch syntax in SOURCE, outside strings/comments."
@@ -158,29 +165,44 @@
       (ende-chat-config--error "root is not an existing directory: %s" path))
     (ende-project-normalize-root expanded)))
 
+(defun ende-chat-config--remove-grants (predicate configuration)
+  "Remove grants matching PREDICATE from CONFIGURATION.
+Grants are (RESOURCE . TARGET) pairs, keyed by tool."
+  (let (assignments)
+    (dolist (entry (plist-get configuration :grants))
+      (let ((remaining (cl-remove-if predicate (cdr entry))))
+        (when remaining
+          (push (cons (car entry) remaining) assignments))))
+    (plist-put configuration :grants (nreverse assignments))))
+
 (defun ende-chat-config--define-group (form configuration)
-  "Add group definition FORM to CONFIGURATION."
+  "Install group FORM in CONFIGURATION, revoking its inherited permissions."
   (unless (and (ende-chat-config--proper-list-p form) (>= (length form) 3))
     (ende-chat-config--error "malformed group definition: %S" form))
   (let* ((name (ende-chat-config--name (nth 1 form) "group"))
-         (groups (plist-get configuration :groups)))
-    (when (or (assq name groups) (ende-tool--find name))
-      (ende-chat-config--error "group is already defined: %s" name))
-    (let ((tools (mapcar #'ende-chat-config--tool-name (cddr form))))
+         (groups (plist-get configuration :groups))
+         (tools (delete-dups
+                 (mapcar #'ende-chat-config--tool-name (cddr form)))))
+    (when (ende-tool--find name)
+      (ende-chat-config--error "group name conflicts with registered tool: %s"
+                               name))
+    (when (assq name groups)
       (setq configuration
-            (plist-put configuration :groups
-                       (append groups (list (cons name (delete-dups tools)))))))
-    configuration))
+            (plist-put configuration :active-targets
+                       (remq name (plist-get configuration :active-targets)))
+            configuration
+            (ende-chat-config--remove-grants
+             (lambda (grant) (eq (cdr grant) name)) configuration)))
+    (plist-put configuration :groups
+               (ende-chat-config--put name tools groups))))
 
 (defun ende-chat-config--define-resource (form configuration)
-  "Add resource definition FORM to CONFIGURATION."
+  "Install resource FORM in CONFIGURATION, revoking its inherited grants."
   (unless (and (ende-chat-config--proper-list-p form) (>= (length form) 3))
     (ende-chat-config--error "malformed resource definition: %S" form))
   (let* ((name (ende-chat-config--name (nth 1 form) "resource"))
          (resources (plist-get configuration :resources))
          includes excludes)
-    (when (assq name resources)
-      (ende-chat-config--error "resource is already defined: %s" name))
     (dolist (rule (cddr form))
       (unless (and (ende-chat-config--proper-list-p rule)
                    (= (length rule) 2)
@@ -194,30 +216,42 @@
       (ende-chat-config--error "resource %s needs an explicit include" name))
     (setq includes (nreverse includes)
           excludes (nreverse excludes))
+    (when (assq name resources)
+      (let ((revoked (plist-get configuration :revoked-resources)))
+        (dolist (entry (plist-get configuration :grants))
+          (when (assq name (cdr entry))
+            (setq revoked
+                  (ende-chat-config--put
+                   (car entry)
+                   (cl-adjoin name (cdr (assq (car entry) revoked)))
+                   revoked))))
+        (setq configuration
+              (plist-put configuration :revoked-resources revoked))))
     (setq configuration
-          (plist-put configuration :resources
-                     (append resources
-                             (list (cons name
-                                         (list :include includes
-                                               :exclude excludes
-                                               :include-regexps
-                                               (mapcar #'wildcard-to-regexp
-                                                       includes)
-                                               :exclude-regexps
-                                               (mapcar #'wildcard-to-regexp
-                                                       excludes)))))))
-    configuration))
+          (ende-chat-config--remove-grants
+           (lambda (grant) (eq (car grant) name)) configuration))
+    (plist-put configuration :resources
+               (ende-chat-config--put
+                name (list :include includes :exclude excludes
+                           :include-regexps
+                           (mapcar #'wildcard-to-regexp includes)
+                           :exclude-regexps
+                           (mapcar #'wildcard-to-regexp excludes))
+                resources))))
+
+(defun ende-chat-config--target-tools (name configuration)
+  "Return the tools selected by group or tool NAME in CONFIGURATION."
+  (let ((name (ende-chat-config--name name "tool or group")))
+    (or (ende-chat-config--lookup name (plist-get configuration :groups))
+        (list (ende-chat-config--tool-name name)))))
 
 (defun ende-chat-config--resolve-tools (names configuration)
   "Expand tool or group NAMES using CONFIGURATION's group definitions."
   (let (tools)
-    (dolist (raw-name names)
-      (let* ((name (ende-chat-config--name raw-name "tool or group"))
-             (group (ende-chat-config--lookup
-                     name (plist-get configuration :groups))))
-        (setq tools
-              (append tools (or group (list (ende-chat-config--tool-name name)))))))
-    (delete-dups tools)))
+    (dolist (name names)
+      (dolist (tool (ende-chat-config--target-tools name configuration))
+        (push tool tools)))
+    (delete-dups (nreverse tools))))
 
 (defun ende-chat-config--resource-names (names configuration)
   "Validate resource NAMES against CONFIGURATION."
@@ -250,14 +284,21 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
       (let ((tools (ende-chat-config--resolve-tools names configuration))
             (resources (ende-chat-config--resource-names
                         raw-resources configuration))
-            (assignments (plist-get configuration :tool-resources)))
-        (dolist (tool tools)
-          (let ((current (and additive (assq tool assignments)
-                              (cdr (assq tool assignments)))))
-            (setq assignments
-                  (ende-chat-config--put
-                   tool (delete-dups (append current resources)) assignments))))
-        (plist-put configuration :tool-resources assignments)))))
+            (assignments (plist-get configuration :grants)))
+        ;; Clear once so overlapping targets retain both origins.
+        (unless additive
+          (setq assignments
+                (cl-remove-if (lambda (entry) (memq (car entry) tools))
+                              assignments)))
+        (dolist (name (delete-dups names))
+          (dolist (tool (ende-chat-config--target-tools name configuration))
+            (let ((current (cdr (assq tool assignments)))
+                  (grants (mapcar (lambda (resource) (cons resource name))
+                                  resources)))
+              (setq assignments
+                    (ende-chat-config--put
+                     tool (delete-dups (append current grants)) assignments)))))
+        (plist-put configuration :grants assignments)))))
 
 (defun ende-chat-config--apply-form (form configuration)
   "Apply supported operation FORM to CONFIGURATION."
@@ -275,15 +316,16 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
      (unless (and (>= (length form) 2)
                   (cl-every #'symbolp (cdr form)))
        (ende-chat-config--error "tools expects one or more tool or group names"))
-     (plist-put configuration :active-tools
+     (dolist (name (cdr form))
+       (ende-chat-config--target-tools name configuration))
+     (plist-put configuration :active-targets
                 (delete-dups
-                 (append (plist-get configuration :active-tools)
-                         (ende-chat-config--resolve-tools
-                          (cdr form) configuration)))))
+                 (append (plist-get configuration :active-targets)
+                         (cdr form)))))
     ('clear-tools
      (unless (= (length form) 1)
        (ende-chat-config--error "clear-tools takes no arguments"))
-     (plist-put configuration :active-tools nil))
+     (plist-put configuration :active-targets nil))
     ('set-tool-resources
      (ende-chat-config--assign-resources form configuration nil))
     ('add-tool-resources
@@ -291,13 +333,43 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     ('clear-tool-resources
      (unless (= (length form) 1)
        (ende-chat-config--error "clear-tool-resources takes no arguments"))
-     (plist-put configuration :tool-resources nil))
+     (plist-put configuration :grants nil))
     (_ (ende-chat-config--error "unsupported form: %S" (car form)))))
 
 (defun ende-chat-config--empty ()
-  "Return an empty inherited configuration."
-  '(:root nil :groups nil :resources nil :active-tools nil
-	  :tool-resources nil))
+  "Return fresh resolver state, including activation and grant provenance."
+  (list :root nil :groups nil :resources nil :active-targets nil
+        :grants nil :revoked-resources nil))
+
+(defun ende-chat-config--normalize (configuration)
+  "Convert resolver state CONFIGURATION to a runtime access policy."
+  (list :root (plist-get configuration :root)
+        :groups (plist-get configuration :groups)
+        :resources (plist-get configuration :resources)
+        :active-tools
+        (ende-chat-config--resolve-tools
+         (plist-get configuration :active-targets) configuration)
+        :tool-resources
+        (mapcar (lambda (entry)
+                  (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
+                (plist-get configuration :grants))))
+
+(defun ende-chat-config--validate-access (normalized configuration)
+  "Check active tools in NORMALIZED using CONFIGURATION for diagnostics."
+  (dolist (tool (plist-get normalized :active-tools))
+    (when (and (ende-tool-requires-resource (ende-tool--find tool))
+               (null (cdr (assq tool (plist-get normalized :tool-resources)))))
+      (let ((revoked (cdr (assq tool (plist-get configuration
+						:revoked-resources)))))
+        (ende-chat-config--error
+         (concat "active tool %s has no assigned resources%s; "
+                 "use (set-tool-resources %s :resources RESOURCE)")
+         tool
+         (if revoked
+             (format " after resource redefinition revoked %s"
+                     (mapconcat #'symbol-name revoked ", "))
+           "")
+         tool)))))
 
 (defun ende-chat-config--apply-blocks (blocks inherited)
   "Apply BLOCKS over INHERITED and return the resulting configuration."
@@ -306,24 +378,35 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
   (if (null blocks)
       inherited
     (let* ((configuration (ende-chat-config--copy inherited))
+           (ende-chat-config--block-line
+            (line-number-at-pos (org-element-property :begin (car blocks)) t))
            (forms (ende-chat-config--read-forms
                    (ende-chat-config--block-source (car blocks))))
-           (root-count 0))
+           (root-count 0)
+           group-names resource-names)
       (unless (string-empty-p
                (string-trim
                 (or (org-element-property :parameters (car blocks)) "")))
         (ende-chat-config--error "ende blocks do not accept parameters"))
-      ;; Definitions are visible throughout their block, independent of order.
+      ;; Allow forward references.
       (dolist (form forms)
         (unless (ende-chat-config--proper-list-p form)
           (ende-chat-config--error "configuration form must be a list: %S" form))
         (pcase (car form)
           ('group
+           (when (memq (nth 1 form) group-names)
+             (ende-chat-config--error "group is defined twice in this block: %s"
+                                      (nth 1 form)))
            (setq configuration
-                 (ende-chat-config--define-group form configuration)))
+                 (ende-chat-config--define-group form configuration))
+           (push (nth 1 form) group-names))
           ('resource
+           (when (memq (nth 1 form) resource-names)
+             (ende-chat-config--error "resource is defined twice in this block: %s"
+                                      (nth 1 form)))
            (setq configuration
-                 (ende-chat-config--define-resource form configuration)))
+                 (ende-chat-config--define-resource form configuration))
+           (push (nth 1 form) resource-names))
           ('root
            (cl-incf root-count)
            (when (> root-count 1)
@@ -338,10 +421,11 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 
 (defun ende-chat-config-resolve (tree parent-table headline)
   "Resolve chat tool configuration for HEADLINE in parsed Org TREE.
-PARENT-TABLE maps headlines to their parents.  Return an empty normalized
-configuration when no block applies, or a resolved configuration with a
-canonical root.  A configured scope without an explicit inherited or local
-root, or any other invalid form, signals an error."
+PARENT-TABLE maps headlines to their parents.  Apply the document block,
+ancestor blocks, and HEADLINE's own block, never preceding sibling blocks.
+Return a normalized access policy.  Definitions need not be used.  A configured
+scope requires an explicit inherited or local root.  Invalid forms or active
+tools without required resources signal errors before dispatch."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
          (ancestry nil)
          (current headline)
@@ -358,7 +442,9 @@ root, or any other invalid form, signals an error."
                 (ende-chat-config--apply-blocks blocks configuration)))))
     (when (and configured (null (plist-get configuration :root)))
       (ende-chat-config--error "an explicit root is required"))
-    configuration))
+    (let ((normalized (ende-chat-config--normalize configuration)))
+      (ende-chat-config--validate-access normalized configuration)
+      normalized)))
 
 (provide 'ende-chat-config)
 

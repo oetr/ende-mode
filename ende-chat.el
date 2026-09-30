@@ -1066,8 +1066,8 @@ Text-only assistant messages are represented as (\"assistant\" . TEXT)."
                              document headline)
                             (equal (org-element-property :raw-value headline)
                                    "Agent: Reply"))
-                        (ende-chat--tool-call-protocol-p document headline)
-                        (ende-chat--tool-result-protocol-p document headline))))
+                       (ende-chat--tool-call-protocol-p document headline)
+                       (ende-chat--tool-result-protocol-p document headline))))
              (legacy-nested-call
               (and (ende-chat--tool-call-protocol-p document headline)
                    parent
@@ -1843,15 +1843,15 @@ messages; FINAL places the terminal assistant reply after that container."
                 (when (and work (not (eq work anchor)))
                   (error "Chat request pending marker is not its Agent: Work section"))
                 (cond
-                  ((and protocol (not work))
-                   (let ((begin (org-element-property :begin anchor))
-                         (end (org-element-property :end anchor)))
-                     (delete-region begin end)
-                     (goto-char begin)
-                     (setq inserted-marker (copy-marker (point)))
-                     (insert (ende-chat--work-text
-                              anchor-level question-id request-id))
-                     (insert text)))
+                 ((and protocol (not work))
+                  (let ((begin (org-element-property :begin anchor))
+                        (end (org-element-property :end anchor)))
+                    (delete-region begin end)
+                    (goto-char begin)
+                    (setq inserted-marker (copy-marker (point)))
+                    (insert (ende-chat--work-text
+                             anchor-level question-id request-id))
+                    (insert text)))
                  ((or work protocol)
                   (goto-char (ende-chat--request-end document request-id))
                   (setq inserted-marker (copy-marker (point)))
@@ -2555,7 +2555,7 @@ Assistant calls must be followed by matching tool results in order."
                          (placeholder (ende-chat--placeholder job)))
                     (unless placeholder
                       (error "Chat response destination no longer exists"))
-                    (pcase-let ((`(,document ,headline) placeholder))
+                    (pcase-let ((`(,_document ,headline) placeholder))
                       (let* ((level (1+ (org-element-property :level headline)))
                              (content (or (plist-get result :content) ""))
                              (normalized (list :content content))

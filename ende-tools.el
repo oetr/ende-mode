@@ -658,12 +658,12 @@ FUNCTION receives no arguments and may return any value."
                (ende-change-set--create
                 :operation 'edit
                 :root root
-                 :source-kind (if (plist-get source :buffer) "buffer" "file")
-                 :path (plist-get source :relative)
-                 :buffer-id (plist-get source :buffer-id)
-                 :base-digest base-digest
-                 :anchor-edits anchor-edits
-                 :edits edits))))))
+                :source-kind (if (plist-get source :buffer) "buffer" "file")
+                :path (plist-get source :relative)
+                :buffer-id (plist-get source :buffer-id)
+                :base-digest base-digest
+                :anchor-edits anchor-edits
+                :edits edits))))))
     (ende-tools--apply-change-set-object change-set)))
 
 (defun ende-tools--create-file-path (path root)

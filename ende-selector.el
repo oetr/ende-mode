@@ -511,9 +511,8 @@ PREFERRED is selected only when it is present in MODELS."
         (setq ende-selector--model-state
               (if models :ready :error))))))
 
-(defun ende-selector--probe-current-provider (&optional preferred)
-  "Probe the selected provider when it has dynamic model discovery.
-PREFERRED is the model selected before discovery started."
+(defun ende-selector--probe-current-provider (&optional _preferred)
+  "Probe the selected provider when it has dynamic model discovery."
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
          (selector-buffer (current-buffer))

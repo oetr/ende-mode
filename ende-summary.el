@@ -42,7 +42,7 @@
   (rx "[["
       "ende-source:" (group (one-or-more digit))
       "]["
-      (group (minimal-match (zero-or-more any)))
+      (group (minimal-match (zero-or-more not-newline)))
       "]]")
   "Regexp for source citations emitted by the summarization model.")
 

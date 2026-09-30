@@ -1011,7 +1011,7 @@ cached-discovery request so its waiters can cancel it."
                (list stderr-process))
               (unless cancelled
                 (funcall callback payload error)))))
-    (condition-case _startup
+    (condition-case startup-error
         (let ((request
                (ende-curl-start-request
                 :profile profile
@@ -1095,7 +1095,7 @@ cached-discovery request so its waiters can cancel it."
        (funcall
         finish nil
         (ende-error-create :kind 'startup
-                           :message (error-message-string _startup)))))
+                           :message (error-message-string startup-error)))))
     (lambda () (funcall finish nil nil t))))
 
 (defun ende-provider--start-discovery (profile key url)
