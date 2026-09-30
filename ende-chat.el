@@ -230,7 +230,7 @@ discarding superseded details. Be concise but self-contained."
   "Parse the current Org buffer and return an `ende-chat--document'."
   (unless (ende-chat--org-buffer-p)
     (user-error "Chat commands require an Org buffer"))
-  (let* ((tree (org-element-parse-buffer))
+  (let* ((tree (org-element-parse-buffer 'element))
          (headlines (org-element-map tree 'headline #'identity))
          (sorted (sort (copy-sequence headlines)
                        (lambda (left right)
@@ -516,7 +516,7 @@ whole request; a fence inside another sibling's subtree does not."
   "Hide Ende control property drawers in the current Org buffer."
   (when (derived-mode-p 'org-mode)
     (save-excursion
-      (let ((tree (org-element-parse-buffer)))
+      (let ((tree (org-element-parse-buffer 'element)))
         (org-element-map tree 'property-drawer
 			 (lambda (drawer)
 			   (when (cl-every #'ende-chat--reserved-property-p
