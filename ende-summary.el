@@ -98,7 +98,7 @@ Preserve a trailing newline without numbering an extra empty line."
              (format "file:%s::%d" file line)
            (format "ende-buffer:%s::%d"
                    (ende-summary-source-id source) line))))
-    (org-make-link-string target (or description "source"))))
+    (org-link-make-string target (or description "source"))))
 
 (defun ende-summary--citation-link (source line description)
   "Render a citation to LINE in SOURCE with DESCRIPTION.

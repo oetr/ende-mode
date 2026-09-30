@@ -6235,13 +6235,13 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (eq (gethash 'models ende-provider--model-cache) 'unchanged)))))
 
 (ert-deftest ende-test/reasoning-effort-discovery-is-limited-to-builtins ()
-  (let ((called nil)
-        (result nil)
-        (ende-provider-discovery-enabled t)
-        (profile
-         (list :name 'remote :reasoning-effort-discovery-function
-               (lambda (&rest _)
-                 (setq called t)))))
+  (let* ((called nil)
+         (result nil)
+         (ende-provider-discovery-enabled t)
+         (profile
+          (list :name 'remote :reasoning-effort-discovery-function
+                (lambda (&rest _)
+                  (setq called t)))))
     (ende-provider-probe-reasoning-efforts
      profile "remote-model"
      (lambda (efforts default error)
@@ -9952,7 +9952,6 @@ Use COMMAND for the process, or a silent sleep process by default."
      (ende-test--chat-goto "** Question")
      (ende-ask)
      (let* ((document (ende-chat--build-document))
-            (tree (ende-chat--document-tree document))
             (headlines (ende-chat--document-headlines document))
             (reasoning
              (cl-find-if

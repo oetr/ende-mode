@@ -42,6 +42,8 @@
 (require 'ende-target)
 (require 'ende-ui)
 
+(declare-function ende-mode "ende" (&optional arg))
+
 ;;;; Configuration and durable fields
 
 (defcustom ende-chat-buffer-name "*ende-chat*"
