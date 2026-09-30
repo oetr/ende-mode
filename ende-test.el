@@ -274,7 +274,7 @@ process for cancellation tests."
                      '("anchor" "position" "text")))
       (should (eq (gethash "additionalProperties" item) :false))
       (should (equal (append (gethash "enum" (gethash "position"
-                                                       item-properties))
+                                                      item-properties))
                              nil)
                      '("before" "after" "replace")))
       (should (= (gethash "minLength" (gethash "anchor" item-properties)) 1))
@@ -444,8 +444,8 @@ process for cancellation tests."
                             (list
                              (cons "path" "main.el")
                              (cons "edits"
-                                    (list (ende-test--anchor-edit
-                                           "Emacs" "replace" "Lisp"))))
+                                   (list (ende-test--anchor-edit
+                                          "Emacs" "replace" "Lisp"))))
                             root)))
             (let ((change-set-id (plist-get proposal :change_set_id)))
               (ende-tools-apply-change-set change-set-id)
@@ -457,7 +457,7 @@ process for cancellation tests."
             (should (string= (with-temp-buffer
                                (insert-file-contents path)
                                (buffer-string))
-                              "hello Emacs\n"))))
+                             "hello Emacs\n"))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -994,7 +994,7 @@ process for cancellation tests."
                 (should (equal (plist-get result :operation) "create"))
                 (should (equal (plist-get result :status) "pending"))
                 (should-not (file-exists-p (expand-file-name "new.el"
-                                                              child-root)))
+                                                             child-root)))
                 (ende-tools-reject-change-set
                  (plist-get result :change_set_id)))
               (let ((denied
@@ -7666,18 +7666,18 @@ Use COMMAND for the process, or a silent sleep process by default."
                     "Tool Result: read_buffer"
                     "Result C"
                     final-content)))
-         (should-not protocol)
-         (should (equal (ende-test--chat-message-role (car (last messages)))
-                        "user"))
-         (should-not (member "tool" (mapcar #'ende-test--chat-message-role
-                                             messages)))
-          (let ((position 0))
-            (dolist (text ordered-text)
-              (let ((next (string-match (regexp-quote text) context position)))
-                (unless next
-                  (ert-fail (format "Missing %S after position %d"
-                                    text position)))
-                (setq position (+ next (length text))))))
+        (should-not protocol)
+        (should (equal (ende-test--chat-message-role (car (last messages)))
+                       "user"))
+        (should-not (member "tool" (mapcar #'ende-test--chat-message-role
+                                           messages)))
+        (let ((position 0))
+          (dolist (text ordered-text)
+            (let ((next (string-match (regexp-quote text) context position)))
+              (unless next
+                (ert-fail (format "Missing %S after position %d"
+                                  text position)))
+              (setq position (+ next (length text))))))
         (should (equal (mapcar (lambda (headline)
                                  (ende-chat--property
                                   document headline :tool-call-id))
@@ -7728,13 +7728,13 @@ Use COMMAND for the process, or a silent sleep process by default."
       '(:content "")
       '((:id "call-bad" :name "read_file" :arguments "{}")
         (:id "call-bad" :name "search_project"
-         :arguments "{\"regexp\":\"foo\"}"))))
+             :arguments "{\"regexp\":\"foo\"}"))))
     (insert
      (concat
       "** Tool Result: read_file\n:PROPERTIES:\n"
       ":ENDE_CHAT_REQUEST_ID: edited-request\n"
-       ":ENDE_TOOL_CALL_ID: call-bad\n"
-       ":ENDE_TOOL_NAME: read_file\n:END:\n\nEdited result\n\n"
+      ":ENDE_TOOL_CALL_ID: call-bad\n"
+      ":ENDE_TOOL_NAME: read_file\n:END:\n\nEdited result\n\n"
       "** Follow-up\nAsk\n"))
     (ende-test--chat-goto "** Follow-up")
     (let* ((messages (ende-chat-context-at-point))
@@ -7755,10 +7755,10 @@ Use COMMAND for the process, or a silent sleep process by default."
            "** Follow-up\nAsk about the note.\n")
    (org-mode)
    (ende-test--chat-goto "** Follow-up")
-    (let* ((messages (ende-chat-context-at-point))
-           (text (ende-test--chat-context-text messages)))
-      (should (string-match-p "Tool Result: read_file" text))
-       (should-not (ende-test--chat-protocol-messages messages)))))
+   (let* ((messages (ende-chat-context-at-point))
+          (text (ende-test--chat-context-text messages)))
+     (should (string-match-p "Tool Result: read_file" text))
+     (should-not (ende-test--chat-protocol-messages messages)))))
 
 (ert-deftest ende-test/chat-edited-tool-history-still-produces-a-reply ()
   (ende-test--reset)
@@ -7995,8 +7995,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                      "This is a user-authored note.\n\n"
                      "** Agent: Work\n"
                      "This heading is user-authored.\n\n")
-              (let* ((document (ende-chat--build-document))
-                     (headlines (ende-chat--document-headlines document))
+             (let* ((document (ende-chat--build-document))
+                    (headlines (ende-chat--document-headlines document))
                     (reply
                      (cl-find-if
                       (lambda (headline)
@@ -8099,7 +8099,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                   (ende-test--chat-headline-text-hidden-p
                    user-note "This is a user-authored note.")))
 	       (ende-test--chat-goto "** Follow-up")
-             (let* ((messages (ende-chat-context-at-point))
+               (let* ((messages (ende-chat-context-at-point))
                       (text (ende-test--chat-context-text messages))
                       (reply-index
 		       (cl-position-if
@@ -8109,11 +8109,11 @@ Use COMMAND for the process, or a silent sleep process by default."
 			       (string-match-p "Final answer about the source"
 					       (cdr message))))
 			messages)))
-               (should-not (ende-test--chat-protocol-messages messages))
-               (should reply-index)
-               (should (string-match-p "FOO_SOURCE_TOKEN" text))
-               (should (string-match-p "Arguments:" text))
-               (should (string-match-p "Output:" text))
+		 (should-not (ende-test--chat-protocol-messages messages))
+		 (should reply-index)
+		 (should (string-match-p "FOO_SOURCE_TOKEN" text))
+		 (should (string-match-p "Arguments:" text))
+		 (should (string-match-p "Output:" text))
 		 (should (equal (ende-test--chat-message-role (car (last messages)))
 				"user"))
 		 (should
@@ -8123,10 +8123,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                           (string-match-p "This heading is user-authored"
                                           (cdr message))))
                    messages))
-               (should
-                 (cl-every (lambda (role)
-                             (member role '("user" "assistant")))
-                           (mapcar #'ende-test--chat-message-role messages)))
+		 (should
+                  (cl-every (lambda (role)
+                              (member role '("user" "assistant")))
+                            (mapcar #'ende-test--chat-message-role messages)))
 		 (ende-test--chat-goto "** Agent: Work")
 		 (org-fold-show-subtree)
 		 (ende-test--chat-goto "** Follow-up")
@@ -8134,18 +8134,18 @@ Use COMMAND for the process, or a silent sleep process by default."
 		 (ende-test--chat-goto "** Agent: Work")
 		 (org-fold-hide-subtree)
 		 (ende-test--chat-goto "** Follow-up")
-               (let ((follow-up (ende-ask)))
-                 (should (eq (ende-job-state follow-up) 'running))
-                 (ende-test--complete-call (nth 3 ende-test--calls))
-                 (should (eq (ende-job-state follow-up) 'completed))
-                 (let ((provider-messages
-                        (plist-get (nth 3 ende-test--calls) :messages)))
-                   (should-not
-                    (ende-test--chat-protocol-messages provider-messages))
-                   (should
-                    (string-match-p
-                     "Tool Result: read_file"
-                     (ende-test--chat-context-text provider-messages)))))
+		 (let ((follow-up (ende-ask)))
+                   (should (eq (ende-job-state follow-up) 'running))
+                   (ende-test--complete-call (nth 3 ende-test--calls))
+                   (should (eq (ende-job-state follow-up) 'completed))
+                   (let ((provider-messages
+                          (plist-get (nth 3 ende-test--calls) :messages)))
+                     (should-not
+                      (ende-test--chat-protocol-messages provider-messages))
+                     (should
+                      (string-match-p
+                       "Tool Result: read_file"
+                       (ende-test--chat-context-text provider-messages)))))
 		 (should-not
                   (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
 	       (ende-test--chat-goto "** Compact")

@@ -615,9 +615,9 @@ FUNCTION receives no arguments and may return any value."
                             (not (memq (ende-tools--argument edit "all")
                                        '(t :false))))
                    (error "edit item property all must be a boolean"))
-                  (ende-tools--json-object
-                   edit '("anchor" "position" "text" "occurrence" "all"))))
-              edits))))
+                 (ende-tools--json-object
+                  edit '("anchor" "position" "text" "occurrence" "all"))))
+             edits))))
 
 (defun ende-tools--normalize-anchor-edits (raw-edits source)
   "Resolve RAW-EDITS against SOURCE into validated change-set edits."
@@ -925,13 +925,13 @@ return them."
    (cons :type "object")
    (cons :properties
          (list
-           (cons :path '((:type . "string")
-                         (:minLength . 1)
-                         (:description . "Project-relative file path")))
-           (cons :edits
-                 (list (cons :type "array")
-                       (cons :minItems 1)
-                       (cons :items ende-tools--edit-item-schema)))))
+          (cons :path '((:type . "string")
+                        (:minLength . 1)
+                        (:description . "Project-relative file path")))
+          (cons :edits
+                (list (cons :type "array")
+                      (cons :minItems 1)
+                      (cons :items ende-tools--edit-item-schema)))))
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
 

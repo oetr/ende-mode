@@ -650,17 +650,17 @@ Malformed or unsupported drawers are preserved verbatim."
                              :null-object :null :false-object :false))
                     (encoded (and (hash-table-p object)
                                   (gethash "messages" object))))
-                (unless (and (hash-table-p object)
-                             (eql (gethash "version" object) 1)
-                             (vectorp encoded) (not (stringp encoded))
-                             (> (length encoded) 0))
+               (unless (and (hash-table-p object)
+                            (eql (gethash "version" object) 1)
+                            (vectorp encoded) (not (stringp encoded))
+                            (> (length encoded) 0))
                  (error "Unsupported historical tool-context drawer"))
                (mapconcat #'ende-chat--history-drawer-message
                           (append encoded nil) "\n\n"))
-            (error (format "%s (unparsed):\n%s"
-                           ende-chat--tool-context-drawer
-                           raw)))))
-      drawers "\n\n")))
+           (error (format "%s (unparsed):\n%s"
+                          ende-chat--tool-context-drawer
+                          raw)))))
+     drawers "\n\n")))
 
 (defun ende-chat--history-body-string (document headline &optional first-child)
   "Return editable body text from HEADLINE, tolerating stale metadata.
@@ -735,128 +735,128 @@ ancestors are included even when ordinary reasoning context is disabled."
                                headline
                                (ende-chat--document-properties document)))
                   (role-marked (plist-get properties :role-marked))
-                   (local-role (and role-marked (plist-get properties :role)))
-                   (next-owner (if role-marked headline owner))
-                   (next-role (if role-marked (intern local-role) role))
-                   (selected
-                    (and (>= (org-element-property :begin headline) start)
-                         (if reasoning-ancestors-only
-                             (memq headline reasoning-ancestors)
-                           (or (ende-chat--eligible-p document headline)
-                               (memq headline reasoning-ancestors))))))
-              (when (>= (org-element-property :begin headline) question-begin)
-                (throw 'ende-chat--question-reached nil))
-              (when (and selected role-marked)
-                (flush))
-              (cond
-               ((and selected
-                     (ende-chat--work-section-p document headline))
-                (let ((body (ende-chat--history-body-string
-                             document headline
-                             (car (ende-chat--children document headline)))))
-                  (unless (string-blank-p body)
-                    (unless parts
-                      (setq message-owner next-owner
-                            message-role next-role))
-                    (push body parts)))
-                (dolist (child (ende-chat--children document headline))
-                  (walk child next-owner next-role)))
-                ((and selected
-                      (ende-chat--assistant-protocol-p document headline))
-                 (flush)
-                 (let* ((calls
-                         (cl-remove-if-not
-                          (lambda (child)
-                            (ende-chat--tool-call-protocol-p document child))
-                          (ende-chat--children document headline)))
-                        (drawer-text
-                         (ende-chat--history-drawer-text document headline))
-                        (body (ende-chat--history-body-string
-                               document headline (car calls))))
-                   (unless (string-empty-p drawer-text)
-                     (push (ende-chat--message 'assistant drawer-text) messages))
-                   (push (ende-chat--message 'assistant body) messages)
-                   (when-let* ((first-call (car calls)))
-                     (dolist (child (ende-chat--children document headline))
-                       (when (>= (org-element-property :begin child)
-                                 (org-element-property :begin first-call))
-                         (walk child next-owner next-role))))))
-               ((and selected
-                     (ende-chat--tool-result-protocol-p document headline))
-                (flush)
-                (let* ((id (ende-chat--property
-                            document headline :tool-call-id))
-                        (name (or (ende-chat--property
-                                   document headline :tool-name)
-                                  (replace-regexp-in-string
-                                   "\\`Tool Result: *" ""
-                                   (org-element-property :raw-value headline))))
-                        (request-id (ende-chat--property
-                                     document headline :request-id))
-                        (body (ende-chat--history-body-string
-                               document headline
-                               (car (ende-chat--children document headline))))
-                        (arguments
-                         (ende-chat--history-tool-arguments
-                          historical-calls id name request-id))
-                        (content
-                         (if (and (string-prefix-p "Arguments:\n" body)
-                                  (string-match-p "\n\nOutput:\n" body))
-                             (format "Tool Result: %s\n%s" name body)
-                          (format "Tool Result: %s\nArguments:\n%s\n\nOutput:\n%s"
-                                  name (or arguments
-                                           "unavailable in saved history")
-                                  body))))
-                   (push (ende-chat--message 'assistant content) messages)
+                  (local-role (and role-marked (plist-get properties :role)))
+                  (next-owner (if role-marked headline owner))
+                  (next-role (if role-marked (intern local-role) role))
+                  (selected
+                   (and (>= (org-element-property :begin headline) start)
+                        (if reasoning-ancestors-only
+                            (memq headline reasoning-ancestors)
+                          (or (ende-chat--eligible-p document headline)
+                              (memq headline reasoning-ancestors))))))
+             (when (>= (org-element-property :begin headline) question-begin)
+               (throw 'ende-chat--question-reached nil))
+             (when (and selected role-marked)
+               (flush))
+             (cond
+              ((and selected
+                    (ende-chat--work-section-p document headline))
+               (let ((body (ende-chat--history-body-string
+                            document headline
+                            (car (ende-chat--children document headline)))))
+                 (unless (string-blank-p body)
+                   (unless parts
+                     (setq message-owner next-owner
+                           message-role next-role))
+                   (push body parts)))
+               (dolist (child (ende-chat--children document headline))
+                 (walk child next-owner next-role)))
+              ((and selected
+                    (ende-chat--assistant-protocol-p document headline))
+               (flush)
+               (let* ((calls
+                       (cl-remove-if-not
+                        (lambda (child)
+                          (ende-chat--tool-call-protocol-p document child))
+                        (ende-chat--children document headline)))
+                      (drawer-text
+                       (ende-chat--history-drawer-text document headline))
+                      (body (ende-chat--history-body-string
+                             document headline (car calls))))
+                 (unless (string-empty-p drawer-text)
+                   (push (ende-chat--message 'assistant drawer-text) messages))
+                 (push (ende-chat--message 'assistant body) messages)
+                 (when-let* ((first-call (car calls)))
                    (dolist (child (ende-chat--children document headline))
-                     (walk child next-owner next-role))))
-               ((and selected
-                     (ende-chat--tool-call-protocol-p document headline))
-                (flush)
-                (let* ((id (ende-chat--property
-                            document headline :tool-call-id))
-                        (name (or (ende-chat--property
-                                   document headline :tool-name)
-                                  (replace-regexp-in-string
-                                   "\\`Tool Call: *" ""
-                                   (org-element-property :raw-value headline))))
-                        (arguments (ende-chat--history-body-string
-                                    document headline
-                                    (car (ende-chat--children document headline)))))
-                  (push (list id name
-                              (ende-chat--property document headline :request-id)
-                              arguments)
-                        historical-calls)
-                  (push (ende-chat--message
-                         'assistant
-                         (format "Tool Call: %s\nArguments:\n%s"
-                                 name arguments))
-                        messages)
-                  (dolist (child (ende-chat--children document headline))
-                    (walk child next-owner next-role))))
-               (t
-                (when (and selected role-marked
-                           (equal local-role "assistant"))
-                  (flush)
-                  (let ((drawer-text
-                         (ende-chat--history-drawer-text document headline)))
-                    (unless (string-empty-p drawer-text)
-                      (push (ende-chat--message 'assistant drawer-text)
-                            messages))))
-                (when selected
-                  (unless (and parts (eq next-owner message-owner))
-                    (flush)
-                    (setq message-owner next-owner
-                          message-role next-role))
-                  (push (ende-chat--section-text document headline) parts))
-                (dolist (child (ende-chat--fenced-siblings
-                                document (ende-chat--children document headline)
-                                question-begin))
-                  (walk child next-owner next-role)))))))
-       (catch 'ende-chat--question-reached
-         (walk root nil 'user))
-       (flush)
-       (nreverse messages))))
+                     (when (>= (org-element-property :begin child)
+                               (org-element-property :begin first-call))
+                       (walk child next-owner next-role))))))
+              ((and selected
+                    (ende-chat--tool-result-protocol-p document headline))
+               (flush)
+               (let* ((id (ende-chat--property
+                           document headline :tool-call-id))
+                      (name (or (ende-chat--property
+                                 document headline :tool-name)
+                                (replace-regexp-in-string
+                                 "\\`Tool Result: *" ""
+                                 (org-element-property :raw-value headline))))
+                      (request-id (ende-chat--property
+                                   document headline :request-id))
+                      (body (ende-chat--history-body-string
+                             document headline
+                             (car (ende-chat--children document headline))))
+                      (arguments
+                       (ende-chat--history-tool-arguments
+                        historical-calls id name request-id))
+                      (content
+                       (if (and (string-prefix-p "Arguments:\n" body)
+                                (string-match-p "\n\nOutput:\n" body))
+                           (format "Tool Result: %s\n%s" name body)
+                         (format "Tool Result: %s\nArguments:\n%s\n\nOutput:\n%s"
+                                 name (or arguments
+                                          "unavailable in saved history")
+                                 body))))
+                 (push (ende-chat--message 'assistant content) messages)
+                 (dolist (child (ende-chat--children document headline))
+                   (walk child next-owner next-role))))
+              ((and selected
+                    (ende-chat--tool-call-protocol-p document headline))
+               (flush)
+               (let* ((id (ende-chat--property
+                           document headline :tool-call-id))
+                      (name (or (ende-chat--property
+                                 document headline :tool-name)
+                                (replace-regexp-in-string
+                                 "\\`Tool Call: *" ""
+                                 (org-element-property :raw-value headline))))
+                      (arguments (ende-chat--history-body-string
+                                  document headline
+                                  (car (ende-chat--children document headline)))))
+                 (push (list id name
+                             (ende-chat--property document headline :request-id)
+                             arguments)
+                       historical-calls)
+                 (push (ende-chat--message
+                        'assistant
+                        (format "Tool Call: %s\nArguments:\n%s"
+                                name arguments))
+                       messages)
+                 (dolist (child (ende-chat--children document headline))
+                   (walk child next-owner next-role))))
+              (t
+               (when (and selected role-marked
+                          (equal local-role "assistant"))
+                 (flush)
+                 (let ((drawer-text
+                        (ende-chat--history-drawer-text document headline)))
+                   (unless (string-empty-p drawer-text)
+                     (push (ende-chat--message 'assistant drawer-text)
+                           messages))))
+               (when selected
+                 (unless (and parts (eq next-owner message-owner))
+                   (flush)
+                   (setq message-owner next-owner
+                         message-role next-role))
+                 (push (ende-chat--section-text document headline) parts))
+               (dolist (child (ende-chat--fenced-siblings
+                               document (ende-chat--children document headline)
+                               question-begin))
+                 (walk child next-owner next-role)))))))
+      (catch 'ende-chat--question-reached
+        (walk root nil 'user))
+      (flush)
+      (nreverse messages))))
 
 (defun ende-chat--current-headlines
     (document question &optional instructions include-reasoning)
