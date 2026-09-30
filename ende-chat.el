@@ -17,8 +17,9 @@
 ;; descendant.  Reasoning is normally sent only when
 ;; `ende-chat-include-reasoning' is non-nil, except that a question asked from
 ;; within a reasoning subtree includes its reasoning ancestors as context.
-;; Generated assistant/tool exchanges are stored in document order as reply
-;; sections with tool-call children and sibling tool-result sections.
+;; Generated assistant/tool exchanges are stored in document order as sibling
+;; call and result sections inside an Agent: Work container. Older documents
+;; may still place calls below an intermediate reply.
 ;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  The
 ;; nearest fence on the question's ancestor path bounds the request; fences in
 ;; other branches replace preceding siblings only within their own subtrees.
@@ -122,6 +123,9 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-tool-name-property "ENDE_TOOL_NAME"
   "Org property storing the exact provider name of a tool call.")
 
+(defconst ende-chat-tool-kind-property "ENDE_TOOL_KIND"
+  "Org property identifying a generated tool call or result section.")
+
 (defconst ende-chat-content-format-property "ENDE_CHAT_CONTENT_FORMAT"
   "Org property describing the lossless representation of assistant content.")
 
@@ -159,6 +163,7 @@ discarding superseded details. Be concise but self-contained."
         ende-chat-state-property ende-chat-context-fence-property
         ende-chat-work-property
         ende-chat-tool-call-id-property ende-chat-tool-name-property
+        ende-chat-tool-kind-property
         ende-chat-content-format-property
         ende-chat-content-headline-shift-property
         ende-chat-content-synthetic-end-property
@@ -262,6 +267,9 @@ discarding superseded details. Be concise but self-contained."
                              :tool-name
                              (ende-chat--local-property
                               headline ende-chat-tool-name-property)
+                             :tool-kind
+                             (ende-chat--local-property
+                              headline ende-chat-tool-kind-property)
                              :content-format
                              (ende-chat--local-property
                               headline ende-chat-content-format-property)
@@ -322,6 +330,7 @@ discarding superseded details. Be concise but self-contained."
      ((equal property ende-chat-request-id-property) :request-id)
      ((equal property ende-chat-tool-call-id-property) :tool-call-id)
      ((equal property ende-chat-tool-name-property) :tool-name)
+     ((equal property ende-chat-tool-kind-property) :tool-kind)
      ((equal property ende-chat-content-format-property) :content-format)
      ((equal property ende-chat-content-headline-shift-property)
       :content-headline-shift)
@@ -786,11 +795,8 @@ ancestors are included even when ordinary reasoning context is disabled."
                (flush)
                (let* ((id (ende-chat--property
                            document headline :tool-call-id))
-                      (name (or (ende-chat--property
-                                 document headline :tool-name)
-                                (replace-regexp-in-string
-                                 "\\`Tool Result: *" ""
-                                 (org-element-property :raw-value headline))))
+                      (name (ende-chat--tool-heading-name
+                             document headline 'result))
                       (request-id (ende-chat--property
                                    document headline :request-id))
                       (body (ende-chat--history-body-string
@@ -815,11 +821,8 @@ ancestors are included even when ordinary reasoning context is disabled."
                (flush)
                (let* ((id (ende-chat--property
                            document headline :tool-call-id))
-                      (name (or (ende-chat--property
-                                 document headline :tool-name)
-                                (replace-regexp-in-string
-                                 "\\`Tool Call: *" ""
-                                 (org-element-property :raw-value headline))))
+                      (name (ende-chat--tool-heading-name
+                             document headline 'call))
                       (arguments (ende-chat--history-body-string
                                   document headline
                                   (car (ende-chat--children document headline)))))
@@ -925,17 +928,44 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
 
 (defun ende-chat--tool-call-protocol-p (document headline)
   "Return non-nil when HEADLINE carries generated tool-call metadata."
-  (and (ende-chat--protocol-title-p headline "Tool Call:")
-       (or (ende-chat--property document headline :tool-call-id)
-           (ende-chat--property document headline :tool-name)
-           (ende-chat--property document headline :request-id))))
+  (let ((kind (ende-chat--property document headline :tool-kind)))
+    (and (or (equal kind "call")
+             (and (null kind)
+                  (ende-chat--protocol-title-p headline "Tool Call:")))
+         (or (ende-chat--property document headline :tool-call-id)
+             (ende-chat--property document headline :tool-name)
+             (ende-chat--property document headline :request-id)))))
 
 (defun ende-chat--tool-result-protocol-p (document headline)
   "Return non-nil when HEADLINE carries generated tool-result metadata."
-  (and (ende-chat--protocol-title-p headline "Tool Result:")
-       (or (ende-chat--property document headline :tool-call-id)
-           (ende-chat--property document headline :tool-name)
-           (ende-chat--property document headline :request-id))))
+  (let ((kind (ende-chat--property document headline :tool-kind)))
+    (and (or (equal kind "result")
+             (and (null kind)
+                  (ende-chat--protocol-title-p headline "Tool Result:")))
+         (or (ende-chat--property document headline :tool-call-id)
+             (ende-chat--property document headline :tool-name)
+             (ende-chat--property document headline :request-id)))))
+
+(defun ende-chat--tool-heading-name (document headline kind)
+  "Return the tool name for HEADLINE of KIND, tolerating edited metadata."
+  (or (ende-chat--property document headline :tool-name)
+      (let ((title (org-element-property :raw-value headline)))
+        (pcase kind
+          ('call
+           (cond
+            ((string-prefix-p "Tool Call:" title)
+             (string-trim (substring title (length "Tool Call:"))))
+            ((string-prefix-p "--> " title)
+             (substring title 4))
+            (t title)))
+          ('result
+           (cond
+            ((string-prefix-p "Tool Result:" title)
+             (string-trim (substring title (length "Tool Result:"))))
+            ((string-match "\\`\\([^:]+\\):" title)
+             (string-trim (match-string 1 title)))
+            (t title)))
+          (_ title)))))
 
 (defun ende-chat--work-section-p (document headline)
   "Return non-nil when HEADLINE looks like a generated Agent: Work container."
@@ -964,6 +994,13 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
     (while (and parent (not (ende-chat--work-section-p document parent)))
       (setq parent (ende-chat--parent document parent)))
     parent))
+
+(defun ende-chat--protocol-assistant-tool-calls (message)
+  "Return MESSAGE's tool calls when it is a native assistant plist.
+Text-only assistant messages are represented as (\"assistant\" . TEXT)."
+  (and (consp message)
+       (keywordp (car message))
+       (plist-get message :tool-calls)))
 
 (defun ende-chat--validate-work-section (document work)
   "Validate generated protocol layout and request identity for WORK."
@@ -1003,12 +1040,13 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
       (cond
        ((and (ende-chat--assistant-protocol-p document child)
              (equal (org-element-property :raw-value child) "Agent: Reply"))
-        (let ((message (ende-chat--protocol-assistant-message document child)))
-          (unless (plist-get message :tool-calls)
-            (error "Malformed generated Agent: Work: intermediate reply has no tool calls")))
+        ;; Old work sections store their calls under this reply.  New sections
+        ;; may use it for commentary only, with calls as sibling headings.
+        (ende-chat--protocol-assistant-message document child)
         (push child replies))
-       ((and (ende-chat--tool-result-protocol-p document child)
-             (ende-chat--protocol-title-p child "Tool Result:"))
+       ((ende-chat--tool-call-protocol-p document child)
+        (ende-chat--protocol-tool-call document work child))
+       ((ende-chat--tool-result-protocol-p document child)
         (ende-chat--protocol-tool-result-message document child))
        (t
         (error "Malformed generated Agent: Work: unexpected child %s"
@@ -1022,23 +1060,25 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
                    (ende-chat--assistant-protocol-p document headline)
                    (equal (org-element-property :raw-value headline)
                           "Agent: Reply")))
-             (valid-work-child
-              (and within-work
-                   (or (and (eq parent work)
-                            (or (and (ende-chat--assistant-protocol-p
-                                      document headline)
-                                     (equal (org-element-property
-                                             :raw-value headline)
-                                            "Agent: Reply"))
-                                (and (ende-chat--tool-result-protocol-p
-                                      document headline)
-                                     (ende-chat--protocol-title-p
-                                      headline "Tool Result:"))))
-                       (and (ende-chat--tool-call-protocol-p document headline)
-                            parent
-                            (eq (ende-chat--parent document parent) work)
-                            (ende-chat--assistant-protocol-p document parent)))))
-             (valid (or (eq headline work) final-reply valid-work-child)))
+             (direct-work-child
+              (and (eq parent work)
+                   (or (and (ende-chat--assistant-protocol-p
+                             document headline)
+                            (equal (org-element-property :raw-value headline)
+                                   "Agent: Reply"))
+                        (ende-chat--tool-call-protocol-p document headline)
+                        (ende-chat--tool-result-protocol-p document headline))))
+             (legacy-nested-call
+              (and (ende-chat--tool-call-protocol-p document headline)
+                   parent
+                   (eq (ende-chat--parent document parent) work)
+                   (ende-chat--assistant-protocol-p document parent)
+                   (equal (org-element-property :raw-value parent)
+                          "Agent: Reply")))
+             (valid (or (eq headline work)
+                        final-reply
+                        (and within-work
+                             (or direct-work-child legacy-nested-call)))))
         (unless valid
           (error "Malformed generated protocol section outside Agent: Work: %s"
                  (org-element-property :raw-value headline)))
@@ -1058,20 +1098,19 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
                      (not (= (org-element-property :level work)
                              (org-element-property :level (car final-replies))))
                      (>= (org-element-property :begin work)
-                         (org-element-property :begin (car final-replies))))
-		 (error "Malformed generated Agent: Work: final reply must follow its container"))
-	(when (and final-replies
-                   (plist-get
-                    (ende-chat--protocol-assistant-message
-                     document (car final-replies))
-                    :tool-calls))
-          (error "Malformed generated Agent: Work: final reply contains tool calls"))
-	(if (member state '("pending" "failed"))
-            (when final-replies
-              (error "Malformed generated Agent: Work: unfinished request has a final reply"))
-          (unless final-replies
-            (error "Malformed generated Agent: Work: completed request has no final reply"))))
-      work)))
+                         (org-element-property :begin (car final-replies)))))
+        (error "Malformed generated Agent: Work: final reply must follow its container"))
+      (when (and final-replies
+                 (ende-chat--protocol-assistant-tool-calls
+                  (ende-chat--protocol-assistant-message
+                   document (car final-replies))))
+        (error "Malformed generated Agent: Work: final reply contains tool calls"))
+      (if (member state '("pending" "failed"))
+          (when final-replies
+            (error "Malformed generated Agent: Work: unfinished request has a final reply"))
+        (unless final-replies
+          (error "Malformed generated Agent: Work: completed request has no final reply"))))
+    work))
 
 (defun ende-chat--protocol-body-start (headline)
   "Return the start position of HEADLINE's body after its property drawer.
@@ -1106,7 +1145,8 @@ If an edited drawer is malformed, fall back to the line after the heading."
     (insert text)
     (goto-char (point-min))
     (while (not (eobp))
-      (when (looking-at ",\\(?:\\*+[ \t]\\|#\\+\\|,\\)")
+      (when (looking-at
+             ",\\(?:\\*+[ \t]\\|#\\+\\|,\\|:[[:alnum:]_@#%]+:[ \t]*$\\)")
         (delete-char 1))
       (forward-line 1))
     (buffer-string)))
@@ -1265,6 +1305,16 @@ FORMAT selects the host-owned literal or structured-Org representation."
     (list :role "tool" :tool-call-id call-id
           :content (ende-chat--protocol-body-string headline nil t))))
 
+(defun ende-chat--protocol-location (document headline)
+  "Return the logical conversation location of generated HEADLINE.
+Legacy nested calls are normalized to the sibling level used by their work
+container."
+  (let ((work (ende-chat--work-ancestor document headline)))
+    (if work
+        (cons work (1+ (org-element-property :level work)))
+      (cons (ende-chat--parent document headline)
+            (org-element-property :level headline)))))
+
 (defun ende-chat--validate-protocol-step
     (message request-id state &optional tool-name headline document)
   "Validate protocol MESSAGE against the ongoing traversal STATE.
@@ -1275,6 +1325,10 @@ REQUEST-ID is its durable request identity.  STATE is a plist updated in place."
          (seen (plist-get state :seen))
          (parent (plist-get state :parent))
          (level (plist-get state :level))
+         (plist-message (and (consp message) (keywordp (car message))))
+         (role (if plist-message
+                   (plist-get message :role)
+                 (car-safe message)))
          (location (and document headline
                         (ende-chat--protocol-location document headline)))
          (section-parent (car-safe location))
@@ -1297,12 +1351,18 @@ REQUEST-ID is its durable request identity.  STATE is a plist updated in place."
       (setq parent section-parent
             level section-level))
     (setq active request-id)
-    (pcase (plist-get message :role)
+    (pcase role
       ("assistant"
        (when pending
          (error "Generated assistant message began before tool result %s"
                 (caar pending)))
-       (let ((calls (plist-get message :tool-calls)))
+       (unless (if plist-message
+                   (and (plist-member message :content)
+                        (let ((content (plist-get message :content)))
+                          (or (null content) (stringp content))))
+                 (stringp (cdr message)))
+         (error "Invalid generated assistant protocol message"))
+       (let ((calls (ende-chat--protocol-assistant-tool-calls message)))
          (when calls
            (let ((request-seen (or (gethash request-id seen)
                                    (let ((table (make-hash-table :test #'equal)))
@@ -1319,6 +1379,8 @@ REQUEST-ID is its durable request identity.  STATE is a plist updated in place."
                         (cons id (plist-get call :name))))
                     calls))))))
       ("tool"
+       (unless plist-message
+         (error "Invalid generated tool-result protocol message"))
        (let ((call-id (plist-get message :tool-call-id)))
          (unless (and pending
                       (equal call-id (caar pending))
@@ -1760,8 +1822,7 @@ messages; FINAL places the terminal assistant reply after that container."
          (request-id (plist-get instruction :request-id))
          (question-id (plist-get instruction :question-id))
          (buffer (ende-target-buffer (ende-job-target job)))
-         (inserted-marker nil)
-         (fold-position nil))
+         (inserted-marker nil))
     (unless (buffer-live-p buffer)
       (error "Chat response destination no longer exists"))
     (with-current-buffer buffer
@@ -1782,16 +1843,15 @@ messages; FINAL places the terminal assistant reply after that container."
                 (when (and work (not (eq work anchor)))
                   (error "Chat request pending marker is not its Agent: Work section"))
                 (cond
-                 ((and protocol (not work))
-                  (let ((begin (org-element-property :begin anchor))
-                        (end (org-element-property :end anchor)))
-                    (delete-region begin end)
-                    (goto-char begin)
-                    (setq inserted-marker (copy-marker (point))
-                          fold-position begin)
-                    (insert (ende-chat--work-text
-                             anchor-level question-id request-id))
-                    (insert text)))
+                  ((and protocol (not work))
+                   (let ((begin (org-element-property :begin anchor))
+                         (end (org-element-property :end anchor)))
+                     (delete-region begin end)
+                     (goto-char begin)
+                     (setq inserted-marker (copy-marker (point)))
+                     (insert (ende-chat--work-text
+                              anchor-level question-id request-id))
+                     (insert text)))
                  ((or work protocol)
                   (goto-char (ende-chat--request-end document request-id))
                   (setq inserted-marker (copy-marker (point)))
@@ -1833,9 +1893,9 @@ messages; FINAL places the terminal assistant reply after that container."
                       (error "Generated final Agent: Reply was not inserted"))
                     (goto-char (org-element-property :begin reply))
                     (org-entry-put nil ende-chat-state-property "pending")))
-		(ende-chat--hide-control-drawers)
-		(when (and (or fold fold-position) (derived-mode-p 'org-mode))
-                  (goto-char (or fold-position (marker-position inserted-marker)))
+                (ende-chat--hide-control-drawers)
+                (when (and fold (derived-mode-p 'org-mode))
+                  (goto-char (marker-position inserted-marker))
                   (org-fold-hide-subtree))))))))))
 
 (defun ende-chat--finish-request (job)
@@ -1976,16 +2036,51 @@ COMPACT marks the completed response as a context fence."
     (insert text)
     (goto-char (point-min))
     (while (not (eobp))
-      (when (looking-at "\\(?:\\*+[ \t]\\|#\\+\\|,\\)")
+      (when (looking-at
+             "\\(?:\\*+[ \t]\\|#\\+\\|,\\|:[[:alnum:]_@#%]+:[ \t]*$\\)")
         (insert ","))
       (forward-line 1))
     (buffer-string)))
 
-(defun ende-chat--tool-section-properties (request-id call-id tool-name)
+(defun ende-chat--tool-argument-summary (arguments)
+  "Return a compact display summary for JSON object ARGUMENTS, or nil."
+  (condition-case nil
+      (let ((object (json-parse-string
+                     arguments :object-type 'alist :array-type 'array
+                     :null-object :null :false-object :false)))
+        (when (and (consp object)
+                   (cl-every (lambda (entry)
+                               (and (consp entry)
+                                    (symbolp (car entry))))
+                             object))
+          (mapconcat
+           (lambda (entry)
+             (let* ((key (symbol-name (car entry)))
+                    (display-key
+                     (if (string-match-p
+                          "\\`[[:alpha:]_][[:alnum:]_-]*\\'" key)
+                         key
+                       (json-serialize key)))
+                    (value (json-serialize
+                            (cdr entry) :null-object :null
+                            :false-object :false)))
+               (concat display-key "=" value)))
+           object ", ")))
+    (error nil)))
+
+(defun ende-chat--truncate-tool-heading (title level)
+  "Keep the complete heading TITLE at LEVEL within 180 display columns."
+  (let ((width (max 1 (- 180 (1+ level)))))
+    (if (> (string-width title) width)
+        (truncate-string-to-width title width 0 nil "…")
+      title)))
+
+(defun ende-chat--tool-section-properties (request-id call-id tool-name kind)
   "Return host-owned properties for one generated tool section."
   (unless (and (stringp request-id) (not (string-empty-p request-id))
                (stringp call-id) (not (string-empty-p call-id))
                (stringp tool-name) (not (string-empty-p tool-name))
+               (member kind '("call" "result"))
                (not (string-match-p "[\r\n]" request-id))
                (not (string-match-p "[\r\n]" call-id))
                (not (string-match-p "[\r\n]" tool-name)))
@@ -1993,10 +2088,11 @@ COMPACT marks the completed response as a context fence."
   (concat
    (ende-chat--response-property ende-chat-request-id-property request-id)
    (ende-chat--response-property ende-chat-tool-call-id-property call-id)
-   (ende-chat--response-property ende-chat-tool-name-property tool-name)))
+   (ende-chat--response-property ende-chat-tool-name-property tool-name)
+   (ende-chat--response-property ende-chat-tool-kind-property kind)))
 
 (defun ende-chat--tool-call-text (level request-id call)
-  "Render normalized tool CALL as a child section at LEVEL."
+  "Render normalized tool CALL as a section at LEVEL."
   (let ((id (ende-chat--tool-value call :id))
         (name (ende-chat--tool-value call :name))
         (arguments (ende-chat--tool-value call :arguments)))
@@ -2004,9 +2100,10 @@ COMPACT marks the completed response as a context fence."
                  (stringp name) (not (string-empty-p name))
                  (stringp arguments))
       (error "Malformed provider tool call: %S" call))
-    (concat (make-string level ?*) " Tool Call: " name "\n"
+    (concat (make-string level ?*) " "
+            (ende-chat--truncate-tool-heading (concat "--> " name) level) "\n"
             ":PROPERTIES:\n"
-            (ende-chat--tool-section-properties request-id id name)
+            (ende-chat--tool-section-properties request-id id name "call")
             ":END:\n\n"
             (ende-chat--org-literal-text arguments)
             "\n\n")))
@@ -2016,24 +2113,25 @@ COMPACT marks the completed response as a context fence."
            &optional pending format)
   "Render one assistant protocol message and its ordered tool CALLS."
   (let* ((format (if (eq format 'org) 'org 'literal))
-         (text
-          (ende-chat--assistant-text
-           level question-id request-id
-           (concat result-properties
-                   (ende-chat--response-property
-                    ende-chat-content-format-property
-                    (symbol-name format))
-                   (when pending
-                     (ende-chat--response-property ende-chat-state-property
-                                                   "pending")))
-           normalized nil (not (eq format 'org)))))
-    (if calls
-        (concat text
-                (mapconcat (lambda (call)
-                             (ende-chat--tool-call-text
-                              (1+ level) request-id call))
-                           calls ""))
-      text)))
+         (content (plist-get normalized :content))
+         (reply
+          (when (or (null calls)
+                    (and (stringp content) (not (string-blank-p content))))
+            (ende-chat--assistant-text
+             level question-id request-id
+             (concat result-properties
+                     (ende-chat--response-property
+                      ende-chat-content-format-property
+                      (symbol-name format))
+                     (when pending
+                       (ende-chat--response-property ende-chat-state-property
+                                                     "pending")))
+             normalized nil (not (eq format 'org)))))
+         (call-sections
+          (mapconcat (lambda (call)
+                       (ende-chat--tool-call-text level request-id call))
+                     calls "")))
+    (concat reply call-sections)))
 
 (defun ende-chat--tool-result-text (level request-id call result)
   "Render RESULT and CALL's arguments in a self-contained sibling section."
@@ -2042,13 +2140,16 @@ COMPACT marks the completed response as a context fence."
         (arguments (ende-chat--tool-value call :arguments)))
     (unless (and (stringp result) (stringp arguments))
       (error "Tool result for %s must have string content and arguments" id))
-    (concat (make-string level ?*) " Tool Result: " name "\n"
-            ":PROPERTIES:\n"
-            (ende-chat--tool-section-properties request-id id name)
-            ":END:\n\n"
-            (ende-chat--org-literal-text
-             (format "Arguments:\n%s\n\nOutput:\n%s" arguments result))
-            "\n\n")))
+    (let* ((summary (ende-chat--tool-argument-summary arguments))
+           (title (concat name (if summary (concat ": " summary) ""))))
+      (concat (make-string level ?*) " "
+              (ende-chat--truncate-tool-heading title level) "\n"
+              ":PROPERTIES:\n"
+              (ende-chat--tool-section-properties request-id id name "result")
+              ":END:\n\n"
+              (ende-chat--org-literal-text
+               (format "Arguments:\n%s\n\nOutput:\n%s" arguments result))
+              "\n\n"))))
 
 (defun ende-chat--other-compaction-pending-p (job question-id)
   "Return non-nil when another queued compaction still uses QUESTION-ID."

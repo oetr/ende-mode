@@ -7462,7 +7462,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (let* ((document (ende-chat--build-document))
              (call (cl-find-if
                     (lambda (headline)
-                      (ende-chat--protocol-title-p headline "Tool Call:"))
+                      (ende-chat--tool-call-protocol-p document headline))
                     (ende-chat--document-headlines document))))
         (should call)
         (delete-region (org-element-property :begin call)
@@ -7487,6 +7487,188 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should (string-match-p "source text" text))
         (should (= reply (- (length messages) 2)))))))
 
+(ert-deftest ende-test/chat-tool-calls-and-results-are-work-siblings ()
+  (let* ((request-id "request-siblings")
+         (question-id "question-siblings")
+         (calls '((:id "project" :name "project_info" :arguments "{}")
+                  (:id "read" :name "read_file"
+                   :arguments "{\"path\":\"ende.el\",\"start_line\":1}")))
+         (sections
+          (concat
+           (ende-chat--work-text 2 question-id request-id)
+           (ende-chat--assistant-protocol-text
+            3 question-id request-id "" '(:content "Checking the source.") calls)
+           (ende-chat--tool-result-text 3 request-id (car calls) "Project")
+           (ende-chat--tool-result-text 3 request-id (cadr calls) "Source")
+           (ende-chat--assistant-protocol-text
+            2 question-id request-id "" '(:content "Finished.") nil))))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Topic\n** Question\nInspect.\n")
+      (insert sections)
+      (goto-char (point-min))
+      (search-forward "** Agent: Work")
+      (org-back-to-heading t)
+      (org-entry-delete nil ende-chat-state-property)
+      (let* ((document (ende-chat--build-document))
+             (headlines (ende-chat--document-headlines document))
+             (work (cl-find-if (lambda (headline)
+                                 (ende-chat--work-section-p document headline))
+                               headlines))
+             (calls-in-doc
+              (cl-remove-if-not
+               (lambda (headline)
+                 (ende-chat--tool-call-protocol-p document headline))
+               headlines))
+             (results
+              (cl-remove-if-not
+               (lambda (headline)
+                 (ende-chat--tool-result-protocol-p document headline))
+               headlines))
+             (replies
+              (cl-remove-if-not
+               (lambda (headline)
+                 (and (ende-chat--assistant-protocol-p document headline)
+                      (equal (org-element-property :raw-value headline)
+                             "Agent: Reply")))
+               headlines))
+             (final (car (last replies)))
+             (commentary (car replies)))
+        (should (= (length replies) 2))
+        (should (eq (ende-chat--parent document commentary) work))
+        (should (= (org-element-property :level commentary) 3))
+        (should (eq (ende-chat--parent document final)
+                    (ende-chat--parent document work)))
+        (should (= (org-element-property :level final) 2))
+        (should (equal (mapcar (lambda (headline)
+                                 (org-element-property :raw-value headline))
+                               calls-in-doc)
+                       '("--> project_info" "--> read_file")))
+        (should (equal (mapcar (lambda (headline)
+                                 (org-element-property :raw-value headline))
+                               results)
+                       '("project_info" "read_file: path=\"ende.el\", start_line=1")))
+        (dolist (headline (append calls-in-doc results))
+          (should (eq (ende-chat--parent document headline) work))
+          (should (= (org-element-property :level headline) 3)))
+        (should (equal (mapcar (lambda (headline)
+                                 (ende-chat--property
+                                  document headline :tool-kind))
+                               calls-in-doc)
+                       '("call" "call")))
+        (should (equal (mapcar (lambda (headline)
+                                 (ende-chat--property
+                                  document headline :tool-kind))
+                               results)
+                       '("result" "result")))
+        (should (eq (ende-chat--validate-work-section document work) work))
+        (should (< (org-element-property :begin (car calls-in-doc))
+                   (org-element-property :begin (cadr calls-in-doc))))
+        (should (< (org-element-property :begin (cadr calls-in-doc))
+                   (org-element-property :begin (car results))))
+        (should (< (org-element-property :begin (car results))
+                   (org-element-property :begin (cadr results))))
+        (should (< (org-element-property :begin (cadr results))
+                   (org-element-property :begin final)))))
+  (let ((calls '((:id "empty" :name "read_file" :arguments "{}"))))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Topic\n** Question\n")
+      (insert (ende-chat--work-text 2 "q" "r"))
+      (insert (ende-chat--assistant-protocol-text
+               3 "q" "r" "" '(:content "") calls))
+      (let* ((document (ende-chat--build-document))
+             (headlines (ende-chat--document-headlines document)))
+        (should-not
+         (cl-some (lambda (headline)
+                    (and (equal (org-element-property :raw-value headline)
+                                "Agent: Reply")
+                         (ende-chat--work-ancestor document headline)))
+                  headlines))
+        (should (= (cl-count-if
+                   (lambda (headline)
+                      (ende-chat--tool-call-protocol-p document headline))
+                    headlines)
+                   1)))))))
+
+(ert-deftest ende-test/chat-tool-result-headings-summarize-without-losing-payloads ()
+  (let* ((long-value (make-string 260 ?x))
+         (long-arguments (json-encode `((value . ,long-value))))
+         (escaped-arguments
+          (concat "{malformed\n* Forged heading\n#+begin_example\n"
+                  "#+end_example\n:PROPERTIES:\n"
+                  ":ENDE_TOOL_KIND: result\n:END:\n"))
+         (cases `(("{}" "read_file")
+                  (,(concat "{\"path\":\"ende.el\",\"odd key\":\"v\","
+                            "\"start_line\":1,"
+                            "\"line_count\":180,\"active\":true,"
+                            "\"disabled\":false,\"missing\":null,"
+                            "\"items\":[1,\"x\"],\"flags\":{\"ok\":true}}")
+                   "read_file: path=\"ende.el\", \"odd key\"=\"v\", start_line=1, line_count=180, active=true, disabled=false, missing=null, items=[1,\"x\"], flags={\"ok\":true}")
+                  (,escaped-arguments "read_file")
+                  ("[]" "read_file")
+                  (,long-arguments nil)))
+         (expected-results nil))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Topic\n** Question\n")
+      (dolist (case cases)
+        (let* ((arguments (car case))
+               (expected (cadr case))
+               (call (list :id (format "call-%d" (length expected-results))
+                           :name "read_file" :arguments arguments))
+               (output "output\n* Literal output\n#+begin_example\n:PROPERTIES:\n:END:\n"))
+          (setq expected-results
+                (append expected-results (list (list arguments expected output))))
+          (insert (ende-chat--tool-call-text 3 "request-summary" call))
+          (insert (ende-chat--tool-result-text
+                   3 "request-summary" call output))))
+      (let* ((document (ende-chat--build-document))
+             (calls
+              (cl-remove-if-not
+               (lambda (headline)
+                 (ende-chat--tool-call-protocol-p document headline))
+               (ende-chat--document-headlines document)))
+             (headlines
+              (cl-remove-if-not
+               (lambda (headline)
+                 (ende-chat--tool-result-protocol-p document headline))
+               (ende-chat--document-headlines document))))
+        (dolist (entry expected-results)
+          (pcase-let ((`(,arguments ,expected ,output) entry))
+            (let* ((call (pop calls))
+                   (headline (pop headlines))
+                   (title (org-element-property :raw-value headline))
+                   (call-body (ende-chat--protocol-body-string call nil t))
+                   (body (ende-chat--protocol-body-string headline nil t)))
+              (if expected
+                  (should (equal title expected))
+                (should (<= (string-width title) 180))
+                (should (string-suffix-p "…" title)))
+              (should (<= (string-width
+                           (concat (make-string
+                                    (org-element-property :level headline) ?*)
+                                   " " title))
+                          180))
+              (should-not (string-match-p "\n" title))
+              (should (equal call-body arguments))
+              (should (string-match-p (regexp-quote arguments) body))
+              (should (string-match-p (regexp-quote output) body))
+              (should (equal body (format "Arguments:\n%s\n\nOutput:\n%s"
+                                          arguments output))))))
+        (should-not calls)
+        (should-not headlines)
+        (should (= (cl-count-if
+                    (lambda (headline)
+                      (equal (org-element-property :raw-value headline)
+                             "Forged heading"))
+                    (ende-chat--document-headlines document))
+                   0))
+        (should (string-match-p ",\\* Forged heading" (buffer-string)))
+        (should (string-match-p (regexp-quote ",#+begin_example")
+                                (buffer-string)))
+        (should (string-match-p ",:PROPERTIES:" (buffer-string)))))))
+
 (ert-deftest ende-test/chat-tool-history-is-readable-in-source-order ()
   (let* ((first-calls
           (list (list :id "call-A/01" :name "read_file"
@@ -7505,17 +7687,18 @@ Use COMMAND for the process, or a silent sleep process by default."
          (request-id "request-roundtrip")
          (sections
           (concat
+           (ende-chat--work-text 2 "question-roundtrip" request-id)
            (ende-chat--assistant-protocol-text
-            2 "question-roundtrip" request-id ""
+            3 "question-roundtrip" request-id ""
             (list :content assistant-one) first-calls)
-           (ende-chat--tool-result-text 2 request-id (nth 0 first-calls)
-					result-one)
-           (ende-chat--tool-result-text 2 request-id (nth 1 first-calls)
-					result-two)
+           (ende-chat--tool-result-text 3 request-id (nth 0 first-calls)
+                                       result-one)
+           (ende-chat--tool-result-text 3 request-id (nth 1 first-calls)
+                                       result-two)
            (ende-chat--assistant-protocol-text
-            2 "question-roundtrip" request-id ""
+            3 "question-roundtrip" request-id ""
             (list :content assistant-two) (list second-call))
-           (ende-chat--tool-result-text 2 request-id second-call result-three)
+           (ende-chat--tool-result-text 3 request-id second-call result-three)
            (ende-chat--assistant-protocol-text
             2 "question-roundtrip" request-id ""
             (list :content final-content) nil))))
@@ -7533,19 +7716,22 @@ Use COMMAND for the process, or a silent sleep process by default."
              (assistant-headlines
               (cl-remove-if-not
                (lambda (headline)
-                 (equal (org-element-property :raw-value headline)
-                        "Agent: Reply"))
+                 (ende-chat--assistant-protocol-p document headline))
                headlines))
              (calls
               (cl-remove-if-not
                (lambda (headline)
-                 (ende-chat--protocol-title-p headline "Tool Call:"))
+                 (ende-chat--tool-call-protocol-p document headline))
                headlines))
              (results
               (cl-remove-if-not
                (lambda (headline)
-                 (ende-chat--protocol-title-p headline "Tool Result:"))
+                 (ende-chat--tool-result-protocol-p document headline))
                headlines))
+             (work (cl-find-if
+                    (lambda (headline)
+                      (ende-chat--work-section-p document headline))
+                    headlines))
              (ordered-text
               (list assistant-one
                     "Tool Call: read_file"
@@ -7595,25 +7781,32 @@ Use COMMAND for the process, or a silent sleep process by default."
                                   document headline :tool-name))
                                results)
                        '("read_file" "search_project" "read_buffer")))
-        (should (equal (mapcar (lambda (headline)
-                                 (ende-chat--property
-                                  document headline :request-id))
-                               assistant-headlines)
-                       (list request-id request-id request-id)))
-        (should (equal (mapcar (lambda (headline)
-                                 (org-element-property :level headline))
-                               assistant-headlines)
-                       '(2 2 2)))
-        (should (equal (mapcar (lambda (headline)
-                                 (org-element-property :level headline))
-                               calls)
-                       '(3 3 3)))
-        (dolist (headline (append calls results))
-          (should (equal (ende-chat--property
-                          document headline :request-id)
-                         request-id)))
-        (should (eq (ende-chat--parent document (car calls))
-                    (car assistant-headlines)))))))
+         (should (equal (mapcar (lambda (headline)
+                                  (ende-chat--property
+                                   document headline :request-id))
+                                assistant-headlines)
+                        (list request-id request-id)))
+         (should (equal (mapcar (lambda (headline)
+                                  (org-element-property :level headline))
+                                assistant-headlines)
+                        '(3 2)))
+         (should (equal (mapcar (lambda (headline)
+                                  (org-element-property :level headline))
+                                calls)
+                        '(3 3 3)))
+         (should (equal (mapcar (lambda (headline)
+                                  (org-element-property :level headline))
+                                results)
+                        '(3 3 3)))
+         (dolist (headline (append calls results))
+           (should (equal (ende-chat--property
+                           document headline :request-id)
+                          request-id))
+           (should (eq (ende-chat--parent document headline) work)))
+         (should (eq (ende-chat--parent document (car assistant-headlines))
+                     work))
+         (should-not (ende-chat--work-ancestor document
+                                               (car (last assistant-headlines))))))))
 
 (ert-deftest ende-test/chat-edited-protocol-history-is-readable-context ()
   (with-temp-buffer
@@ -7651,11 +7844,132 @@ Use COMMAND for the process, or a silent sleep process by default."
            "This is a user-authored note, not protocol state.\n"
            "** Follow-up\nAsk about the note.\n")
    (org-mode)
+    (ende-test--chat-goto "** Follow-up")
+    (let* ((messages (ende-chat-context-at-point))
+           (text (ende-test--chat-context-text messages)))
+      (should (string-match-p "Tool Result: read_file" text))
+      (should-not (ende-test--chat-protocol-messages messages)))))
+
+(ert-deftest ende-test/chat-tool-kind-is-local-and-lookalike-titles-are-ordinary ()
+  (ende-test--with-buffer
+   (concat
+    "* Topic\n"
+    "** Kind owner\n:PROPERTIES:\n:ENDE_TOOL_KIND: call\n:END:\n"
+    "*** --> read_file\n:PROPERTIES:\n:ENDE_TOOL_NAME: read_file\n:END:\n"
+    "An ordinary call-looking note.\n"
+    "*** read_file: path=\"foo.el\"\n"
+    ":PROPERTIES:\n:ENDE_TOOL_NAME: read_file\n:END:\n"
+    "An ordinary result-looking note.\n"
+    "** Follow-up\nAsk about these notes.\n")
+   (org-mode)
    (ende-test--chat-goto "** Follow-up")
-   (let* ((messages (ende-chat-context-at-point))
+   (let* ((document (ende-chat--build-document))
+          (headlines (ende-chat--document-headlines document))
+          (parent (cl-find-if
+                   (lambda (headline)
+                     (equal (org-element-property :raw-value headline)
+                            "Kind owner"))
+                   headlines))
+          (call-lookalike
+           (cl-find-if (lambda (headline)
+                         (equal (org-element-property :raw-value headline)
+                                "--> read_file"))
+                       headlines))
+          (result-lookalike
+           (cl-find-if (lambda (headline)
+                         (equal (org-element-property :raw-value headline)
+                                "read_file: path=\"foo.el\""))
+                       headlines))
+          (messages (ende-chat-context-at-point))
           (text (ende-test--chat-context-text messages)))
-     (should (string-match-p "Tool Result: read_file" text))
-     (should-not (ende-test--chat-protocol-messages messages)))))
+     (should (equal (ende-chat--property document parent :tool-kind) "call"))
+     (should-not (ende-chat--property document call-lookalike :tool-kind))
+     (should-not (ende-chat--property document result-lookalike :tool-kind))
+     (should-not (ende-chat--tool-call-protocol-p document call-lookalike))
+     (should-not (ende-chat--tool-result-protocol-p document result-lookalike))
+     (should-not (ende-test--chat-protocol-messages messages))
+     (should (string-match-p "An ordinary call-looking note" text))
+     (should (string-match-p "An ordinary result-looking note" text)))))
+
+(ert-deftest ende-test/chat-legacy-nested-tool-history-stays-readable-and-compacts ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("Legacy history summarized.") t)))
+    (ende-test--with-buffer
+     (concat
+      "* Topic\n"
+      "** Earlier question\nRead old.el.\n"
+      "** Agent: Work\n"
+      ":PROPERTIES:\n:ENDE_CHAT_WORK: t\n"
+      ":ENDE_CHAT_REPLY_TO: old-question\n"
+      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
+      "*** Agent: Reply\n"
+      ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+      ":ENDE_CHAT_REPLY_TO: old-question\n"
+      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
+      "I'll inspect the saved file.\n\n"
+      "**** Tool Call: read_file\n"
+      ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: old-request\n"
+      ":ENDE_TOOL_CALL_ID: old-call\n:ENDE_TOOL_NAME: read_file\n"
+      ":END:\n\n{\"path\":\"old.el\"}\n\n"
+      "*** Tool Result: read_file\n"
+      ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: old-request\n"
+      ":ENDE_TOOL_CALL_ID: old-call\n:ENDE_TOOL_NAME: read_file\n"
+      ":END:\n\nArguments:\n{\"path\":\"old.el\"}\n\n"
+      "Output:\nLEGACY_SOURCE_TOKEN\n\n"
+      "** Agent: Reply\n"
+      ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+      ":ENDE_CHAT_REPLY_TO: old-question\n"
+      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
+      "Legacy final answer.\n\n"
+      "** Follow-up\nExplain the saved result.\n"
+      "** Compact\n"
+      ":PROPERTIES:\n:ENDE_VISIBILITY: hidden\n:END:\n\n"
+      "Keep the important source behavior.\n"
+      "** Later\nContinue from the summary.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Follow-up")
+     (let* ((document (ende-chat--build-document))
+            (headlines (ende-chat--document-headlines document))
+            (work (cl-find-if
+                   (lambda (headline)
+                     (ende-chat--work-section-p document headline))
+                   headlines))
+            (calls (cl-remove-if-not
+                    (lambda (headline)
+                      (ende-chat--tool-call-protocol-p document headline))
+                    headlines))
+            (results (cl-remove-if-not
+                      (lambda (headline)
+                        (ende-chat--tool-result-protocol-p document headline))
+                      headlines))
+            (messages (ende-chat-context-at-point))
+            (text (ende-test--chat-context-text messages)))
+       (should work)
+       (should (eq (ende-chat--validate-work-section document work) work))
+       (should (= (length calls) 1))
+       (should (= (length results) 1))
+       (should-not (ende-chat--property document (car calls) :tool-kind))
+       (should-not (ende-chat--property document (car results) :tool-kind))
+       (should-not (ende-test--chat-protocol-messages messages))
+       (should (string-match-p "Tool Call: read_file" text))
+       (should (string-match-p "Arguments:\n{\"path\":\"old.el\"}" text))
+       (should (string-match-p "LEGACY_SOURCE_TOKEN" text))
+       (should (string-match-p "Legacy final answer" text)))
+     (ende-test--chat-goto "** Compact")
+     (let ((job (ende-compact)))
+       (let* ((messages (plist-get (car ende-test--calls) :messages))
+              (text (ende-test--chat-context-text messages)))
+         (should (string-match-p "LEGACY_SOURCE_TOKEN" text))
+         (should (string-match-p "Arguments:" text)))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed)))
+     (ende-test--chat-goto "** Later")
+     (let ((text (ende-test--chat-context-text
+                  (ende-chat-context-at-point))))
+       (should (string-match-p "Legacy history summarized" text))
+       (should-not (string-match-p "LEGACY_SOURCE_TOKEN" text)))))
+  (ende-test--reset))
 
 (ert-deftest ende-test/chat-edited-tool-history-still-produces-a-reply ()
   (ende-test--reset)
@@ -7897,7 +8211,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                     (reply
                      (cl-find-if
                       (lambda (headline)
-                        (and (equal (org-element-property :raw-value headline)
+                        (and (ende-chat--assistant-protocol-p document headline)
+                             (equal (org-element-property :raw-value headline)
                                     "Agent: Reply")
                              (null (ende-chat--work-ancestor
                                     document headline))))
@@ -7905,35 +8220,26 @@ Use COMMAND for the process, or a silent sleep process by default."
                     (works
                      (cl-remove-if-not
                       (lambda (headline)
-                        (ende-chat--work-section-p document headline))
+                       (ende-chat--work-section-p document headline))
                       headlines))
                     (work (car works))
                     (protocol-headlines
                      (cl-remove-if-not
                       (lambda (headline)
-                        (or (equal (org-element-property :raw-value headline)
-                                   "Agent: Reply")
-                            (and (ende-chat--protocol-title-p
-                                  headline "Tool Call:")
-                                 (ende-chat--tool-call-protocol-p
-                                  document headline))
+                        (or (ende-chat--assistant-protocol-p
+                             document headline)
+                            (ende-chat--tool-call-protocol-p document headline)
                             (ende-chat--tool-result-protocol-p document headline)))
                       headlines))
                     (calls
                      (cl-remove-if-not
                       (lambda (headline)
-                        (and (ende-chat--protocol-title-p
-                              headline "Tool Call:")
-                             (ende-chat--tool-call-protocol-p
-                              document headline)))
+                        (ende-chat--tool-call-protocol-p document headline))
                       headlines))
                     (results
                      (cl-remove-if-not
                       (lambda (headline)
-                        (and (ende-chat--protocol-title-p
-                              headline "Tool Result:")
-                             (ende-chat--tool-result-protocol-p
-                              document headline)))
+                        (ende-chat--tool-result-protocol-p document headline))
                       headlines)))
 	       (should reply)
 	       (should (= (length works) 1))
@@ -7962,11 +8268,11 @@ Use COMMAND for the process, or a silent sleep process by default."
                 (equal (mapcar (lambda (headline)
                                  (org-element-property :raw-value headline))
 			       protocol-headlines)
-		       '("Agent: Reply"
-                         "Tool Call: read_file" "Tool Call: read_file"
-                         "Tool Result: read_file" "Tool Result: read_file"
-                         "Agent: Reply" "Tool Call: read_file"
-                         "Tool Result: read_file" "Agent: Reply")))
+		       '("--> read_file" "--> read_file"
+                         "read_file: path=\"foo.el\""
+                         "read_file: path=\"bar.el\""
+                         "--> read_file" "read_file: path=\"baz.el\""
+                         "Agent: Reply")))
 	       (should (equal (mapcar (lambda (headline)
                                         (ende-chat--property
                                          document headline :tool-call-id))
@@ -7977,6 +8283,12 @@ Use COMMAND for the process, or a silent sleep process by default."
                                          document headline :tool-call-id))
                                       results)
                               '("call-A" "call-B" "call-C")))
+	       (dolist (headline (append calls results))
+	         (should (eq (ende-chat--parent document headline) work))
+	         (should (= (org-element-property :level headline) 3))
+	         (should-not
+	          (ende-test--chat-headline-text-hidden-p
+	           headline (org-element-property :raw-value headline))))
 	       (should
                 (ende-test--chat-headline-text-hidden-p
                  work "FOO_SOURCE_TOKEN"))
@@ -8039,9 +8351,9 @@ Use COMMAND for the process, or a silent sleep process by default."
                           (plist-get (nth 3 ende-test--calls) :messages)))
                      (should-not
                       (ende-test--chat-protocol-messages provider-messages))
-                     (should
-                      (string-match-p
-                       "Tool Result: read_file"
+                      (should
+                       (string-match-p
+                        "Tool Result: read_file"
                        (ende-test--chat-context-text provider-messages)))))
 		 (should-not
                   (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
@@ -8121,29 +8433,23 @@ Use COMMAND for the process, or a silent sleep process by default."
                                     (plist-get (ende-job-instruction job) :request-id))
                              (null (ende-chat--work-ancestor document headline))))
                       (ende-chat--document-headlines document)))
-                    (intermediate
-                     (cl-find-if
-                      (lambda (headline)
-                        (and (equal (org-element-property :raw-value headline)
-                                    "Agent: Reply")
-                             (eq (ende-chat--work-ancestor document headline)
-                                 work)))
-                      (ende-chat--document-headlines document)))
-                    (calls
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (ende-chat--protocol-title-p headline "Tool Call:"))
-                      (ende-chat--document-headlines document)))
-                    (results
-                     (cl-remove-if-not
-                      (lambda (headline)
-                        (ende-chat--protocol-title-p
-                         headline "Tool Result:"))
-                      (ende-chat--document-headlines document)))
-                    (message
-                     (ende-chat--protocol-assistant-message document intermediate)))
+                     (calls
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (ende-chat--tool-call-protocol-p document headline))
+                       (ende-chat--document-headlines document)))
+                     (results
+                      (cl-remove-if-not
+                       (lambda (headline)
+                         (ende-chat--tool-result-protocol-p document headline))
+                       (ende-chat--document-headlines document))))
 	       (should work)
 	       (should-not reply)
+	       (should-not
+	        (cl-some (lambda (headline)
+	                   (and (ende-chat--assistant-protocol-p document headline)
+	                        (ende-chat--work-ancestor document headline)))
+	                 (ende-chat--document-headlines document)))
 	       (should (equal (ende-chat--property document work :state)
                               "failed"))
 	       (should (equal (mapcar (lambda (call)
@@ -8156,11 +8462,16 @@ Use COMMAND for the process, or a silent sleep process by default."
                                          document result :tool-call-id))
                                       results)
                               '("call-A")))
-	       (should (equal (plist-get message :tool-calls)
-                              '((:id "call-A" :name "read_file"
-                                     :arguments "{\"path\":\"a.el\"}")
-                                (:id "call-B" :name "read_file"
-                                     :arguments "{\"path\":\"b.el\"}"))))
+	       (should (eq (ende-chat--parent document (car calls)) work))
+	       (should (eq (ende-chat--parent document (cadr calls)) work))
+	       (should (eq (ende-chat--parent document (car results)) work))
+	       (should (< (org-element-property :begin (cadr calls))
+	                  (org-element-property :begin (car results))))
+	       (should (equal (mapcar (lambda (call)
+	                               (ende-chat--protocol-body-string call nil t))
+	                             calls)
+	                      '("{\"path\":\"a.el\"}" "{\"path\":\"b.el\"}")))
+	       (should (eq (ende-chat--validate-work-section document work) work))
 	       (should-not
                 (string-match-p "This must not be requested" (buffer-string)))))))
       (ende-test--reset)
