@@ -7100,7 +7100,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (string-match-p "Unsupported ENDE_CHAT_TOOL_CONTEXT version: 2"
                               failure)))))
 
-(ert-deftest ende-test/chat-single-tool-round-is-restored-before-the-reply ()
+(ert-deftest ende-test/chat-single-tool-round-is-readable-in-history ()
   (let* ((call (list :id "read-1" :name "read_file"
                      :arguments "{ \"path\" : \"foo.el\" }"))
          (assistant
@@ -7115,10 +7115,18 @@ Use COMMAND for the process, or a silent sleep process by default."
       (org-mode)
       (insert "* Topic\n** Question\nRead foo.el.\n")
       (insert assistant tool answer)
+      (let* ((document (ende-chat--build-document))
+             (call (cl-find-if
+                    (lambda (headline)
+                      (ende-chat--protocol-title-p headline "Tool Call:"))
+                    (ende-chat--document-headlines document))))
+        (should call)
+        (delete-region (org-element-property :begin call)
+                       (org-element-property :end call)))
       (insert "** Follow-up\nAsk about nil.\n")
       (ende-test--chat-goto "** Follow-up")
       (let* ((messages (ende-chat-context-at-point))
-             (protocol (ende-test--chat-protocol-messages messages))
+             (text (ende-test--chat-context-text messages))
              (reply (cl-position-if
                      (lambda (message)
                        (and (equal (ende-test--chat-message-role message)
@@ -7126,20 +7134,16 @@ Use COMMAND for the process, or a silent sleep process by default."
                             (stringp (cdr message))
                             (string-match-p "Final answer" (cdr message))))
                      messages)))
-        (should (= (length protocol) 2))
-        (should (equal (mapcar #'ende-test--chat-message-role messages)
-                       '("user" "assistant" "tool" "assistant" "user")))
-        (should (equal (plist-get (car protocol) :content)
-                       "I'll inspect foo.el."))
-        (should (equal (plist-get
-                        (car (plist-get (car protocol) :tool-calls))
-                        :arguments)
-                       "{ \"path\" : \"foo.el\" }"))
-        (should (equal (plist-get (cadr protocol) :tool-call-id) "read-1"))
-        (should (= reply (1+ (cl-position (car (last protocol))
-                                          messages :test #'equal))))))))
+        (should-not (ende-test--chat-protocol-messages messages))
+        (should (string-match-p "I'll inspect foo.el." text))
+        (should-not (string-match-p "Tool Call: read_file" text))
+        (should (string-match-p "Tool Result: read_file" text))
+        (should (string-match-p "Arguments:\n{ \"path\" : \"foo.el\" }"
+                                text))
+        (should (string-match-p "source text" text))
+        (should (= reply (- (length messages) 2)))))))
 
-(ert-deftest ende-test/chat-protocol-sections-round-trip-losslessly-in-order ()
+(ert-deftest ende-test/chat-tool-history-is-readable-in-source-order ()
   (let* ((first-calls
           (list (list :id "call-A/01" :name "read_file"
                       :arguments "{\n  \"path\" : \"foo.el\",\n  \"note\" : \"* literal\"\n}" )
@@ -7180,6 +7184,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (let* ((document (ende-chat--build-document))
              (headlines (ende-chat--document-headlines document))
              (messages (ende-chat-context-at-point))
+             (context (ende-test--chat-context-text messages))
              (protocol (ende-test--chat-protocol-messages messages))
              (assistant-headlines
               (cl-remove-if-not
@@ -7196,33 +7201,36 @@ Use COMMAND for the process, or a silent sleep process by default."
               (cl-remove-if-not
                (lambda (headline)
                  (ende-chat--protocol-title-p headline "Tool Result:"))
-               headlines)))
-        (should (equal
-                 (mapcar #'ende-test--chat-message-role messages)
-                 '("user" "assistant" "tool" "tool" "assistant" "tool"
-                   "assistant" "user")))
-        (should (equal
-                 (mapcar (lambda (message)
-                           (if (eq (car-safe message) :role)
-                               (plist-get message :role)
-                             (car message)))
-                         protocol)
-                 '("assistant" "tool" "tool" "assistant" "tool")))
-        (should (equal (plist-get (nth 0 protocol) :content) assistant-one))
-        (should
-         (equal (mapcar (lambda (call) (plist-get call :id))
-                        (plist-get (nth 0 protocol) :tool-calls))
-                '("call-A/01" "call-B:02")))
-        (should
-         (equal (mapcar (lambda (call) (plist-get call :arguments))
-                        (plist-get (nth 0 protocol) :tool-calls))
-                (mapcar (lambda (call) (plist-get call :arguments))
-                        first-calls)))
-        (should (equal (plist-get (nth 1 protocol) :content) result-one))
-        (should (equal (plist-get (nth 2 protocol) :content) result-two))
-        (should (equal (plist-get (nth 3 protocol) :content) assistant-two))
-        (should (equal (plist-get (nth 4 protocol) :content) result-three))
-        (should (equal (cdr (nth 6 messages)) final-content))
+               headlines))
+             (ordered-text
+              (list assistant-one
+                    "Tool Call: read_file"
+                    (plist-get (car first-calls) :arguments)
+                    "Tool Call: search_project"
+                    (plist-get (cadr first-calls) :arguments)
+                    "Tool Result: read_file"
+                    "first line"
+                    "* raw result heading"
+                    "#+begin_example"
+                    "Tool Result: search_project"
+                    "matches"
+                    "Tool Call: read_buffer"
+                    (plist-get second-call :arguments)
+                    "Tool Result: read_buffer"
+                    "Result C"
+                    final-content)))
+         (should-not protocol)
+         (should (equal (ende-test--chat-message-role (car (last messages)))
+                        "user"))
+         (should-not (member "tool" (mapcar #'ende-test--chat-message-role
+                                             messages)))
+          (let ((position 0))
+            (dolist (text ordered-text)
+              (let ((next (string-match (regexp-quote text) context position)))
+                (unless next
+                  (ert-fail (format "Missing %S after position %d"
+                                    text position)))
+                (setq position (+ next (length text))))))
         (should (equal (mapcar (lambda (headline)
                                  (ende-chat--property
                                   document headline :tool-call-id))
@@ -7263,7 +7271,7 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should (eq (ende-chat--parent document (car calls))
                     (car assistant-headlines)))))))
 
-(ert-deftest ende-test/chat-protocol-validation-rejects-malformed-and-unowned-results ()
+(ert-deftest ende-test/chat-edited-protocol-history-is-readable-context ()
   (with-temp-buffer
     (org-mode)
     (insert "* Topic\n** Question\nAsk\n")
@@ -7271,50 +7279,97 @@ Use COMMAND for the process, or a silent sleep process by default."
      (ende-chat--assistant-protocol-text
       2 "question-bad" "request-bad" ""
       '(:content "")
-      '((:id "call-bad" :name "read_file" :arguments "{}"))))
+      '((:id "call-bad" :name "read_file" :arguments "{}")
+        (:id "call-bad" :name "search_project"
+         :arguments "{\"regexp\":\"foo\"}"))))
     (insert
      (concat
       "** Tool Result: read_file\n:PROPERTIES:\n"
-      ":ENDE_CHAT_REQUEST_ID: request-bad\n"
-      ":ENDE_TOOL_NAME: read_file\n:END:\n\n{}\n\n"
+      ":ENDE_CHAT_REQUEST_ID: edited-request\n"
+       ":ENDE_TOOL_CALL_ID: call-bad\n"
+       ":ENDE_TOOL_NAME: read_file\n:END:\n\nEdited result\n\n"
       "** Follow-up\nAsk\n"))
     (ende-test--chat-goto "** Follow-up")
-    (let ((failure
-           (condition-case caught
-               (progn (ende-chat-context-at-point) nil)
-             (error (error-message-string caught)))))
-      (should (string-match-p "Malformed generated tool result" failure))))
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Topic\n** Question\nAsk\n")
-    (insert
-     (ende-chat--assistant-protocol-text
-      2 "question-duplicate" "request-duplicate" ""
-      '(:content "")
-      '((:id "same-call" :name "read_file" :arguments "{}")
-        (:id "same-call" :name "search_project" :arguments "{}"))))
-    (insert "** Follow-up\nAsk again.\n")
-    (ende-test--chat-goto "** Follow-up")
-    (let ((failure
-           (condition-case caught
-               (progn (ende-chat-context-at-point) nil)
-             (error (error-message-string caught)))))
-      (should (string-match-p "Duplicate generated tool-call ID" failure))))
+    (let* ((messages (ende-chat-context-at-point))
+           (text (ende-test--chat-context-text messages)))
+      (should-not (ende-test--chat-protocol-messages messages))
+      (should (string-match-p "Tool Call: read_file" text))
+      (should (string-match-p "Tool Call: search_project" text))
+      (should (string-match-p "Arguments:\n{}" text))
+      (should (string-match-p "{\"regexp\":\"foo\"}" text))
+      (should (string-match-p
+               (regexp-quote
+                "Tool Result: read_file\nArguments:\n{}\n\nOutput:\nEdited result")
+               text))
+      (should (string-match-p "Edited result" text))))
   (ende-test--with-buffer
    (concat "* Topic\n** Tool Result: read_file\n"
            "This is a user-authored note, not protocol state.\n"
            "** Follow-up\nAsk about the note.\n")
    (org-mode)
    (ende-test--chat-goto "** Follow-up")
-   (let* ((messages (ende-chat-context-at-point))
-          (text (ende-test--chat-context-text messages)))
-     (should (string-match-p "Tool Result: read_file" text))
-     (should-not (ende-test--chat-protocol-messages messages)))))
+    (let* ((messages (ende-chat-context-at-point))
+           (text (ende-test--chat-context-text messages)))
+      (should (string-match-p "Tool Result: read_file" text))
+       (should-not (ende-test--chat-protocol-messages messages)))))
 
-(ert-deftest ende-test/chat-tool-context-drawer-errors-when-serialized-as-assistant ()
-  (dolist (case '(("not JSON" "Invalid ENDE_CHAT_TOOL_CONTEXT JSON")
-                  ("{\"version\":2,\"messages\":[]}"
-                   "Unsupported ENDE_CHAT_TOOL_CONTEXT version")))
+(ert-deftest ende-test/chat-edited-tool-history-still-produces-a-reply ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("A useful reply.") t)))
+    (ende-test--with-buffer
+     (concat
+      "* Topic\n"
+      "** Earlier question\nRead the source.\n"
+      "** Edited work wrapper\n"
+      ":PROPERTIES:\n:ENDE_CHAT_WORK: t\n"
+      ":ENDE_CHAT_REQUEST_ID: wrapper-request\n:END:\n\n"
+      "A note added while editing the history.\n"
+      "*** Agent: Reply\n"
+      ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+      ":ENDE_CHAT_REQUEST_ID: reply-request\n"
+      ":ENDE_CHAT_CONTENT_FORMAT: org\n"
+      ":ENDE_CHAT_CONTENT_HEADLINE_SHIFT: stale\n"
+      ":ENDE_CHAT_CONTENT_SYNTHETIC_END: example\n"
+      ":ENDE_CHAT_CONTENT_SYNTHETIC_NEWLINE: t\n:END:\n\n"
+      "Old answer with preserved spaces  \n"
+      "*** Tool Result: read_file\n"
+      ":PROPERTIES:\n"
+      ":ENDE_CHAT_REQUEST_ID: unrelated-request\n"
+      ":ENDE_TOOL_CALL_ID: orphan-result\n"
+      ":ENDE_TOOL_NAME: read_file\n:END:\n\n"
+      "Arguments:\n{\"path\":\"src/example.el\"}\n\n"
+      "Output:\nThe saved source text.\n\n"
+      "** Follow-up\nExplain the saved result.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Follow-up")
+     (let* ((original (buffer-string))
+            (messages (ende-chat-context-at-point))
+            (text (ende-test--chat-context-text messages)))
+       (should (string-match-p "Edited work wrapper" text))
+       (should (string-match-p "A note added while editing" text))
+       (should (string-match-p "Old answer with preserved spaces  " text))
+       (should (string-match-p "src/example\\.el" text))
+       (should (string-match-p "The saved source text" text))
+       (should-not (ende-test--chat-protocol-messages messages))
+       (should (equal original (buffer-string))))
+     (let ((job (ende-ask)))
+       (should (eq (ende-job-state job) 'running))
+       (cl-letf (((symbol-function 'ende-chat--tool-response)
+                  (lambda (&rest _)
+                    (error "Historical calls must not execute again"))))
+         (ende-test--complete-call (car ende-test--calls)))
+       (should (eq (ende-job-state job) 'completed))
+       (let* ((provider-messages (plist-get (car ende-test--calls) :messages))
+              (provider-text (ende-test--chat-context-text provider-messages)))
+         (should-not (ende-test--chat-protocol-messages provider-messages))
+         (should (string-match-p "The saved source text" provider-text))
+         (should (string-match-p "src/example\\.el" provider-text)))
+       (should (string-match-p "A useful reply" (buffer-string)))))))
+
+(ert-deftest ende-test/chat-edited-tool-context-drawers-are-preserved ()
+  (dolist (raw '("not JSON"
+                 "{\"version\":2,\"messages\":[]}"
+                 "{\"version\":1,\"messages\":[{\"role\":\"tool\",\"tool_call_id\":\"orphan\",\"content\":\"Saved output\"}]}"))
     (ende-test--reset)
     (ende-test--with-buffer
      (format
@@ -7323,14 +7378,19 @@ Use COMMAND for the process, or a silent sleep process by default."
 	      ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
 	      ":%s:\n%s\n:END:\n\nAnswer\n"
 	      "** Follow-up\nAsk\n")
-      ende-chat--tool-context-drawer (car case))
+      ende-chat--tool-context-drawer raw)
      (org-mode)
      (ende-test--chat-goto "** Follow-up")
-     (let ((failure
-            (condition-case caught
-                (progn (ende-chat-context-at-point) nil)
-              (error (error-message-string caught)))))
-       (should (string-match-p (cadr case) failure))))))
+     (let* ((messages (ende-chat-context-at-point))
+            (text (ende-test--chat-context-text messages)))
+       (should (string-match-p "Answer" text))
+       (should-not (ende-test--chat-protocol-messages messages))
+       (cond
+        ((equal raw "not JSON")
+         (should (string-match-p "not JSON" text)))
+        ((string-match-p "\"version\":2" raw)
+         (should (string-match-p (regexp-quote raw) text)))
+        (t (should (string-match-p "Saved output" text))))))))
 
 (ert-deftest ende-test/chat-tool-context-drawer-is-not-user-protocol-history ()
   (ende-test--reset)
@@ -7400,7 +7460,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 			       (ende-test--chat-context-text
                                 (list work-message))))))))
 
-(ert-deftest ende-test/chat-work-validation-rejects-duplicate-request-containers ()
+(ert-deftest ende-test/chat-copied-work-containers-remain-readable ()
   (let* ((request-id "request-duplicate-work")
          (question-id "question-duplicate-work")
          (first-call '(:id "call-first" :name "read_file" :arguments "{}"))
@@ -7425,12 +7485,12 @@ Use COMMAND for the process, or a silent sleep process by default."
       (insert protocol)
       (insert "** Follow-up\nContinue\n")
       (ende-test--chat-goto "** Follow-up")
-      (let ((failure
-             (condition-case caught
-                 (progn (ende-chat-context-at-point) nil)
-               (error (error-message-string caught)))))
-        (should (string-match-p "Multiple generated Agent: Work sections"
-                                failure))))))
+      (let* ((messages (ende-chat-context-at-point))
+             (text (ende-test--chat-context-text messages)))
+        (should-not (ende-test--chat-protocol-messages messages))
+        (dolist (content '("First round" "First result" "Second round"
+                           "Second result" "Final"))
+          (should (string-match-p content text)))))))
 
 (ert-deftest ende-test/chat-tool-history-survives-follow-up-and-compaction ()
   (let ((root (make-temp-file "ende-chat-history-" t)))
@@ -7488,13 +7548,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                      "This is a user-authored note.\n\n"
                      "** Agent: Work\n"
                      "This heading is user-authored.\n\n")
-             (let* ((first-round
-                     (last (plist-get (nth 1 ende-test--calls) :messages) 3))
-                    (second-round
-                     (last (plist-get (nth 2 ende-test--calls) :messages) 2))
-                    (expected-transcript (append first-round second-round))
-                    (document (ende-chat--build-document))
-                    (headlines (ende-chat--document-headlines document))
+              (let* ((document (ende-chat--build-document))
+                     (headlines (ende-chat--document-headlines document))
                     (reply
                      (cl-find-if
                       (lambda (headline)
@@ -7568,16 +7623,6 @@ Use COMMAND for the process, or a silent sleep process by default."
                          "Tool Result: read_file" "Tool Result: read_file"
                          "Agent: Reply" "Tool Call: read_file"
                          "Tool Result: read_file" "Agent: Reply")))
-	       (should (equal
-                        (mapcar (lambda (message)
-                                  (if (equal (plist-get message :role) "tool")
-                                      (plist-get message :tool-call-id)
-                                    (mapcar (lambda (call)
-                                              (plist-get call :id))
-                                            (plist-get message :tool-calls))))
-				expected-transcript)
-                        '(("call-A" "call-B") "call-A" "call-B"
-                          ("call-C") "call-C")))
 	       (should (equal (mapcar (lambda (headline)
                                         (ende-chat--property
                                          document headline :tool-call-id))
@@ -7607,8 +7652,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                   (ende-test--chat-headline-text-hidden-p
                    user-note "This is a user-authored note.")))
 	       (ende-test--chat-goto "** Follow-up")
-	       (let* ((messages (ende-chat-context-at-point))
-                      (protocol (ende-test--chat-protocol-messages messages))
+             (let* ((messages (ende-chat-context-at-point))
+                      (text (ende-test--chat-context-text messages))
                       (reply-index
 		       (cl-position-if
 			(lambda (message)
@@ -7617,9 +7662,11 @@ Use COMMAND for the process, or a silent sleep process by default."
 			       (string-match-p "Final answer about the source"
 					       (cdr message))))
 			messages)))
-		 (should (equal protocol expected-transcript))
-		 (should (= reply-index (1+ (cl-position (car (last protocol))
-                                                         messages :test #'equal))))
+               (should-not (ende-test--chat-protocol-messages messages))
+               (should reply-index)
+               (should (string-match-p "FOO_SOURCE_TOKEN" text))
+               (should (string-match-p "Arguments:" text))
+               (should (string-match-p "Output:" text))
 		 (should (equal (ende-test--chat-message-role (car (last messages)))
 				"user"))
 		 (should
@@ -7629,10 +7676,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                           (string-match-p "This heading is user-authored"
                                           (cdr message))))
                    messages))
-		 (should
-                  (equal (mapcar #'ende-test--chat-message-role messages)
-			 '("user" "user" "assistant" "tool" "tool"
-                           "assistant" "tool" "assistant" "user" "user")))
+               (should
+                 (cl-every (lambda (role)
+                             (member role '("user" "assistant")))
+                           (mapcar #'ende-test--chat-message-role messages)))
 		 (ende-test--chat-goto "** Agent: Work")
 		 (org-fold-show-subtree)
 		 (ende-test--chat-goto "** Follow-up")
@@ -7640,20 +7687,31 @@ Use COMMAND for the process, or a silent sleep process by default."
 		 (ende-test--chat-goto "** Agent: Work")
 		 (org-fold-hide-subtree)
 		 (ende-test--chat-goto "** Follow-up")
-		 (let ((follow-up (ende-ask)))
-                   (should (eq (ende-job-state follow-up) 'running))
-                   (ende-test--complete-call (nth 3 ende-test--calls))
-                   (should (eq (ende-job-state follow-up) 'completed)))
+               (let ((follow-up (ende-ask)))
+                 (should (eq (ende-job-state follow-up) 'running))
+                 (ende-test--complete-call (nth 3 ende-test--calls))
+                 (should (eq (ende-job-state follow-up) 'completed))
+                 (let ((provider-messages
+                        (plist-get (nth 3 ende-test--calls) :messages)))
+                   (should-not
+                    (ende-test--chat-protocol-messages provider-messages))
+                   (should
+                    (string-match-p
+                     "Tool Result: read_file"
+                     (ende-test--chat-context-text provider-messages)))))
 		 (should-not
                   (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
 	       (ende-test--chat-goto "** Compact")
 	       (let ((compaction (ende-compact)))
 		 (should (= (length ende-test--calls) 5))
-		 (let ((compaction-protocol
-			(ende-test--chat-protocol-messages
-			 (plist-get (nth 4 ende-test--calls) :messages))))
-                   (should
-                    (equal compaction-protocol expected-transcript)))
+                 (let* ((compaction-messages
+                         (plist-get (nth 4 ende-test--calls) :messages))
+                        (compaction-text
+                         (ende-test--chat-context-text compaction-messages)))
+                   (should-not
+                    (ende-test--chat-protocol-messages compaction-messages))
+                   (should (string-match-p "FOO_SOURCE_TOKEN" compaction-text))
+                   (should (string-match-p "Arguments:" compaction-text)))
 		 (ende-test--complete-call (nth 4 ende-test--calls))
 		 (should (eq (ende-job-state compaction) 'completed)))
 	       (ende-test--chat-goto "** Later")
