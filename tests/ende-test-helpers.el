@@ -194,6 +194,13 @@ process for cancellation tests."
      (insert ,contents)
      ,@body))
 
+(defun ende-test--anchor-edit (anchor position text &rest properties)
+  "Build an anchor edit with optional additional PROPERTIES."
+  (append (list (cons "anchor" anchor)
+                (cons "position" position)
+                (cons "text" text))
+          properties))
+
 (provide 'ende-test-helpers)
 
 ;;; ende-test-helpers.el ends here
