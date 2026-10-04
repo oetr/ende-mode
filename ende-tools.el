@@ -17,6 +17,7 @@
 (require 'ende-core)
 (require 'ende-edit)
 (require 'ende-project)
+(require 'ende-url)
 
 (defcustom ende-tools-max-listed-files 200
   "Maximum files returned by one `list_project_files' call."
@@ -52,7 +53,7 @@
 
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
-  name description parameters handler read-only requires-resource)
+  name description parameters handler resource-kind requires-root mutates-local)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
@@ -63,22 +64,37 @@
 (defvar ende-tools--access-tool nil
   "Tool symbol currently being authorized by a handler.")
 
+(define-error 'ende-tool-mutation-failure "Ende mutation failed")
+
 (defun ende-tool-register
-    (name description parameters handler &optional read-only resource-policy)
+    (name description parameters handler &optional read-only resource-policy options)
   "Register tool NAME with DESCRIPTION, PARAMETERS, and HANDLER.
 
 HANDLER receives an arguments object and a canonical project root.  NAME is a
 symbol internally and is exposed to model transports as a string.  Pass
-`:write' as READ-ONLY for a mutating tool.  RESOURCE-POLICY may be
-`:no-resource' for tools that do not access project paths."
+`:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
+the historic `:no-resource' registration form; OPTIONS may specify
+`:resource-kind' (`file', `url', or `none') and `:requires-root'."
   (unless (and (symbolp name) (functionp handler))
     (error "invalid ende tool registration: %s" name))
-  (let ((tool (ende-tool--create
-               :name name :description description :parameters parameters
-               :handler handler :read-only (not (eq read-only :write))
-               :requires-resource (not (eq resource-policy :no-resource)))))
+  (let* ((kind (or (plist-get options :resource-kind)
+                   (if (eq resource-policy :no-resource) 'none 'file)))
+         (requires-root (if (plist-member options :requires-root)
+                            (plist-get options :requires-root)
+                          t))
+         (tool (ende-tool--create
+                :name name :description description :parameters parameters
+                :handler handler :resource-kind kind
+                :requires-root requires-root
+                :mutates-local (eq read-only :write))))
+    (unless (memq kind '(file url none))
+      (error "invalid ende tool resource kind: %s" kind))
     (setf (alist-get name ende-tools--registry) tool)
     tool))
+
+(defun ende-tool-read-only (tool)
+  "Return non-nil when TOOL does not mutate local files."
+  (not (ende-tool-mutates-local tool)))
 
 (defun ende-tool--find (name)
   "Return the registered tool called NAME, or nil."
@@ -111,32 +127,42 @@ and controls tool activation and path authorization."
         (list :ok nil :tool (format "%s" name)
               :error (format "unknown ende tool: %s" name))
       (condition-case caught
-          (let ((tool-name (ende-tool-name tool)))
+          (let* ((tool-name (ende-tool-name tool))
+                 (kind (ende-tool-resource-kind tool))
+                 (root-required (ende-tool-requires-root tool))
+                 (assigned (cdr (assq
+                                 tool-name
+                                 (plist-get access-config :tool-resources)))))
             (when access-config
-              (unless (plist-get access-config :root)
-                (error "chat tool configuration has no explicit root"))
               (unless (memq tool-name (plist-get access-config :active-tools))
                 (error "tool is not active in this chat: %s" tool-name))
-              (when (and (ende-tool-requires-resource tool)
-                         (null (cdr (assq
-                                     tool-name
-                                     (plist-get access-config
-                                                :tool-resources)))))
+              (when (and (not (eq kind 'none)) (null assigned))
                 (error "tool has no assigned resources: %s" tool-name)))
-            (let* ((root (ende-project-normalize-root
-                          (or (and access-config
-                                   (plist-get access-config :root))
-                              root
-                              (ende-project-root))))
+            (when (and access-config root-required
+                       (null (plist-get access-config :root)))
+              (error "chat tool configuration has no explicit root"))
+            (let* ((root-value (or root
+                                   (and access-config root-required
+                                        (plist-get access-config :root))))
+                   (root (cond
+                          (root-value
+                           (ende-project-normalize-root root-value))
+                          (root-required (ende-project-root))
+                          (t nil)))
                    (ende-tools--access-config access-config)
                    (ende-tools--access-tool tool-name))
-              (list :ok t
-                    :tool (symbol-name tool-name)
-                    :result (funcall (ende-tool-handler tool) arguments root))))
-        ((error quit)
+               (list :ok t
+                     :tool (symbol-name tool-name)
+                     :result (funcall (ende-tool-handler tool) arguments root))))
+        (ende-tool-mutation-failure
          (list :ok nil
                :tool (symbol-name (ende-tool-name tool))
-               :error (error-message-string caught)))))))
+               :error (error-message-string caught)
+               :recovery (cadr (cdr caught))))
+        ((error quit)
+          (list :ok nil
+                :tool (symbol-name (ende-tool-name tool))
+                :error (error-message-string caught)))))))
 
 (defun ende-tools--resource-allows-p (relative resource)
   "Return non-nil when RESOURCE permits project-relative path RELATIVE."
@@ -178,6 +204,29 @@ and controls tool activation and path authorization."
     (error "path is not authorized by this chat's resources: %s"
            (file-relative-name path root)))
   path)
+
+(defun ende-tools--url-resource-allows-p (url resource)
+  "Return non-nil when URL is included and not excluded by RESOURCE."
+  (and (cl-some (lambda (pattern)
+                  (ende-url-pattern-allows-p pattern url))
+                (plist-get resource :include-url-patterns))
+       (not (cl-some (lambda (pattern)
+                       (ende-url-pattern-allows-p pattern url))
+                     (plist-get resource :exclude-url-patterns)))))
+
+(defun ende-tools--url-authorized-p (url)
+  "Return non-nil when current tool's frozen URL grants permit URL."
+  (if (null ende-tools--access-config)
+      nil
+    (let* ((assignments (plist-get ende-tools--access-config :tool-resources))
+           (resource-names (cdr (assq ende-tools--access-tool assignments)))
+           (resources (plist-get ende-tools--access-config :resources)))
+      (cl-some (lambda (name)
+                 (let ((resource (cdr (assq name resources))))
+                   (and resource
+                        (eq (plist-get resource :type) 'url)
+                        (ende-tools--url-resource-allows-p url resource))))
+               resource-names))))
 
 ;;;; Arguments and source resolution
 

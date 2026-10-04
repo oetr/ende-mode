@@ -33,7 +33,14 @@
 
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
-    (should (= (length definitions) 9))
+    (let ((names (mapcar (lambda (definition)
+                           (alist-get :name (alist-get :function definition)))
+                         definitions)))
+      (should (= (length names) (length (delete-dups (copy-sequence names)))))
+      (dolist (required '("project_info" "list_project_files" "file_info"
+                          "read_file" "list_project_buffers" "read_buffer"
+                          "search_project" "edit_file" "create_file"))
+        (should (member required names))))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))
              (schema

@@ -15,6 +15,7 @@
 (require 'org-element)
 (require 'subr-x)
 (require 'ende-project)
+(require 'ende-url)
 (require 'ende-tools)
 
 (defvar ende-chat-config--block-line nil
@@ -108,14 +109,20 @@
       (ende-chat-config--error "unknown tool: %s" name))
     name))
 
-(defun ende-chat-config--pattern (value resource)
-  "Validate resource path pattern VALUE for RESOURCE."
+(defun ende-chat-config--file-pattern (value resource)
+  "Validate existing project-relative file pattern VALUE for RESOURCE."
   (unless (and (stringp value)
                (not (string-empty-p value))
                (not (file-name-absolute-p value))
                (not (member ".." (split-string value "/" t))))
     (ende-chat-config--error
      "invalid path pattern in resource %s: %S" resource value))
+  value)
+
+(defun ende-chat-config--resource-type (value resource)
+  "Validate resource type VALUE for RESOURCE."
+  (unless (memq value '(file url))
+    (ende-chat-config--error "unsupported type %S in resource %s" value resource))
   value)
 
 (defun ende-chat-config--local-blocks (tree)
@@ -202,20 +209,79 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
     (ende-chat-config--error "malformed resource definition: %S" form))
   (let* ((name (ende-chat-config--name (nth 1 form) "resource"))
          (resources (plist-get configuration :resources))
-         includes excludes)
-    (dolist (rule (cddr form))
-      (unless (and (ende-chat-config--proper-list-p rule)
-                   (= (length rule) 2)
-                   (memq (car rule) '(include exclude)))
-        (ende-chat-config--error "malformed rule in resource %s: %S" name rule))
-      (let ((pattern (ende-chat-config--pattern (cadr rule) name)))
-        (if (eq (car rule) 'include)
-            (push pattern includes)
-          (push pattern excludes))))
+         (tail (cddr form))
+         (type 'file)
+         (type-seen nil)
+         (private nil)
+         (private-seen nil)
+         (rules-seen nil)
+         includes excludes include-patterns exclude-patterns)
+    (while tail
+      (let ((form-part (pop tail)))
+        (cond
+         ((and (ende-chat-config--proper-list-p form-part)
+               (= (length form-part) 2)
+               (memq (car form-part) '(include exclude)))
+          (setq rules-seen t)
+          (let ((pattern
+                 (if (eq type 'file)
+                     (ende-chat-config--file-pattern (cadr form-part) name)
+                   (unless (stringp (cadr form-part))
+                     (ende-chat-config--error
+                      "URL pattern in resource %s must be a string" name))
+                   (condition-case caught
+                       (ende-url-pattern-compile (cadr form-part))
+                     (error
+                      (ende-chat-config--error
+                       "invalid URL pattern in resource %s: %s"
+                       name (error-message-string caught)))))))
+            (if (eq (car form-part) 'include)
+                (progn (push (cadr form-part) includes)
+                       (when (eq type 'url)
+                         (push pattern include-patterns)))
+              (push (cadr form-part) excludes)
+              (when (eq type 'url)
+                (push pattern exclude-patterns)))))
+         ((memq form-part '(:type :allow-private-addresses))
+          (when rules-seen
+            (ende-chat-config--error
+             "resource options must precede include/exclude rules (%s)" name))
+          (unless tail
+            (ende-chat-config--error "resource option %s needs a value" form-part))
+          (let ((value (pop tail)))
+            (pcase form-part
+              (:type
+               (when type-seen
+                 (ende-chat-config--error "resource %s repeats :type" name))
+               (setq type (ende-chat-config--resource-type value name)
+                     type-seen t))
+              (:allow-private-addresses
+               (when private-seen
+                 (ende-chat-config--error
+                  "resource %s repeats :allow-private-addresses" name))
+               (unless (memq value '(t nil))
+                 (ende-chat-config--error
+                  ":allow-private-addresses must be t or nil in resource %s" name))
+               (setq private value private-seen t)))))
+         (t
+          (ende-chat-config--error "malformed rule or option in resource %s: %S"
+                                   name form-part)))))
     (unless includes
       (ende-chat-config--error "resource %s needs an explicit include" name))
     (setq includes (nreverse includes)
-          excludes (nreverse excludes))
+          excludes (nreverse excludes)
+          include-patterns (nreverse include-patterns)
+          exclude-patterns (nreverse exclude-patterns))
+    (when (and private-seen (not (eq type 'url)))
+      (ende-chat-config--error
+       ":allow-private-addresses is only valid for URL resources (%s)" name))
+    (when (and private
+               (cl-some (lambda (pattern)
+                          (memq (plist-get pattern :host-kind)
+                                '(any-dns subdomains)))
+                        (append include-patterns exclude-patterns)))
+      (ende-chat-config--error
+       "private-enabled resource %s must use exact URL hosts" name))
     (when (assq name resources)
       (let ((revoked (plist-get configuration :revoked-resources)))
         (dolist (entry (plist-get configuration :grants))
@@ -232,12 +298,18 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
            (lambda (grant) (eq (car grant) name)) configuration))
     (plist-put configuration :resources
                (ende-chat-config--put
-                name (list :include includes :exclude excludes
-                           :include-regexps
-                           (mapcar #'wildcard-to-regexp includes)
-                           :exclude-regexps
-                           (mapcar #'wildcard-to-regexp excludes))
-                resources))))
+                 name (list :type type
+                            :include includes :exclude excludes
+                            :allow-private-addresses private
+                            :include-regexps
+                            (and (eq type 'file)
+                                 (mapcar #'wildcard-to-regexp includes))
+                            :exclude-regexps
+                            (and (eq type 'file)
+                                 (mapcar #'wildcard-to-regexp excludes))
+                            :include-url-patterns include-patterns
+                            :exclude-url-patterns exclude-patterns)
+                 resources))))
 
 (defun ende-chat-config--target-tools (name configuration)
   "Return the tools selected by group or tool NAME in CONFIGURATION."
@@ -263,7 +335,38 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
                (unless (assq name (plist-get configuration :resources))
                  (ende-chat-config--error "unknown resource: %s" name))
                name))
-           names)))
+            names)))
+
+(defun ende-chat-config--check-assignment-types (tools resources configuration)
+  "Reject incompatible RESOURCES assigned to TOOLS."
+  (dolist (tool-name tools)
+    (let* ((tool (ende-tool--find tool-name))
+           (kind (ende-tool-resource-kind tool)))
+      (unless (eq kind 'none)
+        (dolist (resource-name resources)
+          (let* ((resource (ende-chat-config--lookup
+                            resource-name (plist-get configuration :resources)))
+                 (type (plist-get resource :type)))
+            (unless (eq kind type)
+              (ende-chat-config--error
+               "resource %s has type %s and cannot be assigned to %s (%s)"
+                resource-name type tool-name kind))))))))
+
+(defun ende-chat-config--validate-grant-types (configuration)
+  "Validate all grants in CONFIGURATION, including inactive tool grants."
+  (let ((resources (plist-get configuration :resources)))
+    (dolist (entry (plist-get configuration :grants))
+      (let* ((tool (ende-tool--find (car entry)))
+             (kind (ende-tool-resource-kind tool)))
+        (unless (eq kind 'none)
+          (dolist (grant (cdr entry))
+            (let* ((resource (ende-chat-config--lookup (car grant) resources))
+                   (type (plist-get resource :type)))
+              (unless (eq kind type)
+                (ende-chat-config--error
+                 "resource %s has type %s and cannot be assigned to %s (%s)"
+                 (car grant) type (car entry) kind))))))))
+  configuration)
 
 (defun ende-chat-config--assign-resources (form configuration additive)
   "Apply resource assignment FORM to CONFIGURATION.
@@ -281,10 +384,12 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
         (ende-chat-config--error
          "resource assignment may contain only one :resources separator: %S"
          form))
-      (let ((tools (ende-chat-config--resolve-tools names configuration))
-            (resources (ende-chat-config--resource-names
-                        raw-resources configuration))
-            (assignments (plist-get configuration :grants)))
+       (let ((tools (ende-chat-config--resolve-tools names configuration))
+             (resources (ende-chat-config--resource-names
+                         raw-resources configuration))
+             (assignments (plist-get configuration :grants)))
+         (ende-chat-config--check-assignment-types
+          tools resources configuration)
         ;; Clear once so overlapping targets retain both origins.
         (unless additive
           (setq assignments
@@ -356,8 +461,13 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 
 (defun ende-chat-config--validate-access (normalized configuration)
   "Check active tools in NORMALIZED using CONFIGURATION for diagnostics."
+  (when (cl-some (lambda (tool-name)
+                   (ende-tool-requires-root (ende-tool--find tool-name)))
+                 (plist-get normalized :active-tools))
+    (unless (plist-get normalized :root)
+      (ende-chat-config--error "an explicit root is required by the active tools")))
   (dolist (tool (plist-get normalized :active-tools))
-    (when (and (ende-tool-requires-resource (ende-tool--find tool))
+    (when (and (not (eq (ende-tool-resource-kind (ende-tool--find tool)) 'none))
                (null (cdr (assq tool (plist-get normalized :tool-resources)))))
       (let ((revoked (cdr (assq tool (plist-get configuration
 						:revoked-resources)))))
@@ -423,25 +533,22 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
   "Resolve chat tool configuration for HEADLINE in parsed Org TREE.
 PARENT-TABLE maps headlines to their parents.  Apply the document block,
 ancestor blocks, and HEADLINE's own block, never preceding sibling blocks.
-Return a normalized access policy.  Definitions need not be used.  A configured
-scope requires an explicit inherited or local root.  Invalid forms or active
-tools without required resources signal errors before dispatch."
+Return a normalized access policy.  Definitions need not be used.  An explicit
+root is required only when an active tool needs a project.  Invalid forms or
+active tools without required resources or roots signal errors before dispatch."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
-         (ancestry nil)
-         (current headline)
-         (configuration (ende-chat-config--empty))
-         (configured nil))
+          (ancestry nil)
+          (current headline)
+          (configuration (ende-chat-config--empty)))
     (while current
       (push current ancestry)
       (setq current (gethash current parent-table)))
     (dolist (node (cons tree ancestry))
       (let ((blocks (gethash node blocks-by-node)))
         (when blocks
-          (setq configured t
-                configuration
+          (setq configuration
                 (ende-chat-config--apply-blocks blocks configuration)))))
-    (when (and configured (null (plist-get configuration :root)))
-      (ende-chat-config--error "an explicit root is required"))
+    (setq configuration (ende-chat-config--validate-grant-types configuration))
     (let ((normalized (ende-chat-config--normalize configuration)))
       (ende-chat-config--validate-access normalized configuration)
       normalized)))

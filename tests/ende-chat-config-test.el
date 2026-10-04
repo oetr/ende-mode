@@ -167,6 +167,113 @@
       (delete-directory root t)
       (delete-directory child-root t))))
 
+(ert-deftest ende-test/chat-config-supports-rootless-typed-url-resources ()
+  (let ((tool-name 'ende-test-url-policy-probe)
+        (ende-test-root (make-temp-file "ende-rootless-url-" t)))
+    (unwind-protect
+        (progn
+          ;; This fixture is deliberately test-only; production web_fetch is
+          ;; registered with its implementation in the later transport step.
+          (ende-tool-register
+           tool-name "Test URL policy access" ende-tools--empty-object-schema
+           (lambda (arguments root)
+             (list :root root
+                   :allowed
+                   (ende-tools--url-authorized-p
+                    (ende-url-normalize
+                     (ende-tools--required-string arguments "url")))))
+           nil nil '(:resource-kind url :requires-root nil))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((resource docs :type url
+                          (include "https://*.example.com/**")
+                          (exclude "https://private.example.com/**"))
+                (resource exception :type url
+                          (include "https://private.example.com/**"))
+                (tools ,tool-name)
+                (set-tool-resources ,tool-name :resources docs exception)))
+             "* Conversation\n** Rootless\nFetch only policy-approved URLs.\n"
+             "*** Redefined\n"
+             (ende-test--chat-config-block
+              '((resource docs :type url
+                          (include "https://other.example/**"))))
+             "The old docs grant is revoked.\n")
+            (let* ((document (ende-chat--build-document))
+                   (rootless (ende-test--chat-config-at document "Rootless"))
+                   (redefined (ende-test--chat-config-at document "Redefined")))
+              (should-not (plist-get rootless :root))
+              (should (equal (plist-get rootless :active-tools)
+                             (list tool-name)))
+              (should (equal (cdr (assq tool-name
+                                        (plist-get rootless :tool-resources)))
+                             '(docs exception)))
+              (should (equal (cdr (assq tool-name
+                                        (plist-get redefined :tool-resources)))
+                             '(exception)))
+              (let ((default-directory ende-test-root))
+                (dolist (case '(("https://a.example.com/a" t)
+                                ("https://private.example.com/a" t)
+                                ("https://example.com/a" nil)
+                                ("https://evil-example.com/a" nil)))
+                  (let* ((call (ende-tool-call
+                                tool-name (list :url (car case)) nil rootless))
+                         (result (plist-get call :result)))
+                    (should (plist-get call :ok))
+                    (should (eq (plist-get result :allowed) (cadr case)))
+                    (should-not (plist-get result :root))))
+                (should-not
+                 (plist-get
+                  (plist-get
+                   (ende-tool-call
+                    tool-name '(:url "https://a.example.com/")
+                    nil redefined)
+                   :result)
+                  :allowed))
+                (should
+                 (plist-get
+                  (plist-get
+                   (ende-tool-call
+                    tool-name '(:url "https://private.example.com/")
+                    nil redefined)
+                   :result)
+                  :allowed)))))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              '((resource docs :type url (include "https://example.com/**"))
+                (group files read_file)
+                (tools files)
+                (set-tool-resources files :resources docs)))
+             "* Conversation\n** Bad\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document) "Bad")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((resource files (include "**"))
+                (tools ,tool-name)
+                (set-tool-resources ,tool-name :resources files)))
+             "* Conversation\n** Bad\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document) "Bad")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((resource docs :type url :allow-private-addresses t
+                          (include "https://*.example.com/**"))))
+             "* Conversation\n** Bad\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document) "Bad"))))
+      (setq ende-tools--registry
+            (assq-delete-all tool-name ende-tools--registry))
+      (when (file-directory-p ende-test-root)
+        (delete-directory ende-test-root t)))))
+
 
 
 (ert-deftest ende-test/chat-config-definitions-can-remain-unused ()

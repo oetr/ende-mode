@@ -28,6 +28,7 @@
 (require 'ende-provider)
 (require 'ende-review)
 (require 'ende-project)
+(require 'ende-url)
 (require 'ende-target)
 (require 'ende-ui)
 (require 'ende-llm)
@@ -121,16 +122,14 @@
          (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
                   "ende-transport.el" "ende-curl.el" "ende-provider.el"
                   "ende-codex.el"
-                  "ende-review.el" "ende-project.el" "ende-target.el"
-                  "ende-ui.el"
+                  "ende-review.el" "ende-project.el" "ende-url.el"
+                  "ende-target.el" "ende-ui.el"
                   "ende-openrouter-batch.el" "ende-llm.el"
-                  "ende-queue.el" "ende-edit.el"
-                  "ende-tools.el"
+                  "ende-queue.el" "ende-edit.el" "ende-tools.el"
                   "ende-chat-config.el"
                   "ende-summary.el" "ende-operations.el"
                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
-                  "ende-history.el"
-                  "ende-selector.el" "ende.el")))
+                  "ende-history.el" "ende-selector.el" "ende.el")))
     (dolist (f files) (load (expand-file-name f dir)))
     (setq ende-mode-map (ende--make-mode-map))
     (message "ende: reloaded from %s" dir)))
