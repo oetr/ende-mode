@@ -235,9 +235,14 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
             (should (string-match-p
                      (format "Host: fetch-fixture.invalid:%d" port)
                      (cdar requests)))
-             (should-not (string-match-p
-                          "\\(?:Authorization\\|Cookie\\|Proxy-Authorization\\):"
-                          (cdar requests)))))
+            (should-not (string-match-p
+                         "\\(?:Authorization\\|Cookie\\|Proxy-Authorization\\):"
+                         (cdar requests)))
+            (should-not
+             (cl-some (lambda (buffer)
+                        (string-prefix-p " *ende-web-fetch-"
+                                         (buffer-name buffer)))
+                       (buffer-list)))))
       (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-redirects-to-denied-host-before-dns ()
