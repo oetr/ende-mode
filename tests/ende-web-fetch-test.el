@@ -407,6 +407,50 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                     (buffer-list))))
       (funcall (plist-get fixture :stop)))))
 
+(ert-deftest ende-test/web-fetch-resolver-wait-is-bounded-and-cancellable ()
+  (let* ((transfer (ende-web-fetch--make-transfer
+                    :deadline (+ (float-time) 5)
+                    :header-bytes 0 :body-bytes 0))
+         (real-make-process (symbol-function 'make-process))
+         (process nil)
+         (timer nil)
+         (cancelled nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest arguments)
+                     (should (member "getent" (plist-get arguments :command)))
+                     (setq process
+                           (funcall real-make-process
+                                     :name "ende-test-slow-resolver"
+                                     :buffer nil :command '("sleep" "30")
+                                     :connection-type 'pipe :noquery t
+                                     :filter (plist-get arguments :filter))))))
+          (setq timer
+                (run-at-time
+                 0.05 nil
+                 (lambda ()
+                   (setq cancelled t)
+                   (setf (ende-web-fetch--transfer-cancelled transfer) t)
+                   (let ((active
+                          (ende-web-fetch--transfer-process transfer)))
+                     (when (and (processp active) (process-live-p active))
+                       (delete-process active))))))
+          (condition-case nil
+              (ende-web-fetch--resolve-host transfer "slow.invalid")
+            (quit nil))
+          (should cancelled)
+          (should (processp process))
+          (should-not (process-live-p process))
+          (should-not (ende-web-fetch--transfer-process transfer))
+          (should-not
+            (cl-some (lambda (buffer)
+                       (string-prefix-p " *ende-web-fetch-dns*"
+                                        (buffer-name buffer)))
+                     (buffer-list))))
+      (when timer (cancel-timer timer))
+      (when (and process (process-live-p process))
+        (delete-process process)))))
+
 (ert-deftest ende-test/chat-keeps-fetched-ende-looking-content-untrusted ()
   (ende-test--reset)
   (let* ((fixture
