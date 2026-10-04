@@ -45,7 +45,7 @@
       (dolist (required '("project_info" "list_project_files" "file_info"
                           "read_file" "list_project_buffers" "read_buffer"
                           "search_project" "edit_file" "create_file"
-                          "delete_file" "apply_patch"))
+                          "delete_file" "apply_patch" "web_fetch"))
         (should (member required names))))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))

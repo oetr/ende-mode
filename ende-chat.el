@@ -3037,7 +3037,42 @@ Assistant calls must be followed by matching tool results in order."
        (let* ((function (alist-get :function definition))
               (name (and function (alist-get :name function))))
          (and name (memq (intern name) active))))
-     (ende-tool-definitions))))
+      (ende-tool-definitions))))
+
+(defun ende-chat--execute-tool-round
+    (job calls configuration level request-id assistant)
+  "Execute CALLS for JOB and return assistant/tool messages, or nil on cancel."
+  (let ((round-messages (list assistant)))
+    (catch 'ende-chat--cancel-tool-round
+      (dolist (call calls)
+        (unless (ende-job-current-p job)
+          (throw 'ende-chat--cancel-tool-round nil))
+        (let* ((prior-cancel (ende-job-cancel-function job))
+                (installed-cancel nil)
+                (ende-tools--register-cancellation-function
+                 (lambda (cancel)
+                   (if cancel
+                       (setq installed-cancel cancel)
+                     (when (and installed-cancel
+                                (eq installed-cancel
+                                    (ende-job-cancel-function job)))
+                       (setf (ende-job-cancel-function job) prior-cancel)))
+                   (when cancel
+                     (ende-job-cancellation-set job cancel))))
+               (tool-content
+                (ende-chat--tool-response call configuration)))
+          (unless (ende-job-current-p job)
+            (throw 'ende-chat--cancel-tool-round nil))
+          (ende-chat--persist-request-section
+           job (ende-chat--tool-result-text
+                level request-id call tool-content) t)
+          (setq round-messages
+                (append round-messages
+                        (list (list :role "tool"
+                                    :tool-call-id
+                                    (ende-chat--tool-value call :id)
+                                    :content tool-content))))))
+      (and (ende-job-current-p job) round-messages))))
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
@@ -3091,27 +3126,16 @@ Assistant calls must be followed by matching tool results in order."
                         (cl-incf rounds)
                         (ende--handle-llm-event
                          job '(:type :status :status "Running tools"))
-                        (let ((round-messages (list assistant)))
-                          (dolist (call calls)
-                            (let ((tool-content
-                                   (ende-chat--tool-response
-                                    call configuration)))
-                              (ende-chat--persist-request-section
-                               job
-                               (ende-chat--tool-result-text
-                                level request-id call tool-content)
-                               t)
-                              (setq round-messages
-                                    (append
-                                     round-messages
-                                     (list (list :role "tool"
-                                                 :tool-call-id
-                                                 (ende-chat--tool-value call :id)
-                                                 :content tool-content))))))
-                          (setq messages (append messages round-messages))))
-                      (ende--validate-messages messages)
-                      (ende--send-llm job messages #'on-done nil t)))))))))
-      (ende--dispatch-llm job messages #'on-done nil nil t))))
+                        (let ((round-messages
+                               (ende-chat--execute-tool-round
+                                job calls configuration level request-id
+                                assistant)))
+                          (when (and round-messages (ende-job-current-p job))
+                            (setq messages (append messages round-messages))
+                            (ende--validate-messages messages)
+                            (ende--send-llm
+                              job messages #'on-done nil t))))))))))))
+       (ende--dispatch-llm job messages #'on-done nil nil t))))
 
 (defun ende-chat--run (job)
   "Serialize and dispatch a chat JOB at the moment it starts."

@@ -37,8 +37,31 @@
       (and (>= character ?0) (<= character ?9))
       (memq character '(?- ?. ?_ ?~))))
 
+(defun ende-url--path-character-p (character)
+  "Return non-nil when CHARACTER can safely remain literal in a URI path."
+  (or (ende-url--unreserved-p character)
+       (memq character '(?/ ?: ?@ ?! ?$ ?& ?' ?\( ?\) ?* ?+ ?, ?\; ?=))))
+
+(defun ende-url--escape-component (value &optional query)
+  "Percent-encode raw URI characters in VALUE for a path or QUERY component."
+  (let ((index 0)
+        (parts nil))
+    (while (< index (length value))
+      (let* ((character (aref value index))
+             (literal (or (ende-url--path-character-p character)
+                          (and query (= character ??)))))
+        (if (or literal (= character ?%))
+            (push (char-to-string character) parts)
+          (let ((bytes (encode-coding-string
+                        (char-to-string character) 'utf-8-unix t)))
+            (dotimes (offset (length bytes))
+              (push (format "%%%02X" (aref bytes offset)) parts))))
+        (setq index (1+ index))))
+    (apply #'concat (nreverse parts))))
+
 (defun ende-url--normalize-percent-escapes (path)
   "Normalize unreserved escapes in PATH and reject ambiguous escaping."
+  (setq path (ende-url--escape-component path))
   (ende-url--valid-escapes-p path)
   (when (or (string-match-p "%2[fF]" path)
             (string-match-p "%5[cC]" path))
@@ -58,6 +81,25 @@
               parts)
         (setq position end)))
     (push (substring path position) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun ende-url--normalize-query-escapes (query)
+  "Normalize percent escapes in QUERY without applying path restrictions."
+  (setq query (ende-url--escape-component query t))
+  (ende-url--valid-escapes-p query)
+  (let ((position 0)
+        (parts nil))
+    (while (string-match "%\\([[:xdigit:]][[:xdigit:]]\\)" query position)
+      (let* ((start (match-beginning 0))
+             (end (match-end 0))
+             (byte (string-to-number (match-string 1 query) 16)))
+        (push (substring query position start) parts)
+        (push (if (ende-url--unreserved-p byte)
+                  (char-to-string byte)
+                (format "%%%02X" byte))
+              parts)
+        (setq position end)))
+    (push (substring query position) parts)
     (apply #'concat (nreverse parts))))
 
 (defun ende-url--path-without-dot-segments (path)
@@ -199,8 +241,12 @@ PATTERN permits only the specified DNS wildcard forms."
    ((string-prefix-p "[" raw)
     (unless (string-suffix-p "]" raw)
       (error "malformed bracketed IPv6 host"))
-    (let* ((groups (ende-url--ipv6-groups (substring raw 1 -1)))
+    (let* ((literal (substring raw 1 -1))
+           (groups (ende-url--ipv6-groups literal))
            (number (ende-url--ipv6-number groups)))
+      (when (and (string-match-p "\\." literal)
+                 (/= (ash number -32) #xffff))
+        (error "unsupported embedded IPv4 IPv6 form; use an IPv4-mapped literal"))
       (list :host (concat "[" (ende-url--ipv6-string groups) "]")
             :host-kind (if (= (ash number -32) #xffff)
                            'ipv4-mapped-ipv6
@@ -256,8 +302,6 @@ PATTERN permits only the specified DNS wildcard forms."
                    (<= (length port-text) 5))
         (error "URL port must be a decimal integer from 1 to 65535")))
     (setq host-info (ende-url--host raw-host pattern))
-    (when (and pattern (eq (plist-get host-info :host-kind) 'ipv4-mapped-ipv6))
-      (error "IPv4-mapped IPv6 host patterns are not supported"))
     (let ((port (and port-text (string-to-number port-text))))
       (when (and port (or (< port 1) (> port 65535)))
         (error "URL port must be from 1 to 65535"))
@@ -303,7 +347,7 @@ The result includes `:url', `:scheme', `:host', `:host-kind', `:port',
     (setq path (ende-url--path-without-dot-segments
                 (ende-url--normalize-percent-escapes path)))
     (when query
-      (ende-url--valid-escapes-p query))
+      (setq query (ende-url--normalize-query-escapes query)))
     (let ((normalized
            (concat scheme "://" (plist-get host-info :host)
                    (if (= port default-port) "" (format ":%d" port))

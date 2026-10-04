@@ -34,6 +34,7 @@
 (require 'ende-llm)
 (require 'ende-queue)
 (require 'ende-patch)
+(require 'ende-web-fetch)
 (require 'ende-tools)
 (require 'ende-operations)
 (require 'ende-chat)
@@ -121,9 +122,11 @@
   (let* ((dir (or (file-name-directory (locate-library "ende.el"))
                   (user-error "ende.el not found on load-path")))
          (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
-                  "ende-transport.el" "ende-curl.el" "ende-provider.el"
+                  "ende-transport.el" "ende-url.el" "ende-curl.el"
+                  "ende-web-fetch.el"
+                  "ende-provider.el"
                   "ende-codex.el"
-                  "ende-review.el" "ende-project.el" "ende-url.el"
+                  "ende-review.el" "ende-project.el"
                   "ende-target.el" "ende-ui.el"
                   "ende-openrouter-batch.el" "ende-llm.el"
                   "ende-queue.el" "ende-edit.el" "ende-patch.el"

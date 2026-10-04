@@ -25,6 +25,8 @@
              ("*" "https://service.invalid/" t)
              ("*" "https://127.0.0.1/" nil)
              ("https://127.0.0.1/**" "https://127.0.0.1/a" t)
+             ("https://[::ffff:192.0.2.1]/**"
+              "https://[::ffff:c000:201]/a" t)
              ("https://[2001:db8::1]/**" "https://[2001:0db8:0:0:0:0:0:1]/a" t)))
     (ert-info ((format "%s against %s" (car case) (cadr case)))
       (should (eq (not (null (ende-url-pattern-allows-p
@@ -46,7 +48,21 @@
   (should (equal (plist-get (ende-url-normalize "http://example.com:80/") :url)
                  "http://example.com/"))
   (should (equal (plist-get (ende-url-normalize "https://example.com/a?q=x#f") :url)
-                 "https://example.com/a?q=x")))
+                 "https://example.com/a?q=x"))
+  (should (equal (plist-get
+                  (ende-url-normalize "https://example.com/café space?q=%25")
+                  :url)
+                 "https://example.com/caf%C3%A9%20space?q=%25"))
+  (should (ende-url-pattern-allows-p
+           (ende-url-pattern-compile "https://example.com/café space")
+           "https://example.com/caf%C3%A9%20space")))
+
+(ert-deftest ende-test/url-policy-ignores-query-for-path-permission ()
+  (let ((pattern (ende-url-pattern-compile "https://example.com/docs/index.html")))
+    (should (ende-url-pattern-allows-p
+             pattern "https://example.com/docs/index.html?token=private"))
+    (should-not (ende-url-pattern-allows-p
+                 pattern "https://example.com/docs/other.html?next=index.html"))))
 
 (ert-deftest ende-test/url-policy-rejects-ambiguous-and-unsupported-inputs ()
   (dolist (url '("//example.com/path"

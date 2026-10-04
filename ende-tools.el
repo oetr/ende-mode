@@ -19,6 +19,7 @@
 (require 'ende-project)
 (require 'ende-url)
 (require 'ende-patch)
+(require 'ende-web-fetch)
 
 (defcustom ende-tools-max-listed-files 200
   "Maximum files returned by one `list_project_files' call."
@@ -74,6 +75,9 @@
 
 (defvar ende-tools--access-tool nil
   "Tool symbol currently being authorized by a handler.")
+
+(defvar ende-tools--register-cancellation-function nil
+  "Optional function used to attach and detach an active tool cancellation.")
 
 (define-error 'ende-tool-mutation-failure "Ende mutation failed")
 
@@ -255,6 +259,25 @@ through its parent and must not be followed (notably for symlink-safe deletes)."
                         (eq (plist-get resource :type) 'url)
                         (ende-tools--url-resource-allows-p url resource))))
                resource-names))))
+
+(defun ende-tools--web-url-permission (url)
+  "Return URL policy details for normalized URL, or nil when denied."
+  (let* ((normalized (if (plist-get url :url) url (ende-url-normalize url)))
+         (allowed (ende-tools--url-authorized-p normalized)))
+    (when allowed
+      (let* ((assignments (plist-get ende-tools--access-config :tool-resources))
+             (resource-names (cdr (assq ende-tools--access-tool assignments)))
+             (resources (plist-get ende-tools--access-config :resources))
+             (private
+              (cl-some
+               (lambda (name)
+                 (let ((resource (cdr (assq name resources))))
+                   (and resource
+                        (eq (plist-get resource :type) 'url)
+                        (eq (plist-get resource :allow-private-addresses) t)
+                        (ende-tools--url-resource-allows-p normalized resource))))
+               resource-names)))
+        (list :authorized t :allow-private-addresses private)))))
 
 ;;;; Arguments and source resolution
 
@@ -1610,6 +1633,22 @@ No visiting buffer or review state is involved in this operation."
     (ende-tools--commit-change-sets change-sets)
     (list :files (vconcat (mapcar #'ende-tools--patch-result-entry change-sets)))))
 
+(defun ende-tools--web-fetch (arguments _root)
+  "Fetch one permission-scoped HTTP(S) URL as bounded raw text."
+  (ende-tools--assert-properties arguments '("url" "max_chars") "web_fetch")
+  (let* ((url (ende-tools--required-string arguments "url"))
+         (keys (mapcar #'ende-tools--property-name
+                       (ende-tools--object-keys arguments)))
+         (max-chars
+          (and (member "max_chars" keys)
+               (ende-tools--bounded-integer
+                arguments "max_chars" ende-web-fetch-max-output-chars
+                ende-web-fetch-max-output-chars)))
+         (result
+          (ende-web-fetch url #'ende-tools--web-url-permission max-chars
+                          ende-tools--register-cancellation-function)))
+    result))
+
 ;;;; Tool schemas and registrations
 
 (defconst ende-tools--empty-object-schema
@@ -1655,6 +1694,19 @@ No visiting buffer or review state is involved in this operation."
                    (:minLength . 1)
                    (:description . "Limited Codex-style text patch")))))
     (:required . ("patch"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--web-fetch-schema
+  '((:type . "object")
+    (:properties
+     . ((:url . ((:type . "string")
+                 (:minLength . 1)
+                 (:description . "Absolute HTTP(S) URL authorized by URL resources")))
+        (:max_chars . ((:type . "integer")
+                       (:minimum . 1)
+                       (:maximum . 50000)
+                       (:description . "Optional lower output-character ceiling")))))
+    (:required . ("url"))
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--edit-item-schema
@@ -1776,6 +1828,13 @@ No visiting buffer or review state is involved in this operation."
  "Apply an exact-context multi-file text patch within independently granted scopes."
  ende-tools--apply-patch-schema
  #'ende-tools--apply-patch :write)
+
+(ende-tool-register
+ 'web_fetch
+ "Fetch bounded textual content from a URL explicitly permitted by this chat."
+ ende-tools--web-fetch-schema
+ #'ende-tools--web-fetch nil :no-resource
+ '(:resource-kind url :requires-root nil))
 
 (provide 'ende-tools)
 
