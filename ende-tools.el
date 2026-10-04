@@ -18,6 +18,7 @@
 (require 'ende-edit)
 (require 'ende-project)
 (require 'ende-url)
+(require 'ende-patch)
 
 (defcustom ende-tools-max-listed-files 200
   "Maximum files returned by one `list_project_files' call."
@@ -46,6 +47,16 @@
 
 (defcustom ende-tools-max-edits 100
   "Maximum edits accepted by one `edit_file' call."
+  :type 'integer
+  :group 'ende)
+
+(defcustom ende-tools-max-mutation-operations 50
+  "Maximum file operations accepted by one batch mutation tool call."
+  :type 'integer
+  :group 'ende)
+
+(defcustom ende-tools-max-prepared-bytes (* 20 1024 1024)
+  "Maximum combined original and prepared data for one mutation batch."
   :type 'integer
   :group 'ende)
 
@@ -157,8 +168,8 @@ and controls tool activation and path authorization."
         (ende-tool-mutation-failure
          (list :ok nil
                :tool (symbol-name (ende-tool-name tool))
-               :error (error-message-string caught)
-               :recovery (cadr (cdr caught))))
+               :error (or (cadr caught) (error-message-string caught))
+               :recovery (caddr caught)))
         ((error quit)
           (list :ok nil
                 :tool (symbol-name (ende-tool-name tool))
@@ -171,39 +182,56 @@ and controls tool activation and path authorization."
        (not (cl-some (lambda (regexp) (string-match-p regexp relative))
                      (plist-get resource :exclude-regexps)))))
 
-(defun ende-tools--path-authorized-p (path root)
-  "Return non-nil when canonical PATH is allowed by the current tool policy."
+(defun ende-tools--path-authorized-for-p
+    (tool path root &optional no-follow-final)
+  "Return non-nil when PATH is authorized for TOOL below ROOT.
+When NO-FOLLOW-FINAL is non-nil, PATH's final component is already resolved
+through its parent and must not be followed (notably for symlink-safe deletes)."
   (if (null ende-tools--access-config)
       t
     (let* ((root (file-name-as-directory root))
            (canonical
             (condition-case nil
-                (if (file-exists-p path)
+                (if no-follow-final
+                    (expand-file-name path)
+                  (if (file-exists-p path)
                     (file-truename path)
-                  (expand-file-name path root))
+                    (expand-file-name path root)))
               (error nil)))
            (relative (and canonical
                           (file-in-directory-p canonical root)
                           (file-relative-name canonical root)))
            (assignments (plist-get ende-tools--access-config
-                                   :tool-resources))
-           (resource-names (cdr (assq ende-tools--access-tool assignments)))
+                                    :tool-resources))
+           (resource-names (cdr (assq tool assignments)))
            (resources (plist-get ende-tools--access-config :resources)))
       (and relative
            (not (ende-project--excluded-p relative))
            (cl-some
-            (lambda (name)
-              (let ((resource (cdr (assq name resources))))
-                (and resource
-                     (ende-tools--resource-allows-p relative resource))))
-            resource-names)))))
+             (lambda (name)
+               (let ((resource (cdr (assq name resources))))
+                 (and resource
+                      (eq (plist-get resource :type) 'file)
+                      (ende-tools--resource-allows-p relative resource))))
+             resource-names)))))
+
+(defun ende-tools--path-authorized-p (path root)
+  "Return non-nil when canonical PATH is allowed by the current tool policy."
+  (ende-tools--path-authorized-for-p ende-tools--access-tool path root))
+
+(defun ende-tools--assert-path-authorized-for
+    (tool path root &optional no-follow-final)
+  "Signal unless PATH is allowed for TOOL in ROOT."
+  (unless (ende-tools--path-authorized-for-p
+           tool path root no-follow-final)
+    (error "path is not authorized for %s by this chat's resources: %s"
+           tool (file-relative-name path root)))
+  path)
 
 (defun ende-tools--assert-path-authorized (path root)
   "Signal unless PATH is allowed for the current tool in ROOT."
-  (unless (ende-tools--path-authorized-p path root)
-    (error "path is not authorized by this chat's resources: %s"
-           (file-relative-name path root)))
-  path)
+  (ende-tools--assert-path-authorized-for
+   ende-tools--access-tool path root))
 
 (defun ende-tools--url-resource-allows-p (url resource)
   "Return non-nil when URL is included and not excluded by RESOURCE."
@@ -621,9 +649,560 @@ FUNCTION receives no arguments and may return any value."
 ;;;; Change sets and writes
 
 (cl-defstruct (ende-change-set (:constructor ende-change-set--create))
-  "A validated project change being applied immediately."
+  "A validated disk mutation, prepared separately from its commit."
   operation root source-kind path base-digest anchor-edits edits
-  content)
+  content absolute-path expected-exists original-content original-bytes
+  raw-digest coding-system file-mode identity prepared-coding-system
+  strict-path-policy strict-buffer-policy authorization-tools visiting-buffers
+  recovery-path stage-path committed-identity prepared-raw-digest state)
+
+(defvar ende-tools--mutation-locks (make-hash-table :test #'equal)
+  "Project roots currently locked by an Ende disk mutation.")
+
+(defun ende-tools--file-identity (attributes)
+  "Return stable identity and mutable preconditions from file ATTRIBUTES."
+  (list (file-attribute-file-identifier attributes)
+        (file-attribute-size attributes)
+        (file-attribute-modification-time attributes)
+        (file-attribute-status-change-time attributes)
+        (file-attribute-modes attributes)))
+
+(defun ende-tools--literal-file-bytes (path)
+  "Return PATH contents as uninterpreted unibyte data."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (buffer-string)))
+
+(defun ende-tools--decoded-file (path)
+  "Return decoded disk contents and their coding system for PATH."
+  (with-temp-buffer
+    (let ((coding-system-for-read 'undecided))
+      (insert-file-contents path))
+    (list :content (buffer-substring-no-properties (point-min) (point-max))
+          :coding-system (or last-coding-system-used 'utf-8-unix))))
+
+(defun ende-tools--public-content-digest (content)
+  "Return CONTENT's digest in the same representation as read_file."
+  (with-temp-buffer
+    (insert content)
+    (ende-tools--source-digest)))
+
+(defun ende-tools--capture-file (path)
+  "Capture PATH's bytes, decoded text, coding, identity, and mode consistently."
+  (when (file-symlink-p path)
+    (error "final-component symlinks are not allowed: %s" path))
+  (unless (and (file-regular-p path) (file-readable-p path))
+    (error "mutation source is not a readable regular file: %s" path))
+  (when (and ende-project-max-file-bytes
+             (> (file-attribute-size (file-attributes path))
+                ende-project-max-file-bytes))
+    (error "project file is larger than the tool limit: %s" path))
+  (let* ((before (file-attributes path))
+         (before-identity (ende-tools--file-identity before))
+         (bytes (ende-tools--literal-file-bytes path))
+         (decoded (ende-tools--decoded-file path))
+         (after (file-attributes path))
+         (after-bytes (ende-tools--literal-file-bytes path)))
+    (unless (and after
+                 (equal before-identity (ende-tools--file-identity after))
+                 (string= (secure-hash 'sha256 bytes)
+                          (secure-hash 'sha256 after-bytes)))
+      (error "source changed while preparing mutation: %s" path))
+    (list :content (plist-get decoded :content)
+          :bytes bytes
+          :raw-digest (secure-hash 'sha256 bytes)
+          :digest (ende-tools--public-content-digest
+                   (plist-get decoded :content))
+          :coding-system (plist-get decoded :coding-system)
+          :file-mode (file-modes path)
+          :identity before-identity)))
+
+(defun ende-tools--strict-relative-path (path)
+  "Validate project-relative literal mutation PATH and return it unchanged."
+  (unless (and (stringp path) (not (string-empty-p path)))
+    (error "mutation path must be a non-empty project-relative string"))
+  (when (or (file-name-absolute-p path)
+            (file-remote-p path)
+            (string-match-p "[[:cntrl:]\\\\]" path))
+    (error "mutation path must be local and project-relative: %s" path))
+  (when (cl-some (lambda (component)
+                   (or (string-empty-p component)
+                       (member component '("." ".."))))
+                 (split-string path "/" nil))
+    (error "mutation path must not contain empty, . or .. components: %s" path))
+  path)
+
+(defun ende-tools--resolve-mutation-path (path root &optional strict)
+  "Resolve literal PATH through its existing parent below ROOT.
+The final component is deliberately not followed through a symlink."
+  (if strict
+      (ende-tools--strict-relative-path path)
+    (unless (and (stringp path) (not (string-empty-p path))
+                 (not (file-name-absolute-p path))
+                 (not (file-remote-p path))
+                 (not (string-match-p "[[:cntrl:]]" path)))
+      (error "mutation target is not a project-relative path")))
+  (let* ((root (ende-project-normalize-root root))
+         (expanded (expand-file-name path root))
+         (parent (file-name-directory expanded))
+         (name (file-name-nondirectory expanded)))
+    (when (file-remote-p expanded)
+      (error "remote mutation paths are not supported"))
+    (unless (file-directory-p parent)
+      (error "parent directory does not exist: %s"
+             (file-name-directory path)))
+    (let* ((canonical-parent (file-truename parent))
+           (canonical (expand-file-name name canonical-parent))
+           (relative (file-relative-name canonical root)))
+      ;; Inspect the link itself before containment helpers can resolve its
+      ;; final component.
+      (when (file-symlink-p canonical)
+        (error "final-component symlinks are not allowed: %s" relative))
+      (unless (file-in-directory-p canonical root)
+        (error "path is outside the project: %s" path))
+      (when (ende-project--excluded-p relative)
+        (error "path is excluded from project tools: %s" path))
+      (list :path canonical :relative relative :root root))))
+
+(defun ende-tools--visiting-buffers-for-path (path)
+  "Return every visiting buffer that names PATH, including missing files."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (let ((buffer-path (and (buffer-live-p buffer)
+                             (buffer-file-name buffer))))
+       (when (and buffer-path (not (file-remote-p buffer-path)))
+         (let ((candidate
+                (condition-case nil
+                    (if (file-exists-p buffer-path)
+                        (file-truename buffer-path)
+                      (expand-file-name buffer-path))
+                  (error nil))))
+            (and candidate (file-equal-p candidate path))))))
+   (buffer-list)))
+
+(defun ende-tools--modified-buffers (buffers)
+  "Return modified live buffers among BUFFERS."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (and (buffer-live-p buffer)
+          (with-current-buffer buffer (buffer-modified-p))))
+   buffers))
+
+(defun ende-tools--mutation-existing-p (change-set)
+  "Return non-nil when CHANGE-SET expects an existing source."
+  (eq (ende-change-set-expected-exists change-set) t))
+
+(defun ende-tools--mutation-assert-authorized (change-set path)
+  "Reauthorize CHANGE-SET's complete operation scope at PATH."
+  (dolist (tool (ende-change-set-authorization-tools change-set))
+    (ende-tools--assert-path-authorized-for tool path
+                                             (ende-change-set-root change-set)
+                                             t)))
+
+(defun ende-tools--validate-change-set (change-set)
+  "Revalidate target identity, permissions and buffer policy for CHANGE-SET."
+  (let* ((root (ende-change-set-root change-set))
+         (resolved (ende-tools--resolve-mutation-path
+                    (ende-change-set-path change-set) root
+                    (ende-change-set-strict-path-policy change-set)))
+         (path (plist-get resolved :path))
+         (exists (or (file-exists-p path) (file-symlink-p path))))
+    (unless (equal path (ende-change-set-absolute-path change-set))
+      (error "mutation target resolved differently since preparation: %s"
+             (ende-change-set-path change-set)))
+    (ende-tools--mutation-assert-authorized change-set path)
+    (unless (eq (not (null exists))
+               (ende-tools--mutation-existing-p change-set))
+      (error (if exists
+                 "file appeared after mutation preparation: %s"
+               "file disappeared after mutation preparation: %s")
+             (ende-change-set-path change-set)))
+    (when (ende-tools--mutation-existing-p change-set)
+      (let ((current (ende-tools--capture-file path)))
+        (unless (and (equal (plist-get current :identity)
+                            (ende-change-set-identity change-set))
+                     (equal (plist-get current :raw-digest)
+                            (ende-change-set-raw-digest change-set)))
+          (error "source changed since mutation preparation: %s"
+                 (ende-change-set-path change-set)))))
+    (let ((buffers (ende-tools--visiting-buffers-for-path path)))
+      (when (and (ende-change-set-strict-buffer-policy change-set)
+                 (ende-tools--modified-buffers buffers))
+        (error "unsaved visiting buffer prevents mutation of %s"
+               (ende-change-set-path change-set)))
+      (setf (ende-change-set-visiting-buffers change-set) buffers))
+    path))
+
+(defun ende-tools--validate-change-sets (change-sets)
+  "Validate the complete CHANGE-SETS batch before commit."
+  (dolist (change-set change-sets)
+    (ende-tools--validate-change-set change-set)))
+
+(defun ende-tools--set-snapshot (change-set snapshot)
+  "Store file SNAPSHOT preconditions and source details in CHANGE-SET."
+  (setf (ende-change-set-original-content change-set)
+        (plist-get snapshot :content)
+        (ende-change-set-original-bytes change-set) (plist-get snapshot :bytes)
+        (ende-change-set-raw-digest change-set)
+        (plist-get snapshot :raw-digest)
+        (ende-change-set-base-digest change-set) (plist-get snapshot :digest)
+        (ende-change-set-coding-system change-set)
+        (plist-get snapshot :coding-system)
+        (ende-change-set-file-mode change-set) (plist-get snapshot :file-mode)
+        (ende-change-set-identity change-set) (plist-get snapshot :identity))
+  change-set)
+
+(defun ende-tools--change-set-size (change-set)
+  "Estimate original and prepared bytes held by CHANGE-SET."
+  (+ (string-bytes (or (ende-change-set-original-bytes change-set) ""))
+     (string-bytes (or (ende-change-set-content change-set) ""))))
+
+(defun ende-tools--assert-change-set-limits (change-sets)
+  "Reject excessive operation count or cumulative prepared data."
+  (when (> (length change-sets) ende-tools-max-mutation-operations)
+    (error "mutation batch contains too many file operations (maximum %d)"
+           ende-tools-max-mutation-operations))
+  (let ((total (cl-loop for change-set in change-sets
+                        sum (ende-tools--change-set-size change-set))))
+    (when (> total ende-tools-max-prepared-bytes)
+      (error "mutation batch exceeds the %d-byte prepared-data limit"
+             ende-tools-max-prepared-bytes))))
+
+(defun ende-tools--assert-change-set-targets-unique (change-sets)
+  "Reject duplicate canonical paths and hard-link aliases in CHANGE-SETS."
+  (let ((paths (make-hash-table :test #'equal))
+        (identities (make-hash-table :test #'equal)))
+    (dolist (change-set change-sets)
+      (let ((path (ende-change-set-absolute-path change-set)))
+        (when (gethash path paths)
+          (error "mutation batch targets %s more than once"
+                 (ende-change-set-path change-set)))
+        (puthash path t paths)
+        (when (ende-tools--mutation-existing-p change-set)
+          (let* ((attributes (file-attributes path))
+                 (identity (and attributes
+                                (file-attribute-file-identifier attributes))))
+            (when (and identity (gethash identity identities))
+              (error "mutation batch targets the same existing file through aliases: %s"
+                     (ende-change-set-path change-set)))
+            (when identity
+              (puthash identity t identities))))))))
+
+(defun ende-tools--write-private-bytes (path bytes)
+  "Write raw BYTES to existing private PATH without encoding conversion."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert bytes)
+    (let ((coding-system-for-write 'no-conversion)
+          (inhibit-message t))
+      (write-region (point-min) (point-max) path nil 'silent))))
+
+(defun ende-tools--write-raw-exclusive (path bytes mode)
+  "Exclusively create PATH from uninterpreted BYTES and restore MODE."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert bytes)
+    (let ((coding-system-for-write 'no-conversion)
+          (inhibit-message t))
+      (write-region (point-min) (point-max) path nil 'silent nil 'excl)))
+  (when mode (set-file-modes path mode))
+  path)
+
+(defun ende-tools--write-change-set-stage (change-set)
+  "Create a private, adjacent staged file for existing-file CHANGE-SET."
+  (let* ((path (ende-change-set-absolute-path change-set))
+         (directory (file-name-directory path))
+         (stage (make-temp-file (expand-file-name ".ende-stage-" directory))))
+    (set-file-modes stage #o600)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert (ende-change-set-content change-set))
+            (let ((coding-system-for-write
+                   (or (ende-change-set-prepared-coding-system change-set)
+                       (ende-change-set-coding-system change-set)
+                       'utf-8-unix))
+                  (require-final-newline nil)
+                  (inhibit-message t))
+              (write-region (point-min) (point-max) stage nil 'silent)))
+          (setf (ende-change-set-stage-path change-set) stage
+                (ende-change-set-prepared-raw-digest change-set)
+                (secure-hash 'sha256 (ende-tools--literal-file-bytes stage))
+                (ende-change-set-committed-identity change-set)
+                (ende-tools--file-identity (file-attributes stage)))
+          stage)
+      (unless (equal stage (ende-change-set-stage-path change-set))
+        (when (file-exists-p stage)
+          (delete-file stage))))))
+
+(defun ende-tools--write-change-set-recovery (change-set)
+  "Create restrictive recovery material for existing CHANGE-SET."
+  (let* ((path (ende-change-set-absolute-path change-set))
+         (recovery (make-temp-file
+                    (expand-file-name ".ende-recovery-"
+                                      (file-name-directory path)))))
+    (unwind-protect
+        (progn
+          (set-file-modes recovery #o600)
+          (ende-tools--write-private-bytes
+           recovery (ende-change-set-original-bytes change-set))
+          (set-file-modes recovery #o600)
+          (setf (ende-change-set-recovery-path change-set) recovery)
+          recovery)
+      (unless (equal recovery (ende-change-set-recovery-path change-set))
+        (when (file-exists-p recovery)
+          (delete-file recovery))))))
+
+(defun ende-tools--prepare-change-set-resources (change-sets)
+  "Create all private recovery and staging files for CHANGE-SETS."
+  (dolist (change-set change-sets)
+    (when (ende-tools--mutation-existing-p change-set)
+      (ende-tools--write-change-set-recovery change-set)
+      (unless (eq (ende-change-set-operation change-set) 'delete)
+        (ende-tools--write-change-set-stage change-set)))))
+
+(defun ende-tools--file-current-raw-digest (path)
+  "Return PATH's raw digest, or nil when no regular file exists."
+  (when (and (file-regular-p path) (not (file-symlink-p path)))
+    (secure-hash 'sha256 (ende-tools--literal-file-bytes path))))
+
+(defun ende-tools--file-current-identity (path)
+  "Return PATH's stable file identifier, or nil if it cannot be read."
+  (condition-case nil
+      (and (file-regular-p path) (not (file-symlink-p path))
+           (file-attribute-file-identifier (file-attributes path)))
+    (error nil)))
+
+(defun ende-tools--change-set-result-entry (change-set status)
+  "Return a JSON-compatible per-file report for CHANGE-SET and STATUS."
+  (list :operation (symbol-name (ende-change-set-operation change-set))
+        :path (ende-change-set-path change-set) :status status))
+
+(defun ende-tools--recovery-error-entry (change-set caught)
+  "Return recovery status for CHANGE-SET after rollback condition CAUGHT."
+  (append (ende-tools--change-set-result-entry change-set "recovery_needed")
+          (list :recovery_error (error-message-string caught))))
+
+(defun ende-tools--restore-change-set (change-set)
+  "Best-effort rollback for one CHANGE-SET; return its actual-state report."
+  (let* ((path (ende-change-set-absolute-path change-set))
+         (exists (or (file-exists-p path) (file-symlink-p path)))
+         (operation (ende-change-set-operation change-set))
+         (current-digest (and exists
+                              (ende-tools--file-current-raw-digest path)))
+         (original-p (and exists
+                          (equal current-digest
+                                 (ende-change-set-raw-digest change-set))
+                          (equal (ende-tools--file-current-identity path)
+                                 (car (ende-change-set-identity change-set)))))
+         (new-p (and exists
+                     (equal current-digest
+                            (ende-change-set-prepared-raw-digest change-set))
+                     (equal (ende-tools--file-current-identity path)
+                            (car (ende-change-set-committed-identity change-set)))))
+         (entry (ende-tools--change-set-result-entry change-set "not_applied")))
+    (condition-case caught
+        (cond
+         ((memq operation '(create add))
+          (cond
+           ((not exists) nil)
+           (new-p
+            (let ((delete-by-moving-to-trash nil))
+              (delete-file path))
+            (setq entry
+                  (ende-tools--change-set-result-entry change-set "restored")))
+           (t
+            (setq entry
+                  (ende-tools--change-set-result-entry
+                   change-set "concurrent_change_preserved")))))
+         ((eq operation 'delete)
+          (cond
+           (original-p nil)
+           ((not exists)
+            (let ((bytes (ende-tools--literal-file-bytes
+                          (ende-change-set-recovery-path change-set))))
+              (ende-tools--resolve-mutation-path
+               (ende-change-set-path change-set)
+               (ende-change-set-root change-set)
+               (ende-change-set-strict-path-policy change-set))
+              (ende-tools--write-raw-exclusive
+               path bytes (ende-change-set-file-mode change-set)))
+            (setq entry
+                  (ende-tools--change-set-result-entry change-set "restored")))
+           (t
+            (setq entry
+                  (ende-tools--change-set-result-entry
+                   change-set "concurrent_change_preserved")))))
+         (t
+          (cond
+           (original-p nil)
+           (new-p
+            (let* ((recovery (ende-change-set-recovery-path change-set))
+                   (bytes (ende-tools--literal-file-bytes recovery))
+                   (stage (make-temp-file
+                           (expand-file-name
+                            ".ende-restore-" (file-name-directory path)))))
+              (unwind-protect
+                  (progn
+                    (set-file-modes stage #o600)
+                    (ende-tools--write-private-bytes stage bytes)
+                    (unless (equal current-digest
+                                   (ende-tools--file-current-raw-digest path))
+                      (error "target changed during rollback"))
+                    (rename-file stage path t)
+                    (when (ende-change-set-file-mode change-set)
+                      (set-file-modes path
+                                      (ende-change-set-file-mode change-set)))
+                    (setq entry
+                          (ende-tools--change-set-result-entry
+                           change-set "restored")))
+                (when (file-exists-p stage)
+                  (delete-file stage)))))
+           (t
+            (setq entry
+                   (ende-tools--change-set-result-entry
+                    change-set "concurrent_change_preserved"))))))
+      (error
+       (setq entry (ende-tools--recovery-error-entry change-set caught)))
+      (quit
+       (setq entry (ende-tools--recovery-error-entry change-set caught))))
+    (when (and (ende-change-set-recovery-path change-set)
+               (not (equal (plist-get entry :status) "recovery_needed"))
+               (not (equal (plist-get entry :status)
+                           "concurrent_change_preserved")))
+      (let ((recovery (ende-change-set-recovery-path change-set)))
+        (when (file-exists-p recovery)
+          (delete-file recovery))
+        (setf (ende-change-set-recovery-path change-set) nil)))
+    (when (ende-change-set-recovery-path change-set)
+      (setq entry
+            (append entry
+                    (list :recovery_file
+                          (file-relative-name
+                           (ende-change-set-recovery-path change-set)
+                           (ende-change-set-root change-set))))))
+    entry))
+
+(defun ende-tools--rollback-change-sets (change-sets)
+  "Roll back attempted CHANGE-SETS in reverse order and return a report."
+  (vconcat
+   (mapcar (lambda (change-set)
+             (if (memq (ende-change-set-state change-set) '(committing applied))
+                 (ende-tools--restore-change-set change-set)
+               (ende-tools--change-set-result-entry
+                change-set "not_applied")))
+           (reverse change-sets))))
+
+(defun ende-tools--commit-change-set (change-set)
+  "Apply one fully prepared CHANGE-SET after its final revalidation."
+  (let* ((path (ende-tools--validate-change-set change-set))
+         (operation (ende-change-set-operation change-set)))
+    (setf (ende-change-set-state change-set) 'committing)
+    (pcase operation
+      ((or 'create 'add)
+       (let* ((coding-system
+               (or (ende-change-set-prepared-coding-system change-set)
+                   (and (eq operation 'create)
+                        (ende-change-set-coding-system change-set))
+                   'utf-8-unix))
+              (coding-system-for-write coding-system))
+          (ende-tools--write-new-file (ende-change-set-content change-set)
+                                      path))
+       (setf (ende-change-set-prepared-raw-digest change-set)
+             (ende-tools--file-current-raw-digest path)
+             (ende-change-set-committed-identity change-set)
+             (list (ende-tools--file-current-identity path))
+             (ende-change-set-state change-set) 'applied))
+      ('delete
+       (if delete-by-moving-to-trash
+           (move-file-to-trash path)
+         (delete-file path))
+       (when (or (file-exists-p path) (file-symlink-p path))
+         (error "delete operation did not remove the target: %s"
+                (ende-change-set-path change-set)))
+       (setf (ende-change-set-state change-set) 'applied))
+      (_
+       (unless (ende-change-set-stage-path change-set)
+         (error "missing staged contents for %s"
+                (ende-change-set-path change-set)))
+       (rename-file (ende-change-set-stage-path change-set) path t)
+       (setf (ende-change-set-stage-path change-set) nil)
+       (when (ende-change-set-file-mode change-set)
+         (set-file-modes path (ende-change-set-file-mode change-set)))
+       (setf (ende-change-set-state change-set) 'applied)))))
+
+(defun ende-tools--cleanup-change-set-resources (change-sets keep-recovery)
+  "Clean staging resources for CHANGE-SETS, retaining recovery if requested."
+  (dolist (change-set change-sets)
+    (let ((stage (ende-change-set-stage-path change-set))
+          (recovery (ende-change-set-recovery-path change-set)))
+      (when (and stage (file-exists-p stage))
+        (condition-case nil (delete-file stage) (error nil)))
+      (when (and recovery (not (member recovery keep-recovery))
+                 (file-exists-p recovery))
+        (condition-case nil (delete-file recovery) (error nil))))))
+
+(defvar ende-tools--mutation-retained-recovery nil
+  "Recovery files that must survive mutation cleanup.")
+
+(defun ende-tools--signal-mutation-commit-failure
+    (change-sets root caught)
+  "Roll back CHANGE-SETS and signal a structured failure for CAUGHT."
+  (let ((report (ende-tools--rollback-change-sets change-sets)))
+    (dolist (entry (append report nil))
+      (when (plist-get entry :recovery_file)
+        (push (expand-file-name (plist-get entry :recovery_file) root)
+              ende-tools--mutation-retained-recovery)))
+    (signal 'ende-tool-mutation-failure
+            (list (format "mutation commit failed: %s"
+                          (error-message-string caught))
+                  report))))
+
+(defun ende-tools--commit-change-sets (change-sets)
+  "Commit fully validated CHANGE-SETS with best-effort reverse rollback."
+  (let* ((root (ende-project-normalize-root
+                (ende-change-set-root (car change-sets))))
+         (locked nil)
+         (ende-tools--mutation-retained-recovery nil))
+    (unless change-sets
+      (error "mutation batch must contain at least one operation"))
+    (dolist (change-set change-sets)
+      (unless (equal root (ende-project-normalize-root
+                           (ende-change-set-root change-set)))
+        (error "a mutation batch must stay within one project")))
+    (ende-tools--assert-change-set-limits change-sets)
+    (ende-tools--assert-change-set-targets-unique change-sets)
+    (ende-tools--validate-change-sets change-sets)
+    (when (gethash root ende-tools--mutation-locks)
+      (error "another Ende mutation is already committing in this project"))
+    (puthash root t ende-tools--mutation-locks)
+    (setq locked t)
+    (unwind-protect
+        (progn
+          (ende-tools--prepare-change-set-resources change-sets)
+          ;; Staging can take time; validate the complete input once more before
+          ;; the first target is touched.
+          (ende-tools--validate-change-sets change-sets)
+          (condition-case caught
+              (progn
+                (dolist (change-set change-sets)
+                  (ende-tools--commit-change-set change-set))
+                (mapcar (lambda (change-set)
+                          (ende-tools--change-set-result-entry
+                           change-set "applied"))
+                        change-sets))
+            (error
+             (ende-tools--signal-mutation-commit-failure
+              change-sets root caught))
+            (quit
+             (ende-tools--signal-mutation-commit-failure
+              change-sets root caught))))
+      (unwind-protect
+          (ende-tools--cleanup-change-set-resources
+           change-sets ende-tools--mutation-retained-recovery)
+        (when locked
+          (remhash root ende-tools--mutation-locks))))))
 
 (defun ende-tools--sequence (value)
   "Return VALUE as a list when it is a JSON array or Lisp sequence."
@@ -731,26 +1310,31 @@ FUNCTION receives no arguments and may return any value."
   (ende-tools--assert-properties arguments '("path" "edits") "edit_file")
   (let* ((path (ende-tools--required-string arguments "path"))
          (anchor-edits (ende-tools--anchor-edits
-                         (ende-tools--argument arguments "edits")))
+                          (ende-tools--argument arguments "edits")))
          (source (ende-tools--resolve-disk-source
-                  (list (cons "path" path)) root))
+                   (list (cons "path" path)) root))
+         (absolute-path (plist-get source :path))
+         (snapshot (ende-tools--capture-file absolute-path))
+         (content (plist-get snapshot :content))
+         (edits (ende-tools--normalize-anchor-edits anchor-edits content))
+         (result-content
+          (with-temp-buffer
+            (insert content)
+            (ende-tools--apply-edits-in-buffer edits)
+            (buffer-substring-no-properties (point-min) (point-max))))
          (change-set
-           (ende-tools--with-source
-            source
-           (lambda ()
-             (let* ((content (buffer-substring-no-properties
-                              (point-min) (point-max)))
-                    (base-digest (ende-tools--source-digest))
-                    (edits (ende-tools--normalize-anchor-edits
-                            anchor-edits content)))
-                (ende-change-set--create
-                 :operation 'edit
-                 :root root
-                 :source-kind "file"
-                 :path (plist-get source :relative)
-                 :base-digest base-digest
-                 :anchor-edits anchor-edits
-                 :edits edits))))))
+          (ende-change-set--create
+           :operation 'edit
+           :root root
+           :source-kind "file"
+           :path (plist-get source :relative)
+           :absolute-path absolute-path
+           :expected-exists t
+           :anchor-edits anchor-edits
+           :edits edits
+           :content result-content
+            :authorization-tools '(edit_file))))
+    (ende-tools--set-snapshot change-set snapshot)
     (ende-tools--apply-change-set-object change-set)))
 
 (defun ende-tools--create-file-path (path root)
@@ -766,11 +1350,13 @@ FUNCTION receives no arguments and may return any value."
            (file-relative-name path root)))
   path)
 
-(defun ende-tools--write-new-file (content path)
+(defun ende-tools--write-new-file (content path &optional coding-system)
   "Write CONTENT to new PATH, failing if the filesystem entry exists."
   (with-temp-buffer
     (insert content)
-    (write-region (point-min) (point-max) path nil 'silent nil 'excl)))
+    (let ((coding-system-for-write
+           (or coding-system coding-system-for-write)))
+      (write-region (point-min) (point-max) path nil 'silent nil 'excl))))
 
 (defun ende-tools--create-file (arguments root)
   "Create a new project file immediately when the chat authorizes it."
@@ -830,7 +1416,10 @@ No visiting buffer or review state is involved in this operation."
          (path (ende-tools--create-file-path
                 (ende-change-set-path change-set) root)))
     (ende-tools--assert-new-file-path path root)
-    (ende-tools--write-new-file (ende-change-set-content change-set) path)
+    (setf (ende-change-set-absolute-path change-set) path
+          (ende-change-set-expected-exists change-set) nil
+          (ende-change-set-authorization-tools change-set) '(create_file))
+    (ende-tools--commit-change-sets (list change-set))
     (ende-tools--change-set-result change-set)))
 
 (defun ende-tools--apply-change-set-object (change-set)
@@ -841,41 +1430,13 @@ No visiting buffer or review state is involved in this operation."
 
 (defun ende-tools--apply-edit-change-set-object (change-set)
   "Apply disk-file CHANGE-SET after revalidating its source and every edit."
-  (let* ((source (ende-tools--current-change-set-source change-set))
-         (path (plist-get source :path))
-         (coding-system nil)
-         (application
-          (ende-tools--with-source
-           source
-           (lambda ()
-             (setq coding-system last-coding-system-used)
-             (unless (string=
-                      (ende-change-set-base-digest change-set)
-                      (ende-tools--source-digest))
-               (error "source changed since the change set was created"))
-             (unless (equal
-                      (ende-tools--normalize-anchor-edits
-                       (ende-change-set-anchor-edits change-set)
-                       (buffer-substring-no-properties
-                        (point-min) (point-max)))
-                      (ende-change-set-edits change-set))
-               (error "change set edits no longer match the source"))
-             (ende-tools--apply-edits-in-buffer
-              (ende-change-set-edits change-set))
-             ;; Re-read immediately before writing, so a concurrent disk
-             ;; change during edit application is not overwritten.
-             (let ((current (ende-tools--current-change-set-source change-set)))
-               (unless (string=
-                        (ende-change-set-base-digest change-set)
-                        (ende-tools--with-source
-                         current #'ende-tools--source-digest))
-                 (error "source changed while preparing the disk edit")))
-             (let ((coding-system-for-write
-                    (or coding-system 'utf-8-unix))
-                   (inhibit-message t))
-               (write-region (point-min) (point-max) path nil nil nil))
-             (list :applied_edits
-                   (length (ende-change-set-edits change-set))))))
+  (let* ((application
+          (progn
+            (setf (ende-change-set-expected-exists change-set) t
+                  (ende-change-set-authorization-tools change-set) '(edit_file))
+            (ende-tools--commit-change-sets (list change-set))
+            (list :applied_edits
+                  (length (ende-change-set-edits change-set)))))
          (visiting-buffer
           (ende-project-visiting-buffer
            (ende-change-set-path change-set)
@@ -900,7 +1461,154 @@ No visiting buffer or review state is involved in this operation."
                                (concat
                                  "The visiting buffer was left unchanged and "
                                  "may not reflect this disk edit.")))))))
-    result))
+     result))
+
+(defun ende-tools--delete-file (arguments root)
+  "Delete one authorized regular file without touching visiting buffers."
+  (ende-tools--assert-properties
+   arguments '("path" "expected_digest") "delete_file")
+  (let* ((path (ende-tools--required-string arguments "path"))
+         (keys (mapcar #'ende-tools--property-name
+                       (ende-tools--object-keys arguments)))
+         (expected (ende-tools--argument arguments "expected_digest")))
+    (when (and (member "expected_digest" keys)
+               (not (and (stringp expected)
+                         (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'"
+                                         expected))))
+      (error "expected_digest must be a SHA-256 hex digest"))
+    (let* ((resolved (ende-tools--resolve-mutation-path path root t))
+           (absolute (plist-get resolved :path))
+           (relative (plist-get resolved :relative)))
+      ;; This deliberately authorizes the unresolved final component: the
+      ;; resolver has already canonicalized its parent and rejected symlinks.
+      (ende-tools--assert-path-authorized-for
+       'delete_file absolute root t)
+      (unless (or (file-exists-p absolute) (file-symlink-p absolute))
+        (error "file does not exist: %s" relative))
+      (unless (file-regular-p absolute)
+        (error "delete_file only removes regular files: %s" relative))
+      (let* ((snapshot (ende-tools--capture-file absolute))
+             (change-set
+              (ende-change-set--create
+               :operation 'delete :root root :source-kind "file"
+               :path relative :absolute-path absolute :expected-exists t
+               :strict-path-policy t :strict-buffer-policy t
+               :authorization-tools '(delete_file))))
+        (when (and expected
+                   (not (string-equal expected (plist-get snapshot :digest))))
+          (error "expected_digest does not match the current file: %s" relative))
+        (ende-tools--set-snapshot change-set snapshot)
+        (ende-tools--commit-change-sets (list change-set))
+        (let* ((buffers (ende-change-set-visiting-buffers change-set))
+               (present (and buffers t)))
+          (list :operation "delete" :path relative :status "applied"
+                :visiting_buffer present
+                :visiting_buffer_count (length buffers)
+                :visiting_buffer_warning
+                (and present
+                     (concat "Clean visiting buffers were left unchanged. "
+                             "Saving one later could recreate the deleted file."))))))))
+
+(defun ende-tools--patch-operation-tool (operation)
+  "Return the standalone operation tool corresponding to patch OPERATION."
+  (pcase operation
+    ('add 'create_file)
+    ('update 'edit_file)
+    ('delete 'delete_file)
+    (_ (error "unsupported patch operation: %S" operation))))
+
+(defun ende-tools--patch-change-set (operation root)
+  "Create an unprepared change set for parsed patch OPERATION in ROOT."
+  (let* ((kind (plist-get operation :operation))
+         (target-tool (ende-tools--patch-operation-tool kind)))
+    (ende-change-set--create
+     :operation kind :root root :source-kind "file"
+     :path (plist-get operation :path)
+     :expected-exists (not (eq kind 'add))
+     :strict-path-policy t :strict-buffer-policy t
+     :authorization-tools (list 'apply_patch target-tool)
+     :anchor-edits (plist-get operation :hunks)
+     :content (plist-get operation :content)
+     :prepared-coding-system (and (eq kind 'add) 'utf-8-unix))))
+
+(defun ende-tools--patch-authorize-targets (change-sets root)
+  "Resolve all CHANGE-SETS targets and authorize every scope before reads."
+  (dolist (change-set change-sets)
+    (let* ((resolved (ende-tools--resolve-mutation-path
+                      (ende-change-set-path change-set) root t))
+           (path (plist-get resolved :path)))
+      (setf (ende-change-set-absolute-path change-set) path
+            (ende-change-set-path change-set) (plist-get resolved :relative))))
+  (dolist (change-set change-sets)
+    (ende-tools--mutation-assert-authorized
+     change-set (ende-change-set-absolute-path change-set)))
+  (ende-tools--assert-change-set-targets-unique change-sets))
+
+(defun ende-tools--prepare-patch-change-sets (change-sets)
+  "Read sources and compute every result for pre-authorized CHANGE-SETS."
+  (dolist (change-set change-sets)
+    (let ((path (ende-change-set-absolute-path change-set)))
+      (if (ende-tools--mutation-existing-p change-set)
+          (progn
+            (unless (or (file-exists-p path) (file-symlink-p path))
+              (error "patch source does not exist: %s"
+                     (ende-change-set-path change-set)))
+            (unless (file-regular-p path)
+              (error "patch operation requires a regular file: %s"
+                     (ende-change-set-path change-set)))
+            (let* ((snapshot (ende-tools--capture-file path))
+                   (buffers (ende-tools--visiting-buffers-for-path path)))
+              (when (ende-tools--modified-buffers buffers)
+                (error "unsaved visiting buffer prevents patching %s"
+                       (ende-change-set-path change-set)))
+              (when (string-match-p "\0" (plist-get snapshot :content))
+                (error "binary file cannot be patched as text: %s"
+                       (ende-change-set-path change-set)))
+              (ende-tools--set-snapshot change-set snapshot)
+              (setf (ende-change-set-visiting-buffers change-set) buffers)
+              (when (eq (ende-change-set-operation change-set) 'update)
+                (setf (ende-change-set-content change-set)
+                       (ende-patch-apply-update
+                        (plist-get snapshot :content)
+                        (ende-change-set-anchor-edits change-set))
+                       (ende-change-set-prepared-coding-system change-set)
+                       (plist-get snapshot :coding-system)))))
+        (when (or (file-exists-p path) (file-symlink-p path))
+          (error "cannot add over an existing filesystem entry: %s"
+                 (ende-change-set-path change-set))))))
+  (ende-tools--assert-change-set-limits change-sets)
+  change-sets)
+
+(defun ende-tools--patch-result-entry (change-set)
+  "Return successful operation and buffer-warning details for CHANGE-SET."
+  (let* ((buffers (ende-change-set-visiting-buffers change-set))
+         (present (and buffers t))
+         (operation (ende-change-set-operation change-set))
+         (warning
+          (and present
+               (if (eq operation 'delete)
+                   (concat "Clean visiting buffers were left unchanged. "
+                           "Saving one later could recreate the deleted file.")
+                 (concat "The visiting buffer was left unchanged and may be "
+                         "stale relative to this patch.")))))
+    (append (ende-tools--change-set-result-entry change-set "applied")
+            (list :visiting_buffer present
+                  :visiting_buffer_count (length buffers)
+                  :visiting_buffer_warning warning))))
+
+(defun ende-tools--apply-patch (arguments root)
+  "Apply one fully parsed, authorized patch as a single mutation batch."
+  (ende-tools--assert-properties arguments '("patch") "apply_patch")
+  (let* ((patch (ende-tools--required-string arguments "patch"))
+         ;; Parsing the complete language precedes all path and filesystem work.
+         (operations (ende-patch-parse patch))
+         (change-sets (mapcar (lambda (operation)
+                                (ende-tools--patch-change-set operation root))
+                              operations)))
+    (ende-tools--patch-authorize-targets change-sets root)
+    (ende-tools--prepare-patch-change-sets change-sets)
+    (ende-tools--commit-change-sets change-sets)
+    (list :files (vconcat (mapcar #'ende-tools--patch-result-entry change-sets)))))
 
 ;;;; Tool schemas and registrations
 
@@ -926,6 +1634,27 @@ No visiting buffer or review state is involved in this operation."
         (:content . ((:type . "string")
                      (:description . "Complete file contents; may be empty")))))
     (:required . ("path" "content"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--delete-file-schema
+  '((:type . "object")
+    (:properties
+     . ((:path . ((:type . "string")
+                  (:minLength . 1)
+                  (:description . "Project-relative literal file path")))
+        (:expected_digest . ((:type . "string")
+                             (:pattern . "^[0-9a-fA-F]{64}$")
+                             (:description . "Optional SHA-256 precondition")))))
+    (:required . ("path"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--apply-patch-schema
+  '((:type . "object")
+    (:properties
+     . ((:patch . ((:type . "string")
+                   (:minLength . 1)
+                   (:description . "Limited Codex-style text patch")))))
+    (:required . ("patch"))
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--edit-item-schema
@@ -1035,6 +1764,18 @@ No visiting buffer or review state is involved in this operation."
  "Create a new disk file at an authorized project-relative path; fail if it exists."
  ende-tools--create-file-schema
  #'ende-tools--create-file :write)
+
+(ende-tool-register
+ 'delete_file
+ "Delete one authorized regular disk file without modifying visiting buffers."
+ ende-tools--delete-file-schema
+ #'ende-tools--delete-file :write)
+
+(ende-tool-register
+ 'apply_patch
+ "Apply an exact-context multi-file text patch within independently granted scopes."
+ ende-tools--apply-patch-schema
+ #'ende-tools--apply-patch :write)
 
 (provide 'ende-tools)
 

@@ -274,6 +274,90 @@
       (when (file-directory-p ende-test-root)
         (delete-directory ende-test-root t)))))
 
+(ert-deftest ende-test/chat-patch-needs-patch-and-operation-grants ()
+  (let* ((root (make-temp-file "ende-patch-policy-" t))
+         (source (expand-file-name "src/main.txt" root))
+         (added (expand-file-name "src/new.txt" root))
+         (mixed-delete (expand-file-name "tmp/mixed.txt" root))
+         (hidden-delete (expand-file-name "tmp/hidden.txt" root))
+         (denied-delete (expand-file-name "tmp/denied.txt" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (file-name-directory mixed-delete) t)
+          (with-temp-file source (insert "before\nold\n"))
+          (dolist (path (list mixed-delete hidden-delete denied-delete))
+            (with-temp-file path (insert "remove me\n")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (resource source (include "src/**"))
+                (resource disposable (include "tmp/**"))
+                (set-tool-resources apply_patch :resources source disposable)
+                (set-tool-resources edit_file create_file :resources source)
+                (set-tool-resources delete_file :resources disposable)))
+             "* Conversation\n** Mixed\n"
+             (ende-test--chat-config-block '((tools apply_patch)))
+             "Apply a fully granted patch.\n"
+             "** Hide delete\n"
+             (ende-test--chat-config-block '((tools apply_patch delete_file)))
+             "*** Clear exposure only\n"
+             (ende-test--chat-config-block '((clear-tools) (tools apply_patch)))
+             "Delete through the patch's retained grant.\n"
+             "** Remove delete grant\n"
+             (ende-test--chat-config-block
+              '((tools apply_patch)
+                (clear-tool-resources)
+                (set-tool-resources apply_patch :resources source disposable)
+                (set-tool-resources edit_file create_file :resources source)))
+             "A patch grant alone cannot delete.\n")
+             (let* ((document (ende-chat--build-document))
+                    (mixed (ende-test--chat-config-at document "Mixed"))
+                    (exposed (ende-test--chat-config-at document "Hide delete"))
+                    (hidden (ende-test--chat-config-at
+                             document "Clear exposure only"))
+                   (missing (ende-test--chat-config-at
+                             document "Remove delete grant"))
+                   (patch
+                    (concat "*** Begin Patch\n"
+                            "*** Update File: src/main.txt\n@@\n before\n-old\n+new\n"
+                            "*** Add File: src/new.txt\n+created\n"
+                            "*** Delete File: tmp/mixed.txt\n"
+                            "*** End Patch\n")))
+               (should (equal (plist-get mixed :active-tools) '(apply_patch)))
+               (should (equal (plist-get exposed :active-tools)
+                              '(apply_patch delete_file)))
+               (should (equal (plist-get hidden :active-tools) '(apply_patch)))
+              (let ((result (ende-tool-call
+                             'apply_patch (list :patch patch) root mixed)))
+                (should (plist-get result :ok))
+                (should (file-exists-p added))
+                (should-not (file-exists-p mixed-delete)))
+              (let ((hidden-patch
+                     "*** Begin Patch\n*** Delete File: tmp/hidden.txt\n*** End Patch"))
+                (let ((direct (ende-tool-call
+                               'delete_file '(:path "tmp/hidden.txt") root hidden))
+                      (applied (ende-tool-call
+                                'apply_patch (list :patch hidden-patch)
+                                root hidden)))
+                  (should-not (plist-get direct :ok))
+                  (should (string-match-p "not active" (plist-get direct :error)))
+                  (should (plist-get applied :ok))
+                  (should-not (file-exists-p hidden-delete))))
+              (let ((delete-only-patch
+                     "*** Begin Patch\n*** Delete File: tmp/denied.txt\n*** End Patch"))
+                (let ((denied (ende-tool-call
+                               'apply_patch (list :patch delete-only-patch)
+                               root missing)))
+                  (should-not (plist-get denied :ok))
+                  (should (string-match-p "delete_file"
+                                          (plist-get denied :error)))
+                  (should (file-exists-p denied-delete)))))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
 
 
 (ert-deftest ende-test/chat-config-definitions-can-remain-unused ()

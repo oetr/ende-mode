@@ -33,6 +33,7 @@
 (require 'ende-ui)
 (require 'ende-llm)
 (require 'ende-queue)
+(require 'ende-patch)
 (require 'ende-tools)
 (require 'ende-operations)
 (require 'ende-chat)
@@ -125,7 +126,8 @@
                   "ende-review.el" "ende-project.el" "ende-url.el"
                   "ende-target.el" "ende-ui.el"
                   "ende-openrouter-batch.el" "ende-llm.el"
-                  "ende-queue.el" "ende-edit.el" "ende-tools.el"
+                  "ende-queue.el" "ende-edit.el" "ende-patch.el"
+                  "ende-tools.el"
                   "ende-chat-config.el"
                   "ende-summary.el" "ende-operations.el"
                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"

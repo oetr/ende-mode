@@ -31,6 +31,11 @@
                   (list (cons "path" path) (cons "content" content))
                   root))
 
+(defun ende-test--apply-patch-call (patch root &optional access-config)
+  "Call apply_patch with PATCH within ROOT and optional ACCESS-CONFIG."
+  (ende-tool-call "apply_patch" (list (cons "patch" patch))
+                  root access-config))
+
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
     (let ((names (mapcar (lambda (definition)
@@ -39,7 +44,8 @@
       (should (= (length names) (length (delete-dups (copy-sequence names)))))
       (dolist (required '("project_info" "list_project_files" "file_info"
                           "read_file" "list_project_buffers" "read_buffer"
-                          "search_project" "edit_file" "create_file"))
+                          "search_project" "edit_file" "create_file"
+                          "delete_file" "apply_patch"))
         (should (member required names))))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))
@@ -222,6 +228,7 @@
                          (cons "start_line" 1)
                          (cons "line_count" 1))
                    root))
+
                  (file-read
                   (ende-test--tool-result
                    "read_file"
@@ -805,6 +812,326 @@
         (delete-directory root t))
       (when (file-directory-p outside)
         (delete-directory outside t)))))
+
+(ert-deftest ende-test/project-tools-delete-file-checks-digest-and-buffer-state ()
+  (let* ((root (make-temp-file "ende-tools-delete-" t))
+         (path (expand-file-name "src/main.el" root))
+         (outside (make-temp-file "ende-tools-delete-outside-"))
+         (link (expand-file-name "src/link.el" root))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory path))
+          (with-temp-file path (insert "disk source\n"))
+          (make-symbolic-link outside link)
+          (let* ((info (ende-test--tool-result
+                        "file_info" '(("path" . "src/main.el")) root))
+                 (digest (plist-get info :digest))
+                 (stale (ende-tool-call
+                         "delete_file"
+                         (list :path "src/main.el" :expected_digest (make-string 64 ?0))
+                         root)))
+            (should-not (plist-get stale :ok))
+            (should (file-exists-p path))
+            (should
+              (string-match-p
+              "symlink"
+              (plist-get
+               (ende-tool-call "delete_file"
+                               (list :path "src/link.el") root)
+               :error)))
+            (dolist (bad-path
+                     (list "../outside" (expand-file-name "src/main.el" root)
+                           "src/../src/main.el" "src/" "src"))
+              (should-not (plist-get
+                           (ende-tool-call "delete_file"
+                                           (list :path bad-path) root)
+                           :ok)))
+            (setq buffer (find-file-noselect path))
+            (let ((deleted
+                   (ende-tool-call
+                    "delete_file"
+                    (list :path "src/main.el" :expected_digest digest) root)))
+              (should (plist-get deleted :ok))
+              (let ((result (plist-get deleted :result)))
+                (should (equal (plist-get result :operation) "delete"))
+                (should (equal (plist-get result :status) "applied"))
+                (should (equal (plist-get result :path) "src/main.el"))
+                (should (plist-get result :visiting_buffer))
+                (should (= (plist-get result :visiting_buffer_count) 1))
+                (should (string-match-p "recreate"
+                                        (plist-get result
+                                                   :visiting_buffer_warning))))
+              (should-not (file-exists-p path))
+              (should (buffer-live-p buffer))
+              (with-current-buffer buffer
+                (should (equal (buffer-string) "disk source\n"))
+                (should-not (buffer-modified-p))))
+            (with-current-buffer buffer
+              (erase-buffer)
+              (insert "unsaved text\n")
+              (set-buffer-modified-p t))
+            (with-temp-file path (insert "disk source\n"))
+            (let ((failure (ende-tool-call
+                            "delete_file" '(("path" . "src/main.el")) root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "unsaved visiting buffer"
+                                      (plist-get failure :error)))
+              (should (file-exists-p path))
+               (with-current-buffer buffer
+                 (should (equal (buffer-string) "unsaved text\n"))
+                 (should (buffer-modified-p))))))
+      (when (buffer-live-p buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-exists-p outside)
+        (delete-file outside)))))
+
+(ert-deftest ende-test/project-tools-delete-honors-trash-without-fallback ()
+  (let* ((root (make-temp-file "ende-tools-trash-project-" t))
+         (trash (make-temp-file "ende-tools-trash-dir-" t))
+         (path (expand-file-name "discard.txt" root))
+         (destination (expand-file-name "discard.txt" trash))
+         (delete-by-moving-to-trash t)
+         (calls 0))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "trash me\n"))
+          (cl-letf (((symbol-function 'move-file-to-trash)
+                     (lambda (_path)
+                       (cl-incf calls)
+                       (error "trash backend failed"))))
+            (let ((failure (ende-tool-call
+                            "delete_file" '(("path" . "discard.txt")) root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "trash backend failed"
+                                      (plist-get failure :error)))
+              (should (= calls 1))
+              (should (file-exists-p path))))
+          (cl-letf (((symbol-function 'move-file-to-trash)
+                     (lambda (source)
+                       (cl-incf calls)
+                       (rename-file source destination))))
+            (let ((result (ende-tool-call
+                           "delete_file" '(("path" . "discard.txt")) root)))
+              (should (plist-get result :ok))
+               (should (= calls 2))
+               (should-not (file-exists-p path))
+               (should (file-exists-p destination)))))
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-directory-p trash)
+        (delete-directory trash t)))))
+
+(ert-deftest ende-test/project-tools-apply-patch-commits-mixed-disk-operations ()
+  (let* ((root (make-temp-file "ende-tools-patch-project-" t))
+         (source (expand-file-name "src/main.txt" root))
+         (added (expand-file-name "src/new.txt" root))
+         (deleted (expand-file-name "tmp/old.txt" root))
+         (buffer nil)
+         (patch (concat
+                 "*** Begin Patch\n"
+                 "*** Add File: src/new.txt\n+new text\n"
+                 "*** Update File: src/main.txt\n@@\n before\n-old\n+updated\n"
+                 "*** Delete File: tmp/old.txt\n"
+                 "*** End Patch\n")))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (file-name-directory deleted) t)
+          (with-temp-buffer
+            (insert "before\nold\n")
+            (let ((coding-system-for-write 'utf-8-dos))
+              (write-region (point-min) (point-max) source nil 'silent)))
+          (set-file-modes source #o640)
+          (with-temp-file deleted (insert "discard\n"))
+          (setq buffer (find-file-noselect source))
+          (let ((result (ende-test--apply-patch-call patch root)))
+            (should (plist-get result :ok))
+            (let* ((payload (plist-get result :result))
+                   (files (plist-get payload :files)))
+              (should (vectorp files))
+              (should (= (length files) 3))
+              (should (equal (mapcar (lambda (file)
+                                       (plist-get file :operation))
+                                     (append files nil))
+                             '("add" "update" "delete")))
+              (should (equal (mapcar (lambda (file)
+                                       (plist-get file :status))
+                                     (append files nil))
+                             '("applied" "applied" "applied")))
+              (should (plist-get (nth 1 (append files nil))
+                                 :visiting_buffer_warning)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents added)
+                             (buffer-string))
+                           "new text\n"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents source)
+                             (buffer-string))
+                           "before\nupdated\n"))
+            (should (= (logand (file-modes source) #o777) #o640))
+            (should-not (file-exists-p deleted))
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally source)
+              (should (equal (buffer-string)
+                             (encode-coding-string
+                              "before\nupdated\n" 'utf-8-dos))))
+            (with-current-buffer buffer
+              (should (equal (buffer-string) "before\nold\n"))
+              (should-not (buffer-modified-p)))))
+      (when (buffer-live-p buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-apply-patch-preflight-leaves-files-alone ()
+  (let* ((root (make-temp-file "ende-tools-patch-preflight-" t))
+         (path (expand-file-name "main.txt" root))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "first\nsecond\n"))
+          (setq buffer (find-file-noselect path))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "unsaved\n")
+            (set-buffer-modified-p t))
+          (let ((dirty-patch
+                 (concat "*** Begin Patch\n"
+                         "*** Add File: new.txt\n+never written\n"
+                         "*** Update File: main.txt\n@@\n first\n-second\n+changed\n"
+                         "*** End Patch\n")))
+            (let ((failure (ende-test--apply-patch-call dirty-patch root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "unsaved visiting buffer"
+                                      (plist-get failure :error)))
+              (should-not (file-exists-p (expand-file-name "new.txt" root)))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "first\nsecond\n"))
+              (with-current-buffer buffer
+                (should (string-suffix-p "unsaved\n" (buffer-string)))
+                (should (buffer-modified-p)))))
+          (with-current-buffer buffer
+            (set-buffer-modified-p nil))
+          (dolist (patch
+                   (list
+                    "*** Begin Patch\n*** Update File: main.txt\n@@\n -absent\n+bad\n*** End Patch"
+                    "*** Begin Patch\n*** Add File: main.txt\n+overwrite\n*** End Patch"))
+            (let ((before (with-temp-buffer
+                            (insert-file-contents path)
+                            (buffer-string))))
+              (should-not (plist-get (ende-test--apply-patch-call patch root)
+                                     :ok))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             before)))))
+          (with-temp-file path (insert "first\nfirst\n"))
+          (let ((ambiguous
+                 (concat "*** Begin Patch\n*** Update File: main.txt\n"
+                         "@@\n first\n+insert\n*** End Patch\n")))
+            (should-not (plist-get (ende-test--apply-patch-call ambiguous root)
+                                   :ok))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "first\nfirst\n")))
+      (when (buffer-live-p buffer)
+        (set-buffer-modified-p nil)
+        (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-apply-patch-rolls-back-failed-commit ()
+  (let* ((root (make-temp-file "ende-tools-patch-rollback-" t))
+         (first (expand-file-name "first.txt" root))
+         (second (expand-file-name "second.txt" root))
+         (patch (concat "*** Begin Patch\n"
+                        "*** Update File: first.txt\n@@\n before\n-old\n+new\n"
+                        "*** Update File: second.txt\n@@\n before\n-old\n+new\n"
+                        "*** End Patch\n"))
+         (commit (symbol-function #'ende-tools--commit-change-set))
+         (count 0))
+    (unwind-protect
+        (progn
+          (with-temp-file first (insert "before\nold\n"))
+          (with-temp-file second (insert "before\nold\n"))
+          (cl-letf (((symbol-function 'ende-tools--commit-change-set)
+                     (lambda (change-set)
+                       (prog1 (funcall commit change-set)
+                          (cl-incf count)
+                          (when (= count 1)
+                            (error "injected commit failure"))))))
+            (let* ((failure (ende-test--apply-patch-call patch root))
+                   (report (plist-get failure :recovery)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "injected commit failure"
+                                      (plist-get failure :error)))
+              (should (vectorp report))
+              (should (= (length report) 2))
+              (let ((first-report
+                     (cl-find-if (lambda (entry)
+                                   (equal (plist-get entry :path) "first.txt"))
+                                 (append report nil)))
+                    (second-report
+                     (cl-find-if (lambda (entry)
+                                   (equal (plist-get entry :path) "second.txt"))
+                                 (append report nil))))
+                (should (equal (plist-get first-report :status) "restored"))
+                (should (equal (plist-get second-report :status)
+                               "not_applied")))
+              (dolist (path (list first second))
+                (should (equal (with-temp-buffer
+                                 (insert-file-contents path)
+                                 (buffer-string))
+                                "before\nold\n"))))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-apply-patch-retains-unsafe-recovery ()
+  (let* ((root (make-temp-file "ende-tools-patch-recovery-" t))
+         (path (expand-file-name "source.txt" root))
+         (patch (concat "*** Begin Patch\n*** Update File: source.txt\n"
+                        "@@\n before\n-old\n+patched\n*** End Patch\n"))
+         (commit (symbol-function #'ende-tools--commit-change-set))
+         (recovery nil))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "before\nold\n"))
+          (cl-letf (((symbol-function 'ende-tools--commit-change-set)
+                     (lambda (change-set)
+                       (prog1 (funcall commit change-set)
+                          (with-temp-file path (insert "concurrent edit\n"))
+                          (error "fail after concurrent change")))))
+            (let* ((failure (ende-test--apply-patch-call patch root))
+                   (report (plist-get failure :recovery))
+                   (entry (aref report 0)))
+              (should-not (plist-get failure :ok))
+              (should (equal (plist-get entry :status)
+                             "concurrent_change_preserved"))
+              (setq recovery (expand-file-name
+                              (plist-get entry :recovery_file) root))
+              (should (file-exists-p recovery))
+              (should (= (logand (file-modes recovery) #o777) #o600))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents recovery)
+                               (buffer-string))
+                             "before\nold\n"))
+              (should (equal (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string))
+                              "concurrent edit\n")))))
+      (when (and recovery (file-exists-p recovery))
+        (delete-file recovery))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
 
 (provide 'ende-tools-test)
 
