@@ -322,8 +322,6 @@
 			      (should (string= (buffer-string) "base"))
 			      (should-not ende--current-job)))))
 
-;;;; Anchor ordering and conflicts
-
 (ert-deftest ende-test/same-endpoint-preserves-fifo ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("A" "B") t)))

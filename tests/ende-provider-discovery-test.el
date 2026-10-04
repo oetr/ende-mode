@@ -12,8 +12,6 @@
 (require 'cl-lib)
 (require 'json)
 
-;;;; Profiles, history, and transport command safety
-
 (ert-deftest ende-test/provider-discovery-cache-is-bounded ()
   (let ((ende-provider--discovery-cache (make-hash-table :test #'equal))
         (ende-provider--discovery-inflight (make-hash-table :test #'equal))

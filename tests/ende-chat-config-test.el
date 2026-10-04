@@ -1,0 +1,612 @@
+;;; ende-chat-config-test.el --- Chat configuration tests -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; Coverage for configuration parsing, inheritance, and permissions.
+
+;;; Code:
+
+(require 'ert)
+(require 'ende)
+(require 'ende-test-helpers)
+(require 'cl-lib)
+(require 'ende-chat-test-helpers)
+
+
+
+(ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
+  (let* ((root (make-temp-file "ende-chat-config-" t))
+         (child-root (make-temp-file "ende-chat-child-config-" t))
+         (configuration
+          (format
+           (concat
+            "#+begin_ende\n(root %S)\n"
+            "(group inspect project_info list_project_files file_info read_file "
+            "search_project list_project_buffers read_buffer)\n"
+            "(group modify edit_file create_file)\n"
+            "(resource project (include \"**\") (exclude \"private/**\"))\n"
+            "(resource chat (include \"main.el\") (include \"new.el\"))\n"
+            "(tools inspect)\n"
+            "(set-tool-resources inspect :resources project)\n"
+            "#+end_ende\n\n"
+            "* Review\n** Edit\n"
+            "#+begin_ende\n(root %S)\n"
+            "(tools modify)\n"
+            "(set-tool-resources modify :resources chat)\n"
+            "(set-tool-resources read_file :resources chat)\n"
+            "(add-tool-resources read_file :resources project)\n"
+            "#+end_ende\n*** Inspect only\n"
+            "#+begin_ende\n(clear-tools)\n(tools inspect)\n"
+            "(clear-tool-resources)\n"
+            "(set-tool-resources inspect :resources project)\n"
+            "#+end_ende\n")
+           root child-root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "private" root))
+          (make-directory (expand-file-name "private" child-root))
+          (with-temp-file (expand-file-name "main.el" child-root)
+            (insert "hello"))
+          (with-temp-file (expand-file-name "private/secret.txt" child-root)
+            (insert "secret"))
+          (with-temp-buffer
+            (insert configuration)
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (headlines (ende-chat--document-headlines document))
+                   (edit (cl-find-if
+                          (lambda (headline)
+                            (equal (org-element-property :raw-value headline)
+                                   "Edit"))
+                          headlines))
+                   (inspect-only
+                    (cl-find-if
+                     (lambda (headline)
+                       (equal (org-element-property :raw-value headline)
+                              "Inspect only"))
+                     headlines))
+                   (edit-config
+                    (ende-chat-config-resolve
+                     (ende-chat--document-tree document)
+                     (ende-chat--document-parent document) edit))
+                   (inspect-config
+                    (ende-chat-config-resolve
+                     (ende-chat--document-tree document)
+                     (ende-chat--document-parent document) inspect-only)))
+              (should (equal (plist-get edit-config :root)
+                             (ende-project-normalize-root child-root)))
+              (should (memq 'edit_file
+                            (plist-get edit-config :active-tools)))
+              (should (memq 'create_file
+                            (plist-get edit-config :active-tools)))
+              (should (equal (cdr (assq 'edit_file
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat)))
+              (should (equal (cdr (assq 'create_file
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat)))
+              (should (equal (cdr (assq 'read_file
+                                        (plist-get edit-config
+                                                   :tool-resources)))
+                             '(chat project)))
+              (should (equal (plist-get inspect-config :active-tools)
+                             '(project_info list_project_files file_info
+					    read_file search_project list_project_buffers
+					    read_buffer)))
+              (should (equal (plist-get inspect-config :root)
+                             (ende-project-normalize-root child-root)))
+              (should-not (memq 'edit_file
+                                (plist-get inspect-config :active-tools)))
+              (should-not (assq 'edit_file
+                                (plist-get inspect-config :tool-resources)))
+              (let ((allowed
+                     (ende-tool-call
+                      "edit_file"
+                      (list (cons "path" "main.el")
+                            (cons "edits"
+                                  (list (ende-test--anchor-edit
+                                         "hello" "replace" "updated"))))
+                      child-root edit-config)))
+                (should (plist-get allowed :ok))
+                (should (equal (plist-get (plist-get allowed :result) :status)
+                               "applied")))
+              (let* ((created
+                      (ende-tool-call
+                       "create_file"
+                       '(("path" . "new.el") ("content" . ""))
+                       child-root edit-config))
+                     (result (plist-get created :result)))
+                (should (plist-get created :ok))
+                (should (equal (plist-get result :operation) "create"))
+                (should (equal (plist-get result :status) "applied"))
+                (should-not (plist-member result :change_set_id))
+                (should (= (file-attribute-size
+                            (file-attributes
+                             (expand-file-name "new.el" child-root)))
+                           0)))
+              (let ((denied
+                     (ende-tool-call
+                      "create_file"
+                      '(("path" . "private/secret.txt")
+                        ("content" . "changed"))
+                      child-root edit-config)))
+                (should-not (plist-get denied :ok))
+                (should (string-match-p "not authorized"
+                                        (plist-get denied :error))))))
+          (let ((ran nil))
+            (should-error
+             (ende-chat-config--read-forms "(#.(setq ran t))"))
+            (should-not ran))
+          (with-temp-buffer
+            (insert "#+begin_ende\n(tools read_file)\n#+end_ende\n* Q\n")
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (question (car (ende-chat--document-headlines document))))
+              (should-error
+               (ende-chat-config-resolve
+                (ende-chat--document-tree document)
+                (ende-chat--document-parent document) question))))
+          (with-temp-buffer
+            (insert
+             (format
+              (concat "#+begin_ende\n(root %S)\n(group inspect project_info)\n"
+                      "(tools inspect)\n#+end_ende\n* A\n** B\n#+begin_ende\n"
+                      "(group inspect project_info)\n#+end_ende\n")
+              root))
+            (org-mode)
+            (let* ((document (ende-chat--build-document))
+                   (configuration (ende-test--chat-config-at document "B"))
+                   (inherited (ende-test--chat-config-at document "A")))
+              (should (equal (plist-get configuration :groups)
+                             (plist-get inherited :groups)))
+              (should (equal (plist-get inherited :active-tools) '(project_info)))
+              (should-not (plist-get configuration :active-tools))
+              (should-not (plist-get configuration :tool-resources)))))
+      (delete-directory root t)
+      (delete-directory child-root t))))
+
+
+
+(ert-deftest ende-test/chat-config-definitions-can-remain-unused ()
+  (let ((root (make-temp-file "ende-config-library-" t))
+        (cases '(("** No tools" nil)
+                 ("** Inspect" (project_info list_project_files read_file))
+                 ("*** Clear tools" nil)
+                 ("*** Redefine active" nil)
+                 ("*** Redefine unused" (project_info list_project_files read_file))
+                 ("** Direct tools" (read_file))
+                 ("** Direct grants" (read_file))
+                 ("** Information" (project_info))
+                 ("** Redefine only" nil))))
+    (ende-test--reset)
+    (unwind-protect
+        (let ((ende-llm-function
+               (ende-test--fake-llm (make-list (length cases) "Available tools described."))))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (group inspect project_info list_project_files read_file)
+                (group modify edit_file create_file)
+                (resource project (include "bla.org"))
+                (resource unused (include "unused/**"))))
+             "* Conversation\n** No tools\nWhich tools are available?\n"
+             "** Inspect\n"
+             (ende-test--chat-config-block
+              '((tools inspect) (set-tool-resources inspect :resources project)))
+             "Which tools are available?\n*** Clear tools\n"
+             (ende-test--chat-config-block '((clear-tools)))
+             "Which tools are available?\n*** Redefine active\n"
+             (ende-test--chat-config-block '((group inspect read_file)))
+             "Which tools are available?\n*** Redefine unused\n"
+             (ende-test--chat-config-block
+              '((group modify file_info) (resource unused (include "other/**"))))
+             "Which tools are available?\n** Direct tools\n"
+             (ende-test--chat-config-block
+              '((tools read_file) (set-tool-resources read_file :resources project)))
+             "Which tools are available?\n** Direct grants\n"
+             (ende-test--chat-config-block
+              '((group inspect read_file)
+                (tools inspect)
+                (set-tool-resources read_file :resources project)))
+             "Which tools are available?\n** Information\n"
+             (ende-test--chat-config-block '((tools project_info)))
+             "Which tools are available?\n** Redefine only\n"
+             (ende-test--chat-config-block
+              '((group inspect file_info) (resource project (include "other.org"))))
+             "Which tools are available?\n")
+            (dolist (case cases)
+              (ert-info ((car case))
+                (ende-test--chat-goto (car case))
+                (let ((configuration
+                       (ende-test--chat-config-at
+                        (ende-chat--build-document)
+                        (org-get-heading t t t t))))
+                  (should (equal (plist-get configuration :active-tools) (cadr case)))
+                  (should (assq 'modify (plist-get configuration :groups)))
+                  (should (assq 'unused (plist-get configuration :resources))))
+                (should (eq (ende-job-state (ende-ask)) 'completed))
+                (let* ((options (plist-get (car (last ende-test--calls)) :options))
+                       (names (mapcar (lambda (definition)
+                                        (alist-get :name (alist-get :function definition)))
+                                      (plist-get options :tool-definitions))))
+                  (should (equal (sort names #'string<)
+                                 (sort (mapcar #'symbol-name (cadr case)) #'string<))))))))
+      (ende-test--reset)
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-redefinitions-follow-the-org-tree ()
+  (let ((root (make-temp-file "ende-config-scopes-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "src/private" root) t)
+          (dolist (path '("main.el" "src/public.el" "src/private/secret.el"))
+            (with-temp-file (expand-file-name path root)
+              (insert "source\n")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (group inspect project_info read_file search_project)
+                (resource project (include "**") (exclude "src/private/**"))
+                (tools inspect)
+                (set-tool-resources inspect :resources project)))
+             "* Conversation\n** Original\nInspect.\n** Changed\n"
+             (ende-test--chat-config-block
+              '((tools inspect)
+                (set-tool-resources inspect :resources project)
+                (resource project (include "src/**") (exclude "src/private/**"))
+                (group inspect project_info read_file)))
+             "Inspect sources.\n*** Descendant\nContinue.\n"
+             "*** Information only\n"
+             (ende-test--chat-config-block
+              '((group inspect project_info) (tools inspect)))
+             "Describe the project.\n** Agent: Reply\n"
+             ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\nSaved answer.\n"
+             "** Next\nContinue.\n* Other conversation\nInspect.\n")
+            (let ((document (ende-chat--build-document)))
+              ;; Resolve children first to catch shared-state mutation.
+              (dolist (case
+                       '(("Information only" (project_info) nil)
+                         ("Descendant" (project_info read_file) ("src/public.el"))
+                         ("Changed" (project_info read_file) ("src/public.el"))
+                         ("Next" (project_info read_file search_project)
+                          ("main.el" "src/public.el"))
+                         ("Original" (project_info read_file search_project)
+                          ("main.el" "src/public.el"))
+                         ("Other conversation" (project_info read_file search_project)
+                          ("main.el" "src/public.el"))))
+                (ert-info ((car case))
+                  (let* ((configuration
+                          (ende-test--chat-config-at document (car case)))
+                         (active (cadr case))
+                         (allowed (caddr case)))
+                    (should (equal (plist-get configuration :active-tools) active))
+                    (should (equal (cdr (assq 'inspect
+                                              (plist-get configuration :groups)))
+                                   active))
+                    (should (equal configuration
+                                   (ende-test--chat-config-at document (car case))))
+                    (should (plist-get
+                             (ende-tool-call 'project_info nil root configuration)
+                             :ok))
+                    (dolist (path '("main.el" "src/public.el" "src/private/secret.el"))
+                      (let ((result (ende-tool-call 'read_file (list :path path)
+                                                    root configuration)))
+                        (should (eq (not (null (plist-get result :ok)))
+                                    (not (null (member path allowed)))))))))))))
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-group-replacement-preserves-independent-grants ()
+  (let ((root (make-temp-file "ende-config-origins-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert
+           (ende-test--chat-config-block
+            `((root ,root)
+              (group changing read_file search_project file_info)
+              (group stable read_file list_project_files)
+              (resource broad (include "**"))
+              (resource safe (include "safe.el"))
+              (resource direct (include "direct.el"))
+              (resource replacement (include "new.el"))
+              (tools changing stable search_project)
+              (set-tool-resources changing :resources broad)
+              (add-tool-resources stable :resources safe)
+              (add-tool-resources search_project :resources direct)
+              (add-tool-resources read_file :resources broad)))
+           "* Conversation\n** Replace group\n"
+           (ende-test--chat-config-block
+            '((group changing project_info read_buffer)
+              (tools changing)
+              (set-tool-resources changing :resources replacement)))
+           "Inspect.\n*** Revoke broad\n"
+           (ende-test--chat-config-block
+            '((resource broad (include "**"))))
+           "Inspect safely.\n")
+          (let* ((document (ende-chat--build-document))
+                 (replacement (ende-test--chat-config-at document "Replace group"))
+                 (revoked (ende-test--chat-config-at document "Revoke broad")))
+            (dolist (configuration (list replacement revoked))
+              (should (equal (plist-get configuration :active-tools)
+                             '(read_file list_project_files search_project
+                                         project_info read_buffer)))
+              (let ((assignments (plist-get configuration :tool-resources)))
+                (should-not (assq 'file_info assignments))
+                (should (equal (cdr (assq 'search_project assignments)) '(direct)))
+                (should (equal (cdr (assq 'list_project_files assignments)) '(safe)))
+                (should (equal (cdr (assq 'read_buffer assignments)) '(replacement)))))
+            (should (equal (cdr (assq 'read_file
+                                      (plist-get replacement :tool-resources)))
+                           '(safe broad)))
+            (should (equal (cdr (assq 'read_file
+                                      (plist-get revoked :tool-resources)))
+                           '(safe)))
+            (should-not (plist-member replacement :grants))
+            (should-not (plist-member replacement :active-targets))))
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-resource-replacement-requires-selective-renewal ()
+  (let ((root (make-temp-file "ende-config-resources-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "private" root))
+          (dolist (path '("public.el" "private/secret.el"))
+            (with-temp-file (expand-file-name path root)
+              (insert "TOKEN\n")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (group readers read_file)
+                (group metadata file_info)
+                (resource project (include "**"))
+                (resource retained (include "public.el"))
+                (tools readers metadata search_project)
+                (set-tool-resources readers metadata search_project :resources project)
+                (add-tool-resources readers metadata search_project :resources retained)))
+             "* Conversation\n** Revoke\n"
+             (ende-test--chat-config-block
+              '((resource project (include "private/**"))))
+             "Only public access remains.\n*** Renew readers\n"
+             (ende-test--chat-config-block
+              '((add-tool-resources readers :resources project)
+                (resource unused (include "unused/**"))))
+             "Read private sources too.\n** Reset access\n"
+             (ende-test--chat-config-block
+              '((resource project (include "private/**"))
+                (clear-tools)
+                (tools readers)
+                (clear-tool-resources)
+                (set-tool-resources readers :resources project)))
+             "Only read private sources.\n")
+            (let ((document (ende-chat--build-document)))
+              (dolist (case '(("Revoke" (retained) (retained) nil)
+                              ("Renew readers" (retained project) (retained) t)
+                              ("Reset access" (project) nil t)))
+                (ert-info ((car case))
+                  (let* ((configuration
+                          (ende-test--chat-config-at document (car case)))
+                         (assignments (plist-get configuration :tool-resources)))
+                    (should (equal (cdr (assq 'read_file assignments)) (cadr case)))
+                    (dolist (tool '(file_info search_project))
+                      (should (equal (cdr (assq tool assignments)) (caddr case))))
+                    (should (eq (plist-get
+                                 (ende-tool-call 'read_file
+                                                 '(:path "private/secret.el")
+                                                 root configuration)
+                                 :ok)
+                                (nth 3 case)))
+                    (should-not (plist-get
+                                 (ende-tool-call 'file_info
+                                                 '(:path "private/secret.el")
+                                                 root configuration)
+                                 :ok))
+                    (when (caddr case)
+                      (let* ((call (ende-tool-call 'search_project '(:regexp "TOKEN")
+                                                   root configuration))
+                             (matches (plist-get (plist-get call :result) :matches)))
+                        (should (plist-get call :ok))
+                        (should (= (length matches) 1))
+                        (should (equal (plist-get (car matches) :path) "public.el"))))))))))
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-assignment-operations-remain-ordered ()
+  (let ((root (make-temp-file "ende-config-order-" t)))
+    (unwind-protect
+        (dolist (case
+                 '((nil (wide) (wide) (wide))
+                   (((set-tool-resources first :resources narrow)
+                     (add-tool-resources second :resources extra))
+                    (narrow) (narrow extra) (wide extra))
+                   (((add-tool-resources second :resources extra)
+                     (set-tool-resources first :resources narrow))
+                    (narrow) (narrow) (wide extra))
+                   (((clear-tool-resources)
+                     (set-tool-resources first second :resources narrow))
+                    (narrow) (narrow) (narrow))))
+          (ert-info ((format "Operations: %S" (car case)))
+            (with-temp-buffer
+              (org-mode)
+              (insert
+               (ende-test--chat-config-block
+                `((root ,root)
+                  (group first read_file file_info)
+                  (group second file_info search_project)
+                  (resource wide (include "**"))
+                  (resource narrow (include "main.el"))
+                  (resource extra (include "other.el"))
+                  (tools first second)
+                  (set-tool-resources first second :resources wide)))
+               "* Conversation\n** Operations\n"
+               (ende-test--chat-config-block (car case))
+               "Inspect.\n*** Replace second\n"
+               (ende-test--chat-config-block
+                '((group second project_info) (tools second)))
+               "Inspect again.\n")
+              (let* ((document (ende-chat--build-document))
+                     (configuration (ende-test--chat-config-at document "Operations"))
+                     (replacement (ende-test--chat-config-at document "Replace second")))
+                (cl-mapc (lambda (tool expected)
+                           (should (equal (cdr (assq tool (plist-get configuration
+                                                                     :tool-resources)))
+                                          expected)))
+                         '(read_file file_info search_project) (cdr case))
+                (should (equal (plist-get replacement :active-tools)
+                               '(read_file file_info project_info)))
+                (dolist (tool '(read_file file_info))
+                  (should (equal (cdr (assq tool (plist-get replacement :tool-resources)))
+                                 (cadr case))))
+                (should-not (assq 'search_project
+                                  (plist-get replacement :tool-resources)))))))
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-rejects-incomplete-or-ambiguous-permissions ()
+  (let ((root (make-temp-file "ende-config-invalid-" t)))
+    (unwind-protect
+        (dolist
+            (case
+             '((((group inspect read_file) (tools inspect)) "no assigned resources")
+               (((group inspect read_file) (tools read_file)) "no assigned resources")
+               (((group inspect read_file) (tools inspect)
+                 (set-tool-resources inspect :resources project)
+                 (clear-tool-resources)) "no assigned resources")
+               (((resource project (include "**"))) "resource redefinition revoked project")
+               (((group inspect project_info) (group inspect read_file)) "defined twice")
+               (((resource project (include "**"))
+                 (resource project (include "public/**"))) "defined twice")
+               (((group read_file project_info)) "conflicts with registered tool")
+               (((tools edit_file)) "no assigned resources")))
+          (ert-info ((format "Invalid operations: %S" (car case)))
+            (ende-test--reset)
+            (let ((ende-llm-function (ende-test--fake-llm '("Must not be requested"))))
+              (with-temp-buffer
+                (org-mode)
+                (insert
+                 (ende-test--chat-config-block
+                  `((root ,root)
+                    (group inspect read_file)
+                    (resource project (include "**"))
+                    (tools inspect)
+                    (set-tool-resources inspect :resources project)))
+                 "* Question\n"
+                 (ende-test--chat-config-block (car case))
+                 "Inspect.\n")
+                (let ((failure
+                       (should-error
+                        (ende-test--chat-config-at (ende-chat--build-document) "Question"))))
+                  (should (string-match-p (cadr case) (error-message-string failure))))
+                (ende-test--chat-goto "* Question")
+                (let ((job (ende-ask)))
+                  (should (eq (ende-job-state job) 'failed))
+                  (should (string-match-p
+                           (cadr case)
+                           (ende-error-display-message (ende-job-error job)))))
+                (should-not ende-test--calls)))))
+      (ende-test--reset)
+      (delete-directory root t))))
+
+
+
+(ert-deftest ende-test/chat-config-dispatch-uses-live-scopes-and-freezes-tool-access ()
+  (let ((root (make-temp-file "ende-config-dispatch-" t)))
+    (ende-test--reset)
+    (unwind-protect
+        (progn
+          (dolist (path '("public.el" "private.el"))
+            (with-temp-file (expand-file-name path root)
+              (insert path "\n")))
+          (let ((ende-llm-function
+                 (ende-test--fake-llm
+                  (list
+                   (list :tool-calls
+                         '((:id "public" :name "read_file"
+				:arguments "{\"path\":\"public.el\"}")
+                           (:id "private" :name "read_file"
+				:arguments "{\"path\":\"private.el\"}")))
+                   "Scoped answer." "Follow-up answer.")
+                  t)))
+            (with-temp-buffer
+              (org-mode)
+              (insert
+               (ende-test--chat-config-block
+                `((root ,root)
+                  (group inspect read_file)
+                  (resource project (include "**"))
+                  (tools inspect)
+                  (set-tool-resources inspect :resources project)))
+               "* Conversation\n** Question\n"
+               (ende-test--chat-config-block
+                '((group inspect read_file)
+                  (resource project (include "public.el"))))
+               "Read the files.\n** Next\nContinue.\n")
+              (ende-test--chat-goto "** Question")
+              (setq ende--queue-suspended t)
+              (let ((job (ende-ask)))
+                (should (eq (ende-job-state job) 'queued))
+                (search-forward "#+end_ende")
+                (beginning-of-line)
+                (insert "(tools inspect)\n"
+                        "(set-tool-resources inspect :resources project)\n")
+                (setq ende--queue-suspended nil)
+                (ende-process-next)
+                (should (eq (ende-job-state job) 'running))
+                (should (= (length ende-test--calls) 1))
+                (ende-test--chat-goto "** Question")
+                (search-forward "(include \"public.el\")")
+                (replace-match "(include \"private.el\")" t t)
+                (ende-test--complete-call (car ende-test--calls))
+                (should (= (length ende-test--calls) 2))
+                (let* ((messages (plist-get (cadr ende-test--calls) :messages))
+                       (results (cl-remove-if-not
+                                 (lambda (message)
+                                   (equal (ende-test--chat-message-role message) "tool"))
+                                 messages)))
+                  (should (= (length results) 2))
+                  (cl-mapc
+                   (lambda (message allowed)
+                     (let ((result (json-parse-string
+                                    (plist-get message :content)
+                                    :object-type 'plist
+                                    :null-object nil :false-object nil)))
+                       (should (eq (plist-get result :ok) allowed))
+                       (if allowed
+                           (should (equal (plist-get (plist-get result :result) :content)
+                                          "public.el\n"))
+                         (should (string-match-p "not authorized"
+                                                 (plist-get result :error))))))
+                   results '(t nil)))
+                (ende-test--complete-call (cadr ende-test--calls))
+                (should (eq (ende-job-state job) 'completed)))
+              (ende-test--chat-goto "** Next")
+              (let* ((configuration
+                      (ende-test--chat-config-at (ende-chat--build-document) "Next"))
+                     (job (ende-ask)))
+                (dolist (path '("public.el" "private.el"))
+                  (should (plist-get
+                           (ende-tool-call 'read_file (list :path path) root configuration)
+                           :ok)))
+                (ende-test--complete-call (nth 2 ende-test--calls))
+                (should (eq (ende-job-state job) 'completed))))))
+      (ende-test--reset)
+      (delete-directory root t))))
+
+(provide 'ende-chat-config-test)
+
+;;; ende-chat-config-test.el ends here

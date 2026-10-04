@@ -100,8 +100,6 @@ Use COMMAND for the process, or a silent sleep process by default."
              (plist-get request :config-file))
        (list process (plist-get request :stderr-process))))))
 
-;;;; SSE parser
-
 (ert-deftest ende-test/transport-session-settles-once-and-cleans-resources ()
   (let* ((process-buffer (generate-new-buffer " *ende-test-process*"))
          (stderr-buffer (generate-new-buffer " *ende-test-stderr*"))
@@ -362,8 +360,6 @@ Use COMMAND for the process, or a silent sleep process by default."
       (delete-process process)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
-
-;;;; Profiles, history, and transport command safety
 
 (ert-deftest ende-test/auth-and-body-are-not-command-arguments ()
   (let* ((token "secret-token")

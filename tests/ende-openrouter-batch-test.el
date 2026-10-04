@@ -48,8 +48,6 @@
        request (ende-protocol-json-read-string "{\"choices\":[]}"))
       (should-not events))))
 
-;;;; Rubber-duck exercises
-
 (ert-deftest ende-test/openrouter-batch-profile-has-separate-endpoints ()
   (let ((profile (ende-provider-profile 'openrouter-batch)))
     (should (eq (plist-get profile :transport) 'openrouter-batch))

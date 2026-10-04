@@ -11,8 +11,6 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
-;;;; Anchor ordering and conflicts
-
 (ert-deftest ende-test/parallel-same-endpoint-preserves-enqueue-order ()
   (ende-test--reset)
   (let ((ende-llm-function

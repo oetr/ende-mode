@@ -12,8 +12,6 @@
 (require 'cl-lib)
 (require 'ende-chat-test-helpers)
 
-;;;; Org-backed chat
-
 (defun ende-test--selector-ask-from-buffer (source)
   "Run the selector's ask action for SOURCE with the test model."
   (with-temp-buffer
@@ -28,8 +26,6 @@
     (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
       (call-interactively
        (lookup-key ende-selector-mode-map (kbd "a"))))))
-
-;;;; SSE parser
 
 (ert-deftest ende-test/selector-quota-is-scoped-and-ignores-stale-results ()
   (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
@@ -897,8 +893,6 @@
                 (should-not (buffer-live-p buffer))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
-
-;;;; Profiles, history, and transport command safety
 
 (ert-deftest ende-test/selector-retries-failed-model-probe ()
   (let* ((buffer (generate-new-buffer " *ende-selector-probe-retry-test*"))

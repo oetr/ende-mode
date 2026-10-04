@@ -135,8 +135,6 @@
       (should-not (string-match-p "ende\\.el"
                                   (mapconcat #'identity diagnostics "\n"))))))
 
-;;;; SSE parser
-
 (ert-deftest ende-test/codex-session-clears-resource-slots ()
   (let ((process-buffer (generate-new-buffer " *ende-test-codex-process*"))
         (stderr-buffer (generate-new-buffer " *ende-test-codex-stderr*"))
@@ -744,8 +742,6 @@
     (should (= (plist-get result :tokens) 7))
     (should (ende-codex--session-terminal-event session))
     (should-not (ende-codex--session-terminal session))))
-
-;;;; Profiles, history, and transport command safety
 
 (ert-deftest ende-test/codex-effort-probe-uses-selected-model-capabilities ()
   (let ((calls 0)
