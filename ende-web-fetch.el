@@ -227,7 +227,8 @@ Unsupported or malformed forms signal rather than bypassing classification."
                            (ende-web-fetch--remaining-time transfer)))))
     (unwind-protect
         (progn
-          (set-buffer-multibyte nil)
+          (with-current-buffer buffer
+            (set-buffer-multibyte nil))
           (setq process
                 (make-process
                  :name "ende-web-fetch-dns"

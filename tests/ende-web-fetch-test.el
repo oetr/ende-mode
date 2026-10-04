@@ -140,6 +140,55 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                    (list (ende-web-fetch-classify-address "169.254.169.254"))
                    t))))
 
+(ert-deftest ende-test/web-fetch-resolver-preserves-caller-buffer-state ()
+  (let ((real-make-process (symbol-function 'make-process)))
+    (dolist (outcome '(("printf" "8.8.8.8 STREAM host\n") ("false")))
+      (with-temp-buffer
+        (insert "prefix “quoted” — apostrophe ’ emoji 🙂 suffix")
+        (setq buffer-file-coding-system 'utf-8-unix)
+        (goto-char 19)
+        (narrow-to-region 8 35)
+        (set-buffer-modified-p t)
+        (let* ((caller (current-buffer))
+               (before
+                (list enable-multibyte-characters
+                      (save-restriction
+                        (widen)
+                        (buffer-substring-no-properties (point-min) (point-max)))
+                      buffer-file-coding-system
+                      (buffer-modified-p)
+                      (point) (point-min) (point-max)))
+               (transfer
+                (ende-web-fetch--make-transfer
+                 :deadline (+ (float-time) 5)
+                 :header-bytes 0 :body-bytes 0))
+               (result
+                (condition-case nil
+                    (cl-letf (((symbol-function 'make-process)
+                               (lambda (&rest arguments)
+                                 (should
+                                  (equal (plist-get arguments :command)
+                                         '("getent" "ahosts" "state.invalid")))
+                                 (let ((arguments (copy-sequence arguments)))
+                                   (setq arguments
+                                         (plist-put arguments :command outcome))
+                                   (apply real-make-process arguments)))))
+                      (ende-web-fetch--resolve-host transfer "state.invalid"))
+                  (error :failure))))
+          (should (eq caller (current-buffer)))
+          (if (equal (car outcome) "printf")
+              (should (equal result '((public . "8.8.8.8"))))
+            (should (eq result :failure)))
+          (should
+           (equal before
+                   (list enable-multibyte-characters
+                        (save-restriction
+                          (widen)
+                          (buffer-substring-no-properties (point-min) (point-max)))
+                        buffer-file-coding-system
+                        (buffer-modified-p)
+                        (point) (point-min) (point-max)))))))))
+
 (ert-deftest ende-test/web-fetch-denies-initial-url-before-resolving ()
   (let ((resolved nil))
     (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
