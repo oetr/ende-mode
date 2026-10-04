@@ -1,0 +1,10 @@
+#+TITLE: ERT suites
+
+The Makefile discovers suites under this directory. Loading a suite registers
+its tests; the Makefile runs ERT.
+
+#+begin_src sh
+make test
+make test TEST_FILES=tests/ende-mode-line-test.el
+make test TEST_FILES='tests/ende-queue-test.el tests/ende-provider-test.el'
+#+end_src
