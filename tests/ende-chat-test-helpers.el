@@ -27,6 +27,14 @@
     (ende-chat-config-resolve (ende-chat--document-tree document)
                               (ende-chat--document-parent document) headline)))
 
+;;;; Org-backed chat
+
+(defun ende-test--chat-goto (heading)
+  "Move point to the Org headline whose exact text is HEADING."
+  (goto-char (point-min))
+  (search-forward (concat heading "\n"))
+  (org-back-to-heading t))
+
 (provide 'ende-chat-test-helpers)
 
 ;;; ende-chat-test-helpers.el ends here
