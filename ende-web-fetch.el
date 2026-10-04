@@ -337,8 +337,17 @@ Unsupported or malformed forms signal rather than bypassing classification."
           (error "web_fetch received a malformed HTTP header"))
         (let ((name (downcase (match-string 1 line)))
               (value (string-trim (match-string 2 line))))
-          (setq headers (assq-delete-all name headers)
-                headers (cons (cons name value) headers)))))
+          (let ((previous (assoc-string name headers t)))
+            (when (and previous
+                       (member name '("content-encoding" "content-type"
+                                      "location"))
+                       (not (string-equal (cdr previous) value)))
+              (error "web_fetch received conflicting %s headers" name))
+            (setq headers
+                  (cons (cons name value)
+                        (cl-remove-if
+                         (lambda (header) (string-equal (car header) name))
+                         headers)))))))
     (cons status headers)))
 
 (defun ende-web-fetch--append-body (transfer hop bytes process)
