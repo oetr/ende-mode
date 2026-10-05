@@ -3029,6 +3029,28 @@ Assistant calls must be followed by matching tool results in order."
                :error (format "tool arguments are not a JSON object: %s"
                               (plist-get parsed :invalid-arguments))))))))
 
+(defun ende-chat--tool-response-async (call configuration callback)
+  (let* ((name (ende-chat--tool-value call :name))
+         (arguments (ende-chat--tool-value call :arguments))
+         (tool (ende-tool--find name)))
+    (if (not (and tool (ende-tool-async tool)))
+        (funcall callback (ende-chat--tool-response call configuration))
+      (let ((parsed
+             (condition-case caught
+                 (json-parse-string arguments :object-type 'hash-table)
+               (error
+                (list :invalid-arguments (error-message-string caught))))))
+        (if (hash-table-p parsed)
+            (ende-tool-call-async
+             name parsed (plist-get configuration :root) configuration
+             (lambda (result) (funcall callback (json-encode result))))
+          (funcall
+           callback
+           (json-encode
+             (list :ok nil :tool name
+                  :error (format "tool arguments are not a JSON object: %s"
+                                 (plist-get parsed :invalid-arguments))))))))))
+
 (defun ende-chat--tool-definitions (configuration)
   "Return provider tool definitions enabled by CONFIGURATION."
   (let ((active (plist-get configuration :active-tools)))
@@ -3040,39 +3062,56 @@ Assistant calls must be followed by matching tool results in order."
       (ende-tool-definitions))))
 
 (defun ende-chat--execute-tool-round
-    (job calls configuration level request-id assistant)
-  "Execute CALLS for JOB and return assistant/tool messages, or nil on cancel."
-  (let ((round-messages (list assistant)))
-    (catch 'ende-chat--cancel-tool-round
-      (dolist (call calls)
-        (unless (ende-job-current-p job)
-          (throw 'ende-chat--cancel-tool-round nil))
-        (let* ((prior-cancel (ende-job-cancel-function job))
-                (installed-cancel nil)
-                (ende-tools--register-cancellation-function
-                 (lambda (cancel)
-                   (if cancel
-                       (setq installed-cancel cancel)
-                     (when (and installed-cancel
-                                (eq installed-cancel
-                                    (ende-job-cancel-function job)))
-                       (setf (ende-job-cancel-function job) prior-cancel)))
-                   (when cancel
-                     (ende-job-cancellation-set job cancel))))
-               (tool-content
-                (ende-chat--tool-response call configuration)))
-          (unless (ende-job-current-p job)
-            (throw 'ende-chat--cancel-tool-round nil))
-          (ende-chat--persist-request-section
-           job (ende-chat--tool-result-text
-                level request-id call tool-content) t)
-          (setq round-messages
-                (append round-messages
-                        (list (list :role "tool"
-                                    :tool-call-id
-                                    (ende-chat--tool-value call :id)
-                                    :content tool-content))))))
-      (and (ende-job-current-p job) round-messages))))
+    (job calls configuration level request-id assistant callback)
+  (let ((remaining calls)
+        (round-messages (list assistant)))
+    (cl-labels
+        ((run-next ()
+           (let ((continue t)
+                 (pending nil))
+             (while (and continue remaining (ende-job-current-p job))
+               (let* ((call (pop remaining))
+                      (prior-cancel (ende-job-cancel-function job))
+                      (installed-cancel nil)
+                      (ende-tools--register-cancellation-function
+                       (lambda (cancel)
+                         (if cancel
+                             (setq installed-cancel cancel)
+                           (when (and installed-cancel
+                                      (eq installed-cancel
+                                          (ende-job-cancel-function job)))
+                             (setf (ende-job-cancel-function job)
+                                   prior-cancel)))
+                         (when cancel
+                           (ende-job-cancellation-set job cancel))))
+                      (synchronous t)
+                      (completed nil))
+                 (ende-chat--tool-response-async
+                  call configuration
+                  (lambda (tool-content)
+                    (setq completed t)
+                    (when (ende-job-current-p job)
+                      (ende--call-with-job-error
+                       job
+                       (lambda ()
+                         (ende-chat--persist-request-section
+                          job (ende-chat--tool-result-text
+                               level request-id call tool-content) t)
+                         (push (list :role "tool"
+                                     :tool-call-id
+                                     (ende-chat--tool-value call :id)
+                                     :content tool-content)
+                               round-messages)
+                         (unless synchronous
+                           (run-next)))))))
+                 (setq synchronous nil)
+                 (unless completed
+                   (setq continue nil
+                         pending t))))
+              (when (and (ende-job-current-p job)
+                         (null remaining) (not pending))
+                (funcall callback (nreverse round-messages))))))
+      (run-next))))
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
@@ -3126,16 +3165,20 @@ Assistant calls must be followed by matching tool results in order."
                         (cl-incf rounds)
                         (ende--handle-llm-event
                          job '(:type :status :status "Running tools"))
-                        (let ((round-messages
-                               (ende-chat--execute-tool-round
-                                job calls configuration level request-id
-                                assistant)))
-                          (when (and round-messages (ende-job-current-p job))
-                            (setq messages (append messages round-messages))
-                            (ende--validate-messages messages)
-                            (ende--send-llm
-                              job messages #'on-done nil t))))))))))))
-       (ende--dispatch-llm job messages #'on-done nil nil t))))
+                        (ende-chat--execute-tool-round
+                         job calls configuration level request-id assistant
+                         (lambda (round-messages)
+                           (when (and round-messages
+                                      (ende-job-current-p job))
+                             (ende--call-with-job-error
+                              job
+                              (lambda ()
+                                (setq messages
+                                      (append messages round-messages))
+                                (ende--validate-messages messages)
+                                (ende--send-llm
+                                 job messages #'on-done nil t)))))))))))))))
+        (ende--dispatch-llm job messages #'on-done nil nil t))))
 
 (defun ende-chat--run (job)
   "Serialize and dispatch a chat JOB at the moment it starts."

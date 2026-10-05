@@ -65,7 +65,7 @@
 
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
-  name description parameters handler resource-kind requires-root mutates-local)
+  name description parameters handler resource-kind requires-root mutates-local async)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
@@ -101,6 +101,7 @@ the historic `:no-resource' registration form; OPTIONS may specify
                 :name name :description description :parameters parameters
                 :handler handler :resource-kind kind
                 :requires-root requires-root
+                :async (eq (plist-get options :async) t)
                 :mutates-local (eq read-only :write))))
     (unless (memq kind '(file url none))
       (error "invalid ende tool resource kind: %s" kind))
@@ -130,54 +131,89 @@ the historic `:no-resource' registration form; OPTIONS may specify
                        (cons :parameters (ende-tool-parameters tool))))))
    (mapcar #'cdr ende-tools--registry)))
 
-(defun ende-tool-call (name arguments &optional root access-config)
-  "Invoke model tool NAME with ARGUMENTS within project ROOT.
+(defun ende-tool--call-root (tool root access-config)
+  (let* ((tool-name (ende-tool-name tool))
+         (kind (ende-tool-resource-kind tool))
+         (root-required (ende-tool-requires-root tool))
+         (assigned (cdr (assq tool-name
+                              (plist-get access-config :tool-resources)))))
+    (when access-config
+      (unless (memq tool-name (plist-get access-config :active-tools))
+        (error "tool is not active in this chat: %s" tool-name))
+      (when (and (not (eq kind 'none)) (null assigned))
+        (error "tool has no assigned resources: %s" tool-name)))
+    (when (and access-config root-required
+               (null (plist-get access-config :root)))
+      (error "chat tool configuration has no explicit root"))
+    (let ((root-value (or root
+                          (and access-config root-required
+                               (plist-get access-config :root)))))
+      (cond
+       (root-value (ende-project-normalize-root root-value))
+       (root-required (ende-project-root))
+       (t nil)))))
 
-Return a JSON-compatible result object.  Tool failures are returned as data so
-an agent can recover from an invalid path, regexp, or stale source version.
-When ACCESS-CONFIG is non-nil, it must be the normalized chat configuration
-and controls tool activation and path authorization."
+(defun ende-tool--failure-result (tool caught)
+  (if (eq (car-safe caught) 'ende-tool-mutation-failure)
+      (list :ok nil
+            :tool (symbol-name (ende-tool-name tool))
+            :error (or (cadr caught) (error-message-string caught))
+            :recovery (caddr caught))
+    (list :ok nil
+          :tool (symbol-name (ende-tool-name tool))
+          :error (error-message-string caught))))
+
+(defun ende-tool-call (name arguments &optional root access-config)
+  "Invoke synchronous tool NAME with ARGUMENTS within project ROOT."
   (let ((tool (ende-tool--find name)))
     (if (null tool)
         (list :ok nil :tool (format "%s" name)
               :error (format "unknown ende tool: %s" name))
       (condition-case caught
           (let* ((tool-name (ende-tool-name tool))
-                 (kind (ende-tool-resource-kind tool))
-                 (root-required (ende-tool-requires-root tool))
-                 (assigned (cdr (assq
-                                 tool-name
-                                 (plist-get access-config :tool-resources)))))
-            (when access-config
-              (unless (memq tool-name (plist-get access-config :active-tools))
-                (error "tool is not active in this chat: %s" tool-name))
-              (when (and (not (eq kind 'none)) (null assigned))
-                (error "tool has no assigned resources: %s" tool-name)))
-            (when (and access-config root-required
-                       (null (plist-get access-config :root)))
-              (error "chat tool configuration has no explicit root"))
-            (let* ((root-value (or root
-                                   (and access-config root-required
-                                        (plist-get access-config :root))))
-                   (root (cond
-                          (root-value
-                           (ende-project-normalize-root root-value))
-                          (root-required (ende-project-root))
-                          (t nil)))
-                   (ende-tools--access-config access-config)
-                   (ende-tools--access-tool tool-name))
-               (list :ok t
-                     :tool (symbol-name tool-name)
-                     :result (funcall (ende-tool-handler tool) arguments root))))
-        (ende-tool-mutation-failure
-         (list :ok nil
-               :tool (symbol-name (ende-tool-name tool))
-               :error (or (cadr caught) (error-message-string caught))
-               :recovery (caddr caught)))
-        ((error quit)
-          (list :ok nil
-                :tool (symbol-name (ende-tool-name tool))
-                :error (error-message-string caught)))))))
+                 (root (ende-tool--call-root tool root access-config))
+                 (ende-tools--access-config access-config)
+                 (ende-tools--access-tool tool-name))
+            (when (ende-tool-async tool)
+              (if (null access-config)
+                  (error "URL is not authorized by this chat's URL resources")
+                (error "tool %s requires asynchronous dispatch" tool-name)))
+            (list :ok t :tool (symbol-name tool-name)
+                  :result (funcall (ende-tool-handler tool) arguments root)))
+        ((ende-tool-mutation-failure error quit)
+         (ende-tool--failure-result tool caught))))))
+
+(defun ende-tool-call-async (name arguments root access-config callback)
+  (let ((tool (ende-tool--find name)))
+    (if (null tool)
+        (funcall callback
+                 (list :ok nil :tool (format "%s" name)
+                       :error (format "unknown ende tool: %s" name)))
+      (if (not (ende-tool-async tool))
+          (funcall callback (ende-tool-call name arguments root access-config))
+        (let ((settled nil))
+          (condition-case caught
+              (let* ((tool-name (ende-tool-name tool))
+                     (call-root (ende-tool--call-root
+                                 tool root access-config))
+                     (ende-tools--access-config access-config)
+                     (ende-tools--access-tool tool-name))
+                (funcall
+                 (ende-tool-handler tool) arguments call-root
+                 (lambda (value error)
+                   (unless settled
+                     (setq settled t)
+                     (funcall
+                      callback
+                      (if error
+                          (ende-tool--failure-result
+                           tool (list 'error (format "%s" error)))
+                        (list :ok t :tool (symbol-name tool-name)
+                              :result value)))))))
+            ((ende-tool-mutation-failure error quit)
+             (unless settled
+               (setq settled t)
+               (funcall callback (ende-tool--failure-result tool caught))))))))))
 
 (defun ende-tools--resource-allows-p (relative resource)
   "Return non-nil when RESOURCE permits project-relative path RELATIVE."
@@ -1633,21 +1669,26 @@ No visiting buffer or review state is involved in this operation."
     (ende-tools--commit-change-sets change-sets)
     (list :files (vconcat (mapcar #'ende-tools--patch-result-entry change-sets)))))
 
-(defun ende-tools--web-fetch (arguments _root)
-  "Fetch one permission-scoped HTTP(S) URL as bounded raw text."
+(defun ende-tools--web-fetch (arguments _root callback)
   (ende-tools--assert-properties arguments '("url" "max_chars") "web_fetch")
   (let* ((url (ende-tools--required-string arguments "url"))
          (keys (mapcar #'ende-tools--property-name
                        (ende-tools--object-keys arguments)))
+         (access-config ende-tools--access-config)
+         (access-tool ende-tools--access-tool)
+         (register-cancellation ende-tools--register-cancellation-function)
          (max-chars
           (and (member "max_chars" keys)
                (ende-tools--bounded-integer
                 arguments "max_chars" ende-web-fetch-max-output-chars
-                ende-web-fetch-max-output-chars)))
-         (result
-          (ende-web-fetch url #'ende-tools--web-url-permission max-chars
-                          ende-tools--register-cancellation-function)))
-    result))
+                ende-web-fetch-max-output-chars))))
+    (ende-web-fetch
+     url
+     (lambda (normalized)
+       (let ((ende-tools--access-config access-config)
+             (ende-tools--access-tool access-tool))
+         (ende-tools--web-url-permission normalized)))
+     callback max-chars register-cancellation)))
 
 ;;;; Tool schemas and registrations
 
@@ -1833,8 +1874,8 @@ No visiting buffer or review state is involved in this operation."
  'web_fetch
  "Fetch bounded textual content from a URL explicitly permitted by this chat."
  ende-tools--web-fetch-schema
- #'ende-tools--web-fetch nil :no-resource
- '(:resource-kind url :requires-root nil))
+  #'ende-tools--web-fetch nil :no-resource
+  '(:resource-kind url :requires-root nil :async t))
 
 (provide 'ende-tools)
 

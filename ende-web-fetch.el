@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 
-;; A synchronous, cancellable curl transport for the model-facing web_fetch
+;; An asynchronous, cancellable curl transport for the model-facing web_fetch
 ;; tool.  Every URL is authorized before DNS, all DNS answers are classified,
 ;; and DNS names are pinned with curl --resolve.  Provider credentials and
 ;; transport profiles are intentionally not involved.
@@ -75,8 +75,14 @@ Other non-global classes, including shared, link-local, documentation,
 benchmarking, multicast, and reserved ranges remain denied.")
 
 (cl-defstruct (ende-web-fetch--transfer (:constructor ende-web-fetch--make-transfer))
-  "One fetch call's deadline, cancellation state, process, and byte totals."
-  deadline cancel-function cancelled process header-bytes body-bytes failure)
+  "One fetch call's request-owned asynchronous lifecycle state."
+  deadline deadline-timer phase phase-deadline phase-timer
+  directory callback dns-callback authorize register-cancellation cancel-function
+  requested-url current-url max-chars max-redirects connect-timeout
+  max-response-bytes max-header-bytes max-stderr-bytes redirects
+  addresses allow-private connected
+  process stderr-process stderr-buffer resolver-buffer
+  hop header-bytes body-bytes failure cancelled settled)
 
 (cl-defstruct (ende-web-fetch--hop (:constructor ende-web-fetch--make-hop))
   "One pinned HTTP response and its private buffers."
@@ -177,133 +183,300 @@ Unsupported or malformed forms signal rather than bypassing classification."
              (car entry) (cdr entry))))
   addresses)
 
-(defun ende-web-fetch--cancelled-p (transfer)
-  "Signal `quit' if TRANSFER has been cancelled."
-  (when (ende-web-fetch--transfer-cancelled transfer)
-    (signal 'quit nil)))
-
 (defun ende-web-fetch--remaining-time (transfer)
   "Return TRANSFER's remaining deadline time in seconds."
   (- (ende-web-fetch--transfer-deadline transfer) (float-time)))
 
-(defun ende-web-fetch--check-deadline (transfer)
-  "Signal when TRANSFER's overall deadline has expired."
-  (ende-web-fetch--cancelled-p transfer)
-  (when (<= (ende-web-fetch--remaining-time transfer) 0)
-    (error "web_fetch exceeded its %s-second overall deadline"
-           ende-web-fetch-call-timeout)))
+(defun ende-web-fetch--cancel-phase-timer (transfer)
+  (let ((timer (ende-web-fetch--transfer-phase-timer transfer)))
+    (when (timerp timer)
+      (cancel-timer timer)))
+  (setf (ende-web-fetch--transfer-phase-timer transfer) nil))
 
-(defun ende-web-fetch--append-resolver-output (buffer process chunk)
-  "Append bounded resolver CHUNK to BUFFER for PROCESS."
+(defun ende-web-fetch--cancel-timers (transfer)
+  (let ((timer (ende-web-fetch--transfer-deadline-timer transfer)))
+    (when (timerp timer)
+      (cancel-timer timer)))
+  (setf (ende-web-fetch--transfer-deadline-timer transfer) nil)
+  (ende-web-fetch--cancel-phase-timer transfer))
+
+(defun ende-web-fetch--release-process (transfer)
+  (let ((process (ende-web-fetch--transfer-process transfer))
+        (stderr-process (ende-web-fetch--transfer-stderr-process transfer))
+        (stderr-buffer (ende-web-fetch--transfer-stderr-buffer transfer)))
+    (setf (ende-web-fetch--transfer-process transfer) nil
+          (ende-web-fetch--transfer-stderr-process transfer) nil
+          (ende-web-fetch--transfer-stderr-buffer transfer) nil)
+    (when (processp process)
+      (set-process-filter process nil)
+      (set-process-sentinel process nil)
+      (set-process-query-on-exit-flag process nil))
+    (when (processp stderr-process)
+      (set-process-filter stderr-process nil)
+      (set-process-sentinel stderr-process nil)
+      (set-process-query-on-exit-flag stderr-process nil))
+    (when (and (processp process) (process-live-p process))
+      (delete-process process))
+    (when (and (processp stderr-process) (process-live-p stderr-process))
+      (delete-process stderr-process))
+    (when (buffer-live-p stderr-buffer)
+      (kill-buffer stderr-buffer))))
+
+(defun ende-web-fetch--release-hop (hop)
+  "Kill private buffers owned by completed HOP."
+  (when hop
+    (dolist (buffer (list (ende-web-fetch--hop-body-buffer hop)
+                          (ende-web-fetch--hop-stderr-buffer hop)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(defun ende-web-fetch--settle (transfer outcome result error)
+  (unless (ende-web-fetch--transfer-settled transfer)
+    (setf (ende-web-fetch--transfer-settled transfer) outcome)
+    (ende-web-fetch--cancel-timers transfer)
+    (ende-web-fetch--release-process transfer)
+    (let ((resolver-buffer (ende-web-fetch--transfer-resolver-buffer transfer))
+          (hop (ende-web-fetch--transfer-hop transfer))
+          (register (ende-web-fetch--transfer-register-cancellation transfer))
+          (callback (ende-web-fetch--transfer-callback transfer)))
+      (setf (ende-web-fetch--transfer-resolver-buffer transfer) nil
+            (ende-web-fetch--transfer-dns-callback transfer) nil
+            (ende-web-fetch--transfer-hop transfer) nil
+            (ende-web-fetch--transfer-register-cancellation transfer) nil
+            (ende-web-fetch--transfer-callback transfer) nil
+            (ende-web-fetch--transfer-authorize transfer) nil
+            (ende-web-fetch--transfer-cancel-function transfer) nil
+            (ende-web-fetch--transfer-current-url transfer) nil)
+      (when (buffer-live-p resolver-buffer)
+        (kill-buffer resolver-buffer))
+      (ende-web-fetch--release-hop hop)
+      (when register
+        (condition-case nil
+            (funcall register nil)
+          ((error quit) nil)))
+      (when callback
+        (condition-case nil
+            (funcall callback result error)
+          ((error quit) nil))))))
+
+(defun ende-web-fetch--address-list (addresses)
+  (mapconcat #'cdr addresses ","))
+
+(defun ende-web-fetch--destination-label (transfer)
+  (let* ((url (ende-web-fetch--transfer-current-url transfer))
+         (host (plist-get url :host))
+         (port (plist-get url :port)))
+    (format "%s:%d" host port)))
+
+(defun ende-web-fetch--overall-timeout (transfer)
+  (unless (ende-web-fetch--transfer-settled transfer)
+    (let ((phase (ende-web-fetch--transfer-phase transfer)))
+      (ende-web-fetch--settle
+       transfer 'timeout nil
+       (format "web_fetch overall deadline expired during %s for %s"
+               (pcase phase
+                 ('dns "DNS resolution")
+                 ('curl (if (or (ende-web-fetch--transfer-connected transfer)
+                                (and (ende-web-fetch--transfer-hop transfer)
+                                     (ende-web-fetch--hop-status
+                                      (ende-web-fetch--transfer-hop transfer))))
+                            "response transfer"
+                          "connection"))
+                 (_ "request"))
+               (ende-web-fetch--destination-label transfer))))))
+
+(defun ende-web-fetch--phase-timeout (transfer host process)
+  (when (and (not (ende-web-fetch--transfer-settled transfer))
+             (eq process (ende-web-fetch--transfer-process transfer)))
+    (let ((phase-deadline (ende-web-fetch--transfer-phase-deadline transfer))
+          (deadline (ende-web-fetch--transfer-deadline transfer)))
+      (ende-web-fetch--settle
+       transfer 'timeout nil
+       (if (< phase-deadline deadline)
+           (format "web_fetch DNS timeout resolving %s" host)
+         (format "web_fetch overall deadline expired while resolving %s" host))))))
+
+(defun ende-web-fetch--append-resolver-output (buffer transfer process chunk)
   (let ((size (+ (with-current-buffer buffer (buffer-size))
                  (string-bytes chunk))))
-    (if (> size ende-web-fetch-max-response-header-bytes)
+    (if (> size (ende-web-fetch--transfer-max-header-bytes transfer))
         (progn
-          (process-put process :ende-web-fetch-resolver-overflow t)
-          (when (process-live-p process) (delete-process process)))
+          (setf (ende-web-fetch--transfer-failure transfer)
+                "DNS resolver output exceeded its byte limit")
+          (when (process-live-p process)
+            (delete-process process)))
       (with-current-buffer buffer
         (goto-char (point-max))
         (insert chunk)))))
 
-(defun ende-web-fetch--wait-process (transfer process deadline)
-  "Cancellably wait for PROCESS until DEADLINE under TRANSFER's deadline."
-  (while (process-live-p process)
-    (ende-web-fetch--check-deadline transfer)
-    (let ((remaining (min deadline (ende-web-fetch--remaining-time transfer))))
-      (when (<= remaining 0)
-        (when (process-live-p process) (delete-process process))
-        (error "web_fetch DNS or connection deadline expired"))
-      (accept-process-output process (min 0.1 remaining))))
-  (ende-web-fetch--check-deadline transfer))
+(defun ende-web-fetch--append-stderr (buffer transfer process chunk)
+  (let* ((size (with-current-buffer buffer (buffer-size)))
+         (remaining (- (ende-web-fetch--transfer-max-stderr-bytes transfer)
+                       size)))
+    (when (> remaining 0)
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (insert (substring chunk 0 (min remaining (length chunk))))))
+    (when (> (string-bytes chunk) remaining)
+      (process-put process :ende-web-fetch-stderr-truncated t))
+    (when (and (eq (ende-web-fetch--transfer-phase transfer) 'curl)
+               (with-current-buffer buffer
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward "Connected to " nil t))))
+      (setf (ende-web-fetch--transfer-connected transfer) t))))
 
-(defun ende-web-fetch--resolve-host (transfer host)
-  "Resolve DNS HOST using a bounded local helper process."
-  (let* ((default-directory (ende-web-fetch--local-directory))
-         (buffer (generate-new-buffer " *ende-web-fetch-dns*"))
-         (process nil)
-         (complete nil)
-         (deadline (+ (float-time)
-                      (min ende-web-fetch-connect-timeout
-                           (ende-web-fetch--remaining-time transfer)))))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (set-buffer-multibyte nil))
-          (setq process
-                (make-process
-                 :name "ende-web-fetch-dns"
-                 :buffer nil
-                 :command (list "getent" "ahosts" host)
-                 :connection-type 'pipe
-                 :coding 'binary
-                 :noquery t
-                 :filter (apply-partially
-                          #'ende-web-fetch--append-resolver-output buffer)))
-          (setf (ende-web-fetch--transfer-process transfer) process)
-          (ende-web-fetch--wait-process transfer process deadline)
-          (when (process-get process :ende-web-fetch-resolver-overflow)
-            (error "DNS resolver output exceeded its bound"))
-          (unless (and (eq (process-status process) 'exit)
-                       (zerop (process-exit-status process)))
-            (error "DNS resolution failed for %s" host))
-          (let ((addresses nil))
-            (with-current-buffer buffer
-              (dolist (line (split-string (buffer-string) "\n" t))
-                (let ((token (car (split-string line "[ \t]+" t))))
-                  (when token
-                    (push (ende-web-fetch-classify-address token) addresses)))))
-            (setq complete t)
-            (delete-dups (nreverse addresses))))
-      (when (and (processp process) (process-live-p process))
-        (delete-process process))
-      (when (eq (ende-web-fetch--transfer-process transfer) process)
-        (setf (ende-web-fetch--transfer-process transfer) nil))
+(defun ende-web-fetch--new-stderr-process (transfer)
+  (let ((buffer (generate-new-buffer " *ende-web-fetch-stderr*")))
+    (with-current-buffer buffer
+      (set-buffer-multibyte nil))
+    (condition-case caught
+        (let ((process
+               (make-pipe-process
+                :name (generate-new-buffer-name "ende-web-fetch-stderr")
+                :buffer nil :noquery t :coding 'binary :sentinel #'ignore
+                :filter (apply-partially
+                         #'ende-web-fetch--append-stderr buffer transfer))))
+          (setf (ende-web-fetch--transfer-stderr-buffer transfer) buffer
+                (ende-web-fetch--transfer-stderr-process transfer) process)
+          process)
+      ((error quit)
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))
+       (signal (car caught) (cdr caught))))))
+
+(defun ende-web-fetch--stderr-text (transfer)
+  (let ((buffer (ende-web-fetch--transfer-stderr-buffer transfer)))
+    (if (buffer-live-p buffer)
+        (let ((text (with-current-buffer buffer
+                      (decode-coding-string (buffer-string) 'utf-8))))
+          (string-trim (substring text 0 (min (length text) 1024))))
+      "")))
+
+(defun ende-web-fetch--resolver-addresses (buffer)
+  (let (addresses)
+    (with-current-buffer buffer
+      (dolist (line (split-string (buffer-string) "\n" t))
+        (let ((token (car (split-string line "[ \t]+" t))))
+          (when token
+            (push (ende-web-fetch-classify-address token) addresses)))))
+    (delete-dups (nreverse addresses))))
+
+(defun ende-web-fetch--dns-sentinel (transfer host buffer process _event)
+  (when (and (not (ende-web-fetch--transfer-settled transfer))
+             (eq process (ende-web-fetch--transfer-process transfer))
+             (memq (process-status process) '(exit signal failed closed)))
+    (let* ((exit (process-exit-status process))
+           (stderr (ende-web-fetch--stderr-text transfer))
+           (failure (ende-web-fetch--transfer-failure transfer))
+           (callback (ende-web-fetch--transfer-dns-callback transfer))
+           (addresses nil)
+           (parse-error nil))
+      (ende-web-fetch--cancel-phase-timer transfer)
+      (ende-web-fetch--release-process transfer)
+      (setf (ende-web-fetch--transfer-phase transfer) nil
+            (ende-web-fetch--transfer-failure transfer) nil
+            (ende-web-fetch--transfer-resolver-buffer transfer) nil
+            (ende-web-fetch--transfer-dns-callback transfer) nil)
+      (when (and (not failure) (eq (process-status process) 'exit) (zerop exit))
+        (condition-case caught
+            (setq addresses (ende-web-fetch--resolver-addresses buffer))
+          ((error quit)
+           (setq parse-error (error-message-string caught)))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer))
-      (unless complete
-        (ignore-errors (ende-web-fetch--check-deadline transfer))))))
+      (cond
+       (failure
+        (funcall callback nil failure))
+       (parse-error
+        (funcall callback nil
+                 (format "DNS resolution returned invalid addresses for %s: %s"
+                         host parse-error)))
+       ((not (and (eq (process-status process) 'exit) (zerop exit)))
+        (funcall callback nil
+                 (format "DNS resolution failed for %s%s"
+                         host (if (string-empty-p stderr) ""
+                                (concat ": " stderr)))))
+       ((null addresses)
+        (funcall callback nil
+                 (format "DNS resolution returned no addresses for %s" host)))
+       (t
+        (funcall callback addresses nil))))))
 
-(defun ende-web-fetch--destination-addresses (transfer normalized allow-private)
-  "Return all vetted destination addresses for NORMALIZED URL."
-  (let* ((kind (plist-get normalized :host-kind))
-         (addresses
-          (pcase kind
-            ('dns
-             (ende-web-fetch--resolve-host
-              transfer (plist-get normalized :host)))
-            ('ipv4
-             (list (ende-web-fetch-classify-address
-                    (plist-get normalized :host))))
-            ('ipv4-mapped-ipv6
-             (list (ende-web-fetch-classify-address
-                    (substring (plist-get normalized :host) 1 -1))))
-            ('ipv6
-             (list (ende-web-fetch-classify-address
-                    (substring (plist-get normalized :host) 1 -1))))
-            (_ (error "unsupported URL host type for web_fetch")))))
-    (ende-web-fetch--assert-addresses addresses allow-private)))
+(defun ende-web-fetch--resolve-host (transfer host callback)
+  (let* ((buffer (generate-new-buffer " *ende-web-fetch-dns*"))
+         (remaining (ende-web-fetch--remaining-time transfer))
+          (phase-duration
+           (min (ende-web-fetch--transfer-connect-timeout transfer) remaining))
+         (default-directory (ende-web-fetch--transfer-directory transfer))
+         (process nil))
+    (setf (ende-web-fetch--transfer-dns-callback transfer) callback
+          (ende-web-fetch--transfer-phase transfer) 'dns
+          (ende-web-fetch--transfer-phase-deadline transfer)
+          (+ (float-time) phase-duration)
+          (ende-web-fetch--transfer-resolver-buffer transfer) buffer)
+    (with-current-buffer buffer
+      (set-buffer-multibyte nil))
+    (if (<= phase-duration 0)
+        (funcall callback nil
+                 (format "web_fetch overall deadline expired before DNS for %s"
+                         host))
+      (condition-case caught
+          (let ((stderr-process
+                 (ende-web-fetch--new-stderr-process transfer)))
+            (setq process
+                  (make-process
+                   :name (generate-new-buffer-name "ende-web-fetch-dns")
+                   :buffer nil :stderr stderr-process
+                   :command (list "getent" "ahosts" host)
+                   :connection-type 'pipe :coding 'binary :noquery t
+                   :filter (apply-partially
+                            #'ende-web-fetch--append-resolver-output
+                            buffer transfer)
+                   :sentinel (apply-partially
+                              #'ende-web-fetch--dns-sentinel
+                              transfer host buffer)))
+            (setf (ende-web-fetch--transfer-process transfer) process
+                  (ende-web-fetch--transfer-phase-timer transfer)
+                  (run-at-time phase-duration nil
+                               #'ende-web-fetch--phase-timeout
+                               transfer host process)))
+        ((error quit)
+         (let ((message (error-message-string caught)))
+           (ende-web-fetch--release-process transfer)
+           (when (buffer-live-p buffer)
+             (kill-buffer buffer))
+           (setf (ende-web-fetch--transfer-resolver-buffer transfer) nil
+                 (ende-web-fetch--transfer-phase transfer) nil)
+           (funcall callback nil
+                    (format "DNS resolver could not start for %s: %s"
+                            host message))))))))
 
-(defun ende-web-fetch--resolve-option (host port address)
-  "Build a curl --resolve value pinning HOST and PORT to ADDRESS."
+(defun ende-web-fetch--resolve-option (host port addresses)
   (format "%s:%d:%s" host port
-          (if (string-match-p ":" address)
-              (concat "[" address "]")
-            address)))
+          (mapconcat (lambda (entry)
+                       (let ((address (cdr entry)))
+                         (if (string-match-p ":" address)
+                             (concat "[" address "]")
+                           address)))
+                     addresses ",")))
 
-(defun ende-web-fetch--command (normalized address deadline)
-  "Build hardened curl argv for NORMALIZED URL pinned to ADDRESS until DEADLINE."
+(defun ende-web-fetch--command (transfer normalized addresses)
   (let* ((url (plist-get normalized :url))
          (host (plist-get normalized :host))
          (port (plist-get normalized :port))
-         (remaining (max 0.1 (- deadline (float-time))))
+         (remaining (max 0.001 (ende-web-fetch--remaining-time transfer)))
+         (connect-timeout
+          (max 0.001
+               (min (ende-web-fetch--transfer-connect-timeout transfer)
+                    remaining)))
          (dns-host (eq (plist-get normalized :host-kind) 'dns)))
     (append
-     (list "curl" "--disable" "--silent" "--show-error"
-           "--globoff" "--path-as-is" "--proto" "=http,https"
+     (list "curl" "--disable" "--silent" "--show-error" "--no-buffer"
+           "--verbose" "--globoff" "--path-as-is" "--proto" "=http,https"
            "--proxy" "" "--noproxy" "*"
            "--connect-timeout"
-           (number-to-string
-            (min ende-web-fetch-connect-timeout remaining))
+           (number-to-string connect-timeout)
            "--max-time" (number-to-string remaining)
            "--include"
            "--header" "Accept-Encoding: identity"
@@ -311,7 +484,7 @@ Unsupported or malformed forms signal rather than bypassing classification."
            "Accept: text/html, text/plain, application/json, application/xml, text/xml")
      (when dns-host
        (list "--resolve"
-             (ende-web-fetch--resolve-option host port address)))
+             (ende-web-fetch--resolve-option host port addresses)))
      (list "--url" url))))
 
 (defun ende-web-fetch--header-value (headers name)
@@ -355,7 +528,7 @@ Unsupported or malformed forms signal rather than bypassing classification."
   "Append response BYTES to HOP under TRANSFER's cumulative byte ceiling."
   (let ((total (+ (ende-web-fetch--transfer-body-bytes transfer)
                   (string-bytes bytes))))
-    (if (> total ende-web-fetch-max-response-bytes)
+    (if (> total (ende-web-fetch--transfer-max-response-bytes transfer))
         (progn
           (setf (ende-web-fetch--transfer-failure transfer)
                 "web_fetch response bodies exceed the configured byte limit")
@@ -365,121 +538,294 @@ Unsupported or malformed forms signal rather than bypassing classification."
         (goto-char (point-max))
         (insert bytes)))))
 
+(defun ende-web-fetch--consume-response-chunk (transfer hop process chunk)
+  (if (ende-web-fetch--hop-in-body hop)
+      (ende-web-fetch--append-body transfer hop chunk process)
+    (let ((pending (concat (ende-web-fetch--hop-pending-header hop) chunk)))
+      (while (and pending (not (ende-web-fetch--hop-in-body hop)))
+        (let* ((crlf (string-match "\r\n\r\n" pending))
+               (lf (string-match "\n\n" pending))
+               (delimiter
+                (cond
+                 ((and crlf (or (null lf) (<= crlf lf)))
+                  (list crlf (+ crlf 4)))
+                 (lf (list lf (+ lf 2))))))
+          (if (null delimiter)
+              (progn
+                (when (> (+ (ende-web-fetch--transfer-header-bytes transfer)
+                            (string-bytes pending))
+                         (ende-web-fetch--transfer-max-header-bytes transfer))
+                  (error "web_fetch response headers exceed the configured byte limit"))
+                (setf (ende-web-fetch--hop-pending-header hop) pending)
+                (setq pending nil))
+            (let* ((start (car delimiter))
+                   (end (cadr delimiter))
+                   (block (substring pending 0 start))
+                   (header-size (string-bytes (substring pending 0 end)))
+                   (parsed (ende-web-fetch--parse-header-block block))
+                   (status (car parsed)))
+              (cl-incf (ende-web-fetch--transfer-header-bytes transfer)
+                       header-size)
+              (when (> (ende-web-fetch--transfer-header-bytes transfer)
+                       (ende-web-fetch--transfer-max-header-bytes transfer))
+                (error "web_fetch response headers exceed the configured byte limit"))
+              (setf (ende-web-fetch--hop-status hop) status
+                    (ende-web-fetch--hop-headers hop) (cdr parsed)
+                    (ende-web-fetch--hop-pending-header hop) "")
+              (setq pending (substring pending end))
+              (if (and (>= status 100) (< status 200))
+                  (when (= status 101)
+                    (error "web_fetch does not support protocol upgrades"))
+                (setf (ende-web-fetch--hop-in-body hop) t)
+                (unless (string-empty-p pending)
+                  (ende-web-fetch--append-body
+                   transfer hop pending process))))))))))
+
 (defun ende-web-fetch--response-filter (transfer hop process chunk)
   "Parse HTTP response CHUNK for PROCESS, enforcing live byte ceilings."
-  (unless (or (string-empty-p chunk)
+  (unless (or (ende-web-fetch--transfer-settled transfer)
+              (string-empty-p chunk)
               (ende-web-fetch--transfer-failure transfer))
     (condition-case caught
-              (let ((pending (if (ende-web-fetch--hop-in-body hop)
-                           ""
-                         (concat (ende-web-fetch--hop-pending-header hop)
-                                 chunk)))
-              delimiter)
-          (if (ende-web-fetch--hop-in-body hop)
-              (ende-web-fetch--append-body transfer hop chunk process)
-            (while (and pending (not (ende-web-fetch--hop-in-body hop)))
-              (let ((crlf (string-match "\r\n\r\n" pending))
-                    (lf (string-match "\n\n" pending)))
-                (setq delimiter
-                      (cond
-                       ((and crlf (or (null lf) (<= crlf lf)))
-                        (list crlf (+ crlf 4)))
-                       (lf (list lf (+ lf 2)))))
-                (if (null delimiter)
-                    (progn
-                      (when (> (+ (ende-web-fetch--transfer-header-bytes transfer)
-                                  (string-bytes pending))
-                               ende-web-fetch-max-response-header-bytes)
-                        (error "web_fetch response headers exceed the configured byte limit"))
-                      (setf (ende-web-fetch--hop-pending-header hop) pending)
-                      (setq pending nil))
-                  (let* ((start (car delimiter))
-                         (end (cadr delimiter))
-                         (block (substring pending 0 start))
-                         (header-size (string-bytes (substring pending 0 end)))
-                         (parsed (ende-web-fetch--parse-header-block block))
-                         (status (car parsed)))
-                    (cl-incf (ende-web-fetch--transfer-header-bytes transfer)
-                             header-size)
-                    (when (> (ende-web-fetch--transfer-header-bytes transfer)
-                             ende-web-fetch-max-response-header-bytes)
-                      (error "web_fetch response headers exceed the configured byte limit"))
-                    (setf (ende-web-fetch--hop-status hop) status
-                          (ende-web-fetch--hop-headers hop) (cdr parsed)
-                          (ende-web-fetch--hop-pending-header hop) "")
-                    (setq pending (substring pending end))
-                    (if (and (>= status 100) (< status 200))
-                        (when (= status 101)
-                          (error "web_fetch does not support protocol upgrades"))
-                      (setf (ende-web-fetch--hop-in-body hop) t)
-                      (when (not (string-empty-p pending))
-                        (ende-web-fetch--append-body
-                          transfer hop pending process)))))))))
-      ((error quit)
-        (setf (ende-web-fetch--transfer-failure transfer)
-              (error-message-string caught))
-        (when (process-live-p process)
-          (delete-process process))))))
+        (ende-web-fetch--consume-response-chunk transfer hop process chunk)
+      (error
+       (setf (ende-web-fetch--transfer-failure transfer)
+             (error-message-string caught))
+       (when (process-live-p process)
+         (delete-process process))))))
 
-(defun ende-web-fetch--new-hop (transfer normalized address)
-  "Perform one authorized, address-pinned HTTP request for NORMALIZED."
-  (let* ((default-directory (ende-web-fetch--local-directory))
-         (body (generate-new-buffer " *ende-web-fetch-body*"))
-         (stderr (generate-new-buffer " *ende-web-fetch-stderr*"))
+(defun ende-web-fetch--curl-error (transfer exit hop stderr)
+  (let* ((destination (ende-web-fetch--destination-label transfer))
+         (addresses (ende-web-fetch--address-list
+                     (ende-web-fetch--transfer-addresses transfer)))
+         (candidates (if (string-empty-p addresses) "literal address" addresses))
+         (diagnostic
+          (string-join
+           (cl-remove-if
+            (lambda (line) (string-match-p "\\`[*<>] " line))
+            (split-string stderr "\n" t))
+           "\n"))
+         (detail (if (string-empty-p diagnostic) ""
+                   (concat ": " diagnostic))))
+    (cond
+     ((and (= exit 28)
+           (or (ende-web-fetch--transfer-connected transfer)
+               (ende-web-fetch--hop-status hop)))
+      (format "web_fetch response deadline exceeded from %s via [%s] (curl exit 28)%s"
+              destination candidates detail))
+     ((= exit 28)
+      (format "web_fetch connection timeout to %s via [%s] (curl exit 28)%s"
+              destination candidates detail))
+     ((memq exit '(51 60 77))
+      (format "web_fetch TLS certificate verification failed for %s via [%s] (curl exit %d)%s"
+              destination candidates exit detail))
+     ((= exit 35)
+      (format "web_fetch TLS handshake failed for %s via [%s] (curl exit 35)%s"
+              destination candidates detail))
+     ((= exit 6)
+      (format "web_fetch DNS resolution failed for %s despite pinned candidates [%s] (curl exit 6)%s"
+              destination candidates detail))
+     ((and (= exit 7) (null (ende-web-fetch--hop-status hop)))
+      (format "web_fetch connection failed to %s via [%s] (curl exit 7)%s"
+              destination candidates detail))
+     ((null (ende-web-fetch--hop-status hop))
+      (format "web_fetch connection failed to %s via [%s] (curl exit %d)%s"
+              destination candidates exit detail))
+     (t
+      (format "web_fetch response transfer failed from %s via [%s] (curl exit %d)%s"
+              destination candidates exit detail)))))
+
+(defun ende-web-fetch--finish-response (transfer hop)
+  (let* ((headers (ende-web-fetch--hop-headers hop))
+         (raw-content-type (ende-web-fetch--header-value headers "content-type"))
+         (mime (ende-web-fetch--text-content-type headers))
+         (encoding (ende-web-fetch--header-value headers "content-encoding")))
+    (when (and encoding (not (string-equal (downcase encoding) "identity")))
+      (error "web_fetch does not support Content-Encoding: %s" encoding))
+    (let* ((bytes (with-current-buffer (ende-web-fetch--hop-body-buffer hop)
+                    (buffer-string)))
+           (content (ende-web-fetch--decode-body
+                     bytes (or raw-content-type (car mime))))
+           (limit (ende-web-fetch--transfer-max-chars transfer)))
+      (list :requested_url (ende-web-fetch--transfer-requested-url transfer)
+            :final_url
+            (plist-get (ende-web-fetch--transfer-current-url transfer) :url)
+            :status (ende-web-fetch--hop-status hop)
+            :content_type (cdr mime)
+            :content (if (> (length content) limit)
+                         (substring content 0 limit)
+                       content)
+            :truncated (if (> (length content) limit) t :json-false)))))
+
+(defun ende-web-fetch--start-curl (transfer normalized addresses)
+  (let* ((body (generate-new-buffer " *ende-web-fetch-body*"))
          (hop (ende-web-fetch--make-hop
-               :body-buffer body :stderr-buffer stderr
-               :pending-header "" :in-body nil))
-         (process nil)
-         (success nil))
-    (with-current-buffer body (set-buffer-multibyte nil))
-    (with-current-buffer stderr (set-buffer-multibyte nil))
-    (unwind-protect
+               :body-buffer body :pending-header "" :in-body nil))
+         (default-directory (ende-web-fetch--transfer-directory transfer))
+         (stderr-process nil)
+         (process nil))
+    (with-current-buffer body
+      (set-buffer-multibyte nil))
+    (setf (ende-web-fetch--transfer-hop transfer) hop
+          (ende-web-fetch--transfer-phase transfer) 'curl
+          (ende-web-fetch--transfer-connected transfer) nil)
+    (condition-case caught
         (progn
-          (ende-web-fetch--check-deadline transfer)
+          (setq stderr-process (ende-web-fetch--new-stderr-process transfer))
+          (setf (ende-web-fetch--hop-stderr-buffer hop)
+                (ende-web-fetch--transfer-stderr-buffer transfer))
           (setq process
                 (make-process
-                 :name "ende-web-fetch"
-                 :buffer nil :stderr stderr
+                 :name (generate-new-buffer-name "ende-web-fetch")
+                 :buffer nil :stderr stderr-process
                  :command (ende-web-fetch--command
-                           normalized address
-                           (ende-web-fetch--transfer-deadline transfer))
+                           transfer normalized addresses)
                  :connection-type 'pipe :coding 'binary :noquery t
                  :filter (apply-partially
-                          #'ende-web-fetch--response-filter transfer hop)))
-          (setf (ende-web-fetch--transfer-process transfer) process)
-          (while (process-live-p process)
-            (ende-web-fetch--wait-process
-             transfer process (ende-web-fetch--transfer-deadline transfer)))
-          (when (ende-web-fetch--transfer-failure transfer)
-            (error "%s" (ende-web-fetch--transfer-failure transfer)))
-          (unless (eq (process-status process) 'exit)
-            (error "web_fetch curl process did not exit normally"))
-          (unless (zerop (process-exit-status process))
-            (error "web_fetch transport failed: %s"
-                   (let ((message (with-current-buffer stderr
-                                    (decode-coding-string
-                                     (buffer-string) 'utf-8))))
-                     (if (string-empty-p (string-trim message))
-                         "curl failed"
-                       (string-trim message)))))
-          (unless (ende-web-fetch--hop-status hop)
-            (error "web_fetch received no HTTP response"))
-          (setq success t)
-          hop)
-      (when (and (processp process) (process-live-p process))
-        (delete-process process))
-      (when (eq process (ende-web-fetch--transfer-process transfer))
-        (setf (ende-web-fetch--transfer-process transfer) nil))
-      (unless success
-        (when (buffer-live-p body) (kill-buffer body))
-        (when (buffer-live-p stderr) (kill-buffer stderr))))))
+                          #'ende-web-fetch--response-filter transfer hop)
+                 :sentinel (apply-partially
+                            #'ende-web-fetch--curl-sentinel transfer hop)))
+          (setf (ende-web-fetch--transfer-process transfer) process))
+      ((error quit)
+       (let ((message (error-message-string caught)))
+         (ende-web-fetch--release-process transfer)
+         (ende-web-fetch--settle
+          transfer 'failure nil
+          (format "web_fetch could not start curl for %s: %s"
+                  (ende-web-fetch--destination-label transfer) message)))))))
 
-(defun ende-web-fetch--release-hop (hop)
-  "Kill private buffers owned by completed HOP."
-  (dolist (buffer (list (ende-web-fetch--hop-body-buffer hop)
-                        (ende-web-fetch--hop-stderr-buffer hop)))
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer))))
+(defun ende-web-fetch--start-with-addresses
+    (transfer normalized addresses allow-private)
+  (condition-case caught
+      (progn
+        (ende-web-fetch--assert-addresses addresses allow-private)
+        (setf (ende-web-fetch--transfer-addresses transfer) addresses)
+        (ende-web-fetch--start-curl transfer normalized addresses))
+    ((error quit)
+     (ende-web-fetch--settle
+      transfer 'failure nil
+       (format "web_fetch destination authorization failed for %s: %s"
+               (ende-web-fetch--destination-label transfer)
+              (error-message-string caught))))))
+
+(defun ende-web-fetch--handle-hop (transfer hop)
+  (let ((status (ende-web-fetch--hop-status hop))
+        (location (ende-web-fetch--header-value
+                   (ende-web-fetch--hop-headers hop) "location")))
+    (if (and (memq status '(301 302 303 307 308)) location)
+        (if (>= (ende-web-fetch--transfer-redirects transfer)
+                (ende-web-fetch--transfer-max-redirects transfer))
+            (ende-web-fetch--settle
+             transfer 'failure nil "web_fetch exceeded its redirect limit")
+          (condition-case caught
+              (let ((redirect
+                     (ende-web-fetch--redirect-url
+                      location (ende-web-fetch--transfer-current-url transfer))))
+                (ende-web-fetch--release-hop hop)
+                (setf (ende-web-fetch--transfer-hop transfer) nil
+                      (ende-web-fetch--transfer-current-url transfer) redirect
+                      (ende-web-fetch--transfer-redirects transfer)
+                      (1+ (ende-web-fetch--transfer-redirects transfer)))
+                (ende-web-fetch--start-request transfer))
+            ((error quit)
+             (ende-web-fetch--settle
+              transfer 'failure nil
+              (format "web_fetch redirect failed from %s: %s"
+                      (ende-web-fetch--destination-label transfer)
+                      (error-message-string caught))))))
+      (condition-case caught
+          (ende-web-fetch--settle
+           transfer 'success (ende-web-fetch--finish-response transfer hop) nil)
+        ((error quit)
+         (ende-web-fetch--settle
+          transfer 'failure nil
+          (format "web_fetch response processing failed for %s: %s"
+                  (ende-web-fetch--destination-label transfer)
+                  (error-message-string caught))))))))
+
+(defun ende-web-fetch--curl-sentinel (transfer hop process _event)
+  (when (and (not (ende-web-fetch--transfer-settled transfer))
+             (eq process (ende-web-fetch--transfer-process transfer))
+             (memq (process-status process) '(exit signal failed closed)))
+    (let* ((status (process-status process))
+           (exit (process-exit-status process))
+           (stderr (ende-web-fetch--stderr-text transfer))
+           (failure (ende-web-fetch--transfer-failure transfer)))
+      (ende-web-fetch--cancel-phase-timer transfer)
+      (ende-web-fetch--release-process transfer)
+      (setf (ende-web-fetch--transfer-phase transfer) nil
+            (ende-web-fetch--transfer-failure transfer) nil)
+      (cond
+       (failure
+        (ende-web-fetch--settle transfer 'failure nil failure))
+       ((not (and (eq status 'exit) (zerop exit)))
+        (ende-web-fetch--settle
+         transfer 'failure nil
+         (ende-web-fetch--curl-error transfer exit hop stderr)))
+       ((null (ende-web-fetch--hop-status hop))
+        (ende-web-fetch--settle
+         transfer 'failure nil
+         (format "web_fetch received no HTTP response from %s"
+                 (ende-web-fetch--destination-label transfer))))
+       (t
+        (ende-web-fetch--handle-hop transfer hop))))))
+
+(defun ende-web-fetch--start-with-permission
+    (transfer normalized permission)
+  (let ((allow-private (plist-get permission :allow-private-addresses)))
+    (setf (ende-web-fetch--transfer-allow-private transfer) allow-private)
+    (pcase (plist-get normalized :host-kind)
+      ('dns
+       (ende-web-fetch--resolve-host
+        transfer (plist-get normalized :host)
+        (lambda (addresses error)
+          (unless (ende-web-fetch--transfer-settled transfer)
+            (if error
+                (ende-web-fetch--settle transfer 'failure nil error)
+              (ende-web-fetch--start-with-addresses
+               transfer normalized addresses allow-private))))))
+      ((or 'ipv4 'ipv4-mapped-ipv6 'ipv6)
+       (condition-case caught
+           (let ((address (plist-get normalized :host)))
+             (when (memq (plist-get normalized :host-kind)
+                         '(ipv4-mapped-ipv6 ipv6))
+               (setq address (substring address 1 -1)))
+             (ende-web-fetch--start-with-addresses
+              transfer normalized
+              (list (ende-web-fetch-classify-address address)) allow-private))
+         ((error quit)
+          (ende-web-fetch--settle
+           transfer 'failure nil
+            (format "web_fetch destination authorization failed for %s: %s"
+                    (ende-web-fetch--destination-label transfer)
+                    (error-message-string caught))))))
+      (_
+       (ende-web-fetch--settle
+        transfer 'failure nil "web_fetch encountered an unsupported host type")))))
+
+(defun ende-web-fetch--start-request (transfer)
+  (unless (ende-web-fetch--transfer-settled transfer)
+    (let* ((normalized (ende-web-fetch--transfer-current-url transfer))
+           (permission
+            (condition-case caught
+                (funcall (ende-web-fetch--transfer-authorize transfer)
+                         normalized)
+              ((error quit)
+               (ende-web-fetch--settle
+                transfer 'failure nil
+                (format "web_fetch authorization failed for %s: %s"
+                        (ende-web-fetch--destination-label transfer)
+                        (error-message-string caught)))
+               :failed))))
+      (cond
+       ((eq permission :failed) nil)
+       ((not permission)
+        (ende-web-fetch--settle
+         transfer 'failure nil
+         (format "URL is not authorized by this chat's URL resources: %s"
+                 (plist-get normalized :url))))
+       (t (ende-web-fetch--start-with-permission
+           transfer normalized permission))))))
 
 (defun ende-web-fetch--text-content-type (headers)
   "Return normalized textual MIME type in HEADERS or signal."
@@ -520,95 +866,63 @@ Unsupported or malformed forms signal rather than bypassing classification."
          location
        (url-expand-file-name location (plist-get current :url))))))
 
-(defun ende-web-fetch (url authorize &optional max-chars register-cancellation)
-  "Fetch URL under AUTHORIZE with bounded, unauthenticated HTTP.
-AUTHORIZE receives a normalized URL plist and returns either nil or a plist
-whose `:allow-private-addresses' field is non-nil.  MAX-CHARS may lower the
-configured output ceiling.  REGISTER-CANCELLATION is called with a cancellation
-function while work is active, then nil during cleanup."
-  (unless (functionp authorize)
-    (error "web_fetch requires an explicit URL authorization policy"))
-  (let* ((initial (ende-url-normalize url))
-         (requested (plist-get initial :url))
-         (transfer (ende-web-fetch--make-transfer
-                    :deadline (+ (float-time) ende-web-fetch-call-timeout)
-                    :header-bytes 0 :body-bytes 0))
-         (cancel (lambda ()
-                   (setf (ende-web-fetch--transfer-cancelled transfer) t)
-                   (let ((process (ende-web-fetch--transfer-process transfer)))
-                     (when (and (processp process) (process-live-p process))
-                       (delete-process process)))))
-         (limit (or max-chars ende-web-fetch-max-output-chars))
-         (current initial)
-         (redirects 0)
-         result)
-    (unless (and (integerp limit) (> limit 0)
-                 (<= limit ende-web-fetch-max-output-chars))
-      (error "max_chars must be a positive integer no greater than %d"
-             ende-web-fetch-max-output-chars))
-    (unless (funcall authorize initial)
-      (error "URL is not authorized by this chat's URL resources"))
-    (when register-cancellation
-      (funcall register-cancellation cancel))
-    (unwind-protect
-        (catch 'finished
-          (while t
-            (ende-web-fetch--check-deadline transfer)
-            (let* ((permission (funcall authorize current))
-                   (_ (unless permission
-                        (error "redirect URL is not authorized by this chat's URL resources")))
-                   (private (plist-get permission :allow-private-addresses))
-                   (addresses (ende-web-fetch--destination-addresses
-                               transfer current private))
-                   (selected (cdar addresses))
-                   (hop (ende-web-fetch--new-hop transfer current selected))
-                   (status (ende-web-fetch--hop-status hop))
-                   (headers (ende-web-fetch--hop-headers hop))
-                   (location (ende-web-fetch--header-value headers "location")))
-              (if (memq status '(301 302 303 307 308))
-                  (if location
-                      (progn
-                        (ende-web-fetch--release-hop hop)
-                        (when (>= redirects ende-web-fetch-max-redirects)
-                          (error "web_fetch exceeded its redirect limit"))
-                        (cl-incf redirects)
-                        (setq current (ende-web-fetch--redirect-url
-                                       location current)))
-                    (setq result (cons hop current))
-                    (throw 'finished result))
-                 (setq result (cons hop current))
-                (throw 'finished result)))))
-      (when register-cancellation
-        (ignore-errors (funcall register-cancellation nil)))
-        (when (and (processp (ende-web-fetch--transfer-process transfer))
-                   (process-live-p
-                    (ende-web-fetch--transfer-process transfer)))
-         (delete-process (ende-web-fetch--transfer-process transfer))))
-    (let* ((hop (car result))
-           (final (cdr result)))
-      (unwind-protect
-          (let* ((headers (ende-web-fetch--hop-headers hop))
-                 (raw-content-type
-                  (ende-web-fetch--header-value headers "content-type"))
-                 (mime (ende-web-fetch--text-content-type headers))
-                 (encoding
-                  (ende-web-fetch--header-value headers "content-encoding")))
-            (when (and encoding
-                       (not (string-equal (downcase encoding) "identity")))
-              (error "web_fetch does not support Content-Encoding: %s" encoding))
-            (let* ((bytes (with-current-buffer
-                              (ende-web-fetch--hop-body-buffer hop)
-                            (buffer-string)))
-                   (content (ende-web-fetch--decode-body
-                             bytes (or raw-content-type (car mime))))
-                   (truncated (> (length content) limit)))
-              (list :requested_url requested
-                    :final_url (plist-get final :url)
-                    :status (ende-web-fetch--hop-status hop)
-                    :content_type (cdr mime)
-                    :content (if truncated (substring content 0 limit) content)
-                    :truncated (if truncated t :json-false))))
-        (ende-web-fetch--release-hop hop)))))
+(defun ende-web-fetch
+    (url authorize callback &optional max-chars register-cancellation)
+  (unless (and (functionp authorize) (functionp callback))
+    (error "web_fetch requires authorization and completion functions"))
+  (let (transfer)
+    (condition-case caught
+        (let* ((initial (ende-url-normalize url))
+               (output-limit ende-web-fetch-max-output-chars)
+               (limit (or max-chars output-limit))
+               (connect-timeout ende-web-fetch-connect-timeout)
+               (call-timeout ende-web-fetch-call-timeout))
+          (unless (and (integerp limit) (> limit 0) (<= limit output-limit))
+            (error "max_chars must be a positive integer no greater than %d"
+                   output-limit))
+          (unless (and (numberp connect-timeout) (> connect-timeout 0)
+                       (numberp call-timeout) (> call-timeout 0))
+            (error "web_fetch timeouts must be positive numbers"))
+          (let* ((directory (ende-web-fetch--local-directory))
+                 (deadline (+ (float-time) call-timeout)))
+            (setq transfer
+                  (ende-web-fetch--make-transfer
+                   :deadline deadline
+                   :directory directory
+                   :callback callback
+                   :authorize authorize
+                   :register-cancellation register-cancellation
+                   :requested-url (plist-get initial :url)
+                   :current-url initial
+                   :max-chars limit
+                   :max-redirects ende-web-fetch-max-redirects
+                   :connect-timeout connect-timeout
+                   :max-response-bytes ende-web-fetch-max-response-bytes
+                   :max-header-bytes ende-web-fetch-max-response-header-bytes
+                   :max-stderr-bytes 8192
+                   :redirects 0 :header-bytes 0 :body-bytes 0))
+            (setf (ende-web-fetch--transfer-cancel-function transfer)
+                  (lambda ()
+                    (unless (ende-web-fetch--transfer-settled transfer)
+                      (setf (ende-web-fetch--transfer-cancelled transfer) t)
+                       (ende-web-fetch--settle
+                        transfer 'cancelled nil "web_fetch was cancelled"))))
+            (setf (ende-web-fetch--transfer-deadline-timer transfer)
+                  (run-at-time (max 0 (- deadline (float-time))) nil
+                               #'ende-web-fetch--overall-timeout transfer))
+            (when register-cancellation
+              (funcall register-cancellation
+                       (ende-web-fetch--transfer-cancel-function transfer)))
+            (ende-web-fetch--start-request transfer)
+            transfer))
+      ((error quit)
+       (if transfer
+           (ende-web-fetch--settle
+            transfer 'failure nil (error-message-string caught))
+         (condition-case nil
+             (funcall callback nil (error-message-string caught))
+           ((error quit) nil)))
+        transfer))))
 
 (provide 'ende-web-fetch)
 
