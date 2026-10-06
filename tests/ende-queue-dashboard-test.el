@@ -107,7 +107,7 @@
                       (cons 'job (ende-job-id job))))
           (ende-queue-ui-toggle-entry)
           (let ((details (buffer-string)))
-            (should (string-match-p "Last user message: " details))
+            (should (string-match-p "Latest user message: " details))
             (should (string-match-p "How LLMs work" details))
             (should (string-match-p "Can you tell me how LLMs work\\?"
                                     details))
@@ -116,6 +116,36 @@
             (should-not (string-match-p "Source metadata:" details))
             (should-not (string-match-p "Name: Roadmap.org" details))
             (should-not (string-match-p "Type: file" details))))))))
+
+(ert-deftest ende-test/dashboard-chat-details-show-effort-and-tool-call-state ()
+  (ende-test--dashboard-reset)
+  (let ((ende-queue-ui-view 'jobs))
+    (with-temp-buffer
+      (let ((enabled
+             (ende--make-job
+              :id 41 :type 'chat :state 'running
+              :profile '(:name remote :model "gpt-6.1-sol"
+                         :reasoning-effort "max" :parallel t
+                         :max-concurrency 2 :tool-definitions (tool)))))
+        (ende-job-emit-event enabled '(:type :tool-call-count :count 0))
+        (ende-job-emit-event enabled '(:type :tool-call-count :count 2))
+        (ende-job-emit-event enabled '(:type :tool-call-count :count 5))
+        (should (equal (ende-queue-ui--operation enabled) "chat"))
+        (ende-queue-ui--job-details enabled 'running)
+        (let ((details (buffer-string)))
+          (should (string-match-p "Model: gpt-6.1-sol max" details))
+          (should (string-match-p "Tool calls: 5" details)))
+        (erase-buffer)
+        (setf (ende-job-profile enabled)
+              '(:name remote :model "gpt-6.1-sol" :parallel t
+                :max-concurrency 2 :tool-definitions nil))
+        (ende-queue-ui--job-details enabled 'running)
+        (should (string-match-p "Tool calls: <disabled>" (buffer-string)))
+        (erase-buffer)
+        (setf (ende-job-profile enabled)
+              (plist-put (ende-job-profile enabled) :tool-definitions '(tool)))
+        (ende-queue-ui--job-details enabled 'queued)
+        (should-not (string-match-p "Tool calls:" (buffer-string)))))))
 
 (ert-deftest ende-test/dashboard-header-shows-state-appropriate-action ()
   (ende-test--dashboard-reset)

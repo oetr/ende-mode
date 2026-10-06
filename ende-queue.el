@@ -28,7 +28,8 @@
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
-  enqueued-at started-at finished-at dispatch-order status latest-user)
+  enqueued-at started-at finished-at dispatch-order status latest-user
+  tool-call-count)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -172,6 +173,10 @@ state."
     (:status
      (when (stringp (plist-get event :status))
        (setf (ende-job-status job) (plist-get event :status))))
+    (:tool-call-count
+     (let ((count (plist-get event :count)))
+       (when (and (integerp count) (>= count 0))
+         (setf (ende-job-tool-call-count job) count))))
     (:begin
      (unless (ende-job-latest-user job)
        (let ((messages (plist-get event :messages))

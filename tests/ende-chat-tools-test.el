@@ -21,6 +21,7 @@
          (private-directory (expand-file-name "private" root))
          (private (expand-file-name "secret.txt" private-directory))
          (visited nil)
+         (job nil)
          (frozen-configuration nil)
          (original-search (symbol-function #'ende-tools--search-source)))
     (ende-test--reset)
@@ -31,12 +32,19 @@
           (with-temp-file private (insert "classified text\n"))
           (let ((ende-llm-function
                  (ende-test--fake-llm
-                  (list
-                   (list :tool-calls
-                         (list (list :id "call-search"
-                                     :name "search_project"
-                                     :arguments "{\"regexp\":\"classified\"}")))
-                   "Search complete")
+                   (list
+                    (list :tool-calls
+                          (list (list :id "call-project"
+                                      :name "project_info"
+                                      :arguments "{}")
+                                (list :id "call-search"
+                                      :name "search_project"
+                                      :arguments "{\"regexp\":\"classified\"}")))
+                    (list :tool-calls
+                          (list (list :id "call-project-round-2"
+                                      :name "project_info"
+                                      :arguments "{}")))
+                    "Search complete")
                   t)))
             (with-temp-buffer
               (insert
@@ -58,7 +66,7 @@
                            (push (plist-get source :relative) visited)
                            (funcall original-search source regexp before after
                                     maximum))))
-                (ende-ask)
+                (setq job (ende-ask))
                 (let* ((document (ende-chat--build-document))
                        (question (car (ende-chat--document-headlines document))))
                   (setq frozen-configuration
@@ -71,10 +79,14 @@
                   (replace-match
                    "(resource project (include \"private/**\")" t t)
                   (ende-test--complete-call (car ende-test--calls))
-                  (ende-test--complete-call (nth 1 ende-test--calls))))
+                  (should (= (ende-job-tool-call-count job) 2))
+                  (ende-test--complete-call (nth 1 ende-test--calls))
+                  (should (= (ende-job-tool-call-count job) 3))
+                  (ende-test--complete-call (nth 2 ende-test--calls))))
+              (should (= (ende-job-tool-call-count job) 3))
               (should (equal (nreverse visited) '("main.el")))
               (should (string-match-p "Search complete" (buffer-string)))
-              (should (= (length ende-test--calls) 2))
+              (should (= (length ende-test--calls) 3))
               (let* ((first-call (car ende-test--calls))
                      (definitions (plist-get (plist-get first-call :options)
                                              :tool-definitions))

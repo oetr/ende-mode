@@ -198,9 +198,7 @@
 (defun ende-queue-ui--operation (job)
   "Return JOB's concise operation label."
   (pcase (ende-job-type job)
-    ('chat (if (plist-get (ende-job-profile job) :tool-definitions)
-               "chat/tools"
-             "chat"))
+    ('chat "chat")
     ('chat-compact "compact")
     (type (symbol-name type))))
 
@@ -340,6 +338,7 @@
   (let* ((profile (ende-job-profile job))
          (columns (mapcar #'car (ende-queue-ui--columns ende-queue-ui-view)))
          (model (plist-get profile :model))
+         (effort (plist-get profile :reasoning-effort))
          (latest (ende-job-latest-user job)))
     (unless (memq 'policy columns)
       (ende-queue-ui--detail-line
@@ -348,13 +347,24 @@
       (ende-queue-ui--detail-line
        (format "Provider: %s" (ende-queue-ui--provider-name job)) job))
     (when (and (stringp model) (not (string-empty-p model)))
-      (ende-queue-ui--detail-line (format "Model: %s" model) job))
+      (ende-queue-ui--detail-line
+       (format "Model: %s%s" model
+               (if effort (format " %s" effort) ""))
+       job))
+    (when (and (eq state 'running)
+               (eq (ende-job-type job) 'chat)
+               (plist-member profile :tool-definitions))
+      (ende-queue-ui--detail-line
+       (if (plist-get profile :tool-definitions)
+           (format "Tool calls: %d" (or (ende-job-tool-call-count job) 0))
+         "Tool calls: <disabled>")
+       job))
     (when latest
       (let* ((lines (mapcar #'string-trim (split-string latest "\n" t)))
              (lines (seq-take (cl-remove-if #'string-empty-p lines) 5)))
         (when lines
           (ende-queue-ui--detail-line
-           (concat "Last user message: " (car lines)) job)
+           (concat "Latest user message: " (car lines)) job)
           (dolist (line (cdr lines))
             (ende-queue-ui--detail-line line job)))))
     (when (and (eq state 'queued) (null latest))

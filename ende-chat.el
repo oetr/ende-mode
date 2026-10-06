@@ -3084,8 +3084,11 @@ Assistant calls must be followed by matching tool results in order."
                                    prior-cancel)))
                          (when cancel
                            (ende-job-cancellation-set job cancel))))
-                      (synchronous t)
-                      (completed nil))
+                       (synchronous t)
+                       (completed nil))
+                 (ende-job-emit-event
+                  job (list :type :tool-call-count
+                            :count (1+ (or (ende-job-tool-call-count job) 0))))
                  (ende-chat--tool-response-async
                   call configuration
                   (lambda (tool-content)
@@ -3128,6 +3131,7 @@ Assistant calls must be followed by matching tool results in order."
       (error "Tool calls are unavailable with the OpenRouter batch transport"))
     (setq profile (plist-put profile :tool-definitions definitions))
     (setf (ende-job-profile job) profile)
+    (ende-job-emit-event job '(:type :tool-call-count :count 0))
     (cl-labels
         ((on-done (result)
            (ende--call-with-job-error
