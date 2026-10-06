@@ -23,14 +23,18 @@
 
 
 (ert-deftest ende-test/queue-snapshots-do-not-expose-list-state ()
-  (let ((ende--active-jobs (list :active))
-        (ende-queue (list :pending)))
+  (let* ((active-job (ende--make-job :id 1 :state 'running))
+         (pending-job (ende--make-job :id 2 :state 'queued))
+         (ende--active-jobs (list active-job))
+         (ende-queue (list pending-job)))
     (let ((active (ende-active-jobs))
           (pending (ende-pending-jobs)))
       (setcar active :changed)
       (setcar pending :changed)
-      (should (equal ende--active-jobs '(:active)))
-      (should (equal ende-queue '(:pending))))))
+      (should (eq (car ende--active-jobs) active-job))
+      (should (eq (car ende-queue) pending-job))
+      (should (cl-every #'ende-job-p (ende-active-jobs)))
+      (should (cl-every #'ende-job-p (ende-pending-jobs))))))
 
 ;;;; Queue lifecycle
 

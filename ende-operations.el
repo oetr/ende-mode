@@ -478,7 +478,8 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
                                   (ende-pending-jobs)))
          (let ((other-target (ende-job-target other-job)))
            (when (and (not (eq other-job job))
-                      (> (ende-job-id other-job) (ende-job-id job))
+                      (or (eq (ende-job-state other-job) 'queued)
+                          (> (ende-job-id other-job) (ende-job-id job)))
                       (eq (ende-job-type other-job) 'insert)
                       (eq (ende-target-buffer other-target) buffer))
              (ende-ignore-errors

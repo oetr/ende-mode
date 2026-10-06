@@ -18,6 +18,18 @@
 
 (defvar ende-test--fake-responses nil)
 
+(defconst ende-test--dashboard-profile
+  '(:name remote :model "dashboard-test" :max-concurrency 2 :parallel nil))
+
+(defun ende-test--dashboard-request (profile)
+  "Build a deterministic insertion request using PROFILE."
+  (let ((position (point-max)))
+    (list 'insert
+          :target (ende-target-create
+                   :buffer (current-buffer) :start position :end position
+                   :cursor position :review-policy 'ignore)
+          :profile profile)))
+
 (defun ende-test--callback (call name &rest args)
   "Invoke callback NAME from CALL with ARGS when it exists."
   (let ((callback (plist-get (plist-get call :callbacks) name)))
@@ -154,10 +166,12 @@ process for cancellation tests."
         ende--queue-suspended nil
         ende--current-job nil
         ende--active-jobs nil
-        ende--fences nil
         ende--aborting nil
         ende--dispatching nil
         ende--next-job-id 0
+        ende--next-dispatch-order 0
+        ende--next-fence-id 0
+        ende-queue-paused nil
         ende-openrouter-batch--next-request-id 0
         ende-openrouter-batch--known-groups nil
         ende-summary--next-source-id 0)
