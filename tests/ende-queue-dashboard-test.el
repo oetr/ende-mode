@@ -69,6 +69,27 @@
                                   buffers-second-row))
           (should (string-match-p "Behind #" buffers-second-row)))))))
 
+(ert-deftest ende-test/dashboard-header-shows-state-appropriate-action ()
+  (ende-test--dashboard-reset)
+  (let ((ende-llm-function (ende-test--fake-llm '(:stall) t)))
+    (ende-test--with-buffer "base"
+      (let* ((job (ende-enqueue
+                   (ende-test--dashboard-request
+                    ende-test--dashboard-profile)))
+             (dashboard (ende-queue-open)))
+        (with-current-buffer dashboard
+          (should (string-match-p "ACTIVE  P pause" (buffer-string)))
+          (ende-queue-pause)
+          (ende-queue-ui--render)
+          (should (string-match-p "PAUSED (no new starts)  R resume"
+                                  (buffer-string)))
+          (ende-queue-resume)
+          (ende-queue-resume)
+          (ende-queue-ui--render)
+          (should (string-match-p "ACTIVE  P pause" (buffer-string))))
+        (should (eq (ende-job-state job) 'running))
+        (should (= (length ende-test--calls) 1))))))
+
 (ert-deftest ende-test/queue-pause-is-independent-of-dashboard-lifecycle ()
   (ende-test--dashboard-reset)
   (let ((ende-llm-function (ende-test--fake-llm '(" A" " B" " C") t)))

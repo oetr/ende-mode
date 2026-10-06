@@ -554,9 +554,10 @@
       (let ((inhibit-read-only t))
         (erase-buffer)
         (ende-queue-ui--line
-         (format "Queue [%s]  %s%s  R resume  v buffers  ? help"
+         (format "Queue [%s]  %s  %s%s  v buffers  ? help"
                  (if (eq ende-queue-ui-view 'jobs) "Jobs" "Buffers")
                  (if ende-queue-paused "PAUSED (no new starts)" "ACTIVE")
+                 (if ende-queue-paused "R resume" "P pause")
                  (if (> (ende-queue-ui--marked-count) 0)
                      (format "  · %d marked" (ende-queue-ui--marked-count))
                    ""))
