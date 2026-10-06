@@ -42,6 +42,7 @@
 (require 'ende-rubber-duck)
 (require 'ende-history)
 (require 'ende-selector)
+(require 'ende-queue-ui)
 
 ;;;; Keymap and Minor Mode
 
@@ -134,7 +135,8 @@
                   "ende-chat-config.el"
                   "ende-summary.el" "ende-operations.el"
                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
-                  "ende-history.el" "ende-selector.el" "ende.el")))
+                  "ende-history.el" "ende-selector.el" "ende-queue-ui.el"
+                  "ende.el")))
     (dolist (f files) (load (expand-file-name f dir)))
     (setq ende-mode-map (ende--make-mode-map))
     (message "ende: reloaded from %s" dir)))
