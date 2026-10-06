@@ -34,6 +34,12 @@
   "An ordered queue barrier with an explicit set of unfinished predecessors."
   id provider jobs)
 
+(defun ende-job-latest-user-set (job text)
+  "Retain a bounded inert latest-user excerpt TEXT on JOB."
+  (when (stringp text)
+    (setf (ende-job-latest-user job)
+          (substring-no-properties text 0 (min 1200 (length text))))))
+
 (defvar ende--next-job-id 0
   "Next numeric identifier assigned to a job.")
 
@@ -167,16 +173,16 @@ state."
      (when (stringp (plist-get event :status))
        (setf (ende-job-status job) (plist-get event :status))))
     (:begin
-     (let ((messages (plist-get event :messages))
-           latest)
-       (dolist (entry messages)
-         (when (and (consp entry) (equal (car entry) "user")
-                    (stringp (cdr entry)))
-            (setq latest (cdr entry))))
-       (when latest
-         ;; Retain only a bounded inert excerpt, never a duplicate transcript.
-         (setf (ende-job-latest-user job)
-               (substring-no-properties latest 0 (min 1200 (length latest)))))))
+     (unless (ende-job-latest-user job)
+       (let ((messages (plist-get event :messages))
+             latest)
+         (dolist (entry messages)
+           (when (and (consp entry) (equal (car entry) "user")
+                      (stringp (cdr entry)))
+             (setq latest (cdr entry))))
+         (when latest
+           ;; Retain only a bounded inert excerpt, never a duplicate transcript.
+           (ende-job-latest-user-set job latest)))))
     (_ nil))
   (dolist (function ende-job-event-functions)
     (ende-ignore-errors function job event)))

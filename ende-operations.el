@@ -198,9 +198,23 @@ result is applied."
                     "\n")
          "\n\n")))))
 
+(defun ende-operations--latest-user-message (messages)
+  "Return the last string-valued user message in MESSAGES, or nil."
+  (let (latest)
+    (dolist (message messages)
+      (when (and (consp message)
+                 (equal (car message) "user")
+                 (stringp (cdr message)))
+        (setq latest (cdr message))))
+    latest))
+
 (defun ende-operations--add-source-metadata (job messages)
   "Prepend JOB's source metadata to the first user message in MESSAGES."
-  (let ((block (ende-operations--source-metadata-block job)))
+  (let ((block (ende-operations--source-metadata-block job))
+        (latest-user (ende-operations--latest-user-message messages)))
+    (when latest-user
+      ;; Capture before metadata is added so the dashboard can show user text.
+      (ende-job-latest-user-set job latest-user))
     (if (null block)
         messages
       (let ((added nil))

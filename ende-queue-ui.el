@@ -350,10 +350,11 @@
     (when (and (stringp model) (not (string-empty-p model)))
       (ende-queue-ui--detail-line (format "Model: %s" model) job))
     (when latest
-      (let ((lines (seq-take (split-string latest "\n") 3)))
+      (let* ((lines (mapcar #'string-trim (split-string latest "\n" t)))
+             (lines (seq-take (cl-remove-if #'string-empty-p lines) 5)))
         (when lines
           (ende-queue-ui--detail-line
-           (concat "Latest user: " (car lines)) job)
+           (concat "Last user message: " (car lines)) job)
           (dolist (line (cdr lines))
             (ende-queue-ui--detail-line line job)))))
     (when (and (eq state 'queued) (null latest))

@@ -69,6 +69,54 @@
                                   buffers-second-row))
           (should (string-match-p "Behind #" buffers-second-row)))))))
 
+(ert-deftest ende-test/dashboard-user-preview-skips-source-metadata-and-shows-five-lines ()
+  (ende-test--dashboard-reset)
+  (let ((ende-llm-function (ende-test--fake-llm nil t)))
+    (ende-test--with-buffer "base"
+      (ende-queue-pause)
+      (let* ((job (ende-enqueue
+                   (ende-test--dashboard-request
+                    ende-test--dashboard-profile)))
+             (user-message
+              (concat "* How LLMs work\n"
+                      "Can you tell me how LLMs work?\n"
+                      "Explain the basic idea.\n"
+                      "Keep it concise.\n"
+                      "Use two sentences.\n"
+                      "This sixth line should stay hidden."))
+             (messages (list (cons "user" user-message)))
+             (prepared
+              (cl-letf (((symbol-function
+                          'ende-operations--source-metadata-block)
+                         (lambda (_job)
+                           (concat "Source metadata:\n"
+                                   "Name: Roadmap.org\n"
+                                   "Type: file\n"
+                                   "Major mode: org-mode\n\n"))))
+                (ende-operations--add-source-metadata job messages)))
+             (dashboard nil))
+        (should (string-match-p "Source metadata:"
+                                (cdar prepared)))
+        ;; The provider-facing begin event must not replace the original text
+        ;; captured before source metadata was added.
+        (let ((ende-job-event-functions nil))
+          (ende-job-emit-event job (list :type :begin :messages prepared)))
+        (setq dashboard (ende-queue-open))
+        (with-current-buffer dashboard
+          (goto-char (ende-queue-ui--position-for-key
+                      (cons 'job (ende-job-id job))))
+          (ende-queue-ui-toggle-entry)
+          (let ((details (buffer-string)))
+            (should (string-match-p "Last user message: " details))
+            (should (string-match-p "How LLMs work" details))
+            (should (string-match-p "Can you tell me how LLMs work\\?"
+                                    details))
+            (should (string-match-p "Use two sentences\\." details))
+            (should-not (string-match-p "This sixth line" details))
+            (should-not (string-match-p "Source metadata:" details))
+            (should-not (string-match-p "Name: Roadmap.org" details))
+            (should-not (string-match-p "Type: file" details))))))))
+
 (ert-deftest ende-test/dashboard-header-shows-state-appropriate-action ()
   (ende-test--dashboard-reset)
   (let ((ende-llm-function (ende-test--fake-llm '(:stall) t)))
