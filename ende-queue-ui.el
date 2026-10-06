@@ -291,14 +291,14 @@
   (let* ((marked (gethash (ende-job-id job) ende-queue-ui--marked-ids))
          (expanded (gethash (ende-job-id job) ende-queue-ui--expanded-jobs))
          (buffer (ende-target-buffer (ende-job-target job)))
-         (values (list :id (number-to-string (ende-job-id job))
-                       :buffer (ende-queue-ui--safe-name buffer)
-                       :operation (ende-queue-ui--operation job)
-                       :policy (ende-queue-ui--policy job)
-                       :provider (ende-queue-ui--provider-name job)
-                       :state (if (eq state 'running) "Running" "Queued")
-                       :status (ende-queue-ui--job-status job state)
-                       :time (ende-queue-ui--elapsed job state)))
+         (values (list (cons 'id (number-to-string (ende-job-id job)))
+                       (cons 'buffer (ende-queue-ui--safe-name buffer))
+                       (cons 'operation (ende-queue-ui--operation job))
+                       (cons 'policy (ende-queue-ui--policy job))
+                       (cons 'provider (ende-queue-ui--provider-name job))
+                       (cons 'state (if (eq state 'running) "Running" "Queued"))
+                       (cons 'status (ende-queue-ui--job-status job state))
+                       (cons 'time (ende-queue-ui--elapsed job state))))
           (prefix (concat (if marked
                              (propertize "*" 'face 'ende-queue-ui-mark-face)
                            " ")
@@ -308,7 +308,7 @@
                   (mapconcat
                    (lambda (column)
                      (ende-queue-ui--fit
-                      (plist-get values (car column)) (nth 1 column)))
+                      (alist-get (car column) values) (nth 1 column)))
                    (ende-queue-ui--columns view) " "))))
     (ende-queue-ui--line
       summary

@@ -23,6 +23,52 @@
   (clrhash ende-queue-ui--folded-buffers)
   (setq ende-queue-ui--buffer-order nil))
 
+(defun ende-test--dashboard-job-row (dashboard id)
+  "Return the rendered summary line for job ID in DASHBOARD."
+  (with-current-buffer dashboard
+    (let ((position (ende-queue-ui--position-for-key (cons 'job id))))
+      (when position
+        (save-excursion
+          (goto-char position)
+          (buffer-substring-no-properties
+           (line-beginning-position) (line-end-position)))))))
+
+(ert-deftest ende-test/dashboard-summary-rows-render-job-fields-in-both-views ()
+  (ende-test--dashboard-reset)
+  (let ((ende-llm-function (ende-test--fake-llm nil t)))
+    (ende-test--with-buffer "base"
+      (ende-queue-pause)
+      (let* ((first (ende-enqueue
+                     (ende-test--dashboard-request
+                      ende-test--dashboard-profile)))
+             (second (ende-enqueue
+                      (ende-test--dashboard-request
+                       ende-test--dashboard-profile)))
+             (dashboard (ende-queue-open))
+             (first-id (ende-job-id first))
+             (second-id (ende-job-id second))
+             (jobs-first-row (ende-test--dashboard-job-row dashboard first-id))
+             (jobs-second-row (ende-test--dashboard-job-row dashboard second-id)))
+        (should (string-match-p (format "\\b%d\\b" first-id) jobs-first-row))
+        (should (string-match-p "insert" jobs-first-row))
+        (should (string-match-p "Ready" jobs-first-row))
+        (should (string-match-p "wait" jobs-first-row))
+        (should (string-match-p (format "\\b%d\\b" second-id) jobs-second-row))
+        (should (string-match-p "Behind #" jobs-second-row))
+        (with-current-buffer dashboard
+          (ende-queue-ui-switch-view))
+        (let ((buffers-first-row
+               (ende-test--dashboard-job-row dashboard first-id))
+              (buffers-second-row
+               (ende-test--dashboard-job-row dashboard second-id)))
+          (should (string-match-p (format "\\b%d\\b" first-id)
+                                  buffers-first-row))
+          (should (string-match-p "Queued" buffers-first-row))
+          (should (string-match-p "insert" buffers-first-row))
+          (should (string-match-p (format "\\b%d\\b" second-id)
+                                  buffers-second-row))
+          (should (string-match-p "Behind #" buffers-second-row)))))))
+
 (ert-deftest ende-test/queue-pause-is-independent-of-dashboard-lifecycle ()
   (ende-test--dashboard-reset)
   (let ((ende-llm-function (ende-test--fake-llm '(" A" " B" " C") t)))
