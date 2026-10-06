@@ -19,6 +19,7 @@
 (require 'ende-provider)
 (require 'ende-commands)
 (require 'ende-rubber-duck)
+(require 'ende-queue-ui)
 
 (defcustom ende-selector-buffer-name "*ende-selector*"
   "Buffer used by the provider and model selector."
@@ -342,6 +343,7 @@ the discovered pricing metadata for those model IDs."
       (insert (format "e        - Effort:        %s\n\n" effort))
       (insert (format "Quota: %s\n\n" (ende-selector--quota-display)))
       (insert "a  - ask\n"
+              "d  - queue dashboard\n"
 	      "e  - select reasoning effort\n"
 	      "i  - insert\n"
               "I  - insert anywhere\n"
@@ -865,6 +867,12 @@ before dispatch, so queued jobs contain only a live-confirmed value."
   (interactive)
   (ende-selector--run 'chat))
 
+(defun ende-selector-dashboard ()
+  "Close the selector and open the Ende queue dashboard."
+  (interactive)
+  (ende-selector-close)
+  (ende-queue-open))
+
 (defun ende-selector-compact ()
   "Compact the current chat context using the selector choice."
   (interactive)
@@ -917,6 +925,7 @@ before dispatch, so queued jobs contain only a live-confirmed value."
   (define-key ende-selector-mode-map (kbd "P") #'ende-selector-toggle-parallel)
   (define-key ende-selector-mode-map (kbd "i") #'ende-selector-insert)
   (define-key ende-selector-mode-map (kbd "a") #'ende-selector-ask)
+  (define-key ende-selector-mode-map (kbd "d") #'ende-selector-dashboard)
   (define-key ende-selector-mode-map (kbd "k") #'ende-selector-compact)
   (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
   (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)

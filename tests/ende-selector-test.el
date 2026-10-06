@@ -773,7 +773,8 @@
       (ende-selector--render)
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
                      "Quota: unavailable"
-                     "i  - insert" "a  - ask" "I  - insert anywhere"
+                     "i  - insert" "a  - ask" "d  - queue dashboard"
+                      "I  - insert anywhere"
                      "k  - compact chat context"
                      "w  - write anywhere"
                      "m  - select/search model"
@@ -793,6 +794,7 @@
         (original-P (lookup-key ende-selector-mode-map (kbd "P")))
         (original-e (lookup-key ende-selector-mode-map (kbd "e")))
         (original-a (lookup-key ende-selector-mode-map (kbd "a")))
+        (original-d (lookup-key ende-selector-mode-map (kbd "d")))
         (original-k (lookup-key ende-selector-mode-map (kbd "k"))))
     (unwind-protect
         (progn
@@ -802,6 +804,7 @@
           (define-key ende-selector-mode-map (kbd "P") nil)
           (define-key ende-selector-mode-map (kbd "e") nil)
           (define-key ende-selector-mode-map (kbd "a") nil)
+          (define-key ende-selector-mode-map (kbd "d") nil)
           (define-key ende-selector-mode-map (kbd "k") nil)
           (with-temp-buffer
             (ende-selector-mode)
@@ -821,6 +824,8 @@
                         #'ende-selector-select-effort))
             (should (eq (key-binding (kbd "a"))
                         #'ende-selector-ask))
+            (should (eq (key-binding (kbd "d"))
+                        #'ende-selector-dashboard))
             (should (eq (key-binding (kbd "k"))
                         #'ende-selector-compact))
             (should (eq (key-binding (kbd "RET"))
@@ -842,7 +847,21 @@
       (define-key ende-selector-mode-map (kbd "P") original-P)
       (define-key ende-selector-mode-map (kbd "e") original-e)
       (define-key ende-selector-mode-map (kbd "a") original-a)
+      (define-key ende-selector-mode-map (kbd "d") original-d)
       (define-key ende-selector-mode-map (kbd "k") original-k))))
+
+(ert-deftest ende-test/selector-dashboard-action-closes-and-opens-queue ()
+  (let ((selector-closed nil)
+        (dashboard-opened nil))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (cl-letf (((symbol-function 'ende-selector-close)
+                 (lambda () (setq selector-closed t)))
+                ((symbol-function 'ende-queue-open)
+                 (lambda () (setq dashboard-opened t))))
+        (call-interactively (key-binding (kbd "d")))))
+    (should selector-closed)
+    (should dashboard-opened)))
 
 
 
