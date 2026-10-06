@@ -125,14 +125,13 @@
               (run-at-time 0.08 nil #'ende-queue-ui--refresh-callback buffer))))))
 
 (defun ende-queue-ui--refresh-callback (buffer)
-  "Refresh BUFFER if it still displays the dashboard."
+  "Refresh BUFFER when the dashboard is displayed."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq ende-queue-ui--refresh-timer nil)
       (when (derived-mode-p 'ende-queue-ui-mode)
-        (if (get-buffer-window buffer t)
-            (ende-queue-ui--render)
-          (ende-queue-ui--detach-observers))))))
+        (when (get-buffer-window buffer t)
+          (ende-queue-ui--render))))))
 
 (defun ende-queue-ui--clock (buffer)
   "Refresh elapsed times in visible dashboard BUFFER."
@@ -142,8 +141,16 @@
           (ende-queue-ui--render)
         (when (timerp ende-queue-ui--clock-timer)
           (cancel-timer ende-queue-ui--clock-timer)
-          (setq ende-queue-ui--clock-timer nil)
-          (ende-queue-ui--detach-observers))))))
+          (setq ende-queue-ui--clock-timer nil))))))
+
+(defun ende-queue-ui--window-buffer-changed (frame)
+  "Refresh the dashboard when a window on FRAME starts displaying it."
+  (let ((buffer ende-queue-ui--buffer))
+    (when (and (buffer-live-p buffer)
+               (get-buffer-window buffer frame))
+      (with-current-buffer buffer
+        (ende-queue-ui--start-clock)
+        (ende-queue-ui--schedule-refresh)))))
 
 (defun ende-queue-ui--attach-observers ()
   "Subscribe this dashboard to scheduler and lifecycle notifications."
@@ -168,6 +175,8 @@
   (setq ende-queue-ui--refresh-timer nil
         ende-queue-ui--clock-timer nil)
   (ende-queue-ui--detach-observers)
+  (remove-hook 'window-buffer-change-functions
+               #'ende-queue-ui--window-buffer-changed)
   (when (eq ende-queue-ui--buffer (current-buffer))
     (setq ende-queue-ui--buffer nil)))
 
@@ -804,8 +813,7 @@
           (setq ende-queue-ui--clock-timer nil))
         (when (timerp ende-queue-ui--refresh-timer)
           (cancel-timer ende-queue-ui--refresh-timer)
-          (setq ende-queue-ui--refresh-timer nil))
-        (ende-queue-ui--detach-observers)))))
+          (setq ende-queue-ui--refresh-timer nil))))))
 
 (defvar ende-queue-ui-mode-map
   (let ((map (make-sparse-keymap)))
@@ -842,6 +850,8 @@
   (setq ende-queue-ui--buffer (current-buffer))
   (add-hook 'kill-buffer-hook #'ende-queue-ui--cleanup nil t)
   (ende-queue-ui--attach-observers)
+  (add-hook 'window-buffer-change-functions
+            #'ende-queue-ui--window-buffer-changed)
   (ende-queue-ui--start-clock))
 
 ;;;###autoload

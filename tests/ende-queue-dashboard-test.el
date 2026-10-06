@@ -33,6 +33,14 @@
           (buffer-substring-no-properties
            (line-beginning-position) (line-end-position)))))))
 
+(defun ende-test--dashboard-flush-refresh (dashboard)
+  "Run DASHBOARD's pending refresh now, keeping tests independent of timers."
+  (with-current-buffer dashboard
+    (when (timerp ende-queue-ui--refresh-timer)
+      (cancel-timer ende-queue-ui--refresh-timer)
+      (setq ende-queue-ui--refresh-timer nil)))
+  (ende-queue-ui--refresh-callback dashboard))
+
 (ert-deftest ende-test/dashboard-summary-rows-render-job-fields-in-both-views ()
   (ende-test--dashboard-reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t)))
@@ -146,6 +154,81 @@
               (plist-put (ende-job-profile enabled) :tool-definitions '(tool)))
         (ende-queue-ui--job-details enabled 'queued)
         (should-not (string-match-p "Tool calls:" (buffer-string)))))))
+
+(ert-deftest ende-test/dashboard-refreshes-job-lifecycle-across-display-changes ()
+  (save-window-excursion
+    (delete-other-windows)
+    (ende-test--dashboard-reset)
+    (let* ((ende--job-handlers (copy-alist ende--job-handlers))
+           (profile (plist-put (copy-tree ende-test--dashboard-profile)
+                               :tool-definitions '(tool)))
+           job dashboard)
+      (ende-register-job-handler 'chat (lambda (_job) nil))
+      (ende-test--with-buffer "source"
+        (let* ((source (current-buffer))
+               (request (ende-test--dashboard-request profile)))
+          (setcar request 'chat)
+          (setq job (ende-enqueue request)
+                dashboard (ende-queue-open))
+          (ende-job-emit-event job '(:type :tool-call-count :count 0))
+          (with-current-buffer dashboard
+            (goto-char (ende-queue-ui--position-for-key
+                        (cons 'job (ende-job-id job))))
+            (ende-queue-ui-toggle-entry))
+          (let* ((dashboard-window (get-buffer-window dashboard t))
+                 (source-window (split-window-right nil dashboard-window)))
+            (set-window-buffer dashboard-window dashboard)
+            (set-window-buffer source-window source)
+            (select-window source-window)
+
+            ;; A displayed but unselected dashboard still follows job events.
+            (ende-job-emit-event
+             job '(:type :tool-call-count :count 2))
+            (ende-test--dashboard-flush-refresh dashboard)
+            (with-current-buffer dashboard
+              (should (string-match-p "Tool calls: 2" (buffer-string))))
+
+            ;; Quit cancels display timers, but leaves event observers attached.
+            (select-window dashboard-window)
+            (ende-queue-ui-quit)
+            (unless (window-live-p dashboard-window)
+              (setq dashboard-window (selected-window)))
+            (should-not (get-buffer-window dashboard t))
+            (should (memq #'ende-queue-ui--job-event
+                          ende-job-event-functions))
+            (should (memq #'ende-queue-ui--queue-event
+                          ende-queue-event-functions))
+            (ende-job-emit-event
+             job '(:type :tool-call-count :count 3))
+            (ende-test--dashboard-flush-refresh dashboard)
+
+            ;; Showing it again schedules a refresh without requiring `g'.
+            (set-window-buffer dashboard-window dashboard)
+            (run-hook-with-args 'window-buffer-change-functions
+                                (window-frame dashboard-window))
+            (ende-test--dashboard-flush-refresh dashboard)
+            (with-current-buffer dashboard
+              (should (string-match-p "Tool calls: 3" (buffer-string))))
+
+            ;; Completion while hidden is reflected when the view returns.
+            (set-window-buffer dashboard-window source)
+            (ende-job-finish job "done")
+            (ende-test--dashboard-flush-refresh dashboard)
+            (set-window-buffer dashboard-window dashboard)
+            (run-hook-with-args 'window-buffer-change-functions
+                                (window-frame dashboard-window))
+            (ende-test--dashboard-flush-refresh dashboard)
+            (with-current-buffer dashboard
+              (should-not (ende-queue-ui--position-for-key
+                           (cons 'job (ende-job-id job))))))
+          (when (buffer-live-p dashboard)
+            (kill-buffer dashboard))
+          (should-not (memq #'ende-queue-ui--job-event
+                            ende-job-event-functions))
+          (should-not (memq #'ende-queue-ui--queue-event
+                            ende-queue-event-functions))
+          (should-not (memq #'ende-queue-ui--window-buffer-changed
+                            window-buffer-change-functions)))))))
 
 (ert-deftest ende-test/dashboard-header-shows-state-appropriate-action ()
   (ende-test--dashboard-reset)
