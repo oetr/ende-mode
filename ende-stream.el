@@ -106,7 +106,7 @@ successful exit RESPONSE-CALLBACK receives parsed response headers.  Header
 parsing failures are sent to HEADER-ERROR-CALLBACK.  When IDLE-ERROR-FIRST is
 non-nil, a recorded idle error takes precedence over the exit status."
   (when (and (not (ende-stream-terminal-p stream))
-             (memq (process-status process) '(exit signal closed failed)))
+             (memq (process-status process) '(exit signal closed)))
     (let ((idle-error (process-get process :ende-idle-error)))
       (cond
        ((and idle-error idle-error-first)

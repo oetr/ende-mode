@@ -369,8 +369,10 @@
           (with-temp-file headers-file
             (insert "HTTP/1.1 400 Bad Request\r\n\r\n"))
           (let ((session
-                 (ende-codex--make-session
-                  :preview-parts '("{\"detail\":\"invalid request body\"}"))))
+                 (ende-codex--make-session)))
+            (ende-stream-append-preview
+             (ende-codex--session-stream session)
+             "{\"detail\":\"invalid request body\"}")
             (ende-transport-session-set-resources
              (ende-codex--lifecycle session)
              (list :headers-file headers-file))
@@ -487,10 +489,7 @@
                 (list :on-event (lambda (event) (push event events))
                       :on-done (lambda (value) (setq result value))
                       :on-error (lambda (error) (setq failure error)))
-                :sse (ende-protocol-make-sse)
-                :estimated-chars 0
-                :received-bytes 0
-                :preview-bytes 0)))
+                :estimated-chars 0)))
           (ende-transport-session-set-resources
            (ende-codex--lifecycle session)
            (list :process process :headers-file headers-file))
@@ -535,10 +534,7 @@
                 :profile '(:model "gpt-test")
                 :callbacks (list :on-error
                                  (lambda (error) (setq failure error)))
-                :sse (ende-protocol-make-sse)
-                :estimated-chars 0
-                :received-bytes 0
-                :preview-bytes 0)))
+                :estimated-chars 0)))
           (ende-transport-session-set-resources
            (ende-codex--lifecycle session)
            (list :process process :headers-file headers-file))
@@ -727,7 +723,6 @@
            :callbacks (list :on-event (lambda (event) (push event events))
                             :on-done (lambda (value) (setq result value))
                             :on-error (lambda (value) (setq failure value)))
-           :sse (ende-protocol-make-sse)
            :estimated-chars 0)))
     (ende-codex--handle-event
      session

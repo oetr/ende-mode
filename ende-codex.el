@@ -20,6 +20,7 @@
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-transport)
+(require 'ende-stream)
 
 (defcustom ende-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -107,9 +108,9 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile lifecycle auth-cancel sse content-parts thinking-parts usage actual-model
-  tool-calls actual-provider finish-reason estimated-chars received-bytes preview-parts
-  preview-bytes generation-start terminal-event cancelled)
+  profile lifecycle stream auth-cancel content-parts thinking-parts usage actual-model
+  tool-calls actual-provider finish-reason estimated-chars generation-start
+  terminal-event cancelled)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -120,10 +121,13 @@ The :callbacks argument initializes the composed transport lifecycle."
                  (cl-loop for (key value) on arguments by #'cddr
                           unless (eq key :callbacks)
                           append (list key value)))))
-    (setf (ende-codex--session-lifecycle session)
-          (ende-transport-session-create
-           callbacks (apply-partially #'ende-codex--fail session)))
-    session))
+    (let ((lifecycle
+           (ende-transport-session-create
+            callbacks (apply-partially #'ende-codex--fail session))))
+      (setf (ende-codex--session-lifecycle session) lifecycle
+            (ende-codex--session-stream session)
+            (ende-stream-create lifecycle (ende-protocol-make-sse)))
+      session)))
 
 (defun ende-codex--lifecycle (session)
   "Return the composed transport lifecycle for SESSION."
@@ -1013,8 +1017,8 @@ is queried for every call; it does not share the model catalog cache."
   (unless (ende-codex--terminal-p session)
     (ende-codex--cancel-auth-waiter session)
     (unwind-protect
-        (ende-transport-session-settle
-         (ende-codex--lifecycle session)
+        (ende-stream-settle
+         (ende-codex--session-stream session)
          outcome value
          (when (or (ende-codex--session-content-parts session)
                    (ende-codex--session-thinking-parts session)
@@ -1249,33 +1253,15 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                "ChatGPT request failed"))
           :details error)))))))
 
-(defun ende-codex--append-preview (session chunk)
-  "Append a bounded prefix of CHUNK to SESSION's error preview."
-  (let* ((used (or (ende-codex--session-preview-bytes session) 0))
-         (remaining (and ende-max-error-body-bytes
-                         (- ende-max-error-body-bytes used)))
-         (prefix (if remaining
-                     (and (> remaining 0)
-                          (ende-transport-byte-prefix chunk remaining))
-                   chunk)))
-    (when prefix
-      (push prefix (ende-codex--session-preview-parts session))
-      (setf (ende-codex--session-preview-bytes session)
-            (+ used (string-bytes prefix))))))
-
-(defun ende-codex--preview-text (session)
-  "Return SESSION's bounded error preview."
-  (mapconcat #'identity
-             (nreverse (ende-codex--session-preview-parts session)) ""))
-
-(defun ende-codex--http-error (session)
+(defun ende-codex--http-error (session &optional response-status)
   "Return a structured HTTP error for SESSION."
-  (let* ((status (condition-case nil
-                     (car (ende-curl-response-headers
-                           (ende-transport-session-headers-file
-                            (ende-codex--lifecycle session))))
-                   (error nil)))
-         (preview (ende-codex--preview-text session))
+  (let* ((status (or response-status
+                     (condition-case nil
+                         (car (ende-stream-response-headers
+                               (ende-codex--session-stream session)))
+                       (error nil))))
+         (preview (ende-stream-preview-text
+                   (ende-codex--session-stream session)))
          (detail (ende-transport-error-detail preview)))
     (ende-error-create
      :kind 'http
@@ -1286,97 +1272,84 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                (string-trim preview))
                           "ChatGPT request failed")))))
 
+(defun ende-codex--handle-sse-events (session events)
+  "Decode Codex JSON EVENTS for SESSION, ignoring Chat Completions markers."
+  (dolist (event events)
+    (unless (ende-codex--terminal-p session)
+      (when (eq (plist-get event :type) :json)
+        (ende-codex--handle-event session (plist-get event :value))))))
+
+(defun ende-codex--filter-error (session error _over-limit)
+  "Settle SESSION for SSE parser ERROR."
+  (ende-codex--fail
+   session (ende-error-create :kind 'protocol
+                              :message (error-message-string error))))
+
 (defun ende-codex--filter (session _process chunk)
   "Consume curl output CHUNK for SESSION."
-  (unless (ende-codex--terminal-p session)
-    (let* ((received (ende-codex--session-received-bytes session))
-           (chunk-bytes (string-bytes chunk))
-           (total (+ received chunk-bytes))
-           (remaining (and ende-max-response-bytes
-                           (- ende-max-response-bytes received)))
-           (processable (if (and ende-max-response-bytes
-                                 (> total ende-max-response-bytes))
-                            (ende-transport-byte-prefix chunk (max 0 remaining))
-                          chunk)))
-      (setf (ende-codex--session-received-bytes session) total)
-      (ende-codex--append-preview session chunk)
-      (condition-case filter-error
-          (when (> (length processable) 0)
-            (dolist (event
-                     (ende-protocol-sse-feed
-                      (ende-codex--session-sse session) processable))
-              (unless (ende-codex--terminal-p session)
-                (when (eq (plist-get event :type) :json)
-                  (ende-codex--handle-event
-                   session (plist-get event :value))))))
-        ((error quit)
-         (ende-codex--fail
-          session
-          (ende-error-create :kind 'protocol
-                             :message (error-message-string filter-error)))))
-      (when (and ende-max-response-bytes
-                 (> total ende-max-response-bytes)
-                 (not (ende-codex--terminal-p session)))
-        (ende-codex--fail
-         session
-         (ende-error-create
-          :kind 'resource
-          :message "response exceeds ende-max-response-bytes"))))))
+  (ende-stream-filter
+   (ende-codex--session-stream session) chunk
+   (apply-partially #'ende-codex--handle-sse-events session)
+   (apply-partially #'ende-codex--fail session)
+   (apply-partially #'ende-codex--filter-error session)))
 
-(defun ende-codex--sentinel (session process event)
-  "Handle terminal PROCESS EVENT for SESSION."
-  (when (and (not (ende-codex--terminal-p session))
-             (memq (process-status process) '(exit signal closed)))
-    (if (/= (process-exit-status process) 0)
-        (ende-codex--fail
-         session
-         (or (process-get process :ende-idle-error)
-             (ende-error-create
-              :kind (if (= (process-exit-status process) 28) 'timeout 'transport)
-              :message (format "curl exited with status %d (%s)"
-                               (process-exit-status process)
-                               (string-trim event)))))
-      (condition-case finish-error
-          (let* ((headers
-                  (ende-curl-response-headers
-                   (ende-transport-session-headers-file
-                    (ende-codex--lifecycle session))))
-                 (status (car headers))
-                 (content-type (cdr headers)))
-            (cond
-             ((or (null status) (< status 200) (>= status 300))
-              (ende-codex--fail session (ende-codex--http-error session)))
-             ((and content-type
-                   (not (ende-curl-event-stream-p content-type)))
+(defun ende-codex--process-error (session process event idle-error)
+  "Settle SESSION for failed PROCESS with sentinel EVENT or IDLE-ERROR."
+  (ende-codex--fail
+   session
+   (or idle-error
+       (ende-error-create
+        :kind (if (= (process-exit-status process) 28) 'timeout 'transport)
+        :message (format "curl exited with status %d (%s)"
+                         (process-exit-status process)
+                         (string-trim event))))))
+
+(defun ende-codex--header-error (session error)
+  "Settle SESSION for response-header parsing ERROR."
+  (ende-codex--fail
+   session (ende-error-create :kind 'protocol
+                              :message (error-message-string error))))
+
+(defun ende-codex--finish-response (session headers)
+  "Validate response HEADERS and finalize Codex's terminal Responses event."
+  (condition-case finish-error
+      (let* ((status (car headers))
+             (content-type (cdr headers))
+             (content-type-error
+              (ende-stream-content-type-error content-type 'if-present)))
+        (cond
+         ((not (ende-stream-http-success-p status))
+          (ende-codex--fail session (ende-codex--http-error session status)))
+         (content-type-error
+          (ende-codex--fail session content-type-error))
+         (t
+          (ende-stream-dispatch-events
+           (ende-codex--session-stream session)
+           (ende-protocol-sse-flush
+            (ende-stream-session-parser (ende-codex--session-stream session)))
+           (apply-partially #'ende-codex--handle-sse-events session))
+          (unless (ende-codex--terminal-p session)
+            (if (ende-codex--session-terminal-event session)
+                (ende-codex--settle
+                 session 'success (ende-codex--result session))
               (ende-codex--fail
                session
                (ende-error-create
                 :kind 'protocol
-                :message (format "expected text/event-stream, got %s"
-                                 (or content-type "unknown")))))
-              (t
-               (dolist (event
-                        (ende-protocol-sse-flush
-                         (ende-codex--session-sse session)))
-                 (when (and (not (ende-codex--terminal-p session))
-                            (eq (plist-get event :type) :json))
-                   (ende-codex--handle-event
-                    session (plist-get event :value))))
-               (unless (ende-codex--terminal-p session)
-                (if (ende-codex--session-terminal-event session)
-                    (ende-codex--settle
-                     session 'success (ende-codex--result session))
-                  (ende-codex--fail
-                   session
-                   (ende-error-create
-                    :kind 'protocol
-                    :message "Codex stream ended without a terminal response event")))))))
-        ((error quit)
-         (ende-codex--fail
-          session
-          (ende-error-create
-           :kind 'protocol
-           :message (error-message-string finish-error))))))))
+                :message "Codex stream ended without a terminal response event")))))))
+    ((error quit)
+     (ende-codex--fail
+      session
+      (ende-error-create :kind 'protocol
+                         :message (error-message-string finish-error))))))
+
+(defun ende-codex--sentinel (session process event)
+  "Handle terminal PROCESS EVENT for SESSION."
+  (ende-stream-sentinel
+   (ende-codex--session-stream session) process event
+   (apply-partially #'ende-codex--process-error session)
+   (apply-partially #'ende-codex--finish-response session)
+   (apply-partially #'ende-codex--header-error session)))
 
 (defun ende-codex--message-content (role content)
   "Return CONTENT in the Responses shape required for ROLE."
@@ -1530,10 +1503,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (session
           (ende-codex--make-session
            :profile profile :callbacks callbacks
-           :sse (ende-protocol-make-sse)
            :tool-calls (make-hash-table :test #'eql)
-           :estimated-chars 0 :received-bytes 0 :preview-parts nil
-           :preview-bytes 0)))
+           :estimated-chars 0)))
     (condition-case startup-error
         (progn
           (ende-validate-resource-options)
