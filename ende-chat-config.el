@@ -298,18 +298,18 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
            (lambda (grant) (eq (car grant) name)) configuration))
     (plist-put configuration :resources
                (ende-chat-config--put
-                 name (list :type type
-                            :include includes :exclude excludes
-                            :allow-private-addresses private
-                            :include-regexps
-                            (and (eq type 'file)
-                                 (mapcar #'wildcard-to-regexp includes))
-                            :exclude-regexps
-                            (and (eq type 'file)
-                                 (mapcar #'wildcard-to-regexp excludes))
-                            :include-url-patterns include-patterns
-                            :exclude-url-patterns exclude-patterns)
-                 resources))))
+                name (list :type type
+                           :include includes :exclude excludes
+                           :allow-private-addresses private
+                           :include-regexps
+                           (and (eq type 'file)
+                                (mapcar #'wildcard-to-regexp includes))
+                           :exclude-regexps
+                           (and (eq type 'file)
+                                (mapcar #'wildcard-to-regexp excludes))
+                           :include-url-patterns include-patterns
+                           :exclude-url-patterns exclude-patterns)
+                resources))))
 
 (defun ende-chat-config--target-tools (name configuration)
   "Return the tools selected by group or tool NAME in CONFIGURATION."
@@ -335,7 +335,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
                (unless (assq name (plist-get configuration :resources))
                  (ende-chat-config--error "unknown resource: %s" name))
                name))
-            names)))
+           names)))
 
 (defun ende-chat-config--check-assignment-types (tools resources configuration)
   "Reject incompatible RESOURCES assigned to TOOLS."
@@ -350,7 +350,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
             (unless (eq kind type)
               (ende-chat-config--error
                "resource %s has type %s and cannot be assigned to %s (%s)"
-                resource-name type tool-name kind))))))))
+               resource-name type tool-name kind))))))))
 
 (defun ende-chat-config--validate-grant-types (configuration)
   "Validate all grants in CONFIGURATION, including inactive tool grants."
@@ -384,12 +384,12 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
         (ende-chat-config--error
          "resource assignment may contain only one :resources separator: %S"
          form))
-       (let ((tools (ende-chat-config--resolve-tools names configuration))
-             (resources (ende-chat-config--resource-names
-                         raw-resources configuration))
-             (assignments (plist-get configuration :grants)))
-         (ende-chat-config--check-assignment-types
-          tools resources configuration)
+      (let ((tools (ende-chat-config--resolve-tools names configuration))
+            (resources (ende-chat-config--resource-names
+                        raw-resources configuration))
+            (assignments (plist-get configuration :grants)))
+        (ende-chat-config--check-assignment-types
+         tools resources configuration)
         ;; Clear once so overlapping targets retain both origins.
         (unless additive
           (setq assignments
@@ -541,9 +541,9 @@ them.  Definitions need not be used.  An explicit root is required only when
 an active tool needs a project.  Invalid forms or
 active tools without required resources or roots signal errors before dispatch."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
-          (ancestry nil)
-          (current headline)
-          (configuration (ende-chat-config--empty)))
+         (ancestry nil)
+         (current headline)
+         (configuration (ende-chat-config--empty)))
     (while current
       (push current ancestry)
       (setq current (gethash current parent-table)))

@@ -290,9 +290,9 @@ discarding superseded details. Be concise but self-contained."
                (puthash headline (nreverse value) children))
              children)
     (let ((document
-            (ende-chat--make-document
-             :tree tree :headlines sorted :parent parent :children children
-             :properties properties :exclusions (make-hash-table :test #'eq))))
+           (ende-chat--make-document
+            :tree tree :headlines sorted :parent parent :children children
+            :properties properties :exclusions (make-hash-table :test #'eq))))
       (ende-chat--collect-section-exclusions document)
       document)))
 
@@ -690,63 +690,63 @@ ancestors are included even when ordinary reasoning context is disabled."
                (throw 'ende-chat--question-reached nil))
              (when (and selected role-marked)
                (flush))
-              (cond
-               ((and selected
-                     (ende-chat--work-section-p document headline))
-                (let ((body (ende-chat--history-body-string
+             (cond
+              ((and selected
+                    (ende-chat--work-section-p document headline))
+               (let ((body (ende-chat--history-body-string
+                            document headline
+                            (car (ende-chat--children document headline)))))
+                 (unless (string-blank-p body)
+                   (unless parts
+                     (setq message-owner next-owner
+                           message-role next-role))
+                   (push body parts)))
+               (dolist (child (ende-chat--children document headline))
+                 (walk child next-owner next-role)))
+              ((and selected
+                    (ende-chat--assistant-protocol-p document headline))
+               (flush)
+               (push (ende-chat--message
+                      'assistant
+                      (ende-chat--history-body-string document headline))
+                     messages))
+              ((and selected
+                    (ende-chat--tool-result-protocol-p document headline))
+               (flush)
+               (let* ((name (ende-chat--tool-name document headline))
+                      (body (ende-chat--history-body-string
                              document headline
                              (car (ende-chat--children document headline)))))
-                  (unless (string-blank-p body)
-                    (unless parts
-                      (setq message-owner next-owner
-                            message-role next-role))
-                    (push body parts)))
-                (dolist (child (ende-chat--children document headline))
-                  (walk child next-owner next-role)))
-               ((and selected
-                     (ende-chat--assistant-protocol-p document headline))
-                (flush)
-                (push (ende-chat--message
-                       'assistant
-                       (ende-chat--history-body-string document headline))
-                      messages))
-               ((and selected
-                     (ende-chat--tool-result-protocol-p document headline))
-                (flush)
-                (let* ((name (ende-chat--tool-name document headline))
-                       (body (ende-chat--history-body-string
-                              document headline
-                              (car (ende-chat--children document headline)))))
-                  (push (ende-chat--message
-                         'assistant (format "Tool Result: %s\n%s" name body))
-                        messages)
-                  (dolist (child (ende-chat--children document headline))
-                    (walk child next-owner next-role))))
-               ((and selected
-                     (ende-chat--tool-call-protocol-p document headline))
-                (flush)
-                (let* ((name (ende-chat--tool-name document headline))
-                       (arguments (ende-chat--history-body-string
-                                   document headline
-                                   (car (ende-chat--children document headline)))))
-                  (push (ende-chat--message
-                         'assistant
-                         (format "Tool Call: %s\nArguments:\n%s"
-                                 name arguments))
-                        messages)
-                  (dolist (child (ende-chat--children document headline))
-                    (walk child next-owner next-role))))
-               (t
-                (when selected
-                  (unless (and parts (eq next-owner message-owner))
-                    (flush)
-                    (setq message-owner next-owner
-                          message-role next-role))
-                  (push (ende-chat--section-text document headline) parts))
-                (dolist (child (ende-chat--fenced-siblings
-                                document (ende-chat--children document headline)
-                                question-begin))
-                  (walk child next-owner next-role)))))))
+                 (push (ende-chat--message
+                        'assistant (format "Tool Result: %s\n%s" name body))
+                       messages)
+                 (dolist (child (ende-chat--children document headline))
+                   (walk child next-owner next-role))))
+              ((and selected
+                    (ende-chat--tool-call-protocol-p document headline))
+               (flush)
+               (let* ((name (ende-chat--tool-name document headline))
+                      (arguments (ende-chat--history-body-string
+                                  document headline
+                                  (car (ende-chat--children document headline)))))
+                 (push (ende-chat--message
+                        'assistant
+                        (format "Tool Call: %s\nArguments:\n%s"
+                                name arguments))
+                       messages)
+                 (dolist (child (ende-chat--children document headline))
+                   (walk child next-owner next-role))))
+              (t
+               (when selected
+                 (unless (and parts (eq next-owner message-owner))
+                   (flush)
+                   (setq message-owner next-owner
+                         message-role next-role))
+                 (push (ende-chat--section-text document headline) parts))
+               (dolist (child (ende-chat--fenced-siblings
+                               document (ende-chat--children document headline)
+                               question-begin))
+                 (walk child next-owner next-role)))))))
       (catch 'ende-chat--question-reached
         (walk root nil 'user))
       (flush)
@@ -1930,10 +1930,10 @@ current fold state.  FINAL places the terminal assistant reply after it."
                             (error "Malformed generated Agent: Work final reply placement"))
                           (when (and work-start-marker
                                      (not
-                                       (eql (ende-chat--headline-parent-position
-                                           work-start-marker)
-                                          (ende-chat--headline-parent-position
-                                           (org-element-property :begin reply)))))
+                                      (eql (ende-chat--headline-parent-position
+                                            work-start-marker)
+                                           (ende-chat--headline-parent-position
+                                            (org-element-property :begin reply)))))
                             (error "Malformed generated Agent: Work final reply placement")))
                         (unless (<= (length reasoning-headlines) 1)
                           (error "Multiple reasoning sections for chat request %s"
@@ -2648,7 +2648,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
           (funcall
            callback
            (json-encode
-             (list :ok nil :tool name
+            (list :ok nil :tool name
                   :error (format "tool arguments are not a JSON object: %s"
                                  (plist-get parsed :invalid-arguments))))))))))
 
@@ -2661,7 +2661,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
        (let* ((function (alist-get :function definition))
               (name (and function (alist-get :name function))))
          (and name (memq (intern name) active))))
-      (ende-tool-definitions))))
+     (ende-tool-definitions))))
 
 (defun ende-chat--execute-tool-round
     (job calls configuration level request-id assistant callback)
@@ -2689,8 +2689,8 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                                    prior-cancel)))
                          (when cancel
                            (ende-job-cancellation-set job cancel))))
-                       (synchronous t)
-                       (completed nil))
+                      (synchronous t)
+                      (completed nil))
                  (ende-job-emit-event
                   job (list :type :tool-call-count
                             :count (1+ (or (ende-job-tool-call-count job) 0))))
@@ -2716,9 +2716,9 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                  (unless completed
                    (setq continue nil
                          pending t))))
-              (when (and (ende-job-current-p job)
-                         (null remaining) (not pending))
-                (funcall callback (nreverse round-messages))))))
+             (when (and (ende-job-current-p job)
+                        (null remaining) (not pending))
+               (funcall callback (nreverse round-messages))))))
       (run-next))))
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)

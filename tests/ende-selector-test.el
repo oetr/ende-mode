@@ -774,7 +774,7 @@
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
                      "Quota: unavailable"
                      "i  - insert" "a  - ask" "d  - queue dashboard"
-                      "I  - insert anywhere"
+                     "I  - insert anywhere"
                      "k  - compact chat context"
                      "w  - write anywhere"
                      "m  - select/search model"

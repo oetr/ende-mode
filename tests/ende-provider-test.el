@@ -29,9 +29,9 @@
          (ende-provider-model "legacy-model")
          (local (ende-provider-resolve-profile '(:temperature 0.4)))
          (named '(:name remote :url "https://remote.test/chat/completions"
-                  :model "remote-model"))
+			:model "remote-model"))
          (batch '(:transport openrouter-batch
-                  :batch-url "https://openrouter.ai/api/v1/batches"))
+			     :batch-url "https://openrouter.ai/api/v1/batches"))
          (responses
           (let ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
                 (ende-codex-model "gpt-configured"))
@@ -167,8 +167,8 @@
           (ende-llm--request-body
            messages
            '(:model "openrouter/model"
-             :reasoning-effort-wire-api openrouter
-             :reasoning-effort "high")))
+		    :reasoning-effort-wire-api openrouter
+		    :reasoning-effort "high")))
          (ordinary
           (ende-llm--request-body
            messages

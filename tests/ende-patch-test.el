@@ -28,10 +28,10 @@
                      (update "src/main.txt")
                      (delete "tmp/old.txt"))))
     (should (equal (plist-get (car operations) :content) "alpha\nbeta\n"))
-     (should (equal (ende-patch-apply-update
-                     "one\ntwo\nthree\nfour\n"
-                     (plist-get (cadr operations) :hunks))
-                    "one\nTWO\nthree\nFOUR\n"))))
+    (should (equal (ende-patch-apply-update
+                    "one\ntwo\nthree\nfour\n"
+                    (plist-get (cadr operations) :hunks))
+                   "one\nTWO\nthree\nFOUR\n"))))
 
 (ert-deftest ende-test/patch-preserves-final-newline-and-supports-empty-additions ()
   (let* ((hunks (plist-get

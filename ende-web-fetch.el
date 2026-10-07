@@ -406,8 +406,8 @@ Unsupported or malformed forms signal rather than bypassing classification."
 (defun ende-web-fetch--resolve-host (transfer host callback)
   (let* ((buffer (generate-new-buffer " *ende-web-fetch-dns*"))
          (remaining (ende-web-fetch--remaining-time transfer))
-          (phase-duration
-           (min (ende-web-fetch--transfer-connect-timeout transfer) remaining))
+         (phase-duration
+          (min (ende-web-fetch--transfer-connect-timeout transfer) remaining))
          (default-directory (ende-web-fetch--transfer-directory transfer))
          (process nil))
     (setf (ende-web-fetch--transfer-dns-callback transfer) callback
@@ -704,8 +704,8 @@ Unsupported or malformed forms signal rather than bypassing classification."
     ((error quit)
      (ende-web-fetch--settle
       transfer 'failure nil
-       (format "web_fetch destination authorization failed for %s: %s"
-               (ende-web-fetch--destination-label transfer)
+      (format "web_fetch destination authorization failed for %s: %s"
+              (ende-web-fetch--destination-label transfer)
               (error-message-string caught))))))
 
 (defun ende-web-fetch--handle-hop (transfer hop)
@@ -796,9 +796,9 @@ Unsupported or malformed forms signal rather than bypassing classification."
          ((error quit)
           (ende-web-fetch--settle
            transfer 'failure nil
-            (format "web_fetch destination authorization failed for %s: %s"
-                    (ende-web-fetch--destination-label transfer)
-                    (error-message-string caught))))))
+           (format "web_fetch destination authorization failed for %s: %s"
+                   (ende-web-fetch--destination-label transfer)
+                   (error-message-string caught))))))
       (_
        (ende-web-fetch--settle
         transfer 'failure nil "web_fetch encountered an unsupported host type")))))
@@ -905,8 +905,8 @@ Unsupported or malformed forms signal rather than bypassing classification."
                   (lambda ()
                     (unless (ende-web-fetch--transfer-settled transfer)
                       (setf (ende-web-fetch--transfer-cancelled transfer) t)
-                       (ende-web-fetch--settle
-                        transfer 'cancelled nil "web_fetch was cancelled"))))
+                      (ende-web-fetch--settle
+                       transfer 'cancelled nil "web_fetch was cancelled"))))
             (setf (ende-web-fetch--transfer-deadline-timer transfer)
                   (run-at-time (max 0 (- deadline (float-time))) nil
                                #'ende-web-fetch--overall-timeout transfer))
@@ -922,7 +922,7 @@ Unsupported or malformed forms signal rather than bypassing classification."
          (condition-case nil
              (funcall callback nil (error-message-string caught))
            ((error quit) nil)))
-        transfer))))
+       transfer))))
 
 (provide 'ende-web-fetch)
 

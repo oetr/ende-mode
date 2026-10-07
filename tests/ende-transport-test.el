@@ -399,7 +399,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should-not (plist-get success :error))
       (unless (equal (plist-get (plist-get success :result) :content) "answer")
         (ert-fail (format "%s success transport did not return content: %S"
-                         transport success)))
+                          transport success)))
       (should (eq (car (plist-get success :order)) :start))
       (should (eq (car (last (plist-get success :order))) :done))
       (should (plist-get success :cleaned))

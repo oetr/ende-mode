@@ -278,7 +278,7 @@
                        (should call)
                        (should (equal (plist-get stored :tool-call-id) id))
                        (dolist (text (list (plist-get call :arguments)
-                                          (plist-get message :content)))
+                                           (plist-get message :content)))
                          (should (string-match-p
                                   (regexp-quote text)
                                   (plist-get stored :content))))))
@@ -327,10 +327,10 @@
                     ;; Children-only folds the parent's body too.  Recognize
                     ;; the user's view before any new protocol text is inserted.
                     (should (eq (not (null (ende-chat--subtree-folded-p
-                                           (org-element-property :begin work))))
+                                            (org-element-property :begin work))))
                                 (eq view 'collapsed)))
                     (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                           work "--> about_thinking")))
+                                            work "--> about_thinking")))
                                 (eq view 'collapsed))))
                   ;; Append another tool round, then finalize.  Neither operation
                   ;; may reopen a collapsed container or close an expanded one.
@@ -346,16 +346,16 @@
                       (should work)
                       (should (= (length calls) 2))
                       (should (eq (not (null (ende-chat--subtree-folded-p
-                                             (org-element-property :begin work))))
+                                              (org-element-property :begin work))))
                                   collapsed))
                       (dolist (node calls)
                         (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                               node (org-element-property :raw-value node))))
+						node (org-element-property :raw-value node))))
                                     collapsed)))
                       ;; Revealing children keeps their old bodies folded;
                       ;; fully expanding the work preserves those visible bodies.
                       (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                             (car calls) (plist-get first :arguments))))
+                                              (car calls) (plist-get first :arguments))))
                                   (not (eq view 'expanded))))))
                   (should (eq (ende-job-state job) 'completed)))))
           (ende-test--reset))))))

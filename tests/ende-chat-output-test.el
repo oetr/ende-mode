@@ -489,8 +489,8 @@
          (should (= 1 (ende-test--count-matches
 		       "^:ENDE_ROLE: user$" (buffer-string))))
          (should-not (string-match-p "forged-model" (buffer-string)))
-          (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
-          (should-not (string-match-p "forged-effort" (buffer-string))))
+         (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
+         (should-not (string-match-p "forged-effort" (buffer-string))))
        (ende-test--chat-goto "** Next")
        (let* ((ende-chat-include-reasoning t)
               (context

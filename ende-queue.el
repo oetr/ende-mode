@@ -247,7 +247,7 @@ HANDLER receives one `ende-job' object."
         (setcdr previous (cdr cell))
         (when (eq cell ende--queue-tail)
           (setq ende--queue-tail previous))
-         entry))))
+        entry))))
 
 (defun ende--queue-sync-tail ()
   "Refresh the queue tail after a structural queue mutation."
@@ -803,7 +803,7 @@ membership are updated before eligible work is dispatched."
   (interactive)
   (let ((status (list :running (and ende--active-jobs t)
                       :active (and ende--current-job
-                                    (ende-job-id ende--current-job))
+                                   (ende-job-id ende--current-job))
                       :active-jobs (mapcar #'ende-job-id ende--active-jobs)
                       :pending (length (ende-pending-jobs))
                       :fences (length (ende-queue-fences))

@@ -143,7 +143,7 @@
                    (result
                     (if (eq operation 'completion-with-reasoning)
                         '(:content "Benchmark answer with /emphasis/ and [[https://example.test][a link]]."
-                          :thinking "Benchmark reasoning with *emphasis*.")
+				   :thinking "Benchmark reasoning with *emphasis*.")
                       '(:content "Benchmark answer with /emphasis/ and [[https://example.test][a link]].")))
                    (callback (plist-get ende-chat-benchmark--callbacks :on-done)))
               (unless callback

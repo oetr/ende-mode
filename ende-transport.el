@@ -80,11 +80,11 @@
    (list (ende-transport-session-process session)
          (ende-transport-session-stderr-process session)))
   (setf (ende-transport-session-process session) nil
-         (ende-transport-session-process-buffer session) nil
-         (ende-transport-session-stderr-buffer session) nil
-         (ende-transport-session-stderr-process session) nil
-         (ende-transport-session-headers-file session) nil
-         (ende-transport-session-config-file session) nil))
+        (ende-transport-session-process-buffer session) nil
+        (ende-transport-session-stderr-buffer session) nil
+        (ende-transport-session-stderr-process session) nil
+        (ende-transport-session-headers-file session) nil
+        (ende-transport-session-config-file session) nil))
 
 (defun ende-transport-session-transfer (session)
   "Mark SESSION transferred to another transport and release its callbacks."

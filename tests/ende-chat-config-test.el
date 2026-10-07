@@ -93,8 +93,8 @@
                              '(chat project)))
               (should (equal (plist-get inspect-config :active-tools)
                              '(project_info list_project_files file_info
-                               read_file search_project list_project_buffers
-                               read_buffer about_thinking)))
+					    read_file search_project list_project_buffers
+					    read_buffer about_thinking)))
               (should (equal (plist-get inspect-config :root)
                              (ende-project-normalize-root child-root)))
               (should-not (memq 'edit_file
@@ -315,11 +315,11 @@
                 (set-tool-resources apply_patch :resources source disposable)
                 (set-tool-resources edit_file create_file :resources source)))
              "A patch grant alone cannot delete.\n")
-             (let* ((document (ende-chat--build-document))
-                    (mixed (ende-test--chat-config-at document "Mixed"))
-                    (exposed (ende-test--chat-config-at document "Hide delete"))
-                    (hidden (ende-test--chat-config-at
-                             document "Clear exposure only"))
+            (let* ((document (ende-chat--build-document))
+                   (mixed (ende-test--chat-config-at document "Mixed"))
+                   (exposed (ende-test--chat-config-at document "Hide delete"))
+                   (hidden (ende-test--chat-config-at
+                            document "Clear exposure only"))
                    (missing (ende-test--chat-config-at
                              document "Remove delete grant"))
                    (patch
@@ -328,12 +328,12 @@
                             "*** Add File: src/new.txt\n+created\n"
                             "*** Delete File: tmp/mixed.txt\n"
                             "*** End Patch\n")))
-               (should (equal (plist-get mixed :active-tools)
-                              '(apply_patch about_thinking)))
-               (should (equal (plist-get exposed :active-tools)
-                              '(apply_patch delete_file about_thinking)))
-               (should (equal (plist-get hidden :active-tools)
-                              '(apply_patch about_thinking)))
+              (should (equal (plist-get mixed :active-tools)
+                             '(apply_patch about_thinking)))
+              (should (equal (plist-get exposed :active-tools)
+                             '(apply_patch delete_file about_thinking)))
+              (should (equal (plist-get hidden :active-tools)
+                             '(apply_patch about_thinking)))
               (let ((result (ende-tool-call
                              'apply_patch (list :patch patch) root mixed)))
                 (should (plist-get result :ok))

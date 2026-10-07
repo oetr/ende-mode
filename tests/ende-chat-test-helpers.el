@@ -49,7 +49,7 @@
     (org-mode)
     (insert (ende-test--chat-context-text messages))
     (org-element-map (org-element-parse-buffer) 'headline
-      (lambda (headline) (org-element-property :raw-value headline)))))
+		     (lambda (headline) (org-element-property :raw-value headline)))))
 
 (defun ende-test--chat-message-role (message)
   "Return the role of an ordinary or protocol-shaped chat MESSAGE."

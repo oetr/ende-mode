@@ -502,8 +502,8 @@ ignored.  Return non-nil when a probe was started."
          (explicit-p
           (or (and (stringp configured-model)
                    (not (string-empty-p configured-model)))
-               (and (ende-provider-configured-models-explicit-p profile)
-                    models))))
+              (and (ende-provider-configured-models-explicit-p profile)
+                   models))))
     (setq ende-selector--model-details nil)
     (if explicit-p
         (progn
@@ -552,24 +552,24 @@ PREFERRED is selected only when it is present in MODELS."
                           (= ende-selector--probe-generation generation)))
                (setq completed t)
                (with-current-buffer selector-buffer
-                  (when (eq (ende-selector--provider-name) provider)
-                    (setq ende-selector--probe-cancel nil)
-                    (let* ((live-profile (ende-provider-profile provider))
-                           (live-preferred
-                            (if (= selection-generation
-                                   ende-selector--model-selection-generation)
-                                (ende-selector--preferred-model
-                                 provider live-profile)
-                              (ende-selector--model-name))))
-                      (if error
-                          (ende-selector--apply-model-probe-error
-                           live-profile live-preferred)
-                        (ende-selector--apply-model-catalog
-                         live-profile models
-                         (ende-provider-model-details live-profile)
-                         (ende-provider-models-generation live-profile)
-                         live-preferred)))
-                    (ende-selector--render)))))))
+                 (when (eq (ende-selector--provider-name) provider)
+                   (setq ende-selector--probe-cancel nil)
+                   (let* ((live-profile (ende-provider-profile provider))
+                          (live-preferred
+                           (if (= selection-generation
+                                  ende-selector--model-selection-generation)
+                               (ende-selector--preferred-model
+                                provider live-profile)
+                             (ende-selector--model-name))))
+                     (if error
+                         (ende-selector--apply-model-probe-error
+                          live-profile live-preferred)
+                       (ende-selector--apply-model-catalog
+                        live-profile models
+                        (ende-provider-model-details live-profile)
+                        (ende-provider-models-generation live-profile)
+                        live-preferred)))
+                   (ende-selector--render)))))))
       (let ((cancel (ende-provider-probe-models profile callback)))
         (when (and (not completed)
                    (= ende-selector--probe-generation generation))

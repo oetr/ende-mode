@@ -190,12 +190,12 @@ the transport's representative default profile."
                     :model "test-model" :temperature 0.2 :require-sse t)))
          (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
          (auth '(:access "transport-test-token"
-                 :expires 9999999999999)))
+			 :expires 9999999999999)))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
                  (setq request-args args)
                  (setq process
-                        (funcall real-make-process
+                       (funcall real-make-process
                                 :name (plist-get args :name)
                                 :buffer nil :command '("cat")
                                 :connection-type 'pipe :noquery t

@@ -306,7 +306,7 @@
                        (cons 'state (if (eq state 'running) "Running" "Queued"))
                        (cons 'status (ende-queue-ui--job-status job state))
                        (cons 'time (ende-queue-ui--elapsed job state))))
-          (prefix (concat (if marked
+         (prefix (concat (if marked
                              (propertize "*" 'face 'ende-queue-ui-mark-face)
                            " ")
                          (if expanded "▾ " "▸ ")))
@@ -318,11 +318,11 @@
                       (alist-get (car column) values) (nth 1 column)))
                    (ende-queue-ui--columns view) " "))))
     (ende-queue-ui--line
-      summary
-      (list 'ende-queue-ui-kind 'job
-            'ende-queue-ui-owner job
-            'ende-queue-ui-job-id (ende-job-id job)
-            'ende-queue-ui-state state))
+     summary
+     (list 'ende-queue-ui-kind 'job
+           'ende-queue-ui-owner job
+           'ende-queue-ui-job-id (ende-job-id job)
+           'ende-queue-ui-state state))
     (when expanded
       (ende-queue-ui--job-details job state))))
 
@@ -471,10 +471,10 @@
       (setcdr group (nreverse (cdr group))))
     (setq ende-queue-ui--buffer-order
           (cl-remove-if
-            (lambda (buffer)
-              (and (bufferp buffer)
-                   (not (buffer-live-p buffer))
-                   (not (assq buffer groups))))
+           (lambda (buffer)
+             (and (bufferp buffer)
+                  (not (buffer-live-p buffer))
+                  (not (assq buffer groups))))
            ende-queue-ui--buffer-order))
     (let (stale)
       (maphash (lambda (buffer _value)
@@ -711,7 +711,7 @@
     (unless (cl-every (lambda (job) (eq (ende-job-state job) 'queued)) jobs)
       (user-error "Concurrency policy can only change for queued jobs"))
     (let* ((choice (completing-read "Policy: " '("parallel" "wait-idle")
-                                   nil t))
+                                    nil t))
            (policy (intern choice)))
       (ende-queue-change-policy ids policy))))
 
@@ -761,9 +761,9 @@
            (puthash id t ende-queue-ui--expanded-fences))))
       ('buffer
        (let ((buffer (cdr entry)))
-          (if (gethash buffer ende-queue-ui--folded-buffers)
-              (remhash buffer ende-queue-ui--folded-buffers)
-            (puthash buffer t ende-queue-ui--folded-buffers)))))
+         (if (gethash buffer ende-queue-ui--folded-buffers)
+             (remhash buffer ende-queue-ui--folded-buffers)
+           (puthash buffer t ende-queue-ui--folded-buffers)))))
     (ende-queue-ui--render)))
 
 (defun ende-queue-ui-visit-source ()

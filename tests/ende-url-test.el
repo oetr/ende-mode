@@ -78,11 +78,11 @@
     (ert-info ((format "Rejected request URL %S" url))
       (should-error (ende-url-normalize url))))
   (dolist (pattern '("example.com/path"
-                    "example.com:443"
-                    "https://example.com/path?q=1"
-                    "https://example.com/path#fragment"
-                    "https://*.127.0.0.1/**"
-                    "127.0.0.1"))
+                     "example.com:443"
+                     "https://example.com/path?q=1"
+                     "https://example.com/path#fragment"
+                     "https://*.127.0.0.1/**"
+                     "127.0.0.1"))
     (ert-info ((format "Rejected URL policy pattern %S" pattern))
       (should-error (ende-url-pattern-compile pattern)))))
 

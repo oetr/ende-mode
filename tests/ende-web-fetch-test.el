@@ -36,8 +36,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (setq server
           (make-network-process
            :name "ende-test-web-server"
-            :server t :host (or host "127.0.0.1") :service 0
-            :family (or family 'ipv4)
+           :server t :host (or host "127.0.0.1") :service 0
+           :family (or family 'ipv4)
            :noquery t
            :log
            (lambda (_server client message)
@@ -51,41 +51,41 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                          (concat (or (process-get connection :request) "")
                                  chunk)))
                     (process-put connection :request request)
-                     (when (and (not (process-get connection :replied))
-                                (string-match "\r\n\r\n" request))
-                       (process-put connection :replied t)
-                       (let* ((line (car (split-string request "\r\n")))
+                    (when (and (not (process-get connection :replied))
+                               (string-match "\r\n\r\n" request))
+                      (process-put connection :replied t)
+                      (let* ((line (car (split-string request "\r\n")))
                              (path (and (string-match
                                          "\\`[^ ]+[ \t]+\\([^ \t]+\\)"
                                          line)
                                         (match-string 1 line)))
                              (response (cdr (assoc path routes))))
                         (push (cons path request) requests)
-                         (cond
-                          ((eq response :hold) nil)
-                          ((and (consp response) (eq (car response) :chunks))
-                           (ende-test--web-send-chunks
-                            connection (cdr response)
-                            (lambda (timer) (push timer timers))))
-                          ((and (consp response) (eq (car response) :partial))
-                            (process-send-string connection (cadr response))
-                            (process-send-eof connection))
-                          (t
-                           (process-send-string
-                            connection (or response
-                                           (concat
-                                            "HTTP/1.1 404 Not Found\r\n"
-                                            "Content-Type: text/plain\r\n"
-                                            "Content-Length: 9\r\n\r\nnot found")))
-                           (process-send-eof connection))))))))))))
+                        (cond
+                         ((eq response :hold) nil)
+                         ((and (consp response) (eq (car response) :chunks))
+                          (ende-test--web-send-chunks
+                           connection (cdr response)
+                           (lambda (timer) (push timer timers))))
+                         ((and (consp response) (eq (car response) :partial))
+                          (process-send-string connection (cadr response))
+                          (process-send-eof connection))
+                         (t
+                          (process-send-string
+                           connection (or response
+                                          (concat
+                                           "HTTP/1.1 404 Not Found\r\n"
+                                           "Content-Type: text/plain\r\n"
+                                           "Content-Length: 9\r\n\r\nnot found")))
+                          (process-send-eof connection))))))))))))
     (list :server server
           :port (process-contact server :service)
-           :requests (lambda () (nreverse (copy-sequence requests)))
-           :stop (lambda ()
-                   (dolist (timer timers)
-                     (when (timerp timer)
-                       (cancel-timer timer)))
-                   (dolist (client clients)
+          :requests (lambda () (nreverse (copy-sequence requests)))
+          :stop (lambda ()
+                  (dolist (timer timers)
+                    (when (timerp timer)
+                      (cancel-timer timer)))
+                  (dolist (client clients)
                     (when (process-live-p client)
                       (delete-process client)))
                   (when (process-live-p server)
@@ -138,8 +138,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (and (not (string-empty-p chunk))
        (let ((first (aref chunk 0))
              (last (aref chunk (1- (length chunk)))))
-          (or (and (>= first #x80) (<= first #xbf))
-              (and (>= last #xc2) (<= last #xf4))))))
+         (or (and (>= first #x80) (<= first #xbf))
+             (and (>= last #xc2) (<= last #xf4))))))
 
 (defun ende-test--web-await (start &optional timeout)
   (let ((done nil)
@@ -201,8 +201,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
         (should (eq (not (null (ende-web-fetch--address-allowed-p
                                 class nil)))
                     (not (null (nth 2 case)))))
-         (should (eq (not (null (ende-web-fetch--address-allowed-p
-                                 class t)))
+        (should (eq (not (null (ende-web-fetch--address-allowed-p
+                                class t)))
                     (not (null (nth 3 case))))))))
   (dolist (address '("127.1" "0x7f000001" "fe80::1%lo"))
     (should-error (ende-web-fetch-classify-address address))))
@@ -214,7 +214,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (should (= (length (ende-web-fetch--assert-addresses addresses t)) 2))
     (should-error (ende-web-fetch--assert-addresses
                    (list (ende-web-fetch-classify-address "169.254.169.254"))
-                    t))))
+                   t))))
 
 (ert-deftest ende-test/web-fetch-denies-mixed-dns-results-before-http ()
   (let* ((fixture (ende-test--web-http-server nil))
@@ -233,7 +233,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
             (should-not (plist-get result :ok))
             (should (string-match-p "authorization failed"
                                     (plist-get result :error)))
-             (should-not (funcall (plist-get fixture :requests)))))
+            (should-not (funcall (plist-get fixture :requests)))))
       (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-resolver-preserves-caller-buffer-state ()
@@ -274,8 +274,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                   (setq arguments
                                         (plist-put arguments :command outcome))
                                   (apply real-make-process arguments)))))
-                      (ende-web-fetch--resolve-host
-                       transfer "state.invalid" callback))))))
+                     (ende-web-fetch--resolve-host
+                      transfer "state.invalid" callback))))))
           (should (eq caller (current-buffer)))
           (if (equal (car outcome) "printf")
               (should (equal (car result) '((public . "8.8.8.8"))))
@@ -283,7 +283,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                     (cadr result))))
           (should
            (equal before
-                   (list enable-multibyte-characters
+                  (list enable-multibyte-characters
                         (save-restriction
                           (widen)
                           (buffer-substring-no-properties (point-min) (point-max)))
@@ -304,12 +304,12 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                 (lambda (_url) nil) callback))))))
       (should (string-match-p "not authorized" (cadr outcome)))
       (should-not resolved))
-  (let ((configless
-         (ende-test--web-tool-call '(:url "https://example.invalid/") nil)))
-    (should-not (plist-get configless :ok))
-    (should (string-match-p "not authorized"
-                            (plist-get configless :error)))
-    (should-not resolved))))
+    (let ((configless
+           (ende-test--web-tool-call '(:url "https://example.invalid/") nil)))
+      (should-not (plist-get configless :ok))
+      (should (string-match-p "not authorized"
+                              (plist-get configless :error)))
+      (should-not resolved))))
 
 (ert-deftest ende-test/web-fetch-max-chars-cannot-raise-the-output-ceiling ()
   (let ((config (ende-test--web-policy "https://example.com/**"))
@@ -330,31 +330,31 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
          (transfer (ende-web-fetch--make-transfer
                     :deadline (+ (float-time) 10)
                     :connect-timeout 10))
-          (ende-allow-environment-proxy t)
-          (command
-           (ende-web-fetch--command
-            transfer normalized
-            (list (ende-web-fetch-classify-address "203.0.113.7"))))
-          (fallback-command
-           (ende-web-fetch--command
-            transfer normalized
-            (list (ende-web-fetch-classify-address
-                   "2001:4860:4860::8888")
-                   (ende-web-fetch-classify-address "8.8.8.8")))))
+         (ende-allow-environment-proxy t)
+         (command
+          (ende-web-fetch--command
+           transfer normalized
+           (list (ende-web-fetch-classify-address "203.0.113.7"))))
+         (fallback-command
+          (ende-web-fetch--command
+           transfer normalized
+           (list (ende-web-fetch-classify-address
+                  "2001:4860:4860::8888")
+                 (ende-web-fetch-classify-address "8.8.8.8")))))
     (should (equal (car command) "curl"))
-     (should (equal (cadr command) "--disable"))
-     (should (member "--no-buffer" command))
+    (should (equal (cadr command) "--disable"))
+    (should (member "--no-buffer" command))
     (should (member "--globoff" command))
-     (should (member "--path-as-is" command))
-     (should (member "--verbose" command))
+    (should (member "--path-as-is" command))
+    (should (member "--verbose" command))
     (should (member "--proto" command))
     (should (member "--noproxy" command))
     (should (equal (cadr (member "--noproxy" command)) "*"))
     (should (equal (cadr (member "--proxy" command)) ""))
-     (should (equal (cadr (member "--resolve" command))
-                    "example.com:443:203.0.113.7"))
-     (should (equal (cadr (member "--resolve" fallback-command))
-                    "example.com:443:[2001:4860:4860::8888],8.8.8.8"))
+    (should (equal (cadr (member "--resolve" command))
+                   "example.com:443:203.0.113.7"))
+    (should (equal (cadr (member "--resolve" fallback-command))
+                   "example.com:443:[2001:4860:4860::8888],8.8.8.8"))
     (should (member "Accept-Encoding: identity" command))
     (should-not (member "--config" command))
     (should-not (member "--netrc" command))
@@ -363,26 +363,26 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (should (= ende-web-fetch-call-timeout 30))
     (should (= ende-web-fetch-max-redirects 5))
     (should (= ende-web-fetch-max-response-bytes (* 2 1024 1024)))
-     (should (= ende-web-fetch-max-response-header-bytes (* 64 1024)))
-     (should (= ende-web-fetch-max-output-chars 50000))))
+    (should (= ende-web-fetch-max-response-header-bytes (* 64 1024)))
+    (should (= ende-web-fetch-max-output-chars 50000))))
 
 (ert-deftest ende-test/web-fetch-curl-errors-have-phase-context-and-redact-trace-lines ()
   (let* ((transfer
           (ende-web-fetch--make-transfer
            :current-url (ende-url-normalize
                          "https://example.com:8443/private?secret=value")
-            :addresses (list (ende-web-fetch-classify-address "8.8.8.8")
-                             (ende-web-fetch-classify-address "2001:4860:4860::8888"))))
+           :addresses (list (ende-web-fetch-classify-address "8.8.8.8")
+                            (ende-web-fetch-classify-address "2001:4860:4860::8888"))))
          (hop (ende-web-fetch--make-hop)))
     (let ((connection (ende-web-fetch--curl-error transfer 28 hop
-                                                    "curl: (28) Connection timed out")))
+                                                  "curl: (28) Connection timed out")))
       (should (string-match-p "connection timeout" connection))
       (should (string-match-p "example.com:8443" connection))
       (should (string-match-p "8.8.8.8,2001:4860:4860::8888" connection)))
     (setf (ende-web-fetch--transfer-connected transfer) t)
     (should (string-match-p "response deadline exceeded"
                             (ende-web-fetch--curl-error transfer 28 hop
-                             "curl: (28) Operation timed out")))
+							"curl: (28) Operation timed out")))
     (let ((tls (ende-web-fetch--curl-error
                 transfer 60 hop
                 (concat "* Connected to example.com (8.8.8.8) port 8443\n"
@@ -398,8 +398,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (let* ((fixture
           (ende-test--web-http-server
            `(("/start" . ,(concat "HTTP/1.1 302 Found\r\n"
-                                   "Location: /text?view=raw\r\n"
-                                   "Content-Length: 0\r\n\r\n"))
+                                  "Location: /text?view=raw\r\n"
+                                  "Content-Length: 0\r\n\r\n"))
              ("/text?view=raw" . ,(ende-test--web-response
                                    "404 Not Found"
                                    "Content-Type: text/plain; charset=utf-8\r\n"
@@ -413,11 +413,11 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (unwind-protect
         (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
                    (lambda (_transfer host callback)
-                      (push host resolver-hosts)
-                        (funcall callback
-                                      (list (ende-web-fetch-classify-address
-                                             "127.0.0.1"))
-                                      nil))))
+                     (push host resolver-hosts)
+                     (funcall callback
+                              (list (ende-web-fetch-classify-address
+                                     "127.0.0.1"))
+                              nil))))
           (let* ((result (ende-test--web-tool-call (list :url url) config))
                  (value (plist-get result :result))
                  (requests (funcall (plist-get fixture :requests))))
@@ -443,15 +443,15 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
              (cl-some (lambda (buffer)
                         (string-prefix-p " *ende-web-fetch-"
                                          (buffer-name buffer)))
-                       (buffer-list)))))
+                      (buffer-list)))))
       (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-curl-falls-back-across-vetted-addresses ()
   (let* ((fixture
           (ende-test--web-http-server
            `(("/fallback" . ,(ende-test--web-response
-                               "200 OK" "Content-Type: text/plain\r\n"
-                                "reachable")))))
+                              "200 OK" "Content-Type: text/plain\r\n"
+                              "reachable")))))
          (port (plist-get fixture :port))
          (url (format "http://fetch-fixture.invalid:%d/fallback" port))
          (config (ende-test--web-policy
@@ -487,7 +487,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                    (ende-web-fetch
                     url (lambda (_url) '(:allow-private-addresses t))
                     callback))
-                  3)))
+                 3)))
           (when (and (cadr outcome)
                      (string-match-p "connection failed\|timeout"
                                      (cadr outcome)))
@@ -500,8 +500,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (let* ((fixture
           (ende-test--web-http-server
            `(("/start" . ,(concat "HTTP/1.1 302 Found\r\n"
-                                   "Location: http://denied.invalid/private\r\n"
-                                   "Content-Length: 0\r\n\r\n")))))
+                                  "Location: http://denied.invalid/private\r\n"
+                                  "Content-Length: 0\r\n\r\n")))))
          (port (plist-get fixture :port))
          (config (ende-test--web-policy
                   (format "http://fetch-fixture.invalid:%d/start" port)))
@@ -509,11 +509,11 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (unwind-protect
         (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
                    (lambda (_transfer host callback)
-                      (push host resolved)
-                       (funcall callback
-                               (list (ende-web-fetch-classify-address
-                                       "127.0.0.1"))
-                               nil))))
+                     (push host resolved)
+                     (funcall callback
+                              (list (ende-web-fetch-classify-address
+                                     "127.0.0.1"))
+                              nil))))
           (let ((result (ende-test--web-tool-call
                          (list :url (format "http://fetch-fixture.invalid:%d/start"
                                             port))
@@ -530,10 +530,10 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
          (fixture
           (ende-test--web-http-server
            `(("/large" . ,(concat "HTTP/1.1 200 OK\r\n"
-                                   "Content-Type: text/plain\r\n"
-                                   "Transfer-Encoding: chunked\r\n\r\n"
-                                   (format "%x\r\n%s\r\n0\r\n\r\n"
-                                           (string-bytes large-body) large-body)))
+                                  "Content-Type: text/plain\r\n"
+                                  "Transfer-Encoding: chunked\r\n\r\n"
+                                  (format "%x\r\n%s\r\n0\r\n\r\n"
+                                          (string-bytes large-body) large-body)))
              ("/binary" . ,(ende-test--web-response
                             "200 OK" "Content-Type: application/octet-stream\r\n"
                             "not text"))
@@ -545,115 +545,115 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                              (concat "Content-Type: text/plain\r\n"
                                      "X-Padding: " (make-string 80 ?x) "\r\n")
                              "small"))
-              ("/long" . ,(ende-test--web-response
-                            "200 OK" "Content-Type: text/plain\r\n"
-                            "hello world"))
-              ("/redirect-large" . ,(concat
-                                      "HTTP/1.1 302 Found\r\n"
-                                      "Location: /redirect-body\r\n"
-                                      "Content-Length: 20\r\n\r\n"
-                                      (make-string 20 ?a)))
-              ("/redirect-body" . ,(ende-test--web-response
-                                    "200 OK" "Content-Type: text/plain\r\n"
-                                    (make-string 20 ?b)))
-              ("/redirect-header" . ,(concat
-                                       "HTTP/1.1 302 Found\r\n"
-                                       "Location: /header-final\r\n"
-                                       "Content-Length: 0\r\n\r\n"))
-              ("/header-final" . ,(ende-test--web-response
+             ("/long" . ,(ende-test--web-response
+                          "200 OK" "Content-Type: text/plain\r\n"
+                          "hello world"))
+             ("/redirect-large" . ,(concat
+                                    "HTTP/1.1 302 Found\r\n"
+                                    "Location: /redirect-body\r\n"
+                                    "Content-Length: 20\r\n\r\n"
+                                    (make-string 20 ?a)))
+             ("/redirect-body" . ,(ende-test--web-response
                                    "200 OK" "Content-Type: text/plain\r\n"
-                                   "ok")))))
+                                   (make-string 20 ?b)))
+             ("/redirect-header" . ,(concat
+                                     "HTTP/1.1 302 Found\r\n"
+                                     "Location: /header-final\r\n"
+                                     "Content-Length: 0\r\n\r\n"))
+             ("/header-final" . ,(ende-test--web-response
+                                  "200 OK" "Content-Type: text/plain\r\n"
+                                  "ok")))))
          (port (plist-get fixture :port))
          (pattern (format "http://fetch-fixture.invalid:%d/**" port))
          (config (ende-test--web-policy pattern)))
-     (unwind-protect
-         (progn
-           (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                      (lambda (_transfer _host callback)
-                        (funcall callback
-                                 (list (ende-web-fetch-classify-address
-                                        "127.0.0.1"))
-                                 nil)))
-                     (ende-web-fetch-max-response-bytes 32))
-             (let ((oversized
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                     (lambda (_transfer _host callback)
+                       (funcall callback
+                                (list (ende-web-fetch-classify-address
+                                       "127.0.0.1"))
+                                nil)))
+                    (ende-web-fetch-max-response-bytes 32))
+            (let ((oversized
+                   (ende-test--web-tool-call
+                    (list :url (format "http://fetch-fixture.invalid:%d/large"
+                                       port))
+                    config)))
+              (should-not (plist-get oversized :ok))
+              (should (string-match-p "byte limit"
+                                      (plist-get oversized :error))))
+            (let ((binary
+                   (ende-test--web-tool-call
+                    (list :url (format "http://fetch-fixture.invalid:%d/binary"
+                                       port))
+                    config)))
+              (should-not (plist-get binary :ok))
+              (should (string-match-p "content type"
+                                      (plist-get binary :error))))
+            (let ((encoded
+                   (ende-test--web-tool-call
+                    (list :url (format "http://fetch-fixture.invalid:%d/gzip"
+                                       port))
+                    config)))
+              (should-not (plist-get encoded :ok))
+              (should (string-match-p "Content-Encoding"
+                                      (plist-get encoded :error))))
+            (let ((redirected
+                   (ende-test--web-tool-call
+                    (list :url (format
+                                "http://fetch-fixture.invalid:%d/redirect-large"
+                                port))
+                    config)))
+              (should-not (plist-get redirected :ok))
+              (should (string-match-p "byte limit"
+                                      (plist-get redirected :error)))))
+          (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                     (lambda (_transfer _host callback)
+                       (funcall callback
+                                (list (ende-web-fetch-classify-address
+                                       "127.0.0.1"))
+                                nil)))
+                    (ende-web-fetch-max-response-header-bytes 32))
+            (let ((headers
+                   (ende-test--web-tool-call
+                    (list :url (format "http://fetch-fixture.invalid:%d/headers"
+                                       port))
+                    config)))
+              (should-not (plist-get headers :ok))
+              (should (string-match-p "headers.*byte limit"
+                                      (plist-get headers :error)))))
+          (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                     (lambda (_transfer _host callback)
+                       (funcall callback
+                                (list (ende-web-fetch-classify-address
+                                       "127.0.0.1"))
+                                nil)))
+                    (ende-web-fetch-max-response-header-bytes 100))
+            (let ((headers
+                   (ende-test--web-tool-call
+                    (list :url (format
+                                "http://fetch-fixture.invalid:%d/redirect-header"
+                                port))
+                    config)))
+              (should-not (plist-get headers :ok))
+              (should (string-match-p "headers.*byte limit"
+                                      (plist-get headers :error)))))
+          (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                     (lambda (_transfer _host callback)
+                       (funcall callback
+                                (list (ende-web-fetch-classify-address
+                                       "127.0.0.1"))
+                                nil))))
+            (let* ((url (format "http://fetch-fixture.invalid:%d/long" port))
+                   (limit-result
                     (ende-test--web-tool-call
-                     (list :url (format "http://fetch-fixture.invalid:%d/large"
-                                        port))
-                     config)))
-               (should-not (plist-get oversized :ok))
-               (should (string-match-p "byte limit"
-                                       (plist-get oversized :error))))
-             (let ((binary
-                    (ende-test--web-tool-call
-                     (list :url (format "http://fetch-fixture.invalid:%d/binary"
-                                        port))
-                     config)))
-               (should-not (plist-get binary :ok))
-               (should (string-match-p "content type"
-                                       (plist-get binary :error))))
-             (let ((encoded
-                    (ende-test--web-tool-call
-                     (list :url (format "http://fetch-fixture.invalid:%d/gzip"
-                                        port))
-                     config)))
-                (should-not (plist-get encoded :ok))
-                (should (string-match-p "Content-Encoding"
-                                        (plist-get encoded :error))))
-              (let ((redirected
-                     (ende-test--web-tool-call
-                      (list :url (format
-                                  "http://fetch-fixture.invalid:%d/redirect-large"
-                                  port))
-                      config)))
-                (should-not (plist-get redirected :ok))
-                (should (string-match-p "byte limit"
-                                        (plist-get redirected :error)))))
-           (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                      (lambda (_transfer _host callback)
-                        (funcall callback
-                                 (list (ende-web-fetch-classify-address
-                                        "127.0.0.1"))
-                                 nil)))
-                     (ende-web-fetch-max-response-header-bytes 32))
-             (let ((headers
-                    (ende-test--web-tool-call
-                     (list :url (format "http://fetch-fixture.invalid:%d/headers"
-                                        port))
-                     config)))
-             (should-not (plist-get headers :ok))
-             (should (string-match-p "headers.*byte limit"
-                                     (plist-get headers :error)))))
-           (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                      (lambda (_transfer _host callback)
-                        (funcall callback
-                                 (list (ende-web-fetch-classify-address
-                                        "127.0.0.1"))
-                                 nil)))
-                     (ende-web-fetch-max-response-header-bytes 100))
-             (let ((headers
-                    (ende-test--web-tool-call
-                     (list :url (format
-                                 "http://fetch-fixture.invalid:%d/redirect-header"
-                                 port))
-                     config)))
-               (should-not (plist-get headers :ok))
-               (should (string-match-p "headers.*byte limit"
-                                       (plist-get headers :error)))))
-           (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                      (lambda (_transfer _host callback)
-                        (funcall callback
-                                 (list (ende-web-fetch-classify-address
-                                        "127.0.0.1"))
-                                 nil))))
-             (let* ((url (format "http://fetch-fixture.invalid:%d/long" port))
-                    (limit-result
-                     (ende-test--web-tool-call
-                      (list :url url :max_chars 5) config))
-                    (value (plist-get limit-result :result)))
-               (should (plist-get limit-result :ok))
-               (should (equal (plist-get value :content) "hello"))
-               (should (eq (plist-get value :truncated) t)))))
-        (funcall (plist-get fixture :stop)))))
+                     (list :url url :max_chars 5) config))
+                   (value (plist-get limit-result :result)))
+              (should (plist-get limit-result :ok))
+              (should (equal (plist-get value :content) "hello"))
+              (should (eq (plist-get value :truncated) t)))))
+      (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-timeout-cancels-process-and-releases-buffers ()
   (let* ((fixture (ende-test--web-http-server '(("/slow" . :hold))))
@@ -662,25 +662,25 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
          (authorize (lambda (_url) '(:allow-private-addresses t)))
          (ende-web-fetch-call-timeout 0.15)
          (ende-web-fetch-connect-timeout 1))
-     (unwind-protect
-         (let ((outcome
-                (ende-test--web-await
-                 (lambda (callback)
-                   (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                              (lambda (_transfer _host done)
-                                (funcall done
-                                         (list (ende-web-fetch-classify-address
-                                                "127.0.0.1"))
-                                          nil))))
-                      (ende-web-fetch url authorize callback)))
-                 5)))
-            (should (string-match-p "response transfer" (cadr outcome)))
+    (unwind-protect
+        (let ((outcome
+               (ende-test--web-await
+                (lambda (callback)
+                  (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                             (lambda (_transfer _host done)
+                               (funcall done
+                                        (list (ende-web-fetch-classify-address
+                                               "127.0.0.1"))
+                                        nil))))
+                    (ende-web-fetch url authorize callback)))
+                5)))
+          (should (string-match-p "response transfer" (cadr outcome)))
           (should (= (length (funcall (plist-get fixture :requests))) 1))
-           (should-not
-             (cl-some (lambda (buffer)
-                        (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
-                (buffer-list))))
-       (funcall (plist-get fixture :stop)))))
+          (should-not
+           (cl-some (lambda (buffer)
+                      (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
+                    (buffer-list))))
+      (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-dns-phase-timeout-is-independent-and-cleaned ()
   (let* ((real-make-process (symbol-function 'make-process))
@@ -704,9 +704,9 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                             (setq process (apply real-make-process arguments))))))
                (setq transfer
                      (ende-web-fetch
-                       "http://dns-slow.invalid/"
-                       (lambda (_url) '(:allow-private-addresses t))
-                       callback)))
+                      "http://dns-slow.invalid/"
+                      (lambda (_url) '(:allow-private-addresses t))
+                      callback)))
              3))))
     (should (string-match-p "DNS timeout resolving dns-slow.invalid"
                             (cadr outcome)))
@@ -720,7 +720,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
     (should-not
      (cl-some (lambda (buffer)
                 (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
-               (buffer-list)))))
+              (buffer-list)))))
 
 (ert-deftest ende-test/web-fetch-connection-failure-has-destination-context ()
   (let* ((fixture (ende-test--web-http-server nil))
@@ -734,8 +734,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
           (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
                      (lambda (_transfer _host callback)
                        (funcall callback
-                                 (list (ende-web-fetch-classify-address
-                                        "127.0.0.1"))
+                                (list (ende-web-fetch-classify-address
+                                       "127.0.0.1"))
                                 nil))))
             (let* ((result (ende-test--web-tool-call (list :url url) config))
                    (error (plist-get result :error)))
@@ -750,25 +750,25 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (let* ((fixture
           (ende-test--web-http-server
            `(("/partial" . (:partial
-                             ,(concat "HTTP/1.1 200 OK\r\n"
-                                      "Content-Type: text/plain\r\n"
-                                       "Content-Length: 100\r\n\r\n"
-                                       "partial"))))))
+                            ,(concat "HTTP/1.1 200 OK\r\n"
+                                     "Content-Type: text/plain\r\n"
+                                     "Content-Length: 100\r\n\r\n"
+                                     "partial"))))))
          (port (plist-get fixture :port))
          (url (format "http://fetch-fixture.invalid:%d/partial" port))
          (authorize (lambda (_url) '(:allow-private-addresses t)))
-          (ende-web-fetch-call-timeout 0.15)
+         (ende-web-fetch-call-timeout 0.15)
          (outcome
           (ende-test--web-await
            (lambda (callback)
-              (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                         (lambda (_transfer _host done)
-                           (funcall done
-                                    (list (ende-web-fetch-classify-address
-                                           "127.0.0.1"))
-                                    nil))))
-                (ende-web-fetch url authorize callback)))
-            3)))
+             (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
+                        (lambda (_transfer _host done)
+                          (funcall done
+                                   (list (ende-web-fetch-classify-address
+                                          "127.0.0.1"))
+                                   nil))))
+               (ende-web-fetch url authorize callback)))
+           3)))
     (unwind-protect
         (progn
           (should (string-match-p "response transfer failed"
@@ -804,16 +804,16 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
              nil
              (lambda (function)
                (when function
-                  (setq cancel function
-                        timer (run-at-time 0.1 nil function))))))
+                 (setq cancel function
+                       timer (run-at-time 0.1 nil function))))))
           (while (and (not cancelled) (timerp timer))
             (accept-process-output nil 0.02))
           (should cancelled)
           (should (functionp cancel))
           (when timer (cancel-timer timer))
           (should-not
-            (cl-some (lambda (buffer)
-                       (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
+           (cl-some (lambda (buffer)
+                      (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
                     (buffer-list))))
       (funcall (plist-get fixture :stop)))))
 
@@ -821,8 +821,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (let* ((fixture
           (ende-test--web-http-server
            `(("/start" . ,(concat "HTTP/1.1 302 Found\r\n"
-                                   "Location: /hold\r\n"
-                                   "Content-Length: 0\r\n\r\n"))
+                                  "Location: /hold\r\n"
+                                  "Content-Length: 0\r\n\r\n"))
              ("/hold" . :hold))))
          (port (plist-get fixture :port))
          (url (format "http://fetch-fixture.invalid:%d/start" port))
@@ -877,7 +877,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
   (let* ((fixture
           (ende-test--web-http-server
            `(("/ok" . ,(ende-test--web-response
-                          "200 OK" "Content-Type: text/plain\r\n" "done")))))
+                        "200 OK" "Content-Type: text/plain\r\n" "done")))))
          (port (plist-get fixture :port))
          (url (format "http://fetch-fixture.invalid:%d/ok" port))
          (real-make-process (symbol-function 'make-process))
@@ -891,8 +891,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                (ende-test--web-await
                 (lambda (callback)
                   (cl-letf (((symbol-function 'ende-web-fetch--resolve-host)
-                              (lambda (_transfer _host done)
-                                (funcall done
+                             (lambda (_transfer _host done)
+                               (funcall done
                                         (list (ende-web-fetch-classify-address
                                                "127.0.0.1"))
                                         nil)))
@@ -902,14 +902,14 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                      stderr-process
                                      (plist-get arguments :stderr)
                                      process
-                                       (apply real-make-process arguments)))))
+                                     (apply real-make-process arguments)))))
                     (setq transfer
                           (ende-web-fetch
                            url (lambda (_url) '(:allow-private-addresses t))
                            (lambda (value error)
                              (setq callback-count (1+ callback-count))
-                              (funcall callback value error)))))
-                 3))))
+                             (funcall callback value error)))))
+                  3))))
           (should-not (cadr outcome))
           (should (equal (plist-get (car outcome) :content) "done"))
           (should (= callback-count 1))
@@ -955,8 +955,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                                   '("sleep" "30")))
                                  (setq stderr-process
                                        (plist-get arguments :stderr))
-                                  (setq process
-                                        (apply real-make-process arguments))))))
+                                 (setq process
+                                       (apply real-make-process arguments))))))
                     (setq transfer
                           (ende-web-fetch
                            "http://slow.invalid/"
@@ -968,7 +968,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                      timer (run-at-time 0.05 nil function))))))
                     (should (process-live-p process))
                     (should-not (ende-web-fetch--transfer-settled transfer)))
-                5))))
+                  5))))
           (setq cancelled (string-match-p "cancelled" (cadr outcome)))
           (should cancelled)
           (should (processp process))
@@ -977,10 +977,10 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
           (should (processp stderr-process))
           (should-not (process-live-p stderr-process))
           (should-not
-            (cl-some (lambda (buffer)
-                        (string-prefix-p " *ende-web-fetch-dns*"
-                                         (buffer-name buffer)))
-                      (buffer-list)))
+           (cl-some (lambda (buffer)
+                      (string-prefix-p " *ende-web-fetch-dns*"
+                                       (buffer-name buffer)))
+                    (buffer-list)))
           (should-not (memq timer timer-list)))
       (when timer (cancel-timer timer))
       (when (and process (process-live-p process))
@@ -1043,13 +1043,13 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
               (let* ((before
                       (ende-test--chat-config-at
                        (ende-chat--build-document) "Question"))
-                      (job (ende-ask)))
-                  (should (eq (ende-job-state job) 'running))
-                  (ende-test--complete-call (car ende-test--calls))
-                  (should (= (length ende-test--calls) 1))
-                  (should
-                   (ende-test--web-wait-until
-                   (lambda () (= (length ende-test--calls) 2)) 5))
+                     (job (ende-ask)))
+                (should (eq (ende-job-state job) 'running))
+                (ende-test--complete-call (car ende-test--calls))
+                (should (= (length ende-test--calls) 1))
+                (should
+                 (ende-test--web-wait-until
+                  (lambda () (= (length ende-test--calls) 2)) 5))
                 (let* ((messages (plist-get (cadr ende-test--calls) :messages))
                        (tool-message
                         (cl-find-if
@@ -1067,10 +1067,10 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                (lambda (definition)
                                  (alist-get :name (alist-get :function definition)))
                                definitions)))
-                    (should (equal fetched content))
-                    (should fragmented)
-                   (should (equal (sort names #'string<)
-                                  '("about_thinking" "web_fetch")))
+                  (should (equal fetched content))
+                  (should fragmented)
+                  (should (equal (sort names #'string<)
+                                 '("about_thinking" "web_fetch")))
                   (should (string-match-p "attacker\\.invalid" (buffer-string)))
                   (should-not
                    (cl-some (lambda (headline)
@@ -1091,10 +1091,10 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                   (ende-chat--build-document) "Question")))
                   (should (equal (plist-get before :active-tools)
                                  '(web_fetch about_thinking))))
-                 (ende-test--complete-call (cadr ende-test--calls))
-                 (should (eq (ende-job-state job) 'completed))
-                 (should (string-match-p (regexp-quote reply)
-                                         (buffer-string)))))))
+                (ende-test--complete-call (cadr ende-test--calls))
+                (should (eq (ende-job-state job) 'completed))
+                (should (string-match-p (regexp-quote reply)
+                                        (buffer-string)))))))
       (funcall (plist-get fixture :stop))
       (ende-test--reset))))
 
@@ -1106,7 +1106,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
          (port (plist-get fixture :port))
          (first-url (format "http://fetch-fixture.invalid:%d/hold" port))
          (later-url (format "http://fetch-fixture.invalid:%d/later" port))
-          (ende-llm-function
+         (ende-llm-function
           (ende-test--fake-llm
            (list
             (list :tool-calls

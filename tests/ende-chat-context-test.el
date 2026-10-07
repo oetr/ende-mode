@@ -99,8 +99,8 @@
    (let* ((messages (ende-chat-context-at-point))
           (text (ende-test--chat-context-text messages)))
      (should (string-match-p "Keep this ordinary note" text))
-      (should-not (string-match-p "not ordinary context" text))
-      (should-not (ende-test--chat-protocol-messages messages)))))
+     (should-not (string-match-p "not ordinary context" text))
+     (should-not (ende-test--chat-protocol-messages messages)))))
 
 
 

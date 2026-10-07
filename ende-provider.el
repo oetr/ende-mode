@@ -111,7 +111,7 @@ When nil, use only the response inactivity timeout."
 
 (defconst ende-provider--secret-profile-keys
   '(:token :api-key :secret :authorization :auth-token :access :refresh
-    :access-token :refresh-token :bearer-token)
+	   :access-token :refresh-token :bearer-token)
   "Profile fields reserved for credentials, which remain in auth-source.")
 
 (defun ende-provider--strip-secret-fields (profile)
@@ -235,22 +235,22 @@ defaults.  OpenRouter profiles use auth-source credentials."
                      :parallel nil
                      :temperature ende-provider-temperature
                      :require-sse t))))))
-     (let ((profile (ende-plist-merge
-                     (plist-put (copy-sequence base) :name name)
-                     custom)))
+    (let ((profile (ende-plist-merge
+                    (plist-put (copy-sequence base) :name name)
+                    custom)))
       (setq profile
             (plist-put
-              profile :model-explicit-p
-              (or (and (plist-member custom :model) t)
-                  (and (not typed-openai)
-                       (pcase name
-                         ('openai
-                          (not (equal ende-codex-model
-                                      ende-provider--default-codex-model)))
-                          ('openrouter nil)
-                          ('openrouter-batch nil)
-                          (_ (not (equal ende-provider-model
-                                         ende-provider--default-model))))))))
+             profile :model-explicit-p
+             (or (and (plist-member custom :model) t)
+                 (and (not typed-openai)
+                      (pcase name
+                        ('openai
+                         (not (equal ende-codex-model
+                                     ende-provider--default-codex-model)))
+                        ('openrouter nil)
+                        ('openrouter-batch nil)
+                        (_ (not (equal ende-provider-model
+                                       ende-provider--default-model))))))))
       (setq profile
             (plist-put profile :models-explicit-p
                        (and (plist-member custom :models) t)))
@@ -275,7 +275,7 @@ Named profiles and batch requests retain their existing option shape."
     (ende-provider--strip-secret-fields
      (ende-plist-merge
       '(:type openai :max-concurrency 1 :parallel nil
-        :stream-usage t :require-sse t)
+              :stream-usage t :require-sse t)
       options)))
    ((eq (plist-get options :wire-api) 'responses)
     (ende-provider--strip-secret-fields

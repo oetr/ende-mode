@@ -440,10 +440,10 @@
               (should (ende-review-overlay-p review))
               (should (string= (buffer-string)
                                "unsaved buffer contents\n")))
-             (should (string= (with-temp-buffer
-                                (insert-file-contents path)
-                                (buffer-string))
-                              "hello Emacs\n"))))
+            (should (string= (with-temp-buffer
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "hello Emacs\n"))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -476,8 +476,8 @@
               (set-buffer-multibyte nil)
               (insert-file-contents-literally path)
               (should (equal (buffer-string)
-                              (encode-coding-string
-                               "naïve\nkeep\n" 'utf-8-dos))))))
+                             (encode-coding-string
+                              "naïve\nkeep\n" 'utf-8-dos))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -834,7 +834,7 @@
             (should-not (plist-get stale :ok))
             (should (file-exists-p path))
             (should
-              (string-match-p
+             (string-match-p
               "symlink"
               (plist-get
                (ende-tool-call "delete_file"
@@ -878,9 +878,9 @@
               (should (string-match-p "unsaved visiting buffer"
                                       (plist-get failure :error)))
               (should (file-exists-p path))
-               (with-current-buffer buffer
-                 (should (equal (buffer-string) "unsaved text\n"))
-                 (should (buffer-modified-p))))))
+              (with-current-buffer buffer
+                (should (equal (buffer-string) "unsaved text\n"))
+                (should (buffer-modified-p))))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -917,9 +917,9 @@
             (let ((result (ende-tool-call
                            "delete_file" '(("path" . "discard.txt")) root)))
               (should (plist-get result :ok))
-               (should (= calls 2))
-               (should-not (file-exists-p path))
-               (should (file-exists-p destination)))))
+              (should (= calls 2))
+              (should-not (file-exists-p path))
+              (should (file-exists-p destination)))))
       (when (file-directory-p root)
         (delete-directory root t))
       (when (file-directory-p trash)
@@ -1033,16 +1033,16 @@
                                (insert-file-contents path)
                                (buffer-string))
                              before)))))
-          (with-temp-file path (insert "first\nfirst\n"))
-          (let ((ambiguous
-                 (concat "*** Begin Patch\n*** Update File: main.txt\n"
-                         "@@\n first\n+insert\n*** End Patch\n")))
-            (should-not (plist-get (ende-test--apply-patch-call ambiguous root)
-                                   :ok))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
-                           "first\nfirst\n")))
+      (with-temp-file path (insert "first\nfirst\n"))
+      (let ((ambiguous
+             (concat "*** Begin Patch\n*** Update File: main.txt\n"
+                     "@@\n first\n+insert\n*** End Patch\n")))
+        (should-not (plist-get (ende-test--apply-patch-call ambiguous root)
+                               :ok))
+        (should (equal (with-temp-buffer
+                         (insert-file-contents path)
+                         (buffer-string))
+                       "first\nfirst\n")))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -1066,9 +1066,9 @@
           (cl-letf (((symbol-function 'ende-tools--commit-change-set)
                      (lambda (change-set)
                        (prog1 (funcall commit change-set)
-                          (cl-incf count)
-                          (when (= count 1)
-                            (error "injected commit failure"))))))
+                         (cl-incf count)
+                         (when (= count 1)
+                           (error "injected commit failure"))))))
             (let* ((failure (ende-test--apply-patch-call patch root))
                    (report (plist-get failure :recovery)))
               (should-not (plist-get failure :ok))
@@ -1091,7 +1091,7 @@
                 (should (equal (with-temp-buffer
                                  (insert-file-contents path)
                                  (buffer-string))
-                                "before\nold\n"))))))
+                               "before\nold\n"))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -1108,8 +1108,8 @@
           (cl-letf (((symbol-function 'ende-tools--commit-change-set)
                      (lambda (change-set)
                        (prog1 (funcall commit change-set)
-                          (with-temp-file path (insert "concurrent edit\n"))
-                          (error "fail after concurrent change")))))
+                         (with-temp-file path (insert "concurrent edit\n"))
+                         (error "fail after concurrent change")))))
             (let* ((failure (ende-test--apply-patch-call patch root))
                    (report (plist-get failure :recovery))
                    (entry (aref report 0)))
@@ -1125,9 +1125,9 @@
                                (buffer-string))
                              "before\nold\n"))
               (should (equal (with-temp-buffer
-                                (insert-file-contents path)
-                                (buffer-string))
-                              "concurrent edit\n")))))
+                               (insert-file-contents path)
+                               (buffer-string))
+                             "concurrent edit\n")))))
       (when (and recovery (file-exists-p recovery))
         (delete-file recovery))
       (when (file-directory-p root)

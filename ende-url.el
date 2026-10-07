@@ -40,7 +40,7 @@
 (defun ende-url--path-character-p (character)
   "Return non-nil when CHARACTER can safely remain literal in a URI path."
   (or (ende-url--unreserved-p character)
-       (memq character '(?/ ?: ?@ ?! ?$ ?& ?' ?\( ?\) ?* ?+ ?, ?\; ?=))))
+      (memq character '(?/ ?: ?@ ?! ?$ ?& ?' ?\( ?\) ?* ?+ ?, ?\; ?=))))
 
 (defun ende-url--escape-component (value &optional query)
   "Percent-encode raw URI characters in VALUE for a path or QUERY component."
@@ -425,9 +425,9 @@ The result includes `:url', `:scheme', `:host', `:host-kind', `:port',
     (and (string= (plist-get pattern :scheme) (plist-get request :scheme))
          (= (plist-get pattern :port) (plist-get request :port))
          host-match
-          (let ((case-fold-search nil))
-            (string-match-p (plist-get pattern :path-regexp)
-                            (plist-get request :path))))))
+         (let ((case-fold-search nil))
+           (string-match-p (plist-get pattern :path-regexp)
+                           (plist-get request :path))))))
 
 (provide 'ende-url)
 

@@ -151,7 +151,7 @@
          (should-not (marker-buffer question-marker))
          (should-not (plist-get (ende-job-instruction job) :question-marker))
          (should-not (plist-get (ende-job-instruction job)
-                               :request-end-marker)))))))
+				:request-end-marker)))))))
 
 
 

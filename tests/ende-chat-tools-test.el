@@ -33,19 +33,19 @@
           (with-temp-file private (insert "classified text\n"))
           (let ((ende-llm-function
                  (ende-test--fake-llm
-                   (list
-                    (list :tool-calls
-                          (list (list :id "call-project"
-                                      :name "project_info"
-                                      :arguments "{}")
-                                (list :id "call-search"
-                                      :name "search_project"
-                                      :arguments "{\"regexp\":\"classified\"}")))
-                    (list :tool-calls
-                          (list (list :id "call-project-round-2"
-                                      :name "project_info"
-                                      :arguments "{}")))
-                    "Search complete")
+                  (list
+                   (list :tool-calls
+                         (list (list :id "call-project"
+                                     :name "project_info"
+                                     :arguments "{}")
+                               (list :id "call-search"
+                                     :name "search_project"
+                                     :arguments "{\"regexp\":\"classified\"}")))
+                   (list :tool-calls
+                         (list (list :id "call-project-round-2"
+                                     :name "project_info"
+                                     :arguments "{}")))
+                   "Search complete")
                   t)))
             (with-temp-buffer
               (insert
@@ -394,7 +394,7 @@
                       (lambda (headline)
 			(ende-chat--tool-call-protocol-p document headline))
                       headlines)
-                      1)))))))
+                     1)))))))
 
 
 
@@ -701,7 +701,7 @@
                           (equal (ende-chat--property document headline :role)
                                  "assistant")))
                    headlines)
-                   1))))))
+                  1))))))
 
 
 
@@ -1028,26 +1028,26 @@
                       (string-match-p
                        "Tool Result: read_file"
                        (ende-test--chat-context-text provider-messages)))))
-	       (ende-test--chat-goto "** Compact")
-	       (let ((compaction (ende-compact)))
-		 (should (= (length ende-test--calls) 5))
-                 (let* ((compaction-messages
-                         (plist-get (nth 4 ende-test--calls) :messages))
-                        (compaction-text
-                         (ende-test--chat-context-text compaction-messages)))
-                   (should-not
-                    (ende-test--chat-protocol-messages compaction-messages))
-                   (should (string-match-p "FOO_SOURCE_TOKEN" compaction-text))
-                   (should (string-match-p "Arguments:" compaction-text)))
-		 (ende-test--complete-call (nth 4 ende-test--calls))
-		 (should (eq (ende-job-state compaction) 'completed)))
-	       (ende-test--chat-goto "** Later")
-	       (let* ((messages (ende-chat-context-at-point))
-                      (text (ende-test--chat-context-text messages)))
-		 (should (string-match-p "Compact summary only" text))
-		 (should-not (ende-test--chat-protocol-messages messages))
-		 (should-not (string-match-p "FOO_SOURCE_TOKEN" text))
-		 (should-not (string-match-p "call-A" text))))))))
+		 (ende-test--chat-goto "** Compact")
+		 (let ((compaction (ende-compact)))
+		   (should (= (length ende-test--calls) 5))
+                   (let* ((compaction-messages
+                           (plist-get (nth 4 ende-test--calls) :messages))
+                          (compaction-text
+                           (ende-test--chat-context-text compaction-messages)))
+                     (should-not
+                      (ende-test--chat-protocol-messages compaction-messages))
+                     (should (string-match-p "FOO_SOURCE_TOKEN" compaction-text))
+                     (should (string-match-p "Arguments:" compaction-text)))
+		   (ende-test--complete-call (nth 4 ende-test--calls))
+		   (should (eq (ende-job-state compaction) 'completed)))
+		 (ende-test--chat-goto "** Later")
+		 (let* ((messages (ende-chat-context-at-point))
+			(text (ende-test--chat-context-text messages)))
+		   (should (string-match-p "Compact summary only" text))
+		   (should-not (ende-test--chat-protocol-messages messages))
+		   (should-not (string-match-p "FOO_SOURCE_TOKEN" text))
+		   (should-not (string-match-p "call-A" text))))))))
       (ende-test--reset)
       (when (file-directory-p root)
 	(delete-directory root t)))))
@@ -1231,7 +1231,7 @@
                           (org-element-property :begin (car tool-results))))
                (should (equal
                         (mapcar (lambda (call)
-                                   (ende-chat--protocol-body-string call nil 'literal))
+                                  (ende-chat--protocol-body-string call nil 'literal))
                                 tool-calls)
                         '("{\"path\":\"one.el\"}"
                           "{\"path\":\"two.el\"}")))
@@ -1248,7 +1248,7 @@
                  (should-not
                   (string-match-p
                    "ENDE_MODEL\\|ENDE_REASONING_EFFORT\\|tool-model\\|high"
-                    (ende-chat--protocol-body-string call nil 'literal))))
+                   (ende-chat--protocol-body-string call nil 'literal))))
                (should (equal
                         (ende-test--chat-headline-property
                          final-reply ende-chat-model-property)

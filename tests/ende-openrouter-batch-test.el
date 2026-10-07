@@ -507,8 +507,8 @@
             (let ((session
                    (ende-llm--make-session
                     :profile '(:transport auto
-                               :batch-url "https://openrouter.ai/api/v1/batches")
-                     :messages '(("user" . "question")))))
+					  :batch-url "https://openrouter.ai/api/v1/batches")
+                    :messages '(("user" . "question")))))
               (ende-stream-append-preview
                (ende-llm--session-stream session)
                "{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}")

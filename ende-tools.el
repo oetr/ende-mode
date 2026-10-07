@@ -162,7 +162,7 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
                               (plist-get access-config :tool-resources)))))
     (when access-config
       (unless (memq tool-name (ende-tool-active-names
-                              (plist-get access-config :active-tools)))
+                               (plist-get access-config :active-tools)))
         (error "tool is not active in this chat: %s" tool-name))
       (when (and (not (eq kind 'none)) (null assigned))
         (error "tool has no assigned resources: %s" tool-name)))
@@ -262,25 +262,25 @@ through its parent and must not be followed (notably for symlink-safe deletes)."
                 (if no-follow-final
                     (expand-file-name path)
                   (if (file-exists-p path)
-                    (file-truename path)
+                      (file-truename path)
                     (expand-file-name path root)))
               (error nil)))
            (relative (and canonical
                           (file-in-directory-p canonical root)
                           (file-relative-name canonical root)))
            (assignments (plist-get ende-tools--access-config
-                                    :tool-resources))
+                                   :tool-resources))
            (resource-names (cdr (assq tool assignments)))
            (resources (plist-get ende-tools--access-config :resources)))
       (and relative
            (not (ende-project--excluded-p relative))
            (cl-some
-             (lambda (name)
-               (let ((resource (cdr (assq name resources))))
-                 (and resource
-                      (eq (plist-get resource :type) 'file)
-                      (ende-tools--resource-allows-p relative resource))))
-             resource-names)))))
+            (lambda (name)
+              (let ((resource (cdr (assq name resources))))
+                (and resource
+                     (eq (plist-get resource :type) 'file)
+                     (ende-tools--resource-allows-p relative resource))))
+            resource-names)))))
 
 (defun ende-tools--path-authorized-p (path root)
   "Return non-nil when canonical PATH is allowed by the current tool policy."
@@ -397,9 +397,9 @@ use `ende-tools--resolve-disk-source' instead."
                (ende-project-path path root) root))
              (buffer (ende-project-visiting-buffer path root))
              (relative (file-relative-name canonical root)))
-         (list :kind (if buffer 'buffer 'file)
-               :buffer buffer :path canonical :relative relative
-               :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
+        (list :kind (if buffer 'buffer 'file)
+              :buffer buffer :path canonical :relative relative
+              :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
 
 (defun ende-tools--resolve-disk-source (arguments root)
   "Resolve an authorized project file in ARGUMENTS below ROOT.
@@ -462,8 +462,8 @@ FUNCTION receives no arguments and may return any value."
             (widen)
             (funcall function))))
     (ende-tools--with-disk-source source
-      (lambda (_coding-system)
-        (funcall function)))))
+				  (lambda (_coding-system)
+				    (funcall function)))))
 
 (defun ende-tools--source-digest ()
   "Return a SHA-256 digest of the complete current source buffer."
@@ -487,8 +487,8 @@ FUNCTION receives no arguments and may return any value."
               :source_kind (ende-tools--source-kind-name source)
               :line_count (ende-tools--source-line-count)
               :byte_count (if disk-source
-                             (file-attribute-size attributes)
-                           (string-bytes (buffer-string)))
+                              (file-attribute-size attributes)
+                            (string-bytes (buffer-string)))
               :digest (ende-tools--source-digest)
               :disk_mtime
               (and attributes
@@ -584,9 +584,9 @@ FUNCTION receives no arguments and may return any value."
     (ende-tools--with-source
      source
      (lambda ()
-        (append (list :path (plist-get source :relative)
-                      :source_kind "file"
-                      :digest (ende-tools--source-digest))
+       (append (list :path (plist-get source :relative)
+                     :source_kind "file"
+                     :digest (ende-tools--source-digest))
                (ende-tools--source-buffer-metadata source)
                (ende-tools--line-slice start-line line-count))))))
 
@@ -864,7 +864,7 @@ The final component is deliberately not followed through a symlink."
                         (file-truename buffer-path)
                       (expand-file-name buffer-path))
                   (error nil))))
-            (and candidate (file-equal-p candidate path))))))
+           (and candidate (file-equal-p candidate path))))))
    (buffer-list)))
 
 (defun ende-tools--modified-buffers (buffers)
@@ -883,8 +883,8 @@ The final component is deliberately not followed through a symlink."
   "Reauthorize CHANGE-SET's complete operation scope at PATH."
   (dolist (tool (ende-change-set-authorization-tools change-set))
     (ende-tools--assert-path-authorized-for tool path
-                                             (ende-change-set-root change-set)
-                                             t)))
+                                            (ende-change-set-root change-set)
+                                            t)))
 
 (defun ende-tools--validate-change-set (change-set)
   "Revalidate target identity, permissions and buffer policy for CHANGE-SET."
@@ -899,7 +899,7 @@ The final component is deliberately not followed through a symlink."
              (ende-change-set-path change-set)))
     (ende-tools--mutation-assert-authorized change-set path)
     (unless (eq (not (null exists))
-               (ende-tools--mutation-existing-p change-set))
+		(ende-tools--mutation-existing-p change-set))
       (error (if exists
                  "file appeared after mutation preparation: %s"
                "file disappeared after mutation preparation: %s")
@@ -1147,8 +1147,8 @@ The final component is deliberately not followed through a symlink."
                   (delete-file stage)))))
            (t
             (setq entry
-                   (ende-tools--change-set-result-entry
-                    change-set "concurrent_change_preserved"))))))
+                  (ende-tools--change-set-result-entry
+                   change-set "concurrent_change_preserved"))))))
       (error
        (setq entry (ende-tools--recovery-error-entry change-set caught)))
       (quit
@@ -1193,8 +1193,8 @@ The final component is deliberately not followed through a symlink."
                         (ende-change-set-coding-system change-set))
                    'utf-8-unix))
               (coding-system-for-write coding-system))
-          (ende-tools--write-new-file (ende-change-set-content change-set)
-                                      path))
+         (ende-tools--write-new-file (ende-change-set-content change-set)
+                                     path))
        (setf (ende-change-set-prepared-raw-digest change-set)
              (ende-tools--file-current-raw-digest path)
              (ende-change-set-committed-identity change-set)
@@ -1396,9 +1396,9 @@ The final component is deliberately not followed through a symlink."
   (ende-tools--assert-properties arguments '("path" "edits") "edit_file")
   (let* ((path (ende-tools--required-string arguments "path"))
          (anchor-edits (ende-tools--anchor-edits
-                          (ende-tools--argument arguments "edits")))
+                        (ende-tools--argument arguments "edits")))
          (source (ende-tools--resolve-disk-source
-                   (list (cons "path" path)) root))
+                  (list (cons "path" path)) root))
          (absolute-path (plist-get source :path))
          (snapshot (ende-tools--capture-file absolute-path))
          (content (plist-get snapshot :content))
@@ -1419,7 +1419,7 @@ The final component is deliberately not followed through a symlink."
            :anchor-edits anchor-edits
            :edits edits
            :content result-content
-            :authorization-tools '(edit_file))))
+           :authorization-tools '(edit_file))))
     (ende-tools--set-snapshot change-set snapshot)
     (ende-tools--apply-change-set-object change-set)))
 
@@ -1545,9 +1545,9 @@ No visiting buffer or review state is involved in this operation."
                                   "It has unsaved changes; saving that old "
                                   "buffer later could overwrite this disk edit.")
                                (concat
-                                 "The visiting buffer was left unchanged and "
-                                 "may not reflect this disk edit.")))))))
-     result))
+                                "The visiting buffer was left unchanged and "
+                                "may not reflect this disk edit.")))))))
+    result))
 
 (defun ende-tools--delete-file (arguments root)
   "Delete one authorized regular file without touching visiting buffers."
@@ -1654,11 +1654,11 @@ No visiting buffer or review state is involved in this operation."
               (setf (ende-change-set-visiting-buffers change-set) buffers)
               (when (eq (ende-change-set-operation change-set) 'update)
                 (setf (ende-change-set-content change-set)
-                       (ende-patch-apply-update
-                        (plist-get snapshot :content)
-                        (ende-change-set-anchor-edits change-set))
-                       (ende-change-set-prepared-coding-system change-set)
-                       (plist-get snapshot :coding-system)))))
+                      (ende-patch-apply-update
+                       (plist-get snapshot :content)
+                       (ende-change-set-anchor-edits change-set))
+                      (ende-change-set-prepared-coding-system change-set)
+                      (plist-get snapshot :coding-system)))))
         (when (or (file-exists-p path) (file-symlink-p path))
           (error "cannot add over an existing filesystem entry: %s"
                  (ende-change-set-path change-set))))))
@@ -1959,8 +1959,8 @@ Return trimmed plain text without text properties."
  'web_fetch
  "Fetch bounded textual content from a URL explicitly permitted by this chat."
  ende-tools--web-fetch-schema
-  #'ende-tools--web-fetch nil :no-resource
-  '(:resource-kind url :requires-root nil :async t))
+ #'ende-tools--web-fetch nil :no-resource
+ '(:resource-kind url :requires-root nil :async t))
 
 (provide 'ende-tools)
 
