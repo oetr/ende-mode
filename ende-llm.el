@@ -415,27 +415,15 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--handoff-to-batch (session)
   "Retry SESSION through OpenRouter Batch after its exact Batch-only error."
-  (if (plist-get (ende-llm--session-profile session) :tool-definitions)
-      (ende-llm--fail
-       session
-       (ende-error-create
-        :kind 'unsupported
-        :message "Tool calls are unavailable with the OpenRouter batch transport"))
-    (let ((callbacks
-           (ende-transport-session-callbacks (ende-llm--lifecycle session)))
-          (profile (copy-tree (ende-llm--session-profile session)))
-          (messages (ende-llm--session-messages session)))
-      (setq profile (plist-put profile :transport 'openrouter-batch))
-      (condition-case caught
-        (progn
-          (ende-openrouter-batch-default messages callbacks profile)
-          (ende-transport-session-transfer (ende-llm--lifecycle session))
-          (ende-llm--cleanup-session session))
-        ((error quit)
-         (ende-llm--fail
-          session
-          (ende-error-create
-           :kind 'startup :message (error-message-string caught))))))))
+  (let ((error
+         (ende-openrouter-batch-handoff
+          (ende-llm--session-messages session)
+          (ende-transport-session-callbacks (ende-llm--lifecycle session))
+          (ende-llm--session-profile session))))
+    (if error
+        (ende-llm--fail session error)
+      (ende-transport-session-transfer (ende-llm--lifecycle session))
+      (ende-llm--cleanup-session session))))
 
 (defun ende-llm--finish-success (session &optional headers)
   "Validate and successfully finish SESSION, or settle it with an error."
@@ -453,12 +441,8 @@ The :callbacks argument initializes the composed transport lifecycle."
                      (ende-stream-content-type-error
                       content-type 'required))))
           (cond
-           ((and (eq (plist-get (ende-llm--session-profile session)
-                                :transport)
-                     'auto)
-                 (numberp status)
-                 (= status 404)
-                 (string-match-p "[Bb]atch API" (or detail "")))
+           ((ende-openrouter-batch-auto-fallback-p
+             (ende-llm--session-profile session) status detail)
             (ende-llm--handoff-to-batch session))
            ((not (ende-stream-http-success-p status))
             (ende-llm--fail
@@ -591,12 +575,9 @@ The :callbacks argument initializes the composed transport lifecycle."
                 (:temperature . ,(plist-get profile :temperature))
                 (:stream . t)
                 (:stream_options . ((:include_usage . t))))))
-    (let ((effort (ende-provider-reasoning-effort profile 'openrouter)))
-      (when effort
-        (setq body
-              (append body
-                      (list (cons :reasoning
-                                  (list (cons :effort effort))))))))
+    (setq body
+          (append body
+                  (ende-provider-openrouter-reasoning-parameters profile)))
     (when (plist-get profile :tool-definitions)
       (setq body
             (append body
@@ -646,31 +627,29 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
-  (cond
-   ((eq (plist-get options :transport) 'openrouter-batch)
-    (ende-openrouter-batch-default messages callbacks options))
-   ((eq (plist-get options :wire-api) 'responses)
-    (ende-codex-default messages callbacks options))
-   (t
-    (let* ((profile (if (plist-get options :name)
-                        options
-                      (ende-plist-merge (ende-provider-profile) options)))
-           (session
-            (ende-llm--make-session
-             :profile profile :callbacks callbacks
-             :model (plist-get profile :model)
-             :reasoning (ende-protocol-make-reasoning)
-             :tool-calls (make-hash-table :test #'eql)
-             :estimated-chars 0)))
-      (condition-case startup-error
-          (ende-llm--start-session session messages)
-        ((error quit)
-         (ende-llm--fail
-          session
-          (ende-error-create :kind 'startup
-                             :message (error-message-string startup-error)))))
-      (ende-transport-session-process
-       (ende-llm--lifecycle session))))))
+  (let ((profile (ende-provider-resolve-profile options)))
+    (cond
+     ((eq (plist-get profile :transport) 'openrouter-batch)
+      (ende-openrouter-batch-default messages callbacks profile))
+     ((eq (plist-get profile :wire-api) 'responses)
+      (ende-codex-default messages callbacks profile))
+     (t
+      (let* ((session
+              (ende-llm--make-session
+               :profile profile :callbacks callbacks
+               :model (plist-get profile :model)
+               :reasoning (ende-protocol-make-reasoning)
+               :tool-calls (make-hash-table :test #'eql)
+               :estimated-chars 0)))
+        (condition-case startup-error
+            (ende-llm--start-session session messages)
+          ((error quit)
+           (ende-llm--fail
+            session
+            (ende-error-create :kind 'startup
+                               :message (error-message-string startup-error)))))
+        (ende-transport-session-process
+         (ende-llm--lifecycle session)))))))
 
 (provide 'ende-llm)
 

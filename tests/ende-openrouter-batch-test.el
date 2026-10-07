@@ -522,6 +522,17 @@
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
 
+(ert-deftest ende-test/openrouter-auto-fallback-policy-is-specific ()
+  (let ((profile '(:transport auto)))
+    (should (ende-openrouter-batch-auto-fallback-p
+             profile 404 "This model is available through the Batch API"))
+    (should-not (ende-openrouter-batch-auto-fallback-p
+                 profile 400 "This model is available through the Batch API"))
+    (should-not (ende-openrouter-batch-auto-fallback-p
+                 profile 404 "ordinary not found"))
+    (should-not (ende-openrouter-batch-auto-fallback-p
+                 '(:transport openrouter-batch) 404 "Batch API"))))
+
 (provide 'ende-openrouter-batch-test)
 
 ;;; ende-openrouter-batch-test.el ends here

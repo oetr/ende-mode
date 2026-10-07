@@ -24,6 +24,57 @@
 
 
 
+(ert-deftest ende-test/provider-resolves-legacy-effective-profiles ()
+  (let* ((ende-provider-endpoint "http://localhost:9000/v1/chat/completions")
+         (ende-provider-model "legacy-model")
+         (local (ende-provider-resolve-profile '(:temperature 0.4)))
+         (named '(:name remote :url "https://remote.test/chat/completions"
+                  :model "remote-model"))
+         (batch '(:transport openrouter-batch
+                  :batch-url "https://openrouter.ai/api/v1/batches"))
+         (responses
+          (let ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
+                (ende-codex-model "gpt-configured"))
+            (ende-provider-resolve-profile '(:wire-api responses)))))
+    (should (eq (plist-get local :name) 'local))
+    (should (equal (plist-get local :url) ende-provider-endpoint))
+    (should (equal (plist-get local :model) "legacy-model"))
+    (should (= (plist-get local :temperature) 0.4))
+    (should (equal (ende-provider-resolve-profile named) named))
+    (should (equal (ende-provider-resolve-profile batch) batch))
+    (should (equal (plist-get responses :url)
+                   "https://chatgpt.com/backend-api/codex/responses"))
+    (should (equal (plist-get responses :model) "gpt-configured"))))
+
+
+
+(ert-deftest ende-test/provider-openrouter-reasoning-policy-is-separate ()
+  (should (equal
+           (ende-provider-openrouter-reasoning-parameters
+            '(:reasoning-effort-wire-api openrouter :reasoning-effort "high"))
+           '((:reasoning (:effort . "high")))))
+  (should-not
+   (ende-provider-openrouter-reasoning-parameters
+    '(:reasoning-effort-wire-api responses :reasoning-effort high))))
+
+(ert-deftest ende-test/chat-request-body-uses-openrouter-reasoning-policy ()
+  (let* ((messages '(("user" . "question")))
+         (openrouter
+          (ende-llm--request-body
+           messages
+           '(:model "openrouter/model"
+             :reasoning-effort-wire-api openrouter
+             :reasoning-effort "high")))
+         (ordinary
+          (ende-llm--request-body
+           messages
+           '(:model "ordinary-model" :reasoning-effort "high"))))
+    (should (equal (alist-get :reasoning openrouter)
+                   '((:effort . "high"))))
+    (should-not (alist-get :reasoning ordinary))))
+
+
+
 (ert-deftest ende-test/provider-runtime-concurrency-and-parallel-settings ()
   (ende-provider-clear-runtime-settings)
   (let ((ende-provider-profiles

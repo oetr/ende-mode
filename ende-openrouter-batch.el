@@ -333,11 +333,7 @@
               ,@(when (numberp (plist-get profile :temperature))
                   (list (cons :temperature
                               (plist-get profile :temperature))))
-              ,@(let ((effort (ende-provider-reasoning-effort
-                               profile 'openrouter)))
-                  (when effort
-                    (list (cons :reasoning
-                                (list (cons :effort effort))))))
+              ,@(ende-provider-openrouter-reasoning-parameters profile)
               ,@(when (integerp ende-max-output-tokens)
                   (list (cons :max_tokens ende-max-output-tokens)))))))
 
@@ -894,6 +890,32 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
         (ende-openrouter-batch--group-cleanup group)
         (ende-openrouter-batch--unregister-group group))))
   nil)
+
+(defun ende-openrouter-batch-auto-fallback-p (profile status detail)
+  "Return non-nil when PROFILE's STATUS and DETAIL request Batch fallback."
+  (and (eq (plist-get profile :transport) 'auto)
+       (numberp status)
+       (= status 404)
+       (string-match-p "[Bb]atch API" (or detail ""))))
+
+(defun ende-openrouter-batch-handoff (messages callbacks profile)
+  "Handoff MESSAGES and CALLBACKS through OpenRouter Batch for PROFILE.
+Return a structured error when the request cannot be transferred."
+  (if (plist-get profile :tool-definitions)
+      (ende-error-create
+       :kind 'unsupported
+       :message "Tool calls are unavailable with the OpenRouter batch transport")
+    (let ((batch-profile (copy-tree profile)))
+      (setq batch-profile
+            (plist-put batch-profile :transport 'openrouter-batch))
+      (condition-case caught
+          (progn
+            (ende-openrouter-batch-default
+             messages callbacks batch-profile)
+            nil)
+        ((error quit)
+         (ende-error-create
+          :kind 'startup :message (error-message-string caught)))))))
 
 (defun ende-openrouter-batch-default (messages callbacks &optional options)
   "Submit MESSAGES through OpenRouter's asynchronous Batch API.

@@ -238,7 +238,21 @@ Supported settings are `:max-concurrency' and `:parallel'."
         (let ((value (ende-provider--runtime-value name key)))
           (unless (eq value :unset)
             (setq profile (plist-put profile key value)))))
-      profile)))
+       profile)))
+
+(defun ende-provider-resolve-profile (options)
+  "Resolve OPTIONS to a detached effective provider profile.
+Named profiles and batch requests retain their existing option shape."
+  (cond
+   ((plist-get options :name)
+    (copy-tree options))
+   ((eq (plist-get options :transport) 'openrouter-batch)
+    (copy-tree options))
+   ((eq (plist-get options :wire-api) 'responses)
+    (ende-plist-merge
+     (list :url ende-codex-endpoint :model ende-codex-model) options))
+   (t
+    (ende-plist-merge (ende-provider-profile) options))))
 
 (defun ende-provider-max-concurrency (profile)
   "Return the positive maximum concurrent jobs allowed by PROFILE."
@@ -263,6 +277,12 @@ Saved efforts are revalidated before a job sends its first request."
          (stringp effort)
          (not (string-empty-p effort))
          effort)))
+
+(defun ende-provider-openrouter-reasoning-parameters (profile)
+  "Return OpenRouter-specific request parameters for PROFILE."
+  (let ((effort (ende-provider-reasoning-effort profile 'openrouter)))
+    (when effort
+      (list (cons :reasoning (list (cons :effort effort)))))))
 
 (defun ende-provider-names ()
   "Return configured provider profile names for the selector."
