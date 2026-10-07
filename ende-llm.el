@@ -18,6 +18,7 @@
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-transport)
+(require 'ende-stream)
 (require 'ende-provider)
 (require 'ende-openrouter-batch)
 (require 'ende-codex)
@@ -41,11 +42,10 @@ normalized :tool-calls for the chat tool loop.")
 (cl-defstruct (ende-llm--session
                (:constructor ende-llm--allocate-session))
   "State owned by one asynchronous LLM transport request."
-  profile lifecycle discovery-cancel model messages json-data sse reasoning
+  profile lifecycle stream discovery-cancel model messages json-data reasoning
   content-parts thinking-parts usage
   tool-calls
-  provider-error actual-model actual-provider estimated-chars received-bytes
-  response-preview response-preview-parts response-preview-bytes finish-reason
+  provider-error actual-model actual-provider estimated-chars finish-reason
   generation-start last-status last-usage-update)
 
 (defun ende-llm--make-session (&rest arguments)
@@ -57,10 +57,13 @@ The :callbacks argument initializes the composed transport lifecycle."
                  (cl-loop for (key value) on arguments by #'cddr
                           unless (eq key :callbacks)
                           append (list key value)))))
-    (setf (ende-llm--session-lifecycle session)
-          (ende-transport-session-create
-           callbacks (apply-partially #'ende-llm--fail session)))
-    session))
+    (let ((lifecycle
+           (ende-transport-session-create
+            callbacks (apply-partially #'ende-llm--fail session))))
+      (setf (ende-llm--session-lifecycle session) lifecycle
+            (ende-llm--session-stream session)
+            (ende-stream-create lifecycle (ende-protocol-make-sse)))
+      session)))
 
 (defun ende-llm--lifecycle (session)
   "Return the composed transport lifecycle for SESSION."
@@ -91,8 +94,8 @@ The :callbacks argument initializes the composed transport lifecycle."
   (unless (ende-llm--terminal-p session)
     (ende-llm--cancel-discovery-waiter session)
     (unwind-protect
-        (ende-transport-session-settle
-         (ende-llm--lifecycle session)
+        (ende-stream-settle
+         (ende-llm--session-stream session)
          outcome value
          (when (or (ende-llm--session-content-parts session)
                    (ende-llm--session-thinking-parts session)
@@ -206,9 +209,8 @@ The :callbacks argument initializes the composed transport lifecycle."
 (defun ende-llm--response-status (session)
   "Return SESSION's HTTP response status, or nil."
   (condition-case nil
-      (car (ende-curl-response-headers
-            (ende-transport-session-headers-file
-             (ende-llm--lifecycle session))))
+      (car (ende-stream-response-headers
+            (ende-llm--session-stream session)))
     (error nil)))
 
 (defun ende-llm--handle-provider-error (session json-error)
@@ -383,7 +385,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 (defun ende-llm--http-error-detail (session)
   "Return a provider error detail parsed from SESSION's response preview."
   (ende-transport-error-detail
-   (ende-llm--response-preview-text session)))
+   (ende-stream-preview-text (ende-llm--session-stream session))))
 
 (defun ende-llm--result (session)
   "Build the normalized result plist for SESSION."
@@ -435,17 +437,21 @@ The :callbacks argument initializes the composed transport lifecycle."
           (ende-error-create
            :kind 'startup :message (error-message-string caught))))))))
 
-(defun ende-llm--finish-success (session)
+(defun ende-llm--finish-success (session &optional headers)
   "Validate and successfully finish SESSION, or settle it with an error."
   (unless (ende-llm--terminal-p session)
     (condition-case finish-error
-        (let* ((headers (ende-curl-response-headers
-                         (ende-transport-session-headers-file
-                          (ende-llm--lifecycle session))))
+        (let* ((headers (or headers
+                            (ende-stream-response-headers
+                             (ende-llm--session-stream session))))
                (status (car headers))
                (content-type (cdr headers))
                (detail (and (or (null status) (< status 200) (>= status 300))
-                            (ende-llm--http-error-detail session))))
+                            (ende-llm--http-error-detail session)))
+               (content-type-error
+                (and (plist-get (ende-llm--session-profile session) :require-sse)
+                     (ende-stream-content-type-error
+                      content-type 'required))))
           (cond
            ((and (eq (plist-get (ende-llm--session-profile session)
                                 :transport)
@@ -454,7 +460,7 @@ The :callbacks argument initializes the composed transport lifecycle."
                  (= status 404)
                  (string-match-p "[Bb]atch API" (or detail "")))
             (ende-llm--handoff-to-batch session))
-           ((or (null status) (< status 200) (>= status 300))
+           ((not (ende-stream-http-success-p status))
             (ende-llm--fail
              session
              (ende-error-create
@@ -462,20 +468,14 @@ The :callbacks argument initializes the composed transport lifecycle."
               :message (if detail
                            (format "HTTP status %s: %s" status detail)
                          (format "unexpected HTTP status %s" status)))))
-           ((and (plist-get (ende-llm--session-profile session) :require-sse)
-                 (or (null content-type)
-                     (not (ende-curl-event-stream-p content-type))))
-            (ende-llm--fail
-             session
-             (ende-error-create
-              :kind 'protocol
-              :message (format "expected text/event-stream, got %s"
-                               (or content-type "unknown")))))
+           (content-type-error
+            (ende-llm--fail session content-type-error))
            (t
             (ende-llm--handle-events
              session
              (ende-protocol-sse-finish
-              (ende-llm--session-sse session)))
+              (ende-stream-session-parser
+               (ende-llm--session-stream session))))
             (unless (ende-llm--terminal-p session)
               (let ((reasoning-error
                      (ende-protocol-reasoning-finish
@@ -497,102 +497,64 @@ The :callbacks argument initializes the composed transport lifecycle."
         (ende-error-create :kind 'protocol
                            :message (error-message-string finish-error)))))))
 
-(defun ende-llm--finish-process-error (session process event)
+(defun ende-llm--finish-process-error (session process event &optional idle-error)
   "Settle SESSION for failed PROCESS with sentinel EVENT."
-  (let ((status (process-exit-status process))
-        (stderr-buffer
-         (ende-transport-session-stderr-buffer
-          (ende-llm--lifecycle session))))
-    (ende-llm--fail
-     session
-     (ende-error-create
-      :kind (if (= status 28) 'timeout 'transport)
-      :message
-      (or (and (buffer-live-p stderr-buffer)
-               (with-current-buffer stderr-buffer
-                 (let ((text (string-trim
-                              (substring (buffer-string) 0
-                                         (if ende-max-error-body-bytes
-                                             (min (buffer-size)
-                                                  ende-max-error-body-bytes)
-                                           (buffer-size))))))
-                   (unless (string-empty-p text) text))))
-          (format "curl exited with status %d (%s)"
-                  status (string-trim event)))))))
+  (if idle-error
+      (ende-llm--fail session idle-error)
+    (let ((status (process-exit-status process))
+          (stderr-buffer
+           (ende-transport-session-stderr-buffer
+            (ende-llm--lifecycle session))))
+      (ende-llm--fail
+       session
+       (ende-error-create
+        :kind (if (= status 28) 'timeout 'transport)
+        :message
+        (or (and (buffer-live-p stderr-buffer)
+                 (with-current-buffer stderr-buffer
+                   (let ((text (string-trim
+                                (substring (buffer-string) 0
+                                           (if ende-max-error-body-bytes
+                                               (min (buffer-size)
+                                                    ende-max-error-body-bytes)
+                                             (buffer-size))))))
+                     (unless (string-empty-p text) text))))
+            (format "curl exited with status %d (%s)"
+                    status (string-trim event))))))))
 
-(defun ende-llm--response-preview-text (session)
-  "Return SESSION's bounded response preview as a string."
-  (let ((parts (ende-llm--session-response-preview-parts session)))
-    (if parts
-        (mapconcat #'identity (nreverse parts) "")
-      (or (ende-llm--session-response-preview session) ""))))
+(defun ende-llm--filter-error (session error over-limit)
+  "Settle SESSION for SSE parser ERROR and whether the response OVER-LIMIT."
+  (ende-llm--fail
+   session
+   (if over-limit
+       (ende-error-create
+        :kind 'resource
+        :message "response exceeds ende-max-response-bytes")
+     (ende-error-create :kind 'protocol
+                        :message (error-message-string error)))))
 
-(defun ende-llm--append-response-preview (session chunk)
-  "Append a bounded, byte-safe prefix of CHUNK to SESSION's preview."
-  (let* ((used (or (ende-llm--session-response-preview-bytes session) 0))
-         (remaining (and ende-max-error-body-bytes
-                         (- ende-max-error-body-bytes used)))
-         (prefix (if remaining
-                     (and (> remaining 0)
-                          (ende-transport-byte-prefix chunk remaining))
-                   chunk)))
-    (when prefix
-      (push prefix (ende-llm--session-response-preview-parts session))
-      (setf (ende-llm--session-response-preview-bytes session)
-            (+ used (string-bytes prefix))))))
+(defun ende-llm--header-error (session error)
+  "Settle SESSION for response-header parsing ERROR."
+  (ende-llm--fail
+   session (ende-error-create :kind 'protocol
+                              :message (error-message-string error))))
 
 (defun ende-llm--process-filter (session _process chunk)
   "Consume one curl output CHUNK for SESSION."
-  (unless (ende-llm--terminal-p session)
-    (let* ((received (ende-llm--session-received-bytes session))
-           (chunk-bytes (string-bytes chunk))
-           (total (+ received chunk-bytes))
-           (remaining (and ende-max-response-bytes
-                           (- ende-max-response-bytes received)))
-           (processable (if (and ende-max-response-bytes
-                                 (> total ende-max-response-bytes))
-                            (ende-transport-byte-prefix chunk (max 0 remaining))
-                          chunk)))
-      (setf (ende-llm--session-received-bytes session) total)
-      (ende-llm--append-response-preview session chunk)
-      (condition-case filter-error
-          (when (> (length processable) 0)
-            (ende-llm--handle-events
-             session
-             (ende-protocol-sse-feed
-              (ende-llm--session-sse session) processable)))
-        ((error quit)
-         (if (and ende-max-response-bytes
-                  (> total ende-max-response-bytes))
-             (ende-llm--fail
-              session
-              (ende-error-create
-               :kind 'resource
-               :message "response exceeds ende-max-response-bytes"))
-           (ende-llm--fail
-            session
-            (ende-error-create :kind 'protocol
-                               :message
-                               (error-message-string filter-error))))))
-      (when (and ende-max-response-bytes
-                 (> total ende-max-response-bytes)
-                 (not (ende-llm--terminal-p session)))
-        (ende-llm--fail
-         session
-         (ende-error-create
-          :kind 'resource
-          :message "response exceeds ende-max-response-bytes"))))))
+  (ende-stream-filter
+   (ende-llm--session-stream session) chunk
+   (apply-partially #'ende-llm--handle-events session)
+   (apply-partially #'ende-llm--fail session)
+   (apply-partially #'ende-llm--filter-error session)))
 
 (defun ende-llm--process-sentinel (session process event)
   "Handle PROCESS terminal EVENT for SESSION."
-  (when (and (not (ende-llm--terminal-p session))
-             (memq (process-status process) '(exit signal closed)))
-    (cond
-     ((process-get process :ende-idle-error)
-      (ende-llm--fail session (process-get process :ende-idle-error)))
-     ((= (process-exit-status process) 0)
-      (ende-llm--finish-success session))
-     (t (ende-llm--finish-process-error session process event)))))
+  (ende-stream-sentinel
+   (ende-llm--session-stream session) process event
+   (apply-partially #'ende-llm--finish-process-error session)
+   (apply-partially #'ende-llm--finish-success session)
+   (apply-partially #'ende-llm--header-error session)
+   t))
 
 (defun ende-llm--discovery-result (session metadata)
   "Emit discovered METADATA for a live SESSION."
@@ -697,11 +659,9 @@ The :callbacks argument initializes the composed transport lifecycle."
             (ende-llm--make-session
              :profile profile :callbacks callbacks
              :model (plist-get profile :model)
-             :sse (ende-protocol-make-sse)
              :reasoning (ende-protocol-make-reasoning)
              :tool-calls (make-hash-table :test #'eql)
-             :estimated-chars 0 :received-bytes 0
-             :response-preview-parts nil :response-preview-bytes 0)))
+             :estimated-chars 0)))
       (condition-case startup-error
           (ende-llm--start-session session messages)
         ((error quit)

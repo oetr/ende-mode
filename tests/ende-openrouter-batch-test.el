@@ -508,9 +508,10 @@
                    (ende-llm--make-session
                     :profile '(:transport auto
                                :batch-url "https://openrouter.ai/api/v1/batches")
-                    :messages '(("user" . "question"))
-                    :response-preview-parts
-                    '("{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}"))))
+                     :messages '(("user" . "question")))))
+              (ende-stream-append-preview
+               (ende-llm--session-stream session)
+               "{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}")
               (ende-transport-session-set-resources
                (ende-llm--lifecycle session)
                (list :headers-file headers-file))

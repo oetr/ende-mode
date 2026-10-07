@@ -124,7 +124,7 @@
                   (user-error "ende.el not found on load-path")))
          (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
                   "ende-transport.el" "ende-url.el" "ende-curl.el"
-                  "ende-web-fetch.el"
+                  "ende-stream.el" "ende-web-fetch.el"
                   "ende-provider.el"
                   "ende-codex.el"
                   "ende-review.el" "ende-project.el"
