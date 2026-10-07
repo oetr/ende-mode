@@ -52,10 +52,12 @@
              :arguments "{\"regexp\":\"foo\"}"))))
     (insert
      (concat
-      "** Tool Result: read_file\n:PROPERTIES:\n"
+      "** read_file: path=\"foo.el\"\n:PROPERTIES:\n"
       ":ENDE_CHAT_REQUEST_ID: edited-request\n"
+      ":ENDE_TOOL_KIND: result\n"
       ":ENDE_TOOL_CALL_ID: call-bad\n"
-      ":ENDE_TOOL_NAME: read_file\n:END:\n\nEdited result\n\n"
+      ":ENDE_TOOL_NAME: read_file\n:END:\n\n"
+      "Arguments:\n{}\n\nOutput:\nEdited result\n\n"
       "** Follow-up\nAsk\n"))
     (ende-test--chat-goto "** Follow-up")
     (let* ((messages (ende-chat-context-at-point))
@@ -83,13 +85,13 @@
 
 
 
-(ert-deftest ende-test/chat-tool-context-drawer-is-not-user-protocol-history ()
+(ert-deftest ende-test/reserved-chat-drawers-are-excluded-from-context ()
   (ende-test--reset)
   (ende-test--with-buffer
    (concat "* Topic\n"
            "** User note\n"
            ":PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
-           ":ENDE_CHAT_TOOL_CONTEXT:\nnot JSON\n:END:\n"
+           ":ENDE_CHAT_PRIVATE:\nnot ordinary context\n:END:\n"
            "Keep this ordinary note.\n"
            "** Follow-up\nAsk\n")
    (org-mode)
@@ -97,8 +99,30 @@
    (let* ((messages (ende-chat-context-at-point))
           (text (ende-test--chat-context-text messages)))
      (should (string-match-p "Keep this ordinary note" text))
-     (should-not (string-match-p "not JSON" text))
-     (should-not (ende-test--chat-protocol-messages messages)))))
+      (should-not (string-match-p "not ordinary context" text))
+      (should-not (ende-test--chat-protocol-messages messages)))))
+
+
+
+(ert-deftest ende-test/chat-reasoning-ancestors-follow-document-order ()
+  (with-temp-buffer
+    (org-mode)
+    (insert (concat
+             "* Root\n"
+             "** Outer reasoning\n"
+             ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+             "Outer context.\n"
+             "*** Inner reasoning\n"
+             ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+             "Inner context.\n"
+             "**** Question\nAsk.\n"))
+    (let* ((document (ende-chat--build-document))
+           (question (car (last (ende-chat--document-headlines document))))
+           (ancestors (ende-chat--reasoning-ancestors document question)))
+      (should (equal (mapcar (lambda (headline)
+                               (org-element-property :raw-value headline))
+                             ancestors)
+                     '("Outer reasoning" "Inner reasoning"))))))
 
 
 

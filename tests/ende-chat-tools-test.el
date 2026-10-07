@@ -189,7 +189,7 @@
 
 ;;;; Org-backed chat
 
-(ert-deftest ende-test/chat-tool-context-round-trips-to-provider-protocols ()
+(ert-deftest ende-test/chat-tool-messages-adapt-to-provider-protocols ()
   (let* ((transcript
           (list (list :role "assistant" :content nil
                       :tool-calls
@@ -207,41 +207,10 @@
                                   :arguments "{\"path\":\"third.el\"}")))
                 (list :role "tool" :tool-call-id "call-3"
                       :content "{\"text\":\"third result\"}")))
-         (encoded
-          (json-encode
-           (list
-            (cons :version 1)
-            (cons :messages
-                  (vconcat
-                   (mapcar
-                    (lambda (message)
-                      (pcase (plist-get message :role)
-                        ("assistant"
-                         (list (cons :role "assistant")
-                               (cons :content (plist-get message :content))
-                               (cons :tool_calls
-                                     (vconcat
-                                      (mapcar
-                                       (lambda (call)
-                                         (list
-                                          (cons :id (plist-get call :id))
-                                          (cons :name (plist-get call :name))
-                                          (cons :arguments
-                                                (plist-get call :arguments))))
-                                       (plist-get message :tool-calls))))))
-                        ("tool"
-                         (list (cons :role "tool")
-                               (cons :tool_call_id
-                                     (plist-get message :tool-call-id))
-                               (cons :content (plist-get message :content))))))
-                    transcript))))))
-         (decoded (ende-chat--decode-tool-context encoded))
-         (chat-assistant (ende-llm--message-json (car decoded)))
-         (chat-tool (ende-llm--message-json (nth 1 decoded)))
-         (responses (ende-codex--request-messages decoded)))
-    (should-not (string-match-p "\n" encoded))
-    (should (equal decoded transcript))
-    (should (equal (plist-get (car (plist-get (car decoded) :tool-calls))
+         (chat-assistant (ende-llm--message-json (car transcript)))
+         (chat-tool (ende-llm--message-json (nth 1 transcript)))
+         (responses (ende-codex--request-messages transcript)))
+    (should (equal (plist-get (car (plist-get (car transcript) :tool-calls))
                               :arguments)
                    "{ \"path\" : \"foo.el\" }"))
     (should (equal (alist-get :arguments
@@ -253,28 +222,28 @@
     (should (equal (alist-get :call_id (nth 0 responses)) "call-1"))
     (should (equal (alist-get :call_id (nth 1 responses)) "call-2"))
     (should (equal (alist-get :output (nth 2 responses))
-                   (plist-get (nth 1 decoded) :content)))
+                   (plist-get (nth 1 transcript) :content)))
     (should (equal (alist-get :call_id (nth 5 responses)) "call-3"))
     (should (equal (alist-get :output (nth 6 responses))
-                   (plist-get (nth 4 decoded) :content)))
+                   (plist-get (nth 4 transcript) :content)))))
+
+
+
+(ert-deftest ende-test/chat-tool-call-list-accepts-proper-sequences-only ()
+  (let* ((calls '((:id "call-1") (:id "call-2")))
+         (result (list :tool-calls calls)))
+    (should (equal (ende-chat--tool-call-list result) calls))
+    (should (equal
+             (ende-chat--tool-call-list
+              (list :tool-calls (vconcat calls)))
+             calls))
+    (should-not (ende-chat--tool-call-list '(:tool-calls nil)))
+    (dolist (invalid '("not a call array" 7))
+      (should-error
+       (ende-chat--tool-call-list (list :tool-calls invalid))))
     (should-error
-     (ende-chat--validate-tool-context
-      '((:role "tool" :tool-call-id "orphan" :content "result")))
-     :type 'error)
-    (let ((failure
-           (condition-case caught
-               (progn (ende-chat--decode-tool-context "{not JSON") nil)
-             (error (error-message-string caught)))))
-      (should (string-match-p "Invalid ENDE_CHAT_TOOL_CONTEXT JSON" failure)))
-    (let ((failure
-           (condition-case caught
-               (progn
-                 (ende-chat--decode-tool-context
-                  "{\"version\":2,\"messages\":[]}")
-                 nil)
-             (error (error-message-string caught)))))
-      (should (string-match-p "Unsupported ENDE_CHAT_TOOL_CONTEXT version: 2"
-                              failure)))))
+     (ende-chat--tool-call-list
+      (list :tool-calls (cons (car calls) 'improper-tail))))))
 
 
 
@@ -425,7 +394,41 @@
                       (lambda (headline)
 			(ende-chat--tool-call-protocol-p document headline))
                       headlines)
-                     1)))))))
+                      1)))))))
+
+
+
+(ert-deftest ende-test/chat-work-rejects-nested-tool-call-headings ()
+  (with-temp-buffer
+    (org-mode)
+    (insert (concat
+             "* Topic\n** Question\nInspect.\n"
+             "*** Agent: Work\n"
+             ":PROPERTIES:\n:ENDE_CHAT_WORK: t\n"
+             ":ENDE_CHAT_REPLY_TO: question\n"
+             ":ENDE_CHAT_REQUEST_ID: request\n:END:\n\n"
+             "**** Agent: Reply\n"
+             ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+             ":ENDE_CHAT_REPLY_TO: question\n"
+             ":ENDE_CHAT_REQUEST_ID: request\n"
+             ":ENDE_CHAT_CONTENT_FORMAT: literal\n:END:\n\n"
+             "Checking the source.\n\n"
+             "***** --> read_file\n"
+             ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: request\n"
+             ":ENDE_TOOL_KIND: call\n:ENDE_TOOL_CALL_ID: call\n"
+             ":ENDE_TOOL_NAME: read_file\n:END:\n\n{}\n"))
+    (let* ((document (ende-chat--build-document))
+           (work (cl-find-if
+                  (lambda (headline)
+                    (ende-chat--work-section-p document headline))
+                  (ende-chat--document-headlines document)))
+           (failure
+            (condition-case caught
+                (progn (ende-chat--validate-work-section document work) nil)
+              (error (error-message-string caught)))))
+      (should (string-match-p
+               "Malformed generated protocol section outside Agent: Work"
+               failure)))))
 
 
 
@@ -570,15 +573,18 @@
 
 
 
-(ert-deftest ende-test/chat-tool-kind-is-local-and-lookalike-titles-are-ordinary ()
+(ert-deftest ende-test/chat-tool-protocol-requires-local-kind-metadata ()
   (ende-test--with-buffer
    (concat
     "* Topic\n"
     "** Kind owner\n:PROPERTIES:\n:ENDE_TOOL_KIND: call\n:END:\n"
-    "*** --> read_file\n:PROPERTIES:\n:ENDE_TOOL_NAME: read_file\n:END:\n"
+    "*** Tool Call: read_file\n"
+    ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: lookalike-request\n"
+    ":ENDE_TOOL_CALL_ID: lookalike-call\n:ENDE_TOOL_NAME: read_file\n:END:\n"
     "An ordinary call-looking note.\n"
-    "*** read_file: path=\"foo.el\"\n"
-    ":PROPERTIES:\n:ENDE_TOOL_NAME: read_file\n:END:\n"
+    "*** Tool Result: read_file\n"
+    ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: lookalike-request\n"
+    ":ENDE_TOOL_CALL_ID: lookalike-call\n:ENDE_TOOL_NAME: read_file\n:END:\n"
     "An ordinary result-looking note.\n"
     "** Follow-up\nAsk about these notes.\n")
    (org-mode)
@@ -593,105 +599,27 @@
           (call-lookalike
            (cl-find-if (lambda (headline)
                          (equal (org-element-property :raw-value headline)
-                                "--> read_file"))
+                                "Tool Call: read_file"))
                        headlines))
           (result-lookalike
            (cl-find-if (lambda (headline)
                          (equal (org-element-property :raw-value headline)
-                                "read_file: path=\"foo.el\""))
+                                "Tool Result: read_file"))
                        headlines))
           (messages (ende-chat-context-at-point))
           (text (ende-test--chat-context-text messages)))
      (should (equal (ende-chat--property document parent :tool-kind) "call"))
      (should-not (ende-chat--property document call-lookalike :tool-kind))
      (should-not (ende-chat--property document result-lookalike :tool-kind))
+     (should (equal (ende-chat--property document call-lookalike :tool-call-id)
+                    "lookalike-call"))
+     (should (equal (ende-chat--property document result-lookalike :tool-call-id)
+                    "lookalike-call"))
      (should-not (ende-chat--tool-call-protocol-p document call-lookalike))
      (should-not (ende-chat--tool-result-protocol-p document result-lookalike))
      (should-not (ende-test--chat-protocol-messages messages))
      (should (string-match-p "An ordinary call-looking note" text))
      (should (string-match-p "An ordinary result-looking note" text)))))
-
-
-
-(ert-deftest ende-test/chat-legacy-nested-tool-history-stays-readable-and-compacts ()
-  (ende-test--reset)
-  (let ((ende-llm-function
-         (ende-test--fake-llm '("Legacy history summarized.") t)))
-    (ende-test--with-buffer
-     (concat
-      "* Topic\n"
-      "** Earlier question\nRead old.el.\n"
-      "** Agent: Work\n"
-      ":PROPERTIES:\n:ENDE_CHAT_WORK: t\n"
-      ":ENDE_CHAT_REPLY_TO: old-question\n"
-      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
-      "*** Agent: Reply\n"
-      ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
-      ":ENDE_CHAT_REPLY_TO: old-question\n"
-      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
-      "I'll inspect the saved file.\n\n"
-      "**** Tool Call: read_file\n"
-      ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: old-request\n"
-      ":ENDE_TOOL_CALL_ID: old-call\n:ENDE_TOOL_NAME: read_file\n"
-      ":END:\n\n{\"path\":\"old.el\"}\n\n"
-      "*** Tool Result: read_file\n"
-      ":PROPERTIES:\n:ENDE_CHAT_REQUEST_ID: old-request\n"
-      ":ENDE_TOOL_CALL_ID: old-call\n:ENDE_TOOL_NAME: read_file\n"
-      ":END:\n\nArguments:\n{\"path\":\"old.el\"}\n\n"
-      "Output:\nLEGACY_SOURCE_TOKEN\n\n"
-      "** Agent: Reply\n"
-      ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
-      ":ENDE_CHAT_REPLY_TO: old-question\n"
-      ":ENDE_CHAT_REQUEST_ID: old-request\n:END:\n\n"
-      "Legacy final answer.\n\n"
-      "** Follow-up\nExplain the saved result.\n"
-      "** Compact\n"
-      ":PROPERTIES:\n:ENDE_VISIBILITY: hidden\n:END:\n\n"
-      "Keep the important source behavior.\n"
-      "** Later\nContinue from the summary.\n")
-     (org-mode)
-     (ende-test--chat-goto "** Follow-up")
-     (let* ((document (ende-chat--build-document))
-            (headlines (ende-chat--document-headlines document))
-            (work (cl-find-if
-                   (lambda (headline)
-                     (ende-chat--work-section-p document headline))
-                   headlines))
-            (calls (cl-remove-if-not
-                    (lambda (headline)
-                      (ende-chat--tool-call-protocol-p document headline))
-                    headlines))
-            (results (cl-remove-if-not
-                      (lambda (headline)
-                        (ende-chat--tool-result-protocol-p document headline))
-                      headlines))
-            (messages (ende-chat-context-at-point))
-            (text (ende-test--chat-context-text messages)))
-       (should work)
-       (should (eq (ende-chat--validate-work-section document work) work))
-       (should (= (length calls) 1))
-       (should (= (length results) 1))
-       (should-not (ende-chat--property document (car calls) :tool-kind))
-       (should-not (ende-chat--property document (car results) :tool-kind))
-       (should-not (ende-test--chat-protocol-messages messages))
-       (should (string-match-p "Tool Call: read_file" text))
-       (should (string-match-p "Arguments:\n{\"path\":\"old.el\"}" text))
-       (should (string-match-p "LEGACY_SOURCE_TOKEN" text))
-       (should (string-match-p "Legacy final answer" text)))
-     (ende-test--chat-goto "** Compact")
-     (let ((job (ende-compact)))
-       (let* ((messages (plist-get (car ende-test--calls) :messages))
-              (text (ende-test--chat-context-text messages)))
-         (should (string-match-p "LEGACY_SOURCE_TOKEN" text))
-         (should (string-match-p "Arguments:" text)))
-       (ende-test--complete-call (car ende-test--calls))
-       (should (eq (ende-job-state job) 'completed)))
-     (ende-test--chat-goto "** Later")
-     (let ((text (ende-test--chat-context-text
-                  (ende-chat-context-at-point))))
-       (should (string-match-p "Legacy history summarized" text))
-       (should-not (string-match-p "LEGACY_SOURCE_TOKEN" text)))))
-  (ende-test--reset))
 
 
 
@@ -747,34 +675,6 @@
          (should (string-match-p "The saved source text" provider-text))
          (should (string-match-p "src/example\\.el" provider-text)))
        (should (string-match-p "A useful reply" (buffer-string)))))))
-
-
-
-(ert-deftest ende-test/chat-edited-tool-context-drawers-are-preserved ()
-  (dolist (raw '("not JSON"
-                 "{\"version\":2,\"messages\":[]}"
-                 "{\"version\":1,\"messages\":[{\"role\":\"tool\",\"tool_call_id\":\"orphan\",\"content\":\"Saved output\"}]}"))
-    (ende-test--reset)
-    (ende-test--with-buffer
-     (format
-      (concat "* Topic\n"
-	      "** Agent: Reply\n"
-	      ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-	      ":%s:\n%s\n:END:\n\nAnswer\n"
-	      "** Follow-up\nAsk\n")
-      ende-chat--tool-context-drawer raw)
-     (org-mode)
-     (ende-test--chat-goto "** Follow-up")
-     (let* ((messages (ende-chat-context-at-point))
-            (text (ende-test--chat-context-text messages)))
-       (should (string-match-p "Answer" text))
-       (should-not (ende-test--chat-protocol-messages messages))
-       (cond
-        ((equal raw "not JSON")
-         (should (string-match-p "not JSON" text)))
-        ((string-match-p "\"version\":2" raw)
-         (should (string-match-p (regexp-quote raw) text)))
-        (t (should (string-match-p "Saved output" text))))))))
 
 
 
@@ -1037,11 +937,6 @@
 	       (dolist (child (ende-chat--children document work))
                  (should (equal (ende-chat--property document child :request-id)
                                 (ende-chat--property document work :request-id))))
-	       (should-not (cl-some
-                            (lambda (drawers) drawers)
-                            (hash-table-values
-                             (ende-chat--document-tool-context-drawers
-                              document))))
 	       (should
                 (equal (mapcar (lambda (headline)
                                  (org-element-property :raw-value headline))
@@ -1133,8 +1028,6 @@
                       (string-match-p
                        "Tool Result: read_file"
                        (ende-test--chat-context-text provider-messages)))))
-		 (should-not
-                  (string-match-p "ENDE_CHAT_TOOL_CONTEXT" (buffer-string))))
 	       (ende-test--chat-goto "** Compact")
 	       (let ((compaction (ende-compact)))
 		 (should (= (length ende-test--calls) 5))
@@ -1154,7 +1047,7 @@
 		 (should (string-match-p "Compact summary only" text))
 		 (should-not (ende-test--chat-protocol-messages messages))
 		 (should-not (string-match-p "FOO_SOURCE_TOKEN" text))
-		 (should-not (string-match-p "call-A" text)))))))
+		 (should-not (string-match-p "call-A" text))))))))
       (ende-test--reset)
       (when (file-directory-p root)
 	(delete-directory root t)))))
@@ -1248,7 +1141,7 @@
 	       (should (< (org-element-property :begin (cadr calls))
 	                  (org-element-property :begin (car results))))
 	       (should (equal (mapcar (lambda (call)
-					(ende-chat--protocol-body-string call nil t))
+					(ende-chat--protocol-body-string call nil 'literal))
 	                              calls)
 	                      '("{\"path\":\"a.el\"}" "{\"path\":\"b.el\"}")))
 	       (should (eq (ende-chat--validate-work-section document work) work))
@@ -1338,7 +1231,7 @@
                           (org-element-property :begin (car tool-results))))
                (should (equal
                         (mapcar (lambda (call)
-                                  (ende-chat--protocol-body-string call nil t))
+                                   (ende-chat--protocol-body-string call nil 'literal))
                                 tool-calls)
                         '("{\"path\":\"one.el\"}"
                           "{\"path\":\"two.el\"}")))
@@ -1355,7 +1248,7 @@
                  (should-not
                   (string-match-p
                    "ENDE_MODEL\\|ENDE_REASONING_EFFORT\\|tool-model\\|high"
-                   (ende-chat--protocol-body-string call nil t))))
+                    (ende-chat--protocol-body-string call nil 'literal))))
                (should (equal
                         (ende-test--chat-headline-property
                          final-reply ende-chat-model-property)

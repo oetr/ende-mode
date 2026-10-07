@@ -70,8 +70,8 @@
             (let* ((call (pop calls))
                    (headline (pop headlines))
                    (title (org-element-property :raw-value headline))
-                   (call-body (ende-chat--protocol-body-string call nil t))
-                   (body (ende-chat--protocol-body-string headline nil t)))
+                   (call-body (ende-chat--protocol-body-string call nil 'literal))
+                   (body (ende-chat--protocol-body-string headline nil 'literal)))
               (if expected
                   (should (equal title expected))
                 (should (<= (string-width title) 180))
@@ -489,10 +489,8 @@
          (should (= 1 (ende-test--count-matches
 		       "^:ENDE_ROLE: user$" (buffer-string))))
          (should-not (string-match-p "forged-model" (buffer-string)))
-         (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
-         (should-not (string-match-p "ENDE_CHAT_TOOL_CONTEXT"
-                                     (buffer-string)))
-         (should-not (string-match-p "forged-effort" (buffer-string))))
+          (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
+          (should-not (string-match-p "forged-effort" (buffer-string))))
        (ende-test--chat-goto "** Next")
        (let* ((ende-chat-include-reasoning t)
               (context
