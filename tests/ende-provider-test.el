@@ -48,6 +48,110 @@
 
 
 
+(ert-deftest ende-test/typed-openai-profile-is-isolated-from-built-ins ()
+  (let* ((ende-provider-endpoint "http://localhost:9100/v1/chat/completions")
+         (ende-provider-model "local-configured")
+         (ende-provider-temperature 1.4)
+         (ende-codex-model "codex-configured")
+         (ende-provider-profiles
+          '((deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "deepseek-chat"
+                      :auth-source-host "api.deepseek.com"
+                      :auth-source-user "ende"
+                      :auth-source-port 443
+                      :api-key "discard-this-secret")
+            (no-defaults :type openai
+                         :url "https://example.test/custom/generate")))
+         (profile (ende-provider-profile 'deepseek))
+         (no-defaults (ende-provider-profile 'no-defaults))
+         (snapshot (ende-provider-profile-snapshot 'deepseek)))
+    (should (eq (plist-get profile :type) 'openai))
+    (should (equal (plist-get profile :url)
+                   "https://api.deepseek.com/chat/completions"))
+    (should (equal (plist-get profile :model) "deepseek-chat"))
+    (should-not (plist-member profile :temperature))
+    (should (eq (plist-get profile :stream-usage) t))
+    (should (plist-get profile :model-explicit-p))
+    (should-not (plist-get profile :wire-api))
+    (should-not (plist-get profile :auth-method))
+    (should-not (plist-get profile :model-discovery-key))
+    (should-not (plist-get profile :reasoning-effort-wire-api))
+    (should-not (plist-get profile :transport))
+    (should-not (plist-get profile :batch-url))
+    (should-not (plist-get profile :model-discovery-function))
+    (should-not (plist-get profile :request-headers))
+    (should-not (plist-get profile :api-key))
+    (should-not (ende-provider-models-url profile))
+    (should-not (ende-provider-model-discovery-available-p profile))
+    (should-not (plist-get no-defaults :model))
+    (should-not (plist-get no-defaults :model-explicit-p))
+    (should-not (plist-member no-defaults :temperature))
+    (should (equal (plist-get no-defaults :url)
+                   "https://example.test/custom/generate"))
+    (should-not (plist-get snapshot :api-key))
+    (should-not (string-match-p "discard-this-secret"
+                                (prin1-to-string snapshot)))))
+
+
+
+(ert-deftest ende-test/typed-openai-request-options-are-explicit ()
+  (let* ((ende-provider-profiles
+          '((deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "deepseek-chat")))
+         (profile (ende-provider-profile 'deepseek))
+         (messages '(("user" . "question")))
+         (body (ende-llm--request-body messages profile))
+         (no-usage
+          (ende-llm--request-body
+           messages (plist-put (copy-tree profile) :stream-usage nil)))
+         (temperature
+          (ende-llm--request-body
+           messages (plist-put (copy-tree profile) :temperature 0.3))))
+    (should-not (assq :temperature body))
+    (should (equal (alist-get :stream_options body)
+                   '((:include_usage . t))))
+    (should-not (assq :stream_options no-usage))
+    (should (= (alist-get :temperature temperature) 0.3))))
+
+
+
+(ert-deftest ende-test/typed-openai-auth-source-is-host-scoped-and-private ()
+  (let* ((ende-provider-profiles
+          '((deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "deepseek-chat"
+                      :auth-source-host "api.deepseek.com"
+                      :auth-source-user "ende"
+                      :auth-source-port 443)))
+         (profile (ende-provider-profile 'deepseek))
+         (token "deepseek-secret-token")
+         (config nil))
+    (cl-letf (((symbol-function 'auth-source-search)
+               (lambda (&rest arguments)
+                 (should (equal (plist-get arguments :host) "api.deepseek.com"))
+                 (should (equal (plist-get arguments :user) "ende"))
+                 (should (= (plist-get arguments :port) 443))
+                 (list (list :secret token)))))
+      (setq config (ende-curl--config profile))
+      (unwind-protect
+          (let ((command (ende-curl-command profile "/tmp/headers" config)))
+            (should-not (member token command))
+            (should (equal (cadr (member "--url" command))
+                           "https://api.deepseek.com/chat/completions"))
+            (should-not (string-match-p token (prin1-to-string profile)))
+            (with-temp-buffer
+              (insert-file-contents config)
+              (should (string-match-p
+                       "Authorization: Bearer deepseek-secret-token"
+                       (buffer-string))))
+            (should (= (logand (file-modes config) #o777) #o600)))
+        (when (file-exists-p config)
+          (delete-file config))))))
+
+
+
 (ert-deftest ende-test/provider-openrouter-reasoning-policy-is-separate ()
   (should (equal
            (ende-provider-openrouter-reasoning-parameters

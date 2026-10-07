@@ -359,6 +359,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/stream-transports-share-request-lifecycle-contract ()
+  (ende-test--reset)
   (dolist (transport '(chat codex))
     (let* ((success
             (ende-test--run-stream-request
@@ -396,8 +397,9 @@ Use COMMAND for the process, or a silent sleep process by default."
                         (plist-get failure :events)))
            (failure-order (plist-get failure :order)))
       (should-not (plist-get success :error))
-      (should (equal (plist-get (plist-get success :result) :content)
-                     "answer"))
+      (unless (equal (plist-get (plist-get success :result) :content) "answer")
+        (ert-fail (format "%s success transport did not return content: %S"
+                         transport success)))
       (should (eq (car (plist-get success :order)) :start))
       (should (eq (car (last (plist-get success :order))) :done))
       (should (plist-get success :cleaned))
@@ -416,6 +418,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/stream-transports-count-multibyte-response-bytes ()
+  (ende-test--reset)
   (dolist (transport '(chat codex))
     (let* ((prefix
             (if (eq transport 'codex)
@@ -432,6 +435,101 @@ Use COMMAND for the process, or a silent sleep process by default."
                         (plist-get out :events))))
       (should (eq (ende-error-kind (plist-get out :error)) 'resource))
       (should (equal (plist-get (plist-get partial :result) :content) "é"))
+      (should (plist-get out :cleaned)))))
+
+
+
+(ert-deftest ende-test/deepseek-stream-auth-usage-and-tool-history-round-trip ()
+  (let* ((token "deepseek-secret-token")
+         (ende-provider-profiles
+          '((deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "deepseek-chat"
+                      :auth-source-host "api.deepseek.com"
+                      :auth-source-user "ende"
+                      :auth-source-port 443)))
+         (profile (ende-provider-profile 'deepseek))
+         (auth-query nil)
+         (out nil)
+         (chunks
+          (list
+           (concat "data: {\"model\":\"deepseek-chat\",\"choices\":[{"
+                   "\"delta\":{\"reasoning_content\":\"Reviewing\"}}]}\n\n")
+           (concat "data: {\"choices\":[{\"delta\":{"
+                   "\"content\":\"Answer\"}}]}\n\n")
+           (concat "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                   "\"index\":0,\"id\":\"call-1\",\"type\":\"function\","
+                   "\"function\":{\"name\":\"lookup\","
+                   "\"arguments\":\"{\\\"q\\\":\"}}]}}]}\n\n")
+           (concat "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                   "\"index\":0,\"function\":{"
+                   "\"arguments\":\"\\\"deep\\\"}\"}}]}}]}\n\n")
+           (concat "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,"
+                   "\"completion_tokens\":3,\"total_tokens\":8}}\n\n")
+           "data: [DONE]\n\n")))
+    (cl-letf (((symbol-function 'auth-source-search)
+               (lambda (&rest arguments)
+                 (setq auth-query arguments)
+                 (list (list :secret token)))))
+      (setq out
+            (ende-test--run-stream-request
+             'openai-compatible chunks nil nil profile)))
+    (let* ((result (plist-get out :result))
+           (calls (plist-get result :tool-calls))
+           (call (car calls))
+           (request-body
+            (ende-protocol-json-read-string
+             (plist-get out :request-body)))
+           (history-body
+            (ende-protocol-json-read-string
+             (json-encode
+              (ende-llm--request-body
+               (list (cons "user" "question")
+                     (list :role "assistant" :content "Answer"
+                           :tool-calls calls)
+                     (list :role "tool" :content "{\"found\":true}"
+                           :tool-call-id "call-1"))
+               profile))))
+           (history (ende-protocol-json-get "messages" history-body))
+           (assistant (aref history 1))
+           (history-call
+            (aref (ende-protocol-json-get "tool_calls" assistant) 0))
+           (tool-message (aref history 2))
+           (command (plist-get out :command)))
+      (should (equal (plist-get result :content) "Answer"))
+      (should (equal (plist-get result :thinking) "Reviewing"))
+      (should (= (plist-get result :tokens) 3))
+      (should (equal (plist-get call :id) "call-1"))
+      (should (equal (plist-get call :name) "lookup"))
+      (should (equal (plist-get call :arguments) "{\"q\":\"deep\"}"))
+      (should (equal (ende-protocol-json-get "model" request-body)
+                     "deepseek-chat"))
+      (should-not (ende-protocol-json-has-key-p "temperature" request-body))
+      (should-not (ende-protocol-json-has-key-p "reasoning" request-body))
+      (should (eq (ende-protocol-json-get
+                   "include_usage"
+                   (ende-protocol-json-get "stream_options" request-body))
+                  t))
+      (should (equal (ende-protocol-json-get "id" history-call) "call-1"))
+      (should (equal
+               (ende-protocol-json-get
+                "arguments" (ende-protocol-json-get "function" history-call))
+               "{\"q\":\"deep\"}"))
+      (should (equal (ende-protocol-json-get "tool_call_id" tool-message)
+                     "call-1"))
+      (should (equal (plist-get auth-query :host) "api.deepseek.com"))
+      (should (equal (plist-get auth-query :user) "ende"))
+      (should (= (plist-get auth-query :port) 443))
+      (should (string-match-p "Authorization: Bearer deepseek-secret-token"
+                              (plist-get out :config-text)))
+      (should-not (member token command))
+      (should-not (string-match-p token (plist-get out :request-body)))
+      (should-not (string-match-p token
+                                  (prin1-to-string
+                                   (ende-provider-profile-snapshot 'deepseek))))
+      (should (equal (cadr (member "--url" command))
+                     "https://api.deepseek.com/chat/completions"))
+      (should-not (ende-provider-model-discovery-available-p profile))
       (should (plist-get out :cleaned)))))
 
 

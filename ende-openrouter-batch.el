@@ -893,7 +893,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
 
 (defun ende-openrouter-batch-auto-fallback-p (profile status detail)
   "Return non-nil when PROFILE's STATUS and DETAIL request Batch fallback."
-  (and (eq (plist-get profile :transport) 'auto)
+  (and (not (eq (plist-get profile :type) 'openai))
+       (eq (plist-get profile :transport) 'auto)
        (numberp status)
        (= status 404)
        (string-match-p "[Bb]atch API" (or detail ""))))

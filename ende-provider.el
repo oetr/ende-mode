@@ -109,6 +109,17 @@ When nil, use only the response inactivity timeout."
     "X-OpenRouter-Title: ende-mode")
   "OpenRouter app-attribution headers for the built-in profiles.")
 
+(defconst ende-provider--secret-profile-keys
+  '(:token :api-key :secret :authorization :auth-token :access :refresh
+    :access-token :refresh-token :bearer-token)
+  "Profile fields reserved for credentials, which remain in auth-source.")
+
+(defun ende-provider--strip-secret-fields (profile)
+  "Return PROFILE without credential fields."
+  (cl-loop for (key value) on profile by #'cddr
+           unless (memq key ende-provider--secret-profile-keys)
+           append (list key value)))
+
 ;;;; Profiles and display policy
 
 (defvar ende-provider--runtime-settings (make-hash-table :test #'eq)
@@ -154,83 +165,92 @@ Supported settings are `:max-concurrency' and `:parallel'."
 (defun ende-provider-profile (&optional name)
   "Return a non-secret provider profile for NAME.
 
- The URL/model customizations remain the local-provider defaults.  OpenRouter
- provides both synchronous and Batch API profile templates and requires an
- auth-source entry before it can be dispatched."
+Typed `openai' profiles use their configured endpoint and model without local
+defaults.  OpenRouter profiles use auth-source credentials."
   (let* ((name (or name (car ende-providers)
                    ende-provider-default-profile))
+         (custom (alist-get name ende-provider-profiles))
+         (typed-openai
+          (and (not (eq name 'openai))
+               (eq (plist-get custom :type) 'openai)))
          (base
-          (pcase name
-            ('openai
-             (list :url ende-codex-endpoint
-                   :model ende-codex-model
-                   :model-discovery-key
-                   (list ende-codex-models-endpoint
-                         ende-codex-client-version
-                         (expand-file-name ende-codex-auth-file))
-                   :max-concurrency 4
-                   :parallel nil
-                   :wire-api 'responses
-                   :auth-method 'opencode-oauth
-                   :model-discovery-function #'ende-codex-probe-models
-                   :reasoning-effort-wire-api 'responses
-                   :require-sse t
-                   :display-name "OpenAI"))
-            ('openrouter
-             (list :url "https://openrouter.ai/api/v1/chat/completions"
-                   :batch-url "https://openrouter.ai/api/v1/batches"
-                   :batch-endpoint "/v1/chat/completions"
-                   :transport 'auto
-                   :model ende-provider--default-openrouter-model
-                   :max-concurrency 4
-                   :parallel nil
-                   :temperature 0.2
-                   :auth-source-host "openrouter.ai"
-                   :auth-source-user "ende"
-                   :auth-source-port 443
-                   :request-headers
-                   (copy-sequence ende-provider--openrouter-request-headers)
-                   :reasoning-effort-wire-api 'openrouter
-                   :require-sse t))
-            ('openrouter-batch
-             (list :url "https://openrouter.ai/api/v1/chat/completions"
-                   :batch-url "https://openrouter.ai/api/v1/batches"
-                   :batch-endpoint "/v1/chat/completions"
-                   :transport 'openrouter-batch
-                   :model ende-provider--default-openrouter-model
-                   :max-concurrency 16
-                   :parallel t
-                   :temperature 0.2
-                   :auth-source-host "openrouter.ai"
-                   :auth-source-user "ende"
-                   :auth-source-port 443
-                   :request-headers
-                   (copy-sequence ende-provider--openrouter-request-headers)
-                   :reasoning-effort-wire-api 'openrouter
-                   :require-sse nil))
-            (_
-             (list :url ende-provider-endpoint
-                   :model ende-provider-model
-                   :max-concurrency 1
-                   :parallel nil
-                   :temperature ende-provider-temperature
-                   :require-sse t))))
-         (custom (alist-get name ende-provider-profiles)))
-    (let ((profile (ende-plist-merge
-                    (plist-put (copy-sequence base) :name name)
-                    custom)))
+          (if typed-openai
+              (list :type 'openai
+                    :max-concurrency 1
+                    :parallel nil
+                    :stream-usage t
+                    :require-sse t)
+            (pcase name
+              ('openai
+               (list :url ende-codex-endpoint
+                     :model ende-codex-model
+                     :model-discovery-key
+                     (list ende-codex-models-endpoint
+                           ende-codex-client-version
+                           (expand-file-name ende-codex-auth-file))
+                     :max-concurrency 4
+                     :parallel nil
+                     :wire-api 'responses
+                     :auth-method 'opencode-oauth
+                     :model-discovery-function #'ende-codex-probe-models
+                     :reasoning-effort-wire-api 'responses
+                     :require-sse t
+                     :display-name "OpenAI"))
+              ('openrouter
+               (list :url "https://openrouter.ai/api/v1/chat/completions"
+                     :batch-url "https://openrouter.ai/api/v1/batches"
+                     :batch-endpoint "/v1/chat/completions"
+                     :transport 'auto
+                     :model ende-provider--default-openrouter-model
+                     :max-concurrency 4
+                     :parallel nil
+                     :temperature 0.2
+                     :auth-source-host "openrouter.ai"
+                     :auth-source-user "ende"
+                     :auth-source-port 443
+                     :request-headers
+                     (copy-sequence ende-provider--openrouter-request-headers)
+                     :reasoning-effort-wire-api 'openrouter
+                     :require-sse t))
+              ('openrouter-batch
+               (list :url "https://openrouter.ai/api/v1/chat/completions"
+                     :batch-url "https://openrouter.ai/api/v1/batches"
+                     :batch-endpoint "/v1/chat/completions"
+                     :transport 'openrouter-batch
+                     :model ende-provider--default-openrouter-model
+                     :max-concurrency 16
+                     :parallel t
+                     :temperature 0.2
+                     :auth-source-host "openrouter.ai"
+                     :auth-source-user "ende"
+                     :auth-source-port 443
+                     :request-headers
+                     (copy-sequence ende-provider--openrouter-request-headers)
+                     :reasoning-effort-wire-api 'openrouter
+                     :require-sse nil))
+              (_
+               (list :url ende-provider-endpoint
+                     :model ende-provider-model
+                     :max-concurrency 1
+                     :parallel nil
+                     :temperature ende-provider-temperature
+                     :require-sse t))))))
+     (let ((profile (ende-plist-merge
+                     (plist-put (copy-sequence base) :name name)
+                     custom)))
       (setq profile
             (plist-put
-             profile :model-explicit-p
-             (or (and (plist-member custom :model) t)
-                 (pcase name
-                   ('openai
-                    (not (equal ende-codex-model
-                                ende-provider--default-codex-model)))
-                   ('openrouter nil)
-                   ('openrouter-batch nil)
-                   (_ (not (equal ende-provider-model
-                                  ende-provider--default-model)))))))
+              profile :model-explicit-p
+              (or (and (plist-member custom :model) t)
+                  (and (not typed-openai)
+                       (pcase name
+                         ('openai
+                          (not (equal ende-codex-model
+                                      ende-provider--default-codex-model)))
+                          ('openrouter nil)
+                          ('openrouter-batch nil)
+                          (_ (not (equal ende-provider-model
+                                         ende-provider--default-model))))))))
       (setq profile
             (plist-put profile :models-explicit-p
                        (and (plist-member custom :models) t)))
@@ -238,21 +258,32 @@ Supported settings are `:max-concurrency' and `:parallel'."
         (let ((value (ende-provider--runtime-value name key)))
           (unless (eq value :unset)
             (setq profile (plist-put profile key value)))))
-       profile)))
+      (ende-provider--strip-secret-fields profile))))
 
 (defun ende-provider-resolve-profile (options)
   "Resolve OPTIONS to a detached effective provider profile.
 Named profiles and batch requests retain their existing option shape."
   (cond
+   ((eq (plist-get options :name) 'openai)
+    (ende-provider--strip-secret-fields
+     (ende-plist-merge (ende-provider-profile 'openai) options)))
    ((plist-get options :name)
-    (copy-tree options))
+    (ende-provider--strip-secret-fields (copy-tree options)))
    ((eq (plist-get options :transport) 'openrouter-batch)
-    (copy-tree options))
+    (ende-provider--strip-secret-fields (copy-tree options)))
+   ((eq (plist-get options :type) 'openai)
+    (ende-provider--strip-secret-fields
+     (ende-plist-merge
+      '(:type openai :max-concurrency 1 :parallel nil
+        :stream-usage t :require-sse t)
+      options)))
    ((eq (plist-get options :wire-api) 'responses)
-    (ende-plist-merge
-     (list :url ende-codex-endpoint :model ende-codex-model) options))
+    (ende-provider--strip-secret-fields
+     (ende-plist-merge
+      (list :url ende-codex-endpoint :model ende-codex-model) options)))
    (t
-    (ende-plist-merge (ende-provider-profile) options))))
+    (ende-provider--strip-secret-fields
+     (ende-plist-merge (ende-provider-profile) options)))))
 
 (defun ende-provider-max-concurrency (profile)
   "Return the positive maximum concurrent jobs allowed by PROFILE."
@@ -280,7 +311,8 @@ Saved efforts are revalidated before a job sends its first request."
 
 (defun ende-provider-openrouter-reasoning-parameters (profile)
   "Return OpenRouter-specific request parameters for PROFILE."
-  (let ((effort (ende-provider-reasoning-effort profile 'openrouter)))
+  (let ((effort (and (not (eq (plist-get profile :type) 'openai))
+                     (ende-provider-reasoning-effort profile 'openrouter))))
     (when effort
       (list (cons :reasoning (list (cons :effort effort)))))))
 
@@ -313,7 +345,7 @@ Built-in profile defaults are deliberately not preferences."
 (defun ende-provider-profile-snapshot (&optional name)
   "Return a detached, non-secret snapshot of provider profile NAME."
   (let ((snapshot (copy-tree (ende-provider-profile name))))
-    (dolist (key '(:token :api-key :secret :authorization :auth-token))
+    (dolist (key ende-provider--secret-profile-keys)
       (setq snapshot (plist-put snapshot key nil)))
     snapshot))
 
@@ -555,6 +587,7 @@ metadata and configured profile values."
 (defun ende-provider--discovery-key (profile)
   "Return a non-secret cache key for provider PROFILE."
   (list (plist-get profile :url)
+        (plist-get profile :models-url)
         (plist-get profile :name)
         (plist-get profile :auth-source-host)
         (plist-get profile :auth-source-user)
@@ -585,8 +618,13 @@ metadata and configured profile values."
 
 (defun ende-provider-models-url (profile)
   "Return the OpenAI-compatible model-list URL for PROFILE, or nil."
-  (let ((url (plist-get profile :url)))
+  (let ((configured (plist-get profile :models-url))
+        (url (plist-get profile :url)))
     (cond
+     ((and (stringp configured) (not (string-empty-p configured)))
+      configured)
+     ((eq (plist-get profile :type) 'openai)
+      nil)
      ((and (stringp url)
            (string-match
             "\\`\\(.+\\)/chat/completions\\(?:/\\)?\\(?:[?#].*\\)?\\'"

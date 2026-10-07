@@ -570,14 +570,20 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
-  (let ((body `((:model . ,(plist-get profile :model))
-                (:messages . ,(mapcar #'ende-llm--message-json messages))
-                (:temperature . ,(plist-get profile :temperature))
-                (:stream . t)
-                (:stream_options . ((:include_usage . t))))))
-    (setq body
-          (append body
-                  (ende-provider-openrouter-reasoning-parameters profile)))
+  (let* ((typed-openai (eq (plist-get profile :type) 'openai))
+         (temperature (plist-get profile :temperature))
+         (stream-usage (if (plist-member profile :stream-usage)
+                           (plist-get profile :stream-usage)
+                         t))
+         (body `((:model . ,(plist-get profile :model))
+                 (:messages . ,(mapcar #'ende-llm--message-json messages))
+                 ,@(if (or (not typed-openai) (numberp temperature))
+                       (list (cons :temperature temperature)))
+                 (:stream . t)
+                 ,@(when (or (not typed-openai) stream-usage)
+                     '((:stream_options . ((:include_usage . t))))))))
+    (setq body (append body
+                       (ende-provider-openrouter-reasoning-parameters profile)))
     (when (plist-get profile :tool-definitions)
       (setq body
             (append body
@@ -629,9 +635,12 @@ The :callbacks argument initializes the composed transport lifecycle."
   "Send MESSAGES asynchronously using a callback-safe curl transport."
   (let ((profile (ende-provider-resolve-profile options)))
     (cond
-     ((eq (plist-get profile :transport) 'openrouter-batch)
+     ((and (eq (plist-get profile :transport) 'openrouter-batch)
+           (not (eq (plist-get profile :type) 'openai)))
       (ende-openrouter-batch-default messages callbacks profile))
-     ((eq (plist-get profile :wire-api) 'responses)
+     ((and (eq (plist-get profile :wire-api) 'responses)
+           (or (not (eq (plist-get profile :type) 'openai))
+               (eq (plist-get profile :name) 'openai)))
       (ende-codex-default messages callbacks profile))
      (t
       (let* ((session

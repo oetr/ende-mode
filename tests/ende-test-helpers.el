@@ -146,14 +146,18 @@ process for cancellation tests."
     count))
 
 (defun ende-test--run-stream-request
-    (transport chunks &optional cancel-on-start response-limit)
+    (transport chunks &optional cancel-on-start response-limit profile)
   "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
 When CANCEL-ON-START is non-nil, cancel from the start callback.
-RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
+RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'.  PROFILE overrides
+the transport's representative default profile."
   (let* ((ende-provider-discovery-enabled nil)
          (ende-max-response-bytes response-limit)
          (real-make-process (symbol-function 'make-process))
+         (real-process-send-string (symbol-function 'process-send-string))
          (request-args nil)
+         (request-body nil)
+         (config-text nil)
          (process nil)
          (events nil)
          (order nil)
@@ -178,11 +182,12 @@ RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
                   (setq failure error)
                   (push :on-error order))))
          (profile
-          (list :name 'transport-test
-                :url (if (eq transport 'codex)
-                         "https://chatgpt.com/backend-api/codex/responses"
-                       "https://example.test/v1/chat/completions")
-                :model "test-model" :temperature 0.2 :require-sse t))
+          (or profile
+              (list :name 'transport-test
+                    :url (if (eq transport 'codex)
+                             "https://chatgpt.com/backend-api/codex/responses"
+                           "https://example.test/v1/chat/completions")
+                    :model "test-model" :temperature 0.2 :require-sse t)))
          (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
          (auth '(:access "transport-test-token"
                  :expires 9999999999999)))
@@ -190,11 +195,15 @@ RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
                (lambda (&rest args)
                  (setq request-args args)
                  (setq process
-                       (funcall real-make-process
+                        (funcall real-make-process
                                 :name (plist-get args :name)
                                 :buffer nil :command '("cat")
                                 :connection-type 'pipe :noquery t
                                 :filter #'ignore :sentinel #'ignore))))
+              ((symbol-function 'process-send-string)
+               (lambda (target body)
+                 (setq request-body (concat (or request-body "") body))
+                 (funcall real-process-send-string target body)))
               ((symbol-function 'ende-codex--resolve-auth)
                (lambda (callback)
                  (funcall callback auth)
@@ -208,8 +217,13 @@ RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
               (let* ((command (plist-get request-args :command))
                      (headers-file
                       (cadr (member "--dump-header" command)))
+                     (config-file (cadr (member "--config" command)))
                      (filter (plist-get request-args :filter))
                      (sentinel (plist-get request-args :sentinel)))
+                (when (and config-file (file-readable-p config-file))
+                  (with-temp-buffer
+                    (insert-file-contents config-file)
+                    (setq config-text (buffer-string))))
                 (with-temp-file headers-file
                   (insert "HTTP/1.1 200 OK\r\n"
                           (if (eq transport 'codex)
@@ -220,21 +234,27 @@ RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
                 (when (process-live-p process)
                   (process-send-eof process)
                   (while (process-live-p process)
-                    (accept-process-output process 0.05))
+                    (accept-process-output process 0.05)))
+                (when (and (processp process)
+                           (memq (process-status process)
+                                 '(exit signal closed failed)))
                   (funcall sentinel process "finished\n"))))
-            (let ((response-buffer
-                   (and process (process-get process :ende-response-buffer)))
-                  (stderr-buffer
-                   (and process (process-get process :ende-stderr-buffer)))
-                  (stderr-process
-                   (and process (process-get process :ende-stderr-process)))
-                  (headers-file
-                   (and process (process-get process :ende-headers-file)))
-                  (config-file
-                   (and process (process-get process :ende-config-file))))
+            (let* ((command (plist-get request-args :command))
+                   (response-buffer
+                    (and process (process-get process :ende-response-buffer)))
+                   (stderr-buffer
+                    (and process (process-get process :ende-stderr-buffer)))
+                   (stderr-process
+                    (and process (process-get process :ende-stderr-process)))
+                   (headers-file
+                    (and process (process-get process :ende-headers-file)))
+                   (config-file
+                    (and process (process-get process :ende-config-file))))
               (list :events (nreverse events)
                     :order (nreverse order)
                     :result result :error failure
+                    :request-body request-body :command command
+                    :config-text config-text
                     :cleaned
                     (and (not (and (processp process)
                                    (process-live-p process)))

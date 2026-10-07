@@ -531,7 +531,9 @@
     (should-not (ende-openrouter-batch-auto-fallback-p
                  profile 404 "ordinary not found"))
     (should-not (ende-openrouter-batch-auto-fallback-p
-                 '(:transport openrouter-batch) 404 "Batch API"))))
+                 '(:transport openrouter-batch) 404 "Batch API"))
+    (should-not (ende-openrouter-batch-auto-fallback-p
+                 '(:type openai :transport auto) 404 "Batch API"))))
 
 (provide 'ende-openrouter-batch-test)
 

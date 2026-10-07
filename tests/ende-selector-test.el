@@ -960,6 +960,59 @@
 
 
 
+(ert-deftest ende-test/selector-runs-configured-model-after-discovery-fails ()
+  (let* ((source (generate-new-buffer " *ende-selector-configured-source*"))
+         (selector (generate-new-buffer " *ende-selector-configured-model*"))
+         (probe
+          (lambda (callback)
+            (funcall callback
+                     nil
+                     (ende-error-create :kind 'discovery
+                                        :message "catalog unavailable"))
+            (lambda () nil)))
+         (ende-providers '(deepseek))
+         (ende-provider-profiles
+          (list
+           (list 'deepseek :type 'openai
+                 :url "https://api.deepseek.com/chat/completions"
+                 :model "deepseek-chat"
+                 :models '("deepseek-chat" "deepseek-reasoner")
+                 :model-discovery-function probe)))
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+         (ende-selector--model-validations (make-hash-table :test #'equal))
+         (ende-provider--model-cache (make-hash-table :test #'equal))
+         (ende-provider--model-inflight (make-hash-table :test #'equal))
+         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--model-generation 0)
+         (queued nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "source"))
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(deepseek)
+                  ende-selector--provider-index 0)
+            (cl-letf (((symbol-function 'ende-enqueue-operation)
+                       (lambda (type instruction profile)
+                         (setq queued (list type instruction profile)))))
+              (ende-selector--set-provider 0)
+              (should (eq ende-selector--model-state :ready))
+              (should (equal ende-selector--models
+                             '("deepseek-chat" "deepseek-reasoner")))
+              (should (equal (ende-selector--model-name) "deepseek-chat"))
+              (ende-selector-insert)))
+          (should (eq (car queued) 'insert))
+          (should (eq (plist-get (nth 2 queued) :type) 'openai))
+          (should (equal (plist-get (nth 2 queued) :model) "deepseek-chat")))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+
+
 (ert-deftest ende-test/selector-ask-includes-only-reasoning-ancestors ()
   (dolist (policy '(root-prefix current-section-only))
     (ende-test--reset)

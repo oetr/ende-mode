@@ -495,6 +495,28 @@ ignored.  Return non-nil when a probe was started."
      (t
       (ende-selector--set-models nil)))))
 
+(defun ende-selector--apply-model-probe-error (profile preferred)
+  "Keep explicitly configured PROFILE models usable after discovery fails."
+  (let* ((configured-model (ende-provider-configured-model profile))
+         (models (ende-provider-models profile))
+         (explicit-p
+          (or (and (stringp configured-model)
+                   (not (string-empty-p configured-model)))
+               (and (ende-provider-configured-models-explicit-p profile)
+                    models))))
+    (setq ende-selector--model-details nil)
+    (if explicit-p
+        (progn
+          (when (and (stringp configured-model)
+                     (not (member configured-model models)))
+            (setq models (cons configured-model models)))
+          (ende-selector--set-models
+           models
+           (or (and (stringp preferred) (member preferred models) preferred)
+               configured-model))
+          (setq ende-selector--model-state :ready))
+      (setq ende-selector--model-state :error))))
+
 (defun ende-selector--apply-model-catalog
     (profile models details generation preferred &optional error)
   "Apply a discovered or configured model CATALOG to PROFILE.
@@ -502,7 +524,7 @@ PREFERRED is selected only when it is present in MODELS."
   (let ((models (cl-remove-if-not #'stringp models)))
     (setq ende-selector--model-details (copy-tree details))
     (if error
-        (setq ende-selector--model-state :error)
+        (ende-selector--apply-model-probe-error profile preferred)
       (let ((selected
              (and preferred
                   (ende-selector--valid-model-p
@@ -530,24 +552,24 @@ PREFERRED is selected only when it is present in MODELS."
                           (= ende-selector--probe-generation generation)))
                (setq completed t)
                (with-current-buffer selector-buffer
-                 (when (eq (ende-selector--provider-name) provider)
-                   (setq ende-selector--probe-cancel nil)
-                   (if error
-                       (setq ende-selector--model-state :error)
-                     (let* ((live-profile (ende-provider-profile provider))
-                            (live-preferred
-                             (if (= selection-generation
-                                    ende-selector--model-selection-generation)
-                                 (ende-selector--preferred-model
-                                  provider live-profile)
-                               (ende-selector--model-name)))
-                            (catalog-generation
-                             (ende-provider-models-generation live-profile)))
-                       (ende-selector--apply-model-catalog
-                        live-profile models
-                        (ende-provider-model-details live-profile)
-                        catalog-generation live-preferred)))
-                   (ende-selector--render)))))))
+                  (when (eq (ende-selector--provider-name) provider)
+                    (setq ende-selector--probe-cancel nil)
+                    (let* ((live-profile (ende-provider-profile provider))
+                           (live-preferred
+                            (if (= selection-generation
+                                   ende-selector--model-selection-generation)
+                                (ende-selector--preferred-model
+                                 provider live-profile)
+                              (ende-selector--model-name))))
+                      (if error
+                          (ende-selector--apply-model-probe-error
+                           live-profile live-preferred)
+                        (ende-selector--apply-model-catalog
+                         live-profile models
+                         (ende-provider-model-details live-profile)
+                         (ende-provider-models-generation live-profile)
+                         live-preferred)))
+                    (ende-selector--render)))))))
       (let ((cancel (ende-provider-probe-models profile callback)))
         (when (and (not completed)
                    (= ende-selector--probe-generation generation))
@@ -573,9 +595,7 @@ PREFERRED is selected only when it is present in MODELS."
     (cond
      (catalog
       (if (plist-get catalog :error)
-          (progn
-            (ende-selector--set-provisional-models profile preferred)
-            (setq ende-selector--model-state :error))
+          (ende-selector--apply-model-probe-error profile preferred)
         (ende-selector--apply-model-catalog
          profile
          (plist-get catalog :models)
