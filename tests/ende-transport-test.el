@@ -346,6 +346,84 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 
+(ert-deftest ende-test/stream-transports-share-request-lifecycle-contract ()
+  (dolist (transport '(chat codex))
+    (let* ((success
+            (ende-test--run-stream-request
+             transport
+             (if (eq transport 'codex)
+                 (list
+                  (concat "data: {\"type\":\"response.output_text.delta\","
+                          "\"delta\":\"answer\"}\n\n")
+                  (concat "data: {\"type\":\"response.completed\","
+                          "\"response\":{\"model\":\"test-model\","
+                          "\"usage\":{\"output_tokens\":2}}}\n\n"))
+               (list
+                (concat "data: {\"choices\":[{\"delta\":{"
+                        "\"content\":\"answer\"}}]}\n\n")
+                (concat "data: {\"choices\":[],\"usage\":{"
+                        "\"completion_tokens\":2}}\n\n")
+                "data: [DONE]\n\n"))))
+           (failure
+            (ende-test--run-stream-request
+             transport
+             (if (eq transport 'codex)
+                 (list
+                  (concat "data: {\"type\":\"response.output_text.delta\","
+                          "\"delta\":\"partial\"}\n\n")
+                  (concat "data: {\"type\":\"response.failed\","
+                          "\"error\":{\"message\":\"provider failed\"}}\n\n"))
+               (list
+                (concat "data: {\"choices\":[{\"delta\":{"
+                        "\"content\":\"partial\"}}]}\n\n")
+                (concat "data: {\"error\":{\"message\":"
+                        "\"provider failed\"}}\n\n")))))
+           (partial-event
+            (cl-find-if (lambda (event)
+                          (eq (plist-get event :type) :partial-result))
+                        (plist-get failure :events)))
+           (failure-order (plist-get failure :order)))
+      (should-not (plist-get success :error))
+      (should (equal (plist-get (plist-get success :result) :content)
+                     "answer"))
+      (should (eq (car (plist-get success :order)) :start))
+      (should (eq (car (last (plist-get success :order))) :done))
+      (should (plist-get success :cleaned))
+      (should (eq (ende-error-kind (plist-get failure :error)) 'provider))
+      (should (equal (plist-get (plist-get partial-event :result) :content)
+                     "partial"))
+      (should (< (cl-position :partial-result failure-order)
+                 (cl-position :on-error failure-order)))
+      (should (plist-get failure :cleaned)))
+    (let* ((cancelled (ende-test--run-stream-request transport nil t)))
+      (should (eq (ende-error-kind (plist-get cancelled :error)) 'cancelled))
+      (should (equal (plist-get cancelled :order)
+                     '(:start :error :on-error)))
+      (should (plist-get cancelled :cleaned)))))
+
+
+
+(ert-deftest ende-test/stream-transports-count-multibyte-response-bytes ()
+  (dolist (transport '(chat codex))
+    (let* ((prefix
+            (if (eq transport 'codex)
+                (concat "data: {\"type\":\"response.output_text.delta\","
+                        "\"delta\":\"é\"}\n\n")
+              (concat "data: {\"choices\":[{\"delta\":{"
+                      "\"content\":\"é\"}}]}\n\n")))
+           (out
+            (ende-test--run-stream-request
+             transport (list prefix "世界") nil (string-bytes prefix)))
+           (partial
+            (cl-find-if (lambda (event)
+                          (eq (plist-get event :type) :partial-result))
+                        (plist-get out :events))))
+      (should (eq (ende-error-kind (plist-get out :error)) 'resource))
+      (should (equal (plist-get (plist-get partial :result) :content) "é"))
+      (should (plist-get out :cleaned)))))
+
+
+
 (ert-deftest ende-test/curl-stderr-is-byte-bounded ()
   (let ((buffer (generate-new-buffer " *ende-test-stderr*"))
         (process (make-pipe-process :name "ende-test-stderr-process"

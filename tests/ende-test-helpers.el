@@ -145,6 +145,110 @@ process for cancellation tests."
       (setq start (match-end 0)))
     count))
 
+(defun ende-test--run-stream-request
+    (transport chunks &optional cancel-on-start response-limit)
+  "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
+When CANCEL-ON-START is non-nil, cancel from the start callback.
+RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'."
+  (let* ((ende-provider-discovery-enabled nil)
+         (ende-max-response-bytes response-limit)
+         (real-make-process (symbol-function 'make-process))
+         (request-args nil)
+         (process nil)
+         (events nil)
+         (order nil)
+         (result nil)
+         (failure nil)
+         (messages (list (cons "user" "question")))
+         (callbacks
+          (list :on-start
+                (lambda (cancel)
+                  (push :start order)
+                  (when cancel-on-start (funcall cancel)))
+                :on-event
+                (lambda (event)
+                  (push event events)
+                  (push (plist-get event :type) order))
+                :on-done
+                (lambda (value)
+                  (setq result value)
+                  (push :done order))
+                :on-error
+                (lambda (error)
+                  (setq failure error)
+                  (push :on-error order))))
+         (profile
+          (list :name 'transport-test
+                :url (if (eq transport 'codex)
+                         "https://chatgpt.com/backend-api/codex/responses"
+                       "https://example.test/v1/chat/completions")
+                :model "test-model" :temperature 0.2 :require-sse t))
+         (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
+         (auth '(:access "transport-test-token"
+                 :expires 9999999999999)))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq request-args args)
+                 (setq process
+                       (funcall real-make-process
+                                :name (plist-get args :name)
+                                :buffer nil :command '("cat")
+                                :connection-type 'pipe :noquery t
+                                :filter #'ignore :sentinel #'ignore))))
+              ((symbol-function 'ende-codex--resolve-auth)
+               (lambda (callback)
+                 (funcall callback auth)
+                 nil)))
+      (unwind-protect
+          (progn
+            (if (eq transport 'codex)
+                (ende-codex-default messages callbacks profile)
+              (ende-llm-default messages callbacks profile))
+            (unless cancel-on-start
+              (let* ((command (plist-get request-args :command))
+                     (headers-file
+                      (cadr (member "--dump-header" command)))
+                     (filter (plist-get request-args :filter))
+                     (sentinel (plist-get request-args :sentinel)))
+                (with-temp-file headers-file
+                  (insert "HTTP/1.1 200 OK\r\n"
+                          (if (eq transport 'codex)
+                              "\r\n"
+                            "Content-Type: text/event-stream\r\n\r\n")))
+                (dolist (chunk chunks)
+                  (funcall filter process chunk))
+                (when (process-live-p process)
+                  (process-send-eof process)
+                  (while (process-live-p process)
+                    (accept-process-output process 0.05))
+                  (funcall sentinel process "finished\n"))))
+            (let ((response-buffer
+                   (and process (process-get process :ende-response-buffer)))
+                  (stderr-buffer
+                   (and process (process-get process :ende-stderr-buffer)))
+                  (stderr-process
+                   (and process (process-get process :ende-stderr-process)))
+                  (headers-file
+                   (and process (process-get process :ende-headers-file)))
+                  (config-file
+                   (and process (process-get process :ende-config-file))))
+              (list :events (nreverse events)
+                    :order (nreverse order)
+                    :result result :error failure
+                    :cleaned
+                    (and (not (and (processp process)
+                                   (process-live-p process)))
+                         (not (buffer-live-p response-buffer))
+                         (not (buffer-live-p stderr-buffer))
+                         (not (and (processp stderr-process)
+                                   (process-live-p stderr-process)))
+                         (not (and headers-file
+                                   (file-exists-p headers-file)))
+                         (not (and config-file
+                                   (file-exists-p config-file)))))))
+        (when (and (processp process) (process-live-p process))
+          (delete-process process))))))
+
 (defun ende-test--reset ()
   "Reset global state and clean test-created processes and buffers."
   (ende-abort-queue)
