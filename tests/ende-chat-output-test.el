@@ -17,6 +17,10 @@
 (ert-deftest ende-test/chat-tool-result-headings-summarize-without-losing-payloads ()
   (let* ((long-value (make-string 260 ?x))
          (long-arguments (json-encode `((value . ,long-value))))
+         (unicode-arguments
+          (let ((object (make-hash-table :test #'equal)))
+            (puthash "odd key ’" "I’ve traced café — 世界 🐈" object)
+            (json-encode object)))
          (escaped-arguments
           (concat "{malformed\n* Forged heading\n#+begin_example\n"
                   "#+end_example\n:PROPERTIES:\n"
@@ -28,6 +32,8 @@
                             "\"disabled\":false,\"missing\":null,"
                             "\"items\":[1,\"x\"],\"flags\":{\"ok\":true}}")
                    "read_file: path=\"ende.el\", \"odd key\"=\"v\", start_line=1, line_count=180, active=true, disabled=false, missing=null, items=[1,\"x\"], flags={\"ok\":true}")
+                  (,unicode-arguments
+                   "read_file: \"odd key ’\"=\"I’ve traced café — 世界 🐈\"")
                   ("{\"options\":{\":mode\":\"fast\"}}"
                    "read_file: options={\":mode\":\"fast\"}")
                   (,escaped-arguments "read_file")

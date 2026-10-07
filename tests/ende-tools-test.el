@@ -42,7 +42,7 @@
                            (alist-get :name (alist-get :function definition)))
                          definitions)))
       (should (= (length names) (length (delete-dups (copy-sequence names)))))
-      (dolist (required '("project_info" "list_project_files" "file_info"
+      (dolist (required '("about_thinking" "project_info" "list_project_files" "file_info"
                           "read_file" "list_project_buffers" "read_buffer"
                           "search_project" "edit_file" "create_file"
                           "delete_file" "apply_patch" "web_fetch"))

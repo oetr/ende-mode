@@ -430,6 +430,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     ('clear-tools
      (unless (= (length form) 1)
        (ende-chat-config--error "clear-tools takes no arguments"))
+     ;; Mandatory tools are added during normalization, not inherited here.
      (plist-put configuration :active-targets nil))
     ('set-tool-resources
      (ende-chat-config--assign-resources form configuration nil))
@@ -452,8 +453,9 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
         :groups (plist-get configuration :groups)
         :resources (plist-get configuration :resources)
         :active-tools
-        (ende-chat-config--resolve-tools
-         (plist-get configuration :active-targets) configuration)
+        (ende-tool-active-names
+         (ende-chat-config--resolve-tools
+          (plist-get configuration :active-targets) configuration))
         :tool-resources
         (mapcar (lambda (entry)
                   (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
@@ -533,8 +535,10 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
   "Resolve chat tool configuration for HEADLINE in parsed Org TREE.
 PARENT-TABLE maps headlines to their parents.  Apply the document block,
 ancestor blocks, and HEADLINE's own block, never preceding sibling blocks.
-Return a normalized access policy.  Definitions need not be used.  An explicit
-root is required only when an active tool needs a project.  Invalid forms or
+Return a normalized access policy.  Always-available tools remain active even
+without config blocks or after `clear-tools'; resource grants cannot disable
+them.  Definitions need not be used.  An explicit root is required only when
+an active tool needs a project.  Invalid forms or
 active tools without required resources or roots signal errors before dispatch."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
           (ancestry nil)

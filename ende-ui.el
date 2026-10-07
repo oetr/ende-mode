@@ -7,6 +7,8 @@
 ;;; Commentary:
 
 ;; Visual indicator overlays, badges, and spinner animations for ende jobs.
+;; Agent activity is transient plain text outside the folded tool transcript;
+;; host execution phases and token metrics do not replace that activity.
 
 ;;; Code:
 
@@ -52,6 +54,7 @@
   (let* ((status (or (overlay-get ov 'status) "Queued"))
          (is-queued (string= status "Queued"))
          (icon (if is-queued "⏳" spinner))
+         (activity (ende-ui--display-label (overlay-get ov 'activity-title)))
          (client (ende-ui--display-label (overlay-get ov 'client)))
          (model (ende-ui--display-label (overlay-get ov 'model)))
          (provider-str
@@ -70,14 +73,32 @@
            ((> tokens 0)
             (format " (%s%d tok)" (if estimated "~" "") tokens))
            (t "")))
-         (badge (format " [%s %s%s%s] " icon status provider-str metric-str)))
+         (badge (format " [%s %s%s%s%s] " icon status
+                        (if activity (concat " — " activity) "")
+                        provider-str metric-str)))
     (propertize badge 'face 'ende-badge-face)))
+
+(defun ende-ui--activity-paragraph (status)
+  "Return safely displayed, wrapped plain-text STATUS for a live indicator.
+Format only when the report changes, not on each spinner tick."
+  (when status
+    (with-temp-buffer
+      (insert (replace-regexp-in-string
+               "[[:cntrl:]]+" " " (substring-no-properties status)))
+      (let ((fill-column 72))
+        (fill-region (point-min) (point-max)))
+      (propertize
+       (concat "\n    "
+               (replace-regexp-in-string "\n" "\n    " (buffer-string))
+               "\n")
+       'face 'shadow))))
 
 (defun ende-ui--put-badge (ov spinner)
   "Place the SPINNER badge on OV's appropriate side.
 Zero-width indicators use `after-string' so point can remain before them;
 range overlays keep their badge before the covered text."
-  (let ((badge (ende-ui--format-badge ov spinner)))
+  (let ((badge (concat (ende-ui--format-badge ov spinner)
+                       (overlay-get ov 'activity-paragraph))))
     (if (= (overlay-start ov) (overlay-end ov))
         (progn
           (overlay-put ov 'before-string nil)
@@ -154,6 +175,10 @@ When APPEARANCE is `badge-only', do not apply a face to the covered text."
              (ende-ui--start-spinner)))
           (:client (overlay-put ov 'client val))
           (:model (overlay-put ov 'model val))
+          (:activity-title (overlay-put ov 'activity-title val))
+          (:activity-status
+           (overlay-put ov 'activity-paragraph
+                        (ende-ui--activity-paragraph val)))
           (:tokens (overlay-put ov 'tokens val))
           (:speed  (overlay-put ov 'speed val))
           (:estimated (overlay-put ov 'estimated val)))))
@@ -172,6 +197,11 @@ adapter for queued and terminal states."
           overlay
           :client (plist-get event :client)
           :model (plist-get event :model))))
+      (:agent-activity
+       (when overlay
+         (ende-ui-update-overlay
+          overlay :activity-title (ende-job-activity-title job)
+          :activity-status (ende-job-activity-status job))))
       (:settled
        (when overlay
          (ende-ui-delete-overlay overlay)

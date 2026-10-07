@@ -93,8 +93,8 @@
                              '(chat project)))
               (should (equal (plist-get inspect-config :active-tools)
                              '(project_info list_project_files file_info
-					    read_file search_project list_project_buffers
-					    read_buffer)))
+                               read_file search_project list_project_buffers
+                               read_buffer about_thinking)))
               (should (equal (plist-get inspect-config :root)
                              (ende-project-normalize-root child-root)))
               (should-not (memq 'edit_file
@@ -161,8 +161,10 @@
                    (inherited (ende-test--chat-config-at document "A")))
               (should (equal (plist-get configuration :groups)
                              (plist-get inherited :groups)))
-              (should (equal (plist-get inherited :active-tools) '(project_info)))
-              (should-not (plist-get configuration :active-tools))
+              (should (equal (plist-get inherited :active-tools)
+                             '(project_info about_thinking)))
+              (should (equal (plist-get configuration :active-tools)
+                             '(about_thinking)))
               (should-not (plist-get configuration :tool-resources)))))
       (delete-directory root t)
       (delete-directory child-root t))))
@@ -205,7 +207,7 @@
                    (redefined (ende-test--chat-config-at document "Redefined")))
               (should-not (plist-get rootless :root))
               (should (equal (plist-get rootless :active-tools)
-                             (list tool-name)))
+                             (list tool-name 'about_thinking)))
               (should (equal (cdr (assq tool-name
                                         (plist-get rootless :tool-resources)))
                              '(docs exception)))
@@ -326,10 +328,12 @@
                             "*** Add File: src/new.txt\n+created\n"
                             "*** Delete File: tmp/mixed.txt\n"
                             "*** End Patch\n")))
-               (should (equal (plist-get mixed :active-tools) '(apply_patch)))
+               (should (equal (plist-get mixed :active-tools)
+                              '(apply_patch about_thinking)))
                (should (equal (plist-get exposed :active-tools)
-                              '(apply_patch delete_file)))
-               (should (equal (plist-get hidden :active-tools) '(apply_patch)))
+                              '(apply_patch delete_file about_thinking)))
+               (should (equal (plist-get hidden :active-tools)
+                              '(apply_patch about_thinking)))
               (let ((result (ende-tool-call
                              'apply_patch (list :patch patch) root mixed)))
                 (should (plist-get result :ok))
@@ -416,7 +420,8 @@
                        (ende-test--chat-config-at
                         (ende-chat--build-document)
                         (org-get-heading t t t t))))
-                  (should (equal (plist-get configuration :active-tools) (cadr case)))
+                  (should (equal (plist-get configuration :active-tools)
+                                 (append (cadr case) '(about_thinking))))
                   (should (assq 'modify (plist-get configuration :groups)))
                   (should (assq 'unused (plist-get configuration :resources))))
                 (should (eq (ende-job-state (ende-ask)) 'completed))
@@ -425,7 +430,9 @@
                                         (alist-get :name (alist-get :function definition)))
                                       (plist-get options :tool-definitions))))
                   (should (equal (sort names #'string<)
-                                 (sort (mapcar #'symbol-name (cadr case)) #'string<))))))))
+                                 (sort (mapcar #'symbol-name
+                                               (append (cadr case) '(about_thinking)))
+                                       #'string<))))))))
       (ende-test--reset)
       (delete-directory root t))))
 
@@ -478,7 +485,8 @@
                           (ende-test--chat-config-at document (car case)))
                          (active (cadr case))
                          (allowed (caddr case)))
-                    (should (equal (plist-get configuration :active-tools) active))
+                    (should (equal (plist-get configuration :active-tools)
+                                   (append active '(about_thinking))))
                     (should (equal (cdr (assq 'inspect
                                               (plist-get configuration :groups)))
                                    active))
@@ -530,7 +538,7 @@
             (dolist (configuration (list replacement revoked))
               (should (equal (plist-get configuration :active-tools)
                              '(read_file list_project_files search_project
-                                         project_info read_buffer)))
+                                         project_info read_buffer about_thinking)))
               (let ((assignments (plist-get configuration :tool-resources)))
                 (should-not (assq 'file_info assignments))
                 (should (equal (cdr (assq 'search_project assignments)) '(direct)))
@@ -658,7 +666,7 @@
                                           expected)))
                          '(read_file file_info search_project) (cdr case))
                 (should (equal (plist-get replacement :active-tools)
-                               '(read_file file_info project_info)))
+                               '(read_file file_info project_info about_thinking)))
                 (dolist (tool '(read_file file_info))
                   (should (equal (cdr (assq tool (plist-get replacement :tool-resources)))
                                  (cadr case))))

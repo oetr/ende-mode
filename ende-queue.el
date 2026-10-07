@@ -29,7 +29,7 @@
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
-  tool-call-count)
+  tool-call-count activity-title activity-status activity-updated-at)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -167,9 +167,25 @@ state."
 (defvar ende-queue-abort-functions nil
   "Functions called after all queued jobs have been invalidated.")
 
+(defun ende-job-report-activity (job title status)
+  "Report validated TITLE and STATUS for the originating agent JOB.
+Return non-nil while JOB is current, including for an unchanged report.
+Stale reports do nothing.  Transport status and scheduler state are untouched."
+  (when (ende-job-current-p job)
+    (unless (and (equal title (ende-job-activity-title job))
+                 (equal status (ende-job-activity-status job)))
+      (ende-job-emit-event
+       job (list :type :agent-activity :title title :status status
+                 :updated-at (float-time))))
+    t))
+
 (defun ende-job-emit-event (job event)
   "Send EVENT for JOB to lifecycle observers without propagating failures."
   (pcase (plist-get event :type)
+    (:agent-activity
+     (setf (ende-job-activity-title job) (plist-get event :title)
+           (ende-job-activity-status job) (plist-get event :status)
+           (ende-job-activity-updated-at job) (plist-get event :updated-at)))
     (:status
      (when (stringp (plist-get event :status))
        (setf (ende-job-status job) (plist-get event :status))))

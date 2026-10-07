@@ -101,7 +101,7 @@
                                                            definition)))
                                              definitions)
                                      #'string<)
-                               '("list_project_files" "project_info"
+                               '("about_thinking" "list_project_files" "project_info"
                                  "read_file" "search_project")))
                 (should (equal (plist-get tool-reply :role) "tool"))
                 (should-not (string-match-p "classified"

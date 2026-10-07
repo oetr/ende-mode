@@ -1069,7 +1069,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                definitions)))
                     (should (equal fetched content))
                     (should fragmented)
-                   (should (equal names '("web_fetch")))
+                   (should (equal (sort names #'string<)
+                                  '("about_thinking" "web_fetch")))
                   (should (string-match-p "attacker\\.invalid" (buffer-string)))
                   (should-not
                    (cl-some (lambda (headline)
@@ -1088,7 +1089,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                   (should (equal before
                                  (ende-test--chat-config-at
                                   (ende-chat--build-document) "Question")))
-                  (should (equal (plist-get before :active-tools) '(web_fetch))))
+                  (should (equal (plist-get before :active-tools)
+                                 '(web_fetch about_thinking))))
                  (ende-test--complete-call (cadr ende-test--calls))
                  (should (eq (ende-job-state job) 'completed))
                  (should (string-match-p (regexp-quote reply)

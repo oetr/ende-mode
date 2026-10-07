@@ -399,6 +399,15 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
                               (format-time-string "%Y-%m-%d %H:%M:%S")))
               (ende-history--insert-section
                "Prompt" (ende-history--entry-prompt entry))
+              (when (ende-job-activity-title job)
+                (ende-history--insert-section
+                 "Last reported activity"
+                 (format "%s\n%s\nUpdated: %s"
+                         (ende-job-activity-title job)
+                         (ende-job-activity-status job)
+                         (format-time-string
+                          "%Y-%m-%d %H:%M:%S"
+                          (ende-job-activity-updated-at job)))))
               (ende-history--insert-section "Thinking" thinking)
               (ende-history--insert-section "Output" content)
               (ende-history--insert-section "Diagnostics" diagnostics)

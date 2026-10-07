@@ -7,8 +7,10 @@
 ;;; Commentary:
 
 ;; A provider-independent registry and implementation of project-scoped read
-;; tools, disk-file edits, and file creation.  Path-based tools use disk
-;; contents; buffer tools explicitly use visiting-buffer contents.
+;; tools, disk-file edits, file creation, and agent progress reporting.
+;; Path-based tools use disk contents; buffer tools explicitly use visiting-buffer
+;; contents.  about_thinking is always available, requires no project permissions,
+;; and reports public activity rather than provider reasoning traces.
 
 ;;; Code:
 
@@ -65,7 +67,8 @@
 
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
-  name description parameters handler resource-kind requires-root mutates-local async)
+  name description parameters handler resource-kind requires-root mutates-local async
+  always-available)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
@@ -79,6 +82,10 @@
 (defvar ende-tools--register-cancellation-function nil
   "Optional function used to attach and detach an active tool cancellation.")
 
+(defvar ende-tools--report-activity-function nil
+  "Job-scoped callback accepting an activity title and status paragraph.
+Return non-nil if the originating agent job still accepts reports.")
+
 (define-error 'ende-tool-mutation-failure "Ende mutation failed")
 
 (defun ende-tool-register
@@ -89,7 +96,9 @@ HANDLER receives an arguments object and a canonical project root.  NAME is a
 symbol internally and is exposed to model transports as a string.  Pass
 `:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
 the historic `:no-resource' registration form; OPTIONS may specify
-`:resource-kind' (`file', `url', or `none') and `:requires-root'."
+`:resource-kind' (`file', `url', or `none'), `:requires-root', `:async', and
+`:always-available'.  Always-available tools must be resource-free, rootless,
+and non-mutating; chat configuration cannot disable them."
   (unless (and (symbolp name) (functionp handler))
     (error "invalid ende tool registration: %s" name))
   (let* ((kind (or (plist-get options :resource-kind)
@@ -102,9 +111,15 @@ the historic `:no-resource' registration form; OPTIONS may specify
                 :handler handler :resource-kind kind
                 :requires-root requires-root
                 :async (eq (plist-get options :async) t)
+                :always-available (eq (plist-get options :always-available) t)
                 :mutates-local (eq read-only :write))))
     (unless (memq kind '(file url none))
       (error "invalid ende tool resource kind: %s" kind))
+    (when (and (ende-tool-always-available tool)
+               (or (not (eq kind 'none)) requires-root
+                   (ende-tool-mutates-local tool)))
+      (error "always-available tool must be resource-free and non-mutating: %s"
+             name))
     (setf (alist-get name ende-tools--registry) tool)
     tool))
 
@@ -119,6 +134,14 @@ the historic `:no-resource' registration form; OPTIONS may specify
           (lambda (entry)
             (string= name (symbol-name (car entry))))
 	  ende-tools--registry))))
+
+(defun ende-tool-active-names (configured)
+  "Return CONFIGURED names plus always-available tools, without duplicates.
+Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
+  (delete-dups
+   (append configured
+           (cl-loop for (name . tool) in ende-tools--registry
+                    when (ende-tool-always-available tool) collect name))))
 
 (defun ende-tool-definitions ()
   "Return registered tools in OpenAI-compatible function-tool shape."
@@ -138,16 +161,20 @@ the historic `:no-resource' registration form; OPTIONS may specify
          (assigned (cdr (assq tool-name
                               (plist-get access-config :tool-resources)))))
     (when access-config
-      (unless (memq tool-name (plist-get access-config :active-tools))
+      (unless (memq tool-name (ende-tool-active-names
+                              (plist-get access-config :active-tools)))
         (error "tool is not active in this chat: %s" tool-name))
       (when (and (not (eq kind 'none)) (null assigned))
         (error "tool has no assigned resources: %s" tool-name)))
     (when (and access-config root-required
                (null (plist-get access-config :root)))
       (error "chat tool configuration has no explicit root"))
-    (let ((root-value (or root
-                          (and access-config root-required
-                               (plist-get access-config :root)))))
+    (let ((root-value
+           ;; Mandatory activity tools must not depend on a configured project.
+           (unless (ende-tool-always-available tool)
+             (or root
+                 (and access-config root-required
+                      (plist-get access-config :root))))))
       (cond
        (root-value (ende-project-normalize-root root-value))
        (root-required (ende-project-root))
@@ -1690,6 +1717,39 @@ No visiting buffer or review state is involved in this operation."
          (ende-tools--web-url-permission normalized)))
      callback max-chars register-cancellation)))
 
+;;;; Agent activity
+
+(defconst ende-tools--activity-title-limit 120
+  "Maximum characters accepted for an agent activity title.")
+
+(defconst ende-tools--activity-status-limit 1000
+  "Maximum characters accepted for an agent activity paragraph.")
+
+(defun ende-tools--activity-text (arguments name limit &optional single-line)
+  "Validate activity argument NAME in ARGUMENTS, bounded by LIMIT.
+SINGLE-LINE disallows control characters, including newlines and tabs.
+Return trimmed plain text without text properties."
+  (let ((text (ende-tools--required-string arguments name)))
+    (when (string-blank-p text)
+      (error "%s must not be blank" name))
+    (when (> (length text) limit)
+      (error "%s exceeds %d characters" name limit))
+    (when (and single-line (string-match-p "[[:cntrl:]]" text))
+      (error "%s must be a single line without control characters" name))
+    (string-trim (substring-no-properties text))))
+
+(defun ende-tools--about-thinking (arguments _root)
+  "Report ARGUMENTS as the originating agent job's current activity."
+  (ende-tools--assert-properties arguments '("title" "status") "about_thinking")
+  (let ((title (ende-tools--activity-text
+                arguments "title" ende-tools--activity-title-limit t))
+        (status (ende-tools--activity-text
+                 arguments "status" ende-tools--activity-status-limit)))
+    (unless (and (functionp ende-tools--report-activity-function)
+                 (funcall ende-tools--report-activity-function title status))
+      (error "about_thinking requires an active agent session"))
+    (list :accepted t)))
+
 ;;;; Tool schemas and registrations
 
 (defconst ende-tools--empty-object-schema
@@ -1779,6 +1839,31 @@ No visiting buffer or review state is involved in this operation."
                       (cons :items ende-tools--edit-item-schema)))))
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
+
+(ende-tool-register
+ 'about_thinking
+ (concat "Update your user-visible progress report with a short title and "
+         "1-3 sentences. Use at the start of substantive work, before the "
+         "tools it describes, and when changing phases or encountering a "
+         "blocker. Report current actions and progress, not private reasoning; "
+         "avoid unchanged updates. Always available, without project permissions.")
+ (list
+  (cons :type "object")
+  (cons :properties
+        (list
+         (cons :title
+               (list (cons :type "string") (cons :minLength 1)
+                     (cons :maxLength ende-tools--activity-title-limit)
+                     (cons :description "Short, single-line activity title")))
+         (cons :status
+               (list (cons :type "string") (cons :minLength 1)
+                     (cons :maxLength ende-tools--activity-status-limit)
+                     (cons :description
+                           "1-3 sentences about current activity, progress, or a blocker")))))
+  (cons :required '("title" "status"))
+  (cons :additionalProperties :json-false))
+ #'ende-tools--about-thinking nil :no-resource
+ '(:requires-root nil :always-available t))
 
 (ende-tool-register
  'project_info

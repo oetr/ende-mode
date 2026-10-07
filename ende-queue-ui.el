@@ -243,7 +243,7 @@
 (defun ende-queue-ui--job-status (job state)
   "Return JOB's concise state/status label for STATE."
   (if (eq state 'running)
-      (or (ende-job-status job) "Running")
+      (or (ende-job-activity-title job) (ende-job-status job) "Running")
     (let* ((explanation (ende-job-explanation job))
            (blockers (plist-get explanation :blockers)))
       (if blockers
@@ -342,6 +342,19 @@
    (list 'ende-queue-ui-kind 'detail 'ende-queue-ui-owner owner
          'ende-queue-ui-job-id (and (ende-job-p owner) (ende-job-id owner)))))
 
+(defun ende-queue-ui--detail-paragraph (text owner)
+  "Render inert TEXT wrapped to the dashboard width as details for OWNER."
+  (let* ((width (max 20 (- (ende-queue-ui--window-width) 4)))
+         (lines
+          (with-temp-buffer
+            (insert (replace-regexp-in-string
+                     "[[:cntrl:]]+" " " (substring-no-properties text)))
+            (let ((fill-column width))
+              (fill-region (point-min) (point-max)))
+            (split-string (buffer-string) "\n" t))))
+    (dolist (line lines)
+      (ende-queue-ui--detail-line line owner))))
+
 (defun ende-queue-ui--job-details (job state)
   "Render non-redundant inert details for JOB in STATE."
   (let* ((profile (ende-job-profile job))
@@ -360,6 +373,16 @@
        (format "Model: %s%s" model
                (if effort (format " %s" effort) ""))
        job))
+    (when (and (eq state 'running) (ende-job-activity-title job))
+      (ende-queue-ui--detail-line
+       (format "Activity: %s (updated %s)"
+               (ende-job-activity-title job)
+               (format-time-string "%H:%M:%S"
+                                   (ende-job-activity-updated-at job)))
+       job)
+      (ende-queue-ui--detail-paragraph (ende-job-activity-status job) job)
+      (ende-queue-ui--detail-line
+       (format "Execution: %s" (or (ende-job-status job) "Running")) job))
     (when (and (eq state 'running)
                (eq (ende-job-type job) 'chat)
                (plist-member profile :tool-definitions))
