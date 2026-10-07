@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'ende-chat-test-helpers)
+(require 'ox-ascii)
 
 
 
@@ -884,8 +885,90 @@
              (let ((job (ende-ask)))
 	       (ende-test--complete-call (nth 0 ende-test--calls))
 	       (should (= (length ende-test--calls) 2))
+	       ;; The group starts closed while first-round results are appended.
+	       (let* ((document (ende-chat--build-document))
+	              (request-id
+	               (plist-get (ende-job-instruction job) :request-id))
+	              (work (ende-chat--request-work-section document request-id))
+	              (headlines (ende-chat--document-headlines document))
+	              (calls
+	               (cl-remove-if-not
+	                (lambda (headline)
+	                  (ende-chat--tool-call-protocol-p document headline))
+	                headlines))
+	              (results
+	               (cl-remove-if-not
+	                (lambda (headline)
+	                  (ende-chat--tool-result-protocol-p document headline))
+	                headlines)))
+	         (should work)
+	         (should (equal (org-element-property :tags work)
+	                        '("ignore" "noexport")))
+	         (should (= (length calls) 2))
+	         (should (= (length results) 2))
+	         (should (ende-test--chat-headline-text-hidden-p
+	                  work "--> read_file"))
+	         (ende-test--chat-goto "** Agent: Work")
+	         ;; Reveal child headings without opening their argument/output bodies.
+	         (org-fold-show-children)
+	         (dolist (headline (append calls results))
+	           (should-not
+	            (ende-test--chat-headline-text-hidden-p
+	             headline (org-element-property :raw-value headline))))
+	         (dolist (entry '(("call-A" . "{ \"path\" : \"foo.el\" }")
+	                          ("call-B" . "{\"path\":\"bar.el\"}")))
+	           (let ((call
+	                  (cl-find-if
+	                   (lambda (headline)
+	                     (equal (ende-chat--property
+	                             document headline :tool-call-id)
+	                            (car entry)))
+	                   calls)))
+	             (should (ende-test--chat-headline-text-hidden-p
+	                      call (cdr entry)))))
+	         (dolist (entry '(("call-A" . "FOO_SOURCE_TOKEN")
+	                          ("call-B" . "BAR_SOURCE_TOKEN")))
+	           (let ((result
+	                  (cl-find-if
+	                   (lambda (headline)
+	                     (equal (ende-chat--property
+	                             document headline :tool-call-id)
+	                            (car entry)))
+	                   results)))
+	             (should (ende-test--chat-headline-text-hidden-p
+	                      result (cdr entry))))))
 	       (ende-test--complete-call (nth 1 ende-test--calls))
 	       (should (= (length ende-test--calls) 3))
+	       ;; The later round appends under the user's expanded Work section.
+	       (let* ((document (ende-chat--build-document))
+	              (request-id
+	               (plist-get (ende-job-instruction job) :request-id))
+	              (work (ende-chat--request-work-section document request-id))
+	              (call
+	               (cl-find-if
+	                (lambda (headline)
+	                  (equal (ende-chat--property
+	                          document headline :tool-call-id)
+	                         "call-C"))
+	                (ende-chat--document-headlines document)))
+	              (result
+	               (cl-find-if
+	                (lambda (headline)
+	                  (and (ende-chat--tool-result-protocol-p document headline)
+	                       (equal (ende-chat--property
+	                               document headline :tool-call-id)
+	                              "call-C")))
+	                (ende-chat--document-headlines document))))
+	         (should work)
+	         (should call)
+	         (should result)
+	         (should-not
+	          (ende-test--chat-headline-text-hidden-p
+	           call (org-element-property :raw-value call)))
+	         (should (ende-test--chat-headline-text-hidden-p
+	                  call "{\"path\":\"baz.el\"}"))
+	         (should (ende-test--chat-headline-text-hidden-p
+	                  result "BAZ_SOURCE_TOKEN")))
 	       (ende-test--complete-call (nth 2 ende-test--calls))
 	       (should (eq (ende-job-state job) 'completed)))
              (ende-test--chat-goto "** Follow-up")
@@ -939,6 +1022,13 @@
                           (org-element-property :level reply)))
 	       (should (< (org-element-property :begin work)
                           (org-element-property :begin reply)))
+	       (should-not
+	        (ende-test--chat-headline-text-hidden-p work "--> read_file"))
+	       (let ((export (org-export-as 'ascii)))
+	         (should-not (string-match-p "--> read_file" export))
+	         (should-not (string-match-p "FOO_SOURCE_TOKEN" export))
+	         (should
+	          (string-match-p "Final answer about the source" export)))
 	       (should
                 (eq reply
                     (cadr (memq work

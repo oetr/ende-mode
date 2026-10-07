@@ -30,10 +30,14 @@
 ;;;; Org-backed chat
 
 (defun ende-test--chat-goto (heading)
-  "Move point to the Org headline whose exact text is HEADING."
+  "Move point to the Org headline HEADING, ignoring trailing tags."
   (goto-char (point-min))
-  (search-forward (concat heading "\n"))
-  (org-back-to-heading t))
+  (let ((regexp
+         (concat "^" (regexp-quote heading)
+                 "\\(?:[ \t]+:[-[:alnum:]_@#%:]+:\\)?[ \t]*$")))
+    (unless (re-search-forward regexp nil t)
+      (error "No Org headline matching %s" heading))
+    (org-back-to-heading t)))
 
 (defun ende-test--chat-context-text (messages)
   "Return all serialized chat message text in MESSAGES."

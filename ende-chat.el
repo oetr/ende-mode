@@ -1785,13 +1785,28 @@ COMPACT selects the context-fence title."
 
 (defun ende-chat--work-text (level question-id request-id)
   "Return a pending generated Agent: Work container at LEVEL."
-  (concat (make-string level ?*) " " ende-chat--work-title "\n"
+  (concat (make-string level ?*) " " ende-chat--work-title
+          " :ignore:noexport:\n"
           ":PROPERTIES:\n"
           (ende-chat--response-property ende-chat-work-property "t")
           (ende-chat--response-property ende-chat-reply-to-property question-id)
           (ende-chat--response-property ende-chat-request-id-property request-id)
           (ende-chat--response-property ende-chat-state-property "pending")
           ":END:\n\n"))
+
+(defun ende-chat--subtree-folded-p (position)
+  "Return non-nil when the headline at POSITION has a folded subtree."
+  (save-excursion
+    (goto-char position)
+    (org-back-to-heading t)
+    (org-end-of-meta-data t)
+    (let ((contents-start (point)))
+      ;; An ancestor fold also hides this position; only this heading's own
+      ;; outline overlay starts here.
+      (and (org-fold-folded-p contents-start 'org-fold-outline)
+           (cl-some (lambda (overlay)
+                      (= (overlay-start overlay) contents-start))
+                    (overlays-at contents-start))))))
 
 (defun ende-chat--reply-sibling-p (document headline question-id)
   "Return non-nil when HEADLINE is an Ende reply to QUESTION-ID."
@@ -2041,10 +2056,24 @@ COMPACT always places a same-level context-fence sibling."
     (when-let* ((marker (plist-get information property)))
       (set-marker marker nil))))
 
+(defun ende-chat--hide-tool-call-subtrees-in-region (begin end)
+  "Fold generated tool-call subtrees in complete sections BEGIN..END."
+  (when (derived-mode-p 'org-mode)
+    (let* ((document (ende-chat--build-document-in-region begin end))
+           (calls (cl-remove-if-not
+                   (lambda (headline)
+                     (ende-chat--tool-call-protocol-p document headline))
+                   (ende-chat--document-headlines document))))
+      (save-excursion
+        (dolist (call calls)
+          (goto-char (org-element-property :begin call))
+          (org-fold-hide-subtree))))))
+
 (defun ende-chat--persist-request-section (job text &optional fold protocol final)
   "Persist TEXT after JOB's protocol sections or replace its placeholder.
-FOLD folds an inserted section.  PROTOCOL creates a work container for tool
-messages; FINAL places the terminal assistant reply after that container."
+FOLD folds an inserted section.  PROTOCOL creates a work container and folds
+new tool calls; a new container starts folded, while later inserts preserve its
+current fold state.  FINAL places the terminal assistant reply after it."
   (let* ((instruction (ende-job-instruction job))
          (request-id (plist-get instruction :request-id))
          (question-id (plist-get instruction :question-id))
@@ -2054,6 +2083,9 @@ messages; FINAL places the terminal assistant reply after that container."
          (request-end-marker (plist-get instruction :request-end-marker))
          (inserted-marker nil)
          (inserted-end-marker nil)
+         (work-fold-marker nil)
+         (work-was-folded nil)
+         (created-work nil)
          (work-start-marker nil)
          (work-end-marker nil)
          (reply-marker nil)
@@ -2090,6 +2122,13 @@ messages; FINAL places the terminal assistant reply after that container."
                       (error "Chat response destination was edited or moved"))
                     (when (and work (not (eq work anchor)))
                       (error "Chat request pending marker is not its Agent: Work section"))
+                    (when work
+                      (setq work-fold-marker
+                            (copy-marker (org-element-property :begin work))
+                            work-was-folded
+                            (and (derived-mode-p 'org-mode)
+                                 (ende-chat--subtree-folded-p
+                                  work-fold-marker))))
                     (when (and final work)
                       (setq work-start-marker
                             (copy-marker
@@ -2110,6 +2149,8 @@ messages; FINAL places the terminal assistant reply after that container."
                         (delete-region begin end)
                         (goto-char begin)
                         (setq inserted-marker (copy-marker (point)))
+                        (setq work-fold-marker (copy-marker (point))
+                              created-work t)
                         (insert (ende-chat--work-text
                                  anchor-level question-id request-id))
                         (insert text)
@@ -2236,6 +2277,19 @@ messages; FINAL places the terminal assistant reply after that container."
                     (when (and fold (derived-mode-p 'org-mode))
                       (goto-char (marker-position inserted-marker))
                       (org-fold-hide-subtree))
+                    (when (and protocol (not final)
+                               (derived-mode-p 'org-mode))
+                      (ende-chat--hide-tool-call-subtrees-in-region
+                       inserted-marker inserted-end-marker))
+                    (when (and work-fold-marker
+                               (derived-mode-p 'org-mode)
+                               (or created-work work-was-folded)
+                               (not (ende-chat--subtree-folded-p
+                                     work-fold-marker)))
+                      ;; Fold new work once; on later inserts restore only a
+                      ;; fold that was already present before the insertion.
+                      (goto-char work-fold-marker)
+                      (org-fold-hide-subtree))
                     (if final
                         (progn
                           (set-marker destination-marker
@@ -2254,6 +2308,8 @@ messages; FINAL places the terminal assistant reply after that container."
           (set-marker inserted-marker nil))
         (when inserted-end-marker
           (set-marker inserted-end-marker nil))
+        (when work-fold-marker
+          (set-marker work-fold-marker nil))
         (when work-start-marker
           (set-marker work-start-marker nil))
         (when work-end-marker
