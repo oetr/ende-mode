@@ -47,7 +47,7 @@ When nil, an active stream has no total wall-clock deadline."
                  (number :tag "Maximum seconds"))
   :group 'ende)
 
-(defcustom ende-response-idle-timeout 60
+(defcustom ende-response-idle-timeout 120
   "Maximum seconds without response-body data before a request fails.
 
 The wait starts when the curl process starts and resets on each nonempty
