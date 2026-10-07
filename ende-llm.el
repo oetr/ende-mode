@@ -39,59 +39,57 @@ normalized :tool-calls for the chat tool loop.")
 ;;;; Client implementation
 
 (cl-defstruct (ende-llm--session
-               (:constructor ende-llm--make-session))
+               (:constructor ende-llm--allocate-session))
   "State owned by one asynchronous LLM transport request."
-  profile callbacks lifecycle discovery-cancel model messages json-data process process-buffer stderr-buffer
-  stderr-process
-  headers-file config-file sse reasoning content-parts thinking-parts usage
+  profile lifecycle discovery-cancel model messages json-data sse reasoning
+  content-parts thinking-parts usage
   tool-calls
   provider-error actual-model actual-provider estimated-chars received-bytes
   response-preview response-preview-parts response-preview-bytes finish-reason
-  generation-start last-status last-usage-update terminal)
+  generation-start last-status last-usage-update)
+
+(defun ende-llm--make-session (&rest arguments)
+  "Create a Chat Completions session from protocol ARGUMENTS.
+The :callbacks argument initializes the composed transport lifecycle."
+  (let* ((callbacks (plist-get arguments :callbacks))
+         (session
+          (apply #'ende-llm--allocate-session
+                 (cl-loop for (key value) on arguments by #'cddr
+                          unless (eq key :callbacks)
+                          append (list key value)))))
+    (setf (ende-llm--session-lifecycle session)
+          (ende-transport-session-create
+           callbacks (apply-partially #'ende-llm--fail session)))
+    session))
 
 (defun ende-llm--lifecycle (session)
-  "Return the shared lifecycle object for SESSION, creating it if needed."
-  (or (ende-llm--session-lifecycle session)
-      (let ((lifecycle
-             (ende-transport-session-create
-              (ende-llm--session-callbacks session)
-              (apply-partially #'ende-llm--fail session))))
-        (ende-transport-session-set-resources
-         lifecycle
-         (list :process (ende-llm--session-process session)
-               :response-buffer (ende-llm--session-process-buffer session)
-               :stderr-buffer (ende-llm--session-stderr-buffer session)
-               :stderr-process (ende-llm--session-stderr-process session)
-               :headers-file (ende-llm--session-headers-file session)
-               :config-file (ende-llm--session-config-file session)))
-        (setf (ende-llm--session-lifecycle session) lifecycle))))
+  "Return the composed transport lifecycle for SESSION."
+  (ende-llm--session-lifecycle session))
+
+(defun ende-llm--terminal-p (session)
+  "Return non-nil when SESSION's transport has settled."
+  (ende-transport-session-terminal (ende-llm--lifecycle session)))
 
 (defun ende-llm--invoke-callback (session name &rest arguments)
   "Invoke callback NAME for SESSION with ARGUMENTS safely."
   (apply #'ende-transport-session-invoke
          (ende-llm--lifecycle session) name arguments))
 
+(defun ende-llm--cancel-discovery-waiter (session)
+  "Cancel SESSION's discovery waiter without disturbing other callers."
+  (let ((cancel (ende-llm--session-discovery-cancel session)))
+    (setf (ende-llm--session-discovery-cancel session) nil)
+    (when cancel (ende-ignore-errors cancel))))
+
 (defun ende-llm--cleanup-session (session)
-  "Release all process resources owned by SESSION."
-  (when (ende-llm--session-lifecycle session)
-    (ende-transport-session-cleanup
-     (ende-llm--session-lifecycle session)))
-  (setf (ende-llm--session-process session) nil
-        (ende-llm--session-process-buffer session) nil
-        (ende-llm--session-stderr-buffer session) nil
-        (ende-llm--session-stderr-process session) nil
-        (ende-llm--session-headers-file session) nil
-        (ende-llm--session-config-file session) nil
-        (ende-llm--session-lifecycle session) nil))
+  "Cancel auxiliary waiters and clean resources owned by SESSION."
+  (ende-llm--cancel-discovery-waiter session)
+  (ende-transport-session-cleanup (ende-llm--lifecycle session)))
 
 (defun ende-llm--settle (session outcome value)
   "Settle SESSION exactly once with OUTCOME and VALUE."
-  (unless (ende-llm--session-terminal session)
-    (setf (ende-llm--session-terminal session) outcome)
-    (let ((cancel (ende-llm--session-discovery-cancel session)))
-      (setf (ende-llm--session-discovery-cancel session) nil)
-      (when cancel
-        (ende-ignore-errors cancel)))
+  (unless (ende-llm--terminal-p session)
+    (ende-llm--cancel-discovery-waiter session)
     (unwind-protect
         (ende-transport-session-settle
          (ende-llm--lifecycle session)
@@ -101,8 +99,7 @@ normalized :tool-calls for the chat tool loop.")
                    (ende-llm--session-usage session)
                    (ende-llm--session-finish-reason session))
            (ende-llm--result session)))
-      (ende-llm--cleanup-session session)
-      (setf (ende-llm--session-callbacks session) nil))))
+      (ende-llm--cleanup-session session))))
 
 (defun ende-llm--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -115,7 +112,7 @@ normalized :tool-calls for the chat tool loop.")
 
 (defun ende-llm--emit-event (session event)
   "Emit EVENT for SESSION unless it has settled."
-  (unless (ende-llm--session-terminal session)
+  (unless (ende-llm--terminal-p session)
     (ende-llm--invoke-callback session :on-event event)))
 
 (defun ende-llm--emit-diagnostic (session text)
@@ -165,7 +162,7 @@ normalized :tool-calls for the chat tool loop.")
 
 (defun ende-llm--emit-delta (session channel text)
   "Record and emit nonempty TEXT on CHANNEL for SESSION."
-  (when (and (not (ende-llm--session-terminal session))
+  (when (and (not (ende-llm--terminal-p session))
              (stringp text) (> (length text) 0))
     (if (and ende-max-output-chars
              (> (+ (ende-llm--session-estimated-chars session) (length text))
@@ -184,7 +181,7 @@ normalized :tool-calls for the chat tool loop.")
       (ende-llm--emit-event
        session (list :type :delta :channel channel :text text))
       (let ((now (float-time)))
-        (when (and (not (ende-llm--session-terminal session))
+        (when (and (not (ende-llm--terminal-p session))
                    (or (null (ende-llm--session-last-usage-update session))
                        (>= (- now
                               (ende-llm--session-last-usage-update session))
@@ -210,7 +207,8 @@ normalized :tool-calls for the chat tool loop.")
   "Return SESSION's HTTP response status, or nil."
   (condition-case nil
       (car (ende-curl-response-headers
-            (ende-llm--session-headers-file session)))
+            (ende-transport-session-headers-file
+             (ende-llm--lifecycle session))))
     (error nil)))
 
 (defun ende-llm--handle-provider-error (session json-error)
@@ -352,7 +350,7 @@ normalized :tool-calls for the chat tool loop.")
       (ende-llm--handle-provider-error
        session (ende-protocol-json-get "error" json))
     (ende-llm--handle-metadata session json)
-    (unless (ende-llm--session-terminal session)
+    (unless (ende-llm--terminal-p session)
       (let* ((event (ende-llm--response-event json))
              (finish-reason (plist-get event :finish-reason))
              (reasoning (plist-get event :reasoning))
@@ -364,11 +362,11 @@ normalized :tool-calls for the chat tool loop.")
           (setf (ende-llm--session-finish-reason session) finish-reason))
         (ende-llm--handle-usage
          session (ende-protocol-json-get "usage" json))
-        (when (and (not (ende-llm--session-terminal session))
+        (when (and (not (ende-llm--terminal-p session))
                    (stringp reasoning) (> (length reasoning) 0))
           (ende-llm--emit-status session "Thinking")
           (ende-llm--emit-delta session :thinking reasoning))
-        (when (and (not (ende-llm--session-terminal session))
+        (when (and (not (ende-llm--terminal-p session))
                    (stringp content) (> (length content) 0))
           (ende-protocol-reasoning-feed
            (ende-llm--session-reasoning session) content
@@ -377,7 +375,7 @@ normalized :tool-calls for the chat tool loop.")
 (defun ende-llm--handle-events (session events)
   "Handle parsed SSE EVENTS for SESSION."
   (dolist (event events)
-    (unless (ende-llm--session-terminal session)
+    (unless (ende-llm--terminal-p session)
       (pcase (plist-get event :type)
         (:done (ende-llm--finish-success session))
         (:json (ende-llm--handle-json session (plist-get event :value)))))))
@@ -421,15 +419,16 @@ normalized :tool-calls for the chat tool loop.")
        (ende-error-create
         :kind 'unsupported
         :message "Tool calls are unavailable with the OpenRouter batch transport"))
-    (let ((callbacks (ende-llm--session-callbacks session))
+    (let ((callbacks
+           (ende-transport-session-callbacks (ende-llm--lifecycle session)))
           (profile (copy-tree (ende-llm--session-profile session)))
           (messages (ende-llm--session-messages session)))
       (setq profile (plist-put profile :transport 'openrouter-batch))
       (condition-case caught
-          (progn
-            (ende-openrouter-batch-default messages callbacks profile)
-            (setf (ende-llm--session-terminal session) 'handoff)
-            (ende-llm--cleanup-session session))
+        (progn
+          (ende-openrouter-batch-default messages callbacks profile)
+          (ende-transport-session-transfer (ende-llm--lifecycle session))
+          (ende-llm--cleanup-session session))
         ((error quit)
          (ende-llm--fail
           session
@@ -438,10 +437,11 @@ normalized :tool-calls for the chat tool loop.")
 
 (defun ende-llm--finish-success (session)
   "Validate and successfully finish SESSION, or settle it with an error."
-  (unless (ende-llm--session-terminal session)
+  (unless (ende-llm--terminal-p session)
     (condition-case finish-error
         (let* ((headers (ende-curl-response-headers
-                         (ende-llm--session-headers-file session)))
+                         (ende-transport-session-headers-file
+                          (ende-llm--lifecycle session))))
                (status (car headers))
                (content-type (cdr headers))
                (detail (and (or (null status) (< status 200) (>= status 300))
@@ -476,7 +476,7 @@ normalized :tool-calls for the chat tool loop.")
              session
              (ende-protocol-sse-finish
               (ende-llm--session-sse session)))
-            (unless (ende-llm--session-terminal session)
+            (unless (ende-llm--terminal-p session)
               (let ((reasoning-error
                      (ende-protocol-reasoning-finish
                       (ende-llm--session-reasoning session)
@@ -500,7 +500,9 @@ normalized :tool-calls for the chat tool loop.")
 (defun ende-llm--finish-process-error (session process event)
   "Settle SESSION for failed PROCESS with sentinel EVENT."
   (let ((status (process-exit-status process))
-        (stderr-buffer (ende-llm--session-stderr-buffer session)))
+        (stderr-buffer
+         (ende-transport-session-stderr-buffer
+          (ende-llm--lifecycle session))))
     (ende-llm--fail
      session
      (ende-error-create
@@ -541,7 +543,7 @@ normalized :tool-calls for the chat tool loop.")
 
 (defun ende-llm--process-filter (session _process chunk)
   "Consume one curl output CHUNK for SESSION."
-  (unless (ende-llm--session-terminal session)
+  (unless (ende-llm--terminal-p session)
     (let* ((received (ende-llm--session-received-bytes session))
            (chunk-bytes (string-bytes chunk))
            (total (+ received chunk-bytes))
@@ -574,7 +576,7 @@ normalized :tool-calls for the chat tool loop.")
                                (error-message-string filter-error))))))
       (when (and ende-max-response-bytes
                  (> total ende-max-response-bytes)
-                 (not (ende-llm--session-terminal session)))
+                 (not (ende-llm--terminal-p session)))
         (ende-llm--fail
          session
          (ende-error-create
@@ -583,7 +585,7 @@ normalized :tool-calls for the chat tool loop.")
 
 (defun ende-llm--process-sentinel (session process event)
   "Handle PROCESS terminal EVENT for SESSION."
-  (when (and (not (ende-llm--session-terminal session))
+  (when (and (not (ende-llm--terminal-p session))
              (memq (process-status process) '(exit signal closed)))
     (cond
      ((process-get process :ende-idle-error)
@@ -663,32 +665,22 @@ normalized :tool-calls for the chat tool loop.")
                         profile headers-file config-file))
             :filter (apply-partially #'ende-llm--process-filter session)
             :sentinel (apply-partially #'ende-llm--process-sentinel session))))
-      (setf (ende-llm--session-process session)
-            (plist-get request :process)
-            (ende-llm--session-process-buffer session)
-            (plist-get request :response-buffer)
-            (ende-llm--session-stderr-buffer session)
-            (plist-get request :stderr-buffer)
-            (ende-llm--session-stderr-process session)
-            (plist-get request :stderr-process)
-            (ende-llm--session-headers-file session)
-            (plist-get request :headers-file)
-            (ende-llm--session-config-file session)
-            (plist-get request :config-file))
       (ende-transport-session-set-resources
        (ende-llm--lifecycle session) request))
     (ende-llm--invoke-callback
      session :on-start (apply-partially #'ende-llm--cancel session))
     (ende-llm--diagnose-request session request-body)
-    (when (and (not (ende-llm--session-terminal session))
+    (when (and (not (ende-llm--terminal-p session))
                ende-provider-discovery-enabled)
       (setf (ende-llm--session-discovery-cancel session)
             (ende-provider-discover
              profile (apply-partially #'ende-llm--discovery-result session))))
-    (unless (ende-llm--session-terminal session)
-      (process-send-string (ende-llm--session-process session)
-                           (ende-llm--session-json-data session))
-      (process-send-eof (ende-llm--session-process session)))))
+    (unless (ende-llm--terminal-p session)
+      (process-send-string
+       (ende-transport-session-process (ende-llm--lifecycle session))
+       (ende-llm--session-json-data session))
+      (process-send-eof
+       (ende-transport-session-process (ende-llm--lifecycle session))))))
 
 (defun ende-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
@@ -717,7 +709,8 @@ normalized :tool-calls for the chat tool loop.")
           session
           (ende-error-create :kind 'startup
                              :message (error-message-string startup-error)))))
-      (ende-llm--session-process session)))))
+      (ende-transport-session-process
+       (ende-llm--lifecycle session))))))
 
 (provide 'ende-llm)
 

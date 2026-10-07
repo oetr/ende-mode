@@ -142,19 +142,26 @@
         (config-file (make-temp-file "ende-test-codex-config-")))
     (let ((session
            (ende-codex--make-session
-            :callbacks nil
-            :process-buffer process-buffer
-            :stderr-buffer stderr-buffer
-            :headers-file headers-file
-            :config-file config-file)))
+            :callbacks nil)))
+      (ende-transport-session-set-resources
+       (ende-codex--lifecycle session)
+       (list :response-buffer process-buffer
+             :stderr-buffer stderr-buffer
+             :headers-file headers-file :config-file config-file))
       (ende-codex--fail
        session (ende-error-create :kind 'transport :message "failed"))
-      (should-not (ende-codex--session-process session))
-      (should-not (ende-codex--session-process-buffer session))
-      (should-not (ende-codex--session-stderr-buffer session))
-      (should-not (ende-codex--session-stderr-process session))
-      (should-not (ende-codex--session-headers-file session))
-      (should-not (ende-codex--session-config-file session))
+      (should-not (ende-transport-session-process
+                   (ende-codex--lifecycle session)))
+      (should-not (ende-transport-session-process-buffer
+                   (ende-codex--lifecycle session)))
+      (should-not (ende-transport-session-stderr-buffer
+                   (ende-codex--lifecycle session)))
+      (should-not (ende-transport-session-stderr-process
+                   (ende-codex--lifecycle session)))
+      (should-not (ende-transport-session-headers-file
+                   (ende-codex--lifecycle session)))
+      (should-not (ende-transport-session-config-file
+                   (ende-codex--lifecycle session)))
       (should-not (buffer-live-p process-buffer))
       (should-not (buffer-live-p stderr-buffer))
       (should-not (file-exists-p headers-file))
@@ -361,12 +368,14 @@
         (progn
           (with-temp-file headers-file
             (insert "HTTP/1.1 400 Bad Request\r\n\r\n"))
-          (let* ((session
-                  (ende-codex--make-session
-                   :headers-file headers-file
-                   :preview-parts '("{\"detail\":\"invalid request body\"}")))
-                 (error (ende-codex--http-error session)))
-            (should (string= (ende-error-message error)
+          (let ((session
+                 (ende-codex--make-session
+                  :preview-parts '("{\"detail\":\"invalid request body\"}"))))
+            (ende-transport-session-set-resources
+             (ende-codex--lifecycle session)
+             (list :headers-file headers-file))
+            (should (string= (ende-error-message
+                              (ende-codex--http-error session))
                              "HTTP status 400: invalid request body"))))
       (when (file-exists-p headers-file)
         (delete-file headers-file)))))
@@ -474,8 +483,6 @@
         (let ((session
                (ende-codex--make-session
                 :profile '(:model "gpt-test")
-                :process process
-                :headers-file headers-file
                 :callbacks
                 (list :on-event (lambda (event) (push event events))
                       :on-done (lambda (value) (setq result value))
@@ -484,6 +491,9 @@
                 :estimated-chars 0
                 :received-bytes 0
                 :preview-bytes 0)))
+          (ende-transport-session-set-resources
+           (ende-codex--lifecycle session)
+           (list :process process :headers-file headers-file))
           (with-temp-file headers-file
             (insert "HTTP/2 200\r\nContent-Type: application/json\r\n\r\n"))
           (ende-codex--filter
@@ -523,14 +533,15 @@
         (let ((session
                (ende-codex--make-session
                 :profile '(:model "gpt-test")
-                :process process
-                :headers-file headers-file
                 :callbacks (list :on-error
                                  (lambda (error) (setq failure error)))
                 :sse (ende-protocol-make-sse)
                 :estimated-chars 0
                 :received-bytes 0
                 :preview-bytes 0)))
+          (ende-transport-session-set-resources
+           (ende-codex--lifecycle session)
+           (list :process process :headers-file headers-file))
           (with-temp-file headers-file
             (insert "HTTP/2 200\r\n\r\n"))
           (ende-codex--filter session process "data: [DONE]\n\n")
@@ -741,7 +752,8 @@
     (should (string= (plist-get result :model) "gpt-actual"))
     (should (= (plist-get result :tokens) 7))
     (should (ende-codex--session-terminal-event session))
-    (should-not (ende-codex--session-terminal session))))
+    (should-not (ende-transport-session-terminal
+                 (ende-codex--lifecycle session)))))
 
 (ert-deftest ende-test/codex-effort-probe-uses-selected-model-capabilities ()
   (let ((calls 0)

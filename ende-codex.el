@@ -106,29 +106,32 @@
   "In-flight ChatGPT/Codex quota discovery processes.")
 
 (cl-defstruct (ende-codex--session
-               (:constructor ende-codex--make-session))
-  profile callbacks lifecycle process process-buffer stderr-buffer stderr-process
-  headers-file
-  config-file auth-cancel sse content-parts thinking-parts usage actual-model
+               (:constructor ende-codex--allocate-session))
+  profile lifecycle auth-cancel sse content-parts thinking-parts usage actual-model
   tool-calls actual-provider finish-reason estimated-chars received-bytes preview-parts
-  preview-bytes generation-start terminal terminal-event cancelled)
+  preview-bytes generation-start terminal-event cancelled)
+
+(defun ende-codex--make-session (&rest arguments)
+  "Create a Codex protocol session from ARGUMENTS.
+The :callbacks argument initializes the composed transport lifecycle."
+  (let* ((callbacks (plist-get arguments :callbacks))
+         (session
+          (apply #'ende-codex--allocate-session
+                 (cl-loop for (key value) on arguments by #'cddr
+                          unless (eq key :callbacks)
+                          append (list key value)))))
+    (setf (ende-codex--session-lifecycle session)
+          (ende-transport-session-create
+           callbacks (apply-partially #'ende-codex--fail session)))
+    session))
 
 (defun ende-codex--lifecycle (session)
-  "Return the shared lifecycle object for SESSION, creating it if needed."
-  (or (ende-codex--session-lifecycle session)
-      (let ((lifecycle
-             (ende-transport-session-create
-              (ende-codex--session-callbacks session)
-              (apply-partially #'ende-codex--fail session))))
-        (ende-transport-session-set-resources
-         lifecycle
-         (list :process (ende-codex--session-process session)
-               :response-buffer (ende-codex--session-process-buffer session)
-               :stderr-buffer (ende-codex--session-stderr-buffer session)
-               :stderr-process (ende-codex--session-stderr-process session)
-               :headers-file (ende-codex--session-headers-file session)
-               :config-file (ende-codex--session-config-file session)))
-        (setf (ende-codex--session-lifecycle session) lifecycle))))
+  "Return the composed transport lifecycle for SESSION."
+  (ende-codex--session-lifecycle session))
+
+(defun ende-codex--terminal-p (session)
+  "Return non-nil when SESSION's transport has settled."
+  (ende-transport-session-terminal (ende-codex--lifecycle session)))
 
 ;;;; Credential handling
 
@@ -956,19 +959,16 @@ is queried for every call; it does not share the model catalog cache."
   (apply #'ende-transport-session-invoke
          (ende-codex--lifecycle session) name arguments))
 
+(defun ende-codex--cancel-auth-waiter (session)
+  "Cancel SESSION's OAuth waiter without disturbing other callers."
+  (let ((cancel (ende-codex--session-auth-cancel session)))
+    (setf (ende-codex--session-auth-cancel session) nil)
+    (when cancel (ende-ignore-errors cancel))))
+
 (defun ende-codex--cleanup (session)
   "Release resources owned by SESSION."
-  (when (ende-codex--session-lifecycle session)
-    (ende-transport-session-cleanup
-     (ende-codex--session-lifecycle session)))
-  (setf (ende-codex--session-process session) nil
-        (ende-codex--session-process-buffer session) nil
-        (ende-codex--session-stderr-buffer session) nil
-        (ende-codex--session-stderr-process session) nil
-        (ende-codex--session-headers-file session) nil
-        (ende-codex--session-config-file session) nil
-        (ende-codex--session-auth-cancel session) nil
-        (ende-codex--session-lifecycle session) nil))
+  (ende-codex--cancel-auth-waiter session)
+  (ende-transport-session-cleanup (ende-codex--lifecycle session)))
 
 (defun ende-codex--tool-call-list (session)
   "Return collected function calls from SESSION in output order."
@@ -1010,8 +1010,8 @@ is queried for every call; it does not share the model catalog cache."
 
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
-  (unless (ende-codex--session-terminal session)
-    (setf (ende-codex--session-terminal session) outcome)
+  (unless (ende-codex--terminal-p session)
+    (ende-codex--cancel-auth-waiter session)
     (unwind-protect
         (ende-transport-session-settle
          (ende-codex--lifecycle session)
@@ -1021,8 +1021,7 @@ is queried for every call; it does not share the model catalog cache."
                    (ende-codex--session-usage session)
                    (ende-codex--tool-call-list session))
            (ende-codex--result session)))
-      (ende-codex--cleanup session)
-      (setf (ende-codex--session-callbacks session) nil))))
+      (ende-codex--cleanup session))))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -1031,21 +1030,18 @@ is queried for every call; it does not share the model catalog cache."
 (defun ende-codex--cancel (session)
   "Cancel SESSION."
   (setf (ende-codex--session-cancelled session) t)
-  (let ((cancel (ende-codex--session-auth-cancel session)))
-    (setf (ende-codex--session-auth-cancel session) nil)
-    (when cancel (funcall cancel)))
   (ende-codex--fail
    session (ende-error-create :kind 'cancelled :message "Process cancelled")))
 
 (defun ende-codex--emit (session event)
   "Emit EVENT unless SESSION has settled."
-  (unless (ende-codex--session-terminal session)
+  (unless (ende-codex--terminal-p session)
     (ende-codex--invoke-callback session :on-event event)))
 
 (defun ende-codex--emit-delta (session channel text)
   "Record and emit TEXT on CHANNEL."
   (when (and (stringp text) (> (length text) 0)
-             (not (ende-codex--session-terminal session)))
+             (not (ende-codex--terminal-p session)))
     (if (and ende-max-output-chars
              (> (+ (ende-codex--session-estimated-chars session)
                    (length text))
@@ -1276,7 +1272,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
   "Return a structured HTTP error for SESSION."
   (let* ((status (condition-case nil
                      (car (ende-curl-response-headers
-                           (ende-codex--session-headers-file session)))
+                           (ende-transport-session-headers-file
+                            (ende-codex--lifecycle session))))
                    (error nil)))
          (preview (ende-codex--preview-text session))
          (detail (ende-transport-error-detail preview)))
@@ -1291,7 +1288,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--filter (session _process chunk)
   "Consume curl output CHUNK for SESSION."
-  (unless (ende-codex--session-terminal session)
+  (unless (ende-codex--terminal-p session)
     (let* ((received (ende-codex--session-received-bytes session))
            (chunk-bytes (string-bytes chunk))
            (total (+ received chunk-bytes))
@@ -1308,7 +1305,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
             (dolist (event
                      (ende-protocol-sse-feed
                       (ende-codex--session-sse session) processable))
-              (unless (ende-codex--session-terminal session)
+              (unless (ende-codex--terminal-p session)
                 (when (eq (plist-get event :type) :json)
                   (ende-codex--handle-event
                    session (plist-get event :value))))))
@@ -1319,7 +1316,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                              :message (error-message-string filter-error)))))
       (when (and ende-max-response-bytes
                  (> total ende-max-response-bytes)
-                 (not (ende-codex--session-terminal session)))
+                 (not (ende-codex--terminal-p session)))
         (ende-codex--fail
          session
          (ende-error-create
@@ -1328,7 +1325,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--sentinel (session process event)
   "Handle terminal PROCESS EVENT for SESSION."
-  (when (and (not (ende-codex--session-terminal session))
+  (when (and (not (ende-codex--terminal-p session))
              (memq (process-status process) '(exit signal closed)))
     (if (/= (process-exit-status process) 0)
         (ende-codex--fail
@@ -1342,7 +1339,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (condition-case finish-error
           (let* ((headers
                   (ende-curl-response-headers
-                   (ende-codex--session-headers-file session)))
+                   (ende-transport-session-headers-file
+                    (ende-codex--lifecycle session))))
                  (status (car headers))
                  (content-type (cdr headers)))
             (cond
@@ -1356,15 +1354,15 @@ When APPEND is non-nil, append the argument delta to the stored value."
                 :kind 'protocol
                 :message (format "expected text/event-stream, got %s"
                                  (or content-type "unknown")))))
-             (t
-              (dolist (event
-                       (ende-protocol-sse-flush
-                        (ende-codex--session-sse session)))
-                (when (and (not (ende-codex--session-terminal session))
-                           (eq (plist-get event :type) :json))
-                  (ende-codex--handle-event
-                   session (plist-get event :value))))
-              (unless (ende-codex--session-terminal session)
+              (t
+               (dolist (event
+                        (ende-protocol-sse-flush
+                         (ende-codex--session-sse session)))
+                 (when (and (not (ende-codex--terminal-p session))
+                            (eq (plist-get event :type) :json))
+                   (ende-codex--handle-event
+                    session (plist-get event :value))))
+               (unless (ende-codex--terminal-p session)
                 (if (ende-codex--session-terminal-event session)
                     (ende-codex--settle
                      session 'success (ende-codex--result session))
@@ -1500,24 +1498,18 @@ When APPEND is non-nil, append the argument delta to the stored value."
                       (ende-curl-command profile headers-file config-file))
            :filter (apply-partially #'ende-codex--filter session)
            :sentinel (apply-partially #'ende-codex--sentinel session))))
-    (setf (ende-codex--session-process session) (plist-get request :process)
-          (ende-codex--session-process-buffer session)
-          (plist-get request :response-buffer)
-          (ende-codex--session-stderr-buffer session)
-          (plist-get request :stderr-buffer)
-          (ende-codex--session-headers-file session)
-          (plist-get request :headers-file)
-          (ende-codex--session-config-file session)
-          (plist-get request :config-file))
     (ende-transport-session-set-resources
      (ende-codex--lifecycle session) request)
     (ende-codex--diagnose-request session request-body)
-    (process-send-string (ende-codex--session-process session) body)
-    (process-send-eof (ende-codex--session-process session))))
+    (process-send-string
+     (ende-transport-session-process (ende-codex--lifecycle session)) body)
+    (process-send-eof
+     (ende-transport-session-process (ende-codex--lifecycle session)))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
-  (unless (ende-codex--session-terminal session)
+  (setf (ende-codex--session-auth-cancel session) nil)
+  (unless (ende-codex--terminal-p session)
     (if (ende-error-p auth)
         (ende-codex--fail session auth)
       (condition-case startup-error
@@ -1549,7 +1541,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (plist-get profile :url))
           (ende-codex--invoke-callback
            session :on-start (apply-partially #'ende-codex--cancel session))
-          (unless (ende-codex--session-terminal session)
+          (unless (ende-codex--terminal-p session)
             (setf (ende-codex--session-auth-cancel session)
                   (ende-codex--resolve-auth
                    (apply-partially #'ende-codex--auth-ready
@@ -1560,7 +1552,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-error-create
          :kind 'startup
          :message (error-message-string startup-error)))))
-    (ende-codex--session-process session)))
+    (ende-transport-session-process
+     (ende-codex--lifecycle session))))
 
 (provide 'ende-codex)
 

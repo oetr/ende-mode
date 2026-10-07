@@ -117,27 +117,39 @@ Use COMMAND for the process, or a silent sleep process by default."
                              (error "callback failed"))
                  :on-done (lambda (_result) (setq done (1+ done)))
                  :on-error (lambda (_error) (setq errors (1+ errors))))
-           :discovery-cancel (lambda () (setq discovery-cancelled t))
-           :process-buffer process-buffer :stderr-buffer stderr-buffer
-           :headers-file headers-file :config-file config-file)))
+           :discovery-cancel (lambda () (setq discovery-cancelled t)))))
+    (ende-transport-session-set-resources
+     (ende-llm--lifecycle session)
+     (list :response-buffer process-buffer
+           :stderr-buffer stderr-buffer
+           :headers-file headers-file :config-file config-file))
     (ende-llm--fail
      session (ende-error-create :kind 'transport :message "failed"))
     (ende-llm--fail
      session (ende-error-create :kind 'transport :message "late"))
     (ende-llm--settle session 'success "late")
-    (should (eq (ende-llm--session-terminal session) 'failure))
+    (should (eq (ende-transport-session-terminal
+                 (ende-llm--lifecycle session))
+                'failure))
     (should (= events 1))
     (should (= done 0))
     (should (= errors 1))
     (should discovery-cancelled)
     (should-not (ende-llm--session-discovery-cancel session))
-    (should-not (ende-llm--session-callbacks session))
-    (should-not (ende-llm--session-process session))
-    (should-not (ende-llm--session-process-buffer session))
-    (should-not (ende-llm--session-stderr-buffer session))
-    (should-not (ende-llm--session-stderr-process session))
-    (should-not (ende-llm--session-headers-file session))
-    (should-not (ende-llm--session-config-file session))
+    (should-not (ende-transport-session-callbacks
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-process
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-process-buffer
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-stderr-buffer
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-stderr-process
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-headers-file
+                 (ende-llm--lifecycle session)))
+    (should-not (ende-transport-session-config-file
+                 (ende-llm--lifecycle session)))
     (should-not (buffer-live-p process-buffer))
     (should-not (buffer-live-p stderr-buffer))
     (should-not (file-exists-p headers-file))
