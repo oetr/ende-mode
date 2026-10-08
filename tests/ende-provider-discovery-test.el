@@ -493,6 +493,65 @@
         (clrhash ende-provider--discovery-inflight)
         (setq ende-provider--discovery-processes nil)))))
 
+(ert-deftest ende-test/provider-discovery-cancelling-one-waiter-keeps-request ()
+  (let ((profile '(:name local
+			 :url "http://localhost:8080/v1/chat/completions"
+			 :model "llama3"))
+        (process nil)
+        (make-process-count 0)
+        (first-value :pending)
+        (second-value :pending)
+        (ende-provider-discovery-enabled t)
+        (ende-provider--discovery-cache (make-hash-table :test #'equal))
+        (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+        (ende-provider--discovery-processes nil)
+        (real-make-process (symbol-function 'make-process))
+        (real-send-eof (symbol-function 'process-send-eof)))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (cl-incf make-process-count)
+                 (setq process
+                       (funcall real-make-process
+                                :name (plist-get args :name)
+                                :buffer (plist-get args :buffer)
+                                :command '("cat")
+                                :connection-type 'pipe :noquery t
+                                :filter (plist-get args :filter)
+                                :sentinel (plist-get args :sentinel)))))
+              ((symbol-function 'process-send-string) #'ignore)
+              ((symbol-function 'process-send-eof) #'ignore))
+      (unwind-protect
+          (let* ((cancel-first
+                  (ende-provider-discover
+                   profile (lambda (value) (setq first-value value))))
+                 (cancel-second
+                  (ende-provider-discover
+                   profile (lambda (value) (setq second-value value))))
+                 (key (ende-provider--discovery-key profile))
+                 (response-buffer (process-get process :ende-response-buffer))
+                 (headers-file (process-get process :ende-headers-file))
+                 (filter (process-filter process)))
+            (should (= make-process-count 1))
+            (funcall cancel-first)
+            (should (process-live-p process))
+            (should (= (length (gethash key ende-provider--discovery-inflight)) 1))
+            (with-temp-file headers-file
+              (insert "HTTP/1.1 200 OK\r\n\r\n"))
+            (funcall filter process "{\"data\":[{\"id\":\"llama3\"}]}")
+            (funcall real-send-eof process)
+            (while (process-live-p process)
+              (accept-process-output process 0.01))
+            (should (eq first-value :pending))
+            (should (plist-get second-value :models))
+            (should (equal (plist-get second-value :models) '("llama3")))
+            (should-not (gethash key ende-provider--discovery-inflight))
+            (should-not (buffer-live-p response-buffer))
+            (should-not (file-exists-p headers-file))
+            (funcall cancel-second))
+        (when (and (processp process) (process-live-p process))
+          (delete-process process))
+        (setq ende-provider--discovery-processes nil)))))
+
 
 
 (ert-deftest ende-test/provider-discovery-response-is-bounded ()

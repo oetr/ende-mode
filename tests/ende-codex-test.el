@@ -622,6 +622,78 @@
       (when (file-exists-p auth-file)
         (delete-file auth-file)))))
 
+(ert-deftest ende-test/openai-refresh-cancelling-one-waiter-keeps-flight ()
+  (let* ((auth-file (make-temp-file "ende-openai-shared-refresh-"))
+         (ende-codex-auth-file auth-file)
+         (ende-codex--refresh-flights (make-hash-table :test #'equal))
+         (ende-codex--refresh-processes nil)
+         (process nil)
+         (process-count 0)
+         (first-value :pending)
+         (second-value :pending)
+         (auth '(:access "old-access" :refresh "old-refresh"
+			 :expires 0 :account-id "account-id"))
+         (real-make-process (symbol-function 'make-process))
+         (real-send-eof (symbol-function 'process-send-eof)))
+    (unwind-protect
+        (progn
+          (with-temp-file auth-file
+            (insert "{\"openai\":{\"type\":\"oauth\","
+                    "\"access\":\"old-access\","
+                    "\"refresh\":\"old-refresh\","
+                    "\"expires\":0,\"accountId\":\"account-id\"}}"))
+          (cl-letf (((symbol-function 'make-process)
+                     (lambda (&rest args)
+                       (cl-incf process-count)
+                       (setq process
+                             (funcall real-make-process
+                                      :name (plist-get args :name)
+                                      :buffer (plist-get args :buffer)
+                                      :stderr (plist-get args :stderr)
+                                      :command '("cat")
+                                      :connection-type 'pipe :noquery t
+                                      :filter (plist-get args :filter)
+                                      :sentinel (plist-get args :sentinel)))))
+                    ((symbol-function 'process-send-string) #'ignore)
+                    ((symbol-function 'process-send-eof) #'ignore))
+            (let* ((cancel-first
+                    (ende-codex--refresh-auth
+                     auth (lambda (value) (setq first-value value))))
+                   (cancel-second
+                    (ende-codex--refresh-auth
+                     auth (lambda (value) (setq second-value value))))
+                   (key (list (expand-file-name auth-file)
+                              ende-codex-issuer ende-codex-client-id))
+                   (flight (gethash key ende-codex--refresh-flights)))
+              (should (= process-count 1))
+              (funcall cancel-first)
+              (should (process-live-p process))
+              (should (= (length (ende-codex--refresh-flight-waiters flight)) 1))
+              (with-temp-file (ende-codex--refresh-flight-headers-file flight)
+                (insert "HTTP/1.1 200 OK\r\n\r\n"))
+              (ende-codex--refresh-filter
+               flight process
+               (concat "{\"access_token\":\"new-access\","
+                       "\"refresh_token\":\"new-refresh\","
+                       "\"expires_in\":3600}"))
+              (funcall real-send-eof process)
+              (while (process-live-p process)
+                (accept-process-output process 0.01))
+              (should (eq first-value :pending))
+              (should (equal (plist-get second-value :access) "new-access"))
+              (should-not (gethash key ende-codex--refresh-flights))
+              (should-not ende-codex--refresh-processes)
+              (should-not
+               (buffer-live-p
+                (ende-codex--refresh-flight-response-buffer flight)))
+              (should-not (file-exists-p
+                           (ende-codex--refresh-flight-headers-file flight)))
+              (funcall cancel-second))))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process))
+      (when (file-exists-p auth-file)
+        (delete-file auth-file)))))
+
 
 
 (ert-deftest ende-test/openai-refresh-startup-failure-does-not-wedge-flight ()
