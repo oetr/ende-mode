@@ -315,7 +315,7 @@ the discovered pricing metadata for those model IDs."
       ('explicit
        (if value
            (format "%s (explicit)" value)
-         "Omitted (explicit override)"))
+         "Provider default (omitted)"))
       ('profile
        (if value
            (format "%s (profile)" value)
@@ -344,21 +344,23 @@ the discovered pricing metadata for those model IDs."
              (functionp
               (plist-get profile :reasoning-effort-probe-function))))))
 
-(defun ende-selector--control-line (label control profile)
-  "Render LABEL, canonical CONTROL, and its source in PROFILE."
+(defun ende-selector--control-value (control profile)
+  "Render CONTROL's effective value and source in PROFILE."
   (let* ((setting (ende-selector--control-setting control))
-         (text (ende-selector--control-value-label control setting))
-         (mapped (ende-provider-control-descriptor profile control)))
+         (mapped (ende-provider-control-descriptor profile control))
+         (text (if (and (not mapped)
+                        (null (plist-get setting :value))
+                        (eq (plist-get setting :source) 'provider-default))
+                   "not mapped"
+                 (ende-selector--control-value-label control setting))))
     (when (and (eq control :temperature)
                (ende-selector--temperature-ignored-p
                 (ende-selector--resolved-profile)))
       (setq text (concat text " (no effect in thinking mode)")))
     (unless mapped
-      (when (or (plist-get setting :value)
-                (eq (plist-get setting :source) 'profile)
-                (eq (plist-get setting :source) 'explicit))
+      (unless (equal text "not mapped")
         (setq text (concat text " (unverified mapping)"))))
-    (format "%-10s %s" label text)))
+    text))
 
 (defun ende-selector--render ()
   "Render the current selector state."
@@ -382,9 +384,9 @@ the discovered pricing metadata for those model IDs."
           (cond
            ((eq thinking 'off)
             (format "%s (inactive while thinking is off)"
-                    (ende-selector--control-value-label
+                    (ende-selector--control-value
                      :reasoning-effort
-                     (ende-selector--control-setting :reasoning-effort))))
+                     profile)))
            ((eq ende-selector--effort-state :loading) "validating...")
            ((eq ende-selector--effort-state :invalid)
             (format "%s (unsupported; correct this setting)"
@@ -395,48 +397,28 @@ the discovered pricing metadata for those model IDs."
               "lookup failed; retry"))
            ((eq ende-selector--effort-state :unavailable)
             "capability information unavailable")
-           (t (ende-selector--control-value-label
-               :reasoning-effort
-               (ende-selector--control-setting :reasoning-effort)))))
-         (temperature-line
-          (when (or (ende-selector--control-supported-p
-                     profile :temperature)
-                    (plist-get (ende-selector--control-setting :temperature)
-                               :value))
-            (ende-selector--control-line
-             "Temperature:" :temperature profile)))
-         (thinking-line
-          (when (or (ende-selector--control-supported-p profile :thinking)
-                    (plist-get (ende-selector--control-setting :thinking) :value))
-            (if (and (ende-provider-deepseek-model-verified-p profile)
-                     (null thinking)
-                     (equal (plist-get
-                             (ende-selector--control-setting :reasoning-effort)
-                             :value)
-                            "none"))
-                "Thinking:  off (reasoning effort none)"
-              (ende-selector--control-line "Thinking:" :thinking profile))))
-         (effort-line
-          (when (or (ende-selector--control-supported-p
-                     profile :reasoning-effort)
-                    (ende-provider-control-descriptor
-                     profile :reasoning-effort)
-                    (plist-get (ende-selector--control-setting
-                                :reasoning-effort)
-                               :value)
-                    (memq ende-selector--effort-state
-                          '(:error :unavailable)))
-            (format "Effort:     %s"
-                    (if (and (not (ende-selector--control-supported-p
-                                   profile :reasoning-effort))
-                             (not (eq ende-selector--effort-state :loading)))
-                        (if (plist-get
-                             (ende-selector--control-setting
+           (t (ende-selector--control-value :reasoning-effort profile))))
+         (temperature-value
+          (ende-selector--control-value :temperature profile))
+         (thinking-value
+          (if (and (ende-provider-deepseek-model-verified-p profile)
+                   (null thinking)
+                   (equal (plist-get
+                           (ende-selector--control-setting :reasoning-effort)
+                           :value)
+                          "none"))
+              "off (reasoning effort none)"
+            (ende-selector--control-value :thinking profile)))
+         (effort-value
+          (if (and (not (ende-selector--control-supported-p
+                         profile :reasoning-effort))
+                   (not (eq ende-selector--effort-state :loading)))
+              (if (plist-get (ende-selector--control-setting
                               :reasoning-effort)
                              :value)
-                            (concat effort-label " (capability unverified)")
-                          "capability information unavailable")
-                      effort-label))))
+                  (concat effort-label " (capability unverified)")
+                "capability information unavailable")
+            effort-label))
          (capability-note
           (when (and (eq (plist-get profile :builtin-profile) 'deepseek)
                      model-name
@@ -450,28 +432,26 @@ the discovered pricing metadata for those model IDs."
             (format "Invalid controls: %s\n" message))))
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert (format "n/p      - Provider:      %s\n"   provider))
-      (insert (format "C-n/C-p  - Model:         %s%s\n" model-status model))
-      (insert (format "c/C      - Concurrency:   %d\n" (ende-selector--provider-concurrency)))
-      (insert (format "P        - Parallel:      %s\n"
-                      (if (ende-selector--provider-parallel-p)
-                          "on"
-                        "off")))
-      (insert "Controls:\n")
-      (when temperature-line (insert temperature-line "\n"))
+      (insert (format "%-8s - %-18s %s\n" "n/p" "Provider:" provider))
+      (insert (format "%-8s - %-18s %s%s\n" "C-n/C-p" "Model:"
+                      model-status model))
+      (insert (format "%-8s - %-18s %d\n" "c/C" "Concurrency:"
+                      (ende-selector--provider-concurrency)))
+      (insert (format "%-8s - %-18s %s\n" "P" "Parallel:"
+                      (if (ende-selector--provider-parallel-p) "on" "off")))
+      (insert "\n")
+      (insert (format "%-8s - %-18s %s\n" "T" "Temperature:"
+                      temperature-value))
+      (insert (format "%-8s - %-18s %s\n" "t" "Thinking:"
+                      thinking-value))
+      (insert (format "%-8s - %-18s %s\n" "e" "Reasoning effort:"
+                      effort-value))
       (when capability-note (insert capability-note))
       (when compatibility-note (insert compatibility-note))
-      (when (or thinking-line effort-line) (insert "Reasoning:\n"))
-      (when thinking-line (insert thinking-line "\n"))
-      (when effort-line (insert effort-line "\n"))
       (insert "\n")
       (insert (format "Quota: %s\n\n" (ende-selector--quota-display)))
       (insert "a  - ask\n"
               "d  - queue dashboard\n"
-              "T  - select temperature\n"
-              "t  - select thinking mode\n"
-              "e  - select reasoning effort\n"
-              "E  - use provider-default effort\n"
               "R  - reset controls to profile settings\n"
               "i  - insert\n"
               "I  - insert anywhere\n"
@@ -930,11 +910,6 @@ performed locally so typing a search term never starts another network request."
         (if ende-selector--effort :remembered :none))
   (ende-selector--render))
 
-(defun ende-selector-effort-provider-default ()
-  "Clear the reasoning-effort preference in the current draft."
-  (interactive)
-  (ende-selector--set-control-preference :reasoning-effort nil))
-
 (defun ende-selector--choose-effort (efforts)
   "Ask for one of EFFORTS or Provider default, without saving it."
   (let* ((setting (ende-selector--control-setting :reasoning-effort))
@@ -974,7 +949,8 @@ performed locally so typing a search term never starts another network request."
                                      '("Provider default") nil t nil nil
                                      "Provider default")
                     "Provider default")
-               (ende-selector-effort-provider-default))
+               (ende-selector--set-control-preference
+                :reasoning-effort nil))
            (ende-selector--effort-validation-failed error))
        (ignore default)
        (if (null efforts)
@@ -1234,8 +1210,7 @@ static or live capability source requires validation."
   (define-key ende-selector-mode-map (kbd "T") #'ende-selector-select-temperature)
   (define-key ende-selector-mode-map (kbd "t") #'ende-selector-select-thinking)
   (define-key ende-selector-mode-map (kbd "e") #'ende-selector-select-effort)
-  (define-key ende-selector-mode-map (kbd "E")
-              #'ende-selector-effort-provider-default)
+  (define-key ende-selector-mode-map (kbd "E") nil)
   (define-key ende-selector-mode-map (kbd "R") #'ende-selector-reset-controls)
   (define-key ende-selector-mode-map (kbd "s") #'ende-selector-summarize)
   (define-key ende-selector-mode-map (kbd "r") #'ende-selector-rubber-duck)

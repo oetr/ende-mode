@@ -634,7 +634,7 @@
           (setq ende-selector--control-preferences
                 '(:temperature 0.7 :thinking off :reasoning-effort "low"))
           (ende-selector--set-control-preference :temperature nil)
-          (ende-selector-effort-provider-default)
+          (ende-selector--set-control-preference :reasoning-effort nil)
           (should (equal ende-selector--control-preferences
                          '(:temperature nil :thinking off
 					:reasoning-effort nil)))
@@ -906,23 +906,70 @@
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
-      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Controls:"
+      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
+                     "Temperature:" "Thinking:" "Reasoning effort:"
                      "Quota: unavailable"
                      "i  - insert" "a  - ask" "d  - queue dashboard"
                      "I  - insert anywhere"
                      "k  - compact chat context"
                      "w  - write anywhere"
                      "m  - select/search model"
-                     "T  - select temperature"
-                     "t  - select thinking mode"
-                     "e  - select reasoning effort"
                      "R  - reset controls to profile settings"
                      "s  - summarize"
                      "r  - rubber duck"
                      "RET       - commit selection and close"
                      "C-c C-c   - approve all LLM changes"
                      "C-c C-k   - reject all LLM changes"))
-        (should (string-match-p (regexp-quote key) (buffer-string)))))))
+        (should (string-match-p (regexp-quote key) (buffer-string))))
+      (should (string-match-p "^T        - Temperature:.*0.8 (profile)$"
+                              (buffer-string)))
+      (should (string-match-p "^t        - Thinking:.*not mapped$"
+                              (buffer-string)))
+      (should (string-match-p "^e        - Reasoning effort:"
+                              (buffer-string)))
+      (should-not (string-match-p "Controls:\\|Reasoning:\\|E  - use provider-default"
+                                  (buffer-string)))
+      (should-not (string-match-p "T  - select temperature\\|t  - select thinking\\|e  - select reasoning"
+                                  (buffer-string))))))
+
+(ert-deftest ende-test/selector-effort-picker-selects-provider-default-with-e ()
+  (let ((buffer (generate-new-buffer " *ende-selector-effort-default-test*"))
+        (ende-provider-profiles
+         '((remote :model "remote-model" :reasoning-effort "high"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort")
+                                                 :choices ("high" "low")))))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("remote-model")
+                ende-selector--model-index 0
+                ende-selector--model-state :ready)
+          (ende-selector--set-control-context)
+          (cl-letf (((symbol-function 'ende-selector--probe-efforts)
+                     (lambda (callback)
+                       (funcall callback '("high" "low") "high" nil)))
+                    ((symbol-function 'completing-read)
+                     (lambda (prompt collection _predicate require-match
+                                     _initial _history _default &rest _)
+                       (should (equal prompt "Reasoning effort: "))
+                       (should (equal collection
+                                      '("Provider default" "high" "low")))
+                       (should require-match)
+                       "Provider default")))
+            (ende-selector-select-effort))
+          (should (plist-member ende-selector--control-preferences
+                                :reasoning-effort))
+          (should-not (plist-get ende-selector--control-preferences
+                                 :reasoning-effort))
+          (should-not (plist-get (ende-selector--resolved-profile)
+                                 :reasoning-effort))
+          (should (string-match-p
+                   "^e        - Reasoning effort:.*Provider default (omitted)$"
+                   (buffer-string))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 
 
@@ -931,6 +978,7 @@
         (original-C (lookup-key ende-selector-mode-map (kbd "C")))
         (original-P (lookup-key ende-selector-mode-map (kbd "P")))
         (original-e (lookup-key ende-selector-mode-map (kbd "e")))
+        (original-E (lookup-key ende-selector-mode-map (kbd "E")))
         (original-a (lookup-key ende-selector-mode-map (kbd "a")))
         (original-d (lookup-key ende-selector-mode-map (kbd "d")))
         (original-k (lookup-key ende-selector-mode-map (kbd "k"))))
@@ -941,6 +989,7 @@
           (define-key ende-selector-mode-map (kbd "C") nil)
           (define-key ende-selector-mode-map (kbd "P") nil)
           (define-key ende-selector-mode-map (kbd "e") nil)
+          (define-key ende-selector-mode-map (kbd "E") #'ignore)
           (define-key ende-selector-mode-map (kbd "a") nil)
           (define-key ende-selector-mode-map (kbd "d") nil)
           (define-key ende-selector-mode-map (kbd "k") nil)
@@ -960,6 +1009,11 @@
                         #'ende-selector-select-model))
             (should (eq (key-binding (kbd "e"))
                         #'ende-selector-select-effort))
+            (should (eq (key-binding (kbd "T"))
+                        #'ende-selector-select-temperature))
+            (should (eq (key-binding (kbd "t"))
+                        #'ende-selector-select-thinking))
+            (should-not (lookup-key ende-selector-mode-map (kbd "E")))
             (should (eq (key-binding (kbd "a"))
                         #'ende-selector-ask))
             (should (eq (key-binding (kbd "d"))
@@ -984,6 +1038,7 @@
       (define-key ende-selector-mode-map (kbd "C") original-C)
       (define-key ende-selector-mode-map (kbd "P") original-P)
       (define-key ende-selector-mode-map (kbd "e") original-e)
+      (define-key ende-selector-mode-map (kbd "E") original-E)
       (define-key ende-selector-mode-map (kbd "a") original-a)
       (define-key ende-selector-mode-map (kbd "d") original-d)
       (define-key ende-selector-mode-map (kbd "k") original-k))))
