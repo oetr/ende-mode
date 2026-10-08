@@ -1010,10 +1010,11 @@ is queried for every call; it does not share the model catalog cache."
          outcome value
          (when (or (ende-codex--session-content-parts session)
                    (ende-codex--session-thinking-parts session)
-                    (ende-codex--session-usage session)
-                    (ende-codex--tool-call-list session))
+                   (ende-codex--session-usage session)
+                   (ende-codex--tool-call-list session))
            (ende-codex--result session)))
-      (ende-codex--cleanup session))))
+      (unless (ende-codex--terminal-p session)
+        (ende-codex--cleanup session)))))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."

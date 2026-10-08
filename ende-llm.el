@@ -102,7 +102,8 @@ The :callbacks argument initializes the composed transport lifecycle."
                    (ende-llm--session-usage session)
                    (ende-llm--session-finish-reason session))
            (ende-llm--result session)))
-      (ende-llm--cleanup-session session))))
+      (unless (ende-llm--terminal-p session)
+        (ende-llm--cleanup-session session)))))
 
 (defun ende-llm--fail (session error)
   "Settle SESSION with structured ERROR."

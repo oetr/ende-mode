@@ -146,11 +146,13 @@ process for cancellation tests."
     count))
 
 (defun ende-test--run-stream-request
-    (transport chunks &optional cancel-on-start response-limit profile)
+    (transport chunks &optional cancel-on-start response-limit profile
+               event-callback-error)
   "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
 When CANCEL-ON-START is non-nil, cancel from the start callback.
 RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'.  PROFILE overrides
-the transport's representative default profile."
+the transport's representative default profile.  EVENT-CALLBACK-ERROR, when
+non-nil, is signalled from the event callback."
   (let* ((ende-provider-discovery-enabled nil)
          (ende-max-response-bytes response-limit)
          (real-make-process (symbol-function 'make-process))
@@ -172,6 +174,9 @@ the transport's representative default profile."
                 :on-event
                 (lambda (event)
                   (push event events)
+                  (when (and event-callback-error
+                             (eq (plist-get event :type) :delta))
+                    (funcall event-callback-error))
                   (push (plist-get event :type) order))
                 :on-done
                 (lambda (value)

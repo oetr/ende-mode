@@ -415,6 +415,29 @@ Use COMMAND for the process, or a silent sleep process by default."
                      '(:start :error :on-error)))
       (should (plist-get cancelled :cleaned)))))
 
+(ert-deftest ende-test/active-callback-failure-cleans-up-once ()
+  (ende-test--reset)
+  (dolist (transport '(chat codex))
+    (let ((cleanup-count 0)
+          (real-cleanup (symbol-function 'ende-transport-session-cleanup)))
+      (let ((out
+             (cl-letf (((symbol-function 'ende-transport-session-cleanup)
+                        (lambda (session)
+                          (cl-incf cleanup-count)
+                          (funcall real-cleanup session))))
+               (ende-test--run-stream-request
+                transport
+                (list (if (eq transport 'codex)
+                          (concat "data: {\"type\":\"response.output_text.delta\","
+                                  "\"delta\":\"answer\"}\n\n")
+                        (concat "data: {\"choices\":[{\"delta\":{"
+                                "\"content\":\"answer\"}}]}\n\n")))
+                nil nil nil (lambda () (error "active callback failed"))))))
+        (should (eq (ende-error-kind (plist-get out :error)) 'callback))
+        (should (= cleanup-count 1))
+        (should (= (cl-count :on-error (plist-get out :order)) 1))
+        (should (plist-get out :cleaned))))))
+
 
 
 (ert-deftest ende-test/stream-transports-count-multibyte-response-bytes ()
