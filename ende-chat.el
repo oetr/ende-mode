@@ -1258,10 +1258,14 @@ private reasoning.\n\n"
 enabled. Use only tools and resources permitted by the effective Ende
 configuration.
 
-For each user request, the effective configuration consists of the document-level
-Ende configuration, configuration inherited from ancestor headings, and
-configuration in the current heading. Configuration in preceding sibling
-requests is historical only and does not carry over to the current request.
+Recompute the effective Ende configuration independently for every user request.
+Start with the document-level configuration, then apply configuration from
+ancestor headings, then configuration in the current heading.
+
+Never apply configuration from a preceding sibling heading to the current
+request. Same-level headings are siblings, not ancestors. A preceding sibling's
+local Ende configuration remains visible as conversation history but is
+historical only and has no effect on the current request.
 
 `tools` activates named tools or groups, `clear-tools` clears configured tool
 activation, and resource definitions and tool-resource assignments constrain

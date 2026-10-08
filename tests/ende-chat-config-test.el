@@ -892,7 +892,8 @@
                     (plist-get (plist-get first-call :options) :tool-definitions))
                    (second-definitions
                     (plist-get (plist-get second-call :options) :tool-definitions))
-                   (second-messages (plist-get second-call :messages)))
+                   (second-messages (plist-get second-call :messages))
+                   (system (cdr (assoc "system" second-messages))))
               (should-not (memq 'read_file (plist-get first :active-tools)))
               (should (memq 'read_file (plist-get second :active-tools)))
               (should (equal (cdr (assq 'read_file
@@ -900,6 +901,9 @@
                              '(project)))
               (should (equal first-definitions second-definitions))
               (should (equal first-definitions (ende-tool-definitions)))
+              (should (string-match-p
+                       (regexp-quote "Same-level headings are siblings, not ancestors.")
+                       system))
               (should
                (cl-some
                 (lambda (message)
