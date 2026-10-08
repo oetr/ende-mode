@@ -32,6 +32,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
                        :url "https://example.test/v1"
                        :model "test-model"
                        :temperature 0.2
+                       :controls '((:temperature :path ("temperature")))
                        :require-sse t)))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
@@ -168,7 +169,8 @@ Use COMMAND for the process, or a silent sleep process by default."
           (auth '(:access "test-access" :refresh "test-refresh"
 			  :expires 9999999999999))
           (profile '(:name test :url "https://example.test/v1/chat/completions"
-			   :model "test-model" :temperature 0.2))
+                           :model "test-model" :temperature 0.2
+                           :controls ((:temperature :path ("temperature")))))
           (cancel nil) (process nil) (failure nil)
           (process-count 0) (pipe-count 0) (send-count 0) (files nil)
           (real-process (symbol-function 'make-process))
@@ -467,7 +469,7 @@ Use COMMAND for the process, or a silent sleep process by default."
          (ende-provider-profiles
           '((deepseek :type openai
                       :url "https://api.deepseek.com/chat/completions"
-                      :model "deepseek-chat"
+                      :model "deepseek-flash"
                       :auth-source-host "api.deepseek.com"
                       :auth-source-user "ende"
                       :auth-source-port 443)))
@@ -476,7 +478,7 @@ Use COMMAND for the process, or a silent sleep process by default."
          (out nil)
          (chunks
           (list
-           (concat "data: {\"model\":\"deepseek-chat\",\"choices\":[{"
+           (concat "data: {\"model\":\"deepseek-flash\",\"choices\":[{"
                    "\"delta\":{\"reasoning_content\":\"Reviewing\"}}]}\n\n")
            (concat "data: {\"choices\":[{\"delta\":{"
                    "\"content\":\"Answer\"}}]}\n\n")
@@ -526,7 +528,8 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal (plist-get call :name) "lookup"))
       (should (equal (plist-get call :arguments) "{\"q\":\"deep\"}"))
       (should (equal (ende-protocol-json-get "model" request-body)
-                     "deepseek-chat"))
+                     "deepseek-flash"))
+      (should (equal (plist-get result :reasoning-content) "Reviewing"))
       (should-not (ende-protocol-json-has-key-p "temperature" request-body))
       (should-not (ende-protocol-json-has-key-p "reasoning" request-body))
       (should (eq (ende-protocol-json-get
@@ -552,7 +555,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                                    (ende-provider-profile-snapshot 'deepseek))))
       (should (equal (cadr (member "--url" command))
                      "https://api.deepseek.com/chat/completions"))
-      (should-not (ende-provider-model-discovery-available-p profile))
+      (should (ende-provider-model-discovery-available-p profile))
       (should (plist-get out :cleaned)))))
 
 
@@ -599,7 +602,8 @@ Use COMMAND for the process, or a silent sleep process by default."
   (let ((ende-max-output-tokens nil))
     (let ((body (ende-llm--request-body
                  (list (cons "user" "body"))
-                 '(:model "test-model" :temperature 0.2))))
+                 '(:model "test-model" :temperature 0.2
+			  :controls ((:temperature :path ("temperature")))))))
       (should-not (alist-get :max_tokens body))
       (should-not (string-match-p "max_tokens" (json-encode body))))))
 

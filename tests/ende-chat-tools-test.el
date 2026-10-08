@@ -1176,9 +1176,11 @@
                    t))
                  (profile
                   '(:name local :model "requested-model"
-			  :reasoning-effort-wire-api openrouter
-			  :reasoning-effort-validated-p t
-			  :reasoning-effort "high")))
+			  :reasoning-effort "high"
+			  :controls ((:temperature :path ("temperature"))
+                                     (:reasoning-effort
+                                      :path ("reasoning" "effort")
+                                      :choices ("high"))))))
             (ende-test--with-buffer
              (format (concat "#+begin_ende\n(root %S)\n"
                              "(group inspect read_file)\n"

@@ -449,8 +449,9 @@
            (profile
             (append (list :name 'local
                           :model (plist-get scenario :request-model)
-                          :reasoning-effort-wire-api 'openrouter
-                          :reasoning-effort-validated-p t)
+                          :controls '((:reasoning-effort
+                                       :path ("reasoning" "effort")
+                                       :choices ("high"))))
                     (when effort (list :reasoning-effort effort))))
            (response
             (append

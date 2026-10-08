@@ -154,6 +154,12 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-reasoning-effort-property "ENDE_REASONING_EFFORT"
   "Org property storing the reasoning effort used for a chat response.")
 
+(defconst ende-chat-temperature-property "ENDE_TEMPERATURE"
+  "Org property storing the requested temperature for a chat response.")
+
+(defconst ende-chat-thinking-property "ENDE_THINKING"
+  "Org property storing the requested thinking mode for a chat response.")
+
 (defconst ende-chat--parsed-property-descriptors
   (list (cons ende-chat-role-property :role)
         (cons ende-chat-visibility-property :visibility)
@@ -175,7 +181,10 @@ discarding superseded details. Be concise but self-contained."
 
 (defconst ende-chat--reserved-properties
   (append (mapcar #'car ende-chat--parsed-property-descriptors)
-          (list ende-chat-model-property ende-chat-reasoning-effort-property))
+          (list ende-chat-model-property
+                ende-chat-reasoning-effort-property
+                ende-chat-temperature-property
+                ende-chat-thinking-property))
   "Control properties that model output may not author.")
 
 (defconst ende-chat--title-key "ENDE_CHAT_TITLE"
@@ -2166,11 +2175,17 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
   (let* ((profile (ende-job-profile job))
          (display (ende--job-display-metadata job result))
          (model (plist-get display :model))
-         (wire-api (plist-get profile :reasoning-effort-wire-api))
-         (effort (and (memq wire-api '(openrouter responses))
-                      (ende-provider-reasoning-effort profile wire-api))))
+         (temperature (plist-get profile :temperature))
+         (thinking (plist-get profile :thinking))
+         (effort (ende-provider-active-reasoning-effort profile)))
     (concat
      (ende-chat--metadata-property ende-chat-model-property model)
+     (ende-chat--metadata-property
+      ende-chat-temperature-property
+      (and (numberp temperature) (format "%s" temperature)))
+     (ende-chat--metadata-property
+      ende-chat-thinking-property
+      (and (memq thinking '(on off)) (symbol-name thinking)))
      (ende-chat--metadata-property ende-chat-reasoning-effort-property
                                    effort))))
 
@@ -2760,7 +2775,9 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                                (assistant
                                 (list :role "assistant"
                                       :content content
-                                      :tool-calls calls))
+                                      :tool-calls calls
+                                      :reasoning-content
+                                      (plist-get result :reasoning-content)))
                                (section
                                 (ende-chat--assistant-protocol-text
                                  level question-id request-id

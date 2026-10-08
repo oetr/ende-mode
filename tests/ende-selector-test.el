@@ -121,7 +121,8 @@
                        0))
             (ende-model-selection-save
              '(:provider remote :model "file-model"
-                         :reasoning-effort "high")
+                         :control-preferences
+                         (:reasoning-effort "high" :temperature nil))
              source))
           (kill-buffer source)
           (setq source nil
@@ -138,7 +139,9 @@
             (ende-mode 1)
             (should (equal (ende-model-selection-for-buffer reopened)
                            '(:provider remote :model "file-model"
-                                       :reasoning-effort "high")))
+                                       :control-preferences
+                                       (:reasoning-effort "high"
+							  :temperature nil))))
             (should (equal (plist-get
                             (ende-provider-profile-for-buffer reopened) :model)
                            "file-model"))
@@ -146,7 +149,13 @@
                      (plist-get
                       (ende-provider-profile-for-buffer reopened)
                       :reasoning-effort)
-                     "high")))
+                     "high"))
+            (should (plist-member
+                     (ende-provider-profile-for-buffer reopened)
+                     :temperature))
+            (should-not (plist-get
+                         (ende-provider-profile-for-buffer reopened)
+                         :temperature)))
           (kill-buffer reopened)
           (setq reopened nil
                 different (get-buffer-create name))
@@ -172,11 +181,12 @@
         (progn
           (ende-model-selection-save
            '(:provider openai :model "shared-model"
-                       :reasoning-effort "medium")
+                       :control-preferences (:reasoning-effort "medium"))
            first)
           (should (equal (ende-model-selection-for-buffer second)
                          '(:provider openai :model "shared-model"
-                                     :reasoning-effort "medium")))
+                                     :control-preferences
+                                     (:reasoning-effort "medium"))))
           (should (= (hash-table-count
                       ende-model-selection--buffer-selections)
                      0)))
@@ -192,8 +202,10 @@
          (ende-providers '(local))
          (ende-provider-profiles
           '((local :models ("one" "two")
-                   :reasoning-effort "made-up"
-                   :reasoning-effort-wire-api openrouter)))
+                   :reasoning-effort "high"
+                   :controls ((:reasoning-effort
+                               :path ("reasoning" "effort")
+                               :choices ("high" "low"))))))
          (ende-selector--last-selection nil)
          (queued nil))
     (unwind-protect
@@ -206,7 +218,8 @@
                   ende-selector--providers '(local)
                   ende-selector--provider-index 0
                   ende-selector--models '("one" "two")
-                  ende-selector--model-index 0)
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
             (ende-selector-next-model)
             (cl-letf (((symbol-function 'ende-enqueue-operation)
                        (lambda (type instruction profile)
@@ -215,7 +228,8 @@
               (ende-selector-insert)))
           (should (eq (nth 0 queued) 'insert))
           (should (string= (plist-get (nth 2 queued) :model) "two"))
-          (should-not (plist-get (nth 2 queued) :reasoning-effort))
+          (should (equal (plist-get (nth 2 queued) :reasoning-effort)
+                         "high"))
           (should (equal ende-selector--last-selection
                          '(:provider local :model "two")))
           (should (equal (ende-model-selection-for-buffer source)
@@ -223,329 +237,332 @@
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+          (kill-buffer buffer)))))
 
 
 
-(ert-deftest ende-test/selector-model-completion-updates-choice ()
-  (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
-        (completion-call nil)
-        (ende-selector--last-selection nil))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0
-                ende-selector--models
-                '("remote/alpha" "remote/beta" "other/gamma")
-                ende-selector--model-details
-                '((:id "remote/alpha" :name "Alpha Model"
-                       :pricing (:prompt "0.000003" :completion "0.000009"
-					 :input-cache-read "0.000001"
-					 :input-cache-write "0.000004"))
-                  (:id "remote/beta" :name "Beta Model")
-                  (:id "other/gamma" :name "Gamma Model"))
-                ende-selector--model-index 0
-                ende-selector--model-state :ready)
-          (cl-letf (((symbol-function 'completing-read)
-                     (lambda (prompt collection predicate require-match
-                                     initial-input history default &rest _)
-                       (setq completion-call
-                             (list :prompt prompt
-                                   :collection collection
-                                   :predicate predicate
-                                   :require-match require-match
-                                   :initial-input initial-input
-                                   :history history
-                                   :default default
-                                   :extra-properties completion-extra-properties
-                                   :styles completion-styles
-                                   :ignore-case completion-ignore-case))
-                       "remote/beta")))
-            (ende-selector-select-model))
-          (should (equal (plist-get completion-call :prompt) "Model: "))
-          (should (equal (plist-get completion-call :collection)
-                         '("remote/alpha" "remote/beta" "other/gamma")))
-          (should-not (member "input" (plist-get completion-call :collection)))
-          (should (plist-get completion-call :require-match))
-          (should-not (plist-get completion-call :initial-input))
-          (should (equal (plist-get completion-call :default)
-                         "remote/alpha"))
-          (let* ((properties (plist-get completion-call :extra-properties))
-                 (affixation (plist-get properties :affixation-function))
-                 (affixed (funcall affixation
-                                   (plist-get completion-call :collection)))
-                 (priced (car affixed))
-                 (unpriced (cadr affixed))
-                 (priced-model (car priced))
-                 (priced-suffix (nth 2 priced)))
-            (should (functionp affixation))
-            (should-not (plist-get properties :annotation-function))
-            (should (string= (substring-no-properties priced-model)
-                             "remote/alpha"))
-            (should (eq (get-text-property 0 'face priced-model)
-                        'ende-selector-model-face))
-            (should
-             (string=
-              (substring-no-properties priced-suffix)
-              "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
-            (should (eq (get-text-property (string-match "in:" priced-suffix)
-                                           'face priced-suffix)
-                        'ende-selector-price-muted-face))
-            (should (eq (get-text-property (string-match "out:" priced-suffix)
-                                           'face priced-suffix)
-                        'ende-selector-price-output-face))
-            (should (eq (get-text-property
-                         (string-match "cache-read:" priced-suffix)
-                         'face priced-suffix)
-                        'ende-selector-price-muted-face))
-            (should (equal (mapcar #'substring-no-properties
-                                   (list (car unpriced) (nth 2 unpriced)))
-                           '("remote/beta" ""))))
-          (should (equal (plist-get completion-call :styles) '(substring)))
-          (should (plist-get completion-call :ignore-case))
-          (should (= ende-selector--model-index 1))
-          (should (string= (ende-selector--model-name) "remote/beta"))
-          (should (equal ende-selector--last-selection
-                         '(:provider remote :model "remote/beta"))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+  (ert-deftest ende-test/selector-model-completion-updates-choice ()
+    (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
+          (completion-call nil)
+          (ende-selector--last-selection nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models
+                  '("remote/alpha" "remote/beta" "other/gamma")
+                  ende-selector--model-details
+                  '((:id "remote/alpha" :name "Alpha Model"
+			 :pricing (:prompt "0.000003" :completion "0.000009"
+					   :input-cache-read "0.000001"
+					   :input-cache-write "0.000004"))
+                    (:id "remote/beta" :name "Beta Model")
+                    (:id "other/gamma" :name "Gamma Model"))
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt collection predicate require-match
+                                       initial-input history default &rest _)
+			 (setq completion-call
+                               (list :prompt prompt
+                                     :collection collection
+                                     :predicate predicate
+                                     :require-match require-match
+                                     :initial-input initial-input
+                                     :history history
+                                     :default default
+                                     :extra-properties completion-extra-properties
+                                     :styles completion-styles
+                                     :ignore-case completion-ignore-case))
+			 "remote/beta")))
+              (ende-selector-select-model))
+            (should (equal (plist-get completion-call :prompt) "Model: "))
+            (should (equal (plist-get completion-call :collection)
+                           '("remote/alpha" "remote/beta" "other/gamma")))
+            (should-not (member "input" (plist-get completion-call :collection)))
+            (should (plist-get completion-call :require-match))
+            (should-not (plist-get completion-call :initial-input))
+            (should (equal (plist-get completion-call :default)
+                           "remote/alpha"))
+            (let* ((properties (plist-get completion-call :extra-properties))
+                   (affixation (plist-get properties :affixation-function))
+                   (affixed (funcall affixation
+                                     (plist-get completion-call :collection)))
+                   (priced (car affixed))
+                   (unpriced (cadr affixed))
+                   (priced-model (car priced))
+                   (priced-suffix (nth 2 priced)))
+              (should (functionp affixation))
+              (should-not (plist-get properties :annotation-function))
+              (should (string= (substring-no-properties priced-model)
+                               "remote/alpha"))
+              (should (eq (get-text-property 0 'face priced-model)
+                          'ende-selector-model-face))
+              (should
+               (string=
+		(substring-no-properties priced-suffix)
+		"  in: $3  out: $9  cache-read: $1  cache-write: $4"))
+              (should (eq (get-text-property (string-match "in:" priced-suffix)
+                                             'face priced-suffix)
+                          'ende-selector-price-muted-face))
+              (should (eq (get-text-property (string-match "out:" priced-suffix)
+                                             'face priced-suffix)
+                          'ende-selector-price-output-face))
+              (should (eq (get-text-property
+                           (string-match "cache-read:" priced-suffix)
+                           'face priced-suffix)
+                          'ende-selector-price-muted-face))
+              (should (equal (mapcar #'substring-no-properties
+                                     (list (car unpriced) (nth 2 unpriced)))
+                             '("remote/beta" ""))))
+            (should (equal (plist-get completion-call :styles) '(substring)))
+            (should (plist-get completion-call :ignore-case))
+            (should (= ende-selector--model-index 1))
+            (should (string= (ende-selector--model-name) "remote/beta"))
+            (should (equal ende-selector--last-selection
+                           '(:provider remote :model "remote/beta"))))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
 
 
 
-(ert-deftest ende-test/selector-preserves-remembered-model-after-discovery ()
-  (let ((buffer (generate-new-buffer " *ende-selector-discovery-test*"))
-        (probe-callback nil)
-        (ende-selector--last-selection
-         '(:provider remote :model "remote/remembered"))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions"
-                   :model "remote/default"))))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0)
-          (cl-letf (((symbol-function 'ende-provider-probe-models)
-                     (lambda (_profile callback)
-                       (setq probe-callback callback)
-                       (lambda () nil))))
-            (ende-selector--set-provider 0)
-            (should (string= (ende-selector--model-name)
-                             "remote/remembered"))
-            (should (string-match-p "validating"
-                                    (buffer-string)))
-            (funcall probe-callback
-                     '("remote/default" "remote/remembered") nil)
-            (should (string= (ende-selector--model-name)
-                             "remote/remembered"))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-
-
-(ert-deftest ende-test/selector-uses-cached-models-before-rendering ()
-  (let* ((buffer (generate-new-buffer " *ende-selector-cached-models-test*"))
-         (profile '(:name remote
-			  :url "http://remote.example/v1/chat/completions"))
-         (ende-providers '(remote))
-         (ende-provider-profiles
-          '((remote :url "http://remote.example/v1/chat/completions")))
-         (ende-selector--last-selection
-          '(:provider remote :model "remote/saved"))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
-         (ende-provider--model-generation 0))
-    (unwind-protect
-        (progn
-          (ende-provider--finish-model-discovery
-           (ende-provider--model-cache-key profile)
-           '("remote/first" "remote/saved") nil nil)
+  (ert-deftest ende-test/selector-preserves-remembered-model-after-discovery ()
+    (let ((buffer (generate-new-buffer " *ende-selector-discovery-test*"))
+          (probe-callback nil)
+          (ende-selector--last-selection
+           '(:provider remote :model "remote/remembered"))
+          (ende-provider-profiles
+           '((remote :url "http://remote.example/v1/chat/completions"
+                     :model "remote/default"))))
+      (unwind-protect
           (with-current-buffer buffer
             (ende-selector-mode)
             (setq ende-selector--providers '(remote)
                   ende-selector--provider-index 0)
             (cl-letf (((symbol-function 'ende-provider-probe-models)
+                       (lambda (_profile callback)
+			 (setq probe-callback callback)
+			 (lambda () nil))))
+              (ende-selector--set-provider 0)
+              (should (string= (ende-selector--model-name)
+                               "remote/remembered"))
+              (should (string-match-p "validating"
+                                      (buffer-string)))
+              (funcall probe-callback
+                       '("remote/default" "remote/remembered") nil)
+              (should (string= (ende-selector--model-name)
+                               "remote/remembered"))))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+
+
+  (ert-deftest ende-test/selector-uses-cached-models-before-rendering ()
+    (let* ((buffer (generate-new-buffer " *ende-selector-cached-models-test*"))
+           (profile '(:name remote
+			    :url "http://remote.example/v1/chat/completions"))
+           (ende-providers '(remote))
+           (ende-provider-profiles
+            '((remote :url "http://remote.example/v1/chat/completions")))
+           (ende-selector--last-selection
+            '(:provider remote :model "remote/saved"))
+           (ende-provider--model-cache (make-hash-table :test #'equal))
+           (ende-provider--model-inflight (make-hash-table :test #'equal))
+           (ende-provider--model-cancellations (make-hash-table :test #'equal))
+           (ende-provider--model-generation 0))
+      (unwind-protect
+          (progn
+            (ende-provider--finish-model-discovery
+             (ende-provider--model-cache-key profile)
+             '("remote/first" "remote/saved") nil nil)
+            (with-current-buffer buffer
+              (ende-selector-mode)
+              (setq ende-selector--providers '(remote)
+                    ende-selector--provider-index 0)
+              (cl-letf (((symbol-function 'ende-provider-probe-models)
+			 (lambda (&rest _)
+                           (error "cached model catalog was not used"))))
+		(ende-selector--set-provider 0)
+		(should (string= (ende-selector--model-name)
+				 "remote/saved"))
+		(should (eq ende-selector--model-state :ready))
+		(setq ende-selector--last-selection nil)
+		(ende-selector--set-provider 0)
+		(should (string= (ende-selector--model-name)
+				 "remote/first")))))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+
+
+  (ert-deftest ende-test/selector-validates-first-model-without-preference ()
+    (let ((buffer (generate-new-buffer " *ende-selector-first-model-test*"))
+          (probe-callback nil)
+          (ende-providers '(remote))
+          (ende-provider-profiles
+           '((remote :url "http://remote.example/v1/chat/completions")))
+          (ende-selector--last-selection nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0)
+            (cl-letf (((symbol-function 'ende-provider-probe-models)
+                       (lambda (_profile callback)
+			 (setq probe-callback callback)
+			 (lambda () nil))))
+              (ende-selector--set-provider 0)
+              (should-not (ende-selector--model-name))
+              (should (string-match-p "validating" (buffer-string)))
+              (funcall probe-callback '("remote/first" "remote/second") nil)
+              (should (string= (ende-selector--model-name)
+                               "remote/first"))
+              (should (eq ende-selector--model-state :ready))))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+
+
+  (ert-deftest ende-test/selector-validates-preferences-once-per-catalog ()
+    (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
+          (messages nil)
+          (ende-providers '(remote))
+          (ende-provider-profiles
+           '((remote :url "http://remote.example/v1/chat/completions")))
+          (ende-selector--last-selection
+           '(:provider remote :model "remote/missing"))
+          (ende-selector--model-validations (make-hash-table :test #'equal))
+          (ende-provider--model-cache (make-hash-table :test #'equal))
+          (ende-provider--model-inflight (make-hash-table :test #'equal))
+          (ende-provider--model-cancellations (make-hash-table :test #'equal))
+          (ende-provider--model-generation 0))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0)
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format-string &rest args)
+			 (push (apply #'format format-string args) messages)))
+                      ((symbol-function 'ende-provider-probe-models)
+                       (lambda (_profile callback)
+			 (funcall callback '("remote/first" "remote/second") nil)
+			 (lambda () nil))))
+              (ende-selector--set-provider 0)
+              (should (string= (ende-selector--model-name) "remote/first"))
+              (should (= (cl-count-if
+                          (lambda (value)
+                            (string-match-p "unavailable" value))
+                          messages)
+			 1))
+              (ende-selector--set-provider 0)
+              (should (= (cl-count-if
+                          (lambda (value)
+                            (string-match-p "unavailable" value))
+                          messages)
+			 1))
+              (setq ende-selector--last-selection
+                    '(:provider remote :model "remote/second"))
+              (ende-selector--set-provider 0)
+              (should (string= (ende-selector--model-name)
+                               "remote/second"))
+              (should (= (cl-count-if
+                          (lambda (value)
+                            (string-match-p "unavailable" value))
+                          messages)
+			 1))
+              (ende-provider-clear-discovery-cache)
+              (setq ende-selector--last-selection
+                    '(:provider remote :model "remote/missing"))
+              (ende-selector--set-provider 0)
+              (should (= (cl-count-if
+                          (lambda (value)
+                            (string-match-p "unavailable" value))
+                          messages)
+			 2))))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+
+
+
+  (ert-deftest ende-test/selector-model-completion-rejects-incomplete-discovery ()
+    (let ((buffer (generate-new-buffer " *ende-selector-model-loading-test*"))
+          (called nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote/default")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :loading)
+            (cl-letf (((symbol-function 'completing-read)
                        (lambda (&rest _)
-                         (error "cached model catalog was not used"))))
-              (ende-selector--set-provider 0)
-              (should (string= (ende-selector--model-name)
-                               "remote/saved"))
-              (should (eq ende-selector--model-state :ready))
-              (setq ende-selector--last-selection nil)
-              (ende-selector--set-provider 0)
-              (should (string= (ende-selector--model-name)
-                               "remote/first")))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+			 (setq called t)
+			 "remote/default")))
+              (should-error (ende-selector-select-model) :type 'user-error))
+            (should-not called))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
 
 
 
-(ert-deftest ende-test/selector-validates-first-model-without-preference ()
-  (let ((buffer (generate-new-buffer " *ende-selector-first-model-test*"))
-        (probe-callback nil)
-        (ende-providers '(remote))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions")))
-        (ende-selector--last-selection nil))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0)
-          (cl-letf (((symbol-function 'ende-provider-probe-models)
-                     (lambda (_profile callback)
-                       (setq probe-callback callback)
-                       (lambda () nil))))
-            (ende-selector--set-provider 0)
-            (should-not (ende-selector--model-name))
-            (should (string-match-p "validating" (buffer-string)))
-            (funcall probe-callback '("remote/first" "remote/second") nil)
-            (should (string= (ende-selector--model-name)
-                             "remote/first"))
-            (should (eq ende-selector--model-state :ready))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+  (ert-deftest ende-test/selector-effort-picker-is-a-static-uncommitted-draft ()
+    (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
+          (ende-provider-profiles
+           '((remote :model "remote-model"
+                     :controls ((:reasoning-effort :path ("reasoning" "effort")
+                                                   :choices ("high" "low"))))))
+          (ende-provider-discovery-enabled nil)
+          (ende-model-selection-scope 'global)
+          (ende-model-selection--last-used nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (ende-selector--set-control-context)
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt collection _predicate require-match
+                                       _initial _history default &rest _)
+			 (should (string= prompt "Reasoning effort: "))
+			 (should (equal collection
+					'("Provider default" "high" "low")))
+			 (should require-match)
+			 (should (equal default "Provider default"))
+			 "high")))
+              (ende-selector-select-effort))
+            (should (equal ende-selector--control-preferences
+                           '(:reasoning-effort "high")))
+            (should (equal ende-selector--effort-validated-context
+                           '(remote "remote-model" "high")))
+            (should-not ende-model-selection--last-used)
+            (should (string-match-p "Effort:.*high (explicit)"
+                                    (buffer-string)))
+            (ende-selector-close)
+            (should-not ende-model-selection--last-used))
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
-
-
-(ert-deftest ende-test/selector-validates-preferences-once-per-catalog ()
-  (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
-        (messages nil)
-        (ende-providers '(remote))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions")))
-        (ende-selector--last-selection
-         '(:provider remote :model "remote/missing"))
-        (ende-selector--model-validations (make-hash-table :test #'equal))
-        (ende-provider--model-cache (make-hash-table :test #'equal))
-        (ende-provider--model-inflight (make-hash-table :test #'equal))
-        (ende-provider--model-cancellations (make-hash-table :test #'equal))
-        (ende-provider--model-generation 0))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0)
-          (cl-letf (((symbol-function 'message)
-                     (lambda (format-string &rest args)
-                       (push (apply #'format format-string args) messages)))
-                    ((symbol-function 'ende-provider-probe-models)
-                     (lambda (_profile callback)
-                       (funcall callback '("remote/first" "remote/second") nil)
-                       (lambda () nil))))
-            (ende-selector--set-provider 0)
-            (should (string= (ende-selector--model-name) "remote/first"))
-            (should (= (cl-count-if
-                        (lambda (value)
-                          (string-match-p "unavailable" value))
-                        messages)
-                       1))
-            (ende-selector--set-provider 0)
-            (should (= (cl-count-if
-                        (lambda (value)
-                          (string-match-p "unavailable" value))
-                        messages)
-                       1))
-            (setq ende-selector--last-selection
-                  '(:provider remote :model "remote/second"))
-            (ende-selector--set-provider 0)
-            (should (string= (ende-selector--model-name)
-                             "remote/second"))
-            (should (= (cl-count-if
-                        (lambda (value)
-                          (string-match-p "unavailable" value))
-                        messages)
-                       1))
-            (ende-provider-clear-discovery-cache)
-            (setq ende-selector--last-selection
-                  '(:provider remote :model "remote/missing"))
-            (ende-selector--set-provider 0)
-            (should (= (cl-count-if
-                        (lambda (value)
-                          (string-match-p "unavailable" value))
-                        messages)
-                       2))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-
-
-(ert-deftest ende-test/selector-model-completion-rejects-incomplete-discovery ()
-  (let ((buffer (generate-new-buffer " *ende-selector-model-loading-test*"))
-        (called nil))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0
-                ende-selector--models '("remote/default")
-                ende-selector--model-index 0
-                ende-selector--model-state :loading)
-          (cl-letf (((symbol-function 'completing-read)
-                     (lambda (&rest _)
-                       (setq called t)
-                       "remote/default")))
-            (should-error (ende-selector-select-model) :type 'user-error))
-          (should-not called))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-
-
-(ert-deftest ende-test/selector-effort-picker-uses-live-values-and-remembers-choice ()
-  (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
-        (calls nil)
-        (ende-provider-profiles '((remote :model "remote-model")))
-        (ende-model-selection-scope 'global)
-        (ende-selector--effort-selections (make-hash-table :test #'equal)))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
-                ende-selector--provider-index 0
-                ende-selector--models '("remote-model")
-                ende-selector--model-index 0
-                ende-selector--model-state :ready)
-          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                     (lambda (profile model callback)
-                       (push (list profile model) calls)
-                       (funcall callback '("high" "low") "low" nil)
-                       (lambda () nil)))
-                    ((symbol-function 'completing-read)
-                     (lambda (prompt collection _predicate require-match
-                                     _initial _history default &rest _)
-                       (should (string= prompt "Reasoning effort: "))
-                       (should (equal collection '("high" "low")))
-                       (should require-match)
-                       (should (string= default "low"))
-                       "high")))
-            (ende-selector-select-effort))
-          (should (= (length calls) 1))
-          (should (string= (cadar calls) "remote-model"))
-          (should (string= ende-selector--effort "high"))
-          (should (eq ende-selector--effort-state :ready))
-          (should ende-selector--effort-validated-p)
-          (should (string=
-                   (gethash '(remote "remote-model")
-                            ende-selector--effort-selections)
-                   "high"))
-          (should (string-match-p "Effort:.*high" (buffer-string))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-
-
-(ert-deftest ende-test/selector-effort-is-saved-only-for-its-source-buffer ()
-  (let* ((source (generate-new-buffer " *ende-effort-source-one*"))
-         (other-source (generate-new-buffer " *ende-effort-source-two*"))
-         (selector (generate-new-buffer " *ende-effort-source-selector*"))
+(ert-deftest ende-test/selector-control-draft-commits-only-to-source-on-confirm ()
+  (let* ((source (generate-new-buffer " *ende-control-source-one*"))
+         (other-source (generate-new-buffer " *ende-control-source-two*"))
+         (selector (generate-new-buffer " *ende-control-source-selector*"))
          (ende-model-selection-scope 'buffer)
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections
           (make-hash-table :test #'equal))
-         (ende-provider-profiles '((remote :model "remote-model"))))
+         (ende-provider-profiles
+          '((remote :model "remote-model"
+                    :controls ((:temperature :path ("temperature"))
+                               (:thinking :path ("thinking")
+                                          :choices (on off))
+                               (:reasoning-effort :path ("reasoning" "effort")
+                                                  :choices ("high" "low")))))))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -562,37 +579,48 @@
                   ende-selector--models '("remote-model")
                   ende-selector--model-index 0
                   ende-selector--model-state :ready)
-            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                       (lambda (_profile _model callback)
-                         (funcall callback '("high" "low") "low" nil)
-                         (lambda () nil)))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _) "high")))
+            (ende-selector--set-control-context)
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (prompt _collection _predicate _require-match
+                                       _initial _history _default &rest _)
+                         (cond
+                          ((string= prompt "Temperature: ")
+                           "Set numeric value")
+                          ((string= prompt "Thinking: ") "off")
+                          ((string= prompt "Reasoning effort: ") "high"))))
+                      ((symbol-function 'read-number)
+                       (lambda (&rest _) 0)))
+              (ende-selector-select-temperature)
+              (ende-selector-select-thinking)
               (ende-selector-select-effort))
-            (should (equal
-                     (plist-get (ende-model-selection-for-buffer source)
-                                :reasoning-effort)
-                     "high"))
             (should-not
-             (plist-get (ende-model-selection-for-buffer other-source)
-                        :reasoning-effort))
-            (setq ende-selector--source-buffer other-source)
-            (ende-selector--set-effort-context)
-            (should-not ende-selector--effort)))
+             (plist-member (ende-model-selection-for-buffer source)
+                           :control-preferences))
+            (ende-selector-confirm))
+          (should (equal
+                   (plist-get (ende-model-selection-for-buffer source)
+                              :control-preferences)
+                   '(:temperature 0 :thinking off :reasoning-effort "high")))
+          (should-not
+           (plist-member (ende-model-selection-for-buffer other-source)
+                         :control-preferences))
+          (let ((profile (ende-provider-profile-for-buffer source)))
+            (should (zerop (plist-get profile :temperature)))
+            (should (eq (plist-get profile :thinking) 'off))
+            (should (equal (plist-get profile :reasoning-effort) "high"))))
       (dolist (buffer (list source other-source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
-
-
 
 (ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
         (callback nil)
         (cancelled 0)
         (completed nil)
-        (ende-provider-profiles '((remote :model "first")))
-        (ende-model-selection-scope 'global)
-        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+        (ende-provider-profiles
+         '((remote :model "first"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
+        (ende-model-selection-scope 'global))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -601,6 +629,7 @@
                 ende-selector--models '("first" "second")
                 ende-selector--model-index 0
                 ende-selector--model-state :ready)
+          (ende-selector--set-control-context)
           (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
                      (lambda (_profile _model probe-callback)
                        (setq callback probe-callback)
@@ -620,20 +649,23 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-
-
-(ert-deftest ende-test/selector-validates-remembered-effort-before-dispatch ()
+(ert-deftest ende-test/selector-validates-control-preferences-before-dispatch ()
   (let ((source (generate-new-buffer " *ende-selector-effort-source*"))
         (selector (generate-new-buffer " *ende-selector-effort-dispatch*"))
         (probe-callback nil)
         (queued nil)
-        (ende-provider-profiles '((remote :model "remote-model")))
-        (ende-model-selection-scope 'global)
-        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+        (ende-provider-profiles
+         '((remote :model "remote-model"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
-          (puthash '(remote "remote-model") "high"
-                   ende-selector--effort-selections)
+          (with-current-buffer source
+            (ende-model-selection-save
+             '(:provider remote :model "remote-model"
+                         :control-preferences (:reasoning-effort "high"))))
           (with-current-buffer selector
             (ende-selector-mode)
             (setq ende-selector--source-buffer source
@@ -642,7 +674,7 @@
                   ende-selector--models '("remote-model")
                   ende-selector--model-index 0
                   ende-selector--model-state :ready)
-            (ende-selector--set-effort-context)
+            (ende-selector--set-control-context)
             (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
                        (lambda (_profile _model callback)
                          (setq probe-callback callback)
@@ -656,24 +688,38 @@
               (funcall probe-callback '("high" "low") "low" nil)))
           (should (equal (take 2 queued) '(insert nil)))
           (should (string= (plist-get (nth 2 queued) :model) "remote-model"))
-          (should (string= (plist-get (nth 2 queued) :reasoning-effort) "high")))
+          (should (string= (plist-get (nth 2 queued) :reasoning-effort) "high"))
+          (should (equal
+                   (plist-get (nth 2 queued)
+                              :reasoning-effort-validated-context)
+                   '(remote "remote-model" "high")))
+          (should (equal
+                   (plist-get (ende-model-selection-for-buffer source)
+                              :control-preferences)
+                   '(:reasoning-effort "high")))
+          (should (not (plist-get (nth 2 queued) :reasoning-effort-validated-p)))
+          (should (buffer-live-p source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
-
-
-(ert-deftest ende-test/selector-rejects-effort-removed-by-live-validation ()
-  (let ((source (generate-new-buffer " *ende-selector-effort-stale-source*"))
-        (selector (generate-new-buffer " *ende-selector-effort-stale*"))
+(ert-deftest ende-test/selector-live-effort-failure-preserves-preference-for-retry ()
+  (let ((source (generate-new-buffer " *ende-selector-retry-source*"))
+        (selector (generate-new-buffer " *ende-selector-retry*"))
+        (callbacks nil)
         (queued nil)
-        (ende-provider-profiles '((remote :model "remote-model")))
-        (ende-model-selection-scope 'global)
-        (ende-selector--effort-selections (make-hash-table :test #'equal)))
+        (ende-provider-profiles
+         '((remote :model "remote-model"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
-          (puthash '(remote "remote-model") "high"
-                   ende-selector--effort-selections)
+          (with-current-buffer source
+            (ende-model-selection-save
+             '(:provider remote :model "remote-model"
+                         :control-preferences (:reasoning-effort "high"))))
           (with-current-buffer selector
             (ende-selector-mode)
             (setq ende-selector--source-buffer source
@@ -682,20 +728,72 @@
                   ende-selector--models '("remote-model")
                   ende-selector--model-index 0
                   ende-selector--model-state :ready)
-            (ende-selector--set-effort-context)
+            (ende-selector--set-control-context)
             (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
                        (lambda (_profile _model callback)
-                         (funcall callback '("low") "low" nil)
+                         (push callback callbacks)
                          (lambda () nil)))
                       ((symbol-function 'ende-enqueue-operation)
-                       (lambda (&rest _)
-                         (setq queued t))))
+                       (lambda (&rest arguments) (setq queued arguments))))
+              (ende-selector-insert)
+              (funcall (pop callbacks)
+                       nil nil
+                       (ende-error-create :kind 'http :message "temporary"))
+              (should (eq ende-selector--effort-state :error))
+              (should-not queued)
+              (should (equal
+                       (plist-get (ende-model-selection-for-buffer source)
+                                  :control-preferences)
+                       '(:reasoning-effort "high")))
+              (ende-selector-insert)
+              (funcall (pop callbacks) '("high" "low") nil nil)))
+          (should (equal (car queued) 'insert))
+          (should (equal
+                   (plist-get (nth 2 queued) :reasoning-effort-validated-context)
+                   '(remote "remote-model" "high"))))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest ende-test/selector-rejects-removed-effort-without-clearing-preference ()
+  (let ((source (generate-new-buffer " *ende-selector-effort-stale-source*"))
+        (selector (generate-new-buffer " *ende-selector-effort-stale*"))
+        (queued nil)
+        (ende-provider-profiles
+         '((remote :model "remote-model"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (ende-model-selection-save
+             '(:provider remote :model "remote-model"
+                         :control-preferences (:reasoning-effort "high"))))
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--provider-index 0
+                  ende-selector--models '("remote-model")
+                  ende-selector--model-index 0
+                  ende-selector--model-state :ready)
+            (ende-selector--set-control-context)
+            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                       (lambda (_profile _model callback)
+                         (funcall callback '("low") nil nil)
+                         (lambda () nil)))
+                      ((symbol-function 'ende-enqueue-operation)
+                       (lambda (&rest _) (setq queued t))))
               (ende-selector-insert))
             (should-not queued)
-            (should-not ende-selector--effort)
-            (should (eq ende-selector--effort-state :error))
-            (should-not (gethash '(remote "remote-model")
-                                 ende-selector--effort-selections))))
+            (should (equal ende-selector--effort "high"))
+            (should (eq ende-selector--effort-state :invalid))
+            (should (equal
+                     (plist-get (ende-model-selection-for-buffer source)
+                                :control-preferences)
+                     '(:reasoning-effort "high")))))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
@@ -771,17 +869,20 @@
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
-      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Effort:"
+      (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:" "Controls:"
                      "Quota: unavailable"
                      "i  - insert" "a  - ask" "d  - queue dashboard"
                      "I  - insert anywhere"
                      "k  - compact chat context"
                      "w  - write anywhere"
                      "m  - select/search model"
+                     "T  - select temperature"
+                     "t  - select thinking mode"
                      "e  - select reasoning effort"
+                     "R  - reset controls to profile settings"
                      "s  - summarize"
                      "r  - rubber duck"
-                     "RET       - confirm and save selection"
+                     "RET       - commit selection and close"
                      "C-c C-c   - approve all LLM changes"
                      "C-c C-k   - reject all LLM changes"))
         (should (string-match-p (regexp-quote key) (buffer-string)))))))
@@ -1028,10 +1129,10 @@
                         :model-discovery-function ,probe)
             (openai :model "legacy-codex" :models ("legacy-codex")
                     :model-discovery-function ,probe)
-            (deepseek :type openai
-                      :url "https://api.deepseek.com/chat/completions"
-                      :model "deepseek-chat"
-                      :models ("deepseek-chat" "deepseek-reasoner"))))
+            (generic-openai :type openai
+                            :url "https://example.test/chat/completions"
+                            :model "generic-chat"
+                            :models ("generic-chat" "generic-reasoner"))))
          (ende-provider--model-inflight (make-hash-table :test #'equal))
          (ende-provider--model-cancellations (make-hash-table :test #'equal))
          (ende-provider--model-cache (make-hash-table :test #'equal))
@@ -1056,12 +1157,12 @@
       (unwind-protect
           (with-current-buffer buffer
             (ende-selector-mode)
-            (setq ende-selector--providers '(deepseek)
+            (setq ende-selector--providers '(generic-openai)
                   ende-selector--provider-index 0)
             (ende-selector--set-provider 0)
             (should (eq ende-selector--model-state :ready))
             (should (equal ende-selector--models
-                           '("deepseek-chat" "deepseek-reasoner"))))
+                           '("generic-chat" "generic-reasoner"))))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 

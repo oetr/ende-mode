@@ -255,6 +255,7 @@ result is applied."
   "Validate EFFORT live for JOB, then send its prepared MESSAGES."
   (let* ((profile (ende-job-profile job))
          (model (plist-get profile :model))
+         (context (ende-provider-reasoning-effort-context profile effort))
          (completed nil)
          cancel)
     (ende--handle-llm-event
@@ -266,23 +267,18 @@ result is applied."
              (setq completed t)
              (when (ende-job-current-p job)
                (ende-job-cancellation-set job nil)
-               (cond
-                (error
-                 (ende--llm-preflight-error job on-error error))
-                ((member effort efforts)
-                 (setf (ende-job-profile job)
-                       (plist-put (ende-job-profile job)
-                                  :reasoning-effort-validated-p t))
-                 (ende--send-llm
-                  job messages on-done on-error no-begin))
-                (t
-                 (ende--llm-preflight-error
-                  job on-error
-                  (ende-error-create
-                   :kind 'discovery
-                   :message
-                   (format "reasoning effort %s is no longer available"
-                           effort)))))))))
+               (let ((validation-error
+                      (ende-provider-reasoning-effort-validation-error
+                       profile effort efforts error)))
+                 (if validation-error
+                     (ende--llm-preflight-error
+                      job on-error validation-error)
+                   (setf (ende-job-profile job)
+                         (plist-put (ende-job-profile job)
+                                    :reasoning-effort-validated-context
+                                    context))
+                   (ende--send-llm
+                    job messages on-done on-error no-begin)))))))
     (unless completed
       (ende-job-cancellation-set job cancel))))
 
@@ -298,12 +294,15 @@ metadata has already been added by a multi-turn operation."
                        messages
                      (ende-operations--add-source-metadata job messages)))
          (profile (ende-job-profile job))
-         (wire-api (plist-get profile :reasoning-effort-wire-api))
-         (effort (and (memq wire-api '(openrouter responses))
-                      (ende-provider-reasoning-effort profile wire-api))))
+         (effort (ende-provider-active-reasoning-effort profile))
+         (context (and effort
+                       (ende-provider-reasoning-effort-context
+                        profile effort))))
     (ende--validate-messages messages)
     (if (and effort
-             (not (plist-get profile :reasoning-effort-validated-p)))
+             (not (equal context
+                         (plist-get profile
+                                    :reasoning-effort-validated-context))))
         (ende--validate-effort-and-send
          job messages on-done on-error no-begin effort)
       (ende--send-llm job messages on-done on-error no-begin))))

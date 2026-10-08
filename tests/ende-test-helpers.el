@@ -192,7 +192,11 @@ non-nil, is signalled from the event callback."
                     :url (if (eq transport 'codex)
                              "https://chatgpt.com/backend-api/codex/responses"
                            "https://example.test/v1/chat/completions")
-                    :model "test-model" :temperature 0.2 :require-sse t)))
+                    :model "test-model"
+                    :temperature (unless (eq transport 'codex) 0.2)
+                    :controls (unless (eq transport 'codex)
+                                '((:temperature :path ("temperature"))))
+                    :require-sse t)))
          (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
          (auth '(:access "transport-test-token"
 			 :expires 9999999999999)))
@@ -313,7 +317,6 @@ non-nil, is signalled from the event callback."
   (clrhash ende-provider--model-cancellations)
   (setq ende-provider--model-generation 0)
   (clrhash ende-selector--model-validations)
-  (clrhash ende-selector--effort-selections)
   (clrhash ende-model-selection--buffer-selections)
   (ende-provider-clear-runtime-settings)
   (clrhash ende-history--entries)

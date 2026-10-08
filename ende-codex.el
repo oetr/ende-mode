@@ -17,6 +17,7 @@
 (require 'subr-x)
 (require 'url-util)
 (require 'ende-core)
+(require 'ende-controls)
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-transport)
@@ -930,7 +931,7 @@ is queried for every call; it does not share the model catalog cache."
              (funcall
               callback nil nil
               (ende-error-create
-               :kind 'discovery
+               :kind 'capability
                :message (format "Codex does not advertise model %s" model)))
            (let* ((options (ende-codex--reasoning-effort-options entry))
                   (efforts (plist-get options :efforts)))
@@ -939,7 +940,7 @@ is queried for every call; it does not share the model catalog cache."
                (funcall
                 callback nil nil
                 (ende-error-create
-                 :kind 'discovery
+                 :kind 'capability
                  :message
                  (format "Codex does not advertise explicit reasoning efforts for %s"
                          model)))))))))))
@@ -1405,12 +1406,6 @@ When APPEND is non-nil, append the argument delta to the stored value."
                (cons :input (ende-codex--request-messages messages))
                (cons :store json-false)
                (cons :stream t))))
-    (let ((effort (ende-provider-reasoning-effort profile 'responses)))
-      (when effort
-        (setq body
-              (append body
-                      (list (cons :reasoning
-                                  (list (cons :effort effort))))))))
     (when (plist-get profile :tool-definitions)
       (setq body
             (append body
@@ -1419,9 +1414,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                  (plist-get profile :tool-definitions)))
                           (cons :tool_choice "auto")))))
     (if ende-max-output-tokens
-        (append body (list (cons :max_output_tokens
-                                 ende-max-output-tokens)))
-      body)))
+        (setq body (append body (list (cons :max_output_tokens
+                                            ende-max-output-tokens)))))
+    (ende-controls-encode body (plist-get profile :controls) profile)))
 
 (defun ende-codex--start-generation (session messages auth)
   "Start a Codex generation for SESSION using AUTH."

@@ -40,8 +40,15 @@
     (should (equal (plist-get local :url) ende-provider-endpoint))
     (should (equal (plist-get local :model) "legacy-model"))
     (should (= (plist-get local :temperature) 0.4))
-    (should (equal (ende-provider-resolve-profile named) named))
-    (should (equal (ende-provider-resolve-profile batch) batch))
+    (should
+     (equal (ende-provider-resolve-profile named)
+            (append named '(:controls ((:temperature :path ("temperature")))))))
+    (should
+     (equal (ende-provider-resolve-profile batch)
+            (append batch
+                    '(:controls ((:temperature :path ("temperature"))
+                                 (:reasoning-effort
+                                  :path ("reasoning" "effort")))))))
     (should (equal (plist-get responses :url)
                    "https://chatgpt.com/backend-api/codex/responses"))
     (should (equal (plist-get responses :model) "gpt-configured"))))
@@ -54,29 +61,28 @@
          (ende-provider-temperature 1.4)
          (ende-codex-model "codex-configured")
          (ende-provider-profiles
-          '((deepseek :type openai
-                      :url "https://api.deepseek.com/chat/completions"
-                      :model "deepseek-chat"
-                      :auth-source-host "api.deepseek.com"
-                      :auth-source-user "ende"
-                      :auth-source-port 443
-                      :api-key "discard-this-secret")
+          '((generic-openai :type openai
+                            :url "https://example.test/chat/completions"
+                            :model "generic-model"
+                            :auth-source-host "example.test"
+			    :auth-source-user "ende"
+			    :auth-source-port 443
+			    :api-key "discard-this-secret")
             (no-defaults :type openai
                          :url "https://example.test/custom/generate")))
-         (profile (ende-provider-profile 'deepseek))
+         (profile (ende-provider-profile 'generic-openai))
          (no-defaults (ende-provider-profile 'no-defaults))
-         (snapshot (ende-provider-profile-snapshot 'deepseek)))
+         (snapshot (ende-provider-profile-snapshot 'generic-openai)))
     (should (eq (plist-get profile :type) 'openai))
     (should (equal (plist-get profile :url)
-                   "https://api.deepseek.com/chat/completions"))
-    (should (equal (plist-get profile :model) "deepseek-chat"))
+                   "https://example.test/chat/completions"))
+    (should (equal (plist-get profile :model) "generic-model"))
     (should-not (plist-member profile :temperature))
     (should (eq (plist-get profile :stream-usage) t))
     (should (plist-get profile :model-explicit-p))
     (should-not (plist-get profile :wire-api))
     (should-not (plist-get profile :auth-method))
     (should-not (plist-get profile :model-discovery-key))
-    (should-not (plist-get profile :reasoning-effort-wire-api))
     (should-not (plist-get profile :transport))
     (should-not (plist-get profile :batch-url))
     (should-not (plist-get profile :model-discovery-function))
@@ -106,12 +112,12 @@
 		   :model "generic-model" :max-concurrency 3 :parallel t
 		   :stream-usage nil :require-sse nil :temperature nil)))
          (ende-provider-profiles
-          '((deepseek :type openai
-                      :url "https://api.deepseek.com/chat/completions"
-                      :model "snapshot-model" :temperature nil)))
+          '((generic-openai :type openai
+                            :url "https://example.test/chat/completions"
+                            :model "snapshot-model" :temperature nil)))
          (snapshot
           (ende-provider-resolve-profile
-           (ende-provider-profile 'deepseek))))
+           (ende-provider-profile 'generic-openai))))
     (dolist (key '(:type :max-concurrency :parallel :stream-usage :require-sse))
       (should (equal (plist-get unnamed key) (plist-get named key))))
     (should (eq (plist-get unnamed :type) 'openai))
@@ -126,12 +132,12 @@
     (should (plist-member overrides :temperature))
     (should-not (plist-get overrides :temperature))
     (let ((ende-provider-profiles
-           '((deepseek :type openai
-                       :url "https://api.deepseek.com/v2/chat/completions"
-                       :model "changed-model" :temperature 0.5))))
+           '((generic-openai :type openai
+                             :url "https://example.test/v2/chat/completions"
+                             :model "changed-model" :temperature 0.5))))
       (let ((resolved (ende-provider-resolve-profile snapshot)))
         (should (equal (plist-get resolved :url)
-                       "https://api.deepseek.com/chat/completions"))
+                       "https://example.test/chat/completions"))
         (should (equal (plist-get resolved :model) "snapshot-model"))
         (should-not (plist-get resolved :temperature)))))
   (let* ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
@@ -211,10 +217,10 @@
 
 (ert-deftest ende-test/typed-openai-request-options-are-explicit ()
   (let* ((ende-provider-profiles
-          '((deepseek :type openai
-                      :url "https://api.deepseek.com/chat/completions"
-                      :model "deepseek-chat")))
-         (profile (ende-provider-profile 'deepseek))
+          '((generic-openai :type openai
+                            :url "https://example.test/chat/completions"
+                            :model "generic-model")))
+         (profile (ende-provider-profile 'generic-openai))
          (messages '(("user" . "question")))
          (body (ende-llm--request-body messages profile))
          (no-usage
@@ -266,30 +272,20 @@
 
 
 
-(ert-deftest ende-test/provider-openrouter-reasoning-policy-is-separate ()
-  (should (equal
-           (ende-provider-openrouter-reasoning-parameters
-            '(:reasoning-effort-wire-api openrouter :reasoning-effort "high"))
-           '((:reasoning (:effort . "high")))))
-  (should-not
-   (ende-provider-openrouter-reasoning-parameters
-    '(:reasoning-effort-wire-api responses :reasoning-effort high))))
-
-(ert-deftest ende-test/chat-request-body-uses-openrouter-reasoning-policy ()
+(ert-deftest ende-test/chat-request-body-encodes-openrouter-effort-by-profile-map ()
   (let* ((messages '(("user" . "question")))
-         (openrouter
-          (ende-llm--request-body
-           messages
-           '(:model "openrouter/model"
-		    :reasoning-effort-wire-api openrouter
-		    :reasoning-effort "high")))
-         (ordinary
-          (ende-llm--request-body
-           messages
-           '(:model "ordinary-model" :reasoning-effort "high"))))
-    (should (equal (alist-get :reasoning openrouter)
+         (profile (plist-put (ende-provider-profile 'openrouter)
+                             :reasoning-effort "high"))
+         (body (ende-llm--request-body messages profile)))
+    (should (equal (alist-get :reasoning body)
                    '((:effort . "high"))))
-    (should-not (alist-get :reasoning ordinary))))
+    (should (equal (alist-get :temperature body) 0.2))))
+
+(ert-deftest ende-test/chat-request-body-rejects-unmapped-active-control ()
+  (should-error
+   (ende-llm--request-body
+    '(("user" . "question"))
+    '(:model "ordinary-model" :reasoning-effort "high"))))
 
 
 

@@ -18,6 +18,7 @@
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-codex)
+(require 'ende-controls)
 
 ;;;; User options
 
@@ -32,8 +33,32 @@
 
 (defconst ende-provider--generic-openai-defaults
   '(:type openai :max-concurrency 1 :parallel nil
-          :stream-usage t :require-sse t)
+	  :stream-usage t :require-sse t
+	  :controls ((:temperature :path ("temperature"))))
   "Static defaults for generic OpenAI-compatible profiles.")
+
+(defconst ende-provider--preset-names
+  '(local openai openrouter openrouter-batch deepseek)
+  "Built-in provider profiles available through :preset.")
+
+(defconst ende-provider--deepseek-verified-models
+  '("deepseek-flash" "deepseek-v4-pro")
+  "DeepSeek models currently documented for the verified chat controls.")
+
+(defun ende-provider-deepseek-model-verified-p (profile)
+  "Return non-nil when PROFILE is the DeepSeek preset with a verified model."
+  (and (eq (plist-get profile :builtin-profile) 'deepseek)
+       (member (plist-get profile :model)
+               ende-provider--deepseek-verified-models)))
+
+(defconst ende-provider--deepseek-controls
+  '((:temperature :path ("temperature"))
+    (:thinking :path ("thinking" "type")
+               :choices (on off)
+               :values ((on . "enabled") (off . "disabled")))
+    (:reasoning-effort :path ("reasoning_effort")
+                       :choices ("none" "low" "high" "max")))
+  "Verified Chat Completions mappings for documented DeepSeek models.")
 
 (defcustom ende-provider-endpoint "http://localhost:8080/v1/chat/completions"
   "OpenAI-compatible chat completions endpoint."
@@ -75,7 +100,7 @@ enables parallel jobs by default.  :source-name-disclosure overrides
   :group 'ende)
 
 (defcustom ende-model-selection-scope 'buffer
-  "Scope used to remember the selected provider, model, and effort.
+  "Scope used to remember the selected provider, model, and control preferences.
 
 When `buffer', selections are associated with the current buffer name and
 visited file and are remembered for this Emacs session.  When `global', one
@@ -131,7 +156,7 @@ When nil, use only the response inactivity timeout."
   "Session-level provider settings changed from the selector.")
 
 (defvar ende-model-selection--last-used nil
-  "Most recently used provider, model, and optional reasoning-effort plist.")
+  "Most recently used provider, model, and optional control-preferences plist.")
 
 (defvar ende-model-selection--buffer-selections (make-hash-table :test #'equal)
   "Selections keyed by buffer name and visited file for this Emacs session.")
@@ -167,123 +192,322 @@ Supported settings are `:max-concurrency' and `:parallel'."
   "Clear all session-level provider settings."
   (clrhash ende-provider--runtime-settings))
 
-(defun ende-provider-profile (&optional name)
-  "Return a non-secret provider profile for NAME.
+(defun ende-provider--built-in-profile (name)
+  "Return built-in defaults for provider NAME, without user customizations."
+  (pcase name
+    ('openai
+     (list :url ende-codex-endpoint
+           :model ende-codex-model
+           :model-discovery-key
+           (list ende-codex-models-endpoint
+                 ende-codex-client-version
+                 (expand-file-name ende-codex-auth-file))
+           :max-concurrency 4
+           :parallel nil
+           :wire-api 'responses
+           :auth-method 'opencode-oauth
+           :model-discovery-function #'ende-codex-probe-models
+           :reasoning-effort-probe-function
+           #'ende-codex-probe-reasoning-efforts
+           :controls '((:reasoning-effort :path ("reasoning" "effort")))
+           :require-sse t
+           :display-name "OpenAI"
+           :builtin-profile 'openai))
+    ('openrouter
+     (list :url "https://openrouter.ai/api/v1/chat/completions"
+           :batch-url "https://openrouter.ai/api/v1/batches"
+           :batch-endpoint "/v1/chat/completions"
+           :transport 'auto
+           :model ende-provider--default-openrouter-model
+           :max-concurrency 4
+           :parallel nil
+           :temperature 0.2
+           :auth-source-host "openrouter.ai"
+           :auth-source-user "ende"
+           :auth-source-port 443
+           :request-headers
+           (copy-sequence ende-provider--openrouter-request-headers)
+           :reasoning-effort-probe-function
+           #'ende-provider--probe-openrouter-reasoning-efforts
+           :controls '((:temperature :path ("temperature"))
+                       (:reasoning-effort
+                        :path ("reasoning" "effort")))
+           :require-sse t
+           :builtin-profile 'openrouter))
+    ('openrouter-batch
+     (list :url "https://openrouter.ai/api/v1/chat/completions"
+           :batch-url "https://openrouter.ai/api/v1/batches"
+           :batch-endpoint "/v1/chat/completions"
+           :transport 'openrouter-batch
+           :model ende-provider--default-openrouter-model
+           :max-concurrency 16
+           :parallel t
+           :temperature 0.2
+           :auth-source-host "openrouter.ai"
+           :auth-source-user "ende"
+           :auth-source-port 443
+           :request-headers
+           (copy-sequence ende-provider--openrouter-request-headers)
+           :reasoning-effort-probe-function
+           #'ende-provider--probe-openrouter-reasoning-efforts
+           :controls '((:temperature :path ("temperature"))
+                       (:reasoning-effort
+                        :path ("reasoning" "effort")))
+           :require-sse nil
+           :builtin-profile 'openrouter-batch))
+    ('deepseek
+     (list :type 'openai
+           :url "https://api.deepseek.com/chat/completions"
+           :models-url "https://api.deepseek.com/models"
+           :model nil
+           :max-concurrency 1
+           :parallel nil
+           :stream-usage t
+           :require-sse t
+           :auth-source-host "api.deepseek.com"
+           :auth-source-user "ende"
+           :auth-source-port 443
+           :display-name "DeepSeek"
+           :builtin-profile 'deepseek))
+    (_
+     (list :url ende-provider-endpoint
+           :model ende-provider-model
+           :max-concurrency 1
+           :parallel nil
+           :temperature ende-provider-temperature
+           :controls '((:temperature :path ("temperature")))
+           :require-sse t))))
 
-Typed `openai' profiles use their configured endpoint and model without local
-defaults.  OpenRouter profiles use auth-source credentials."
-  (let* ((name (or name (car ende-providers)
-                   ende-provider-default-profile))
+(defun ende-provider--specialize-profile (preset model profile)
+  "Apply verified MODEL behavior for built-in PRESET to PROFILE."
+  (if (and (eq preset 'deepseek)
+           (member model ende-provider--deepseek-verified-models))
+      (let ((profile (plist-put profile :controls
+                                (copy-tree ende-provider--deepseek-controls))))
+        (setq profile
+              (plist-put profile :reasoning-history-field 'reasoning_content))
+        (plist-put profile :control-defaults
+                   '(:temperature 1 :thinking on :reasoning-effort "high")))
+    profile))
+
+(defun ende-provider--configured-overrides (custom)
+  "Return public profile overrides from CUSTOM.
+Preset and internal capability metadata are composed separately."
+  (cl-loop for (key value) on custom by #'cddr
+           unless (memq key '(:preset :controls :builtin-profile
+				      :control-defaults :reasoning-history-field))
+           append (list key value)))
+
+(defun ende-provider--compose-profile (name model-override model-override-p)
+  "Compose provider NAME, optionally selecting MODEL-OVERRIDE.
+The user profile table is consulted only here, before any request snapshot."
+  (let* ((name (or name (car ende-providers) ende-provider-default-profile))
          (custom (alist-get name ende-provider-profiles))
+         (preset-p (and custom (plist-member custom :preset)))
+         (preset (if preset-p (plist-get custom :preset) name))
+         (known-preset-p (memq preset ende-provider--preset-names))
          (typed-openai
-          (and (not (eq name 'openai))
+          (and (not preset-p)
+               (not (memq name ende-provider--preset-names))
                (eq (plist-get custom :type) 'openai)))
-         (base
-          (if typed-openai
-              (copy-sequence ende-provider--generic-openai-defaults)
-            (pcase name
-              ('openai
-               (list :url ende-codex-endpoint
-                     :model ende-codex-model
-                     :model-discovery-key
-                     (list ende-codex-models-endpoint
-                           ende-codex-client-version
-                           (expand-file-name ende-codex-auth-file))
-                     :max-concurrency 4
-                     :parallel nil
-                     :wire-api 'responses
-                     :auth-method 'opencode-oauth
-                     :model-discovery-function #'ende-codex-probe-models
-                     :reasoning-effort-wire-api 'responses
-                     :require-sse t
-                     :display-name "OpenAI"))
-              ('openrouter
-               (list :url "https://openrouter.ai/api/v1/chat/completions"
-                     :batch-url "https://openrouter.ai/api/v1/batches"
-                     :batch-endpoint "/v1/chat/completions"
-                     :transport 'auto
-                     :model ende-provider--default-openrouter-model
-                     :max-concurrency 4
-                     :parallel nil
-                     :temperature 0.2
-                     :auth-source-host "openrouter.ai"
-                     :auth-source-user "ende"
-                     :auth-source-port 443
-                     :request-headers
-                     (copy-sequence ende-provider--openrouter-request-headers)
-                     :reasoning-effort-wire-api 'openrouter
-                     :require-sse t))
-              ('openrouter-batch
-               (list :url "https://openrouter.ai/api/v1/chat/completions"
-                     :batch-url "https://openrouter.ai/api/v1/batches"
-                     :batch-endpoint "/v1/chat/completions"
-                     :transport 'openrouter-batch
-                     :model ende-provider--default-openrouter-model
-                     :max-concurrency 16
-                     :parallel t
-                     :temperature 0.2
-                     :auth-source-host "openrouter.ai"
-                     :auth-source-user "ende"
-                     :auth-source-port 443
-                     :request-headers
-                     (copy-sequence ende-provider--openrouter-request-headers)
-                     :reasoning-effort-wire-api 'openrouter
-                     :require-sse nil))
-              (_
-               (list :url ende-provider-endpoint
-                     :model ende-provider-model
-                     :max-concurrency 1
-                     :parallel nil
-                     :temperature ende-provider-temperature
-                     :require-sse t))))))
-    (let ((profile (ende-plist-merge
-                    (plist-put (copy-sequence base) :name name)
-                    custom)))
-      (setq profile
-            (plist-put
-             profile :model-explicit-p
-             (or (and (plist-member custom :model) t)
-                 (and (not typed-openai)
-                      (pcase name
-                        ('openai
-                         (not (equal ende-codex-model
-                                     ende-provider--default-codex-model)))
-                        ('openrouter nil)
-                        ('openrouter-batch nil)
-                        (_ (not (equal ende-provider-model
-                                       ende-provider--default-model))))))))
-      (setq profile
-            (plist-put profile :models-explicit-p
-                       (and (plist-member custom :models) t)))
-      (dolist (key '(:max-concurrency :parallel))
-        (let ((value (ende-provider--runtime-value name key)))
-          (unless (eq value :unset)
-            (setq profile (plist-put profile key value)))))
-      (ende-provider--strip-secret-fields profile))))
+         (_ (when (and preset-p (not known-preset-p))
+              (error "Unknown provider preset %S for profile %S; known presets: %s"
+                     preset name
+                     (mapconcat #'symbol-name ende-provider--preset-names ", "))))
+         (base-name (if preset-p preset name))
+         (base (if typed-openai
+                   (copy-tree ende-provider--generic-openai-defaults)
+                 (ende-provider--built-in-profile base-name)))
+         (configured-model
+          (cond
+           (model-override-p model-override)
+           ((plist-member custom :model) (plist-get custom :model))
+           (t (plist-get base :model))))
+         (base (ende-provider--specialize-profile
+                base-name configured-model base))
+         (profile (ende-plist-merge
+                   base (ende-provider--configured-overrides custom)))
+         (controls (ende-controls-merge-descriptors
+                    (plist-get base :controls)
+                    (and (plist-member custom :controls)
+                         (plist-get custom :controls)))))
+    (setq profile (plist-put profile :name name)
+          profile (plist-put profile :controls controls))
+    (when model-override-p
+      (setq profile (plist-put profile :model model-override)))
+    (setq profile
+          (plist-put
+           profile :model-explicit-p
+           (or (and (plist-member custom :model) t)
+               (and (not typed-openai)
+                    (pcase base-name
+                      ('openai
+                       (not (equal ende-codex-model
+                                   ende-provider--default-codex-model)))
+                      ((or 'openrouter 'openrouter-batch 'deepseek) nil)
+                      (_ (not (equal ende-provider-model
+                                     ende-provider--default-model))))))))
+    (setq profile
+          (plist-put profile :models-explicit-p
+                     (and (plist-member custom :models) t)))
+    (dolist (key '(:max-concurrency :parallel))
+      (let ((value (ende-provider--runtime-value name key)))
+        (unless (eq value :unset)
+          (setq profile (plist-put profile key value)))))
+    (ende-provider--strip-secret-fields profile)))
+
+(defun ende-provider-profile (&optional name)
+  "Return a non-secret, composed provider profile for NAME."
+  (ende-provider--compose-profile name nil nil))
+
+(defun ende-provider-profile-for-model (name model)
+  "Return composed provider NAME specialized for selected MODEL."
+  (ende-provider--compose-profile name model t))
+
+(defun ende-provider-control-descriptor (profile control)
+  "Return PROFILE's descriptor for CONTROL, or nil."
+  (cdr (assq control (plist-get profile :controls))))
+
+(defun ende-provider--validate-control-preferences (preferences)
+  "Validate and return explicit control PREFERENCES."
+  (unless (ende-controls--proper-plist-p preferences)
+    (error "Control preferences must be a plist"))
+  (cl-loop for (control value) on preferences by #'cddr do
+           (unless (memq control ende-controls--names)
+             (error "Unknown control preference: %S" control))
+           (ende-controls--validate-canonical-value
+            control value "Control preference"))
+  preferences)
+
+(defun ende-provider-profile-with-control-preferences (profile preferences)
+  "Return PROFILE with explicit control PREFERENCES applied.
+Present preference keys override PROFILE even when their value is nil."
+  (ende-provider--validate-control-preferences preferences)
+  (let ((resolved (copy-tree profile)))
+    (dolist (control ende-controls--names)
+      (when (plist-member preferences control)
+        (setq resolved
+              (plist-put resolved control (plist-get preferences control)))))
+    resolved))
+
+(defun ende-provider-profile-for-selection (name model preferences)
+  "Resolve provider NAME and MODEL with explicit control PREFERENCES last."
+  (ende-provider-profile-with-control-preferences
+   (ende-provider-profile-for-model name model) preferences))
+
+(defun ende-provider-control-setting (profile preferences control)
+  "Return effective CONTROL value, source, and documented provider default."
+  (unless (memq control ende-controls--names)
+    (error "Unknown control: %S" control))
+  (let* ((explicit (plist-member preferences control))
+         (inherited (plist-member profile control))
+         (defaults (plist-get profile :control-defaults))
+         (default-known (plist-member defaults control)))
+    (list :value (cond
+                  (explicit (plist-get preferences control))
+                  (inherited (plist-get profile control)))
+          :source (cond
+                   (explicit 'explicit)
+                   (inherited 'profile)
+                   (t 'provider-default))
+          :provider-default (and default-known
+                                 (plist-get defaults control))
+          :provider-default-known default-known)))
+
+(defun ende-provider-active-reasoning-effort (profile)
+  "Return PROFILE's active effort, or nil when thinking is off."
+  (and (not (eq (plist-get profile :thinking) 'off))
+       (plist-get profile :reasoning-effort)))
+
+(defun ende-provider-reasoning-effort-context (profile effort)
+  "Return the validation context for PROFILE and EFFORT."
+  (list (plist-get profile :name) (plist-get profile :model) effort))
+
+(defun ende-provider-control-compatibility-error (profile)
+  "Return a message when PROFILE requests a verified incompatible control pair."
+  (when (and (eq (plist-get profile :builtin-profile) 'deepseek)
+             (member (plist-get profile :model)
+                     ende-provider--deepseek-verified-models)
+             (eq (plist-get profile :thinking) 'on)
+             (equal (plist-get profile :reasoning-effort) "none"))
+    "DeepSeek reasoning-effort none disables thinking and conflicts with :thinking on"))
+
+(defun ende-provider-validate-controls (profile)
+  "Validate the active control values and mappings in PROFILE."
+  (ende-controls-validate-descriptors (plist-get profile :controls))
+  (when-let* ((message (ende-provider-control-compatibility-error profile)))
+    (error "%s" message))
+  (ende-controls-encode nil (plist-get profile :controls) profile)
+  t)
+
+(defun ende-provider-reasoning-effort-validation-error
+    (profile effort efforts error)
+  "Return an error for an unverified EFFORT, or ERROR unchanged."
+  (or error
+      (cond
+       ((null efforts)
+        (ende-error-create
+         :kind 'capability
+         :message (format "Reasoning-effort support is unknown for model %s by %s"
+                          (or (plist-get profile :model) "<unknown>")
+                          (ende-provider-client-name profile))))
+       ((not (member effort efforts))
+        (ende-error-create
+         :kind 'unsupported
+         :message
+         (format "Reasoning effort %s is not supported for model %s by %s"
+                 effort
+                 (or (plist-get profile :model) "<unknown>")
+                 (ende-provider-client-name profile)))))))
+
+(defun ende-provider--legacy-control-defaults (profile)
+  "Return protocol mappings for a legacy request PROFILE without :controls.
+The selected wire protocol or explicit transport is used; endpoint hosts are
+never inspected."
+  (cond
+   ((eq (plist-get profile :wire-api) 'responses)
+    '((:reasoning-effort :path ("reasoning" "effort"))))
+   ((or (eq (plist-get profile :transport) 'openrouter-batch)
+        (memq (plist-get profile :name) '(openrouter openrouter-batch)))
+    '((:temperature :path ("temperature"))
+      (:reasoning-effort :path ("reasoning" "effort"))))
+   (t '((:temperature :path ("temperature"))))))
+
+(defun ende-provider--with-legacy-control-defaults (profile)
+  "Add protocol mappings to legacy PROFILE when no mappings are present."
+  (if (plist-member profile :controls)
+      profile
+    (plist-put profile :controls
+               (ende-provider--legacy-control-defaults profile))))
 
 (defun ende-provider-resolve-profile (options)
   "Resolve OPTIONS to a detached effective provider profile.
 Named profiles and batch requests retain their existing option shape."
   (cond
    ((plist-get options :name)
-    (ende-provider--strip-secret-fields
-     (if (eq (plist-get options :type) 'openai)
-         (ende-plist-merge
-          ende-provider--generic-openai-defaults (copy-tree options))
-       (copy-tree options))))
+    (let ((profile
+           (if (eq (plist-get options :type) 'openai)
+               (ende-plist-merge
+                ende-provider--generic-openai-defaults (copy-tree options))
+             (copy-tree options))))
+      (ende-provider--strip-secret-fields
+       (ende-provider--with-legacy-control-defaults profile))))
    ((eq (plist-get options :transport) 'openrouter-batch)
-    (ende-provider--strip-secret-fields (copy-tree options)))
+    (ende-provider--strip-secret-fields
+     (ende-provider--with-legacy-control-defaults (copy-tree options))))
    ((eq (plist-get options :type) 'openai)
     (ende-provider--strip-secret-fields
      (ende-plist-merge
       ende-provider--generic-openai-defaults (copy-tree options))))
    ((eq (plist-get options :wire-api) 'responses)
     (ende-provider--strip-secret-fields
-     (ende-plist-merge
-      (list :url ende-codex-endpoint :model ende-codex-model) options)))
+     (ende-provider--with-legacy-control-defaults
+      (ende-plist-merge
+       (ende-provider--built-in-profile 'openai) options))))
    (t
     (ende-provider--strip-secret-fields
-     (ende-plist-merge (ende-provider-profile) options)))))
+     (ende-provider--with-legacy-control-defaults
+      (ende-plist-merge (ende-provider-profile) options))))))
 
 (defun ende-provider-validate-profile (profile)
   "Validate request configuration in PROFILE before network startup."
@@ -296,10 +520,7 @@ Named profiles and batch requests retain their existing option shape."
   (when (and (plist-member profile :stream-usage)
              (not (memq (plist-get profile :stream-usage) '(nil t))))
     (error ":stream-usage must be boolean"))
-  (when (and (plist-member profile :temperature)
-             (not (or (null (plist-get profile :temperature))
-                      (numberp (plist-get profile :temperature)))))
-    (error ":temperature must be nil or numeric"))
+  (ende-provider-validate-controls profile)
   (let ((url (plist-get profile :url)))
     (unless (and (stringp url) (not (string-empty-p url)))
       (error "Provider profile must include a nonempty :url"))
@@ -323,22 +544,6 @@ Named profiles and batch requests retain their existing option shape."
 (defun ende-provider-parallel-enabled-p (profile)
   "Return non-nil when PROFILE enables parallel jobs by default."
   (eq (plist-get profile :parallel) t))
-
-(defun ende-provider-reasoning-effort (profile wire-api)
-  "Return PROFILE's selected effort when WIRE-API supports it.
-Saved efforts are revalidated before a job sends its first request."
-  (let ((effort (plist-get profile :reasoning-effort)))
-    (and (eq (plist-get profile :reasoning-effort-wire-api) wire-api)
-         (stringp effort)
-         (not (string-empty-p effort))
-         effort)))
-
-(defun ende-provider-openrouter-reasoning-parameters (profile)
-  "Return OpenRouter-specific request parameters for PROFILE."
-  (let ((effort (and (not (eq (plist-get profile :type) 'openai))
-                     (ende-provider-reasoning-effort profile 'openrouter))))
-    (when effort
-      (list (cons :reasoning (list (cons :effort effort)))))))
 
 (defun ende-provider-names ()
   "Return configured provider profile names for the selector."
@@ -394,18 +599,31 @@ kept lexical so recording a preference never initiates a TRAMP connection."
               (ende-model-selection--file-identity buffer-file-name))))))
 
 (defun ende-model-selection--normalize (selection)
-  "Return a detached provider/model/effort selection, or nil.
+  "Return a detached provider/model/control selection, or nil.
 
 SELECTION must contain a provider symbol and a nonempty model string."
   (when (listp selection)
-    (let ((provider (plist-get selection :provider))
-          (model (plist-get selection :model))
-          (effort (plist-get selection :reasoning-effort)))
+    (let* ((provider (plist-get selection :provider))
+           (model (plist-get selection :model))
+           (preferences-present
+            (or (plist-member selection :control-preferences)
+                (plist-member selection :reasoning-effort)))
+           (preferences
+            (if (plist-member selection :control-preferences)
+                (plist-get selection :control-preferences)
+              (when (plist-member selection :reasoning-effort)
+                (list :reasoning-effort
+                      (plist-get selection :reasoning-effort)))))
+           (preferences
+            (and preferences-present
+                 (copy-tree
+                  (ende-provider--validate-control-preferences preferences))))
+           )
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
         (append (list :provider provider :model model)
-                (when (and (stringp effort) (not (string-empty-p effort)))
-                  (list :reasoning-effort effort)))))))
+                (when preferences-present
+                  (list :control-preferences preferences)))))))
 
 (defun ende-model-selection-initialize-buffer (&optional buffer)
   "Initialize BUFFER's per-buffer selection when one can be inherited.
@@ -478,29 +696,31 @@ In per-buffer scope also associate it with BUFFER's name and visited file."
 (defun ende-provider-profile-for-buffer (&optional buffer remember)
   "Return BUFFER's selected provider profile snapshot.
 
-When REMEMBER is non-nil, record the effective provider/model/effort as used.
+When REMEMBER is non-nil, record the selected provider/model and explicit
+control preferences, not inherited values.
 An unset buffer follows the current configured provider defaults."
   (let* ((buffer (or buffer (current-buffer)))
          (_ (ende-model-selection-initialize-buffer buffer))
          (selection (ende-model-selection-for-buffer buffer))
-         (profile (ende-provider-profile-snapshot
-                   (plist-get selection :provider)))
+         (provider (or (plist-get selection :provider)
+                       (car ende-providers)
+                       ende-provider-default-profile))
+         (configured-profile (ende-provider-profile provider))
          (model (or (plist-get selection :model)
-                    (plist-get profile :model))))
-    (when selection
-      (setq profile (plist-put profile :reasoning-effort nil)))
-    (when (stringp model)
-      (setq profile (plist-put profile :model model)))
-    (when (and selection (plist-get selection :reasoning-effort))
-      (setq profile
-            (plist-put profile :reasoning-effort
-                       (plist-get selection :reasoning-effort))))
+                    (plist-get configured-profile :model)))
+         (preferences
+          (and (eq provider (plist-get selection :provider))
+               (equal model (plist-get selection :model))
+               (plist-get selection :control-preferences)))
+         (profile (ende-provider-profile-for-selection
+                   provider model preferences)))
     (when (and remember (stringp model))
       (ende-model-selection-save
-       (append (list :provider (plist-get profile :name) :model model)
-               (let ((effort (plist-get profile :reasoning-effort)))
-                 (when (and (stringp effort) (not (string-empty-p effort)))
-                   (list :reasoning-effort effort))))
+       (append (list :provider provider :model model)
+               (when (plist-member selection :control-preferences)
+                 (list :control-preferences
+                       (copy-tree
+                        (plist-get selection :control-preferences)))))
        buffer))
     profile))
 
@@ -1289,7 +1509,7 @@ the model catalog cache so the returned choices are current."
           (ende-provider--invoke-reasoning-effort-callback
            callback nil nil
            (ende-error-create
-            :kind 'discovery
+            :kind 'capability
             :message "OpenRouter profile has no model-list endpoint"))
           (lambda () nil))
       (ende-provider--start-live-model-request
@@ -1323,7 +1543,7 @@ the model catalog cache so the returned choices are current."
                    (ende-provider--invoke-reasoning-effort-callback
                     callback nil nil
                     (ende-error-create
-                     :kind 'discovery
+                     :kind 'capability
                      :message
                      (format "OpenRouter does not advertise explicit reasoning efforts for %s"
                              model)))))
@@ -1335,15 +1555,18 @@ the model catalog cache so the returned choices are current."
                 :message (error-message-string parse-error)))))))))))
 
 (defun ende-provider-probe-reasoning-efforts (profile model callback)
-  "Query PROFILE live for MODEL's supported reasoning efforts.
-CALLBACK receives (EFFORTS DEFAULT ERROR).  Unlike model discovery, this never
-uses or updates a cache."
-  (let ((probe
-         (pcase (plist-get profile :name)
-           ('openai #'ende-codex-probe-reasoning-efforts)
-           ((or 'openrouter 'openrouter-batch)
-            #'ende-provider--probe-openrouter-reasoning-efforts))))
+  "Resolve PROFILE's reasoning-effort choices for MODEL.
+CALLBACK receives (EFFORTS DEFAULT ERROR).  Configured choices take precedence
+over PROFILE's live probe function.  Live probes bypass model metadata caches."
+  (let* ((descriptor
+          (ende-provider-control-descriptor profile :reasoning-effort))
+         (static (and descriptor (plist-member descriptor :choices)))
+         (probe (plist-get profile :reasoning-effort-probe-function)))
     (cond
+     (static
+      (ende-provider--invoke-reasoning-effort-callback
+       callback (plist-get descriptor :choices) nil nil)
+      (lambda () nil))
      ((not ende-provider-discovery-enabled)
       (ende-provider--invoke-reasoning-effort-callback
        callback nil nil
@@ -1354,8 +1577,9 @@ uses or updates a cache."
       (ende-provider--invoke-reasoning-effort-callback
        callback nil nil
        (ende-error-create
-        :kind 'discovery
-        :message "Provider has no live reasoning-effort endpoint"))
+        :kind 'capability
+        :message (concat "Reasoning-effort support is unknown; configure "
+                         ":choices or :reasoning-effort-probe-function")))
       (lambda () nil))
      (t
       (condition-case probe-error

@@ -83,10 +83,9 @@ When PARTIAL is non-nil, permit inherited descriptors to supply :path."
                              path))
         (error "%s control :path must be a nonempty list of nonempty strings"
                control))
-      (when-let* ((reserved (cl-find-if
-                             (lambda (key)
-                               (member key ende-controls--reserved-path-keys))
-                             path)))
+      (when-let* ((reserved (and (member (car path)
+                                         ende-controls--reserved-path-keys)
+                                 (car path))))
         (error "%s control path may not modify request field %s"
                control reserved))))
   (when (plist-member descriptor :choices)

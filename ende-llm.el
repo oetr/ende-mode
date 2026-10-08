@@ -15,6 +15,7 @@
 (require 'json)
 (require 'subr-x)
 (require 'ende-core)
+(require 'ende-controls)
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-transport)
@@ -43,6 +44,7 @@ normalized :tool-calls for the chat tool loop.")
                (:constructor ende-llm--allocate-session))
   "State owned by one asynchronous LLM transport request."
   profile lifecycle stream discovery-cancel model messages json-data reasoning
+  reasoning-content-parts
   content-parts thinking-parts usage
   tool-calls
   provider-error actual-model actual-provider estimated-chars finish-reason
@@ -300,6 +302,9 @@ The :callbacks argument initializes the composed transport lifecycle."
      :reasoning (ende-llm--first-json-value
                  (list delta choice)
                  '("reasoning_content" "reasoning"))
+     :reasoning-content (ende-llm--first-json-value
+                         (list delta choice message)
+                         '("reasoning_content"))
      :content (or (ende-llm--first-json-value
                    (list delta choice)
                    '("content" "text"))
@@ -357,12 +362,17 @@ The :callbacks argument initializes the composed transport lifecycle."
       (let* ((event (ende-llm--response-event json))
              (finish-reason (plist-get event :finish-reason))
              (reasoning (plist-get event :reasoning))
+             (reasoning-content (plist-get event :reasoning-content))
              (content (plist-get event :content))
              (tool-calls (plist-get event :tool-calls)))
         (when tool-calls
           (ende-llm--collect-tool-calls session tool-calls))
         (when (stringp finish-reason)
           (setf (ende-llm--session-finish-reason session) finish-reason))
+        (when (and (stringp reasoning-content)
+                   (not (string-empty-p reasoning-content)))
+          (push reasoning-content
+                (ende-llm--session-reasoning-content-parts session)))
         (ende-llm--handle-usage
          session (ende-protocol-json-get "usage" json))
         (when (and (not (ende-llm--terminal-p session))
@@ -405,6 +415,12 @@ The :callbacks argument initializes the composed transport lifecycle."
           :thinking (mapconcat #'identity
                                (reverse
                                 (ende-llm--session-thinking-parts session)) "")
+          :reasoning-content
+          (and (ende-llm--session-reasoning-content-parts session)
+               (mapconcat #'identity
+                          (reverse
+                           (ende-llm--session-reasoning-content-parts session))
+                          ""))
           :usage usage :tokens tokens :estimated (null reported)
           :speed (/ (float tokens)
                     (max 0.001 (- (float-time) started)))
@@ -554,8 +570,8 @@ The :callbacks argument initializes the composed transport lifecycle."
     (:function . ((:name . ,(plist-get call :name))
                   (:arguments . ,(plist-get call :arguments))))))
 
-(defun ende-llm--message-json (message)
-  "Encode internal MESSAGE for a Chat Completions request."
+(defun ende-llm--message-json (message &optional profile)
+  "Encode internal MESSAGE for a Chat Completions request under PROFILE."
   (if (and (consp message) (stringp (car message)))
       `((:role . ,(car message)) (:content . ,(cdr message)))
     (let ((role (plist-get message :role))
@@ -563,6 +579,14 @@ The :callbacks argument initializes the composed transport lifecycle."
           (calls (plist-get message :tool-calls))
           (call-id (plist-get message :tool-call-id)))
       (append (list (cons :role role) (cons :content content))
+              (when (and profile
+                         (eq (plist-get profile :reasoning-history-field)
+                             'reasoning_content)
+                         (plist-member profile :tool-definitions)
+                         (equal role "assistant")
+                         (stringp (plist-get message :reasoning-content)))
+                (list (cons :reasoning_content
+                            (plist-get message :reasoning-content))))
               (when calls
                 (list (cons :tool_calls
                             (mapcar #'ende-llm--tool-call-json calls))))
@@ -572,27 +596,26 @@ The :callbacks argument initializes the composed transport lifecycle."
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
   (let* ((typed-openai (eq (plist-get profile :type) 'openai))
-         (temperature (plist-get profile :temperature))
          (stream-usage (if (plist-member profile :stream-usage)
                            (plist-get profile :stream-usage)
                          t))
          (body `((:model . ,(plist-get profile :model))
-                 (:messages . ,(mapcar #'ende-llm--message-json messages))
-                 ,@(if (or (not typed-openai) (numberp temperature))
-                       (list (cons :temperature temperature)))
+                 (:messages . ,(mapcar
+                                (lambda (message)
+                                  (ende-llm--message-json message profile))
+                                messages))
                  (:stream . t)
                  ,@(when (or (not typed-openai) stream-usage)
                      '((:stream_options . ((:include_usage . t))))))))
-    (setq body (append body
-                       (ende-provider-openrouter-reasoning-parameters profile)))
     (when (plist-get profile :tool-definitions)
       (setq body
             (append body
                     (list (cons :tools (plist-get profile :tool-definitions))
                           (cons :tool_choice "auto")))))
     (if (integerp ende-max-output-tokens)
-        (append body (list (cons :max_tokens ende-max-output-tokens)))
-      body)))
+        (setq body (append body (list (cons :max_tokens
+                                            ende-max-output-tokens)))))
+    (ende-controls-encode body (plist-get profile :controls) profile)))
 
 (defun ende-llm--start-session (session messages)
   "Allocate and start SESSION for MESSAGES."

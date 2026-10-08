@@ -112,47 +112,56 @@
 
 
 
-(ert-deftest ende-test/reasoning-effort-discovery-is-limited-to-builtins ()
+(ert-deftest ende-test/reasoning-effort-discovery-uses-profile-probe-and-static-choices ()
   (let* ((called nil)
          (result nil)
          (ende-provider-discovery-enabled t)
          (profile
-          (list :name 'remote :reasoning-effort-discovery-function
-                (lambda (&rest _)
-                  (setq called t)))))
+          (list :name 'remote :reasoning-effort-probe-function
+                (lambda (_profile model callback)
+                  (setq called model)
+                  (funcall callback '("low" "high") "low" nil)
+                  (lambda () nil)))))
     (ende-provider-probe-reasoning-efforts
      profile "remote-model"
      (lambda (efforts default error)
        (setq result (list efforts default error))))
-    (should-not called)
-    (should-not (nth 0 result))
-    (should-not (nth 1 result))
-    (should (ende-error-p (nth 2 result)))
-    (should (string-match-p "no live reasoning-effort endpoint"
-                            (ende-error-message (nth 2 result))))))
+    (should (equal called "remote-model"))
+    (should (equal (car result) '("low" "high")))
+    (should (equal (cadr result) "low"))
+    (should-not (nth 2 result)))
+  (let ((ende-provider-discovery-enabled nil)
+        (result nil))
+    (ende-provider-probe-reasoning-efforts
+     '(:name static
+	     :controls ((:reasoning-effort :path ("effort")
+					   :choices ("low" "high"))))
+     "static-model"
+     (lambda (efforts default error)
+       (setq result (list efforts default error))))
+    (should (equal (car result) '("low" "high")))
+    (should-not (cadr result))
+    (should-not (nth 2 result))))
 
 
 
-(ert-deftest ende-test/reasoning-effort-is-serialized-only-by-supported-apis ()
+(ert-deftest ende-test/reasoning-effort-uses-configured-chat-and-response-mappings ()
   (let* ((messages (list (cons "user" "question")))
          (openrouter
           (list :model "router-model" :temperature 0.2
-                :reasoning-effort-wire-api 'openrouter
+                :controls '((:temperature :path ("temperature"))
+                            (:reasoning-effort :path ("reasoning" "effort")))
                 :reasoning-effort "high"))
          (responses
-          (list :model "codex-model" :reasoning-effort-wire-api 'responses
+          (list :model "codex-model"
+                :controls '((:reasoning-effort :path ("reasoning" "effort")))
                 :reasoning-effort "low"))
-         (unsupported (list :model "local-model" :temperature 0.2
-                            :reasoning-effort "high"))
          (router-body
           (ende-protocol-json-read-string
            (json-encode (ende-llm--request-body messages openrouter))))
          (responses-body
           (ende-protocol-json-read-string
-           (json-encode (ende-codex--request-body messages responses))))
-         (unsupported-body
-          (ende-protocol-json-read-string
-           (json-encode (ende-llm--request-body messages unsupported)))))
+           (json-encode (ende-codex--request-body messages responses)))))
     (should (string=
              (ende-protocol-json-get
               "effort" (ende-protocol-json-get "reasoning" router-body))
@@ -160,8 +169,7 @@
     (should (string=
              (ende-protocol-json-get
               "effort" (ende-protocol-json-get "reasoning" responses-body))
-             "low"))
-    (should-not (ende-protocol-json-has-key-p "reasoning" unsupported-body))))
+             "low"))))
 
 
 

@@ -18,6 +18,7 @@
 (require 'subr-x)
 (require 'url-util)
 (require 'ende-core)
+(require 'ende-controls)
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-provider)
@@ -171,9 +172,8 @@
           (plist-get profile :batch-url)
           (plist-get profile :batch-endpoint)
           (plist-get profile :model)
-          (plist-get profile :temperature)
           (plist-get profile :max-tokens)
-          (ende-provider-reasoning-effort profile 'openrouter)
+          (ende-controls-encode nil (plist-get profile :controls) profile)
           ende-max-output-tokens
           (plist-get profile :request-headers)))))
 
@@ -324,18 +324,18 @@
 
 (defun ende-openrouter-batch--request-body (messages profile custom-id)
   "Build one OpenRouter Batch request for MESSAGES and PROFILE."
-  `((:custom_id . ,custom-id)
-    (:body . ((:messages . ,(mapcar
-                             (lambda (message)
-                               `((:role . ,(car message))
-                                 (:content . ,(cdr message))))
-                             messages))
-              ,@(when (numberp (plist-get profile :temperature))
-                  (list (cons :temperature
-                              (plist-get profile :temperature))))
-              ,@(ende-provider-openrouter-reasoning-parameters profile)
-              ,@(when (integerp ende-max-output-tokens)
-                  (list (cons :max_tokens ende-max-output-tokens)))))))
+  (let ((body
+         `((:messages . ,(mapcar
+                          (lambda (message)
+                            `((:role . ,(car message))
+                              (:content . ,(cdr message))))
+                          messages)))))
+    (setq body (ende-controls-encode body (plist-get profile :controls) profile))
+    (when (integerp ende-max-output-tokens)
+      (setq body (append body (list (cons :max_tokens
+                                          ende-max-output-tokens)))))
+    (list (cons :custom_id custom-id)
+          (cons :body body))))
 
 (defun ende-openrouter-batch--body (group)
   "Build the ordered JSON object submitted for GROUP."
