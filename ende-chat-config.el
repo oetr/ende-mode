@@ -149,6 +149,20 @@
         (buffer-substring-no-properties begin end)
       "")))
 
+(defun ende-chat-config-document-block-source (tree)
+  "Return the document-level Ende block source in parsed Org TREE, or nil."
+  (let ((blocks (gethash tree (ende-chat-config--local-blocks tree))))
+    (when blocks
+      (when (cdr blocks)
+        (ende-chat-config--error "only one config block is allowed per Org node"))
+      ;; Org's :end includes following blank lines, not part of the block.
+      (let* ((block (car blocks))
+             (end (- (org-element-property :end block)
+                     (or (org-element-property :post-blank block) 0))))
+        (buffer-substring-no-properties
+         (org-element-property :begin block)
+         end)))))
+
 (defun ende-chat-config--copy (configuration)
   "Return an independent copy of CONFIGURATION."
   (copy-tree configuration))

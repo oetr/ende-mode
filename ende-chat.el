@@ -1242,11 +1242,34 @@ the next step. Keep updates factual and concise. When issuing several tool
 calls, place the progress update before the work it describes. Avoid unchanged
 updates and calls for every minor action. Report actions and progress, not
 private reasoning.\n\n"
+   "All registered Ende tools may be advertised even when they are not currently
+enabled. Use only tools and resources permitted by the effective Ende
+configuration.
+
+For each user request, the effective configuration consists of the document-level
+Ende configuration, configuration inherited from ancestor headings, and
+configuration in the current heading. Configuration in preceding sibling
+requests is historical only and does not carry over to the current request.
+
+`tools` activates named tools or groups, `clear-tools` clears configured tool
+activation, and resource definitions and tool-resource assignments constrain
+what enabled tools may access. Ende independently enforces tool and resource
+permissions.\n\n"
    ende-chat--org-format
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
 Choose a concise title for the request. Otherwise omit this keyword.")
   "System prompt for Org-backed chat requests.")
+
+(defun ende-chat--system-prompt (document)
+  "Return the normal chat system prompt for DOCUMENT."
+  (if-let* ((configuration
+             (ende-chat-config-document-block-source
+              (ende-chat--document-tree document))))
+      (concat ende-chat--system
+              "\n\nDocument-level Ende configuration:\n"
+              configuration)
+    ende-chat--system))
 
 (defconst ende-chat--compact-system
   (concat
@@ -2837,7 +2860,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                       (request
                        (cons (cons "system" (if compact
                                                 ende-chat--compact-system
-                                              ende-chat--system))
+                                              (ende-chat--system-prompt document)))
                              messages)))
                  (unless messages
                    (error "Chat question has no eligible content"))

@@ -816,6 +816,118 @@
       (ende-test--reset)
       (delete-directory root t))))
 
+(ert-deftest ende-test/chat-system-prompt-preserves-document-config-source ()
+  (ende-test--reset)
+  (let* ((configuration
+          (concat "#+begin_ende\n"
+                  "; keep this comment and spacing\n"
+                  "(tools   about_thinking) ; preserve this syntax\n"
+                  "#+end_ende\n"))
+         (ende-llm-function (ende-test--fake-llm '("Done."))))
+    (with-temp-buffer
+      (org-mode)
+      (insert configuration "\n* Conversation\n** Question\nAsk.\n")
+      (ende-test--chat-goto "** Question")
+      (let* ((job (ende-ask))
+             (messages (plist-get (car ende-test--calls) :messages))
+             (system (cdr (assoc "system" messages)))
+             (first-user
+              (cl-find-if (lambda (message) (equal (car message) "user"))
+                          messages)))
+        (should (eq (ende-job-state job) 'completed))
+        (should (string-prefix-p ende-chat--system system))
+        (should (equal system
+                       (concat ende-chat--system
+                               "\n\nDocument-level Ende configuration:\n"
+                               configuration)))
+        (should (string-match-p (regexp-quote "#+begin_ende") system))
+        (should (string-match-p (regexp-quote "#+end_ende") system))
+        (should (= (ende-test--count-matches
+                    (regexp-quote configuration) system)
+                   1))
+        (should first-user)
+        (should-not (string-match-p (regexp-quote configuration)
+                                    (cdr first-user)))))))
+
+(ert-deftest ende-test/chat-system-prompt-without-document-config-is-unchanged ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Done."))))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Conversation\n** Question\nAsk.\n")
+      (ende-test--chat-goto "** Question")
+      (let* ((job (ende-ask))
+             (messages (plist-get (car ende-test--calls) :messages)))
+        (should (eq (ende-job-state job) 'completed))
+        (should (equal (cdr (assoc "system" messages)) ende-chat--system))))))
+
+(ert-deftest ende-test/chat-sibling-configuration-remains-history-only ()
+  (let ((root (make-temp-file "ende-config-sibling-" t))
+        (clear-block "#+begin_ende\n(clear-tools)\n#+end_ende\n"))
+    (ende-test--reset)
+    (unwind-protect
+        (let ((ende-llm-function
+               (ende-test--fake-llm '("First response." "Second response."))))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (resource project (include "*.el"))
+                (tools read_file)
+                (set-tool-resources read_file :resources project)))
+             "\n* Conversation\n** First\n"
+             clear-block
+             "Temporary access change.\n** Second\nUse the document permissions.\n")
+            (ende-test--chat-goto "** First")
+            (should (eq (ende-job-state (ende-ask)) 'completed))
+            (ende-test--chat-goto "** Second")
+            (should (eq (ende-job-state (ende-ask)) 'completed))
+            (let* ((document (ende-chat--build-document))
+                   (first (ende-test--chat-config-at document "First"))
+                   (second (ende-test--chat-config-at document "Second"))
+                   (first-call (car ende-test--calls))
+                   (second-call (cadr ende-test--calls))
+                   (first-definitions
+                    (plist-get (plist-get first-call :options) :tool-definitions))
+                   (second-definitions
+                    (plist-get (plist-get second-call :options) :tool-definitions))
+                   (second-messages (plist-get second-call :messages)))
+              (should-not (memq 'read_file (plist-get first :active-tools)))
+              (should (memq 'read_file (plist-get second :active-tools)))
+              (should (equal (cdr (assq 'read_file
+                                        (plist-get second :tool-resources)))
+                             '(project)))
+              (should (equal first-definitions second-definitions))
+              (should (equal first-definitions (ende-tool-definitions)))
+              (should
+               (cl-some
+                (lambda (message)
+                  (and (equal (car message) "user")
+                       (string-match-p (regexp-quote clear-block)
+                                       (cdr message))))
+                second-messages)))))
+      (ende-test--reset)
+      (delete-directory root t))))
+
+(ert-deftest ende-test/chat-compaction-keeps-its-stable-system-prompt ()
+  (ende-test--reset)
+  (let* ((configuration
+          (ende-test--chat-config-block '((tools about_thinking))))
+         (ende-llm-function (ende-test--fake-llm '("Summary."))))
+    (with-temp-buffer
+      (org-mode)
+      (insert configuration "\n* Conversation\n** Earlier\nFacts.\n"
+              "** Summary\nKeep the key facts.\n")
+      (ende-test--chat-goto "** Summary")
+      (let* ((job (ende-compact))
+             (messages (plist-get (car ende-test--calls) :messages))
+             (system (cdr (assoc "system" messages))))
+        (should (eq (ende-job-state job) 'completed))
+        (should (equal system ende-chat--compact-system))
+        (should-not (string-match-p "Document-level Ende configuration:" system))
+        (should-not (string-match-p (regexp-quote configuration) system))))))
+
 (provide 'ende-chat-config-test)
 
 ;;; ende-chat-config-test.el ends here
