@@ -693,18 +693,6 @@ NOW is the current time as a Unix timestamp and is injectable for tests."
                                    (- secondary-reset-at now)))))))
     (mapconcat #'identity segments " · ")))
 
-(defun ende-codex--response-detail (preview)
-  "Return a useful error detail parsed from response PREVIEW."
-  (condition-case nil
-      (let* ((payload (ende-protocol-json-read-string preview))
-             (error-payload (ende-protocol-json-get "error" payload)))
-        (or (ende-protocol-json-get "message" error-payload)
-            (ende-protocol-json-get "detail" error-payload)
-            (ende-protocol-json-get "message" payload)
-            (ende-protocol-json-get "detail" payload)
-            (and (stringp error-payload) error-payload)))
-    (error nil)))
-
 (defun ende-codex--probe-json
     (url request-name command parser callback &optional process-slot)
   "Probe authenticated JSON URL and call CALLBACK with parsed data.
@@ -797,7 +785,7 @@ cancellation function."
                                       (with-current-buffer response-buffer
                                         (buffer-string)))
                                      (detail
-                                      (ende-codex--response-detail text)))
+                                      (ende-transport-error-detail text)))
                                 (if (or (null status) (< status 200)
                                         (>= status 300))
                                     (finish
@@ -1022,8 +1010,8 @@ is queried for every call; it does not share the model catalog cache."
          outcome value
          (when (or (ende-codex--session-content-parts session)
                    (ende-codex--session-thinking-parts session)
-                   (ende-codex--session-usage session)
-                   (ende-codex--tool-call-list session))
+                    (ende-codex--session-usage session)
+                    (ende-codex--tool-call-list session))
            (ende-codex--result session)))
       (ende-codex--cleanup session))))
 
