@@ -93,6 +93,119 @@
     (should-not (string-match-p "discard-this-secret"
                                 (prin1-to-string snapshot)))))
 
+(ert-deftest ende-test/provider-resolves-typed-profiles-with-static-defaults ()
+  (let* ((generic '(:type openai :url "https://example.test/v1/chat/completions"
+                          :model "generic-model"))
+         (unnamed (ende-provider-resolve-profile generic))
+         (named (ende-provider-resolve-profile
+                 (append '(:name generic) (copy-tree generic))))
+         (overrides
+          (ende-provider-resolve-profile
+           '(:name generic :type openai
+             :url "https://example.test/v1/chat/completions"
+             :model "generic-model" :max-concurrency 3 :parallel t
+             :stream-usage nil :require-sse nil :temperature nil)))
+         (ende-provider-profiles
+          '((deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "snapshot-model" :temperature nil)))
+         (snapshot
+          (ende-provider-resolve-profile
+           (ende-provider-profile 'deepseek))))
+    (dolist (key '(:type :max-concurrency :parallel :stream-usage :require-sse))
+      (should (equal (plist-get unnamed key) (plist-get named key))))
+    (should (eq (plist-get unnamed :type) 'openai))
+    (should (= (plist-get unnamed :max-concurrency) 1))
+    (should-not (plist-get unnamed :parallel))
+    (should (eq (plist-get unnamed :stream-usage) t))
+    (should (eq (plist-get unnamed :require-sse) t))
+    (should (= (plist-get overrides :max-concurrency) 3))
+    (should (eq (plist-get overrides :parallel) t))
+    (should-not (plist-get overrides :stream-usage))
+    (should-not (plist-get overrides :require-sse))
+    (should (plist-member overrides :temperature))
+    (should-not (plist-get overrides :temperature))
+    (let ((ende-provider-profiles
+           '((deepseek :type openai
+                       :url "https://api.deepseek.com/v2/chat/completions"
+                       :model "changed-model" :temperature 0.5))))
+      (let ((resolved (ende-provider-resolve-profile snapshot)))
+        (should (equal (plist-get resolved :url)
+                       "https://api.deepseek.com/chat/completions"))
+        (should (equal (plist-get resolved :model) "snapshot-model"))
+        (should-not (plist-get resolved :temperature)))))
+  (let* ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
+         (ende-codex-model "snapshot-codex-model")
+         (snapshot (ende-provider-resolve-profile
+                    (ende-provider-profile 'openai))))
+    (let* ((ende-codex-endpoint "https://chatgpt.com/changed")
+           (ende-codex-model "changed-codex-model")
+           (ende-provider-profiles '((openai :temperature 0.1)))
+           (resolved (ende-provider-resolve-profile snapshot)))
+      (should (equal (plist-get resolved :url)
+                     "https://chatgpt.com/backend-api/codex/responses"))
+      (should (equal (plist-get resolved :model) "snapshot-codex-model"))
+      (should (eq (plist-get resolved :wire-api) 'responses))
+      (should (eq (plist-get resolved :auth-method) 'opencode-oauth))
+      (should-not (plist-get resolved :type)))))
+
+(ert-deftest ende-test/provider-validates-request-profiles-before-dispatch ()
+  (let ((valid
+         (list '(:url "https://example.test/v1" :model "legacy-model")
+               '(:type openai :url "https://example.test/v1"
+                       :model "generic-model" :temperature nil :stream-usage nil)
+               '(:wire-api responses
+                           :url "https://chatgpt.com/backend-api/codex/responses"
+                           :model "codex-model")))
+        (invalid
+         (list '(:type unsupported :url "https://example.test/v1"
+                       :model "model")
+               '(:url "https://example.test/v1" :model "")
+               '(:type openai :url "https://example.test/v1"
+                       :model "model" :stream-usage 1)
+               '(:url "https://example.test/v1" :model "model"
+                      :temperature "warm")
+               '(:url "https://example.test/v1" :model "model"
+                      :auth-source-host "other.test"
+                      :auth-source-user "ende" :auth-source-port 443)))
+        (started nil))
+    (dolist (profile valid)
+      (should (ende-provider-validate-profile profile)))
+    (dolist (profile invalid)
+      (let ((events nil)
+            (errors nil))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest _)
+                     (setq started t)
+                     (ert-fail "Started a request with an invalid profile"))))
+          (ende-llm-default
+           '(("user" . "question"))
+           (list :on-event (lambda (event) (push event events))
+                 :on-error (lambda (error) (push error errors)))
+           profile))
+        (should-not started)
+        (should (= (length errors) 1))
+        (should (ende-error-p (car errors)))
+        (should (eq (ende-error-kind (car errors)) 'startup))
+        (should (eq (plist-get (car events) :type) :error))))))
+
+(ert-deftest ende-test/typed-openai-name-does-not-select-codex-auth ()
+  (let ((codex-called nil)
+        (started nil))
+    (cl-letf (((symbol-function 'ende-codex-default)
+               (lambda (&rest _) (setq codex-called t)))
+              ((symbol-function 'ende-llm--start-session)
+               (lambda (session _messages)
+                 (setq started (ende-llm--session-profile session)))))
+      (ende-llm-default
+       '(("user" . "question"))
+       '(:on-error ignore)
+       '(:name openai :type openai :wire-api responses
+               :url "https://example.test/v1" :model "generic-model")))
+    (should-not codex-called)
+    (should (eq (plist-get started :type) 'openai))
+    (should-not (plist-get started :auth-method))))
+
 
 
 (ert-deftest ende-test/typed-openai-request-options-are-explicit ()

@@ -1011,6 +1011,60 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest ende-test/selector-discovery-fallback-is-limited-to-typed-profiles ()
+  (let* ((probe (lambda (callback)
+                  (funcall callback
+                           nil
+                           (ende-error-create
+                            :kind 'discovery :message "catalog unavailable"))
+                  (lambda () nil)))
+         (ende-provider-discovery-enabled t)
+         (ende-provider--runtime-settings (make-hash-table :test #'eq))
+         (ende-provider-profiles
+          `((local :url "http://localhost:8080/v1/chat/completions"
+                   :model "legacy-local" :models ("legacy-local")
+                   :model-discovery-function ,probe)
+            (openrouter :model "legacy-router" :models ("legacy-router")
+                        :model-discovery-function ,probe)
+            (openai :model "legacy-codex" :models ("legacy-codex")
+                    :model-discovery-function ,probe)
+            (deepseek :type openai
+                      :url "https://api.deepseek.com/chat/completions"
+                      :model "deepseek-chat"
+                      :models ("deepseek-chat" "deepseek-reasoner"))))
+         (ende-provider--model-inflight (make-hash-table :test #'equal))
+         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--model-cache (make-hash-table :test #'equal))
+         (ende-provider--discovery-cache (make-hash-table :test #'equal))
+         (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+         (ende-selector--model-validations (make-hash-table :test #'equal)))
+    (dolist (name '(local openrouter openai))
+      (let ((buffer (generate-new-buffer " *ende-selector-legacy-failure*"))
+            (models (plist-get (ende-provider-profile name) :models)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (ende-selector-mode)
+              (setq ende-selector--providers (list name)
+                    ende-selector--provider-index 0)
+              (ende-selector--set-provider 0)
+              (should (eq ende-selector--model-state :error))
+              (should (equal ende-selector--models models))
+              (should-error (ende-selector-select-model) :type 'user-error))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))
+    (let ((buffer (generate-new-buffer " *ende-selector-typed-static*")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (ende-selector-mode)
+            (setq ende-selector--providers '(deepseek)
+                  ende-selector--provider-index 0)
+            (ende-selector--set-provider 0)
+            (should (eq ende-selector--model-state :ready))
+            (should (equal ende-selector--models
+                           '("deepseek-chat" "deepseek-reasoner"))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 
 
 (ert-deftest ende-test/selector-ask-includes-only-reasoning-ancestors ()

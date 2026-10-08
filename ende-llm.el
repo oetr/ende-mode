@@ -631,34 +631,54 @@ The :callbacks argument initializes the composed transport lifecycle."
       (process-send-eof
        (ende-transport-session-process (ende-llm--lifecycle session))))))
 
+(defun ende-llm--dispatch-error (callbacks caught)
+  "Deliver dispatch error CAUGHT through CALLBACKS."
+  (let ((session (ende-llm--make-session :callbacks callbacks)))
+    (ende-llm--fail
+     session
+     (ende-error-create :kind 'startup
+                        :message (error-message-string caught)))))
+
 (defun ende-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
-  (let ((profile (ende-provider-resolve-profile options)))
-    (cond
-     ((and (eq (plist-get profile :transport) 'openrouter-batch)
-           (not (eq (plist-get profile :type) 'openai)))
-      (ende-openrouter-batch-default messages callbacks profile))
-     ((and (eq (plist-get profile :wire-api) 'responses)
-           (or (not (eq (plist-get profile :type) 'openai))
-               (eq (plist-get profile :name) 'openai)))
-      (ende-codex-default messages callbacks profile))
-     (t
-      (let* ((session
-              (ende-llm--make-session
-               :profile profile :callbacks callbacks
-               :model (plist-get profile :model)
-               :reasoning (ende-protocol-make-reasoning)
-               :tool-calls (make-hash-table :test #'eql)
-               :estimated-chars 0)))
-        (condition-case startup-error
-            (ende-llm--start-session session messages)
-          ((error quit)
-           (ende-llm--fail
-            session
-            (ende-error-create :kind 'startup
-                               :message (error-message-string startup-error)))))
-        (ende-transport-session-process
-         (ende-llm--lifecycle session)))))))
+  (let* ((profile (ende-provider-resolve-profile options))
+         (validation-error
+          (condition-case caught
+              (progn
+                (ende-provider-validate-profile profile)
+                (when (and (eq (plist-get profile :transport)
+                               'openrouter-batch)
+                           (not (eq (plist-get profile :type) 'openai)))
+                  (ende-openrouter-batch--validate-options profile))
+                nil)
+            ((error quit) caught))))
+    (if validation-error
+        (ende-llm--dispatch-error callbacks validation-error)
+      (cond
+       ((and (eq (plist-get profile :transport) 'openrouter-batch)
+             (not (eq (plist-get profile :type) 'openai)))
+        (ende-openrouter-batch-default messages callbacks profile))
+       ((and (eq (plist-get profile :wire-api) 'responses)
+             (not (eq (plist-get profile :type) 'openai)))
+        (ende-codex-default messages callbacks profile))
+       (t
+        (let* ((session
+                (ende-llm--make-session
+                 :profile profile :callbacks callbacks
+                 :model (plist-get profile :model)
+                 :reasoning (ende-protocol-make-reasoning)
+                 :tool-calls (make-hash-table :test #'eql)
+                 :estimated-chars 0)))
+          (condition-case startup-error
+              (ende-llm--start-session session messages)
+            ((error quit)
+             (ende-llm--fail
+              session
+              (ende-error-create :kind 'startup
+                                 :message
+                                 (error-message-string startup-error)))))
+          (ende-transport-session-process
+           (ende-llm--lifecycle session))))))))
 
 (provide 'ende-llm)
 

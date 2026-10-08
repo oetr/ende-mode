@@ -500,10 +500,11 @@ ignored.  Return non-nil when a probe was started."
   (let* ((configured-model (ende-provider-configured-model profile))
          (models (ende-provider-models profile))
          (explicit-p
-          (or (and (stringp configured-model)
-                   (not (string-empty-p configured-model)))
-              (and (ende-provider-configured-models-explicit-p profile)
-                   models))))
+          (and (eq (plist-get profile :type) 'openai)
+               (or (and (stringp configured-model)
+                        (not (string-empty-p configured-model)))
+                   (and (ende-provider-configured-models-explicit-p profile)
+                        models)))))
     (setq ende-selector--model-details nil)
     (if explicit-p
         (progn

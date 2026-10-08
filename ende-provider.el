@@ -30,6 +30,11 @@
 (defconst ende-provider--default-codex-model "gpt-5.6-luna"
   "Built-in model for the OpenAI/Codex profile.")
 
+(defconst ende-provider--generic-openai-defaults
+  '(:type openai :max-concurrency 1 :parallel nil
+          :stream-usage t :require-sse t)
+  "Static defaults for generic OpenAI-compatible profiles.")
+
 (defcustom ende-provider-endpoint "http://localhost:8080/v1/chat/completions"
   "OpenAI-compatible chat completions endpoint."
   :type 'string
@@ -175,11 +180,7 @@ defaults.  OpenRouter profiles use auth-source credentials."
                (eq (plist-get custom :type) 'openai)))
          (base
           (if typed-openai
-              (list :type 'openai
-                    :max-concurrency 1
-                    :parallel nil
-                    :stream-usage t
-                    :require-sse t)
+              (copy-sequence ende-provider--generic-openai-defaults)
             (pcase name
               ('openai
                (list :url ende-codex-endpoint
@@ -264,19 +265,18 @@ defaults.  OpenRouter profiles use auth-source credentials."
   "Resolve OPTIONS to a detached effective provider profile.
 Named profiles and batch requests retain their existing option shape."
   (cond
-   ((eq (plist-get options :name) 'openai)
-    (ende-provider--strip-secret-fields
-     (ende-plist-merge (ende-provider-profile 'openai) options)))
    ((plist-get options :name)
-    (ende-provider--strip-secret-fields (copy-tree options)))
+    (ende-provider--strip-secret-fields
+     (if (eq (plist-get options :type) 'openai)
+         (ende-plist-merge
+          ende-provider--generic-openai-defaults (copy-tree options))
+       (copy-tree options))))
    ((eq (plist-get options :transport) 'openrouter-batch)
     (ende-provider--strip-secret-fields (copy-tree options)))
    ((eq (plist-get options :type) 'openai)
     (ende-provider--strip-secret-fields
      (ende-plist-merge
-      '(:type openai :max-concurrency 1 :parallel nil
-              :stream-usage t :require-sse t)
-      options)))
+      ende-provider--generic-openai-defaults (copy-tree options))))
    ((eq (plist-get options :wire-api) 'responses)
     (ende-provider--strip-secret-fields
      (ende-plist-merge
@@ -284,6 +284,30 @@ Named profiles and batch requests retain their existing option shape."
    (t
     (ende-provider--strip-secret-fields
      (ende-plist-merge (ende-provider-profile) options)))))
+
+(defun ende-provider-validate-profile (profile)
+  "Validate request configuration in PROFILE before network startup."
+  (when (and (plist-member profile :type)
+             (not (eq (plist-get profile :type) 'openai)))
+    (error "Unsupported provider type: %S" (plist-get profile :type)))
+  (let ((model (plist-get profile :model)))
+    (unless (and (stringp model) (not (string-empty-p model)))
+      (error "Provider profile must select a nonempty model")))
+  (when (and (plist-member profile :stream-usage)
+             (not (memq (plist-get profile :stream-usage) '(nil t))))
+    (error ":stream-usage must be boolean"))
+  (when (and (plist-member profile :temperature)
+             (not (or (null (plist-get profile :temperature))
+                      (numberp (plist-get profile :temperature)))))
+    (error ":temperature must be nil or numeric"))
+  (let ((url (plist-get profile :url)))
+    (unless (and (stringp url) (not (string-empty-p url)))
+      (error "Provider profile must include a nonempty :url"))
+    (if (and (not (eq (plist-get profile :type) 'openai))
+             (eq (plist-get profile :wire-api) 'responses))
+        (ende-codex--validated-generation-url url)
+      (ende-curl--validated-url profile)))
+  t)
 
 (defun ende-provider-max-concurrency (profile)
   "Return the positive maximum concurrent jobs allowed by PROFILE."
