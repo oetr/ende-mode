@@ -102,9 +102,9 @@
          (overrides
           (ende-provider-resolve-profile
            '(:name generic :type openai
-             :url "https://example.test/v1/chat/completions"
-             :model "generic-model" :max-concurrency 3 :parallel t
-             :stream-usage nil :require-sse nil :temperature nil)))
+		   :url "https://example.test/v1/chat/completions"
+		   :model "generic-model" :max-concurrency 3 :parallel t
+		   :stream-usage nil :require-sse nil :temperature nil)))
          (ende-provider-profiles
           '((deepseek :type openai
                       :url "https://api.deepseek.com/chat/completions"
@@ -147,6 +147,7 @@
       (should (equal (plist-get resolved :model) "snapshot-codex-model"))
       (should (eq (plist-get resolved :wire-api) 'responses))
       (should (eq (plist-get resolved :auth-method) 'opencode-oauth))
+      (should-not (plist-member resolved :temperature))
       (should-not (plist-get resolved :type)))))
 
 (ert-deftest ende-test/provider-validates-request-profiles-before-dispatch ()
