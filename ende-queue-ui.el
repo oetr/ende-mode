@@ -330,30 +330,36 @@
   "Render useful readiness blockers for queued JOB."
   (let ((blockers (cdr (plist-get (ende-job-explanation job) :blockers))))
     (when blockers
-      (ende-queue-ui--detail-line
-       (concat "Also blocked by: "
-               (mapconcat #'ende-queue-ui--blocker-label blockers ", "))
+      (ende-queue-ui--detail-field
+       "Also blocked by"
+       (mapconcat #'ende-queue-ui--blocker-label blockers ", ")
        job))))
 
-(defun ende-queue-ui--detail-line (text owner)
-  "Insert indented TEXT as a detail line owned by OWNER."
+(defun ende-queue-ui--detail-label (label)
+  "Return LABEL and its colon styled as a detail label."
+  (propertize (concat label ":") 'face 'font-lock-type-face))
+
+(defun ende-queue-ui--detail-line (text owner &optional indent)
+  "Insert TEXT as a detail line owned by OWNER with optional INDENT spaces."
   (ende-queue-ui--line
-   (concat "    " text)
+   (concat (make-string (or indent 4) ?\s) text)
    (list 'ende-queue-ui-kind 'detail 'ende-queue-ui-owner owner
          'ende-queue-ui-job-id (and (ende-job-p owner) (ende-job-id owner)))))
 
-(defun ende-queue-ui--detail-paragraph (text owner)
-  "Render inert TEXT wrapped to the dashboard width as details for OWNER."
-  (let* ((width (max 20 (- (ende-queue-ui--window-width) 4)))
-         (lines
-          (with-temp-buffer
-            (insert (replace-regexp-in-string
-                     "[[:cntrl:]]+" " " (substring-no-properties text)))
-            (let ((fill-column width))
-              (fill-region (point-min) (point-max)))
-            (split-string (buffer-string) "\n" t))))
-    (dolist (line lines)
-      (ende-queue-ui--detail-line line owner))))
+(defun ende-queue-ui--detail-field (label value owner &optional indent)
+  "Render LABEL and VALUE as a detail field owned by OWNER at INDENT."
+  (ende-queue-ui--detail-line
+   (concat (ende-queue-ui--detail-label label) " "
+           (substring-no-properties (format "%s" value)))
+   owner indent))
+
+(defun ende-queue-ui--detail-paragraph (text owner &optional indent)
+  "Render inert, unwrapped TEXT as an activity detail for OWNER at INDENT."
+  (let ((message
+         (replace-regexp-in-string
+          "[[:cntrl:]]+" " " (substring-no-properties (or text "")))))
+    (ende-queue-ui--detail-line
+     (propertize message 'face 'font-lock-doc-face) owner indent)))
 
 (defun ende-queue-ui--job-details (job state)
   "Render non-redundant inert details for JOB in STATE."
@@ -363,45 +369,55 @@
          (effort (plist-get profile :reasoning-effort))
          (latest (ende-job-latest-user job)))
     (unless (memq 'policy columns)
-      (ende-queue-ui--detail-line
-       (format "Policy: %s" (ende-queue-ui--policy job)) job))
+      (ende-queue-ui--detail-field
+       "Policy" (ende-queue-ui--policy job) job))
     (unless (memq 'provider columns)
-      (ende-queue-ui--detail-line
-       (format "Provider: %s" (ende-queue-ui--provider-name job)) job))
+      (ende-queue-ui--detail-field
+       "Provider" (ende-queue-ui--provider-name job) job))
     (when (and (stringp model) (not (string-empty-p model)))
-      (ende-queue-ui--detail-line
-       (format "Model: %s%s" model
-               (if effort (format " %s" effort) ""))
+      (ende-queue-ui--detail-field
+       "Model" (format "%s%s" model (if effort (format " %s" effort) ""))
        job))
     (when (and (eq state 'running) (ende-job-activity-title job))
       (ende-queue-ui--detail-line
-       (format "Activity: %s (updated %s)"
-               (ende-job-activity-title job)
-               (format-time-string "%H:%M:%S"
-                                   (ende-job-activity-updated-at job)))
+       (concat
+        (ende-queue-ui--detail-label "Activity") " "
+        (propertize
+         (substring-no-properties (ende-job-activity-title job))
+         'face 'font-lock-function-name-face)
+        " "
+        (propertize
+         (format "(updated %s)"
+                 (format-time-string "%H:%M:%S"
+                                     (ende-job-activity-updated-at job)))
+         'face 'ende-queue-ui-heading-face))
        job)
-      (ende-queue-ui--detail-paragraph (ende-job-activity-status job) job)
-      (ende-queue-ui--detail-line
-       (format "Execution: %s" (or (ende-job-status job) "Running")) job))
+      (ende-queue-ui--detail-paragraph
+       (ende-job-activity-status job) job 8)
+      (ende-queue-ui--detail-field
+       "Execution" (or (ende-job-status job) "Running") job))
     (when (and (eq state 'running)
                (eq (ende-job-type job) 'chat)
                (plist-member profile :tool-definitions))
-      (ende-queue-ui--detail-line
+      (ende-queue-ui--detail-field
+       "Tool calls"
        (if (plist-get profile :tool-definitions)
-           (format "Tool calls: %d" (or (ende-job-tool-call-count job) 0))
-         "Tool calls: <disabled>")
+           (number-to-string (or (ende-job-tool-call-count job) 0))
+         "<disabled>")
        job))
     (when latest
       (let* ((lines (mapcar #'string-trim (split-string latest "\n" t)))
              (lines (seq-take (cl-remove-if #'string-empty-p lines) 5)))
         (when lines
           (ende-queue-ui--detail-line
-           (concat "Latest user message: " (car lines)) job)
+           (concat (ende-queue-ui--detail-label "Latest user message")
+                   " " (car lines))
+           job)
           (dolist (line (cdr lines))
-            (ende-queue-ui--detail-line line job)))))
+            (ende-queue-ui--detail-line line job 8)))))
     (when (and (eq state 'queued) (null latest))
-      (ende-queue-ui--detail-line
-       "Request preview: live source, captured when started" job))
+      (ende-queue-ui--detail-field
+       "Request preview" "live source, captured when started" job))
     (when (eq state 'queued)
       (ende-queue-ui--display-blockers job))))
 
@@ -422,9 +438,9 @@
            'ende-queue-ui-fence-id (ende-queue-fence-id fence))
      'ende-queue-ui-fence-face)
     (when expanded
-      (ende-queue-ui--detail-line
-       (format "All unfinished predecessors: %s"
-               (if ids (mapconcat #'identity ids ", ") "none"))
+      (ende-queue-ui--detail-field
+       "All unfinished predecessors"
+       (if ids (mapconcat #'identity ids ", ") "none")
        fence))))
 
 (defun ende-queue-ui--section (title entries renderer)

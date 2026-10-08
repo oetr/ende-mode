@@ -33,6 +33,92 @@
           (buffer-substring-no-properties
            (line-beginning-position) (line-end-position)))))))
 
+(defun ende-test--dashboard-face-span-p (dashboard text face)
+  "Return non-nil if TEXT in DASHBOARD has exactly FACE.
+When FACE is non-nil, it must also end precisely at TEXT's boundaries."
+  (with-current-buffer dashboard
+    (save-excursion
+      (goto-char (point-min))
+      (let (matched)
+        (while (and (not matched) (search-forward text nil t))
+          (let* ((end (point))
+                 (start (- end (length text)))
+                 (position start)
+                 (matches t))
+            (while (and matches (< position end))
+              (unless (eq (get-text-property position 'face) face)
+                (setq matches nil))
+              (setq position (1+ position)))
+            (when (and matches
+                       (or (null face)
+                           (and (not (eq (get-text-property (1- start) 'face)
+                                         face))
+                                 (not (eq (get-text-property end 'face) face)))))
+              (setq matched t))))
+        matched))))
+
+(defun ende-test--dashboard-assert-chat-details
+    (dashboard job title timestamp status)
+  "Assert expanded chat detail faces, indentation, and preview in DASHBOARD."
+  (with-current-buffer dashboard
+    (let* ((contents (buffer-string))
+           (lines (split-string contents "\n")))
+      (should truncate-lines)
+      (should (member "    Model: gpt-6.1-sol max" lines))
+      (should
+       (member (format "    Activity: %s (updated %s)" title timestamp)
+               lines))
+      (should (member (concat "        " status) lines))
+      (should (member "    Execution: Running" lines))
+      (should (member "    Tool calls: 2" lines))
+      (should (member "    Latest user message: * How LLMs work" lines))
+      (should (member "        Can you tell me how LLMs work?" lines))
+      (should (member "        Explain the basic idea." lines))
+      (should (member "        Keep it concise." lines))
+      (should (member "        Use two sentences." lines))
+      (should-not
+       (member "        This sixth line should stay hidden." lines))
+      (should-not (string-match-p "Source metadata:" contents))
+      (should-not (string-match-p "Name: Roadmap.org" contents))
+      (should-not (string-match-p "Type: file" contents))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard "Model:" 'font-lock-type-face))
+      (should (ende-test--dashboard-face-span-p
+               dashboard "gpt-6.1-sol max" nil))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard "Activity:" 'font-lock-type-face))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard title 'font-lock-function-name-face))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard (format "(updated %s)" timestamp)
+        'ende-queue-ui-heading-face))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard status 'font-lock-doc-face))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard "Latest user message:" 'font-lock-type-face))
+      (should
+       (ende-test--dashboard-face-span-p dashboard "* How LLMs work" nil))
+      (should
+       (ende-test--dashboard-face-span-p
+        dashboard "Can you tell me how LLMs work?" nil))
+      (goto-char (point-min))
+      (let ((activity-position
+             (and (search-forward "Activity:" nil t)
+                  (- (point) (length "Activity:")))))
+        (should activity-position)
+        (should (eq (get-text-property activity-position
+                                        'ende-queue-ui-kind)
+                    'detail))
+        (should (eq (get-text-property activity-position
+                                        'ende-queue-ui-owner)
+                    job))))))
+
 (defun ende-test--dashboard-flush-refresh (dashboard)
   "Run DASHBOARD's pending refresh now, keeping tests independent of timers."
   (with-current-buffer dashboard
@@ -77,53 +163,78 @@
 							buffers-second-row))
 				(should (string-match-p "Behind #" buffers-second-row)))))))
 
-(ert-deftest ende-test/dashboard-user-preview-skips-source-metadata-and-shows-five-lines ()
-  (ende-test--dashboard-reset)
-  (let ((ende-llm-function (ende-test--fake-llm nil t)))
-    (ende-test--with-buffer "base"
-			    (ende-queue-pause)
-			    (let* ((job (ende-enqueue
-					 (ende-test--dashboard-request
-					  ende-test--dashboard-profile)))
-				   (user-message
-				    (concat "* How LLMs work\n"
-					    "Can you tell me how LLMs work?\n"
-					    "Explain the basic idea.\n"
-					    "Keep it concise.\n"
-					    "Use two sentences.\n"
-					    "This sixth line should stay hidden."))
-				   (messages (list (cons "user" user-message)))
-				   (prepared
-				    (cl-letf (((symbol-function
-						'ende-operations--source-metadata-block)
-					       (lambda (_job)
-						 (concat "Source metadata:\n"
-							 "Name: Roadmap.org\n"
-							 "Type: file\n"
-							 "Major mode: org-mode\n\n"))))
-				      (ende-operations--add-source-metadata job messages)))
-				   (dashboard nil))
-			      (should (string-match-p "Source metadata:"
-						      (cdar prepared)))
-			      ;; The provider-facing begin event must not replace the original text
-			      ;; captured before source metadata was added.
-			      (let ((ende-job-event-functions nil))
-				(ende-job-emit-event job (list :type :begin :messages prepared)))
-			      (setq dashboard (ende-queue-open))
-			      (with-current-buffer dashboard
-				(goto-char (ende-queue-ui--position-for-key
-					    (cons 'job (ende-job-id job))))
-				(ende-queue-ui-toggle-entry)
-				(let ((details (buffer-string)))
-				  (should (string-match-p "Latest user message: " details))
-				  (should (string-match-p "How LLMs work" details))
-				  (should (string-match-p "Can you tell me how LLMs work\\?"
-							  details))
-				  (should (string-match-p "Use two sentences\\." details))
-				  (should-not (string-match-p "This sixth line" details))
-				  (should-not (string-match-p "Source metadata:" details))
-				  (should-not (string-match-p "Name: Roadmap.org" details))
-				  (should-not (string-match-p "Type: file" details))))))))
+(ert-deftest ende-test/dashboard-expanded-chat-details-style-and-refresh-in-both-views ()
+  (save-window-excursion
+    (delete-other-windows)
+    (ende-test--dashboard-reset)
+    (let* ((ende--job-handlers (copy-alist ende--job-handlers))
+           (ende-llm-function (ende-test--fake-llm nil t))
+           (profile '(:name remote :model "gpt-6.1-sol"
+                             :reasoning-effort "max" :max-concurrency 2
+                             :parallel nil :tool-definitions (tool)))
+           (activity-title "Inspecting sources")
+           (updated (format-time-string "%H:%M:%S" 0))
+           (activity-message
+            (concat "Reviewing the complete activity message for horizontal "
+                    "scrolling " (make-string 96 ?x)))
+           (user-message
+            (concat "* How LLMs work\n"
+                    "Can you tell me how LLMs work?\n"
+                    "Explain the basic idea.\n"
+                    "Keep it concise.\n"
+                    "Use two sentences.\n"
+                    "This sixth line should stay hidden."))
+           job dashboard)
+      (ende-register-job-handler 'chat (lambda (_job) nil))
+      (unwind-protect
+          (ende-test--with-buffer "base"
+            (let* ((request (ende-test--dashboard-request profile))
+                   (messages (list (cons "user" user-message)))
+                   prepared)
+              (setcar request 'chat)
+              (setq job (ende-enqueue request))
+              (should (eq (ende-job-state job) 'running))
+              (ende-job-emit-event
+               job (list :type :agent-activity :title activity-title
+                         :status activity-message :updated-at 0))
+              (ende-job-emit-event job '(:type :tool-call-count :count 2))
+              (setq prepared
+                    (cl-letf (((symbol-function
+                                'ende-operations--source-metadata-block)
+                               (lambda (_job)
+                                 (concat "Source metadata:\n"
+                                         "Name: Roadmap.org\n"
+                                         "Type: file\n"
+                                         "Major mode: org-mode\n\n"))))
+                      (ende-operations--add-source-metadata job messages)))
+              (should (string-match-p "Source metadata:" (cdar prepared)))
+              ;; The provider-facing event must retain the original user text.
+              (ende-job-emit-event
+               job (list :type :begin :messages prepared))
+              (setq dashboard (ende-queue-open))
+              (set-window-buffer (selected-window) dashboard)
+              (with-current-buffer dashboard
+                (goto-char (ende-queue-ui--position-for-key
+                            (cons 'job (ende-job-id job))))
+                (ende-queue-ui-toggle-entry))
+              (dolist (view '(jobs buffers))
+                (with-current-buffer dashboard
+                  (unless (eq ende-queue-ui-view view)
+                    (ende-queue-ui-switch-view)))
+                (ende-test--dashboard-assert-chat-details
+                 dashboard job activity-title updated activity-message))
+              (let ((refreshed-title "Reviewing changed content")
+                    (refreshed-time (format-time-string "%H:%M:%S" 3600))
+                    (refreshed-message "Rechecking the updated activity line"))
+                (ende-job-emit-event
+                 job (list :type :agent-activity :title refreshed-title
+                           :status refreshed-message :updated-at 3600))
+                (ende-test--dashboard-flush-refresh dashboard)
+                (ende-test--dashboard-assert-chat-details
+                 dashboard job refreshed-title refreshed-time
+                 refreshed-message))))
+        (when (buffer-live-p dashboard)
+          (kill-buffer dashboard))))))
 
 (ert-deftest ende-test/dashboard-chat-details-show-effort-and-tool-call-state ()
   (ende-test--dashboard-reset)
