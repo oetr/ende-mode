@@ -92,6 +92,8 @@ Each item is a profile symbol understood by `ende-provider-profile'."
 
 Each value is a plist.  Secrets must not be stored here; use auth-source
 fields :auth-source-host, :auth-source-user, and :auth-source-port instead.
+An optional :preset reuses built-in provider behavior; :controls replaces or
+refines request mappings for the three built-in controls.
 An optional :display-name overrides endpoint-reported provider names for the
 UI.  :max-concurrency limits parallel jobs for the provider, and :parallel
 enables parallel jobs by default.  :source-name-disclosure overrides
@@ -609,16 +611,13 @@ SELECTION must contain a provider symbol and a nonempty model string."
             (or (plist-member selection :control-preferences)
                 (plist-member selection :reasoning-effort)))
            (preferences
-            (if (plist-member selection :control-preferences)
-                (plist-get selection :control-preferences)
-              (when (plist-member selection :reasoning-effort)
-                (list :reasoning-effort
-                      (plist-get selection :reasoning-effort)))))
-           (preferences
             (and preferences-present
                  (copy-tree
-                  (ende-provider--validate-control-preferences preferences))))
-           )
+                  (ende-provider--validate-control-preferences
+                   (if (plist-member selection :control-preferences)
+                       (plist-get selection :control-preferences)
+                     (list :reasoning-effort
+                           (plist-get selection :reasoning-effort))))))))
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
         (append (list :provider provider :model model)

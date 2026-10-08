@@ -345,13 +345,20 @@
 (ert-deftest ende-test/profile-is-snapshotted-at-enqueue ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '(:stall) t))
-        (ende-provider-endpoint "http://one.example/v1"))
+        (ende-provider-endpoint "http://one.example/v1")
+        (ende-provider-profiles '((local :temperature 0.2))))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
 			    (let ((job (ende-insert-at-cursor)))
-			      (setq ende-provider-endpoint "http://two.example/v1")
+			      (setq ende-provider-endpoint "http://two.example/v1"
+				    ende-provider-profiles
+				    '((local :temperature 0.9
+					     :controls ((:temperature :path ("changed"))))))
 			      (should (string= (plist-get (ende-job-profile job) :url)
-					       "http://one.example/v1"))))))
+					       "http://one.example/v1"))
+			      (should (= (plist-get (ende-job-profile job) :temperature) 0.2))
+			      (should (equal (plist-get (ende-job-profile job) :controls)
+					     '((:temperature :path ("temperature")))))))))
 
 (provide 'ende-queue-test)
 

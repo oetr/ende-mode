@@ -612,6 +612,43 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest ende-test/selector-clearing-one-control-preserves-other-draft-values ()
+  (let ((buffer (generate-new-buffer " *ende-selector-clear-control*"))
+        (ende-provider-profiles
+         '((remote :model "remote-model" :temperature 0.2
+                   :reasoning-effort "high"
+                   :controls ((:temperature :path ("temperature"))
+                              (:thinking :path ("thinking")
+                                         :choices (on off))
+                              (:reasoning-effort :path ("reasoning" "effort")
+                                                 :choices ("high" "low")))))))
+    (unwind-protect
+        (with-current-buffer buffer
+          (ende-selector-mode)
+          (setq ende-selector--providers '(remote)
+                ende-selector--provider-index 0
+                ende-selector--models '("remote-model")
+                ende-selector--model-index 0
+                ende-selector--model-state :ready)
+          (ende-selector--set-control-context)
+          (setq ende-selector--control-preferences
+                '(:temperature 0.7 :thinking off :reasoning-effort "low"))
+          (ende-selector--set-control-preference :temperature nil)
+          (ende-selector-effort-provider-default)
+          (should (equal ende-selector--control-preferences
+                         '(:temperature nil :thinking off
+					:reasoning-effort nil)))
+          (ende-selector-reset-controls)
+          (should-not ende-selector--control-preferences)
+          (should (= (plist-get (ende-selector--resolved-profile)
+                                :temperature)
+                     0.2))
+          (should (equal (plist-get (ende-selector--resolved-profile)
+                                    :reasoning-effort)
+                         "high")))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
         (callback nil)

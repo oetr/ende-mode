@@ -369,8 +369,7 @@ The :callbacks argument initializes the composed transport lifecycle."
           (ende-llm--collect-tool-calls session tool-calls))
         (when (stringp finish-reason)
           (setf (ende-llm--session-finish-reason session) finish-reason))
-        (when (and (stringp reasoning-content)
-                   (not (string-empty-p reasoning-content)))
+        (when (stringp reasoning-content)
           (push reasoning-content
                 (ende-llm--session-reasoning-content-parts session)))
         (ende-llm--handle-usage
@@ -582,7 +581,7 @@ The :callbacks argument initializes the composed transport lifecycle."
               (when (and profile
                          (eq (plist-get profile :reasoning-history-field)
                              'reasoning_content)
-                         (plist-member profile :tool-definitions)
+                         (plist-get profile :tool-definitions)
                          (equal role "assistant")
                          (stringp (plist-get message :reasoning-content)))
                 (list (cons :reasoning_content

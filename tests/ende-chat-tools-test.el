@@ -1276,6 +1276,116 @@
       (when (file-directory-p root)
         (delete-directory root t)))))
 
+(ert-deftest ende-test/deepseek-tool-continuation-replays-raw-reasoning-by-preset-capability ()
+  (dolist (replay '(t nil))
+    (ende-test--reset)
+    (let* ((root (make-temp-file "ende-deepseek-tool-replay-" t))
+           (profile (ende-provider-profile-for-model
+                     'deepseek "deepseek-flash"))
+           (profile (if replay profile
+                      (plist-put profile :reasoning-history-field nil)))
+           (responses
+            (list
+             (list
+              (concat
+               "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\","
+               "\"delta\":{\"reasoning_content\":\"Private plan\",\"tool_calls\":[{"
+               "\"index\":0,\"id\":\"call-1\",\"type\":\"function\","
+               "\"function\":{\"name\":\"read_file\","
+               "\"arguments\":\"{\\\"path\\\":\\\"one.el\\\"}\"}}]}}]}\n\n"
+               "data: [DONE]\n\n"))
+             (list
+              (concat
+               "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\","
+               "\"delta\":{\"reasoning_content\":\"Final plan\","
+               "\"content\":\"Answer\"}}]}\n\n"
+               "data: [DONE]\n\n"))))
+           (request-bodies nil)
+           (real-make-process (symbol-function 'make-process))
+           (real-send-string (symbol-function 'process-send-string))
+           (ende-provider-discovery-enabled nil)
+           (ende-chat-include-reasoning nil)
+           (ende-llm-function
+            (lambda (messages callbacks options)
+              (let* ((process (ende-llm-default messages callbacks options))
+                     (args (process-get process :ende-test-request-args))
+                     (headers (process-get process :ende-headers-file))
+                     (filter (plist-get args :filter))
+                     (sentinel (plist-get args :sentinel))
+                     (chunks (pop responses)))
+                (with-temp-file headers
+                  (insert "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/event-stream\r\n\r\n"))
+                (dolist (chunk chunks)
+                  (funcall filter process chunk))
+                (funcall sentinel process "finished\n")
+                process))))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "one.el" root)
+              (insert "file contents\n"))
+            (cl-letf (((symbol-function 'auth-source-search)
+                       (lambda (&rest _arguments)
+                         (list (list :secret "deepseek-test-token"))))
+                      ((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (let ((process
+                                (funcall
+                                 real-make-process
+                                 :name (plist-get args :name)
+                                 :buffer nil
+                                 :command '("cat")
+                                 :connection-type 'pipe
+                                 :noquery t
+                                 :filter #'ignore
+                                 :sentinel #'ignore)))
+                           (process-put process :ende-test-request-args args)
+                           process)))
+                      ((symbol-function 'process-send-string)
+                       (lambda (process text)
+                         (when (process-get process :ende-test-request-args)
+                           (push text request-bodies))
+                         (funcall real-send-string process text))))
+              (ende-test--with-buffer
+               (format (concat "#+begin_ende\n(root %S)\n"
+                               "(group inspect read_file)\n"
+                               "(resource project (include \"**\"))\n"
+                               "(tools inspect)\n"
+                               "(set-tool-resources inspect :resources project)\n"
+                               "#+end_ende\n\n"
+                               "* Topic\n** Question\nRead one.el\n")
+                       root)
+               (org-mode)
+               (ende-test--chat-goto "** Question")
+               (let ((job (ende-ask profile)))
+                 (should (eq (ende-job-state job) 'completed))
+                 (should (equal (plist-get (ende-job-result job)
+                                           :reasoning-content)
+                                "Final plan"))))
+              (should (= (length request-bodies) 2))
+              (let* ((bodies (mapcar #'ende-protocol-json-read-string
+                                     (nreverse request-bodies)))
+                     (messages (append (ende-protocol-json-get
+					"messages" (cadr bodies)) nil))
+                     (assistant
+                      (cl-find-if
+                       (lambda (message)
+			 (and (equal (ende-protocol-json-get "role" message)
+                                     "assistant")
+                              (ende-protocol-json-has-key-p "tool_calls" message)))
+                       messages)))
+		(should assistant)
+		(if replay
+                    (should (equal
+                             (ende-protocol-json-get
+                              "reasoning_content" assistant)
+                             "Private plan"))
+                  (should-not
+                   (ende-protocol-json-has-key-p "reasoning_content" assistant))))))
+        (ende-test--reset)
+        (when (file-directory-p root)
+          (delete-directory root t))))))
+
 (provide 'ende-chat-tools-test)
 
 ;;; ende-chat-tools-test.el ends here

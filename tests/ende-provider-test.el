@@ -156,6 +156,72 @@
       (should-not (plist-member resolved :temperature))
       (should-not (plist-get resolved :type)))))
 
+(ert-deftest ende-test/deepseek-preset-specializes-before-alias-overrides ()
+  (let* ((ende-provider-profiles
+          '((deepseek :model "deepseek-flash" :temperature 0.7
+                      :controls ((:temperature :path ("custom_temperature"))))
+            (work :preset deepseek :model "deepseek-flash"
+                  :temperature 0.2 :auth-source-user "work"
+                  :controls ((:reasoning-effort :choices ("low" "max"))))))
+         (base (ende-provider-profile 'deepseek))
+         (alias (ende-provider-profile 'work))
+         (unverified (ende-provider-profile-for-model 'deepseek "deepseek-chat"))
+         (incompatible
+          (plist-put (plist-put (copy-tree base) :thinking 'on)
+                     :reasoning-effort "none")))
+    (should (eq (plist-get base :type) 'openai))
+    (should (equal (plist-get base :url)
+                   "https://api.deepseek.com/chat/completions"))
+    (should (equal (plist-get base :model) "deepseek-flash"))
+    (should (equal (plist-get base :temperature) 0.7))
+    (should (eq (plist-get base :reasoning-history-field) 'reasoning_content))
+    (should (equal (plist-get base :control-defaults)
+                   '(:temperature 1 :thinking on :reasoning-effort "high")))
+    (should (equal (plist-get alias :name) 'work))
+    (should (equal (plist-get alias :temperature) 0.2))
+    (should (equal (plist-get alias :auth-source-user) "work"))
+    (should (equal (plist-get (ende-provider-control-descriptor
+                               alias :temperature)
+                              :path)
+                   '("temperature")))
+    (should (equal (plist-get (ende-provider-control-descriptor
+                               alias :reasoning-effort)
+                              :choices)
+                   '("low" "max")))
+    (should-not (plist-get unverified :reasoning-history-field))
+    (should-not (ende-provider-control-descriptor
+                 unverified :reasoning-effort))
+    (should (string-match-p "none disables thinking"
+                            (ende-provider-control-compatibility-error
+                             incompatible)))
+    (should-error (ende-provider-validate-controls incompatible))
+    (let ((ende-provider-profiles '((deepseek :temperature 0.2))))
+      (should-not (plist-get (ende-provider-profile 'deepseek) :model)))
+    (let ((ende-provider-profiles '((work :preset missing :model "model"))))
+      (should-error (ende-provider-profile 'work)
+                    :type 'error))))
+
+(ert-deftest ende-test/control-preferences-inherit-and-omit-by-key-presence ()
+  (let* ((profile '(:name remote :model "model" :temperature 0.8
+			  :thinking on :reasoning-effort "high"
+			  :controls ((:temperature :path ("temperature"))
+				     (:thinking :path ("thinking")
+						:choices (on off))
+                                     (:reasoning-effort
+                                      :path ("reasoning" "effort")))))
+         (preferences '(:temperature nil :thinking off))
+         (resolved
+          (ende-provider-profile-with-control-preferences profile preferences))
+         (body (ende-controls-encode nil (plist-get resolved :controls) resolved)))
+    (should (equal (plist-get profile :temperature) 0.8))
+    (should (plist-member preferences :temperature))
+    (should-not (plist-get resolved :temperature))
+    (should (eq (plist-get resolved :thinking) 'off))
+    (should (equal (plist-get resolved :reasoning-effort) "high"))
+    (should-not (assq :temperature body))
+    (should (equal (alist-get :thinking body) "off"))
+    (should-not (assoc "reasoning" body))))
+
 (ert-deftest ende-test/provider-validates-request-profiles-before-dispatch ()
   (let ((valid
          (list '(:url "https://example.test/v1" :model "legacy-model")

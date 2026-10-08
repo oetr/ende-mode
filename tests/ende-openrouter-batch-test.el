@@ -241,6 +241,7 @@
                        "ende-job-1"))
       (should-not (ende-protocol-json-has-key-p "stream" request-body))
       (should-not (ende-protocol-json-has-key-p "model" request-body))
+      (should (= (ende-protocol-json-get "temperature" request-body) 0.2))
       (should (= (ende-protocol-json-get "max_tokens" request-body) 64))
       (should (string=
                (ende-protocol-json-get
@@ -249,13 +250,15 @@
 
 
 
-(ert-deftest ende-test/openrouter-batches-separate-reasoning-efforts ()
-  (let* ((low (plist-put (ende-provider-profile 'openrouter-batch)
-                         :reasoning-effort "low"))
-         (high (plist-put (ende-provider-profile 'openrouter-batch)
-                          :reasoning-effort "high")))
+(ert-deftest ende-test/openrouter-batches-separate-effective-control-payloads ()
+  (let* ((base (ende-provider-profile 'openrouter-batch))
+         (low (plist-put (copy-tree base) :reasoning-effort "low"))
+         (high (plist-put (copy-tree base) :reasoning-effort "high"))
+         (temperature (plist-put (copy-tree base) :temperature 0.7)))
     (should-not (equal (ende-openrouter-batch--profile-key low)
-                       (ende-openrouter-batch--profile-key high)))))
+                       (ende-openrouter-batch--profile-key high)))
+    (should-not (equal (ende-openrouter-batch--profile-key base)
+                       (ende-openrouter-batch--profile-key temperature)))))
 
 
 

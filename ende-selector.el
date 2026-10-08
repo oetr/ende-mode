@@ -408,7 +408,14 @@ the discovered pricing metadata for those model IDs."
          (thinking-line
           (when (or (ende-selector--control-supported-p profile :thinking)
                     (plist-get (ende-selector--control-setting :thinking) :value))
-            (ende-selector--control-line "Thinking:" :thinking profile)))
+            (if (and (ende-provider-deepseek-model-verified-p profile)
+                     (null thinking)
+                     (equal (plist-get
+                             (ende-selector--control-setting :reasoning-effort)
+                             :value)
+                            "none"))
+                "Thinking:  off (reasoning effort none)"
+              (ende-selector--control-line "Thinking:" :thinking profile))))
          (effort-line
           (when (or (ende-selector--control-supported-p
                      profile :reasoning-effort)
@@ -594,8 +601,8 @@ ignored.  Return a cancellation function."
            (generation (cl-incf ende-selector--next-effort-probe-generation))
            (selection-generation ende-selector--model-selection-generation)
            (completed nil))
-       (setq ende-selector--effort-probe-generation generation
-             ende-selector--effort-state :loading)
+      (setq ende-selector--effort-probe-generation generation
+            ende-selector--effort-state :loading)
       (ende-selector--render)
       (let ((cancel
              (ende-provider-probe-reasoning-efforts
@@ -841,12 +848,17 @@ performed locally so typing a search term never starts another network request."
   "Retain the effort draft and show ERROR as unsupported or temporarily unknown."
   (let ((unsupported
          (and (ende-error-p error)
-              (eq (ende-error-kind error) 'unsupported))))
+              (eq (ende-error-kind error) 'unsupported)))
+        (capability-unknown
+         (and (ende-error-p error)
+              (or (eq (ende-error-kind error) 'capability)
+                  (and (eq (ende-error-kind error) 'discovery)
+                       (string-match-p "disabled"
+                                       (ende-error-message error)))))))
     (setq ende-selector--effort-state
           (cond
            ((and unsupported ende-selector--effort) :invalid)
-           ((and (ende-error-p error)
-                 (eq (ende-error-kind error) 'capability)) :unavailable)
+           (capability-unknown :unavailable)
            (t :error))
           ende-selector--effort-validated-context nil
           ende-selector--pending-run nil)
@@ -910,7 +922,6 @@ performed locally so typing a search term never starts another network request."
   (interactive)
   (setq ende-selector--control-preferences nil
         ende-selector--effort-validated-context nil
-        ende-selector--effort-validated-p nil
         ende-selector--effort nil
         ende-selector--effort-state :none)
   (setq ende-selector--effort
@@ -943,8 +954,7 @@ performed locally so typing a search term never starts another network request."
              (active (ende-provider-active-reasoning-effort profile)))
         (when active
           (setq ende-selector--effort-validated-context
-                (ende-provider-reasoning-effort-context profile active)
-                ende-selector--effort-validated-p t))
+                (ende-provider-reasoning-effort-context profile active)))
         (setq ende-selector--effort-state
               (if active :ready :remembered))
         (ende-selector--render)))))
@@ -1141,7 +1151,6 @@ static or live capability source requires validation."
            (if validation-error
                (ende-selector--effort-validation-failed validation-error)
              (setq ende-selector--effort-validated-context context
-                   ende-selector--effort-validated-p t
                    ende-selector--effort-state :ready)
              (let ((pending ende-selector--pending-run))
                (setq ende-selector--pending-run nil)
@@ -1277,7 +1286,6 @@ static or live capability source requires validation."
             ende-selector--control-context nil
             ende-selector--effort nil
             ende-selector--effort-state :none
-            ende-selector--effort-validated-p nil
             ende-selector--effort-validated-context nil
             ende-selector--quota nil
             ende-selector--quota-state :unavailable
