@@ -151,6 +151,15 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-model-property "ENDE_MODEL"
   "Org property storing the model used for a chat response.")
 
+(defconst ende-chat-input-tokens-property "ENDE_INPUT_TOKENS"
+  "Org property storing the provider-reported input token count.")
+
+(defconst ende-chat-output-tokens-property "ENDE_OUTPUT_TOKENS"
+  "Org property storing the provider-reported output token count.")
+
+(defconst ende-chat-cached-tokens-property "ENDE_CACHED_TOKENS"
+  "Org property storing the provider-reported cached input token count.")
+
 (defconst ende-chat-reasoning-effort-property "ENDE_REASONING_EFFORT"
   "Org property storing the reasoning effort used for a chat response.")
 
@@ -182,6 +191,9 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat--reserved-properties
   (append (mapcar #'car ende-chat--parsed-property-descriptors)
           (list ende-chat-model-property
+                ende-chat-input-tokens-property
+                ende-chat-output-tokens-property
+                ende-chat-cached-tokens-property
                 ende-chat-reasoning-effort-property
                 ende-chat-temperature-property
                 ende-chat-thinking-property))
@@ -2198,6 +2210,7 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
   (let* ((profile (ende-job-profile job))
          (display (ende--job-display-metadata job result))
          (model (plist-get display :model))
+         (counts (ende--usage-token-counts (plist-get result :usage)))
          (temperature (plist-get profile :temperature))
          (thinking (plist-get profile :thinking))
          (effort (ende-provider-active-reasoning-effort profile)))
@@ -2210,7 +2223,19 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
       ende-chat-thinking-property
       (and (memq thinking '(on off)) (symbol-name thinking)))
      (ende-chat--metadata-property ende-chat-reasoning-effort-property
-                                   effort))))
+                                   effort)
+     (ende-chat--metadata-property
+      ende-chat-input-tokens-property
+      (let ((count (plist-get counts :input)))
+        (and (numberp count) (number-to-string (truncate count)))))
+     (ende-chat--metadata-property
+      ende-chat-output-tokens-property
+      (let ((count (plist-get counts :output)))
+        (and (numberp count) (number-to-string (truncate count)))))
+     (ende-chat--metadata-property
+      ende-chat-cached-tokens-property
+      (let ((count (plist-get counts :cached)))
+        (and (numberp count) (number-to-string (truncate count))))))))
 
 (defun ende-chat--reasoning-text
     (level question-id request-id result-properties normalized)

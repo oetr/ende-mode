@@ -241,20 +241,6 @@
             (cl-decf ende-history--entry-count))
         (setq ende-history--entry-count 0)))))
 
-(defun ende-history--usage-get (object key)
-  "Return KEY from provider usage OBJECT.
-KEY is a keyword for plist objects and a string key in JSON hash tables."
-  (cond
-   ((hash-table-p object)
-    (gethash (substring (symbol-name key) 1) object))
-   ((listp object) (plist-get object key))))
-
-(defun ende-history--usage-number (usage &rest keys)
-  "Return the first numeric field in USAGE named by KEYS."
-  (cl-loop for key in keys
-           for value = (ende-history--usage-get usage key)
-           when (numberp value) return value))
-
 (defun ende-history--format-token-count (count)
   "Return integer COUNT with thousands separators."
   (let* ((digits (number-to-string (max 0 (truncate count))))
@@ -268,8 +254,8 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
 
 (defun ende-history--usage-message-summary (usage)
   "Summarize attributed message counts in provider USAGE, when available."
-  (let* ((attribution (ende-history--usage-get usage :attribution))
-         (items (ende-history--usage-get attribution :items)))
+  (let* ((attribution (ende--usage-get usage :attribution))
+         (items (ende--usage-get attribution :items)))
     (when (hash-table-p items)
       (let ((messages 0)
             (input-messages 0)
@@ -277,10 +263,8 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
         (maphash
          (lambda (id item)
            (when (and (stringp id) (string-prefix-p "msg_" id))
-             (let ((input (ende-history--usage-number
-                           item :input_tokens))
-                   (output (ende-history--usage-number
-                            item :output_tokens)))
+             (let ((input (ende--usage-number item :input_tokens))
+                   (output (ende--usage-number item :output_tokens)))
                (cl-incf messages)
                (when (and (numberp input) (> input 0))
                  (cl-incf input-messages))
@@ -294,21 +278,27 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
 
 (defun ende-history--usage-token-summary (usage)
   "Summarize aggregate token counts in provider USAGE, when available."
-  (let* ((input (ende-history--usage-number
-                 usage :input_tokens :prompt_tokens))
-         (output (ende-history--usage-number
-                  usage :output_tokens :completion_tokens))
-         (total (or (ende-history--usage-number usage :total_tokens)
-                    (and (numberp input) (numberp output)
-                         (+ input output)))))
+  (let* ((counts (ende--usage-token-counts usage))
+         (input (plist-get counts :input))
+         (output (plist-get counts :output))
+         (cached (plist-get counts :cached))
+         (total (plist-get counts :total)))
     (when (numberp total)
       (if (and (numberp input) (numberp output))
-          (format "Tokens: %s total (%s input, %s output)"
+          (format "Tokens: %s total (%s input, %s output%s)"
                   (ende-history--format-token-count total)
                   (ende-history--format-token-count input)
-                  (ende-history--format-token-count output))
-        (format "Tokens: %s total"
-                (ende-history--format-token-count total))))))
+                  (ende-history--format-token-count output)
+                  (if (numberp cached)
+                      (format "; %s cached input"
+                              (ende-history--format-token-count cached))
+                    ""))
+        (format "Tokens: %s total%s"
+                (ende-history--format-token-count total)
+                (if (numberp cached)
+                    (format " (%s cached input)"
+                            (ende-history--format-token-count cached))
+                  ""))))))
 
 (defun ende-history--skipped-edit-errors-string (errors)
   "Format skipped structured-edit ERRORS for a history entry."

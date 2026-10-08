@@ -68,6 +68,7 @@
             "{\"input_tokens\":5002,"
             "\"output_tokens\":1216,"
             "\"total_tokens\":6218,"
+            "\"input_tokens_details\":{\"cached_tokens\":4000},"
             "\"attribution\":{\"items\":{"
             "\"msg_input_a\":{\"input_tokens\":4000,\"output_tokens\":0},"
             "\"msg_input_b\":{\"input_tokens\":1000,\"output_tokens\":0},"
@@ -92,7 +93,8 @@
 				(should (string-match-p
 					 "Messages: 3 (2 input, 1 output)" text))
 				(should (string-match-p
-					 "Tokens: 6,218 total (5,002 input, 1,216 output)" text))
+					 "Tokens: 6,218 total (5,002 input, 1,216 output; 4,000 cached input)"
+					 text))
 				(should-not (string-match-p "Provider usage:" text))
 				(should-not (string-match-p "msg_" text))
 				(should-not (string-match-p "attribution" text)))))))
@@ -121,6 +123,7 @@
 				(should (string-match-p "reasoning before failure" text))
 				(should (string-match-p
 					 "Tokens: 4,108 total (12 input, 4,096 output)" text))
+				(should-not (string-match-p "cached input" text))
 				(should-not (string-match-p "reasoning_tokens" text))
 				(should (string-match-p "empty completion" text))
 				(should buffer-read-only)

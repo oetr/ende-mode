@@ -161,6 +161,37 @@ Loopback requests always bypass proxies."
   "Remove trailing newlines from TEXT, preserving inline trailing spaces."
   (string-trim-right text "[\n\r]+"))
 
+(defun ende--usage-get (object key)
+  "Return KEY from provider usage OBJECT.
+KEY is a keyword for plist objects and a string key in JSON hash tables."
+  (cond
+   ((hash-table-p object)
+    (gethash (substring (symbol-name key) 1) object))
+   ((listp object) (plist-get object key))))
+
+(defun ende--usage-number (usage &rest keys)
+  "Return the first numeric field in USAGE named by KEYS."
+  (cl-loop for key in keys
+           for value = (ende--usage-get usage key)
+           when (numberp value) return value))
+
+(defun ende--usage-token-counts (usage)
+  "Return normalized input, output, cached, and total counts from USAGE.
+Unknown counts are nil.  Total is derived from input and output when absent."
+  (let* ((input (ende--usage-number usage :input_tokens :prompt_tokens))
+         (output (ende--usage-number usage :output_tokens :completion_tokens))
+         (total (or (ende--usage-number usage :total_tokens)
+                    (and (numberp input) (numberp output)
+                         (+ input output))))
+         (cached (or (ende--usage-number
+                      (ende--usage-get usage :input_tokens_details)
+                      :cached_tokens)
+                     (ende--usage-number
+                      (ende--usage-get usage :prompt_tokens_details)
+                      :cached_tokens)
+                     (ende--usage-number usage :prompt_cache_hit_tokens))))
+    (list :input input :output output :cached cached :total total)))
+
 (defun ende-validate-resource-options ()
   "Validate transport resource options before starting external processes."
   (dolist (option (list (cons 'ende-connect-timeout ende-connect-timeout)

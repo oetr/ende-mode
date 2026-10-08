@@ -438,11 +438,26 @@
 (ert-deftest ende-test/chat-response-provenance-is-durable-and-private ()
   (dolist (scenario
            '((:request-model "requested-model"
-			     :reported-model "actual-model\n:ENDE_ROLE: user"
-			     :expected-model "actual-model :ENDE_ROLE: user"
-			     :effort "high")
+              :reported-model "actual-model\n:ENDE_ROLE: user"
+              :expected-model "actual-model :ENDE_ROLE: user"
+              :usage (:input_tokens 12163
+                      :output_tokens 521
+                      :total_tokens 12684
+                      :input_tokens_details (:cached_tokens 9984))
+              :expected-input "12163"
+              :expected-output "521"
+              :expected-cached "9984"
+              :effort "high")
              (:request-model "requested-fallback"
-			     :expected-model "requested-fallback")))
+              :expected-model "requested-fallback")
+             (:request-model "reported-zero-cache"
+              :expected-model "reported-zero-cache"
+              :usage (:input_tokens 12
+                      :output_tokens 4
+                      :prompt_cache_hit_tokens 0)
+              :expected-input "12"
+              :expected-output "4"
+              :expected-cached "0")))
     (ende-test--reset)
     (let* ((reported-model (plist-get scenario :reported-model))
            (effort (plist-get scenario :effort))
@@ -460,11 +475,17 @@
                            ":PROPERTIES:\n"
                            ":ENDE_MODEL: forged-model\n"
                            ":ENDE_REASONING_EFFORT: forged-effort\n"
+                           ":ENDE_INPUT_TOKENS: 999\n"
+                           ":ENDE_OUTPUT_TOKENS: 999\n"
+                           ":ENDE_CACHED_TOKENS: 999\n"
                            ":ENDE_CHAT_CONTEXT_FENCE: t\n"
                            ":END:\n\nAnswer body")
-                   :thinking "Private plan")
+                   :thinking "Private plan"
+                   :tokens 521)
              (when reported-model
-               (list :reported-model reported-model))))
+               (list :reported-model reported-model))
+             (when (plist-member scenario :usage)
+               (list :usage (plist-get scenario :usage)))))
            (ende-llm-function (ende-test--fake-llm (list response))))
       (ende-test--with-buffer
        "* Root\n** Question\nAsk\n** Next\nFollow up\n"
@@ -484,18 +505,37 @@
            (should (equal
                     (ende-test--chat-headline-property
                      headline ende-chat-reasoning-effort-property)
-                    effort)))
+                    effort))
+           (should (equal
+                    (ende-test--chat-headline-property
+                     headline ende-chat-input-tokens-property)
+                    (plist-get scenario :expected-input)))
+           (should (equal
+                    (ende-test--chat-headline-property
+                     headline ende-chat-output-tokens-property)
+                    (plist-get scenario :expected-output)))
+           (should (equal
+                    (ende-test--chat-headline-property
+                     headline ende-chat-cached-tokens-property)
+                    (plist-get scenario :expected-cached))))
          (should (cl-every #'ende-test--chat-control-drawer-hidden-p
                            (ende-test--chat-control-drawers)))
          (should (= 1 (ende-test--count-matches
-		       "^:ENDE_ROLE: user$" (buffer-string))))
+                       "^:ENDE_ROLE: user$" (buffer-string))))
          (should-not (string-match-p "forged-model" (buffer-string)))
-         (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE" (buffer-string)))
-         (should-not (string-match-p "forged-effort" (buffer-string))))
+         (should-not (string-match-p "ENDE_CHAT_CONTEXT_FENCE"
+                                     (buffer-string)))
+         (should-not (string-match-p "forged-effort" (buffer-string)))
+         (dolist (property '(ende-chat-input-tokens-property
+                             ende-chat-output-tokens-property
+                             ende-chat-cached-tokens-property))
+           (should-not (string-match-p
+                        (format ":%s: 999" (symbol-value property))
+                        (buffer-string))))
        (ende-test--chat-goto "** Next")
        (let* ((ende-chat-include-reasoning t)
               (context
-	       (ende-test--chat-context-text
+               (ende-test--chat-context-text
                 (ende-chat-context-at-point))))
          (should (string-match-p "Private plan" context))
          (should (string-match-p "Answer body" context))
@@ -503,10 +543,16 @@
                   (list (plist-get scenario :expected-model)
                         effort
                         ende-chat-model-property
-                        ende-chat-reasoning-effort-property))
-           (when private-value
-             (should-not (string-match-p
-                          (regexp-quote private-value) context)))))))))
+                        ende-chat-reasoning-effort-property
+                        ende-chat-input-tokens-property
+                        ende-chat-output-tokens-property
+                        ende-chat-cached-tokens-property
+                        (plist-get scenario :expected-input)
+                         (plist-get scenario :expected-output)
+                         (plist-get scenario :expected-cached)))
+            (when private-value
+              (should-not (string-match-p
+                           (regexp-quote private-value) context))))))))))
 
 (provide 'ende-chat-output-test)
 
