@@ -84,7 +84,7 @@
   "Generation incremented when the user changes the current model.")
 
 (defvar-local ende-selector--control-preferences nil
-  "Explicit control preferences drafted for the current provider and model.")
+  "Explicit control preferences for the current provider and model.")
 
 (defvar-local ende-selector--control-context nil
   "Provider/model identity associated with `ende-selector--control-preferences'.")
@@ -164,7 +164,7 @@
     (and provider model (list provider model))))
 
 (defun ende-selector--resolved-profile ()
-  "Return the current provider/model profile with the control draft applied."
+  "Return the current provider/model profile with controls applied."
   (ende-provider-profile-for-selection
    (ende-selector--provider-name) (ende-selector--model-name)
    ende-selector--control-preferences))
@@ -175,7 +175,7 @@
    (ende-selector--provider-profile) ende-selector--control-preferences control))
 
 (defun ende-selector--set-control-preference (control value)
-  "Draft canonical VALUE for CONTROL without saving the selection."
+  "Save canonical VALUE for CONTROL and refresh the current profile."
   (when ende-selector--pending-run
     (user-error "Wait for reasoning-effort validation to finish"))
   (let ((old-effort ende-selector--effort))
@@ -187,6 +187,13 @@
       (setq ende-selector--effort-validated-context nil
             ende-selector--effort-state
             (if ende-selector--effort :remembered :none)))
+    (when (and (eq ende-selector--model-state :ready)
+               (ende-selector--provider-name)
+               (ende-selector--model-name))
+      (ende-model-selection-save-control-preferences
+       (ende-selector--provider-name) (ende-selector--model-name)
+       ende-selector--control-preferences
+       (or ende-selector--source-buffer (current-buffer))))
     (ende-selector--render)))
 
 (defun ende-selector--remembered-model (provider)
@@ -463,7 +470,7 @@ the discovered pricing metadata for those model IDs."
               "C-c C-c   - approve all LLM changes\n"
               "C-c C-k   - reject all LLM changes\n"
               "RET       - commit selection and close\n"
-              "q/ESC     - discard draft and close\n")
+              "q/ESC     - close without changing active selection\n")
       (goto-char (point-min)))))
 
 (defun ende-selector--cancel-probe ()
@@ -529,15 +536,12 @@ the discovered pricing metadata for those model IDs."
          (context (ende-selector--control-context-key))
          (provider (ende-selector--provider-name))
          (model (ende-selector--model-name))
-         (selection
-          (ende-model-selection-for-buffer
-           (or ende-selector--source-buffer (current-buffer))))
-         (matching-selection
-          (and (equal provider (plist-get selection :provider))
-               (equal model (plist-get selection :model))))
          (preferences
-          (and matching-selection
-               (copy-tree (plist-get selection :control-preferences)))))
+          (and context
+               (copy-tree
+                (ende-model-selection-control-preferences
+                 provider model
+                 (or ende-selector--source-buffer (current-buffer)))))))
     (ende-selector--cancel-effort-probe)
     (setq ende-selector--control-context context
           ende-selector--control-preferences preferences
@@ -560,6 +564,14 @@ the discovered pricing metadata for those model IDs."
                            profile active-effort)))
               :ready)
              (t :remembered))))))
+
+(defun ende-selector--remember-selected-pair ()
+  "Record the current ready provider/model as recently used."
+  (let ((provider (ende-selector--provider-name))
+        (model (ende-selector--model-name)))
+    (when (and (eq ende-selector--model-state :ready) provider model)
+      (ende-model-selection-remember-pair
+       provider model (or ende-selector--source-buffer (current-buffer))))))
 
 (defun ende-selector--effort-error-message (error)
   "Return a useful human-readable message for effort probe ERROR."
@@ -712,7 +724,7 @@ PREFERRED is selected only when it is present in MODELS."
                    (= ende-selector--probe-generation generation))
           (setq ende-selector--probe-cancel cancel))))))
 
-(defun ende-selector--set-provider (index)
+(defun ende-selector--set-provider (index &optional remember-pair)
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
@@ -748,6 +760,8 @@ PREFERRED is selected only when it is present in MODELS."
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
     (ende-selector--set-control-context)
+    (when remember-pair
+      (ende-selector--remember-selected-pair))
     (when (ende-selector--quota-supported-p)
       (ende-selector--probe-quota))
     (ende-selector--render)))
@@ -755,12 +769,12 @@ PREFERRED is selected only when it is present in MODELS."
 (defun ende-selector-next-provider ()
   "Select the next configured provider."
   (interactive)
-  (ende-selector--set-provider (1+ ende-selector--provider-index)))
+  (ende-selector--set-provider (1+ ende-selector--provider-index) t))
 
 (defun ende-selector-previous-provider ()
   "Select the previous configured provider."
   (interactive)
-  (ende-selector--set-provider (1- ende-selector--provider-index)))
+  (ende-selector--set-provider (1- ende-selector--provider-index) t))
 
 (defun ende-selector--move-model (delta)
   "Move the selected model by DELTA."
@@ -771,6 +785,7 @@ PREFERRED is selected only when it is present in MODELS."
                (length ende-selector--models)))
     (cl-incf ende-selector--model-selection-generation)
     (ende-selector--set-control-context)
+    (ende-selector--remember-selected-pair)
     (ende-selector--render)))
 
 (defun ende-selector-next-model ()
@@ -822,10 +837,11 @@ performed locally so typing a search term never starts another network request."
                  ende-selector--model-index index)
            (cl-incf ende-selector--model-selection-generation)
            (ende-selector--set-control-context)
+           (ende-selector--remember-selected-pair)
            (ende-selector--render)))))))
 
 (defun ende-selector--effort-validation-failed (error)
-  "Retain the effort draft and show ERROR as unsupported or temporarily unknown."
+  "Retain the selected effort and show ERROR as unsupported or temporarily unknown."
   (let ((unsupported
          (and (ende-error-p error)
               (eq (ende-error-kind error) 'unsupported)))
@@ -857,7 +873,7 @@ performed locally so typing a search term never starts another network request."
                 control (or (plist-get profile :model) "<unknown>"))))
 
 (defun ende-selector-select-temperature ()
-  "Edit the temperature preference in the current draft."
+  "Set the temperature preference for the current provider/model."
   (interactive)
   (let* ((profile (ende-selector--provider-profile))
          (_ (ende-selector--require-control-mapping profile :temperature))
@@ -875,7 +891,7 @@ performed locally so typing a search term never starts another network request."
        (read-number "Temperature: " (if (numberp current) current 1.0))))))
 
 (defun ende-selector-select-thinking ()
-  "Edit the thinking preference in the current draft."
+  "Set the thinking preference for the current provider/model."
   (interactive)
   (let* ((profile (ende-selector--provider-profile))
          (_ (ende-selector--require-control-mapping profile :thinking))
@@ -908,10 +924,16 @@ performed locally so typing a search term never starts another network request."
         (plist-get (ende-selector--resolved-profile) :reasoning-effort)
         ende-selector--effort-state
         (if ende-selector--effort :remembered :none))
+  (when (and (eq ende-selector--model-state :ready)
+             (ende-selector--provider-name)
+             (ende-selector--model-name))
+    (ende-model-selection-save-control-preferences
+     (ende-selector--provider-name) (ende-selector--model-name) nil
+     (or ende-selector--source-buffer (current-buffer))))
   (ende-selector--render))
 
 (defun ende-selector--choose-effort (efforts)
-  "Ask for one of EFFORTS or Provider default, without saving it."
+  "Ask for one of EFFORTS or Provider default."
   (let* ((setting (ende-selector--control-setting :reasoning-effort))
          (current (plist-get setting :value))
          (choices (cons "Provider default" efforts))
@@ -999,7 +1021,7 @@ performed locally so typing a search term never starts another network request."
   (ende-selector--review-source #'ende-reject-all-output))
 
 (defun ende-selector--save-selection ()
-  "Save the current provider/model and explicit control draft."
+  "Save the current provider/model and explicit controls."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
@@ -1009,7 +1031,8 @@ performed locally so typing a search term never starts another network request."
                (when ende-selector--control-preferences
                  (list :control-preferences
                        (copy-tree ende-selector--control-preferences))))
-       source))))
+       source
+       (not (eq ende-selector--model-state :ready))))))
 
 (defun ende-selector-close ()
   "Close the selector without starting a request."
@@ -1266,6 +1289,8 @@ static or live capability source requires validation."
             ende-selector--quota-state :unavailable
             ende-selector--pending-run nil)
       (ende-selector--set-provider provider-index))
+    (with-current-buffer buffer
+      (ende-selector--remember-selected-pair))
     (let ((window
            (display-buffer
             buffer

@@ -231,13 +231,17 @@
           (make-hash-table :test #'equal))
          (ende-model-selection--buffer-control-preferences
           (make-hash-table :test #'equal))
+         (ende-providers '(alpha beta))
          (ende-provider-profiles
-          '((alpha :temperature 0.7 :thinking on :reasoning-effort "high")
-            (beta :temperature 0.3 :thinking on :reasoning-effort "low")))
+          '((alpha :model "same-model" :temperature 0.7 :thinking on
+                   :reasoning-effort "high")
+            (beta :model "same-model" :temperature 0.3 :thinking on
+                  :reasoning-effort "low")))
          (inheriting (generate-new-buffer " *ende-control-history-inheriting*"))
          (updating (generate-new-buffer " *ende-control-history-updating*"))
          (empty (generate-new-buffer " *ende-control-history-empty*"))
-         (other-provider (generate-new-buffer " *ende-control-history-provider*")))
+         (other-provider (generate-new-buffer " *ende-control-history-provider*"))
+         (direct (generate-new-buffer " *ende-control-history-direct*")))
     (unwind-protect
         (progn
           (ende-model-selection-save-control-preferences
@@ -254,6 +258,10 @@
                    (ende-model-selection-control-preferences
                     'alpha "same-model" inheriting)
                    '(:temperature 0 :thinking off :reasoning-effort nil)))
+          (let ((profile (ende-provider-profile-for-buffer direct)))
+            (should (= (plist-get profile :temperature) 0.4))
+            (should (eq (plist-get profile :thinking) 'on))
+            (should (equal (plist-get profile :reasoning-effort) "high")))
           (with-current-buffer inheriting
             (ende-model-selection-save
              '(:provider alpha :model "same-model"))
@@ -283,7 +291,7 @@
                    (ende-model-selection-control-preferences
                     'alpha "empty-model" updating)
                    '(:temperature 0.2))))
-      (dolist (buffer (list inheriting updating empty other-provider))
+      (dolist (buffer (list inheriting updating empty other-provider direct))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 

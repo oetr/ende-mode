@@ -14,18 +14,25 @@
 
 (defun ende-test--selector-ask-from-buffer (source)
   "Run the selector's ask action for SOURCE with the test model."
-  (with-temp-buffer
-    (ende-selector-mode)
-    (setq ende-selector--source-buffer source
-          ende-selector--providers '(remote)
-          ende-selector--provider-index 0
-          ende-selector--models '("selected-model")
-          ende-selector--model-index 0
-          ende-selector--model-state :ready
-          ende-selector--effort nil)
-    (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
-      (call-interactively
-       (lookup-key ende-selector-mode-map (kbd "a"))))))
+  (let ((ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--source-buffer source
+            ende-selector--providers '(remote)
+            ende-selector--provider-index 0
+            ende-selector--models '("selected-model")
+            ende-selector--model-index 0
+            ende-selector--model-state :ready
+            ende-selector--effort nil)
+      (cl-letf (((symbol-function 'ende-selector-close) #'ignore))
+        (call-interactively
+         (lookup-key ende-selector-mode-map (kbd "a")))))))
 
 (ert-deftest ende-test/selector-quota-is-scoped-and-ignores-stale-results ()
   (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
@@ -227,7 +234,15 @@
                                :path ("reasoning" "effort")
                                :choices ("high" "low"))))))
          (ende-selector--last-selection nil)
-         (queued nil))
+         (queued nil)
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections
+           (make-hash-table :test #'equal))
+          (ende-model-selection--shared-control-preferences
+           (make-hash-table :test #'equal))
+          (ende-model-selection--buffer-control-preferences
+           (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -257,14 +272,22 @@
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
-          (kill-buffer buffer)))))
+          (kill-buffer buffer))))))
 
 
 
   (ert-deftest ende-test/selector-model-completion-updates-choice ()
     (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
           (completion-call nil)
-          (ende-selector--last-selection nil))
+          (ende-selector--last-selection nil)
+          (ende-model-selection-scope 'buffer)
+          (ende-model-selection--last-used nil)
+          (ende-model-selection--buffer-selections
+           (make-hash-table :test #'equal))
+          (ende-model-selection--shared-control-preferences
+           (make-hash-table :test #'equal))
+          (ende-model-selection--buffer-control-preferences
+           (make-hash-table :test #'equal)))
       (unwind-protect
           (with-current-buffer buffer
             (ende-selector-mode)
@@ -340,8 +363,11 @@
             (should (plist-get completion-call :ignore-case))
             (should (= ende-selector--model-index 1))
             (should (string= (ende-selector--model-name) "remote/beta"))
-            (should (equal ende-selector--last-selection
-                           '(:provider remote :model "remote/beta"))))
+            (should-not ende-model-selection--last-used)
+            (should (equal
+                     (ende-model-selection--control-preference-entry
+                      'remote "remote/beta" buffer)
+                     '(t))))
 	(when (buffer-live-p buffer)
           (kill-buffer buffer)))))
 
@@ -352,6 +378,13 @@
           (probe-callback nil)
           (ende-selector--last-selection
            '(:provider remote :model "remote/remembered"))
+          (ende-model-selection-scope 'buffer)
+          (ende-model-selection--buffer-selections
+           (make-hash-table :test #'equal))
+          (ende-model-selection--shared-control-preferences
+           (make-hash-table :test #'equal))
+          (ende-model-selection--buffer-control-preferences
+           (make-hash-table :test #'equal))
           (ende-provider-profiles
            '((remote :url "http://remote.example/v1/chat/completions"
                      :model "remote/default"))))
@@ -372,7 +405,13 @@
               (funcall probe-callback
                        '("remote/default" "remote/remembered") nil)
               (should (string= (ende-selector--model-name)
-                               "remote/remembered"))))
+                               "remote/remembered"))
+              (should (= (hash-table-count
+                          ende-model-selection--shared-control-preferences)
+                         0))
+              (should (= (hash-table-count
+                          ende-model-selection--buffer-control-preferences)
+                         0))))
 	(when (buffer-live-p buffer)
           (kill-buffer buffer)))))
 
@@ -528,17 +567,21 @@
 
 
 
-  (ert-deftest ende-test/selector-effort-picker-is-a-static-uncommitted-draft ()
-    (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
-          (ende-provider-profiles
-           '((remote :model "remote-model"
-                     :controls ((:reasoning-effort :path ("reasoning" "effort")
-                                                   :choices ("high" "low"))))))
-          (ende-provider-discovery-enabled nil)
-          (ende-model-selection-scope 'global)
-          (ende-model-selection--last-used nil))
-      (unwind-protect
-          (with-current-buffer buffer
+(ert-deftest ende-test/selector-effort-picker-remembers-setting-immediately ()
+  (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
+        (ende-provider-profiles
+         '((remote :model "remote-model"
+                   :controls ((:reasoning-effort :path ("reasoning" "effort")
+                                                 :choices ("high" "low"))))))
+        (ende-provider-discovery-enabled nil)
+        (ende-model-selection-scope 'global)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
+    (unwind-protect
+        (with-current-buffer buffer
             (ende-selector-mode)
             (setq ende-selector--providers '(remote)
                   ende-selector--provider-index 0
@@ -560,80 +603,221 @@
                            '(:reasoning-effort "high")))
             (should (equal ende-selector--effort-validated-context
                            '(remote "remote-model" "high")))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'remote "remote-model" buffer)
+                     '(:reasoning-effort "high")))
             (should-not ende-model-selection--last-used)
             (should (string-match-p "Effort:.*high (explicit)"
                                     (buffer-string)))
             (ende-selector-close)
-            (should-not ende-model-selection--last-used))
-	(when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+            (should-not ende-model-selection--last-used)
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'remote "remote-model" buffer)
+                     '(:reasoning-effort "high"))))
+      (when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
 
-(ert-deftest ende-test/selector-control-draft-commits-only-to-source-on-confirm ()
-  (let* ((source (generate-new-buffer " *ende-control-source-one*"))
-         (other-source (generate-new-buffer " *ende-control-source-two*"))
-         (selector (generate-new-buffer " *ende-control-source-selector*"))
+(ert-deftest ende-test/selector-control-history-survives-switches-without-confirmation ()
+  (let* ((test-buffer (generate-new-buffer "Test.org"))
+         (dev-buffer (generate-new-buffer "Dev.org"))
+         (selector nil)
+         (ende-providers '(alpha beta))
+         (ende-provider-discovery-enabled nil)
          (ende-model-selection-scope 'buffer)
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections
           (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences
+          (make-hash-table :test #'equal))
          (ende-provider-profiles
-          '((remote :model "remote-model"
-                    :controls ((:temperature :path ("temperature"))
-                               (:thinking :path ("thinking")
-                                          :choices (on off))
-                               (:reasoning-effort :path ("reasoning" "effort")
-                                                  :choices ("high" "low")))))))
+          '((alpha :model "alpha-one" :models ("alpha-one" "shared-model")
+                   :temperature 0.7 :thinking on :reasoning-effort "low"
+                   :controls ((:temperature :path ("temperature"))
+                              (:thinking :path ("thinking")
+                                         :choices (on off))
+                              (:reasoning-effort :path ("reasoning" "effort")
+                                                 :choices ("high" "low"))))
+            (beta :model "shared-model" :models ("shared-model" "beta-two")
+                  :temperature 0.3 :thinking on :reasoning-effort "low"
+                  :controls ((:temperature :path ("temperature"))
+                             (:thinking :path ("thinking")
+                                        :choices (on off))
+                             (:reasoning-effort :path ("reasoning" "effort")
+                                                :choices ("high" "low")))))))
     (unwind-protect
         (progn
-          (with-current-buffer source
+          (with-current-buffer test-buffer
             (ende-model-selection-save
-             '(:provider remote :model "remote-model")))
-          (with-current-buffer other-source
+             '(:provider alpha :model "alpha-one")))
+          (with-current-buffer dev-buffer
             (ende-model-selection-save
-             '(:provider remote :model "remote-model")))
+             '(:provider beta :model "shared-model")))
+          (cl-letf (((symbol-function 'display-buffer)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'ende-provider-model-discovery-available-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-provider-cached-models)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-selector--valid-model-p)
+                     (lambda (&rest _) t)))
+            (with-current-buffer test-buffer
+              (ende-selector-open)))
+          (setq selector (get-buffer ende-selector-buffer-name))
+          (should (buffer-live-p selector))
           (with-current-buffer selector
-            (ende-selector-mode)
-            (setq ende-selector--source-buffer source
-                  ende-selector--providers '(remote)
-                  ende-selector--provider-index 0
-                  ende-selector--models '("remote-model")
-                  ende-selector--model-index 0
-                  ende-selector--model-state :ready)
-            (ende-selector--set-control-context)
+            (should (eq (ende-selector--provider-name) 'alpha))
+            (should (equal (ende-selector--model-name) "alpha-one"))
+            (let ((value 0))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _) "Set numeric value"))
+                        ((symbol-function 'read-number)
+                         (lambda (&rest _) value)))
+                (ende-selector-select-temperature)))
             (cl-letf (((symbol-function 'completing-read)
-                       (lambda (prompt _collection _predicate _require-match
-                                       _initial _history _default &rest _)
-                         (cond
-                          ((string= prompt "Temperature: ")
-                           "Set numeric value")
-                          ((string= prompt "Thinking: ") "off")
-                          ((string= prompt "Reasoning effort: ") "high"))))
-                      ((symbol-function 'read-number)
-                       (lambda (&rest _) 0)))
-              (ende-selector-select-temperature)
-              (ende-selector-select-thinking)
+                       (lambda (&rest _) "off")))
+              (ende-selector-select-thinking))
+            (cl-letf (((symbol-function 'ende-selector--probe-efforts)
+                       (lambda (callback)
+                         (funcall callback '("high" "low") "low" nil)))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) "high")))
               (ende-selector-select-effort))
-            (should-not
-             (plist-member (ende-model-selection-for-buffer source)
-                           :control-preferences))
-            (ende-selector-confirm))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'alpha "alpha-one" test-buffer)
+                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (ende-selector-next-model)
+            (should (equal (ende-selector--model-name) "shared-model"))
+            (let ((value 0.4))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _) "Set numeric value"))
+                        ((symbol-function 'read-number)
+                         (lambda (&rest _) value)))
+                (ende-selector-select-temperature)))
+            (cl-letf (((symbol-function 'ende-provider-model-discovery-available-p)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-provider-cached-models)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-selector--valid-model-p)
+                       (lambda (&rest _) t)))
+              (ende-selector-next-provider))
+            (should (eq (ende-selector--provider-name) 'beta))
+            (should (equal (ende-selector--model-name) "shared-model"))
+            (let ((value 0.2))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _) "Set numeric value"))
+                        ((symbol-function 'read-number)
+                         (lambda (&rest _) value)))
+                (ende-selector-select-temperature)))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'alpha "shared-model" test-buffer)
+                     '(:temperature 0.4)))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'beta "shared-model" test-buffer)
+                     '(:temperature 0.2)))
+            (cl-letf (((symbol-function 'ende-provider-model-discovery-available-p)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-provider-cached-models)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-selector--valid-model-p)
+                       (lambda (&rest _) t)))
+              (ende-selector-next-provider))
+            (should (equal (ende-selector--model-name) "alpha-one"))
+            (should (= (plist-get (ende-selector--resolved-profile)
+                                  :temperature)
+                       0))
+            (should (eq (plist-get (ende-selector--resolved-profile)
+                                   :thinking)
+                        'off))
+            (should (equal (plist-get (ende-selector--resolved-profile)
+                                      :reasoning-effort)
+                           "high"))
+            (ende-selector-close))
+          (should (equal (plist-get ende-model-selection--last-used :provider)
+                         'beta))
+          (should (equal (plist-get ende-model-selection--last-used :model)
+                         "shared-model"))
+          (cl-letf (((symbol-function 'display-buffer)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'ende-provider-model-discovery-available-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-provider-cached-models)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-selector--valid-model-p)
+                     (lambda (&rest _) t)))
+            (with-current-buffer dev-buffer
+              (ende-selector-open)))
+          (setq selector (get-buffer ende-selector-buffer-name))
+          (with-current-buffer selector
+            (should (eq (ende-selector--provider-name) 'beta))
+            (cl-letf (((symbol-function 'ende-provider-model-discovery-available-p)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-provider-cached-models)
+                       (lambda (_) nil))
+                      ((symbol-function 'ende-selector--valid-model-p)
+                       (lambda (&rest _) t)))
+              (ende-selector-next-provider))
+            (should (equal (ende-selector--model-name) "alpha-one"))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'alpha "alpha-one" dev-buffer)
+                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (let ((value 0.9))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (&rest _) "Set numeric value"))
+                        ((symbol-function 'read-number)
+                         (lambda (&rest _) value)))
+                (ende-selector-select-temperature)))
+            (ende-selector-close))
           (should (equal
-                   (plist-get (ende-model-selection-for-buffer source)
-                              :control-preferences)
+                   (ende-model-selection-control-preferences
+                    'alpha "alpha-one" dev-buffer)
+                   '(:temperature 0.9 :thinking off :reasoning-effort "high")))
+          (cl-letf (((symbol-function 'display-buffer)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'ende-provider-model-discovery-available-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-provider-cached-models)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-selector--valid-model-p)
+                     (lambda (&rest _) t)))
+            (with-current-buffer test-buffer
+              (ende-selector-open)))
+          (setq selector (get-buffer ende-selector-buffer-name))
+          (with-current-buffer selector
+            (should (eq (ende-selector--provider-name) 'alpha))
+            (should (equal (ende-selector--model-name) "alpha-one"))
+            (should (zerop (plist-get (ende-selector--resolved-profile)
+                                      :temperature)))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'alpha "alpha-one" test-buffer)
+                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (ende-selector-close))
+          (should (equal
+                   (gethash '(alpha "alpha-one")
+                            ende-model-selection--shared-control-preferences)
                    '(:temperature 0 :thinking off :reasoning-effort "high")))
-          (should-not
-           (plist-member (ende-model-selection-for-buffer other-source)
-                         :control-preferences))
-          (let ((profile (ende-provider-profile-for-buffer source)))
-            (should (zerop (plist-get profile :temperature)))
-            (should (eq (plist-get profile :thinking) 'off))
-            (should (equal (plist-get profile :reasoning-effort) "high"))))
-      (dolist (buffer (list source other-source selector))
+          (should (equal (plist-get ende-model-selection--last-used :provider)
+                         'beta)))
+      (dolist (buffer (list test-buffer dev-buffer selector
+                            (get-buffer ende-selector-buffer-name)))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
-(ert-deftest ende-test/selector-clearing-one-control-preserves-other-draft-values ()
+(ert-deftest ende-test/selector-clearing-one-control-preserves-other-values ()
   (let ((buffer (generate-new-buffer " *ende-selector-clear-control*"))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal))
         (ende-provider-profiles
          '((remote :model "remote-model" :temperature 0.2
                    :reasoning-effort "high"
@@ -665,7 +849,11 @@
                      0.2))
           (should (equal (plist-get (ende-selector--resolved-profile)
                                     :reasoning-effort)
-                         "high")))
+                         "high"))
+          (should (equal
+                   (ende-model-selection--control-preference-entry
+                    'remote "remote-model" buffer)
+                   '(t))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -677,7 +865,11 @@
         (ende-provider-profiles
          '((remote :model "first"
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
-        (ende-model-selection-scope 'global))
+        (ende-model-selection-scope 'global)
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -716,7 +908,11 @@
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
-        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -770,7 +966,11 @@
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
-        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -821,7 +1021,11 @@
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
-        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-current-buffer source
@@ -862,7 +1066,15 @@
         (display-action nil)
         (quit-window-call nil)
         (probe-profile nil)
-        (selector nil))
+        (selector nil)
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (with-current-buffer source
           (cl-letf (((symbol-function 'display-buffer)
@@ -956,8 +1168,13 @@
   (let ((buffer (generate-new-buffer " *ende-selector-effort-default-test*"))
         (ende-provider-profiles
          '((remote :model "remote-model" :reasoning-effort "high"
-                   :controls ((:reasoning-effort :path ("reasoning" "effort")
-                                                 :choices ("high" "low")))))))
+                     :controls ((:reasoning-effort :path ("reasoning" "effort")
+                                                   :choices ("high" "low"))))))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal)))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)

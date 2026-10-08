@@ -141,6 +141,10 @@
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal))
         (ende-providers '(openrouter))
         (ende-provider-profiles nil)
         (ende-llm-function (ende-test--fake-llm '("unused")))

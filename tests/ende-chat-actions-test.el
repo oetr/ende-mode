@@ -36,6 +36,10 @@
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal))
         (ende-llm-function (ende-test--fake-llm '("Reply"))))
     (unwind-protect
         (ende-test--with-buffer "* Root\n** Question\nAsk\n"
