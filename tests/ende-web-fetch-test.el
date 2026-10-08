@@ -1070,7 +1070,9 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                   (should (equal fetched content))
                   (should fragmented)
                   (should (equal (sort names #'string<)
-                                 '("about_thinking" "web_fetch")))
+                                 (sort (ende-test--tool-definition-names
+                                        (ende-tool-definitions))
+                                       #'string<)))
                   (should (string-match-p "attacker\\.invalid" (buffer-string)))
                   (should-not
                    (cl-some (lambda (headline)

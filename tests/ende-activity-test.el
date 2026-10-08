@@ -57,8 +57,10 @@
                         (ende-chat-config-resolve
                          (ende-chat--document-tree document)
                          (ende-chat--document-parent document) headline))
-                       (definitions (ende-chat--tool-definitions configuration))
-                       (names (plist-get configuration :active-tools))
+                        (definitions (ende-tool-definitions))
+                        (catalog-names
+                         (ende-test--tool-definition-names definitions))
+                        (names (plist-get configuration :active-tools))
                        (profile (list :model "fixture" :tool-definitions definitions)))
                   (should (= (cl-count 'about_thinking names) 1))
                   (should-not (plist-get configuration :root))
@@ -83,7 +85,8 @@
                                     tools)))
                       (should (= (cl-count "about_thinking" wire-names :test #'equal) 1))
                       (should (equal (sort wire-names #'string<)
-                                     (sort (mapcar #'symbol-name names) #'string<))))))))))))
+                                     (sort (copy-sequence catalog-names)
+                                           #'string<))))))))))))
     ;; Runtime checks also cover configurations made before this tool existed.
     (let ((ende-tools--report-activity-function
            (lambda (_title _status) t)))

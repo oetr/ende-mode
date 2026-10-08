@@ -27,6 +27,12 @@
     (ende-chat-config-resolve (ende-chat--document-tree document)
                               (ende-chat--document-parent document) headline)))
 
+(defun ende-test--tool-definition-names (definitions)
+  "Return the provider names in tool DEFINITIONS."
+  (mapcar (lambda (definition)
+            (alist-get :name (alist-get :function definition)))
+          definitions))
+
 ;;;; Org-backed chat
 
 (defun ende-test--chat-goto (heading)

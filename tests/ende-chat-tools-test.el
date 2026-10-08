@@ -101,8 +101,9 @@
                                                            definition)))
                                              definitions)
                                      #'string<)
-                               '("about_thinking" "list_project_files" "project_info"
-                                 "read_file" "search_project")))
+                               (sort (ende-test--tool-definition-names
+                                      (ende-tool-definitions))
+                                     #'string<)))
                 (should (equal (plist-get tool-reply :role) "tool"))
                 (should-not (string-match-p "classified"
                                             (plist-get tool-reply :content)))

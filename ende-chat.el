@@ -2667,17 +2667,6 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                   :error (format "tool arguments are not a JSON object: %s"
                                  (plist-get parsed :invalid-arguments))))))))))
 
-(defun ende-chat--tool-definitions (configuration)
-  "Return configured and always-available provider tool definitions."
-  (let ((active (ende-tool-active-names
-                 (plist-get configuration :active-tools))))
-    (cl-remove-if-not
-     (lambda (definition)
-       (let* ((function (alist-get :function definition))
-              (name (and function (alist-get :name function))))
-         (and name (memq (intern name) active))))
-     (ende-tool-definitions))))
-
 (defun ende-chat--execute-tool-round
     (job calls configuration level request-id assistant callback)
   (let ((remaining calls)
@@ -2738,7 +2727,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
-  (let* ((definitions (ende-chat--tool-definitions configuration))
+  (let* ((definitions (ende-tool-definitions))
          (profile (copy-tree (ende-job-profile job)))
          (rounds 0)
          (maximum ende-chat-max-tool-rounds)
