@@ -318,6 +318,8 @@ non-nil, is signalled from the event callback."
   (setq ende-provider--model-generation 0)
   (clrhash ende-selector--model-validations)
   (clrhash ende-model-selection--buffer-selections)
+  (clrhash ende-model-selection--shared-control-preferences)
+  (clrhash ende-model-selection--buffer-control-preferences)
   (ende-provider-clear-runtime-settings)
   (clrhash ende-history--entries)
   (when (buffer-live-p ende-history--buffer-object)

@@ -105,6 +105,10 @@
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections
           (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences
+          (make-hash-table :test #'equal))
          (ende-provider-model "default-model"))
     (unwind-protect
         (progn
@@ -124,6 +128,10 @@
                          :control-preferences
                          (:reasoning-effort "high" :temperature nil))
              source))
+           (should (equal
+                    (ende-model-selection-control-preferences
+                     'remote "file-model" source)
+                    '(:reasoning-effort "high" :temperature nil)))
           (kill-buffer source)
           (setq source nil
                 other (get-buffer-create " *ende-model-selection-latest*"))
@@ -150,6 +158,10 @@
                       (ende-provider-profile-for-buffer reopened)
                       :reasoning-effort)
                      "high"))
+            (should (equal
+                     (ende-model-selection-control-preferences
+                      'remote "file-model" reopened)
+                     '(:reasoning-effort "high" :temperature nil)))
             (should (plist-member
                      (ende-provider-profile-for-buffer reopened)
                      :temperature))
@@ -175,6 +187,10 @@
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal))
         (first (generate-new-buffer " *ende-model-selection-global-one*"))
         (second (generate-new-buffer " *ende-model-selection-global-two*")))
     (unwind-protect
@@ -187,6 +203,10 @@
                          '(:provider openai :model "shared-model"
                                      :control-preferences
                                      (:reasoning-effort "medium"))))
+          (should (equal
+                   (ende-model-selection-control-preferences
+                    'openai "shared-model" second)
+                   '(:reasoning-effort "medium")))
           (should (= (hash-table-count
                       ende-model-selection--buffer-selections)
                      0)))

@@ -222,6 +222,97 @@
     (should (equal (alist-get :thinking body) "off"))
     (should-not (assoc "reasoning" body))))
 
+(ert-deftest ende-test/model-control-history-is-pair-keyed-and-buffer-isolated ()
+  (let* ((ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections
+          (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-provider-profiles
+          '((alpha :temperature 0.7 :thinking on :reasoning-effort "high")
+            (beta :temperature 0.3 :thinking on :reasoning-effort "low")))
+         (inheriting (generate-new-buffer " *ende-control-history-inheriting*"))
+         (updating (generate-new-buffer " *ende-control-history-updating*"))
+         (empty (generate-new-buffer " *ende-control-history-empty*"))
+         (other-provider (generate-new-buffer " *ende-control-history-provider*")))
+    (unwind-protect
+        (progn
+          (ende-model-selection-save-control-preferences
+           'alpha "same-model"
+           '(:temperature 0 :thinking off :reasoning-effort nil) updating)
+          (should (equal
+                   (ende-model-selection-remember-pair
+                    'alpha "same-model" inheriting)
+                   '(:temperature 0 :thinking off :reasoning-effort nil)))
+          (ende-model-selection-save-control-preferences
+           'alpha "same-model"
+           '(:temperature 0.4 :thinking on :reasoning-effort "high") updating)
+          (should (equal
+                   (ende-model-selection-control-preferences
+                    'alpha "same-model" inheriting)
+                   '(:temperature 0 :thinking off :reasoning-effort nil)))
+          (with-current-buffer inheriting
+            (ende-model-selection-save
+             '(:provider alpha :model "same-model"))
+            (let ((profile (ende-provider-profile-for-buffer inheriting)))
+              (should (zerop (plist-get profile :temperature)))
+              (should (eq (plist-get profile :thinking) 'off))
+              (should (plist-member profile :reasoning-effort))
+              (should-not (plist-get profile :reasoning-effort))))
+          (should-not
+           (ende-model-selection-remember-pair 'beta "same-model" other-provider))
+          (ende-model-selection-save-control-preferences
+           'beta "same-model" '(:temperature 0.9) updating)
+          (should-not
+           (ende-model-selection-control-preferences
+            'beta "same-model" other-provider))
+          (should (equal
+                   (ende-model-selection-control-preferences
+                    'alpha "same-model" updating)
+                   '(:temperature 0.4 :thinking on :reasoning-effort "high")))
+          (ende-model-selection-save
+           '(:provider alpha :model "empty-model") empty)
+          (ende-model-selection-save-control-preferences
+           'alpha "empty-model" '(:temperature 0.2) updating)
+          (should-not
+           (ende-model-selection-control-preferences 'alpha "empty-model" empty))
+          (should (equal
+                   (ende-model-selection-control-preferences
+                    'alpha "empty-model" updating)
+                   '(:temperature 0.2))))
+      (dolist (buffer (list inheriting updating empty other-provider))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest ende-test/model-control-history-global-scope-uses-shared-entry ()
+  (let ((ende-model-selection-scope 'global)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections
+         (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences
+         (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences
+         (make-hash-table :test #'equal))
+        (first (generate-new-buffer " *ende-control-global-first*"))
+        (second (generate-new-buffer " *ende-control-global-second*")))
+    (unwind-protect
+        (progn
+          (ende-model-selection-save-control-preferences
+           'remote "global-model" '(:temperature 0 :thinking off) first)
+          (should (equal
+                   (ende-model-selection-control-preferences
+                    'remote "global-model" second)
+                   '(:temperature 0 :thinking off)))
+          (should (= (hash-table-count
+                      ende-model-selection--buffer-control-preferences)
+                     0)))
+      (dolist (buffer (list first second))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ende-test/provider-validates-request-profiles-before-dispatch ()
   (let ((valid
          (list '(:url "https://example.test/v1" :model "legacy-model")

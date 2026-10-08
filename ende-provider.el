@@ -163,6 +163,14 @@ When nil, use only the response inactivity timeout."
 (defvar ende-model-selection--buffer-selections (make-hash-table :test #'equal)
   "Selections keyed by buffer name and visited file for this Emacs session.")
 
+(defvar ende-model-selection--shared-control-preferences
+  (make-hash-table :test #'equal)
+  "Control preferences keyed by provider/model for this Emacs session.")
+
+(defvar ende-model-selection--buffer-control-preferences
+  (make-hash-table :test #'equal)
+  "Per-buffer control-preference tables keyed by buffer identity.")
+
 (defvar-local ende-model-selection--buffer-selection nil
   "Selection currently associated with this live buffer.")
 
@@ -624,6 +632,142 @@ SELECTION must contain a provider symbol and a nonempty model string."
                 (when preferences-present
                   (list :control-preferences preferences)))))))
 
+(defun ende-model-selection--pair-key (provider model)
+  "Return the preference-history key for PROVIDER and MODEL, or nil."
+  (and (symbolp provider) provider
+       (stringp model) (not (string-empty-p model))
+       (list provider model)))
+
+(defun ende-model-selection--buffer-preference-table (buffer &optional create)
+  "Return BUFFER's pair-preference table, creating it when CREATE is non-nil."
+  (let ((identity (ende-model-selection--buffer-key buffer)))
+    (when identity
+      (or (gethash identity ende-model-selection--buffer-control-preferences)
+          (when create
+            (let ((table (make-hash-table :test #'equal)))
+              (puthash identity table
+                       ende-model-selection--buffer-control-preferences)
+              table))))))
+
+(defun ende-model-selection--legacy-control-preferences
+    (provider model &optional buffer)
+  "Return legacy preferences for PROVIDER and MODEL, if available.
+BUFFER defaults to the current buffer."
+  (let* ((buffer (or buffer (current-buffer)))
+         (pair (ende-model-selection--pair-key provider model))
+         (stored (and (eq ende-model-selection-scope 'buffer)
+                      (buffer-live-p buffer)
+                      (gethash (ende-model-selection--buffer-key buffer)
+                               ende-model-selection--buffer-selections)))
+         (local (and (eq ende-model-selection-scope 'buffer)
+                     (buffer-live-p buffer)
+                     (buffer-local-value
+                      'ende-model-selection--buffer-selection buffer)))
+         (selection
+          (or (and (equal pair
+                          (ende-model-selection--pair-key
+                           (plist-get local :provider)
+                           (plist-get local :model)))
+                   local)
+              (and (equal pair
+                          (ende-model-selection--pair-key
+                           (plist-get stored :provider)
+                           (plist-get stored :model)))
+                   stored)
+              (and (equal pair
+                          (ende-model-selection--pair-key
+                           (plist-get ende-model-selection--last-used :provider)
+                           (plist-get ende-model-selection--last-used :model)))
+                   ende-model-selection--last-used)))
+         (normalized (ende-model-selection--normalize selection)))
+    (when (plist-member normalized :control-preferences)
+      (cons t (copy-tree (plist-get normalized :control-preferences))))))
+
+(defun ende-model-selection--control-preference-entry
+    (provider model &optional buffer)
+  "Return (FOUND . PREFERENCES) for PROVIDER and MODEL.
+An empty preference plist is a found entry.  BUFFER defaults to the current
+buffer."
+  (let* ((pair (ende-model-selection--pair-key provider model))
+         (buffer (or buffer (current-buffer)))
+         (missing (make-symbol "missing"))
+         entry)
+    (when pair
+      (pcase ende-model-selection-scope
+        ('global
+         (let ((preferences
+                (gethash pair ende-model-selection--shared-control-preferences
+                         missing)))
+           (setq entry
+                 (if (eq preferences missing)
+                     (ende-model-selection--legacy-control-preferences
+                      provider model buffer)
+                   (cons t preferences)))))
+        ('buffer
+         (let* ((table (ende-model-selection--buffer-preference-table buffer))
+                (preferences (if table (gethash pair table missing) missing)))
+           (setq entry
+                 (cond
+                  ((not (eq preferences missing)) (cons t preferences))
+                  ((ende-model-selection--legacy-control-preferences
+                    provider model buffer))
+                  (t
+                   (let ((shared
+                          (gethash pair
+                                   ende-model-selection--shared-control-preferences
+                                   missing)))
+                     (unless (eq shared missing)
+                       (cons t shared))))))))
+        (_ (error "Invalid `ende-model-selection-scope': %s"
+                  ende-model-selection-scope))))
+    (when entry
+      (cons t (copy-tree (cdr entry))))))
+
+(defun ende-model-selection-control-preferences (provider model &optional buffer)
+  "Return remembered controls for PROVIDER and MODEL, or nil.
+BUFFER defaults to the current buffer."
+  (cdr (ende-model-selection--control-preference-entry
+        provider model buffer)))
+
+(defun ende-model-selection-save-control-preferences
+    (provider model preferences &optional buffer)
+  "Save explicit control PREFERENCES for PROVIDER and MODEL.
+In buffer scope save a detached copy for BUFFER and also update shared history.
+In global scope update only shared history."
+  (let* ((pair (ende-model-selection--pair-key provider model))
+         (buffer (or buffer (current-buffer)))
+         (preferences
+          (copy-tree (ende-provider--validate-control-preferences preferences))))
+    (unless pair
+      (error "Control preferences require a provider and model"))
+    (unless (memq ende-model-selection-scope '(buffer global))
+      (error "Invalid `ende-model-selection-scope': %s"
+             ende-model-selection-scope))
+    (puthash pair (copy-tree preferences)
+             ende-model-selection--shared-control-preferences)
+    (when (and (eq ende-model-selection-scope 'buffer)
+               (buffer-live-p buffer))
+      (puthash pair (copy-tree preferences)
+               (ende-model-selection--buffer-preference-table buffer t)))
+    (copy-tree preferences)))
+
+(defun ende-model-selection-remember-pair (provider model &optional buffer)
+  "Record PROVIDER and MODEL as recently selected and return its preferences.
+On first selection, snapshot the inherited settings into BUFFER's history.
+BUFFER defaults to the current buffer."
+  (let* ((pair (ende-model-selection--pair-key provider model))
+         (buffer (or buffer (current-buffer)))
+         (entry (ende-model-selection--control-preference-entry
+                 provider model buffer))
+         (preferences (copy-tree (cdr entry))))
+    (unless pair
+      (error "A model selection requires a provider and model"))
+    (unless entry
+      (setq preferences nil))
+    (ende-model-selection-save-control-preferences
+     provider model preferences buffer)
+    (copy-tree preferences)))
+
 (defun ende-model-selection-initialize-buffer (&optional buffer)
   "Initialize BUFFER's per-buffer selection when one can be inherited.
 
@@ -670,13 +814,19 @@ defaults remain authoritative."
   "Save SELECTION as the most recently used choice for BUFFER.
 
 In per-buffer scope also associate it with BUFFER's name and visited file."
-  (let ((selection (ende-model-selection--normalize selection))
-        (buffer (or buffer (current-buffer))))
+  (let* ((selection (ende-model-selection--normalize selection))
+         (buffer (or buffer (current-buffer))))
     (unless selection
       (error "A model selection requires a provider and model"))
     (unless (memq ende-model-selection-scope '(buffer global))
       (error "Invalid `ende-model-selection-scope': %s"
              ende-model-selection-scope))
+    (if (plist-member selection :control-preferences)
+        (ende-model-selection-save-control-preferences
+         (plist-get selection :provider) (plist-get selection :model)
+         (plist-get selection :control-preferences) buffer)
+      (ende-model-selection-remember-pair
+       (plist-get selection :provider) (plist-get selection :model) buffer))
     (setq ende-model-selection--last-used (copy-tree selection))
     (pcase ende-model-selection-scope
       ('global nil)
@@ -704,23 +854,25 @@ An unset buffer follows the current configured provider defaults."
          (provider (or (plist-get selection :provider)
                        (car ende-providers)
                        ende-provider-default-profile))
-         (configured-profile (ende-provider-profile provider))
-         (model (or (plist-get selection :model)
-                    (plist-get configured-profile :model)))
-         (preferences
-          (and (eq provider (plist-get selection :provider))
-               (equal model (plist-get selection :model))
-               (plist-get selection :control-preferences)))
-         (profile (ende-provider-profile-for-selection
-                   provider model preferences)))
+          (configured-profile (ende-provider-profile provider))
+          (model (or (plist-get selection :model)
+                     (plist-get configured-profile :model)))
+          (matching-selection-p
+           (and (eq provider (plist-get selection :provider))
+                (equal model (plist-get selection :model))))
+          (preferences
+           (and matching-selection-p
+                (ende-model-selection-control-preferences
+                 provider model buffer)))
+          (profile (ende-provider-profile-for-selection
+                    provider model preferences)))
     (when (and remember (stringp model))
       (ende-model-selection-save
        (append (list :provider provider :model model)
-               (when (plist-member selection :control-preferences)
-                 (list :control-preferences
-                       (copy-tree
-                        (plist-get selection :control-preferences)))))
-       buffer))
+                (when matching-selection-p
+                  (list :control-preferences
+                        (copy-tree preferences))))
+         buffer))
     profile))
 
 (defun ende-provider-source-name-disclosure-p (profile)
