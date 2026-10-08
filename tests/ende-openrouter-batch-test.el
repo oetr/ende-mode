@@ -490,37 +490,148 @@
 
 
 
-(ert-deftest ende-test/openrouter-auto-handoff-only-matches-batch-error ()
-  (let ((headers-file (make-temp-file "ende-auto-batch-"))
-        (handoff nil))
-    (unwind-protect
-        (progn
-          (with-temp-file headers-file
-            (insert "HTTP/1.1 404 Not Found\r\n"
-                    "Content-Type: application/json\r\n\r\n"))
-          (cl-letf
-              (((symbol-function 'ende-openrouter-batch-default)
-                (lambda (messages callbacks profile)
-                  (setq handoff (list messages callbacks profile))))
-               ((symbol-function 'ende-llm--cleanup-session)
-                (lambda (_session) nil)))
-            (let ((session
-                   (ende-llm--make-session
-                    :profile '(:transport auto
-					  :batch-url "https://openrouter.ai/api/v1/batches")
-                    :messages '(("user" . "question")))))
-              (ende-stream-append-preview
-               (ende-llm--session-stream session)
-               "{\"error\":{\"message\":\"This model is only available through the Batch API. Use the /api/v1/batches endpoint instead.\"}}")
-              (ende-transport-session-set-resources
-               (ende-llm--lifecycle session)
-               (list :headers-file headers-file))
-              (ende-llm--finish-success session)
-              (should handoff)
-              (should (eq (plist-get (nth 2 handoff) :transport)
-                          'openrouter-batch)))))
-      (when (file-exists-p headers-file)
-        (delete-file headers-file)))))
+(ert-deftest ende-test/openrouter-auto-handoff-transfers-stream-ownership ()
+  (dolist (action '(cancel complete))
+    (ende-test--reset)
+    (let* ((ende-provider-discovery-enabled nil)
+           (ende-provider-profiles nil)
+           (ende-provider--runtime-settings (make-hash-table :test #'eq))
+           (profile (plist-put (ende-provider-profile 'openrouter)
+                               :batch-window 60))
+           (processes nil)
+           (stream-args nil)
+           (cancel-owner nil)
+           (cancellations nil)
+           (events nil)
+           (done-count 0)
+           (error-count 0)
+           (real-make-process (symbol-function 'make-process))
+           (real-send-eof (symbol-function 'process-send-eof)))
+      (cl-labels
+          ((finish-request (process status body)
+             (with-temp-file (process-get process :ende-headers-file)
+               (insert (format "HTTP/1.1 %d Mock\r\n"
+                               status)
+                       "Content-Type: application/json\r\n\r\n"))
+             (funcall (process-filter process) process body)
+             (funcall real-send-eof process)
+             (while (process-live-p process)
+               (accept-process-output process 0.01))))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (let ((process
+                            (funcall real-make-process
+                                     :name (plist-get args :name)
+                                     :buffer (plist-get args :buffer)
+                                     :stderr (plist-get args :stderr)
+                                     :command '("cat")
+                                     :connection-type 'pipe :noquery t
+                                     :filter (plist-get args :filter)
+                                     :sentinel (plist-get args :sentinel))))
+                       (process-put process :ende-test-args args)
+                       (push process processes)
+                       (unless stream-args
+                         (setq stream-args args))
+                       process)))
+                  ((symbol-function 'process-send-string) #'ignore)
+                  ((symbol-function 'process-send-eof) #'ignore)
+                  ((symbol-function 'auth-source-search)
+                   (lambda (&rest _)
+                     (list (list :secret "openrouter-test-token")))))
+          (unwind-protect
+              (progn
+                (ende-llm-default
+                 '(("user" . "question"))
+                 (list :on-start (lambda (cancel)
+                                   (push cancel cancellations)
+                                   (setq cancel-owner cancel))
+                       :on-event (lambda (event) (push event events))
+                       :on-done (lambda (_) (cl-incf done-count))
+                       :on-error (lambda (_) (cl-incf error-count)))
+                 profile)
+                (let* ((stream-process (car processes))
+                       (response-buffer
+                        (process-get stream-process :ende-response-buffer))
+                       (stderr-buffer
+                        (process-get stream-process :ende-stderr-buffer))
+                       (stderr-process
+                        (process-get stream-process :ende-stderr-process))
+                       (headers-file
+                        (process-get stream-process :ende-headers-file))
+                       (config-file
+                        (process-get stream-process :ende-config-file)))
+                  (finish-request
+                   stream-process 404
+                   (concat "{\"error\":{\"message\":"
+                           "\"This model is only available through the Batch API.\"}}"))
+                  (should (= (length cancellations) 2))
+                  (should (eq cancel-owner (car cancellations)))
+                  (should-not (eq (car cancellations) (cadr cancellations)))
+                  (should-not (process-live-p stream-process))
+                  (should-not (buffer-live-p response-buffer))
+                  (should-not (buffer-live-p stderr-buffer))
+                  (should-not (process-live-p stderr-process))
+                  (should-not (file-exists-p headers-file))
+                  (should-not (file-exists-p config-file))
+                  (let* ((group (car ende-openrouter-batch--known-groups))
+                         (stream-filter (plist-get stream-args :filter))
+                         (stream-sentinel (plist-get stream-args :sentinel))
+                         (event-count (length events)))
+                    (should group)
+                    (funcall stream-filter stream-process "data: late\n\n")
+                    (funcall stream-sentinel stream-process "finished\n")
+                    (funcall (cadr cancellations))
+                    (should (memq group ende-openrouter-batch--known-groups))
+                    (should (= event-count (length events)))
+                    (should (= done-count 0))
+                    (should (= error-count 0))
+                    (if (eq action 'cancel)
+                        (progn
+                          (funcall cancel-owner)
+                          (should-not
+                           (memq group ende-openrouter-batch--known-groups))
+                          (should (= done-count 0))
+                          (should (= error-count 0)))
+                      (ende-openrouter-batch--flush group)
+                      (let ((submit-process (car processes)))
+                        (finish-request
+                         submit-process 202
+                         "{\"id\":\"batch_handoff\",\"status\":\"validating\"}"))
+                      (ende-openrouter-batch--cancel-timer
+                       (ende-openrouter-batch--group-poll-timer group))
+                      (setf (ende-openrouter-batch--group-poll-timer group) nil)
+                      (ende-openrouter-batch--poll group)
+                      (let* ((poll-process (car processes))
+                             (request (car
+                                       (ende-openrouter-batch--group-requests
+                                        group)))
+                             (result-body
+                              (format
+                               (concat
+                                "{\"status\":\"completed\","
+                                "\"usage\":{\"completion_tokens\":2},"
+                                "\"results\":[{\"custom_id\":\"%s\","
+                                "\"response\":{\"status_code\":200,"
+                                "\"body\":{\"choices\":[{\"message\":{"
+                                "\"content\":\"done\"}}]}}}]}")
+                               (ende-openrouter-batch--request-custom-id
+                                request))))
+                        (finish-request poll-process 200 result-body))
+                      (funcall cancel-owner)
+                      (funcall stream-filter stream-process "data: late\n\n")
+                      (funcall stream-sentinel stream-process "finished\n")
+                      (should (= done-count 1))
+                      (should (= error-count 0))))))
+            (ende-openrouter-batch-abort)
+            (dolist (process processes)
+              (when (process-live-p process)
+                (delete-process process))
+              (ende-curl-cleanup-resources
+               (list (process-get process :ende-response-buffer)
+                     (process-get process :ende-stderr-buffer))
+               (list (process-get process :ende-headers-file)
+                     (process-get process :ende-config-file))
+               (list (process-get process :ende-stderr-process))))))))))
 
 (ert-deftest ende-test/openrouter-auto-fallback-policy-is-specific ()
   (let ((profile '(:transport auto)))
