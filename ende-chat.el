@@ -2734,6 +2734,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                       (ende-tools--report-activity-function
                        (lambda (title status)
                          (ende-job-report-activity job title status)))
+                      (ende-tools--execution-owner (ende-job-id job))
                       (ende-tools--register-cancellation-function
                        (lambda (cancel)
                          (if cancel

@@ -131,7 +131,7 @@
                   "ende-target.el" "ende-ui.el"
                   "ende-openrouter-batch.el" "ende-llm.el"
                   "ende-queue.el" "ende-edit.el" "ende-patch.el"
-                  "ende-tools.el"
+                  "ende-sandbox.el" "ende-tools.el"
                   "ende-chat-config.el"
                   "ende-summary.el" "ende-operations.el"
                   "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"

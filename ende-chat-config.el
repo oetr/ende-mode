@@ -186,6 +186,16 @@
       (ende-chat-config--error "root is not an existing directory: %s" path))
     (ende-project-normalize-root expanded)))
 
+(defun ende-chat-config--podman-image (value)
+  "Validate and return digest-pinned Podman image VALUE."
+  (unless (and (stringp value)
+               (string-match-p
+                "\\`[[:graph:]]+@sha256:[[:xdigit:]]\\{64\\}\\'"
+                value))
+    (ende-chat-config--error
+     "podman-image must be pinned with a sha256 digest"))
+  value)
+
 (defun ende-chat-config--remove-grants (predicate configuration)
   "Remove grants matching PREDICATE from CONFIGURATION.
 Grants are (RESOURCE . TARGET) pairs, keyed by tool."
@@ -429,6 +439,11 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--error "root expects one path string"))
      (plist-put configuration :root
                 (ende-chat-config--canonical-root (cadr form))))
+    ('podman-image
+     (unless (= (length form) 2)
+       (ende-chat-config--error "podman-image expects one image string"))
+     (plist-put configuration :podman-image
+                (ende-chat-config--podman-image (cadr form))))
     ('group (ende-chat-config--define-group form configuration))
     ('resource (ende-chat-config--define-resource form configuration))
     ('tools
@@ -458,12 +473,14 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
-  (list :root nil :groups nil :resources nil :active-targets nil
+  (list :root nil :podman-image nil :groups nil :resources nil
+        :active-targets nil
         :grants nil :revoked-resources nil))
 
 (defun ende-chat-config--normalize (configuration)
   "Convert resolver state CONFIGURATION to a runtime access policy."
   (list :root (plist-get configuration :root)
+        :podman-image (plist-get configuration :podman-image)
         :groups (plist-get configuration :groups)
         :resources (plist-get configuration :resources)
         :active-tools
@@ -495,7 +512,11 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (format " after resource redefinition revoked %s"
                      (mapconcat #'symbol-name revoked ", "))
            "")
-         tool)))))
+          tool))))
+  (when (and (memq 'run_command (plist-get normalized :active-tools))
+             (not (plist-get normalized :podman-image)))
+    (ende-chat-config--error
+     "active tool run_command requires a digest-pinned podman-image")))
 
 (defun ende-chat-config--apply-blocks (blocks inherited)
   "Apply BLOCKS over INHERITED and return the resulting configuration."
@@ -509,6 +530,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
            (forms (ende-chat-config--read-forms
                    (ende-chat-config--block-source (car blocks))))
            (root-count 0)
+           (image-count 0)
            group-names resource-names)
       (unless (string-empty-p
                (string-trim
@@ -538,9 +560,16 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
            (when (> root-count 1)
              (ende-chat-config--error "only one root form is allowed per block"))
            (setq configuration
-                 (ende-chat-config--apply-form form configuration)))))
+                 (ende-chat-config--apply-form form configuration)))
+           ('podman-image
+            (cl-incf image-count)
+            (when (> image-count 1)
+              (ende-chat-config--error
+               "only one podman-image form is allowed per block"))
+            (setq configuration
+                  (ende-chat-config--apply-form form configuration)))))
       (dolist (form forms)
-        (unless (memq (car-safe form) '(root group resource))
+        (unless (memq (car-safe form) '(root podman-image group resource))
           (setq configuration
                 (ende-chat-config--apply-form form configuration))))
       configuration)))

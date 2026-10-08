@@ -45,7 +45,8 @@
       (dolist (required '("about_thinking" "project_info" "list_project_files" "file_info"
                           "read_file" "list_project_buffers" "read_buffer"
                           "search_project" "edit_file" "create_file"
-                          "delete_file" "apply_patch" "web_fetch"))
+                          "delete_file" "apply_patch" "web_fetch"
+                          "run_command" "copy_from_sandbox"))
         (should (member required names))))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))
@@ -56,6 +57,8 @@
         (should (eq (gethash "additionalProperties" schema) :false))))
     (should-not (ende-tool-read-only (ende-tool--find "edit_file")))
     (should-not (ende-tool-read-only (ende-tool--find "create_file")))
+    (should-not (ende-tool-read-only (ende-tool--find "copy_from_sandbox")))
+    (should (ende-tool-async (ende-tool--find "run_command")))
     (should-not (ende-tool--find "edit_source"))
     (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
     (should (string-match-p "edit_file" (json-encode definitions)))
@@ -89,6 +92,25 @@
       (should-not (gethash "minLength" (gethash "text" item-properties)))
       (should (= (gethash "minimum" (gethash "occurrence" item-properties))
                  1)))
+    (let* ((definition
+            (cl-find-if
+             (lambda (candidate)
+               (equal (alist-get :name (alist-get :function candidate))
+                      "run_command"))
+             definitions))
+           (schema (ende-protocol-json-read-string
+                    (json-encode
+                     (alist-get :parameters (alist-get :function definition)))))
+           (properties (gethash "properties" schema)))
+      (should (equal (append (gethash "required" schema) nil)
+                     '("command")))
+      (should (equal (sort (let (keys)
+                             (maphash (lambda (key _value) (push key keys))
+                                      properties)
+                             keys)
+                           #'string<)
+                     '("command" "cwd" "timeout")))
+      (should (eq (gethash "additionalProperties" schema) :false)))
     (let* ((definition
             (cl-find-if
              (lambda (candidate)

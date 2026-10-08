@@ -22,6 +22,7 @@
 (require 'ende-url)
 (require 'ende-patch)
 (require 'ende-web-fetch)
+(require 'ende-sandbox)
 
 (defcustom ende-tools-max-listed-files 200
   "Maximum files returned by one `list_project_files' call."
@@ -78,6 +79,9 @@
 
 (defvar ende-tools--access-tool nil
   "Tool symbol currently being authorized by a handler.")
+
+(defvar ende-tools--execution-owner nil
+  "Ende job ID currently dispatching a tool call.")
 
 (defvar ende-tools--register-cancellation-function nil
   "Optional function used to attach and detach an active tool cancellation.")
@@ -285,6 +289,14 @@ through its parent and must not be followed (notably for symlink-safe deletes)."
 (defun ende-tools--path-authorized-p (path root)
   "Return non-nil when canonical PATH is allowed by the current tool policy."
   (ende-tools--path-authorized-for-p ende-tools--access-tool path root))
+
+(defun ende-tools--authorized-project-files (tool root)
+  "Return project files authorized for TOOL below ROOT."
+  (let ((root (ende-project-normalize-root root)))
+    (cl-remove-if-not
+     (lambda (path)
+       (ende-tools--path-authorized-for-p tool path root))
+     (ende-project-files root))))
 
 (defun ende-tools--assert-path-authorized-for
     (tool path root &optional no-follow-final)
@@ -552,11 +564,10 @@ FUNCTION receives no arguments and may return any value."
          (files
           (cl-remove-if-not
            (lambda (path)
-             (and (ende-tools--path-authorized-p path root)
-                  (or (null glob-regexp)
-                      (string-match-p
-                       glob-regexp (file-relative-name path root)))))
-           (ende-project-files root)))
+             (or (null glob-regexp)
+                 (string-match-p
+                  glob-regexp (file-relative-name path root))))
+           (ende-tools--authorized-project-files 'list_project_files root)))
          (truncated (> (length files) maximum)))
     (list :files
           (mapcar (lambda (path)
@@ -1004,6 +1015,9 @@ The final component is deliberately not followed through a symlink."
     (unwind-protect
         (progn
           (with-temp-buffer
+            (when (eq (ende-change-set-prepared-coding-system change-set)
+                      'no-conversion)
+              (set-buffer-multibyte nil))
             (insert (ende-change-set-content change-set))
             (let ((coding-system-for-write
                    (or (ende-change-set-prepared-coding-system change-set)
@@ -1438,11 +1452,13 @@ The final component is deliberately not followed through a symlink."
 
 (defun ende-tools--write-new-file (content path &optional coding-system)
   "Write CONTENT to new PATH, failing if the filesystem entry exists."
-  (with-temp-buffer
-    (insert content)
-    (let ((coding-system-for-write
-           (or coding-system coding-system-for-write)))
-      (write-region (point-min) (point-max) path nil 'silent nil 'excl))))
+  (let ((coding-system (or coding-system coding-system-for-write)))
+    (with-temp-buffer
+      (when (eq coding-system 'no-conversion)
+        (set-buffer-multibyte nil))
+      (insert content)
+      (let ((coding-system-for-write coding-system))
+        (write-region (point-min) (point-max) path nil 'silent nil 'excl)))))
 
 (defun ende-tools--create-file (arguments root)
   "Create a new project file immediately when the chat authorizes it."
@@ -1750,6 +1766,62 @@ Return trimmed plain text without text properties."
       (error "about_thinking requires an active agent session"))
     (list :accepted t)))
 
+(defun ende-tools--run-command (arguments root callback)
+  "Execute an authorized command asynchronously in the current job sandbox."
+  (ende-tools--assert-properties
+   arguments '("command" "cwd" "timeout") "run_command")
+  (let* ((owner ende-tools--execution-owner)
+         (command (ende-tools--required-string arguments "command"))
+         (cwd (or (ende-tools--argument arguments "cwd") "."))
+         (timeout (ende-tools--bounded-integer
+                   arguments "timeout" 300 3600))
+         (sandbox (and owner (ende-sandbox-for-owner owner))))
+    (unless owner
+      (error "run_command requires an active Ende job"))
+    (unless sandbox
+      (let ((image (plist-get ende-tools--access-config :podman-image))
+            (files (ende-tools--authorized-project-files 'run_command root)))
+        (setq sandbox (ende-sandbox-create owner root image files))))
+    (ende-sandbox-run-command
+     sandbox command cwd timeout callback
+     ende-tools--register-cancellation-function)))
+
+(defun ende-tools--copy-from-sandbox (arguments root)
+  "Copy one sandbox regular file to an independently authorized host path."
+  (ende-tools--assert-properties
+   arguments '("source" "destination") "copy_from_sandbox")
+  (let* ((owner ende-tools--execution-owner)
+         (source (ende-tools--required-string arguments "source"))
+         (destination (ende-tools--required-string arguments "destination")))
+    (unless owner
+      (error "copy_from_sandbox requires an active Ende job"))
+    (let* ((resolved (ende-tools--resolve-mutation-path destination root t))
+           (path (plist-get resolved :path))
+           (relative (plist-get resolved :relative))
+           (exists (or (file-exists-p path) (file-symlink-p path))))
+      (ende-tools--assert-path-authorized-for
+       'copy_from_sandbox path root t)
+      (when (and exists (not (file-regular-p path)))
+        (error "copy destination must be a regular file: %s" relative))
+      (let* ((source-path (ende-sandbox-source-file owner source))
+             (size (file-attribute-size (file-attributes source-path))))
+        (when (> size ende-tools-max-prepared-bytes)
+          (error "sandbox source exceeds the prepared-data limit"))
+        (let* ((bytes (ende-tools--literal-file-bytes source-path))
+               (change-set
+                (ende-change-set--create
+                 :operation (if exists 'edit 'create)
+                 :root root :source-kind "file" :path relative
+                 :absolute-path path :expected-exists (and exists t)
+                 :strict-path-policy t :strict-buffer-policy t
+                 :authorization-tools '(copy_from_sandbox)
+                 :content bytes :prepared-coding-system 'no-conversion)))
+          (when exists
+            (ende-tools--set-snapshot
+             change-set (ende-tools--capture-file path)))
+          (ende-tools--commit-change-sets (list change-set))
+          (ende-tools--change-set-result change-set))))))
+
 ;;;; Tool schemas and registrations
 
 (defconst ende-tools--empty-object-schema
@@ -1808,6 +1880,26 @@ Return trimmed plain text without text properties."
                        (:maximum . 50000)
                        (:description . "Optional lower output-character ceiling")))))
     (:required . ("url"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--run-command-schema
+  '((:type . "object")
+    (:properties
+     . ((:command . ((:type . "string") (:minLength . 1)))
+        (:cwd . ((:type . "string") (:minLength . 1)
+                 (:description . "Workspace-relative working directory")))
+        (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
+    (:required . ("command"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--copy-from-sandbox-schema
+  '((:type . "object")
+    (:properties
+     . ((:source . ((:type . "string") (:minLength . 1)
+                    (:description . "Regular file path inside the job workspace")))
+        (:destination . ((:type . "string") (:minLength . 1)
+                         (:description . "Authorized project-relative destination")))))
+    (:required . ("source" "destination"))
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--edit-item-schema
@@ -1961,6 +2053,18 @@ Return trimmed plain text without text properties."
  ende-tools--web-fetch-schema
  #'ende-tools--web-fetch nil :no-resource
  '(:resource-kind url :requires-root nil :async t))
+
+(ende-tool-register
+ 'run_command
+ "Run a shell command in the current job's private development workspace."
+ ende-tools--run-command-schema
+ #'ende-tools--run-command nil nil '(:async t))
+
+(ende-tool-register
+ 'copy_from_sandbox
+ "Copy one regular file from the job workspace to an independently authorized project path."
+ ende-tools--copy-from-sandbox-schema
+ #'ende-tools--copy-from-sandbox :write)
 
 (provide 'ende-tools)
 
