@@ -74,6 +74,18 @@
     (should (plist-get call :ok))
     (plist-get call :result)))
 
+(defun ende-test--sandbox-command-stderr (stderr)
+  "Return command STDERR after any structured Podman diagnostic lines."
+  (let ((diagnostics-end
+         (if (string-match
+              (concat
+               "\\`\\(?:time=\"[^\"]+\" level=[[:alpha:]]+ "
+               "msg=\"[^\n]*\"\n\\)*")
+              stderr)
+             (match-end 0)
+           0)))
+    (substring stderr diagnostics-end)))
+
 (defun ende-test--sandbox-image-available-p (image)
   "Return non-nil if IMAGE is already available to local rootless Podman."
   (and (executable-find "podman")
@@ -107,6 +119,11 @@
                         "{{.Repository}}@{{.Digest}}"))
                   (let ((images (split-string (buffer-string) "\n" t)))
                     (or (cl-find-if
+                         (lambda (image)
+                           (and (string-prefix-p "localhost/ende-dev@" image)
+                                (ende-test--sandbox-image-available-p image)))
+                         images)
+                        (cl-find-if
                          (lambda (image)
                            (and (string-prefix-p
                                  "docker.io/library/alpine@" image)
@@ -353,7 +370,10 @@
                     root configuration owner-one)))
               (should (= (plist-get result :exit_code) 7))
               (should (equal (plist-get result :stdout) "out"))
-              (should (equal (plist-get result :stderr) "err")))
+              (should (equal
+                       (ende-test--sandbox-command-stderr
+                        (plist-get result :stderr))
+                       "err")))
             (let ((result
                    (ende-test--sandbox-run
                     '(("command" . "mkdir -p public/build && printf built > public/build/result"))
