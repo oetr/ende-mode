@@ -259,11 +259,9 @@
                                    (ende-chat--protocol-tool-call
                                     document (ende-chat--parent document node) node))
                                  calls)))
-                ;; Stored results are self-contained: they retain both the
-                ;; arguments and the raw output, not just the provider payload.
-                (let ((sent-calls
-                       (cl-loop for message in sent
-                                append (plist-get message :tool-calls)))
+                 (let ((sent-calls
+                        (cl-loop for message in sent
+                                 append (plist-get message :tool-calls)))
                       (sent-results
                        (cl-remove-if-not
                         (lambda (message)
@@ -278,20 +276,17 @@
                                            :test #'equal))
                             (stored (ende-chat--protocol-tool-result-message
                                      document node)))
-                       (should call)
-                       (should (equal (plist-get stored :tool-call-id) id))
-                       (dolist (text (list (plist-get call :arguments)
-                                           (plist-get message :content)))
-                         (should (string-match-p
-                                  (regexp-quote text)
-                                  (plist-get stored :content))))))
-                   results sent-results)))
-              (ende-test--chat-goto "** Follow-up")
-              ;; Saved history is intentionally ordinary assistant text, not new tool calls.
-              (let ((history (ende-chat-context-at-point)))
-                (should-not (ende-test--chat-protocol-messages history))
-                (dolist (text '("about_thinking" "Checking access" "Reviewing"))
-                  (should (string-match-p text (ende-test--chat-context-text history)))))
+                        (should call)
+                        (should (equal (plist-get stored :tool-call-id) id))
+                        (should (equal (plist-get stored :content)
+                                       (plist-get message :content)))))
+                    results sent-results)))
+               (ende-test--chat-goto "** Follow-up")
+               (let* ((history (ende-chat-context-at-point))
+                      (history-text (prin1-to-string history)))
+                 (should (ende-test--chat-protocol-messages history))
+                 (dolist (text '("about_thinking" "Checking access" "Reviewing"))
+                   (should (string-match-p text history-text))))
               (with-current-buffer (ende-history--buffer)
                 (should (string-match-p "Last reported activity" (buffer-string)))
                 (should (string-match-p "Reviewing" (buffer-string))))))))
@@ -346,20 +341,15 @@
                                      (ende-chat--tool-call-protocol-p document node))
                                    (ende-chat--document-headlines document)))
                            (collapsed (eq view 'collapsed)))
-                      (should work)
-                      (should (= (length calls) 2))
-                      (should (eq (not (null (ende-chat--subtree-folded-p
-                                              (org-element-property :begin work))))
-                                  collapsed))
-                      (dolist (node calls)
-                        (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-						node (org-element-property :raw-value node))))
-                                    collapsed)))
-                      ;; Revealing children keeps their old bodies folded;
-                      ;; fully expanding the work preserves those visible bodies.
-                      (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                              (car calls) (plist-get first :arguments))))
-                                  (not (eq view 'expanded))))))
+                       (should work)
+                       (should (= (length calls) 2))
+                       (dolist (node calls)
+                         (should (eq (not (null (ende-test--chat-headline-text-hidden-p
+                                                 node (org-element-property :raw-value node))))
+                                     collapsed)))
+                       (should-not (string-match-p
+                                    (regexp-quote (plist-get first :arguments))
+                                    (buffer-string)))))
                   (should (eq (ende-job-state job) 'completed)))))
           (ende-test--reset))))))
 

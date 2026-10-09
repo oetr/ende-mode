@@ -47,7 +47,11 @@
 
 (defun ende-test--chat-context-text (messages)
   "Return all serialized chat message text in MESSAGES."
-  (mapconcat (lambda (message) (cdr message)) messages "\n"))
+  (mapconcat (lambda (message)
+               (if (and (consp message) (stringp (car message)))
+                   (cdr message)
+                 (prin1-to-string message)))
+             messages "\n"))
 
 (defun ende-test--chat-context-headings (messages)
   "Return the headings present in serialized MESSAGES, in order."

@@ -45,6 +45,18 @@
       (when database (sqlite-close database))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/tool-store-requires-built-in-sqlite-support ()
+  (let* ((directory (make-temp-file "ende-tool-store-unavailable-" t))
+         (ende-tool-store-file (expand-file-name "store.sqlite3" directory)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sqlite-available-p) (lambda () nil)))
+          (let ((failure (should-error
+                          (ende-tool-store-put "execution" 'request "{}"))))
+            (should (string-match-p "Emacs build with SQLite support"
+                                    (error-message-string failure)))
+            (should-not (file-exists-p ende-tool-store-file))))
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/tool-store-size-does-not-create-and-counts-sidecars ()
   (let* ((directory (make-temp-file "ende-tool-store-size-" t))
          (file (expand-file-name "store.sqlite3" directory))

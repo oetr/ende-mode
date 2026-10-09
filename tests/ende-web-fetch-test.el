@@ -1073,7 +1073,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                                  (sort (ende-test--tool-definition-names
                                         (ende-tool-definitions))
                                        #'string<)))
-                  (should (string-match-p "attacker\\.invalid" (buffer-string)))
+                   (should-not (string-match-p "attacker\\.invalid" (buffer-string)))
                   (should-not
                    (cl-some (lambda (headline)
                               (equal (org-element-property :raw-value headline)

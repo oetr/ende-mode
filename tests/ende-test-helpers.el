@@ -12,6 +12,12 @@
 (require 'ende-provider)
 (require 'ende)
 
+(defconst ende-test--tool-store-file
+  (expand-file-name (format "ende-tool-store-tests-%s.sqlite3" (emacs-pid))
+                    temporary-file-directory))
+
+(setq ende-tool-store-file ende-test--tool-store-file)
+
 (defvar ende-test--prompts nil)
 
 (defvar ende-test--calls nil)
@@ -280,6 +286,13 @@ non-nil, is signalled from the event callback."
 
 (defun ende-test--reset ()
   "Reset global state and clean test-created processes and buffers."
+  (dolist (file (list ende-test--tool-store-file
+                      (concat ende-test--tool-store-file "-wal")
+                      (concat ende-test--tool-store-file "-shm")
+                      (concat ende-test--tool-store-file "-journal")))
+    (when (file-exists-p file)
+      (delete-file file)))
+  (setq ende-tool-store-file ende-test--tool-store-file)
   (ende-abort-queue)
   (when (fboundp #'ende-openrouter-batch-abort)
     (ende-openrouter-batch-abort))

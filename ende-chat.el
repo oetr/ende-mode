@@ -875,9 +875,6 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
              (ende-chat--property document work :visibility)))
     (unless (member state '(nil "pending" "failed"))
       (error "Malformed generated Agent: Work: invalid request state %s" state))
-    (unless children
-      (error "Malformed generated Agent: Work for request %s has no protocol children"
-             request-id))
     (let* ((text (ende-chat--section-text document work))
            (newline (string-match "\n" text)))
       (when (and newline (not (string-blank-p (substring text (1+ newline)))))

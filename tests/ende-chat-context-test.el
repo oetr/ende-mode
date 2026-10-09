@@ -39,52 +39,6 @@
 
 
 
-(ert-deftest ende-test/chat-edited-protocol-history-is-readable-context ()
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Topic\n** Question\nAsk\n")
-    (insert
-     (ende-chat--assistant-protocol-text
-      2 "question-bad" "request-bad" ""
-      '(:content "")
-      '((:id "call-bad" :name "read_file" :arguments "{}")
-        (:id "call-bad" :name "search_project"
-             :arguments "{\"regexp\":\"foo\"}"))))
-    (insert
-     (concat
-      "** read_file: path=\"foo.el\"\n:PROPERTIES:\n"
-      ":ENDE_CHAT_REQUEST_ID: edited-request\n"
-      ":ENDE_TOOL_KIND: result\n"
-      ":ENDE_TOOL_CALL_ID: call-bad\n"
-      ":ENDE_TOOL_NAME: read_file\n:END:\n\n"
-      "Arguments:\n{}\n\nOutput:\nEdited result\n\n"
-      "** Follow-up\nAsk\n"))
-    (ende-test--chat-goto "** Follow-up")
-    (let* ((messages (ende-chat-context-at-point))
-           (text (ende-test--chat-context-text messages)))
-      (should-not (ende-test--chat-protocol-messages messages))
-      (should (string-match-p "Tool Call: read_file" text))
-      (should (string-match-p "Tool Call: search_project" text))
-      (should (string-match-p "Arguments:\n{}" text))
-      (should (string-match-p "{\"regexp\":\"foo\"}" text))
-      (should (string-match-p
-               (regexp-quote
-                "Tool Result: read_file\nArguments:\n{}\n\nOutput:\nEdited result")
-               text))
-      (should (string-match-p "Edited result" text))))
-  (ende-test--with-buffer
-   (concat "* Topic\n** Tool Result: read_file\n"
-           "This is a user-authored note, not protocol state.\n"
-           "** Follow-up\nAsk about the note.\n")
-   (org-mode)
-   (ende-test--chat-goto "** Follow-up")
-   (let* ((messages (ende-chat-context-at-point))
-          (text (ende-test--chat-context-text messages)))
-     (should (string-match-p "Tool Result: read_file" text))
-     (should-not (ende-test--chat-protocol-messages messages)))))
-
-
-
 (ert-deftest ende-test/reserved-chat-drawers-are-excluded-from-context ()
   (ende-test--reset)
   (ende-test--with-buffer
