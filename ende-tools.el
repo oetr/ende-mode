@@ -1966,6 +1966,129 @@ Return trimmed plain text without text properties."
      sandbox command cwd timeout callback
      ende-tools--register-cancellation-function)))
 
+(defconst ende-tools--host-command-output-limit 65536
+  "Maximum characters captured from each host command output stream.")
+
+(defun ende-tools--run-host-command-process
+    (command cwd timeout callback register-cancellation)
+  "Run host COMMAND in CWD, timing out after TIMEOUT seconds.
+CALLBACK receives a result and error.  REGISTER-CANCELLATION associates the
+process-group cancellation function with the active Ende job."
+  (let ((stdout (list ""))
+        (stderr (list ""))
+        (stderr-process nil)
+        (process nil)
+        (timer nil)
+        (registered nil)
+        (finished nil))
+    (cl-labels
+        ((capture (output chunk)
+           (let ((remaining
+                  (- ende-tools--host-command-output-limit
+                     (length (car output)))))
+             (when (> remaining 0)
+               (setcar output
+                       (concat (car output)
+                               (substring chunk 0 (min remaining (length chunk))))))
+             (when (> (length chunk) remaining)
+               (setcdr output t))))
+         (kill-group ()
+           (when (processp process)
+             ;; On Linux, `make-process' starts the shell as its session leader.
+             (ignore-errors
+               (signal-process (- (process-id process)) 'sigkill))))
+         (clean-stderr ()
+           (when stderr-process
+             (when (process-live-p stderr-process)
+               (ignore-errors (accept-process-output stderr-process 0)))
+             (ignore-errors (delete-process stderr-process))))
+         (unregister-cancellation ()
+           (when registered
+             (setq registered nil)
+             (ignore-errors (funcall register-cancellation nil))))
+         (finish (code error)
+           (unless finished
+             (setq finished t)
+             (when (timerp timer)
+               (cancel-timer timer))
+             (clean-stderr)
+             (unregister-cancellation)
+             (funcall
+              callback
+              (unless error
+                (list :exit_code code
+                      :stdout (car stdout)
+                      :stderr (car stderr)
+                      :stdout_truncated (if (cdr stdout) t :json-false)
+                      :stderr_truncated (if (cdr stderr) t :json-false)))
+              error)))
+         (cancel ()
+           (unless finished
+             (kill-group)
+             (finish nil "command cancelled")))
+         (on-timeout ()
+           (unless finished
+             (kill-group)
+             (finish 124 nil)))
+         (on-sentinel (proc _event)
+           (unless (process-live-p proc)
+             (finish (if (eq (process-status proc) 'exit)
+                         (process-exit-status proc)
+                       125)
+                     nil))))
+      (condition-case caught
+          (progn
+            (setq stderr-process
+                  (make-pipe-process
+                   :name (generate-new-buffer-name "ende-host-command-stderr")
+                   :buffer nil :noquery t :coding 'utf-8-unix
+                   :filter (lambda (_proc chunk) (capture stderr chunk)))
+                  process
+                  (let ((default-directory cwd))
+                    (make-process
+                     :name (generate-new-buffer-name "ende-host-command")
+                     :command (list "/bin/sh" "-c" command)
+                     :buffer nil :stderr stderr-process
+                     :connection-type 'pipe :coding 'utf-8-unix :noquery t
+                     :filter (lambda (_proc chunk) (capture stdout chunk))
+                     :sentinel #'on-sentinel)))
+            (process-send-eof process)
+            (setq timer (run-at-time timeout nil #'on-timeout))
+            (when (functionp register-cancellation)
+              (setq registered t)
+              (funcall register-cancellation #'cancel)))
+        ((error quit)
+         (kill-group)
+         (finish nil (error-message-string caught)))))))
+
+(defun ende-tools--host-command-cwd (cwd root)
+  "Resolve host command CWD relative to ROOT and require a local directory."
+  (unless (and (stringp cwd) (not (string-empty-p cwd)))
+    (error "cwd must be a non-empty string"))
+  (when (string-match-p (string 0) cwd)
+    (error "cwd must not contain NUL characters"))
+  (when (file-remote-p cwd)
+    (error "remote/TRAMP working directories are not supported"))
+  (let ((directory (expand-file-name cwd root)))
+    (when (file-remote-p directory)
+      (error "remote/TRAMP working directories are not supported"))
+    (unless (file-directory-p directory)
+      (error "cwd is not an existing directory: %s" cwd))
+    (file-name-as-directory directory)))
+
+(defun ende-tools--run-host-command (arguments root callback)
+  "Execute an arbitrary host command asynchronously from ROOT."
+  (ende-tools--assert-properties
+   arguments '("command" "cwd" "timeout") "run_host_command")
+  (let* ((command (ende-tools--required-string arguments "command"))
+         (cwd (or (ende-tools--argument arguments "cwd") "."))
+         (timeout (ende-tools--bounded-integer arguments "timeout" 300 3600)))
+    (when (string-match-p (string 0) command)
+      (error "command must not contain NUL characters"))
+    (ende-tools--run-host-command-process
+     command (ende-tools--host-command-cwd cwd root) timeout callback
+     ende-tools--register-cancellation-function)))
+
 (defun ende-tools--copy-from-sandbox (arguments root)
   "Copy one sandbox regular file to an independently authorized host path."
   (ende-tools--assert-properties
@@ -2077,6 +2200,17 @@ Return trimmed plain text without text properties."
      . ((:command . ((:type . "string") (:minLength . 1)))
         (:cwd . ((:type . "string") (:minLength . 1)
                  (:description . "Workspace-relative working directory")))
+        (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
+    (:required . ("command"))
+    (:additionalProperties . :json-false)))
+
+(defconst ende-tools--run-host-command-schema
+  '((:type . "object")
+    (:properties
+     . ((:command . ((:type . "string") (:minLength . 1)))
+        (:cwd . ((:type . "string") (:minLength . 1)
+                 (:description
+                  . "Local working directory, relative to the project root")))
         (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
     (:required . ("command"))
     (:additionalProperties . :json-false)))
@@ -2248,6 +2382,14 @@ Return trimmed plain text without text properties."
  "Run a shell command in the current job's private development workspace."
  ende-tools--run-command-schema
  #'ende-tools--run-command nil nil '(:async t))
+
+(ende-tool-register
+ 'run_host_command
+ (concat "Run an arbitrary shell command directly on the host with the "
+         "permissions and environment of the Emacs process. This command is "
+         "not sandboxed.")
+ ende-tools--run-host-command-schema
+ #'ende-tools--run-host-command nil :no-resource '(:async t))
 
 (ende-tool-register
  'copy_from_sandbox

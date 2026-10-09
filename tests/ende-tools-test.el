@@ -45,6 +45,39 @@
      "* Conversation\n** Tool access\n")
     (ende-test--chat-config-at (ende-chat--build-document) "Tool access")))
 
+(defun ende-test--host-command-call (arguments configuration)
+  "Run host command ARGUMENTS asynchronously and wait for its result."
+  (let ((done nil)
+        (result nil)
+        (deadline (+ (float-time) 15.0)))
+    (ende-tool-call-async "run_host_command" arguments nil configuration
+                          (lambda (value) (setq result value done t)))
+    (while (and (not done) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (unless done
+      (error "timed out waiting for run_host_command"))
+    result))
+
+(defun ende-test--wait-for-host-command-file (path)
+  "Wait for the host command to create PATH."
+  (let ((deadline (+ (float-time) 8.0)))
+    (while (and (not (file-exists-p path)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (unless (file-exists-p path)
+      (error "host command did not create %s" path))))
+
+(defun ende-test--assert-host-process-stopped (pid)
+  "Wait until host process PID is gone or only remains as a zombie."
+  (let ((deadline (+ (float-time) 8.0))
+        attributes)
+    (while (and (< (float-time) deadline)
+                (setq attributes (process-attributes pid))
+                (not (equal (cdr (assq 'state attributes)) "Z")))
+      (accept-process-output nil 0.05))
+    (setq attributes (process-attributes pid))
+    (should (or (null attributes)
+                (equal (cdr (assq 'state attributes)) "Z")))))
+
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
     (let ((names (mapcar (lambda (definition)
@@ -55,7 +88,8 @@
                           "read_file" "list_project_buffers" "read_buffer"
                           "search_project" "edit_file" "create_file"
                           "delete_file" "apply_patch" "web_fetch"
-                          "run_command" "copy_from_sandbox"))
+                          "run_command" "run_host_command"
+                          "copy_from_sandbox"))
         (should (member required names))))
     (dolist (definition definitions)
       (let* ((function (alist-get :function definition))
@@ -68,6 +102,10 @@
     (should-not (ende-tool-read-only (ende-tool--find "create_file")))
     (should-not (ende-tool-read-only (ende-tool--find "copy_from_sandbox")))
     (should (ende-tool-async (ende-tool--find "run_command")))
+    (should (ende-tool-async (ende-tool--find "run_host_command")))
+    (should (eq (ende-tool-resource-kind
+                 (ende-tool--find "run_host_command"))
+                'none))
     (should-not (ende-tool--find "edit_source"))
     (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
     (should (string-match-p "edit_file" (json-encode definitions)))
@@ -137,6 +175,126 @@
       (should (equal (gethash "type" (gethash "content" properties))
                      "string"))
       (should-not (gethash "minLength" (gethash "content" properties))))))
+
+(ert-deftest ende-test/run-host-command-config-needs-no-podman-or-resources ()
+  (let* ((root (make-temp-file "ende-host-command-config-" t))
+         (configuration
+          (ende-test--tool-access-config root '((tools run_host_command)))))
+    (unwind-protect
+        (progn
+          (should (member 'run_host_command
+                          (plist-get configuration :active-tools)))
+          (should (equal (plist-get configuration :root)
+                         (file-name-as-directory root)))
+          (should-not (plist-get configuration :podman-image))
+          (should-not (assq 'run_host_command
+                            (plist-get configuration :tool-resources))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/run-host-command-uses-host-cwd-and-captures-results ()
+  (let* ((root (make-temp-file "ende-host-command-" t))
+         (cwd (expand-file-name "work" root))
+         (configuration
+          (ende-test--tool-access-config root '((tools run_host_command))))
+         (call nil))
+    (unwind-protect
+        (progn
+          (make-directory cwd)
+          (setq call
+                (ende-test--host-command-call
+                 '(("command" . "printf 'out:%s\\n' \"$PWD\"; printf 'err\\n' >&2; exit 7")
+                   ("cwd" . "work"))
+                 configuration))
+          (should (plist-get call :ok))
+          (let ((result (plist-get call :result)))
+            (should (= (plist-get result :exit_code) 7))
+            (should (equal (plist-get result :stdout)
+                           (format "out:%s\n" cwd)))
+            (should (equal (plist-get result :stderr) "err\n"))
+            (should (eq (plist-get result :stdout_truncated) :json-false))
+            (should (eq (plist-get result :stderr_truncated) :json-false)))
+          (setq call
+                (ende-test--host-command-call
+                 '(("command" . "printf '%070000d' 0")) configuration))
+          (should (plist-get call :ok))
+          (let ((result (plist-get call :result)))
+            (should (= (length (plist-get result :stdout)) 65536))
+            (should (eq (plist-get result :stdout_truncated) t))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/run-host-command-cancellation-and-timeout-kill-groups ()
+  (let* ((root (make-temp-file "ende-host-command-stop-" t))
+         (configuration
+          (ende-test--tool-access-config root '((tools run_host_command))))
+         (cancel-file (expand-file-name "cancel.pid" root))
+         (timeout-file (expand-file-name "timeout.pid" root))
+         (cancel-function nil)
+         (timeout-cancel nil))
+    (unwind-protect
+        (progn
+          (let ((done nil)
+                (calls 0)
+                (call-result nil)
+                (ende-tools--register-cancellation-function
+                 (lambda (function) (setq cancel-function function))))
+            (ende-tool-call-async
+             "run_host_command"
+             `(("command" . ,(format "sleep 30 & echo $! > %s; wait"
+                                      (shell-quote-argument cancel-file))))
+             nil configuration
+             (lambda (value)
+               (setq calls (1+ calls) call-result value done t)))
+            (ende-test--wait-for-host-command-file cancel-file)
+            (let ((pid (string-to-number
+                        (with-temp-buffer
+                          (insert-file-contents cancel-file)
+                          (buffer-string)))))
+              (should (> pid 0))
+              (should (process-attributes pid))
+              (should (functionp cancel-function))
+              (funcall cancel-function)
+              (should done)
+              (should (= calls 1))
+              (should-not (plist-get call-result :ok))
+              (ende-test--assert-host-process-stopped pid)
+              (accept-process-output nil 0.1)
+              (should (= calls 1))))
+          (let ((done nil)
+                (calls 0)
+                (call-result nil)
+                (ende-tools--register-cancellation-function
+                 (lambda (function) (setq timeout-cancel function))))
+            (ende-tool-call-async
+             "run_host_command"
+             `(("command" . ,(format "sleep 30 & echo $! > %s; wait"
+                                      (shell-quote-argument timeout-file)))
+               ("timeout" . 1))
+             nil configuration
+             (lambda (value)
+               (setq calls (1+ calls) call-result value done t)))
+            (ende-test--wait-for-host-command-file timeout-file)
+            (let ((pid (string-to-number
+                        (with-temp-buffer
+                          (insert-file-contents timeout-file)
+                          (buffer-string))))
+                  (deadline (+ (float-time) 8.0)))
+              (while (and (not done) (< (float-time) deadline))
+                (accept-process-output nil 0.05))
+              (should done)
+              (should (= calls 1))
+              (should (plist-get call-result :ok))
+              (should (= (plist-get (plist-get call-result :result)
+                                    :exit_code)
+                         124))
+              (should (> pid 0))
+              (ende-test--assert-host-process-stopped pid)
+              (accept-process-output nil 0.1)
+              (should (= calls 1)))))
+      (when (functionp cancel-function)
+        (funcall cancel-function))
+      (when (functionp timeout-cancel)
+        (funcall timeout-cancel))
+      (delete-directory root t))))
 
 (ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
   (let* ((root (make-temp-file "ende-tools-project-" t))
