@@ -26,6 +26,16 @@
 
 (defvar ende-sandbox--by-owner (make-hash-table :test #'eql))
 
+(defun ende-sandbox--join-component (directory component)
+  "Append validated literal COMPONENT to DIRECTORY without path expansion."
+  (concat (file-name-as-directory directory) component))
+
+(defun ende-sandbox--join-relative-path (directory relative)
+  "Append validated workspace-relative RELATIVE literally to DIRECTORY."
+  (dolist (component (split-string relative "/" nil))
+    (setq directory (ende-sandbox--join-component directory component)))
+  directory)
+
 (defun ende-sandbox-for-owner (owner)
   "Return OWNER's sandbox, if one has been created."
   (gethash owner ende-sandbox--by-owner))
@@ -67,7 +77,7 @@
                  (file-in-directory-p source root))
       (error "authorized project file changed during sandbox creation"))
     (let* ((relative (file-relative-name source root))
-           (destination (expand-file-name relative workspace))
+           (destination (ende-sandbox--join-relative-path workspace relative))
            (directory (file-name-directory destination)))
       (make-directory directory t)
       (copy-file source destination nil t nil)))
@@ -140,6 +150,69 @@
       (error "Podman is not installed"))
     (list podman "--log-level=error" "--cgroup-manager=cgroupfs"
           "--hooks-dir" (ende-sandbox-hooks sandbox))))
+
+(defun ende-sandbox--podman-call (sandbox &rest arguments)
+  "Synchronously run Podman ARGUMENTS for SANDBOX and return its output."
+  (let* ((prefix (ende-sandbox--podman-prefix sandbox))
+         (program (car prefix))
+         (operation (car arguments))
+         (arguments (append (cdr prefix) arguments))
+         (process-environment (ende-sandbox--environment)))
+    (with-temp-buffer
+      (let ((status (apply #'call-process program nil t nil arguments)))
+        (unless (and (integerp status) (zerop status))
+          (error "Podman %s failed: %s"
+                 operation (string-trim (buffer-string))))
+        (buffer-string)))))
+
+(defun ende-sandbox--container-running-p (sandbox)
+  "Return non-nil when SANDBOX's existing container is running."
+  (let ((output
+         (ende-sandbox--podman-call
+          sandbox "inspect" "--format" "{{.State.Running}}"
+          (ende-sandbox-container sandbox))))
+    (cond
+     ((string-match "\\(?:\\`\\|[\n\r]\\)true[ \t\r\n]*\\'" output) t)
+     ((string-match "\\(?:\\`\\|[\n\r]\\)false[ \t\r\n]*\\'" output) nil)
+     (t (error "Podman returned an invalid container state: %s"
+               (string-trim output))))))
+
+(defun ende-sandbox--podman-action (sandbox action)
+  "Run container ACTION for SANDBOX."
+  (ende-sandbox--podman-call sandbox action (ende-sandbox-container sandbox)))
+
+(defun ende-sandbox-with-quiesced-workspace (sandbox function)
+  "Call FUNCTION while SANDBOX's running container is paused.
+Invalidate SANDBOX if pausing, workspace access, or unpausing fails."
+  (let ((paused nil)
+        (completed nil)
+        (result nil)
+        (failure nil))
+    (unwind-protect
+        (condition-case caught
+            (progn
+              (when (and (ende-sandbox-started sandbox)
+                         (ende-sandbox-container sandbox)
+                         (ende-sandbox--container-running-p sandbox))
+                (ende-sandbox--podman-action sandbox "pause")
+                (setq paused t))
+              (setq result (funcall function)
+                    completed t))
+          ((error quit)
+           (setq failure caught)))
+      (when paused
+        (condition-case caught
+            (ende-sandbox--podman-action sandbox "unpause")
+          ((error quit)
+           (unless failure
+             (setq failure caught)))))
+      (when (or failure (not completed))
+        (condition-case nil
+            (ende-sandbox-invalidate sandbox)
+          ((error quit) nil))))
+    (when failure
+      (signal (car failure) (cdr failure)))
+    result))
 
 (defun ende-sandbox--capture (value chunk)
   "Append CHUNK to capture VALUE, keeping at most `ende-sandbox--output-limit'."
@@ -325,17 +398,14 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                              (split-string relative "/" nil))))
     (error "sandbox source must be a plain workspace-relative path"))
   (let* ((workspace (ende-sandbox-workspace sandbox))
-         (path (expand-file-name relative workspace))
          (components (split-string relative "/" nil))
-         (current workspace))
+         (path workspace))
     (unless (and (file-directory-p workspace) (not (file-symlink-p workspace)))
       (error "sandbox workspace is not a directory"))
     (dolist (component components)
-      (setq current (expand-file-name component current))
-      (when (file-symlink-p current)
+      (setq path (ende-sandbox--join-component path component))
+      (when (file-symlink-p path)
         (error "sandbox source paths may not contain symlinks")))
-    (unless (file-in-directory-p path (file-name-as-directory workspace))
-      (error "sandbox source escapes its workspace"))
     path))
 
 (defun ende-sandbox--workspace-path (sandbox relative)
@@ -354,7 +424,7 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
          (components (butlast (split-string relative "/" nil)))
          (directory (ende-sandbox-workspace sandbox)))
     (dolist (component components)
-      (setq directory (expand-file-name component directory))
+      (setq directory (ende-sandbox--join-component directory component))
       (cond
        ((file-symlink-p directory)
         (error "sandbox source paths may not contain symlinks"))
@@ -388,7 +458,9 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
   "Remove RELATIVE from SANDBOX if present."
   (let ((path (ende-sandbox--workspace-target sandbox relative)))
     (when (or (file-exists-p path) (file-symlink-p path))
-      (ende-sandbox--delete-tree path))
+      (unless (and (file-regular-p path) (not (file-symlink-p path)))
+        (error "sandbox deletion target is not a regular file"))
+      (delete-file path))
     path))
 
 (defun ende-sandbox-source-file (owner relative)
@@ -407,16 +479,23 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
     (error "cwd must be a non-empty relative workspace path"))
   (when (member ".." (split-string cwd "/" t))
     (error "cwd may not escape /workspace"))
-  (let* ((container-path (expand-file-name cwd "/workspace/"))
-         (relative (file-relative-name container-path "/workspace/"))
-         (host-path (expand-file-name relative (ende-sandbox-workspace sandbox)))
+  (let* ((components (cl-remove-if
+                      (lambda (component)
+                        (or (string-empty-p component)
+                            (equal component ".")))
+                      (split-string cwd "/" nil)))
+         (relative (if components (mapconcat #'identity components "/") "."))
+         (container-path (if components
+                             (ende-sandbox--join-relative-path
+                              "/workspace" relative)
+                           "/workspace"))
+         (host-path (if components
+                        (ende-sandbox--join-relative-path
+                         (ende-sandbox-workspace sandbox) relative)
+                      (ende-sandbox-workspace sandbox)))
          (current (ende-sandbox-workspace sandbox)))
-    (unless (or (equal (directory-file-name container-path) "/workspace")
-                (string-prefix-p "/workspace/" container-path))
-      (error "cwd must resolve beneath /workspace"))
-    (dolist (component (unless (equal relative ".")
-                         (split-string relative "/" t)))
-      (setq current (expand-file-name component current))
+    (dolist (component components)
+      (setq current (ende-sandbox--join-component current component))
       (when (file-symlink-p current)
         (error "cwd may not traverse workspace symlinks")))
     (unless (file-directory-p host-path)

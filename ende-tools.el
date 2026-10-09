@@ -1392,26 +1392,38 @@ Return canonical target and root-relative/public path details."
                        ende-tools--execution-owner))))
     (when (and sandbox (not (ende-sandbox-closing sandbox)))
       (condition-case nil
-          (dolist (change-set change-sets)
-            (let* ((scope
-                    (ende-tools--path-scope-for
-                     'run_command
-                     (ende-change-set-absolute-path change-set)
-                     (ende-change-set-project-root change-set)
-                     t t))
-                   (relative (and scope (plist-get scope :relative))))
-              (when scope
-                (pcase (ende-change-set-operation change-set)
-                  ('delete
-                   (ende-sandbox-delete-file sandbox relative))
-                  ((or 'edit 'create 'add 'update)
-                   (ende-sandbox-sync-file
-                    sandbox (ende-change-set-absolute-path change-set)
-                    relative))))))
+          (let ((syncs
+                 (delq nil
+                       (mapcar
+                        (lambda (change-set)
+                          (let ((scope
+                                 (ende-tools--path-scope-for
+                                  'run_command
+                                  (ende-change-set-absolute-path change-set)
+                                  (ende-change-set-project-root change-set)
+                                  t t)))
+                            (and scope
+                                 (cons change-set
+                                       (plist-get scope :relative)))))
+                        change-sets))))
+            (when syncs
+              (ende-sandbox-with-quiesced-workspace
+               sandbox
+               (lambda ()
+                 (dolist (sync syncs)
+                   (let ((change-set (car sync))
+                         (relative (cdr sync)))
+                     (pcase (ende-change-set-operation change-set)
+                       ('delete
+                        (ende-sandbox-delete-file sandbox relative))
+                       ((or 'edit 'create 'add 'update)
+                        (ende-sandbox-sync-file
+                         sandbox (ende-change-set-absolute-path change-set)
+                         relative)))))))))
         ((error quit)
-         (condition-case nil
-             (ende-sandbox-invalidate sandbox)
-           ((error quit) nil)))))))
+          (condition-case nil
+              (ende-sandbox-invalidate sandbox)
+            ((error quit) nil)))))))
 
 (defun ende-tools--commit-change-sets (change-sets)
   "Commit fully validated CHANGE-SETS with best-effort reverse rollback."
@@ -1442,16 +1454,24 @@ Return canonical target and root-relative/public path details."
         (progn
           (ende-tools--prepare-change-set-resources change-sets)
           (ende-tools--validate-change-sets change-sets)
-          (condition-case caught
-              (progn
-                (dolist (change-set change-sets)
-                  (ende-tools--commit-change-set change-set))
-                (ende-tools--sync-change-sets-to-sandbox change-sets)
-                (mapcar (lambda (change-set)
-                          (ende-tools--change-set-result-entry change-set "applied"))
+          (let ((result
+                 (condition-case caught
+                     (progn
+                       (dolist (change-set change-sets)
+                         (ende-tools--commit-change-set change-set))
+                       (mapcar
+                        (lambda (change-set)
+                          (ende-tools--change-set-result-entry
+                           change-set "applied"))
                         change-sets))
-            (error (ende-tools--signal-mutation-commit-failure change-sets caught))
-            (quit (ende-tools--signal-mutation-commit-failure change-sets caught))))
+                   (error
+                    (ende-tools--signal-mutation-commit-failure
+                     change-sets caught))
+                   (quit
+                    (ende-tools--signal-mutation-commit-failure
+                     change-sets caught)))))
+            (ende-tools--sync-change-sets-to-sandbox change-sets)
+            result))
       (unwind-protect
           (ende-tools--cleanup-change-set-resources
            change-sets ende-tools--mutation-retained-recovery)
@@ -1951,9 +1971,10 @@ Return trimmed plain text without text properties."
   (ende-tools--assert-properties
    arguments '("source" "destination") "copy_from_sandbox")
   (let* ((owner ende-tools--execution-owner)
+         (sandbox (and owner (ende-sandbox-for-owner owner)))
          (source (ende-tools--required-string arguments "source"))
          (destination (ende-tools--required-string arguments "destination")))
-    (unless owner
+    (unless (and owner sandbox (not (ende-sandbox-closing sandbox)))
       (error "copy_from_sandbox requires an active Ende job"))
     (ende-tools--strict-relative-path destination)
     (let* ((resolved (ende-tools--resolve-mutation-path destination root t))
@@ -1964,25 +1985,31 @@ Return trimmed plain text without text properties."
        'copy_from_sandbox path root t)
       (when (and exists (not (file-regular-p path)))
         (error "copy destination must be a regular file: %s" relative))
-      (let* ((source-path (ende-sandbox-source-file owner source))
-             (size (file-attribute-size (file-attributes source-path))))
-        (when (> size ende-tools-max-prepared-bytes)
-          (error "sandbox source exceeds the prepared-data limit"))
-        (let* ((bytes (ende-tools--literal-file-bytes source-path))
-               (change-set
-                (ende-change-set--create
-                 :operation (if exists 'edit 'create)
-                 :root root :project-root root
-                 :source-kind "file" :path relative
-                 :absolute-path path :expected-exists (and exists t)
-                 :strict-path-policy t :strict-buffer-policy t
-                 :authorization-tools '(copy_from_sandbox)
-                 :content bytes :prepared-coding-system 'no-conversion)))
-          (when exists
-            (ende-tools--set-snapshot
-             change-set (ende-tools--capture-file path)))
-          (ende-tools--commit-change-sets (list change-set))
-          (ende-tools--change-set-result change-set))))))
+      (let* ((bytes
+              (ende-sandbox-with-quiesced-workspace
+               sandbox
+               (lambda ()
+                 (let* ((source-path
+                         (ende-sandbox-source-file owner source))
+                        (attributes (file-attributes source-path))
+                        (size (file-attribute-size attributes)))
+                   (when (> size ende-tools-max-prepared-bytes)
+                     (error "sandbox source exceeds the prepared-data limit"))
+                   (ende-tools--literal-file-bytes source-path)))))
+             (change-set
+              (ende-change-set--create
+               :operation (if exists 'edit 'create)
+               :root root :project-root root
+               :source-kind "file" :path relative
+               :absolute-path path :expected-exists (and exists t)
+               :strict-path-policy t :strict-buffer-policy t
+               :authorization-tools '(copy_from_sandbox)
+               :content bytes :prepared-coding-system 'no-conversion)))
+        (when exists
+          (ende-tools--set-snapshot
+           change-set (ende-tools--capture-file path)))
+        (ende-tools--commit-change-sets (list change-set))
+        (ende-tools--change-set-result change-set)))))
 
 ;;;; Tool schemas and registrations
 

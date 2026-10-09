@@ -287,6 +287,44 @@
         (ende-sandbox-cleanup-owner owner))
       (delete-directory root t))))
 
+(ert-deftest ende-test/sandbox-treats-tilde-path-components-literally ()
+  (let* ((root (make-temp-file "ende-sandbox-tilde-" t))
+         (source (expand-file-name "src/~/foo.el" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil))
+    (unless (and (file-directory-p "/dev/shm")
+                 (file-writable-p "/dev/shm")
+                 (ende-sandbox--tmpfs-p (file-truename "/dev/shm")))
+      (delete-directory root t)
+      (ert-skip "a writable /dev/shm tmpfs is required"))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source (insert "snapshot\n"))
+          (cl-letf (((symbol-function 'user-uid) (lambda () 1000))
+                    ((symbol-function 'executable-find)
+                     (lambda (program)
+                       (and (equal program "podman") "/usr/bin/podman"))))
+            (setq sandbox
+                  (ende-sandbox-create
+                   owner root ende-test--sandbox-pin (list source))))
+          (let ((sandbox-file
+                 (ende-test--sandbox-workspace sandbox "src/~/foo.el")))
+            (should (file-in-directory-p sandbox-file
+                                         (ende-sandbox-workspace sandbox)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents sandbox-file)
+                             (buffer-string))
+                           "snapshot\n"))
+            (with-temp-file source (insert "synchronized\n"))
+            (ende-sandbox-sync-file sandbox source "src/~/foo.el")
+            (should (equal (with-temp-buffer
+                             (insert-file-contents sandbox-file)
+                             (buffer-string))
+                           "synchronized\n"))))
+      (ende-sandbox-cleanup-owner owner)
+      (delete-directory root t))))
+
 (ert-deftest ende-test/sandbox-mirrors-committed-source-changes ()
   (let* ((root (make-temp-file "ende-sandbox-sync-" t))
          (source (expand-file-name "src/foo.el" root))
@@ -308,9 +346,13 @@
                                          :resources source))
                    ende-test--sandbox-pin))
                  (ende-tools--execution-owner owner))
-            (setq sandbox
-                  (ende-test--sandbox-fixture owner root (list source)))
-            (should (equal
+             (setq sandbox
+                   (ende-test--sandbox-fixture owner root (list source)))
+             (let ((artifact
+                    (ende-test--sandbox-workspace sandbox "agent/build.log")))
+               (make-directory (file-name-directory artifact) t)
+               (with-temp-file artifact (insert "sandbox-only\n")))
+             (should (equal
                      (with-temp-buffer
                        (insert-file-contents
                         (ende-test--sandbox-workspace sandbox "src/foo.el"))
@@ -322,9 +364,16 @@
                     (list :path "src/foo.el"
                           :edits (list (ende-test--anchor-edit
                                         "version A" "replace" "version B")))
-                    root configuration)))
-              (should (plist-get edited :ok)))
-            (should (eq sandbox (ende-sandbox-for-owner owner)))
+                       root configuration)))
+                 (should (plist-get edited :ok)))
+             (should (eq sandbox (ende-sandbox-for-owner owner)))
+             (should (equal
+                      (with-temp-buffer
+                        (insert-file-contents
+                         (ende-test--sandbox-workspace
+                          sandbox "agent/build.log"))
+                        (buffer-string))
+                      "sandbox-only\n"))
             (should (equal
                      (with-temp-buffer
                        (insert-file-contents
@@ -373,8 +422,283 @@
                        "modified\n"))
               (should-not (ende-sandbox-for-owner owner))
               (should-not (file-exists-p base))
-              (setq sandbox nil))))
+               (setq sandbox nil))))
+       (ende-sandbox-cleanup-owner owner)
+       (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-is-untouched-when-host-batch-rolls-back ()
+  (let* ((root (make-temp-file "ende-sandbox-host-rollback-" t))
+         (first (expand-file-name "src/first.el" root))
+         (second (expand-file-name "src/second.el" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil)
+         (configuration
+          (ende-test--sandbox-config-forms
+           root
+           '((resource source (include "src/**"))
+             (tools apply_patch run_command)
+             (set-tool-resources apply_patch run_command :resources source))
+           ende-test--sandbox-pin))
+         (patch (concat "*** Begin Patch\n"
+                        "*** Update File: src/first.el\n@@\n-old\n+new\n"
+                        "*** Update File: src/second.el\n@@\n-old\n+new\n"
+                        "*** End Patch\n"))
+         (commit (symbol-function 'ende-tools--commit-change-set))
+         (count 0))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory first) t)
+          (with-temp-file first (insert "old\n"))
+          (with-temp-file second (insert "old\n"))
+          (setq sandbox
+                (ende-test--sandbox-fixture owner root (list first second)))
+          (let ((ende-tools--execution-owner owner))
+             (cl-letf (((symbol-function 'ende-tools--commit-change-set)
+                       (lambda (change-set)
+                         (setq count (1+ count))
+                         (if (= count 2)
+                             (error "injected later commit failure")
+                           (funcall commit change-set)))))
+              (let ((failure
+                     (ende-tool-call
+                      "apply_patch" (list (cons "patch" patch))
+                      root configuration)))
+                (should-not (plist-get failure :ok))
+                (should (string-match-p "injected later commit failure"
+                                        (plist-get failure :error))))))
+          (dolist (path (list first second))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents path)
+                             (buffer-string))
+                           "old\n")))
+          (dolist (relative '("src/first.el" "src/second.el"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents
+                              (ende-test--sandbox-workspace sandbox relative))
+                             (buffer-string))
+                           "old\n")))
+          (should (eq sandbox (ende-sandbox-for-owner owner))))
       (ende-sandbox-cleanup-owner owner)
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-sync-failure-keeps-host-edit-and-recreates-sandbox ()
+  (let* ((root (make-temp-file "ende-sandbox-sync-failure-" t))
+         (source (expand-file-name "src/main.el" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil)
+         (fresh nil)
+         (configuration
+          (ende-test--sandbox-config-forms
+           root
+           '((resource source (include "src/**"))
+             (tools edit_file run_command)
+             (set-tool-resources edit_file run_command :resources source))
+           ende-test--sandbox-pin)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source (insert "before\n"))
+          (setq sandbox (ende-test--sandbox-fixture owner root (list source)))
+          (let ((old-base (ende-sandbox-base sandbox))
+                (ende-tools--execution-owner owner))
+            (cl-letf (((symbol-function 'ende-sandbox-sync-file)
+                       (lambda (&rest _arguments)
+                         (error "injected sandbox sync failure"))))
+              (let ((edited
+                     (ende-tool-call
+                      "edit_file"
+                      (list (cons "path" "src/main.el")
+                            (cons "edits"
+                                  (list (ende-test--anchor-edit
+                                         "before" "replace" "committed"))))
+                      root configuration)))
+                (should (plist-get edited :ok)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents source)
+                             (buffer-string))
+                           "committed\n"))
+            (should-not (ende-sandbox-for-owner owner))
+            (should-not (file-exists-p old-base))))
+          (cl-letf (((symbol-function 'ende-sandbox-create)
+                     (lambda (new-owner new-root _image files)
+                       (setq fresh
+                             (ende-test--sandbox-fixture
+                              new-owner new-root files))))
+                    ((symbol-function 'ende-sandbox-run-command)
+                     (lambda (new-sandbox _command _cwd _timeout callback
+                                             _register-cancellation)
+                       (let ((text
+                              (with-temp-buffer
+                                (insert-file-contents
+                                 (ende-test--sandbox-workspace
+                                  new-sandbox "src/main.el"))
+                                (buffer-string))))
+                         (funcall callback
+                                   (ende-sandbox--result
+                                    0 text "" nil nil)
+                                   nil)))))
+            (let ((result
+                   (ende-test--sandbox-call
+                    "run_command" '(("command" . "cat src/main.el"))
+                    root configuration owner)))
+              (should (plist-get result :ok))
+              (should (equal (plist-get (plist-get result :result) :stdout)
+                             "committed\n")))
+             (should fresh)
+             (should-not (eq sandbox fresh))
+             (should (eq fresh (ende-sandbox-for-owner owner)))))
+      (ende-sandbox-cleanup-owner owner)
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-quiesces-source-batches-and-copy-back ()
+  (let* ((root (make-temp-file "ende-sandbox-quiesce-" t))
+         (first (expand-file-name "src/first.el" root))
+         (second (expand-file-name "src/second.el" root))
+         (output (expand-file-name "out/generated.bin" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil)
+         (container "fake-container")
+         (paused nil)
+         (actions nil)
+         (configuration
+          (ende-test--sandbox-config-forms
+           root
+           '((resource source (include "src/**"))
+             (resource output (include "out/**"))
+             (tools apply_patch run_command copy_from_sandbox)
+             (set-tool-resources apply_patch run_command :resources source)
+             (set-tool-resources copy_from_sandbox :resources output))
+           ende-test--sandbox-pin))
+         (patch (concat "*** Begin Patch\n"
+                        "*** Update File: src/first.el\n@@\n-old\n+first updated\n"
+                        "*** Update File: src/second.el\n@@\n-old\n+second updated\n"
+                        "*** End Patch\n"))
+         (sync-file (symbol-function 'ende-sandbox-sync-file))
+         (workspace-path (symbol-function 'ende-sandbox--workspace-path)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory first) t)
+          (make-directory (expand-file-name "out" root) t)
+          (with-temp-file first (insert "old\n"))
+          (with-temp-file second (insert "old\n"))
+          (setq sandbox
+                (ende-test--sandbox-fixture owner root (list first second)))
+          (setf (ende-sandbox-container sandbox) container
+                (ende-sandbox-started sandbox) t)
+          (let ((ende-tools--execution-owner owner))
+            (cl-letf (((symbol-function 'ende-sandbox--container-running-p)
+                       (lambda (_sandbox) t))
+                      ((symbol-function 'ende-sandbox--podman-action)
+                       (lambda (_sandbox action)
+                         (push action actions)
+                         (setq paused (equal action "pause"))))
+                      ((symbol-function 'ende-sandbox-sync-file)
+                       (lambda (&rest arguments)
+                         (should paused)
+                         (apply sync-file arguments)))
+                      ((symbol-function 'ende-sandbox--workspace-path)
+                       (lambda (&rest arguments)
+                         (should paused)
+                         (apply workspace-path arguments))))
+              (let ((edited
+                     (ende-tool-call
+                      "apply_patch" (list (cons "patch" patch))
+                      root configuration)))
+                (should (plist-get edited :ok)))
+              (should (eq sandbox (ende-sandbox-for-owner owner)))
+              (should (equal container (ende-sandbox-container sandbox)))
+              (should (equal (nreverse (copy-sequence actions))
+                             '("pause" "unpause")))
+              (should-not paused)
+              (let ((artifact
+                     (ende-test--sandbox-workspace sandbox "agent.log")))
+                (with-temp-file artifact (insert "built by sandbox\n")))
+              (let ((copied
+                     (ende-test--sandbox-call
+                      "copy_from_sandbox"
+                      '(("source" . "agent.log")
+                        ("destination" . "out/generated.bin"))
+                      root configuration owner)))
+                (should (plist-get copied :ok)))
+              (should (eq sandbox (ende-sandbox-for-owner owner)))
+              (should (equal container (ende-sandbox-container sandbox)))
+              (should (equal (nreverse (copy-sequence actions))
+                             '("pause" "unpause" "pause" "unpause")))
+              (should-not paused)
+              (should (equal (with-temp-buffer
+                               (insert-file-contents output)
+                               (buffer-string))
+                              "built by sandbox\n"))
+              (let ((accessed nil))
+                (cl-letf (((symbol-function 'ende-sandbox--podman-action)
+                           (lambda (_sandbox action)
+                             (when (equal action "unpause")
+                               (error "injected unpause failure"))))
+                          ((symbol-function 'ende-sandbox--remove-container)
+                           (lambda (_sandbox callback)
+                             (funcall callback nil))))
+                  (should-error
+                   (ende-sandbox-with-quiesced-workspace
+                    sandbox (lambda () (setq accessed t)))))
+                (should accessed)
+                (should-not (ende-sandbox-for-owner owner))))))
+      (when sandbox
+        (setf (ende-sandbox-container sandbox) nil
+              (ende-sandbox-started sandbox) nil)
+        (ende-sandbox--dispose sandbox))
+      (ende-sandbox-cleanup-owner owner)
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-deletion-collision-invalidates-without-recursion ()
+  (let* ((root (make-temp-file "ende-sandbox-delete-collision-" t))
+         (source (expand-file-name "src/main.el" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil)
+         (configuration
+          (ende-test--sandbox-config-forms
+           root
+           '((resource source (include "src/**"))
+             (tools delete_file run_command)
+             (set-tool-resources delete_file run_command :resources source))
+           ende-test--sandbox-pin)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source (insert "source\n"))
+          (setq sandbox (ende-test--sandbox-fixture owner root (list source)))
+          (let* ((sandbox-path
+                  (ende-test--sandbox-workspace sandbox "src/main.el"))
+                 (sentinel (expand-file-name "agent-data" sandbox-path)))
+            (delete-file sandbox-path)
+            (make-directory sandbox-path)
+            (with-temp-file sentinel (insert "keep this subtree\n")))
+          (setf (ende-sandbox-container sandbox) "fake-container"
+                (ende-sandbox-started sandbox) t)
+          (let ((ende-tools--execution-owner owner))
+            (cl-letf (((symbol-function 'ende-sandbox--container-running-p)
+                       (lambda (_sandbox) t))
+                      ((symbol-function 'ende-sandbox--podman-action)
+                       (lambda (&rest _arguments) nil))
+                      ((symbol-function 'ende-sandbox--remove-container)
+                       (lambda (_sandbox callback) (funcall callback nil))))
+              (let ((deleted
+                     (ende-tool-call 'delete_file '(:path "src/main.el")
+                                     root configuration)))
+                (should (plist-get deleted :ok))))
+          (should-not (file-exists-p source))
+          (should-not (ende-sandbox-for-owner owner))
+          (let ((sandbox-path
+                 (ende-test--sandbox-workspace sandbox "src/main.el")))
+            (should (file-directory-p sandbox-path))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name "agent-data" sandbox-path))
+                             (buffer-string))
+                           "keep this subtree\n")))))
+      (when sandbox
+        (setf (ende-sandbox-container sandbox) nil
+              (ende-sandbox-started sandbox) nil)
+        (ende-sandbox--dispose sandbox))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-sync-does-not-bypass-run-command-scope ()
@@ -594,36 +918,46 @@
                         (expand-file-name "public/main.c" root))
                        (buffer-string))
                      "int main(void) { return 23; }\n"))
-            (let* ((sandbox (ende-sandbox-for-owner owner-one))
-                   (container (ende-sandbox-container sandbox))
-                   (sandbox-edit
-                    (ende-test--sandbox-run
-                     '(("command" . "printf sandbox-only > public/main.c"))
-                     root configuration owner-one))
-                   (edited
-                    (ende-test--sandbox-call
-                     "edit_file"
-                     (list :path "public/main.c"
-                           :edits (list (ende-test--anchor-edit
-                                         "return 23" "replace" "return 42")))
-                     root configuration owner-one))
-                   (updated
-                    (ende-test--sandbox-run
-                     '(("command" . "cat public/main.c"))
-                     root configuration owner-one)))
-              (should (= (plist-get sandbox-edit :exit_code) 0))
-              (should (plist-get edited :ok))
-              (should (eq sandbox (ende-sandbox-for-owner owner-one)))
-              (should (equal container (ende-sandbox-container sandbox)))
-              (should (= (plist-get updated :exit_code) 0))
-              (should (equal (plist-get updated :stdout)
-                             "int main(void) { return 42; }\n"))
-              (should (equal
-                       (with-temp-buffer
-                         (insert-file-contents
-                          (expand-file-name "public/main.c" root))
-                         (buffer-string))
-                       "int main(void) { return 42; }\n"))))
+             (let* ((sandbox (ende-sandbox-for-owner owner-one))
+                    (container (ende-sandbox-container sandbox))
+                    (artifact
+                     (ende-test--sandbox-workspace sandbox "agent-only.log")))
+               (with-temp-file artifact (insert "keep through sync\n"))
+               (let* ((sandbox-edit
+                       (ende-test--sandbox-run
+                        '(("command" . "printf sandbox-only > public/main.c"))
+                        root configuration owner-one))
+                      (edited
+                       (ende-test--sandbox-call
+                        "edit_file"
+                        (list :path "public/main.c"
+                              :edits (list (ende-test--anchor-edit
+                                            "return 23" "replace" "return 42")))
+                        root configuration owner-one))
+                      (updated
+                       (ende-test--sandbox-run
+                        '(("command" . "cat public/main.c"))
+                        root configuration owner-one)))
+                 (should (= (plist-get sandbox-edit :exit_code) 0))
+                 (should (plist-get edited :ok))
+                 (unless (eq sandbox (ende-sandbox-for-owner owner-one))
+                   (ert-skip
+                    "this Podman runtime cannot pause containers for workspace synchronization"))
+                 (should (eq sandbox (ende-sandbox-for-owner owner-one)))
+                 (should (equal container (ende-sandbox-container sandbox)))
+                 (should (= (plist-get updated :exit_code) 0))
+                 (should (equal (plist-get updated :stdout)
+                                "int main(void) { return 42; }\n"))
+                 (should (equal (with-temp-buffer
+                                  (insert-file-contents artifact)
+                                  (buffer-string))
+                                "keep through sync\n"))
+                 (should (equal
+                          (with-temp-buffer
+                            (insert-file-contents
+                             (expand-file-name "public/main.c" root))
+                            (buffer-string))
+                          "int main(void) { return 42; }\n")))))
           (dolist (owner (list owner-one owner-two))
             (let ((sandbox (ende-sandbox-for-owner owner)))
               (should sandbox)
