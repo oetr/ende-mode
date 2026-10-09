@@ -269,27 +269,40 @@ flags."
 (defun ende-sandbox--dispose (sandbox)
   "Forget SANDBOX and remove its tmpfs files."
   (ende-sandbox--cancel-process sandbox)
-  (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner)
+  (when (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
+    (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
   (ende-sandbox--delete-tree (ende-sandbox-base sandbox)))
+
+(defun ende-sandbox--close (sandbox invalidate)
+  "Stop SANDBOX before deleting its tmpfs workspace.
+When INVALIDATE is non-nil, make it unavailable to its owner immediately."
+  (when (and sandbox (not (ende-sandbox-cleanup-pending sandbox)))
+    (when (and invalidate
+               (eq sandbox (ende-sandbox-for-owner
+                            (ende-sandbox-owner sandbox))))
+      (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
+    (setf (ende-sandbox-closing sandbox) t)
+    (if (ende-sandbox-container sandbox)
+        (progn
+          (setf (ende-sandbox-cleanup-pending sandbox) t)
+          (ende-sandbox--cancel-process sandbox)
+          (ende-sandbox--remove-container
+           sandbox
+           (lambda (success)
+             (setf (ende-sandbox-cleanup-pending sandbox) nil)
+             (when success
+               (ende-sandbox--dispose sandbox)))))
+      (progn
+        (ende-sandbox--cancel-process sandbox)
+        (ende-sandbox--dispose sandbox)))))
 
 (defun ende-sandbox-cleanup-owner (owner)
   "Stop OWNER's container before deleting its tmpfs workspace."
-  (let ((sandbox (ende-sandbox-for-owner owner)))
-    (when (and sandbox (not (ende-sandbox-cleanup-pending sandbox)))
-      (setf (ende-sandbox-closing sandbox) t)
-      (if (ende-sandbox-container sandbox)
-          (progn
-            (setf (ende-sandbox-cleanup-pending sandbox) t)
-            (ende-sandbox--cancel-process sandbox)
-            (ende-sandbox--remove-container
-             sandbox
-             (lambda (success)
-               (setf (ende-sandbox-cleanup-pending sandbox) nil)
-               (when success
-                 (ende-sandbox--dispose sandbox)))))
-        (progn
-          (ende-sandbox--cancel-process sandbox)
-          (ende-sandbox--dispose sandbox))))))
+  (ende-sandbox--close (ende-sandbox-for-owner owner) nil))
+
+(defun ende-sandbox-invalidate (sandbox)
+  "Retire SANDBOX so its owner cannot reuse a stale workspace."
+  (ende-sandbox--close sandbox t))
 
 (defun ende-sandbox--job-event (job event)
   "Clean up a sandbox when its owning JOB settles."
@@ -298,8 +311,8 @@ flags."
 
 (add-hook 'ende-job-event-functions #'ende-sandbox--job-event)
 
-(defun ende-sandbox--workspace-path (sandbox relative)
-  "Resolve relative PATH beneath SANDBOX without following symlinks."
+(defun ende-sandbox--workspace-target (sandbox relative)
+  "Resolve workspace-relative RELATIVE beneath SANDBOX without symlinks."
   (unless (and (stringp relative)
                (not (string-empty-p relative))
                (not (file-name-absolute-p relative))
@@ -315,14 +328,67 @@ flags."
          (path (expand-file-name relative workspace))
          (components (split-string relative "/" nil))
          (current workspace))
+    (unless (and (file-directory-p workspace) (not (file-symlink-p workspace)))
+      (error "sandbox workspace is not a directory"))
     (dolist (component components)
       (setq current (expand-file-name component current))
       (when (file-symlink-p current)
         (error "sandbox source paths may not contain symlinks")))
     (unless (file-in-directory-p path (file-name-as-directory workspace))
       (error "sandbox source escapes its workspace"))
+    path))
+
+(defun ende-sandbox--workspace-path (sandbox relative)
+  "Resolve existing regular RELATIVE beneath SANDBOX without symlinks."
+  (let ((path (ende-sandbox--workspace-target sandbox relative)))
     (unless (and (file-regular-p path) (not (file-symlink-p path)))
       (error "sandbox source must be a regular file"))
+    path))
+
+(defun ende-sandbox-sync-file (sandbox source relative)
+  "Replace RELATIVE in SANDBOX with regular file SOURCE."
+  (unless (and (stringp source) (not (file-remote-p source))
+               (not (file-symlink-p source)) (file-regular-p source))
+    (error "sandbox sync source must be a regular local file"))
+  (let* ((destination (ende-sandbox--workspace-target sandbox relative))
+         (components (butlast (split-string relative "/" nil)))
+         (directory (ende-sandbox-workspace sandbox)))
+    (dolist (component components)
+      (setq directory (expand-file-name component directory))
+      (cond
+       ((file-symlink-p directory)
+        (error "sandbox source paths may not contain symlinks"))
+       ((file-directory-p directory) nil)
+       ((file-exists-p directory)
+        (error "sandbox parent path is not a directory"))
+       (t
+        (make-directory directory)
+        (unless (and (file-directory-p directory)
+                     (not (file-symlink-p directory)))
+          (error "sandbox parent path is not a directory")))))
+    (when (or (file-exists-p destination) (file-symlink-p destination))
+      (unless (file-regular-p destination)
+        (error "sandbox destination is not a regular file")))
+    (let ((stage (make-temp-file (expand-file-name ".ende-sync-" directory))))
+      (unwind-protect
+          (progn
+            (copy-file source stage t t)
+            (set-file-modes stage (file-modes source))
+            (ende-sandbox--workspace-target sandbox relative)
+            (when (or (file-exists-p destination) (file-symlink-p destination))
+              (unless (file-regular-p destination)
+                (error "sandbox destination is not a regular file")))
+            (rename-file stage destination t)
+            (setq stage nil))
+        (when stage
+          (delete-file stage))))
+    destination))
+
+(defun ende-sandbox-delete-file (sandbox relative)
+  "Remove RELATIVE from SANDBOX if present."
+  (let ((path (ende-sandbox--workspace-target sandbox relative)))
+    (when (or (file-exists-p path) (file-symlink-p path))
+      (ende-sandbox--delete-tree path))
     path))
 
 (defun ende-sandbox-source-file (owner relative)

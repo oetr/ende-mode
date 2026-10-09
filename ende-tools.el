@@ -1385,6 +1385,34 @@ Return canonical target and root-relative/public path details."
                           (error-message-string caught))
                   report))))
 
+(defun ende-tools--sync-change-sets-to-sandbox (change-sets)
+  "Mirror committed CHANGE-SETS that are authorized for `run_command'."
+  (let ((sandbox (and ende-tools--execution-owner
+                      (ende-sandbox-for-owner
+                       ende-tools--execution-owner))))
+    (when (and sandbox (not (ende-sandbox-closing sandbox)))
+      (condition-case nil
+          (dolist (change-set change-sets)
+            (let* ((scope
+                    (ende-tools--path-scope-for
+                     'run_command
+                     (ende-change-set-absolute-path change-set)
+                     (ende-change-set-project-root change-set)
+                     t t))
+                   (relative (and scope (plist-get scope :relative))))
+              (when scope
+                (pcase (ende-change-set-operation change-set)
+                  ('delete
+                   (ende-sandbox-delete-file sandbox relative))
+                  ((or 'edit 'create 'add 'update)
+                   (ende-sandbox-sync-file
+                    sandbox (ende-change-set-absolute-path change-set)
+                    relative))))))
+        ((error quit)
+         (condition-case nil
+             (ende-sandbox-invalidate sandbox)
+           ((error quit) nil)))))))
+
 (defun ende-tools--commit-change-sets (change-sets)
   "Commit fully validated CHANGE-SETS with best-effort reverse rollback."
   (unless change-sets
@@ -1418,6 +1446,7 @@ Return canonical target and root-relative/public path details."
               (progn
                 (dolist (change-set change-sets)
                   (ende-tools--commit-change-set change-set))
+                (ende-tools--sync-change-sets-to-sandbox change-sets)
                 (mapcar (lambda (change-set)
                           (ende-tools--change-set-result-entry change-set "applied"))
                         change-sets))
@@ -1943,7 +1972,8 @@ Return trimmed plain text without text properties."
                (change-set
                 (ende-change-set--create
                  :operation (if exists 'edit 'create)
-                 :root root :source-kind "file" :path relative
+                 :root root :project-root root
+                 :source-kind "file" :path relative
                  :absolute-path path :expected-exists (and exists t)
                  :strict-path-policy t :strict-buffer-policy t
                  :authorization-tools '(copy_from_sandbox)
