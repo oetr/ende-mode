@@ -55,12 +55,17 @@
          (request-id (format "benchmark-tool-request-%d" index))
          (call (list :id (format "benchmark-call-%d" index)
                      :name "read_file"
-                     :arguments (format "{\"path\":\"src/%d.el\"}" index))))
+                     :arguments (format "{\"path\":\"src/%d.el\"}" index)
+                     :execution-id (format "benchmark-execution-%d" index))))
     (concat
-     (ende-chat--work-text 2 question-id request-id)
-     (ende-chat--tool-call-text 3 request-id call)
-     (ende-chat--tool-result-text 3 request-id call
-                                  (format "Result body for tool %d." index)))))
+     (replace-regexp-in-string
+      ":ENDE_CHAT_STATE: pending\n" ""
+      (ende-chat--work-text 2 question-id request-id))
+     (ende-chat--assistant-protocol-text
+      3 question-id request-id "" '(:content "Inspecting a source file.")
+      (list call))
+     (ende-chat--assistant-text
+      2 question-id request-id "" '(:content "The source check is incomplete.")))))
 
 (defun ende-chat-benchmark--transcript (section-count)
   "Return a synthetic Org transcript with SECTION-COUNT exchanges."

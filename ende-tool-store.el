@@ -38,19 +38,16 @@
   (let ((version (caar (sqlite-select database "PRAGMA user_version"))))
     (cond
      ((= version 0)
-      (condition-case error-data
-          (progn
-            (sqlite-execute
-             database
-             (concat "CREATE TABLE tool_payloads ("
-                     "execution_id TEXT NOT NULL, "
-                     "kind TEXT NOT NULL CHECK (kind IN ('request', 'result')), "
-                     "payload TEXT NOT NULL, "
-                     "PRIMARY KEY (execution_id, kind))"))
-            (sqlite-execute database "PRAGMA user_version = 1"))
-        (error
-         (error "Cannot initialize tool payload database %s: %s"
-                filename (error-message-string error-data)))))
+      (sqlite-execute
+       database
+       (concat "CREATE TABLE tool_payloads ("
+               "execution_id TEXT NOT NULL, "
+               "kind TEXT NOT NULL CHECK (kind IN ('request', 'result')), "
+               "payload TEXT NOT NULL, "
+               "PRIMARY KEY (execution_id, kind))"))
+      (sqlite-execute
+       database (format "PRAGMA user_version = %d"
+                        ende-tool-store--schema-version)))
      ((/= version ende-tool-store--schema-version)
       (error "Unsupported tool payload database schema version %s in %s; use a fresh database by changing `ende-tool-store-file'"
              version filename))
@@ -66,7 +63,7 @@
       (let ((database
              (condition-case error-data
                (sqlite-open filename nil)
-             (error
+               (error
                 (error "Cannot open tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                        filename (error-message-string error-data))))))
         (condition-case error-data
@@ -75,7 +72,8 @@
               database)
           (error
            (sqlite-close database)
-           (signal (car error-data) (cdr error-data))))))))
+           (error "Cannot initialize or validate tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
+                  filename (error-message-string error-data))))))))
 
 (defun ende-tool-store--call-with-database (create function)
   "Call FUNCTION with an initialized database, creating it when CREATE."
@@ -86,7 +84,7 @@
           (condition-case error-data
               (funcall function database)
             (error
-             (error "Tool payload database %s failed: %s"
+             (error "Tool payload database %s failed: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                     filename (error-message-string error-data))))
         (sqlite-close database)))))
 
@@ -142,9 +140,20 @@
   "Report the tool payload database's on-disk footprint, including sidecars."
   (interactive)
   (pcase-let* ((`(,filename ,files) (ende-tool-store--footprint)))
-    (if (null files)
-        (progn
-          (message "Tool payload database does not exist: %s" filename)
+    (if (not (file-exists-p filename))
+        (let ((sidecars
+               (cl-remove-if (lambda (entry) (equal (car entry) filename))
+                             files)))
+          (message "Tool payload database does not exist: %s%s"
+                   filename
+                   (if sidecars
+                       (concat "; sidecars: "
+                               (mapconcat
+                                (lambda (entry)
+                                  (format "%s (%s bytes)"
+                                          (car entry) (cdr entry)))
+                                sidecars ", "))
+                     ""))
           nil)
       (let ((bytes (apply #'+ (mapcar #'cdr files))))
         (message "Tool payload database %s: %s across %s"
