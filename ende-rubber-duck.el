@@ -172,10 +172,10 @@ Replace the current worksheet, cancelling its pending review if necessary."
             (copy-tree
              (or profile
                  (ende-provider-profile-for-buffer (current-buffer) t))))
-            (exercise (ende-rubber-duck--make-exercise
-                       :original original :source source :mode mode :level level
-                       ;; Retain the selection but revalidate effort at review.
-                       :profile (plist-put profile
+           (exercise (ende-rubber-duck--make-exercise
+                      :original original :source source :mode mode :level level
+                      ;; Retain the selection but revalidate effort at review.
+                      :profile (plist-put profile
                                           :reasoning-effort-validated-context
                                           nil))))
       (deactivate-mark)

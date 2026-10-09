@@ -26,17 +26,18 @@
   :group 'ende)
 
 (defun ende-patch--path (path)
-  "Validate and return project-relative literal PATH."
+  "Validate and return a strict relative or absolute local PATH."
   (unless (and (stringp path) (not (string-empty-p path)))
-    (error "patch path must be a non-empty project-relative string"))
-  (when (or (file-name-absolute-p path)
+    (error "patch path must be a non-empty local path"))
+  (when (or (file-remote-p path)
             (string-match-p "[[:cntrl:]\\\\]" path)
-            (string-match-p "\\`[[:alpha:]]:" path))
-    (error "patch path must be local and project-relative: %s" path))
+            (and (not (file-name-absolute-p path))
+                 (string-match-p "\\`[[:alpha:]]:" path)))
+    (error "patch path must be local and safe: %s" path))
   (when (cl-some (lambda (component)
                    (or (string-empty-p component)
                        (member component '("." ".."))))
-                 (split-string path "/" nil))
+                 (split-string path "/" (file-name-absolute-p path)))
     (error "patch path must not contain empty, . or .. components: %s" path))
   path)
 

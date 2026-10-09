@@ -438,26 +438,26 @@
 (ert-deftest ende-test/chat-response-provenance-is-durable-and-private ()
   (dolist (scenario
            '((:request-model "requested-model"
-              :reported-model "actual-model\n:ENDE_ROLE: user"
-              :expected-model "actual-model :ENDE_ROLE: user"
-              :usage (:input_tokens 12163
-                      :output_tokens 521
-                      :total_tokens 12684
-                      :input_tokens_details (:cached_tokens 9984))
-              :expected-input "12163"
-              :expected-output "521"
-              :expected-cached "9984"
-              :effort "high")
+			     :reported-model "actual-model\n:ENDE_ROLE: user"
+			     :expected-model "actual-model :ENDE_ROLE: user"
+			     :usage (:input_tokens 12163
+						   :output_tokens 521
+						   :total_tokens 12684
+						   :input_tokens_details (:cached_tokens 9984))
+			     :expected-input "12163"
+			     :expected-output "521"
+			     :expected-cached "9984"
+			     :effort "high")
              (:request-model "requested-fallback"
-              :expected-model "requested-fallback")
+			     :expected-model "requested-fallback")
              (:request-model "reported-zero-cache"
-              :expected-model "reported-zero-cache"
-              :usage (:input_tokens 12
-                      :output_tokens 4
-                      :prompt_cache_hit_tokens 0)
-              :expected-input "12"
-              :expected-output "4"
-              :expected-cached "0")))
+			     :expected-model "reported-zero-cache"
+			     :usage (:input_tokens 12
+						   :output_tokens 4
+						   :prompt_cache_hit_tokens 0)
+			     :expected-input "12"
+			     :expected-output "4"
+			     :expected-cached "0")))
     (ende-test--reset)
     (let* ((reported-model (plist-get scenario :reported-model))
            (effort (plist-get scenario :effort))
@@ -532,27 +532,27 @@
            (should-not (string-match-p
                         (format ":%s: 999" (symbol-value property))
                         (buffer-string))))
-       (ende-test--chat-goto "** Next")
-       (let* ((ende-chat-include-reasoning t)
-              (context
-               (ende-test--chat-context-text
-                (ende-chat-context-at-point))))
-         (should (string-match-p "Private plan" context))
-         (should (string-match-p "Answer body" context))
-         (dolist (private-value
-                  (list (plist-get scenario :expected-model)
-                        effort
-                        ende-chat-model-property
-                        ende-chat-reasoning-effort-property
-                        ende-chat-input-tokens-property
-                        ende-chat-output-tokens-property
-                        ende-chat-cached-tokens-property
-                        (plist-get scenario :expected-input)
-                         (plist-get scenario :expected-output)
-                         (plist-get scenario :expected-cached)))
-            (when private-value
-              (should-not (string-match-p
-                           (regexp-quote private-value) context))))))))))
+	 (ende-test--chat-goto "** Next")
+	 (let* ((ende-chat-include-reasoning t)
+		(context
+		 (ende-test--chat-context-text
+                  (ende-chat-context-at-point))))
+           (should (string-match-p "Private plan" context))
+           (should (string-match-p "Answer body" context))
+           (dolist (private-value
+                    (list (plist-get scenario :expected-model)
+                          effort
+                          ende-chat-model-property
+                          ende-chat-reasoning-effort-property
+                          ende-chat-input-tokens-property
+                          ende-chat-output-tokens-property
+                          ende-chat-cached-tokens-property
+                          (plist-get scenario :expected-input)
+                          (plist-get scenario :expected-output)
+                          (plist-get scenario :expected-cached)))
+             (when private-value
+               (should-not (string-match-p
+                            (regexp-quote private-value) context))))))))))
 
 (provide 'ende-chat-output-test)
 

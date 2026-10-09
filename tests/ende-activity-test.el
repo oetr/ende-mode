@@ -57,10 +57,10 @@
                         (ende-chat-config-resolve
                          (ende-chat--document-tree document)
                          (ende-chat--document-parent document) headline))
-                        (definitions (ende-tool-definitions))
-                        (catalog-names
-                         (ende-test--tool-definition-names definitions))
-                        (names (plist-get configuration :active-tools))
+                       (definitions (ende-tool-definitions))
+                       (catalog-names
+                        (ende-test--tool-definition-names definitions))
+                       (names (plist-get configuration :active-tools))
                        (profile (list :model "fixture" :tool-definitions definitions)))
                   (should (= (cl-count 'about_thinking names) 1))
                   (should-not (plist-get configuration :root))

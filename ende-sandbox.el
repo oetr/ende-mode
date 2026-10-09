@@ -146,7 +146,7 @@
   (let ((remaining (- ende-sandbox--output-limit (length (car value)))))
     (when (> remaining 0)
       (setcar value (concat (car value) (substring chunk 0 (min remaining
-                                                               (length chunk))))))
+								(length chunk))))))
     (when (> (length chunk) remaining)
       (setcdr value t))))
 
@@ -235,14 +235,14 @@ flags."
   (append
    (ende-sandbox--podman-prefix sandbox)
    (list "run" "--detach" "--pull=never" "--network=none"
-          "--pid=private" "--ipc=private" "--uts=private"
-          "--user=0" "--cap-drop=all"
+         "--pid=private" "--ipc=private" "--uts=private"
+         "--user=0" "--cap-drop=all"
          "--security-opt=no-new-privileges" "--memory=2g" "--cpus=2"
          "--pids-limit=256" "--http-proxy=false" "--no-hosts"
          "--image-volume=ignore" "--stop-timeout=2" "--name" name
          "--volume"
-          (format "%s:/workspace:rw,rprivate,Z"
-                  (ende-sandbox-workspace sandbox))
+         (format "%s:/workspace:rw,rprivate,Z"
+                 (ende-sandbox-workspace sandbox))
          "--entrypoint" "/bin/sh" (ende-sandbox-image sandbox)
          "-c" "while :; do sleep 3600; done")))
 
@@ -403,12 +403,12 @@ flags."
          (lambda (code _stdout _stderr _out-truncated _err-truncated timed-out)
            (cond
             ((ende-sandbox-closing sandbox) nil)
-           ((and (not timed-out) (= code 0))
-            (setf (ende-sandbox-started sandbox) t)
-            (condition-case caught
-                (ende-sandbox--exec sandbox command cwd timeout callback)
-              (error
-               (funcall callback nil (error-message-string caught)))))
+            ((and (not timed-out) (= code 0))
+             (setf (ende-sandbox-started sandbox) t)
+             (condition-case caught
+                 (ende-sandbox--exec sandbox command cwd timeout callback)
+               (error
+		(funcall callback nil (error-message-string caught)))))
             (t
              (ende-sandbox--remove-container
               sandbox
@@ -447,7 +447,7 @@ flags."
        (if removed
            (ende-sandbox--start-container
             sandbox command cwd timeout callback)
-          (funcall callback nil "sandbox container could not be stopped")))))
+         (funcall callback nil "sandbox container could not be stopped")))))
    (t
     (ende-sandbox--start-container sandbox command cwd timeout callback))))
 

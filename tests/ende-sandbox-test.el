@@ -135,7 +135,7 @@
                                 (string-match-p
                                  "@sha256:[[:xdigit:]]\\{64\\}\\'" image)
                                 (ende-test--sandbox-image-available-p image)))
-                          images)))))))))))
+                         images)))))))))))
 
 (defun ende-test--sandbox-make-project (root)
   "Create a small project tree under ROOT."

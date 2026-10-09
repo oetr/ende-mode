@@ -236,6 +236,8 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
          (tail (cddr form))
          (type 'file)
          (type-seen nil)
+         (resource-root nil)
+         (root-seen nil)
          (private nil)
          (private-seen nil)
          (rules-seen nil)
@@ -266,7 +268,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
               (push (cadr form-part) excludes)
               (when (eq type 'url)
                 (push pattern exclude-patterns)))))
-         ((memq form-part '(:type :allow-private-addresses))
+         ((memq form-part '(:type :root :allow-private-addresses))
           (when rules-seen
             (ende-chat-config--error
              "resource options must precede include/exclude rules (%s)" name))
@@ -279,6 +281,15 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
                  (ende-chat-config--error "resource %s repeats :type" name))
                (setq type (ende-chat-config--resource-type value name)
                      type-seen t))
+              (:root
+               (when root-seen
+                 (ende-chat-config--error "resource %s repeats :root" name))
+               (when (and (stringp value) (file-remote-p value))
+                 (ende-chat-config--error
+                  "resource :root must be a local directory (%s)" name))
+               (setq resource-root
+                     (ende-chat-config--canonical-root value)
+                     root-seen t))
               (:allow-private-addresses
                (when private-seen
                  (ende-chat-config--error
@@ -299,6 +310,9 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
     (when (and private-seen (not (eq type 'url)))
       (ende-chat-config--error
        ":allow-private-addresses is only valid for URL resources (%s)" name))
+    (when (and root-seen (not (eq type 'file)))
+      (ende-chat-config--error
+       ":root is only valid for file resources (%s)" name))
     (when (and private
                (cl-some (lambda (pattern)
                           (memq (plist-get pattern :host-kind)
@@ -323,6 +337,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
     (plist-put configuration :resources
                (ende-chat-config--put
                 name (list :type type
+                           :root resource-root
                            :include includes :exclude excludes
                            :allow-private-addresses private
                            :include-regexps
@@ -512,7 +527,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (format " after resource redefinition revoked %s"
                      (mapconcat #'symbol-name revoked ", "))
            "")
-          tool))))
+         tool))))
   (when (and (memq 'run_command (plist-get normalized :active-tools))
              (not (plist-get normalized :podman-image)))
     (ende-chat-config--error
@@ -561,13 +576,13 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (ende-chat-config--error "only one root form is allowed per block"))
            (setq configuration
                  (ende-chat-config--apply-form form configuration)))
-           ('podman-image
-            (cl-incf image-count)
-            (when (> image-count 1)
-              (ende-chat-config--error
-               "only one podman-image form is allowed per block"))
-            (setq configuration
-                  (ende-chat-config--apply-form form configuration)))))
+          ('podman-image
+           (cl-incf image-count)
+           (when (> image-count 1)
+             (ende-chat-config--error
+              "only one podman-image form is allowed per block"))
+           (setq configuration
+                 (ende-chat-config--apply-form form configuration)))))
       (dolist (form forms)
         (unless (memq (car-safe form) '(root podman-image group resource))
           (setq configuration

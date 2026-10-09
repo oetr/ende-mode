@@ -247,44 +247,86 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
                (funcall callback (ende-tool--failure-result tool caught))))))))))
 
 (defun ende-tools--resource-allows-p (relative resource)
-  "Return non-nil when RESOURCE permits project-relative path RELATIVE."
+  "Return non-nil when RESOURCE permits root-relative path RELATIVE."
   (and (cl-some (lambda (regexp) (string-match-p regexp relative))
                 (plist-get resource :include-regexps))
        (not (cl-some (lambda (regexp) (string-match-p regexp relative))
                      (plist-get resource :exclude-regexps)))))
 
+(defun ende-tools--file-resource-root (resource project-root)
+  "Return RESOURCE's fixed root, or PROJECT-ROOT when it has none."
+  (or (plist-get resource :root) project-root))
+
+(defun ende-tools--path-scopes-for
+    (tool path project-root &optional no-follow-final project-only)
+  "Return matching file scopes for TOOL and PATH under PROJECT-ROOT."
+  (let* ((project-root (ende-project-normalize-root project-root))
+         (expanded (and (stringp path) (not (file-remote-p path))
+                        (expand-file-name path project-root)))
+         (canonical
+          (and expanded
+               (condition-case nil
+                   (cond
+                    (no-follow-final
+                     (let ((parent (file-name-directory expanded)))
+                       (when (file-directory-p parent)
+                         (expand-file-name (file-name-nondirectory expanded)
+                                           (file-truename parent)))))
+                    ((file-exists-p expanded) (file-truename expanded))
+                    (t expanded))
+                 (error nil))))
+         scopes)
+    (when canonical
+      (if (null ende-tools--access-config)
+          (when (file-in-directory-p canonical project-root)
+            (let ((relative (file-relative-name canonical project-root)))
+              (unless (ende-project--excluded-p relative)
+                (push (list :root project-root :relative relative
+                            :public-path relative :fixed-root nil)
+                      scopes))))
+        (let* ((assignments (plist-get ende-tools--access-config :tool-resources))
+               (names (cdr (assq tool assignments)))
+               (resources (plist-get ende-tools--access-config :resources)))
+          (dolist (name names)
+            (let* ((resource (cdr (assq name resources)))
+                   (fixed-root (and resource (plist-get resource :root)))
+                   (effective-root
+                    (and resource (not (and project-only fixed-root))
+                         (ende-tools--file-resource-root resource project-root)))
+                   (effective-root
+                    (and effective-root
+                         (condition-case nil
+                             (ende-project-normalize-root effective-root)
+                           (error nil)))))
+              (when (and resource
+                         (eq (plist-get resource :type) 'file)
+                         effective-root
+                         (file-in-directory-p canonical effective-root))
+                (let ((relative (file-relative-name canonical effective-root)))
+                  (when (and (not (ende-project--excluded-p relative))
+                             (ende-tools--resource-allows-p relative resource))
+                    (push (list :root effective-root :relative relative
+                                :public-path
+                                (if fixed-root
+                                    canonical
+                                  (file-relative-name canonical project-root))
+                                :fixed-root fixed-root)
+                          scopes)))))))))
+    (nreverse scopes)))
+
+(defun ende-tools--path-scope-for
+    (tool path root &optional no-follow-final project-only)
+  "Return one matching authorization scope for TOOL and PATH below ROOT."
+  (car (ende-tools--path-scopes-for
+        tool path root no-follow-final project-only)))
+
 (defun ende-tools--path-authorized-for-p
     (tool path root &optional no-follow-final)
-  "Return non-nil when PATH is authorized for TOOL below ROOT.
-When NO-FOLLOW-FINAL is non-nil, PATH's final component is already resolved
-through its parent and must not be followed (notably for symlink-safe deletes)."
-  (if (null ende-tools--access-config)
-      t
-    (let* ((root (file-name-as-directory root))
-           (canonical
-            (condition-case nil
-                (if no-follow-final
-                    (expand-file-name path)
-                  (if (file-exists-p path)
-                      (file-truename path)
-                    (expand-file-name path root)))
-              (error nil)))
-           (relative (and canonical
-                          (file-in-directory-p canonical root)
-                          (file-relative-name canonical root)))
-           (assignments (plist-get ende-tools--access-config
-                                   :tool-resources))
-           (resource-names (cdr (assq tool assignments)))
-           (resources (plist-get ende-tools--access-config :resources)))
-      (and relative
-           (not (ende-project--excluded-p relative))
-           (cl-some
-            (lambda (name)
-              (let ((resource (cdr (assq name resources))))
-                (and resource
-                     (eq (plist-get resource :type) 'file)
-                     (ende-tools--resource-allows-p relative resource))))
-            resource-names)))))
+  "Return non-nil when PATH is authorized for TOOL below project ROOT.
+When NO-FOLLOW-FINAL is non-nil, PATH's final component is not followed."
+  (and (ende-tools--path-scope-for
+        tool path root no-follow-final)
+       t))
 
 (defun ende-tools--path-authorized-p (path root)
   "Return non-nil when canonical PATH is allowed by the current tool policy."
@@ -295,7 +337,7 @@ through its parent and must not be followed (notably for symlink-safe deletes)."
   (let ((root (ende-project-normalize-root root)))
     (cl-remove-if-not
      (lambda (path)
-       (ende-tools--path-authorized-for-p tool path root))
+       (ende-tools--path-scope-for tool path root nil t))
      (ende-project-files root))))
 
 (defun ende-tools--assert-path-authorized-for
@@ -304,7 +346,7 @@ through its parent and must not be followed (notably for symlink-safe deletes)."
   (unless (ende-tools--path-authorized-for-p
            tool path root no-follow-final)
     (error "path is not authorized for %s by this chat's resources: %s"
-           tool (file-relative-name path root)))
+           tool path))
   path)
 
 (defun ende-tools--assert-path-authorized (path root)
@@ -414,17 +456,37 @@ use `ende-tools--resolve-disk-source' instead."
               :buffer-id (and buffer (ende-project-buffer-id buffer)))))))
 
 (defun ende-tools--resolve-disk-source (arguments root)
-  "Resolve an authorized project file in ARGUMENTS below ROOT.
+  "Resolve an authorized file in ARGUMENTS below project ROOT.
 
 The returned source always reads from disk, even when a visiting buffer
 exists.  Visiting-buffer state is retained only as separate metadata."
   (let* ((path-value (ende-tools--required-string arguments "path"))
-         (path (ende-tools--assert-path-authorized
-                (ende-project-path path-value root) root))
-         (relative (file-relative-name path root)))
+         (_ (when (file-remote-p path-value)
+              (error "remote/TRAMP paths are not supported")))
+         (_ (when (and (file-name-absolute-p path-value)
+                       (null ende-tools--access-config))
+              (error "absolute paths require an explicit file resource grant")))
+         (candidate (if (file-name-absolute-p path-value)
+                        (expand-file-name path-value)
+                      (expand-file-name path-value root)))
+         (_ (when (and (not (file-name-absolute-p path-value))
+                       (not (file-in-directory-p candidate root)))
+              (error "relative path is outside the project: %s" path-value)))
+         (path (if (file-exists-p candidate)
+                   (file-truename candidate)
+                 candidate))
+         (scope (ende-tools--path-scope-for
+                 ende-tools--access-tool path root))
+         (_ (unless scope
+              (error "path is not authorized for %s by this chat's resources: %s"
+                     ende-tools--access-tool path)))
+         (relative (plist-get scope :relative)))
     (ende-project-assert-readable-file path)
-    (list :kind 'file :path path :relative relative
-          :visiting-buffer (ende-project-visiting-buffer relative root))))
+    (list :kind 'file :path path :root (plist-get scope :root)
+          :relative relative :public-path (plist-get scope :public-path)
+          :visiting-buffer
+          (car (ende-tools--visiting-buffers-for-path path)))))
+
 
 (defun ende-tools--source-kind-name (source)
   "Return the public source-kind name for SOURCE."
@@ -495,7 +557,8 @@ FUNCTION receives no arguments and may return any value."
      source
      (lambda ()
        (append
-        (list :path (plist-get source :relative)
+        (list :path (or (plist-get source :public-path)
+                        (plist-get source :relative))
               :source_kind (ende-tools--source-kind-name source)
               :line_count (ende-tools--source-line-count)
               :byte_count (if disk-source
@@ -595,7 +658,8 @@ FUNCTION receives no arguments and may return any value."
     (ende-tools--with-source
      source
      (lambda ()
-       (append (list :path (plist-get source :relative)
+       (append (list :path (or (plist-get source :public-path)
+                               (plist-get source :relative))
                      :source_kind "file"
                      :digest (ende-tools--source-digest))
                (ende-tools--source-buffer-metadata source)
@@ -747,7 +811,7 @@ FUNCTION receives no arguments and may return any value."
 
 (cl-defstruct (ende-change-set (:constructor ende-change-set--create))
   "A validated disk mutation, prepared separately from its commit."
-  operation root source-kind path base-digest anchor-edits edits
+  operation root project-root source-kind path public-path base-digest anchor-edits edits
   content absolute-path expected-exists original-content original-bytes
   raw-digest coding-system file-mode identity prepared-coding-system
   strict-path-policy strict-buffer-policy authorization-tools visiting-buffers
@@ -816,13 +880,13 @@ FUNCTION receives no arguments and may return any value."
           :identity before-identity)))
 
 (defun ende-tools--strict-relative-path (path)
-  "Validate project-relative literal mutation PATH and return it unchanged."
+  "Validate relative literal mutation PATH and return it unchanged."
   (unless (and (stringp path) (not (string-empty-p path)))
-    (error "mutation path must be a non-empty project-relative string"))
+    (error "mutation path must be a non-empty relative string"))
   (when (or (file-name-absolute-p path)
             (file-remote-p path)
             (string-match-p "[[:cntrl:]\\\\]" path))
-    (error "mutation path must be local and project-relative: %s" path))
+    (error "mutation path must be local: %s" path))
   (when (cl-some (lambda (component)
                    (or (string-empty-p component)
                        (member component '("." ".."))))
@@ -830,18 +894,29 @@ FUNCTION receives no arguments and may return any value."
     (error "mutation path must not contain empty, . or .. components: %s" path))
   path)
 
+(defun ende-tools--strict-absolute-path (path)
+  "Validate absolute local mutation PATH and return it unchanged."
+  (unless (and (stringp path) (file-name-absolute-p path)
+               (not (file-remote-p path))
+               (not (string-match-p "[[:cntrl:]\\\\]" path))
+               (not (member ".." (split-string path "/" t)))
+               (not (member "." (split-string path "/" t))))
+    (error "mutation path must be an absolute local path without . or ..: %s"
+           path))
+  path)
+
 (defun ende-tools--resolve-mutation-path (path root &optional strict)
-  "Resolve literal PATH through its existing parent below ROOT.
+  "Resolve PATH through its existing parent, optionally below scope ROOT.
 The final component is deliberately not followed through a symlink."
-  (if strict
-      (ende-tools--strict-relative-path path)
-    (unless (and (stringp path) (not (string-empty-p path))
-                 (not (file-name-absolute-p path))
-                 (not (file-remote-p path))
-                 (not (string-match-p "[[:cntrl:]]" path)))
-      (error "mutation target is not a project-relative path")))
-  (let* ((root (ende-project-normalize-root root))
-         (expanded (expand-file-name path root))
+  (unless (and (stringp path) (not (string-empty-p path))
+               (not (file-remote-p path))
+               (not (string-match-p "[[:cntrl:]\\\\]" path)))
+    (error "mutation target must be a non-empty local path"))
+  (if (file-name-absolute-p path)
+      (when strict (ende-tools--strict-absolute-path path))
+    (when strict (ende-tools--strict-relative-path path)))
+  (let* ((root (and root (ende-project-normalize-root root)))
+         (expanded (expand-file-name path (or root default-directory)))
          (parent (file-name-directory expanded))
          (name (file-name-nondirectory expanded)))
     (when (file-remote-p expanded)
@@ -851,16 +926,43 @@ The final component is deliberately not followed through a symlink."
              (file-name-directory path)))
     (let* ((canonical-parent (file-truename parent))
            (canonical (expand-file-name name canonical-parent))
-           (relative (file-relative-name canonical root)))
+           (relative (and root (file-relative-name canonical root))))
       ;; Inspect the link itself before containment helpers can resolve its
       ;; final component.
       (when (file-symlink-p canonical)
-        (error "final-component symlinks are not allowed: %s" relative))
-      (unless (file-in-directory-p canonical root)
-        (error "path is outside the project: %s" path))
-      (when (ende-project--excluded-p relative)
-        (error "path is excluded from project tools: %s" path))
+        (error "final-component symlinks are not allowed: %s" path))
+      (when (and root (not (file-in-directory-p canonical root)))
+        (error "path is outside the authorized resource root: %s" path))
+      (when (and relative (ende-project--excluded-p relative))
+        (error "path is excluded from tool access: %s" path))
       (list :path canonical :relative relative :root root))))
+
+(defun ende-tools--authorized-mutation-target (path project-root tools)
+  "Safely resolve PATH and find a scope for the first TOOL.
+Every TOOL must independently authorize the canonical target.
+Return canonical target and root-relative/public path details."
+  (when (and (file-name-absolute-p path)
+             (null ende-tools--access-config))
+    (error "absolute paths require an explicit file resource grant"))
+  (let* ((project-root (ende-project-normalize-root project-root))
+         (candidate
+          (ende-tools--resolve-mutation-path
+           path (unless (file-name-absolute-p path) project-root) t))
+         (canonical (plist-get candidate :path))
+         (scope-lists
+          (mapcar (lambda (tool)
+                    (ende-tools--path-scopes-for tool canonical project-root t))
+                  tools))
+         (scope (caar scope-lists)))
+    (unless (and scope (cl-every #'identity scope-lists))
+      (error "path is not authorized for %s by this chat's resources: %s"
+             (mapconcat #'symbol-name tools ", ") canonical))
+    (let* ((resolved (ende-tools--resolve-mutation-path
+                      canonical (plist-get scope :root) t)))
+      (append resolved
+              (list :project-root project-root
+                    :public-path (plist-get scope :public-path)
+                    :fixed-root (plist-get scope :fixed-root))))))
 
 (defun ende-tools--visiting-buffers-for-path (path)
   "Return every visiting buffer that names PATH, including missing files."
@@ -892,10 +994,23 @@ The final component is deliberately not followed through a symlink."
 
 (defun ende-tools--mutation-assert-authorized (change-set path)
   "Reauthorize CHANGE-SET's complete operation scope at PATH."
-  (dolist (tool (ende-change-set-authorization-tools change-set))
-    (ende-tools--assert-path-authorized-for tool path
-                                            (ende-change-set-root change-set)
-                                            t)))
+  (let ((tools (ende-change-set-authorization-tools change-set))
+        (root (ende-project-normalize-root
+               (ende-change-set-root change-set)))
+        (project-root (or (ende-change-set-project-root change-set)
+                          (ende-change-set-root change-set))))
+    (dolist (tool tools)
+      (let ((scopes (ende-tools--path-scopes-for
+                     tool path project-root t)))
+        (unless (and scopes
+                     (or (not (eq tool (car tools)))
+                         (cl-some
+                          (lambda (scope)
+                            (equal root
+                                   (ende-project-normalize-root
+                                    (plist-get scope :root))))
+                          scopes)))
+          (error "path is no longer authorized for %s: %s" tool path))))))
 
 (defun ende-tools--validate-change-set (change-set)
   "Revalidate target identity, permissions and buffer policy for CHANGE-SET."
@@ -1077,7 +1192,9 @@ The final component is deliberately not followed through a symlink."
 (defun ende-tools--change-set-result-entry (change-set status)
   "Return a JSON-compatible per-file report for CHANGE-SET and STATUS."
   (list :operation (symbol-name (ende-change-set-operation change-set))
-        :path (ende-change-set-path change-set) :status status))
+        :path (or (ende-change-set-public-path change-set)
+                  (ende-change-set-path change-set))
+        :status status))
 
 (defun ende-tools--recovery-error-entry (change-set caught)
   "Return recovery status for CHANGE-SET after rollback condition CAUGHT."
@@ -1247,13 +1364,22 @@ The final component is deliberately not followed through a symlink."
   "Recovery files that must survive mutation cleanup.")
 
 (defun ende-tools--signal-mutation-commit-failure
-    (change-sets root caught)
+    (change-sets caught)
   "Roll back CHANGE-SETS and signal a structured failure for CAUGHT."
   (let ((report (ende-tools--rollback-change-sets change-sets)))
     (dolist (entry (append report nil))
       (when (plist-get entry :recovery_file)
-        (push (expand-file-name (plist-get entry :recovery_file) root)
-              ende-tools--mutation-retained-recovery)))
+        (let ((change-set
+               (cl-find-if
+                (lambda (candidate)
+                  (equal (or (ende-change-set-public-path candidate)
+                             (ende-change-set-path candidate))
+                         (plist-get entry :path)))
+                change-sets)))
+          (push (expand-file-name
+                 (plist-get entry :recovery_file)
+                 (ende-change-set-root change-set))
+                ende-tools--mutation-retained-recovery))))
     (signal 'ende-tool-mutation-failure
             (list (format "mutation commit failed: %s"
                           (error-message-string caught))
@@ -1261,47 +1387,46 @@ The final component is deliberately not followed through a symlink."
 
 (defun ende-tools--commit-change-sets (change-sets)
   "Commit fully validated CHANGE-SETS with best-effort reverse rollback."
-  (let* ((root (ende-project-normalize-root
-                (ende-change-set-root (car change-sets))))
+  (unless change-sets
+    (error "mutation batch must contain at least one operation"))
+  (let* ((roots
+          (delete-dups
+           (apply #'append
+                  (mapcar
+                   (lambda (change-set)
+                     (delq nil
+                           (mapcar
+                            (lambda (root)
+                              (and root (ende-project-normalize-root root)))
+                            (list (ende-change-set-project-root change-set)
+                                  (ende-change-set-root change-set)))))
+                   change-sets))))
          (locked nil)
          (ende-tools--mutation-retained-recovery nil))
-    (unless change-sets
-      (error "mutation batch must contain at least one operation"))
-    (dolist (change-set change-sets)
-      (unless (equal root (ende-project-normalize-root
-                           (ende-change-set-root change-set)))
-        (error "a mutation batch must stay within one project")))
     (ende-tools--assert-change-set-limits change-sets)
     (ende-tools--assert-change-set-targets-unique change-sets)
     (ende-tools--validate-change-sets change-sets)
-    (when (gethash root ende-tools--mutation-locks)
-      (error "another Ende mutation is already committing in this project"))
-    (puthash root t ende-tools--mutation-locks)
-    (setq locked t)
+    (when (cl-some (lambda (root) (gethash root ende-tools--mutation-locks)) roots)
+      (error "another Ende mutation is already committing in a target scope"))
+    (dolist (root roots) (puthash root t ende-tools--mutation-locks))
+    (setq locked roots)
     (unwind-protect
         (progn
           (ende-tools--prepare-change-set-resources change-sets)
-          ;; Staging can take time; validate the complete input once more before
-          ;; the first target is touched.
           (ende-tools--validate-change-sets change-sets)
           (condition-case caught
               (progn
                 (dolist (change-set change-sets)
                   (ende-tools--commit-change-set change-set))
                 (mapcar (lambda (change-set)
-                          (ende-tools--change-set-result-entry
-                           change-set "applied"))
+                          (ende-tools--change-set-result-entry change-set "applied"))
                         change-sets))
-            (error
-             (ende-tools--signal-mutation-commit-failure
-              change-sets root caught))
-            (quit
-             (ende-tools--signal-mutation-commit-failure
-              change-sets root caught))))
+            (error (ende-tools--signal-mutation-commit-failure change-sets caught))
+            (quit (ende-tools--signal-mutation-commit-failure change-sets caught))))
       (unwind-protect
           (ende-tools--cleanup-change-set-resources
            change-sets ende-tools--mutation-retained-recovery)
-        (when locked
+        (dolist (root locked)
           (remhash root ende-tools--mutation-locks))))))
 
 (defun ende-tools--sequence (value)
@@ -1406,7 +1531,7 @@ The final component is deliberately not followed through a symlink."
     result))
 
 (defun ende-tools--edit-file (arguments root)
-  "Apply validated anchor edits directly to a project file on disk."
+  "Apply validated anchor edits directly to an authorized file on disk."
   (ende-tools--assert-properties arguments '("path" "edits") "edit_file")
   (let* ((path (ende-tools--required-string arguments "path"))
          (anchor-edits (ende-tools--anchor-edits
@@ -1425,9 +1550,11 @@ The final component is deliberately not followed through a symlink."
          (change-set
           (ende-change-set--create
            :operation 'edit
-           :root root
+           :root (plist-get source :root)
+           :project-root root
            :source-kind "file"
-           :path (plist-get source :relative)
+           :path (plist-get source :public-path)
+           :public-path (plist-get source :public-path)
            :absolute-path absolute-path
            :expected-exists t
            :anchor-edits anchor-edits
@@ -1438,10 +1565,10 @@ The final component is deliberately not followed through a symlink."
     (ende-tools--apply-change-set-object change-set)))
 
 (defun ende-tools--create-file-path (path root)
-  "Return the canonical authorized creation PATH below ROOT."
-  (ende-tools--assert-path-authorized
-   (ende-project-path path root t)
-   root))
+  "Return the canonical authorized creation PATH below project ROOT."
+  (let ((resolved (ende-tools--authorized-mutation-target
+                   path root (list ende-tools--access-tool))))
+    (plist-get resolved :path)))
 
 (defun ende-tools--assert-new-file-path (path root)
   "Signal if PATH already names a filesystem entry."
@@ -1461,21 +1588,26 @@ The final component is deliberately not followed through a symlink."
         (write-region (point-min) (point-max) path nil 'silent nil 'excl)))))
 
 (defun ende-tools--create-file (arguments root)
-  "Create a new project file immediately when the chat authorizes it."
+  "Create a new authorized file immediately when the chat permits it."
   (ende-tools--assert-properties arguments '("path" "content") "create_file")
   (let* ((path (ende-tools--required-string arguments "path"))
          (content (ende-tools--argument arguments "content")))
     (unless (stringp content)
       (error "tool argument content must be a string"))
-    (let* ((canonical (ende-tools--create-file-path path root))
-           (relative (file-relative-name canonical root)))
-      (ende-tools--assert-new-file-path canonical root)
+    (let* ((target (ende-tools--authorized-mutation-target
+                    path root '(create_file)))
+           (canonical (plist-get target :path))
+           (scope-root (plist-get target :root))
+           (public-path (plist-get target :public-path)))
+      (ende-tools--assert-new-file-path canonical scope-root)
       (ende-tools--apply-change-set-object
        (ende-change-set--create
         :operation 'create
-        :root root
+        :root scope-root :project-root root
         :source-kind "file"
-        :path relative
+        :path public-path :public-path public-path
+        :absolute-path canonical :strict-path-policy t
+        :authorization-tools '(create_file)
         :content content)))))
 
 (defun ende-tools--apply-edits-in-buffer (edits)
@@ -1509,18 +1641,22 @@ No visiting buffer or review state is involved in this operation."
 (defun ende-tools--current-change-set-source (change-set)
   "Resolve the current disk source represented by CHANGE-SET."
   (ende-tools--resolve-disk-source
-   (list :path (ende-change-set-path change-set))
-   (ende-change-set-root change-set)))
+   (list :path (ende-change-set-public-path change-set))
+   (or (ende-change-set-project-root change-set)
+       (ende-change-set-root change-set))))
 
 (defun ende-tools--apply-create-change-set-object (change-set)
   "Apply new-file CHANGE-SET without replacing an existing filesystem entry."
   (let* ((root (ende-change-set-root change-set))
-         (path (ende-tools--create-file-path
-                (ende-change-set-path change-set) root)))
+         (project-root (or (ende-change-set-project-root change-set) root))
+         (target (ende-tools--authorized-mutation-target
+                  (ende-change-set-public-path change-set) project-root
+                  (ende-change-set-authorization-tools change-set)))
+         (path (plist-get target :path)))
     (ende-tools--assert-new-file-path path root)
     (setf (ende-change-set-absolute-path change-set) path
-          (ende-change-set-expected-exists change-set) nil
-          (ende-change-set-authorization-tools change-set) '(create_file))
+          (ende-change-set-path change-set) (plist-get target :public-path)
+          (ende-change-set-expected-exists change-set) nil)
     (ende-tools--commit-change-sets (list change-set))
     (ende-tools--change-set-result change-set)))
 
@@ -1534,15 +1670,13 @@ No visiting buffer or review state is involved in this operation."
   "Apply disk-file CHANGE-SET after revalidating its source and every edit."
   (let* ((application
           (progn
-            (setf (ende-change-set-expected-exists change-set) t
-                  (ende-change-set-authorization-tools change-set) '(edit_file))
+            (setf (ende-change-set-expected-exists change-set) t)
             (ende-tools--commit-change-sets (list change-set))
             (list :applied_edits
                   (length (ende-change-set-edits change-set)))))
          (visiting-buffer
-          (ende-project-visiting-buffer
-           (ende-change-set-path change-set)
-           (ende-change-set-root change-set)))
+          (car (ende-tools--visiting-buffers-for-path
+                (ende-change-set-absolute-path change-set))))
          (visiting-modified
           (and visiting-buffer
                (with-current-buffer visiting-buffer
@@ -1578,32 +1712,36 @@ No visiting buffer or review state is involved in this operation."
                          (string-match-p "\\`[[:xdigit:]]\\{64\\}\\'"
                                          expected))))
       (error "expected_digest must be a SHA-256 hex digest"))
-    (let* ((resolved (ende-tools--resolve-mutation-path path root t))
+    (let* ((resolved (ende-tools--authorized-mutation-target
+                      path root '(delete_file)))
            (absolute (plist-get resolved :path))
-           (relative (plist-get resolved :relative)))
+           (scope-root (plist-get resolved :root))
+           (public-path (plist-get resolved :public-path)))
       ;; This deliberately authorizes the unresolved final component: the
       ;; resolver has already canonicalized its parent and rejected symlinks.
       (ende-tools--assert-path-authorized-for
        'delete_file absolute root t)
       (unless (or (file-exists-p absolute) (file-symlink-p absolute))
-        (error "file does not exist: %s" relative))
+        (error "file does not exist: %s" public-path))
       (unless (file-regular-p absolute)
-        (error "delete_file only removes regular files: %s" relative))
+        (error "delete_file only removes regular files: %s" public-path))
       (let* ((snapshot (ende-tools--capture-file absolute))
              (change-set
               (ende-change-set--create
-               :operation 'delete :root root :source-kind "file"
-               :path relative :absolute-path absolute :expected-exists t
+               :operation 'delete :root scope-root :project-root root
+               :source-kind "file"
+               :path public-path :public-path public-path
+               :absolute-path absolute :expected-exists t
                :strict-path-policy t :strict-buffer-policy t
                :authorization-tools '(delete_file))))
         (when (and expected
                    (not (string-equal expected (plist-get snapshot :digest))))
-          (error "expected_digest does not match the current file: %s" relative))
+          (error "expected_digest does not match the current file: %s" public-path))
         (ende-tools--set-snapshot change-set snapshot)
         (ende-tools--commit-change-sets (list change-set))
         (let* ((buffers (ende-change-set-visiting-buffers change-set))
                (present (and buffers t)))
-          (list :operation "delete" :path relative :status "applied"
+          (list :operation "delete" :path public-path :status "applied"
                 :visiting_buffer present
                 :visiting_buffer_count (length buffers)
                 :visiting_buffer_warning
@@ -1611,24 +1749,15 @@ No visiting buffer or review state is involved in this operation."
                      (concat "Clean visiting buffers were left unchanged. "
                              "Saving one later could recreate the deleted file."))))))))
 
-(defun ende-tools--patch-operation-tool (operation)
-  "Return the standalone operation tool corresponding to patch OPERATION."
-  (pcase operation
-    ('add 'create_file)
-    ('update 'edit_file)
-    ('delete 'delete_file)
-    (_ (error "unsupported patch operation: %S" operation))))
-
 (defun ende-tools--patch-change-set (operation root)
   "Create an unprepared change set for parsed patch OPERATION in ROOT."
-  (let* ((kind (plist-get operation :operation))
-         (target-tool (ende-tools--patch-operation-tool kind)))
+  (let ((kind (plist-get operation :operation)))
     (ende-change-set--create
      :operation kind :root root :source-kind "file"
      :path (plist-get operation :path)
      :expected-exists (not (eq kind 'add))
      :strict-path-policy t :strict-buffer-policy t
-     :authorization-tools (list 'apply_patch target-tool)
+     :authorization-tools '(apply_patch)
      :anchor-edits (plist-get operation :hunks)
      :content (plist-get operation :content)
      :prepared-coding-system (and (eq kind 'add) 'utf-8-unix))))
@@ -1636,14 +1765,16 @@ No visiting buffer or review state is involved in this operation."
 (defun ende-tools--patch-authorize-targets (change-sets root)
   "Resolve all CHANGE-SETS targets and authorize every scope before reads."
   (dolist (change-set change-sets)
-    (let* ((resolved (ende-tools--resolve-mutation-path
-                      (ende-change-set-path change-set) root t))
-           (path (plist-get resolved :path)))
-      (setf (ende-change-set-absolute-path change-set) path
-            (ende-change-set-path change-set) (plist-get resolved :relative))))
-  (dolist (change-set change-sets)
-    (ende-tools--mutation-assert-authorized
-     change-set (ende-change-set-absolute-path change-set)))
+    (let* ((tools (ende-change-set-authorization-tools change-set))
+           (resolved (ende-tools--authorized-mutation-target
+                      (ende-change-set-path change-set) root tools)))
+      (setf (ende-change-set-root change-set) (plist-get resolved :root)
+            (ende-change-set-project-root change-set) root
+            (ende-change-set-absolute-path change-set)
+            (plist-get resolved :path)
+            (ende-change-set-path change-set) (plist-get resolved :public-path)
+            (ende-change-set-public-path change-set)
+            (plist-get resolved :public-path))))
   (ende-tools--assert-change-set-targets-unique change-sets))
 
 (defun ende-tools--prepare-patch-change-sets (change-sets)
@@ -1795,6 +1926,7 @@ Return trimmed plain text without text properties."
          (destination (ende-tools--required-string arguments "destination")))
     (unless owner
       (error "copy_from_sandbox requires an active Ende job"))
+    (ende-tools--strict-relative-path destination)
     (let* ((resolved (ende-tools--resolve-mutation-path destination root t))
            (path (plist-get resolved :path))
            (relative (plist-get resolved :relative))
@@ -1833,7 +1965,7 @@ Return trimmed plain text without text properties."
   '((:type . "object")
     (:properties
      . ((:path . ((:type . "string")
-                  (:description . "Project-relative file path")))))
+                  (:description . "Project-relative path or authorized absolute path")))))
     (:required . ("path"))
     (:additionalProperties . :json-false)))
 
@@ -1842,7 +1974,7 @@ Return trimmed plain text without text properties."
     (:properties
      . ((:path . ((:type . "string")
                   (:minLength . 1)
-                  (:description . "Project-relative file path")))
+                  (:description . "Project-relative path or authorized absolute path")))
         (:content . ((:type . "string")
                      (:description . "Complete file contents; may be empty")))))
     (:required . ("path" "content"))
@@ -1853,7 +1985,7 @@ Return trimmed plain text without text properties."
     (:properties
      . ((:path . ((:type . "string")
                   (:minLength . 1)
-                  (:description . "Project-relative literal file path")))
+                  (:description . "Project-relative path or authorized absolute path")))
         (:expected_digest . ((:type . "string")
                              (:pattern . "^[0-9a-fA-F]{64}$")
                              (:description . "Optional SHA-256 precondition")))))
@@ -1924,7 +2056,7 @@ Return trimmed plain text without text properties."
          (list
           (cons :path '((:type . "string")
                         (:minLength . 1)
-                        (:description . "Project-relative file path")))
+                        (:description . "Project-relative path or authorized absolute path")))
           (cons :edits
                 (list (cons :type "array")
                       (cons :minItems 1)
@@ -1981,11 +2113,11 @@ Return trimmed plain text without text properties."
 
 (ende-tool-register
  'read_file
- "Read a bounded, 1-based line range from an authorized project file on disk."
+ "Read a bounded, 1-based line range from an authorized file on disk."
  '((:type . "object")
    (:properties
     . ((:path . ((:type . "string")
-                 (:description . "Project-relative file path")))
+                 (:description . "Project-relative path or authorized absolute path")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
        (:line_count . ((:type . "integer") (:minimum . 1)))))
    (:required . ("path"))
@@ -2031,7 +2163,7 @@ Return trimmed plain text without text properties."
 
 (ende-tool-register
  'create_file
- "Create a new disk file at an authorized project-relative path; fail if it exists."
+ "Create a new authorized file; fail if it exists."
  ende-tools--create-file-schema
  #'ende-tools--create-file :write)
 
@@ -2043,7 +2175,7 @@ Return trimmed plain text without text properties."
 
 (ende-tool-register
  'apply_patch
- "Apply an exact-context multi-file text patch within independently granted scopes."
+ "Apply an exact-context multi-file text patch to paths authorized for apply_patch."
  ende-tools--apply-patch-schema
  #'ende-tools--apply-patch :write)
 

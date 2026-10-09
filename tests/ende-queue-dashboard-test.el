@@ -53,7 +53,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                        (or (null face)
                            (and (not (eq (get-text-property (1- start) 'face)
                                          face))
-                                 (not (eq (get-text-property end 'face) face)))))
+                                (not (eq (get-text-property end 'face) face)))))
               (setq matched t))))
         matched))))
 
@@ -113,10 +113,10 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                   (- (point) (length "Activity:")))))
         (should activity-position)
         (should (eq (get-text-property activity-position
-                                        'ende-queue-ui-kind)
+                                       'ende-queue-ui-kind)
                     'detail))
         (should (eq (get-text-property activity-position
-                                        'ende-queue-ui-owner)
+                                       'ende-queue-ui-owner)
                     job))))))
 
 (defun ende-test--dashboard-flush-refresh (dashboard)
@@ -170,8 +170,8 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
     (let* ((ende--job-handlers (copy-alist ende--job-handlers))
            (ende-llm-function (ende-test--fake-llm nil t))
            (profile '(:name remote :model "gpt-6.1-sol"
-                             :reasoning-effort "max" :max-concurrency 2
-                             :parallel nil :tool-definitions (tool)))
+                            :reasoning-effort "max" :max-concurrency 2
+                            :parallel nil :tool-definitions (tool)))
            (activity-title "Inspecting sources")
            (updated (format-time-string "%H:%M:%S" 0))
            (activity-message
@@ -188,51 +188,51 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
       (ende-register-job-handler 'chat (lambda (_job) nil))
       (unwind-protect
           (ende-test--with-buffer "base"
-            (let* ((request (ende-test--dashboard-request profile))
-                   (messages (list (cons "user" user-message)))
-                   prepared)
-              (setcar request 'chat)
-              (setq job (ende-enqueue request))
-              (should (eq (ende-job-state job) 'running))
-              (ende-job-emit-event
-               job (list :type :agent-activity :title activity-title
-                         :status activity-message :updated-at 0))
-              (ende-job-emit-event job '(:type :tool-call-count :count 2))
-              (setq prepared
-                    (cl-letf (((symbol-function
-                                'ende-operations--source-metadata-block)
-                               (lambda (_job)
-                                 (concat "Source metadata:\n"
-                                         "Name: Roadmap.org\n"
-                                         "Type: file\n"
-                                         "Major mode: org-mode\n\n"))))
-                      (ende-operations--add-source-metadata job messages)))
-              (should (string-match-p "Source metadata:" (cdar prepared)))
-              ;; The provider-facing event must retain the original user text.
-              (ende-job-emit-event
-               job (list :type :begin :messages prepared))
-              (setq dashboard (ende-queue-open))
-              (set-window-buffer (selected-window) dashboard)
-              (with-current-buffer dashboard
-                (goto-char (ende-queue-ui--position-for-key
-                            (cons 'job (ende-job-id job))))
-                (ende-queue-ui-toggle-entry))
-              (dolist (view '(jobs buffers))
-                (with-current-buffer dashboard
-                  (unless (eq ende-queue-ui-view view)
-                    (ende-queue-ui-switch-view)))
-                (ende-test--dashboard-assert-chat-details
-                 dashboard job activity-title updated activity-message))
-              (let ((refreshed-title "Reviewing changed content")
-                    (refreshed-time (format-time-string "%H:%M:%S" 3600))
-                    (refreshed-message "Rechecking the updated activity line"))
-                (ende-job-emit-event
-                 job (list :type :agent-activity :title refreshed-title
-                           :status refreshed-message :updated-at 3600))
-                (ende-test--dashboard-flush-refresh dashboard)
-                (ende-test--dashboard-assert-chat-details
-                 dashboard job refreshed-title refreshed-time
-                 refreshed-message))))
+				  (let* ((request (ende-test--dashboard-request profile))
+					 (messages (list (cons "user" user-message)))
+					 prepared)
+				    (setcar request 'chat)
+				    (setq job (ende-enqueue request))
+				    (should (eq (ende-job-state job) 'running))
+				    (ende-job-emit-event
+				     job (list :type :agent-activity :title activity-title
+					       :status activity-message :updated-at 0))
+				    (ende-job-emit-event job '(:type :tool-call-count :count 2))
+				    (setq prepared
+					  (cl-letf (((symbol-function
+						      'ende-operations--source-metadata-block)
+						     (lambda (_job)
+						       (concat "Source metadata:\n"
+							       "Name: Roadmap.org\n"
+							       "Type: file\n"
+							       "Major mode: org-mode\n\n"))))
+					    (ende-operations--add-source-metadata job messages)))
+				    (should (string-match-p "Source metadata:" (cdar prepared)))
+				    ;; The provider-facing event must retain the original user text.
+				    (ende-job-emit-event
+				     job (list :type :begin :messages prepared))
+				    (setq dashboard (ende-queue-open))
+				    (set-window-buffer (selected-window) dashboard)
+				    (with-current-buffer dashboard
+				      (goto-char (ende-queue-ui--position-for-key
+						  (cons 'job (ende-job-id job))))
+				      (ende-queue-ui-toggle-entry))
+				    (dolist (view '(jobs buffers))
+				      (with-current-buffer dashboard
+					(unless (eq ende-queue-ui-view view)
+					  (ende-queue-ui-switch-view)))
+				      (ende-test--dashboard-assert-chat-details
+				       dashboard job activity-title updated activity-message))
+				    (let ((refreshed-title "Reviewing changed content")
+					  (refreshed-time (format-time-string "%H:%M:%S" 3600))
+					  (refreshed-message "Rechecking the updated activity line"))
+				      (ende-job-emit-event
+				       job (list :type :agent-activity :title refreshed-title
+						 :status refreshed-message :updated-at 3600))
+				      (ende-test--dashboard-flush-refresh dashboard)
+				      (ende-test--dashboard-assert-chat-details
+				       dashboard job refreshed-title refreshed-time
+				       refreshed-message))))
         (when (buffer-live-p dashboard)
           (kill-buffer dashboard))))))
 

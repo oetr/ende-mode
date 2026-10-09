@@ -36,6 +36,15 @@
   (ende-tool-call "apply_patch" (list (cons "patch" patch))
                   root access-config))
 
+(defun ende-test--tool-access-config (root forms)
+  "Resolve tool access configuration FORMS with project ROOT."
+  (with-temp-buffer
+    (org-mode)
+    (insert
+     (ende-test--chat-config-block (cons `(root ,root) forms))
+     "* Conversation\n** Tool access\n")
+    (ende-test--chat-config-at (ende-chat--build-document) "Tool access")))
+
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
     (let ((names (mapcar (lambda (definition)
@@ -161,6 +170,83 @@
         (delete-directory root t))
       (when (file-exists-p outside)
         (delete-file outside)))))
+
+(ert-deftest ende-test/file-tools-read-authorized-external-resources ()
+  (let* ((root (make-temp-file "ende-tools-resource-project-" t))
+         (external-root (make-temp-file "ende-tools-resource-external-" t))
+         (unrelated-root (make-temp-file "ende-tools-resource-unrelated-" t))
+         (project-file (expand-file-name "src/main.el" root))
+         (external-file (expand-file-name "allowed/config.el" external-root))
+         (excluded-file (expand-file-name "allowed/private/secret.el" external-root))
+         (outside-include (expand-file-name "other/config.el" external-root))
+         (unrelated-file (expand-file-name "secret.txt" unrelated-root)))
+    (unwind-protect
+        (progn
+          (dolist (path (list project-file external-file excluded-file
+                              outside-include unrelated-file))
+            (make-directory (file-name-directory path) t))
+          (with-temp-file project-file (insert "project contents\n"))
+          (with-temp-file external-file (insert "external contents\n"))
+          (with-temp-file excluded-file (insert "private contents\n"))
+          (with-temp-file outside-include (insert "not included\n"))
+          (with-temp-file unrelated-file (insert "unrelated\n"))
+          (let* ((configuration
+                  (ende-test--tool-access-config
+                   root
+                   `((resource project (include "**"))
+                     (resource external :root ,external-root
+                               (include "allowed/**")
+                               (exclude "allowed/private/**"))
+                     (tools read_file file_info list_project_files)
+                     (set-tool-resources read_file file_info list_project_files
+                                         :resources project external))))
+                 (project-read
+                  (ende-tool-call 'read_file '(:path "src/main.el")
+                                  root configuration))
+                 (external-read
+                  (ende-tool-call 'read_file (list :path external-file)
+                                  root configuration))
+                 (excluded-read
+                  (ende-tool-call 'read_file (list :path excluded-file)
+                                  root configuration))
+                 (outside-read
+                  (ende-tool-call 'read_file (list :path outside-include)
+                                  root configuration))
+                 (unrelated-read
+                  (ende-tool-call 'read_file (list :path unrelated-file)
+                                  root configuration)))
+            (should (plist-get project-read :ok))
+            (should (equal (plist-get (plist-get project-read :result) :path)
+                           "src/main.el"))
+            (should (plist-get external-read :ok))
+            (let* ((external-result (plist-get external-read :result))
+                   (public-path (plist-get external-result :path))
+                   (round-trip
+                    (ende-tool-call 'file_info (list :path public-path)
+                                    root configuration)))
+              (should (file-name-absolute-p public-path))
+              (should (equal public-path (file-truename external-file)))
+              (should (equal (plist-get external-result :content)
+                             "external contents\n"))
+              (should (plist-get round-trip :ok))
+              (should (equal (plist-get (plist-get round-trip :result) :path)
+                             public-path)))
+            (dolist (denied (list excluded-read outside-read unrelated-read))
+              (should-not (plist-get denied :ok)))
+            (let* ((listed (ende-tool-call 'list_project_files nil
+                                           root configuration))
+                   (paths (mapcar (lambda (record) (plist-get record :path))
+                                  (plist-get (plist-get listed :result) :files))))
+              (should (plist-get listed :ok))
+              (should (equal paths '("src/main.el")))
+              (should-not (member (file-truename external-file) paths))))
+          ;; Internal calls without a frozen chat policy remain project-scoped.
+          (let ((unscoped
+                 (ende-tool-call 'read_file (list :path external-file) root)))
+            (should-not (plist-get unscoped :ok))))
+      (dolist (directory (list root external-root unrelated-root))
+        (when (file-directory-p directory)
+          (delete-directory directory t))))))
 
 (ert-deftest ende-test/project-tools-edit-file-enforces-resource-scope ()
   (let* ((root (make-temp-file "ende-tools-edit-scope-" t))
@@ -788,6 +874,94 @@
       (when (file-directory-p root)
         (delete-directory root t)))))
 
+(ert-deftest ende-test/file-tools-mutate-authorized-external-files ()
+  (let* ((root (make-temp-file "ende-tools-mutation-project-" t))
+         (external-root (make-temp-file "ende-tools-mutation-external-" t))
+         (allowed-directory (expand-file-name "allowed" external-root))
+         (blocked-directory (expand-file-name "blocked" external-root))
+         (path (expand-file-name "allowed/new.txt" external-root))
+         (blocked-path (expand-file-name "blocked/no.txt" external-root)))
+    (unwind-protect
+        (progn
+          (make-directory allowed-directory t)
+          (make-directory blocked-directory t)
+          (let* ((configuration
+                  (ende-test--tool-access-config
+                   root
+                   `((resource external :root ,external-root
+                               (include "allowed/**"))
+                     (tools read_file file_info edit_file create_file delete_file)
+                     (set-tool-resources read_file file_info edit_file create_file
+                                         delete_file :resources external))))
+                 (created (ende-tool-call
+                           'create_file
+                           (list :path path :content "first version\n")
+                           root configuration)))
+            (should (plist-get created :ok))
+            (should (equal (plist-get (plist-get created :result) :path)
+                           path))
+            (let ((read (ende-tool-call 'read_file (list :path path)
+                                        root configuration)))
+              (should (plist-get read :ok))
+              (should (equal (plist-get (plist-get read :result) :content)
+                             "first version\n")))
+            (let ((edited
+                   (ende-tool-call
+                    'edit_file
+                    (list :path path
+                          :edits (list (ende-test--anchor-edit
+                                        "first version" "replace" "second version")))
+                    root configuration)))
+              (should (plist-get edited :ok))
+              (should (equal (plist-get (plist-get edited :result) :path)
+                             path)))
+            (let ((deleted (ende-tool-call 'delete_file (list :path path)
+                                           root configuration)))
+              (should (plist-get deleted :ok))
+              (should (equal (plist-get (plist-get deleted :result) :path)
+                             path))
+              (should-not (file-exists-p path)))
+            (let ((denied (ende-tool-call
+                           'create_file
+                           (list :path blocked-path :content "not allowed")
+                           root configuration)))
+              (should-not (plist-get denied :ok))
+              (should-not (file-exists-p blocked-path)))))
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-directory-p external-root)
+        (delete-directory external-root t)))))
+
+(ert-deftest ende-test/file-tools-reject-external-symlink-escape ()
+  (let* ((root (make-temp-file "ende-tools-symlink-project-" t))
+         (external-root (make-temp-file "ende-tools-symlink-external-" t))
+         (outside-root (make-temp-file "ende-tools-symlink-outside-" t))
+         (allowed-directory (expand-file-name "allowed" external-root))
+         (link (expand-file-name "allowed/escape" external-root))
+         (outside-file (expand-file-name "secret.txt" outside-root)))
+    (unwind-protect
+        (progn
+          (make-directory allowed-directory t)
+          (with-temp-file outside-file (insert "secret\n"))
+          (make-symbolic-link outside-root link)
+          (let* ((configuration
+                  (ende-test--tool-access-config
+                   root
+                   `((resource external :root ,external-root
+                               (include "allowed/**"))
+                     (tools read_file)
+                     (set-tool-resources read_file :resources external))))
+                 (escaped
+                  (ende-tool-call
+                   'read_file
+                   (list :path (expand-file-name "secret.txt" link))
+                   root configuration)))
+            (should-not (plist-get escaped :ok))
+            (should (file-exists-p outside-file))))
+      (dolist (directory (list root external-root outside-root))
+        (when (file-directory-p directory)
+          (delete-directory directory t))))))
+
 (ert-deftest ende-test/project-tools-create-file-is-exclusive-at-write-time ()
   (let* ((root (make-temp-file "ende-tools-create-race-" t))
          (path (expand-file-name "race.el" root))
@@ -1010,6 +1184,80 @@
         (kill-buffer buffer))
       (when (file-directory-p root)
         (delete-directory root t)))))
+
+(ert-deftest ende-test/file-tools-apply-patch-mixes-project-and-external-targets ()
+  (let* ((root (make-temp-file "ende-tools-patch-project-root-" t))
+         (external-root (make-temp-file "ende-tools-patch-external-root-" t))
+         (project-file (expand-file-name "src/main.txt" root))
+         (external-file (expand-file-name "emacs/init.el" external-root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory project-file) t)
+          (make-directory (file-name-directory external-file) t)
+          (with-temp-file project-file (insert "project before\nold\n"))
+          (with-temp-file external-file (insert "external before\nold\n"))
+          (let* ((configuration
+                  (ende-test--tool-access-config
+                   root
+                   `((resource project (include "src/**"))
+                     (resource dotfiles :root ,external-root
+                               (include "emacs/**"))
+                     (tools apply_patch)
+                     (set-tool-resources apply_patch :resources project dotfiles))))
+                 (patch
+                  (concat "*** Begin Patch\n"
+                          "*** Update File: src/main.txt\n"
+                          "@@\n project before\n-old\n+project updated\n"
+                          "*** Update File: " external-file "\n"
+                          "@@\n external before\n-old\n+external updated\n"
+                          "*** End Patch\n"))
+                 (result (ende-test--apply-patch-call
+                          patch root configuration))
+                 (entries (append
+                           (plist-get (plist-get result :result) :files)
+                           nil)))
+            (should (plist-get result :ok))
+            (should (equal (mapcar (lambda (entry) (plist-get entry :path))
+                                   entries)
+                           (list "src/main.txt" external-file)))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents project-file)
+                             (buffer-string))
+                           "project before\nproject updated\n"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents external-file)
+                             (buffer-string))
+                           "external before\nexternal updated\n")))
+          ;; A project-only patch grant rejects the external operation before
+          ;; committing even the authorized project operation in the batch.
+          (let* ((project-only
+                  (ende-test--tool-access-config
+                   root
+                   `((resource project (include "src/**"))
+                     (tools apply_patch)
+                     (set-tool-resources apply_patch :resources project))))
+                 (denied-patch
+                  (concat "*** Begin Patch\n"
+                          "*** Update File: src/main.txt\n"
+                          "@@\n project before\n-project updated\n+should stay\n"
+                          "*** Update File: " external-file "\n"
+                          "@@\n external before\n-external updated\n+should stay\n"
+                          "*** End Patch\n"))
+                 (denied (ende-test--apply-patch-call
+                          denied-patch root project-only)))
+            (should-not (plist-get denied :ok))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents project-file)
+                             (buffer-string))
+                           "project before\nproject updated\n"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents external-file)
+                             (buffer-string))
+                           "external before\nexternal updated\n"))))
+      (when (file-directory-p root)
+        (delete-directory root t))
+      (when (file-directory-p external-root)
+        (delete-directory external-root t)))))
 
 (ert-deftest ende-test/project-tools-apply-patch-preflight-leaves-files-alone ()
   (let* ((root (make-temp-file "ende-tools-patch-preflight-" t))

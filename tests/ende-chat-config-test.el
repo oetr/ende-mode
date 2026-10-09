@@ -276,7 +276,101 @@
       (when (file-directory-p ende-test-root)
         (delete-directory ende-test-root t)))))
 
-(ert-deftest ende-test/chat-patch-needs-patch-and-operation-grants ()
+(ert-deftest ende-test/chat-config-file-resources-have-independent-roots ()
+  (let* ((project-a (make-temp-file "ende-config-project-a-" t))
+         (project-b (make-temp-file "ende-config-project-b-" t))
+         (external (make-temp-file "ende-config-external-" t))
+         (project-a-file (expand-file-name "source.txt" project-a))
+         (project-b-file (expand-file-name "source.txt" project-b))
+         (external-file (expand-file-name "allowed/notes.txt" external))
+         (missing (expand-file-name "missing" external)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory external-file) t)
+          (with-temp-file project-a-file (insert "project A\n"))
+          (with-temp-file project-b-file (insert "project B\n"))
+          (with-temp-file external-file (insert "external\n"))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,project-a)
+                (resource project (include "**"))
+                (resource external :root ,external (include "allowed/**"))
+                (tools read_file)
+                (set-tool-resources read_file :resources project external)))
+             "* Conversation\n** Original root\nRead the original root.\n"
+             "** Changed root\n"
+             (ende-test--chat-config-block `((root ,project-b)))
+             "Read the new root and the fixed external root.\n")
+            (let* ((document (ende-chat--build-document))
+                   (original (ende-test--chat-config-at document "Original root"))
+                   (changed (ende-test--chat-config-at document "Changed root"))
+                   (project-resource
+                    (cdr (assq 'project (plist-get changed :resources))))
+                   (external-resource
+                    (cdr (assq 'external (plist-get changed :resources))))
+                   (project-read
+                    (ende-tool-call 'read_file '(:path "source.txt") nil changed))
+                   (external-read
+                    (ende-tool-call 'read_file (list :path external-file)
+                                    nil changed)))
+              (should (equal (plist-get original :root)
+                             (ende-project-normalize-root project-a)))
+              (should (equal (plist-get changed :root)
+                             (ende-project-normalize-root project-b)))
+              (should-not (plist-get project-resource :root))
+              (should (equal (plist-get external-resource :root)
+                             (ende-project-normalize-root external)))
+              (should (equal (ende-tools--file-resource-root
+                              project-resource (plist-get original :root))
+                             (ende-project-normalize-root project-a)))
+              (should (equal (ende-tools--file-resource-root
+                              project-resource (plist-get changed :root))
+                             (ende-project-normalize-root project-b)))
+              (should (equal (ende-tools--file-resource-root
+                              external-resource (plist-get original :root))
+                             (ende-tools--file-resource-root
+                              external-resource (plist-get changed :root))))
+              (should (plist-get project-read :ok))
+              (should (equal (plist-get (plist-get project-read :result) :content)
+                             "project B\n"))
+              (should (plist-get external-read :ok))
+              (should (equal (plist-get (plist-get external-read :result) :path)
+                             (file-truename external-file)))))
+          (dolist (forms
+                   (list
+                    `((resource bad :type url :root ,external
+                                (include "https://example.com/**")))
+                    `((resource bad :root ,missing (include "**")))
+                    `((resource bad (include "**") :root ,external))
+                    '((resource bad (include "../secret")))
+                    '((resource bad (include "/absolute/**")))))
+            (with-temp-buffer
+              (org-mode)
+              (insert (ende-test--chat-config-block forms)
+                      "* Conversation\n** Invalid\n")
+              (should-error
+               (ende-test--chat-config-at (ende-chat--build-document) "Invalid")))))
+      (let ((failure
+             (with-temp-buffer
+               (org-mode)
+               (insert
+                (ende-test--chat-config-block
+                 `((resource bad :type url :root ,external
+                             (include "https://example.com/**"))))
+                "* Conversation\n** Invalid\n")
+               (should-error
+                (ende-test--chat-config-at
+                 (ende-chat--build-document) "Invalid")))))
+        (should (string-match-p
+                 ":root is only valid for file resources"
+                 (error-message-string failure))))
+      (dolist (directory (list project-a project-b external))
+        (when (file-directory-p directory)
+          (delete-directory directory t))))))
+
+(ert-deftest ende-test/chat-patch-uses-only-apply-patch-grants ()
   (let* ((root (make-temp-file "ende-patch-policy-" t))
          (source (expand-file-name "src/main.txt" root))
          (added (expand-file-name "src/new.txt" root))
@@ -297,14 +391,15 @@
               `((root ,root)
                 (resource source (include "src/**"))
                 (resource disposable (include "tmp/**"))
-                (set-tool-resources apply_patch :resources source disposable)
-                (set-tool-resources edit_file create_file :resources source)
-                (set-tool-resources delete_file :resources disposable)))
+                (resource narrow-delete (include "tmp/direct.txt"))
+                (set-tool-resources apply_patch :resources source disposable)))
              "* Conversation\n** Mixed\n"
              (ende-test--chat-config-block '((tools apply_patch)))
              "Apply a fully granted patch.\n"
              "** Hide delete\n"
-             (ende-test--chat-config-block '((tools apply_patch delete_file)))
+             (ende-test--chat-config-block
+              '((tools apply_patch delete_file)
+                (set-tool-resources delete_file :resources narrow-delete)))
              "*** Clear exposure only\n"
              (ende-test--chat-config-block '((clear-tools) (tools apply_patch)))
              "Delete through the patch's retained grant.\n"
@@ -312,9 +407,8 @@
              (ende-test--chat-config-block
               '((tools apply_patch)
                 (clear-tool-resources)
-                (set-tool-resources apply_patch :resources source disposable)
-                (set-tool-resources edit_file create_file :resources source)))
-             "A patch grant alone cannot delete.\n")
+                (set-tool-resources apply_patch :resources source disposable)))
+             "A patch grant alone permits patch operations.\n")
             (let* ((document (ende-chat--build-document))
                    (mixed (ende-test--chat-config-at document "Mixed"))
                    (exposed (ende-test--chat-config-at document "Hide delete"))
@@ -342,23 +436,22 @@
               (let ((hidden-patch
                      "*** Begin Patch\n*** Delete File: tmp/hidden.txt\n*** End Patch"))
                 (let ((direct (ende-tool-call
-                               'delete_file '(:path "tmp/hidden.txt") root hidden))
+                               'delete_file '(:path "tmp/hidden.txt") root exposed))
                       (applied (ende-tool-call
                                 'apply_patch (list :patch hidden-patch)
                                 root hidden)))
                   (should-not (plist-get direct :ok))
-                  (should (string-match-p "not active" (plist-get direct :error)))
+                  (should (string-match-p "not authorized"
+                                          (plist-get direct :error)))
                   (should (plist-get applied :ok))
                   (should-not (file-exists-p hidden-delete))))
               (let ((delete-only-patch
                      "*** Begin Patch\n*** Delete File: tmp/denied.txt\n*** End Patch"))
-                (let ((denied (ende-tool-call
-                               'apply_patch (list :patch delete-only-patch)
-                               root missing)))
-                  (should-not (plist-get denied :ok))
-                  (should (string-match-p "delete_file"
-                                          (plist-get denied :error)))
-                  (should (file-exists-p denied-delete)))))))
+                (let ((applied (ende-tool-call
+                                'apply_patch (list :patch delete-only-patch)
+                                root missing)))
+                  (should (plist-get applied :ok))
+                  (should-not (file-exists-p denied-delete)))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
