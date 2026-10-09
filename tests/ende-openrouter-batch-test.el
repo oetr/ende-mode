@@ -512,14 +512,29 @@
            (real-send-eof (symbol-function 'process-send-eof)))
       (cl-labels
           ((finish-request (process status body)
-             (with-temp-file (process-get process :ende-headers-file)
-               (insert (format "HTTP/1.1 %d Mock\r\n"
-                               status)
-                       "Content-Type: application/json\r\n\r\n"))
-             (funcall (process-filter process) process body)
-             (funcall real-send-eof process)
-             (while (process-live-p process)
-               (accept-process-output process 0.01))))
+             (let ((sentinel (process-sentinel process))
+                   (sentinel-finished nil)
+                   (deadline (+ (float-time) 5.0)))
+               ;; Process exit can precede the sentinel's stage cleanup and
+               ;; handoff/result callbacks.  Wait for its terminal return.
+               (set-process-sentinel
+                process
+                (lambda (proc event)
+                  (funcall sentinel proc event)
+                  (when (memq (process-status proc) '(exit signal closed failed))
+                    (setq sentinel-finished t))))
+               (unwind-protect
+                   (progn
+                     (with-temp-file (process-get process :ende-headers-file)
+                       (insert (format "HTTP/1.1 %d Mock\r\n" status)
+                               "Content-Type: application/json\r\n\r\n"))
+                     (funcall (process-filter process) process body)
+                     (funcall real-send-eof process)
+                     (while (and (not sentinel-finished)
+                                 (< (float-time) deadline))
+                       (accept-process-output nil 0.01))
+                     (should sentinel-finished))
+                 (set-process-sentinel process sentinel)))))
         (cl-letf (((symbol-function 'make-process)
                    (lambda (&rest args)
                      (let ((process

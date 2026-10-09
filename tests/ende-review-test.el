@@ -345,8 +345,15 @@
   (should (string= (ende-review--blend-color "#000000" "#ffffff" 0.5) "#808080"))
   (should (string= (ende-review--blend-color "#333333" "#ffffff" 0.0) "#333333"))
   (should (string= (ende-review--blend-color "#333333" "#ffffff" 1.0) "#ffffff"))
+  (should (string= (ende-review--blend-color "#102030" "#905010" 0.25) "#302c28"))
+  (should (string= (ende-review--blend-color "#102030" "#905010" 0.75) "#704418"))
   (should (null (ende-review--blend-color "#abc" "#ffffff" 0.5)))
   (should (null (ende-review--blend-color "#ffffff" "junk" 0.5))))
+
+(ert-deftest ende-test/review-highlight-blend-clamps-ratio-and-defaults-to-base ()
+  (should (string= (ende-review--blend-color "#102030" "#905010" nil) "#102030"))
+  (should (string= (ende-review--blend-color "#102030" "#905010" -0.5) "#102030"))
+  (should (string= (ende-review--blend-color "#102030" "#905010" 1.5) "#905010")))
 
 (ert-deftest ende-test/review-highlight-hex-round-trip ()
   (should (equal (ende-review--hex-components "#a1b2c3") '(161 178 195)))

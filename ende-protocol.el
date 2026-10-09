@@ -262,7 +262,8 @@ Errors are signaled so the transport can turn them into protocol failures."
 (defun ende-protocol-json-has-key-p (key object)
   "Return non-nil when parsed JSON hash table OBJECT contains KEY."
   (and (hash-table-p object)
-       (hash-table-contains-p key object)))
+       (let ((missing (make-symbol "missing")))
+         (not (eq (gethash key object missing) missing)))))
 
 ;; Keep the old names for packages that loaded the previous internal helpers.
 (defalias 'ende-protocol--json-read-string #'ende-protocol-json-read-string)

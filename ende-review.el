@@ -128,7 +128,10 @@ Read-only operations such as `summarize' do not use this policy."
         (ratio (max 0.0 (min 1.0 (float (or blend 0.0))))))
     (when (and base-rgb fg-rgb)
       (ende-review--rgb-to-hex
-       (color-blend fg-rgb base-rgb ratio)))))
+       (cl-mapcar (lambda (fg base)
+                    (+ (* fg ratio)
+                       (* base (- 1.0 ratio))))
+                  fg-rgb base-rgb)))))
 
 (defun ende-review--unspecified-p (value)
   "Return non-nil when VALUE is an unresolved `face-attribute' placeholder."

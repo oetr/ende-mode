@@ -216,6 +216,20 @@
      (ende-protocol-sse-feed
       parser (mapconcat (lambda (_) "data:\n") (number-sequence 1 10) "")))))
 
+(ert-deftest ende-test/json-key-presence-distinguishes-null-from-missing ()
+  (let ((object (ende-protocol-json-read-string
+                 "{\"null\":null,\"false\":false,\"zero\":0,\"empty\":\"\"}")))
+    (should-not (ende-protocol-json-get "null" object))
+    (dolist (key '("null" "false" "zero" "empty"))
+      (should (ende-protocol-json-has-key-p key object)))
+    (should-not (ende-protocol-json-has-key-p "missing" object))
+    (puthash "sentinel" (make-symbol "missing") object)
+    (should (ende-protocol-json-has-key-p "sentinel" object)))
+  (should-not (ende-protocol-json-has-key-p
+               "missing" (make-hash-table :test 'equal)))
+  (should-not (ende-protocol-json-has-key-p "key" nil))
+  (should-not (ende-protocol-json-has-key-p "key" '(("key" . t)))))
+
 (provide 'ende-protocol-test)
 
 ;;; ende-protocol-test.el ends here

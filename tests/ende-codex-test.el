@@ -558,12 +558,15 @@
   (let* ((auth-file (make-temp-file "ende-openai-auth-test-"))
          (ende-codex-auth-file auth-file)
          (ende-codex-issuer "https://auth.openai.com:443")
+         (ende-codex--refresh-flights (make-hash-table :test #'equal))
+         (ende-codex--refresh-processes nil)
          (captured nil)
          (process nil)
-         (refreshed nil)
-         (refreshed-again nil)
+         (refreshed :pending)
+         (refreshed-again :pending)
          (make-process-count 0)
          (real-make-process (symbol-function 'make-process))
+         (real-send-eof (symbol-function 'process-send-eof))
          (auth '(:access "old-access" :refresh "old-refresh"
 			 :expires 0 :account-id "account-id")))
     (unwind-protect
@@ -585,7 +588,12 @@
                                       :stderr (plist-get args :stderr)
                                       :command (list "cat")
                                       :connection-type 'pipe
-                                      :noquery t)))))
+                                      :noquery t
+                                      :filter (plist-get args :filter)
+                                      :sentinel (plist-get args :sentinel)))))
+                    ;; The fixture, not request startup, controls mock exit.
+                    ((symbol-function 'process-send-string) #'ignore)
+                    ((symbol-function 'process-send-eof) #'ignore))
             (ende-codex--refresh-auth auth
                                       (lambda (value) (setq refreshed value)))
             (ende-codex--refresh-auth
@@ -594,24 +602,23 @@
             (let* ((command (plist-get captured :command))
                    (headers-file
                     (cadr (member "--dump-header" command)))
-                   (filter (plist-get captured :filter))
-                   (sentinel (plist-get captured :sentinel)))
+                   (filter (plist-get captured :filter)))
               (should-not (member "old-refresh" command))
               (with-temp-file headers-file
                 (insert "HTTP/1.1 200 OK\r\n\r\n"))
-              (with-current-buffer (plist-get captured :buffer)
-                (erase-buffer))
-              (when (process-live-p process)
-                (process-send-eof process))
-              (while (process-live-p process)
-                (accept-process-output process 0.05))
-              (with-current-buffer (plist-get captured :buffer)
-                (erase-buffer))
               (funcall filter process
                        (concat "{\"access_token\":\"new-access\","
                                "\"refresh_token\":\"new-refresh\","
                                "\"expires_in\":3600}"))
-              (funcall sentinel process "finished\n")
+              (funcall real-send-eof process)
+              (let ((deadline (+ (float-time) 5.0)))
+                (while (and (or (eq refreshed :pending)
+                                (eq refreshed-again :pending))
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.01)))
+              (should-not (eq refreshed :pending))
+              (should-not (eq refreshed-again :pending))
+              (should-not (process-live-p process))
               (should (string= (plist-get refreshed :access) "new-access"))
               (should (string= (plist-get refreshed :refresh) "new-refresh"))
               (should (equal refreshed-again refreshed))
@@ -677,8 +684,14 @@
                        "\"refresh_token\":\"new-refresh\","
                        "\"expires_in\":3600}"))
               (funcall real-send-eof process)
-              (while (process-live-p process)
-                (accept-process-output process 0.01))
+              ;; Terminal process status does not imply sentinel delivery.
+              ;; Wait for the remaining callback, not merely process exit.
+              (let ((deadline (+ (float-time) 5.0)))
+                (while (and (eq second-value :pending)
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.01)))
+              (should-not (eq second-value :pending))
+              (should-not (process-live-p process))
               (should (eq first-value :pending))
               (should (equal (plist-get second-value :access) "new-access"))
               (should-not (gethash key ende-codex--refresh-flights))

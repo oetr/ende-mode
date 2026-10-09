@@ -4,7 +4,7 @@
 ;; Author: Peter
 ;; Version: 0.3
 ;; Keywords: convenience, tools, llm
-;; Package-Requires: ((emacs "31.1"))
+;; Package-Requires: ((emacs "30.1"))
 
 ;;; Commentary:
 
