@@ -1468,7 +1468,23 @@ permissions.\n\n"
    ende-chat--org-format
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
-Choose a concise title for the request. Otherwise omit this keyword.")
+Choose a concise title for the request. Otherwise omit this keyword.\n\n"
+   "When producing code, work incrementally. Do not accumulate several production-code changes before validating them.
+For every production-code change:
+1. Make one small coherent change. Prefer changing one function or one tightly coupled behavior at a time.
+2. Immediately run the cheapest structural/syntax validation for every changed source file.
+3. Do not make another behavioral change while structural validation is failing.
+4. Once syntax is clean, run the smallest relevant focused test.
+5. Inspect the resulting diff before continuing.
+6. Keep only green checkpoints. Commit when a coherent step is green.
+
+Do not modify project source through shell/Python/sed commands. Use the provided file-editing tools for source changes. Shell commands are for inspection and verification only.
+
+If the same syntax error or focused test is still failing after two repair edits, stop repairing the current state. Restore the last green checkpoint, reconsider the approach, and reimplement that step in a smaller form.
+
+Do not try to recover a large malformed Lisp form by repeatedly adding or removing parentheses. Restore the known-good form and reapply the intended structural change cleanly.
+
+Prefer several small verified patches over one large rewrite.")
   "System prompt for Org-backed chat requests.")
 
 (defun ende-chat--system-prompt (document)
