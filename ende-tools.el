@@ -2253,6 +2253,8 @@ process-group cancellation function with the active Ende job."
           (cons :edits
                 (list (cons :type "array")
                       (cons :minItems 1)
+                      (cons :maxItems ende-tools-max-edits)
+                      (cons :description "Maximum edits per call.")
                       (cons :items ende-tools--edit-item-schema)))))
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
@@ -2290,11 +2292,13 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'list_project_files
  "List allowed regular files on disk below the project root."
- '((:type . "object")
+ `((:type . "object")
    (:properties
     . ((:glob . ((:type . "string")
                  (:description . "Optional project-relative wildcard")))
-       (:max_results . ((:type . "integer") (:minimum . 1)))
+       (:max_results . ((:type . "integer") (:minimum . 1)
+                        (:maximum . ,ende-tools-max-listed-files)
+                        (:description . "Defaults to the configured maximum.")))
        (:include_metadata . ((:type . "boolean")))))
    (:additionalProperties . :json-false))
  #'ende-tools--list-project-files)
@@ -2307,12 +2311,14 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'read_file
  "Read a bounded, 1-based line range from an authorized file on disk."
- '((:type . "object")
+ `((:type . "object")
    (:properties
     . ((:path . ((:type . "string")
                  (:description . "Project-relative path or authorized absolute path")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
-       (:line_count . ((:type . "integer") (:minimum . 1)))))
+       (:line_count . ((:type . "integer") (:minimum . 1)
+                       (:maximum . ,ende-tools-max-read-lines)
+                       (:description . "Defaults to the configured maximum.")))))
    (:required . ("path"))
    (:additionalProperties . :json-false))
  #'ende-tools--read-file)
@@ -2325,11 +2331,13 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'read_buffer
  "Read a bounded, 1-based line range from a visiting buffer, including unsaved contents."
- '((:type . "object")
+ `((:type . "object")
    (:properties
     . ((:buffer_id . ((:type . "string")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
-       (:line_count . ((:type . "integer") (:minimum . 1)))))
+       (:line_count . ((:type . "integer") (:minimum . 1)
+                       (:maximum . ,ende-tools-max-read-lines)
+                       (:description . "Defaults to the configured maximum.")))))
    (:required . ("buffer_id"))
    (:additionalProperties . :json-false))
  #'ende-tools--read-buffer)
@@ -2337,13 +2345,19 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'search_project
  "Search allowed project files on disk with an Emacs regexp."
- '((:type . "object")
+ `((:type . "object")
    (:properties
     . ((:regexp . ((:type . "string")))
        (:glob . ((:type . "string")))
-       (:context_before . ((:type . "integer") (:minimum . 0)))
-       (:context_after . ((:type . "integer") (:minimum . 0)))
-       (:max_results . ((:type . "integer") (:minimum . 1)))))
+       (:context_before . ((:type . "integer") (:minimum . 0)
+                           (:maximum . ,ende-tools-max-search-context-lines)
+                           (:description . "Defaults to the configured maximum.")))
+       (:context_after . ((:type . "integer") (:minimum . 0)
+                          (:maximum . ,ende-tools-max-search-context-lines)
+                          (:description . "Defaults to the configured maximum.")))
+       (:max_results . ((:type . "integer") (:minimum . 1)
+                        (:maximum . ,ende-tools-max-search-results)
+                        (:description . "Defaults to the configured maximum.")))))
    (:required . ("regexp"))
    (:additionalProperties . :json-false))
  #'ende-tools--search-project)

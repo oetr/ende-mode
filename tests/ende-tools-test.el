@@ -69,6 +69,16 @@
       (error "timed out waiting for run_host_command"))
     result))
 
+(defun ende-test--public-tool-schema (definitions name)
+  "Return the public generated schema for tool NAME from DEFINITIONS."
+  (let* ((definition
+          (cl-find-if
+           (lambda (candidate)
+             (equal (alist-get :name (alist-get :function candidate)) name))
+           definitions))
+         (parameters (alist-get :parameters (alist-get :function definition))))
+    (ende-protocol-json-read-string (json-encode parameters))))
+
 (defun ende-test--wait-for-host-command-file (path)
   "Wait for the host command to create PATH."
   (let ((deadline (+ (float-time) 8.0)))
@@ -109,6 +119,19 @@
                (json-encode (alist-get :parameters function)))))
         (should (hash-table-p (gethash "properties" schema)))
         (should (eq (gethash "additionalProperties" schema) :false))))
+    (dolist (case `(("list_project_files" "max_results"
+                     ,ende-tools-max-listed-files)
+                    ("read_file" "line_count" ,ende-tools-max-read-lines)
+                    ("read_buffer" "line_count" ,ende-tools-max-read-lines)
+                    ("search_project" "context_before"
+                     ,ende-tools-max-search-context-lines)
+                    ("search_project" "context_after"
+                     ,ende-tools-max-search-context-lines)
+                    ("search_project" "max_results"
+                     ,ende-tools-max-search-results)))
+      (let* ((schema (ende-test--public-tool-schema definitions (nth 0 case)))
+             (property (gethash (nth 1 case) (gethash "properties" schema))))
+        (should (= (gethash "maximum" property) (nth 2 case)))))
     (should-not (ende-tool-read-only (ende-tool--find "edit_file")))
     (should-not (ende-tool-read-only (ende-tool--find "create_file")))
     (should-not (ende-tool-read-only (ende-tool--find "copy_from_sandbox")))
@@ -139,6 +162,8 @@
       (should-not (gethash "buffer_id" properties))
       (should-not (gethash "base_digest" properties))
       (should (= (gethash "minItems" (gethash "edits" properties)) 1))
+      (should (= (gethash "maxItems" (gethash "edits" properties))
+                 ende-tools-max-edits))
       (should (equal (append (gethash "required" item) nil)
                      '("anchor" "position" "text")))
       (should (eq (gethash "additionalProperties" item) :false))
