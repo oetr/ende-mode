@@ -14,6 +14,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'ende-queue)
+(require 'ende-chat)
 
 (defface ende-queue-ui-heading-face
   '((t :inherit font-lock-keyword-face))
@@ -109,7 +110,9 @@
 
 (defun ende-queue-ui--job-event (_job event)
   "Schedule a dashboard refresh for relevant lifecycle EVENT on JOB."
-  (unless (memq (plist-get event :type) '(:delta :usage))
+  (unless (or (eq (plist-get event :type) :delta)
+              (and (eq (plist-get event :type) :usage)
+                   (null (plist-get event :usage))))
     (ende-queue-ui--schedule-refresh)))
 
 (defun ende-queue-ui--schedule-refresh ()
@@ -250,6 +253,13 @@
           (ende-queue-ui--blocker-label (car blockers))
         "Ready"))))
 
+(defun ende-queue-ui--tokens (job)
+  "Return JOB's latest provider-reported total token count, or a dash."
+  (let ((total (plist-get
+                (ende--usage-token-counts (ende-job-last-usage job))
+                :total)))
+    (if (numberp total) (number-to-string (truncate total)) "-")))
+
 (defun ende-queue-ui--window-width ()
   "Return available dashboard width in display columns."
   (max 48
@@ -260,23 +270,25 @@
 (defun ende-queue-ui--columns (view)
   "Return the adaptive column layout for VIEW."
   (let ((width (ende-queue-ui--window-width)))
-    (if (>= width 95)
+    (if (>= width 105)
         (if (eq view 'jobs)
             '((id 4 "ID") (buffer 18 "Buffer") (operation 12 "Operation")
-              (policy 10 "Policy") (provider 12 "Provider")
-              (status 20 "Status") (time 10 "Time"))
+              (policy 9 "Policy") (provider 11 "Provider")
+              (tokens 8 "Tokens") (status 18 "Status") (time 9 "Time"))
           '((state 9 "State") (id 4 "ID") (operation 12 "Operation")
-            (policy 10 "Policy") (provider 12 "Provider")
-            (status 20 "Status") (time 10 "Time")))
+            (policy 9 "Policy") (provider 11 "Provider")
+            (tokens 8 "Tokens") (status 18 "Status") (time 9 "Time")))
       (if (eq view 'jobs)
           (list (list 'id 4 "ID")
-                (list 'buffer (max 8 (min 22 (- width 60))) "Buffer")
+                (list 'buffer (max 8 (min 22 (- width 68))) "Buffer")
                 (list 'operation 12 "Operation")
-                (list 'status (max 13 (min 24 (- width 48))) "Status")
+                (list 'tokens 8 "Tokens")
+                (list 'status (max 13 (min 24 (- width 56))) "Status")
                 (list 'time 9 "Time"))
         (list (list 'state 9 "State") (list 'id 4 "ID")
               (list 'operation 12 "Operation")
-              (list 'status (max 13 (min 24 (- width 48))) "Status")
+              (list 'tokens 8 "Tokens")
+              (list 'status (max 13 (min 24 (- width 56))) "Status")
               (list 'time 9 "Time"))))))
 
 (defun ende-queue-ui--fit (text width)
@@ -304,6 +316,7 @@
                        (cons 'policy (ende-queue-ui--policy job))
                        (cons 'provider (ende-queue-ui--provider-name job))
                        (cons 'state (if (eq state 'running) "Running" "Queued"))
+                       (cons 'tokens (ende-queue-ui--tokens job))
                        (cons 'status (ende-queue-ui--job-status job state))
                        (cons 'time (ende-queue-ui--elapsed job state))))
          (prefix (concat (if marked
@@ -361,6 +374,85 @@
     (ende-queue-ui--detail-line
      (propertize message 'face 'font-lock-doc-face) owner indent)))
 
+(defun ende-queue-ui--last-tool-call (job)
+  "Return JOB's newest non-activity tool call and matching result status."
+  (condition-case nil
+      (ende-queue-ui--last-tool-call-from-history job)
+    (error nil)))
+
+(defun ende-queue-ui--last-tool-call-from-history (job)
+  "Return the call and result status selected from JOB's chat history."
+  (let ((target (ende-job-target job)))
+    (when (and (memq (ende-job-type job) '(chat chat-compact))
+               (ende-target-p target)
+               (buffer-live-p (ende-target-buffer target))
+               (with-current-buffer (ende-target-buffer target)
+                 (derived-mode-p 'org-mode)))
+      (with-current-buffer (ende-target-buffer target)
+        (let* ((document (ende-chat--build-document))
+              (request-id (plist-get (ende-job-instruction job) :request-id))
+              (work (and request-id
+                         (ende-chat--request-work-section document request-id)))
+              (calls (and work
+                          (reverse
+                           (cl-remove-if-not
+                            (lambda (headline)
+                              (ende-chat--tool-call-protocol-p document headline))
+                            (ende-chat--children document work)))))
+              selected)
+          (while (and calls (not selected))
+            (let* ((call (pop calls))
+                   (name (ende-chat--property document call :tool-name)))
+              (unless (equal name "about_thinking")
+                (setq selected call))))
+          (when selected
+            (let* ((execution-id
+                    (ende-chat--property document selected :tool-execution-id))
+                   (result
+                    (cl-find-if
+                     (lambda (headline)
+                       (and (ende-chat--tool-result-protocol-p document headline)
+                            (equal execution-id
+                                   (ende-chat--property
+                                    document headline :tool-execution-id))))
+                     (ende-chat--children document work)))
+                   (request (ende-tool-store-get execution-id 'request))
+                   (request (and request
+                                 (ende-chat--parse-tool-payload
+                                  request execution-id 'request)))
+                   (arguments (and request (gethash "arguments" request)))
+                   (summary (and arguments
+                                 (ende-chat--tool-argument-summary arguments)))
+                   (tool (ende-chat--property document selected :tool-name))
+                   (result-payload
+                    (and result (ende-tool-store-get execution-id 'result)))
+                   (result-record
+                    (and result-payload
+                         (ende-chat--parse-tool-payload
+                          result-payload execution-id 'result)))
+                   (outcome
+                    (and result-record
+                         (condition-case nil
+                             (json-parse-string
+                              (gethash "content" result-record)
+                              :object-type 'plist)
+                           (error nil))))
+                   (status
+                    (cond
+                     ((or (null result) (null result-record)) "---")
+                     ((eq (plist-get outcome :ok) t) "OK")
+                     (t "FAILED"))))
+              (list (concat tool (if summary (concat ": " summary) ""))
+                    status))))))))
+
+(defun ende-queue-ui--tool-details (job)
+  "Render JOB's last relevant tool call and its status."
+  (let ((last-call (ende-queue-ui--last-tool-call job)))
+    (ende-queue-ui--detail-field
+     "Last tool call" (or (car last-call) "---") job)
+    (ende-queue-ui--detail-field
+     "Status" (or (cadr last-call) "---") job)))
+
 (defun ende-queue-ui--job-details (job state)
   "Render non-redundant inert details for JOB in STATE."
   (let* ((profile (ende-job-profile job))
@@ -415,6 +507,7 @@
            job)
           (dolist (line (cdr lines))
             (ende-queue-ui--detail-line line job 8)))))
+    (ende-queue-ui--tool-details job)
     (when (and (eq state 'queued) (null latest))
       (ende-queue-ui--detail-field
        "Request preview" "live source, captured when started" job))

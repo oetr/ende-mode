@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'ende-test-helpers)
 (require 'ende-queue-ui)
+(require 'ende-chat-test-helpers)
 
 (defun ende-test--dashboard-reset ()
   "Reset scheduler state and tear down dashboard-only state."
@@ -32,6 +33,23 @@
           (goto-char position)
           (buffer-substring-no-properties
            (line-beginning-position) (line-end-position)))))))
+
+(defun ende-test--dashboard-token-cell (dashboard id)
+  "Return the rendered Tokens cell for job ID in DASHBOARD."
+  (with-current-buffer dashboard
+    (let* ((columns (ende-queue-ui--columns ende-queue-ui-view))
+           (column (cl-position 'tokens columns :key #'car))
+           (width (nth 1 (nth column columns)))
+           (offset (+ 3 (cl-loop for entry in (seq-take columns column)
+                                 sum (1+ (nth 1 entry)))))
+           (position (ende-queue-ui--position-for-key (cons 'job id))))
+      (when position
+        (save-excursion
+          (goto-char position)
+          (string-trim
+           (buffer-substring-no-properties
+            (+ (line-beginning-position) offset)
+            (+ (line-beginning-position) offset width))))))))
 
 (defun ende-test--dashboard-face-span-p (dashboard text face)
   "Return non-nil if TEXT in DASHBOARD has exactly FACE.
@@ -162,6 +180,153 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
 				(should (string-match-p (format "\\b%d\\b" second-id)
 							buffers-second-row))
 				(should (string-match-p "Behind #" buffers-second-row)))))))
+
+(ert-deftest ende-test/dashboard-tokens-follow-latest-provider-usage ()
+  (save-window-excursion
+    (delete-other-windows)
+    (ende-test--dashboard-reset)
+    (let ((ende-llm-function (ende-test--fake-llm '(:stall) t)))
+      (ende-test--with-buffer "base"
+        (let* ((job (ende-enqueue
+                     (ende-test--dashboard-request
+                      ende-test--dashboard-profile)))
+               (dashboard (ende-queue-open))
+               (id (ende-job-id job)))
+          (set-window-buffer (selected-window) dashboard)
+          (dolist (view '(jobs buffers))
+            (with-current-buffer dashboard
+              (unless (eq ende-queue-ui-view view)
+                (ende-queue-ui-switch-view)))
+            (should (equal (ende-test--dashboard-token-cell dashboard id) "-")))
+          (ende--handle-llm-event
+           job '(:type :usage :usage (:input_tokens 18 :output_tokens 7)))
+          (should (timerp (buffer-local-value
+                           'ende-queue-ui--refresh-timer dashboard)))
+          (ende-test--dashboard-flush-refresh dashboard)
+          (should (equal (ende-test--dashboard-token-cell dashboard id) "25"))
+          (ende--handle-llm-event
+           job '(:type :usage :usage (:total_tokens 52)))
+          (ende-test--dashboard-flush-refresh dashboard)
+          (should (equal (ende-test--dashboard-token-cell dashboard id) "52"))
+          (ende--handle-llm-event
+           job '(:type :usage :tokens 99 :estimated t))
+          (should-not (buffer-local-value
+                       'ende-queue-ui--refresh-timer dashboard))
+          (should (equal (ende-job-last-usage job) '(:total_tokens 52)))
+          (dolist (view '(jobs buffers))
+            (with-current-buffer dashboard
+              (unless (eq ende-queue-ui-view view)
+                (ende-queue-ui-switch-view)))
+            (should (string-match-p "Tokens"
+                                    (with-current-buffer dashboard
+                                      (buffer-string))))
+            (should (equal (ende-test--dashboard-token-cell dashboard id) "52")))
+          (when (buffer-live-p dashboard)
+            (kill-buffer dashboard)))))))
+
+(ert-deftest ende-test/dashboard-chat-job-without-tools-shows-empty-tool-details ()
+  (ende-test--dashboard-reset)
+  (with-temp-buffer
+    (org-mode)
+    (let ((job (ende--make-job
+                :id 41 :type 'chat :state 'running
+                :target (ende-target-create
+                         :buffer (current-buffer) :start (point-min)
+                         :end (point-max) :cursor (point-min)
+                         :review-policy 'ignore)
+                :instruction '(:request-id "request-without-tools")
+                :profile '(:name remote :model "fixture"))))
+      (ende-queue-ui--job-details job 'running)
+      (should (string-match-p "Last tool call: ---" (buffer-string)))
+      (should (string-match-p "Status: ---" (buffer-string))))))
+
+(ert-deftest ende-test/dashboard-unfolded-job-shows-latest-matched-tool-result ()
+  (save-window-excursion
+    (delete-other-windows)
+    (ende-test--dashboard-reset)
+    (let* ((ende-tools--registry (copy-sequence ende-tools--registry))
+           (pending nil)
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list
+              (list :tool-calls
+                    (list '(:id "first" :name "ende_test_dashboard_tool"
+                            :arguments "{\"value\":\"first\"}")))
+              (list :tool-calls
+                    (list '(:id "progress-one" :name "about_thinking"
+                            :arguments "{\"title\":\"Inspecting\",\"status\":\"Still working.\"}")))
+              (list :tool-calls
+                    (list '(:id "second" :name "ende_test_dashboard_tool"
+                            :arguments "{\"value\":\"second\"}")))
+              (list :tool-calls
+                    (list '(:id "progress-two" :name "about_thinking"
+                            :arguments "{\"title\":\"Checking\",\"status\":\"Still working.\"}")))
+              "Finished")
+             t))
+           (dashboard nil))
+      (unwind-protect
+          (progn
+            (ende-tool-register
+             'ende_test_dashboard_tool "Dashboard fixture"
+             ende-tools--empty-object-schema
+             (lambda (arguments _root callback)
+               (push (cons (gethash "value" arguments) callback) pending))
+             nil :no-resource '(:requires-root nil :async t))
+            (ende-test--with-buffer
+             (concat (ende-test--chat-config-block
+                      '((group dashboard ende_test_dashboard_tool)
+                        (tools dashboard)))
+                     "* Conversation\n** Question\nInspect.\n")
+             (org-mode)
+             (ende-test--chat-goto "** Question")
+             (let* ((job (ende-ask '(:name remote :model "fixture")))
+                    (id (ende-job-id job)))
+               (setq dashboard (ende-queue-open))
+               (set-window-buffer (selected-window) dashboard)
+               (with-current-buffer dashboard
+                 (goto-char (ende-queue-ui--position-for-key (cons 'job id)))
+                 (ende-queue-ui-toggle-entry))
+               (ende-test--complete-call (car ende-test--calls))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p
+                          "Last tool call: ende_test_dashboard_tool: value=\"first\""
+                          (buffer-string)))
+                 (should (string-match-p "Status: ---" (buffer-string))))
+               (funcall (cdar pending) "first completed" nil)
+               (setq pending (cdr pending))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p "value=\"first\"" (buffer-string)))
+                 (should (string-match-p "Status: OK" (buffer-string))))
+               (ende-test--complete-call (nth 1 ende-test--calls))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p "value=\"first\"" (buffer-string)))
+                 (should (string-match-p "Status: OK" (buffer-string)))
+                 (should-not (string-match-p "about_thinking" (buffer-string))))
+               (ende-test--complete-call (nth 2 ende-test--calls))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p
+                          "Last tool call: ende_test_dashboard_tool: value=\"second\""
+                          (buffer-string)))
+                 (should (string-match-p "Status: ---" (buffer-string))))
+               (funcall (cdar pending) nil "fixture failure")
+               (setq pending (cdr pending))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p "value=\"second\"" (buffer-string)))
+                 (should (string-match-p "Status: FAILED" (buffer-string))))
+               (ende-test--complete-call (nth 3 ende-test--calls))
+               (ende-test--dashboard-flush-refresh dashboard)
+               (with-current-buffer dashboard
+                 (should (string-match-p "value=\"second\"" (buffer-string)))
+                 (should (string-match-p "Status: FAILED" (buffer-string)))
+                 (should-not (string-match-p "about_thinking" (buffer-string)))))))
+        (when (buffer-live-p dashboard)
+          (kill-buffer dashboard))
+        (ende-test--reset)))))
 
 (ert-deftest ende-test/dashboard-expanded-chat-details-style-and-refresh-in-both-views ()
   (save-window-excursion

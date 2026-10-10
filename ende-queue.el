@@ -29,7 +29,7 @@
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
-  tool-call-count activity-title activity-status activity-updated-at)
+  last-usage tool-call-count activity-title activity-status activity-updated-at)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -189,6 +189,9 @@ Stale reports do nothing.  Transport status and scheduler state are untouched."
     (:status
      (when (stringp (plist-get event :status))
        (setf (ende-job-status job) (plist-get event :status))))
+    (:usage
+     (when (plist-get event :usage)
+       (setf (ende-job-last-usage job) (plist-get event :usage))))
     (:tool-call-count
      (let ((count (plist-get event :count)))
        (when (and (integerp count) (>= count 0))
