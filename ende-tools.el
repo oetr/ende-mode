@@ -633,9 +633,10 @@ FUNCTION receives no arguments and may return any value."
            (ende-tools--authorized-project-files 'list_project_files root)))
          (truncated (> (length files) maximum)))
     (list :files
-          (mapcar (lambda (path)
-                    (ende-tools--file-record path root include-metadata))
-                  (cl-subseq files 0 (min maximum (length files))))
+          (vconcat
+           (mapcar (lambda (path)
+                     (ende-tools--file-record path root include-metadata))
+                   (cl-subseq files 0 (min maximum (length files)))))
           :truncated truncated)))
 
 (defun ende-tools--file-info (arguments root)
@@ -676,20 +677,21 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--list-project-buffers (_arguments root)
   "List all allowed live visiting buffers below ROOT."
   (list :buffers
-        (mapcar
-         (lambda (buffer)
-           (with-current-buffer buffer
-             (append (list :name (buffer-name buffer))
-                     (ende-tools--buffer-record buffer root))))
-         (sort
-          (cl-remove-if-not
-           (lambda (buffer)
-             (ende-tools--path-authorized-p
-              (ende-project-buffer-path buffer) root))
-           (ende-project-buffers root))
-          (lambda (left right)
-            (string< (or (buffer-file-name left) "")
-                     (or (buffer-file-name right) "")))))))
+        (vconcat
+         (mapcar
+          (lambda (buffer)
+            (with-current-buffer buffer
+              (append (list :name (buffer-name buffer))
+                      (ende-tools--buffer-record buffer root))))
+          (sort
+           (cl-remove-if-not
+            (lambda (buffer)
+              (ende-tools--path-authorized-p
+               (ende-project-buffer-path buffer) root))
+            (ende-project-buffers root))
+           (lambda (left right)
+             (string< (or (buffer-file-name left) "")
+                      (or (buffer-file-name right) ""))))))))
 
 (defun ende-tools--read-buffer (arguments root)
   "Read a bounded range from one allowed visiting buffer."
@@ -804,7 +806,7 @@ FUNCTION receives no arguments and may return any value."
             (throw 'finished nil))))
       (when (> (length files) ende-tools-max-search-files)
         (setq truncated t)))
-    (list :matches matches :files_inspected files-inspected
+    (list :matches (vconcat matches) :files_inspected files-inspected
           :truncated truncated)))
 
 ;;;; Change sets and writes

@@ -19,6 +19,17 @@
     (should (plist-get call :ok))
     (plist-get call :result)))
 
+(defun ende-test--project-tool-json-records
+    (name arguments field root configuration)
+  "Call project tool NAME and return JSON-decoded FIELD records."
+  (let* ((call (list :id "call-1" :name name
+                     :arguments (json-encode arguments)))
+         (response (ende-chat--tool-response call configuration))
+         (decoded (ende-protocol-json-read-string response)))
+    (should (eq (ende-protocol-json-get "ok" decoded) t))
+    (ende-protocol-json-get
+     field (ende-protocol-json-get "result" decoded))))
+
 (defun ende-test--edit-file-call (path edits root)
   "Call `edit_file' for PATH with anchor EDITS under ROOT."
   (ende-tool-call "edit_file"
@@ -296,6 +307,41 @@
         (funcall timeout-cancel))
       (delete-directory root t))))
 
+(ert-deftest ende-test/project-tool-collections-encode-as-json-arrays ()
+  (let* ((root (make-temp-file "ende-tools-json-collections-" t))
+         (alpha (expand-file-name "alpha.txt" root))
+         (beta (expand-file-name "beta.txt" root))
+         (buffers nil)
+         (empty-arguments (make-hash-table :test 'equal))
+         (search-arguments (make-hash-table :test 'equal)))
+    (puthash "regexp" "needle" search-arguments)
+    (unwind-protect
+        (progn
+          (with-temp-file alpha (insert "needle alpha\n"))
+          (with-temp-file beta (insert "needle beta\n"))
+          (setq buffers (list (find-file-noselect alpha)
+                              (find-file-noselect beta)))
+          (let ((ende-project-root-directory root))
+            (dolist (case (list (list "list_project_files" empty-arguments "files")
+                                (list "search_project" search-arguments "matches")
+                                (list "list_project_buffers" empty-arguments "buffers")))
+              (let ((records (ende-test--project-tool-json-records
+                              (nth 0 case) (nth 1 case) (nth 2 case)
+                              root nil)))
+                (should (vectorp records))
+                (should (= (length records) 2))
+                (should
+                 (equal (mapcar (lambda (record)
+                                  (ende-protocol-json-get "path" record))
+                                (append records nil))
+                        '("alpha.txt" "beta.txt")))))))
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer)
+          (set-buffer-modified-p nil)
+          (kill-buffer buffer)))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
 (ert-deftest ende-test/project-tools-enforce-scope-and-report-file-info ()
   (let* ((root (make-temp-file "ende-tools-project-" t))
          (source (expand-file-name "src/main.el" root))
@@ -316,7 +362,7 @@
               (should (= (plist-get info :line_count) 3))
               (should (= (length (plist-get files :files)) 1))
               (should (string= (plist-get
-                                (car (plist-get files :files)) :path)
+                                (elt (plist-get files :files) 0) :path)
                                "src/main.el")))
             (let ((failure
                    (ende-tool-call
@@ -485,7 +531,7 @@
           (let* ((ende-project-root-directory root)
                  (listed (ende-test--tool-result
                           "list_project_buffers" nil root))
-                 (record (car (plist-get listed :buffers)))
+                 (record (elt (plist-get listed :buffers) 0))
                  (buffer-id (plist-get record :buffer_id))
                  (buffer-read
                   (ende-test--tool-result
@@ -535,16 +581,17 @@
             (should (plist-get info :visiting_buffer))
             (should (eq (plist-get info :visiting_buffer_modified) t))
             (should (string= (plist-get
-                              (car (plist-get files :files)) :source_kind)
+                              (elt (plist-get files :files) 0) :source_kind)
                              "file"))
             (should (string= (plist-get
-                              (car (plist-get files :files)) :digest)
+                              (elt (plist-get files :files) 0) :digest)
                              (plist-get info :digest)))
             (should (= (length (plist-get disk-search :matches)) 1))
             (should (string= (plist-get
-                              (car (plist-get disk-search :matches)) :source_kind)
+                              (elt (plist-get disk-search :matches) 0)
+                              :source_kind)
                              "file"))
-            (should-not (plist-get buffer-search :matches))))
+            (should (= (length (plist-get buffer-search :matches)) 0))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -580,7 +627,7 @@
             (should (plist-get search :truncated))
             (should (string-match-p "needle"
                                     (plist-get
-                                     (car (plist-get search :matches))
+                                     (elt (plist-get search :matches) 0)
                                      :context)))))
       (when (file-directory-p root)
         (delete-directory root t)))))
