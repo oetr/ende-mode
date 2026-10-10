@@ -81,8 +81,7 @@
           (ende-codex--make-session
            :profile '(:model "gpt-test")
            :callbacks (list :on-event
-                            (lambda (event) (push event events)))
-           :estimated-chars 0)))
+                            (lambda (event) (push event events))))))
     (dolist
         (event
          (list
@@ -488,8 +487,7 @@
                 :callbacks
                 (list :on-event (lambda (event) (push event events))
                       :on-done (lambda (value) (setq result value))
-                      :on-error (lambda (error) (setq failure error)))
-                :estimated-chars 0)))
+                      :on-error (lambda (error) (setq failure error))))))
           (ende-transport-session-set-resources
            (ende-codex--lifecycle session)
            (list :process process :headers-file headers-file))
@@ -533,8 +531,7 @@
                (ende-codex--make-session
                 :profile '(:model "gpt-test")
                 :callbacks (list :on-error
-                                 (lambda (error) (setq failure error)))
-                :estimated-chars 0)))
+                                 (lambda (error) (setq failure error))))))
           (ende-transport-session-set-resources
            (ende-codex--lifecycle session)
            (list :process process :headers-file headers-file))
@@ -807,8 +804,7 @@
            :profile '(:model "gpt-test")
            :callbacks (list :on-event (lambda (event) (push event events))
                             :on-done (lambda (value) (setq result value))
-                            :on-error (lambda (value) (setq failure value)))
-           :estimated-chars 0)))
+                            :on-error (lambda (value) (setq failure value))))))
     (ende-codex--handle-event
      session
      (ende-protocol-json-read-string

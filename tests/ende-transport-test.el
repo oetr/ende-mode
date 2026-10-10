@@ -117,8 +117,10 @@ Use COMMAND for the process, or a silent sleep process by default."
                              (setq events (1+ events))
                              (error "callback failed"))
                  :on-done (lambda (_result) (setq done (1+ done)))
-                 :on-error (lambda (_error) (setq errors (1+ errors))))
-           :discovery-cancel (lambda () (setq discovery-cancelled t)))))
+                 :on-error (lambda (_error) (setq errors (1+ errors)))))))
+    (ende-transport-session-add-canceller
+     (ende-llm--lifecycle session)
+     (lambda () (setq discovery-cancelled t)))
     (ende-transport-session-set-resources
      (ende-llm--lifecycle session)
      (list :response-buffer process-buffer
@@ -136,7 +138,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (= done 0))
     (should (= errors 1))
     (should discovery-cancelled)
-    (should-not (ende-llm--session-discovery-cancel session))
+    (should-not (ende-transport-session-auxiliary-cancellers
+                 (ende-llm--lifecycle session)))
     (should-not (ende-transport-session-callbacks
                  (ende-llm--lifecycle session)))
     (should-not (ende-transport-session-process
@@ -416,6 +419,69 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal (plist-get cancelled :order)
                      '(:start :error :on-error)))
       (should (plist-get cancelled :cleaned)))))
+
+(ert-deftest ende-test/stream-transports-share-output-limit-ordering ()
+  (dolist (transport '(chat codex))
+    (let* ((ende-max-output-chars 2)
+           (chunks
+            (if (eq transport 'codex)
+                (list
+                 (concat "data: {\"type\":\"response.output_text.delta\","
+                         "\"delta\":\"ab\"}\n\n")
+                 (concat "data: {\"type\":\"response.output_text.delta\","
+                         "\"delta\":\"c\"}\n\n"))
+              (list
+               (concat "data: {\"choices\":[{\"delta\":{"
+                       "\"content\":\"ab\"}}]}\n\n")
+               (concat "data: {\"choices\":[{\"delta\":{"
+                       "\"content\":\"c\"}}]}\n\n"))))
+           (out (ende-test--run-stream-request transport chunks))
+           (events (plist-get out :events))
+           (partial (cl-find-if
+                     (lambda (event)
+                       (eq (plist-get event :type) :partial-result))
+                     events)))
+      (should (eq (ende-error-kind (plist-get out :error)) 'resource))
+      (should (equal (mapcar (lambda (event) (plist-get event :type)) events)
+                     (if (eq transport 'codex)
+                         '(:diagnostic :status :delta :status
+                           :partial-result :error)
+                       '(:diagnostic :delta :usage :status
+                         :partial-result :error))))
+      (should (equal (plist-get (plist-get partial :result) :content) "ab"))
+      (should (plist-get out :cleaned)))))
+
+(ert-deftest ende-test/estimated-usage-cadence-remains-provider-specific ()
+  (let ((ende-usage-update-interval 60))
+    (dolist (transport '(chat codex))
+      (let* ((chunks
+              (if (eq transport 'codex)
+                  (list
+                   (concat "data: {\"type\":\"response.output_text.delta\","
+                           "\"delta\":\"a\"}\n\n")
+                   (concat "data: {\"type\":\"response.output_text.delta\","
+                           "\"delta\":\"b\"}\n\n")
+                   (concat "data: {\"type\":\"response.completed\","
+                           "\"response\":{\"usage\":{\"output_tokens\":2}}}"
+                           "\n\n"))
+                (list
+                 (concat "data: {\"choices\":[{\"delta\":{"
+                         "\"content\":\"a\"}}]}\n\n")
+                 (concat "data: {\"choices\":[{\"delta\":{"
+                         "\"content\":\"b\"}}]}\n\n")
+                 (concat "data: {\"choices\":[],\"usage\":{"
+                         "\"completion_tokens\":2}}\n\n")
+                 "data: [DONE]\n\n")))
+             (out (ende-test--run-stream-request transport chunks))
+             (estimated
+              (cl-remove-if-not
+               (lambda (event)
+                 (and (eq (plist-get event :type) :usage)
+                      (plist-get event :estimated)))
+               (plist-get out :events))))
+        (should-not (plist-get out :error))
+        (should (= (length estimated) (if (eq transport 'chat) 1 0)))
+        (should (plist-get out :cleaned))))))
 
 (ert-deftest ende-test/active-callback-failure-cleans-up-once ()
   (ende-test--reset)

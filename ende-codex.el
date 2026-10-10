@@ -109,9 +109,7 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile lifecycle stream auth-cancel content-parts thinking-parts usage actual-model
-  tool-calls actual-provider finish-reason estimated-chars generation-start
-  terminal-event cancelled)
+  profile stream tool-calls terminal-event)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -125,18 +123,17 @@ The :callbacks argument initializes the composed transport lifecycle."
     (let ((lifecycle
            (ende-transport-session-create
             callbacks (apply-partially #'ende-codex--fail session))))
-      (setf (ende-codex--session-lifecycle session) lifecycle
-            (ende-codex--session-stream session)
+      (setf (ende-codex--session-stream session)
             (ende-stream-create lifecycle (ende-protocol-make-sse)))
       session)))
 
 (defun ende-codex--lifecycle (session)
   "Return the composed transport lifecycle for SESSION."
-  (ende-codex--session-lifecycle session))
+  (ende-stream-lifecycle (ende-codex--session-stream session)))
 
 (defun ende-codex--terminal-p (session)
   "Return non-nil when SESSION's transport has settled."
-  (ende-transport-session-terminal (ende-codex--lifecycle session)))
+  (ende-stream-terminal-p (ende-codex--session-stream session)))
 
 ;;;; Credential handling
 
@@ -947,22 +944,6 @@ is queried for every call; it does not share the model catalog cache."
 
 ;;;; Responses transport
 
-(defun ende-codex--invoke-callback (session name &rest arguments)
-  "Invoke callback NAME for SESSION safely."
-  (apply #'ende-transport-session-invoke
-         (ende-codex--lifecycle session) name arguments))
-
-(defun ende-codex--cancel-auth-waiter (session)
-  "Cancel SESSION's OAuth waiter without disturbing other callers."
-  (let ((cancel (ende-codex--session-auth-cancel session)))
-    (setf (ende-codex--session-auth-cancel session) nil)
-    (when cancel (ende-ignore-errors cancel))))
-
-(defun ende-codex--cleanup (session)
-  "Release resources owned by SESSION."
-  (ende-codex--cancel-auth-waiter session)
-  (ende-transport-session-cleanup (ende-codex--lifecycle session)))
-
 (defun ende-codex--tool-call-list (session)
   "Return collected function calls from SESSION in output order."
   (let (calls)
@@ -975,47 +956,18 @@ is queried for every call; it does not share the model catalog cache."
 
 (defun ende-codex--result (session)
   "Build a normalized result plist for SESSION."
-  (let* ((usage (ende-codex--session-usage session))
-         (reported (and usage
-                        (ende-protocol-json-get "output_tokens" usage)))
-         (tokens (or reported
-                     (max 0 (floor
-                             (/ (ende-codex--session-estimated-chars session)
-                                4.0)))))
-         (started (or (ende-codex--session-generation-start session)
-                      (float-time))))
-    (list :content (mapconcat #'identity
-                              (reverse
-                               (ende-codex--session-content-parts session)) "")
-          :thinking (mapconcat #'identity
-                               (reverse
-                                (ende-codex--session-thinking-parts session)) "")
-          :usage usage :tokens tokens :estimated (null reported)
-          :tool-calls (ende-codex--tool-call-list session)
-          :speed (/ (float tokens)
-                    (max 0.001 (- (float-time) started)))
-          :finish-reason (ende-codex--session-finish-reason session)
-          :provider (or (ende-codex--session-actual-provider session)
-                        "OpenAI")
-          :model (or (ende-codex--session-actual-model session)
-                     (plist-get (ende-codex--session-profile session)
-                                :model)))))
+  (ende-stream-result
+   (ende-codex--session-stream session) "output_tokens"
+   (plist-get (ende-codex--session-profile session) :model) "OpenAI"
+   (list :tool-calls (ende-codex--tool-call-list session))))
 
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
-  (unless (ende-codex--terminal-p session)
-    (ende-codex--cancel-auth-waiter session)
-    (unwind-protect
-        (ende-stream-settle
-         (ende-codex--session-stream session)
-         outcome value
-         (when (or (ende-codex--session-content-parts session)
-                   (ende-codex--session-thinking-parts session)
-                   (ende-codex--session-usage session)
-                   (ende-codex--tool-call-list session))
-           (ende-codex--result session)))
-      (unless (ende-codex--terminal-p session)
-        (ende-codex--cleanup session)))))
+  (ende-stream-settle-generation
+   (ende-codex--session-stream session) outcome value "output_tokens"
+   (plist-get (ende-codex--session-profile session) :model) "OpenAI"
+   (list :tool-calls (ende-codex--tool-call-list session))
+   (ende-codex--tool-call-list session) nil t))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -1023,52 +975,24 @@ is queried for every call; it does not share the model catalog cache."
 
 (defun ende-codex--cancel (session)
   "Cancel SESSION."
-  (setf (ende-codex--session-cancelled session) t)
   (ende-codex--fail
    session (ende-error-create :kind 'cancelled :message "Process cancelled")))
 
 (defun ende-codex--emit (session event)
   "Emit EVENT unless SESSION has settled."
-  (unless (ende-codex--terminal-p session)
-    (ende-codex--invoke-callback session :on-event event)))
+  (ende-stream-emit (ende-codex--session-stream session) event))
 
 (defun ende-codex--emit-delta (session channel text)
   "Record and emit TEXT on CHANNEL."
-  (when (and (stringp text) (> (length text) 0)
-             (not (ende-codex--terminal-p session)))
-    (if (and ende-max-output-chars
-             (> (+ (ende-codex--session-estimated-chars session)
-                   (length text))
-                ende-max-output-chars))
-        (ende-codex--fail
-         session
-         (ende-error-create
-          :kind 'resource
-          :message "generated output exceeds ende-max-output-chars"))
-      (if (eq channel :content)
-          (push text (ende-codex--session-content-parts session))
-        (push text (ende-codex--session-thinking-parts session)))
-      (cl-incf (ende-codex--session-estimated-chars session) (length text))
-      (unless (ende-codex--session-generation-start session)
-        (setf (ende-codex--session-generation-start session)
-              (float-time)))
-      (ende-codex--emit
-       session (list :type :delta :channel channel :text text)))))
+  (ende-stream-record-delta
+   (ende-codex--session-stream session) channel text
+   (apply-partially #'ende-codex--fail session)))
 
 (defun ende-codex--handle-usage (session usage)
   "Record and emit Responses API USAGE."
   (when (hash-table-p usage)
-    (setf (ende-codex--session-usage session) usage)
-    (let* ((tokens (ende-protocol-json-get "output_tokens" usage))
-           (started (or (ende-codex--session-generation-start session)
-                        (float-time))))
-      (ende-codex--emit
-       session (list :type :usage :tokens (if (numberp tokens) tokens 0)
-                     :speed (if (numberp tokens)
-                                (/ (float tokens)
-                                   (max 0.001 (- (float-time) started)))
-                              0.0)
-                     :usage usage)))))
+    (ende-stream-record-usage
+     (ende-codex--session-stream session) usage "output_tokens")))
 
 (defun ende-codex--tool-call-table (session)
   "Return the function-call table for SESSION, creating it if needed."
@@ -1110,10 +1034,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
   (let* ((table (ende-codex--session-tool-calls session))
          (call (and (hash-table-p table) (gethash output-index table))))
     (when (and call (stringp arguments))
-      (setf (plist-get call :arguments)
-            (if append
-                (concat (or (plist-get call :arguments) "") arguments)
-              arguments))
+      (setq call
+            (plist-put call :arguments
+                       (if append
+                           (concat (or (plist-get call :arguments) "")
+                                   arguments)
+                         arguments)))
       (puthash output-index call table))))
 
 (defun ende-codex--output-items (items)
@@ -1201,14 +1127,16 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (format "OpenAI Responses %s at output index %s"
                  type (or output-index "<unknown>")))))
     (when (stringp model)
-      (setf (ende-codex--session-actual-model session) model))
+      (setf (ende-stream-session-actual-model
+             (ende-codex--session-stream session)) model))
     (when (or (stringp model)
               (member type '("response.created" "response.completed")))
       (ende-codex--emit
        session
        (list :type :metadata
              :metadata (list :source :response
-                             :model (ende-codex--session-actual-model session)
+                             :model (ende-stream-session-actual-model
+                                     (ende-codex--session-stream session))
                              :provider "OpenAI"))))
     (cond
      ((string= type "response.output_text.delta")
@@ -1224,12 +1152,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
      ((member type '("response.completed" "response.done"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))
-      (setf (ende-codex--session-finish-reason session) "stop")
+      (setf (ende-stream-session-finish-reason
+             (ende-codex--session-stream session)) "stop")
       (setf (ende-codex--session-terminal-event session) json))
      ((string= type "response.incomplete")
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))
-      (setf (ende-codex--session-finish-reason session) "incomplete")
+      (setf (ende-stream-session-finish-reason
+             (ende-codex--session-stream session)) "incomplete")
       (setf (ende-codex--session-terminal-event session) json))
      ((member type '("response.failed" "error"))
       (let ((error (or (ende-protocol-json-get "error" json) json)))
@@ -1465,7 +1395,6 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
-  (setf (ende-codex--session-auth-cancel session) nil)
   (unless (ende-codex--terminal-p session)
     (if (ende-error-p auth)
         (ende-codex--fail session auth)
@@ -1487,20 +1416,22 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (session
           (ende-codex--make-session
            :profile profile :callbacks callbacks
-           :tool-calls (make-hash-table :test #'eql)
-           :estimated-chars 0)))
+           :tool-calls (make-hash-table :test #'eql))))
     (condition-case startup-error
         (progn
           (ende-validate-resource-options)
           (ende-codex--validated-generation-url
            (plist-get profile :url))
-          (ende-codex--invoke-callback
-           session :on-start (apply-partially #'ende-codex--cancel session))
+          (ende-transport-session-invoke
+           (ende-codex--lifecycle session) :on-start
+           (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--terminal-p session)
-            (setf (ende-codex--session-auth-cancel session)
-                  (ende-codex--resolve-auth
-                   (apply-partially #'ende-codex--auth-ready
-                                    session messages)))))
+            (let ((cancel
+                   (ende-codex--resolve-auth
+                    (apply-partially #'ende-codex--auth-ready
+                                     session messages))))
+              (ende-transport-session-add-canceller
+               (ende-codex--lifecycle session) cancel))))
       ((error quit)
        (ende-codex--fail
         session

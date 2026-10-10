@@ -18,7 +18,7 @@
                (:constructor ende-transport--make-session))
   "Shared lifecycle state for one asynchronous transport request."
   callbacks callback-error-handler process process-buffer stderr-buffer
-  stderr-process headers-file config-file terminal)
+  stderr-process headers-file config-file terminal auxiliary-cancellers)
 
 (defun ende-transport-session-create (callbacks callback-error-handler)
   "Create a transport session for CALLBACKS and CALLBACK-ERROR-HANDLER."
@@ -42,6 +42,13 @@
               (ende-error-create
                :kind 'callback
                :message (error-message-string callback-error))))))))))
+
+(defun ende-transport-session-add-canceller (session cancel)
+  "Register CANCEL as an auxiliary resource owned by SESSION."
+  (when (functionp cancel)
+    (if (ende-transport-session-terminal session)
+        (ende-ignore-errors cancel)
+      (push cancel (ende-transport-session-auxiliary-cancellers session)))))
 
 (defun ende-transport-session-set-resources (session request)
   "Copy transport resource handles from REQUEST into SESSION."
@@ -72,6 +79,10 @@
 
 (defun ende-transport-session-cleanup (session)
   "Release all process resources owned by SESSION."
+  (let ((cancellers (ende-transport-session-auxiliary-cancellers session)))
+    (setf (ende-transport-session-auxiliary-cancellers session) nil)
+    (dolist (cancel cancellers)
+      (ende-ignore-errors cancel)))
   (ende-transport-cleanup-resources
    (list (ende-transport-session-process-buffer session)
          (ende-transport-session-stderr-buffer session))

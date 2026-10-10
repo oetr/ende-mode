@@ -18,18 +18,123 @@
 (cl-defstruct (ende-stream-session
                (:constructor ende-stream--make-session))
   "Protocol-independent state for one SSE response stream."
-  lifecycle parser received-bytes preview-parts preview-bytes)
+  lifecycle parser received-bytes preview-parts preview-bytes
+  content-parts thinking-parts usage actual-model actual-provider
+  estimated-chars generation-start finish-reason)
 
 (defun ende-stream-create (lifecycle parser)
   "Create a stream driver composed with LIFECYCLE and using PARSER."
   (ende-stream--make-session
    :lifecycle lifecycle :parser parser :received-bytes 0
-   :preview-parts nil :preview-bytes 0))
+   :preview-parts nil :preview-bytes 0
+   :content-parts nil :thinking-parts nil :estimated-chars 0))
+
+(defun ende-stream-lifecycle (stream)
+  "Return STREAM's transport lifecycle."
+  (ende-stream-session-lifecycle stream))
 
 (defun ende-stream-terminal-p (stream)
   "Return non-nil when STREAM's lifecycle has settled."
   (ende-transport-session-terminal
    (ende-stream-session-lifecycle stream)))
+
+(defun ende-stream-emit (stream event)
+  "Emit EVENT for STREAM unless its transport has settled."
+  (unless (ende-stream-terminal-p stream)
+    (ende-transport-session-invoke
+     (ende-stream-lifecycle stream) :on-event event)))
+
+(defun ende-stream-record-delta (stream channel text limit-callback)
+  "Accumulate and emit TEXT on CHANNEL for STREAM.
+Call LIMIT-CALLBACK with a resource error if the output limit is exceeded.
+Return non-nil when the delta was accepted and STREAM remains active."
+  (when (and (not (ende-stream-terminal-p stream))
+             (stringp text) (> (length text) 0))
+    (if (and (numberp ende-max-output-chars)
+             (> (+ (ende-stream-session-estimated-chars stream)
+                   (length text))
+                ende-max-output-chars))
+        (progn
+          (funcall
+           limit-callback
+           (ende-error-create
+            :kind 'resource
+            :message "generated output exceeds ende-max-output-chars"))
+          nil)
+      (progn
+        (if (eq channel :content)
+            (push text (ende-stream-session-content-parts stream))
+          (push text (ende-stream-session-thinking-parts stream)))
+        (cl-incf (ende-stream-session-estimated-chars stream) (length text))
+        (unless (ende-stream-session-generation-start stream)
+          (setf (ende-stream-session-generation-start stream) (float-time)))
+        (ende-stream-emit
+         stream (list :type :delta :channel channel :text text))
+        (not (ende-stream-terminal-p stream))))))
+
+(defun ende-stream-record-usage (stream usage token-key)
+  "Record USAGE on STREAM and emit its normalized usage event.
+TOKEN-KEY names the provider-specific output-token field."
+  (setf (ende-stream-session-usage stream) usage)
+  (let* ((reported (ende-protocol-json-get token-key usage))
+         (tokens (if (numberp reported) reported 0))
+         (now (float-time))
+         (started (or (ende-stream-session-generation-start stream) now)))
+    (ende-stream-emit
+     stream (list :type :usage :tokens tokens
+                  :speed (if (numberp reported)
+                             (/ (float tokens) (max 0.001 (- now started)))
+                           0.0)
+                  :usage usage))))
+
+(defun ende-stream-emit-estimated-usage (stream)
+  "Emit a character-based usage estimate for STREAM."
+  (let* ((now (float-time))
+         (tokens (max 1 (floor
+                         (/ (ende-stream-session-estimated-chars stream)
+                            4.0))))
+         (started (or (ende-stream-session-generation-start stream) now)))
+    (ende-stream-emit
+     stream (list :type :usage :tokens tokens
+                  :speed (/ (float tokens) (max 0.001 (- now started)))
+                  :estimated t))))
+
+(defun ende-stream-result
+    (stream token-key model-fallback provider-fallback &optional extra-fields)
+  "Build a normalized result from STREAM, extended with EXTRA-FIELDS.
+TOKEN-KEY is the provider-specific output-token field."
+  (let* ((usage (ende-stream-session-usage stream))
+         (reported (and usage (ende-protocol-json-get token-key usage)))
+         (tokens (or reported
+                     (max 0 (floor
+                             (/ (ende-stream-session-estimated-chars stream)
+                                4.0)))))
+         (started (or (ende-stream-session-generation-start stream)
+                      (float-time))))
+    (append
+     (list :content (mapconcat #'identity
+                               (reverse
+                                (ende-stream-session-content-parts stream)) "")
+           :thinking (mapconcat #'identity
+                                (reverse
+                                 (ende-stream-session-thinking-parts stream)) "")
+           :usage usage :tokens tokens :estimated (null reported)
+           :speed (/ (float tokens) (max 0.001 (- (float-time) started)))
+           :finish-reason (ende-stream-session-finish-reason stream)
+           :provider (or (ende-stream-session-actual-provider stream)
+                         provider-fallback)
+           :model (or (ende-stream-session-actual-model stream)
+                      model-fallback))
+     extra-fields)))
+
+(defun ende-stream-has-result-p (stream &optional protocol-state allow-finish)
+  "Return non-nil if STREAM or PROTOCOL-STATE has partial result data."
+  (or (ende-stream-session-content-parts stream)
+      (ende-stream-session-thinking-parts stream)
+      (ende-stream-session-usage stream)
+      (and allow-finish
+           (ende-stream-session-finish-reason stream))
+      protocol-state))
 
 (defun ende-stream-append-preview (stream chunk)
   "Append a bounded, byte-safe prefix of CHUNK to STREAM's preview."
@@ -143,6 +248,22 @@ types, or nil to skip validation."
   "Settle STREAM's lifecycle once with OUTCOME, VALUE, and PARTIAL-RESULT."
   (ende-transport-session-settle
    (ende-stream-session-lifecycle stream) outcome value partial-result))
+
+(defun ende-stream-settle-generation
+    (stream outcome value token-key model-fallback provider-fallback
+            &optional extra-fields protocol-state allow-finish allow-tool-calls)
+  "Settle a normalized generation and include its partial result when useful.
+EXTRA-FIELDS extends the result plist; PROTOCOL-STATE can indicate additional
+provider-specific partial data."
+  (unless (ende-stream-terminal-p stream)
+    (ende-stream-settle
+     stream outcome value
+     (when (or (ende-stream-has-result-p
+                stream protocol-state allow-finish)
+               (and allow-tool-calls
+                    (plist-get extra-fields :tool-calls)))
+       (ende-stream-result stream token-key model-fallback provider-fallback
+                           extra-fields)))))
 
 (provide 'ende-stream)
 

@@ -43,12 +43,8 @@ normalized :tool-calls for the chat tool loop.")
 (cl-defstruct (ende-llm--session
                (:constructor ende-llm--allocate-session))
   "State owned by one asynchronous LLM transport request."
-  profile lifecycle stream discovery-cancel model messages json-data reasoning
-  reasoning-content-parts
-  content-parts thinking-parts usage
-  tool-calls
-  provider-error actual-model actual-provider estimated-chars finish-reason
-  generation-start last-status last-usage-update)
+  profile stream model messages json-data reasoning reasoning-content-parts
+  tool-calls provider-error last-status last-usage-update)
 
 (defun ende-llm--make-session (&rest arguments)
   "Create a Chat Completions session from protocol ARGUMENTS.
@@ -62,50 +58,34 @@ The :callbacks argument initializes the composed transport lifecycle."
     (let ((lifecycle
            (ende-transport-session-create
             callbacks (apply-partially #'ende-llm--fail session))))
-      (setf (ende-llm--session-lifecycle session) lifecycle
-            (ende-llm--session-stream session)
+      (setf (ende-llm--session-stream session)
             (ende-stream-create lifecycle (ende-protocol-make-sse)))
       session)))
 
 (defun ende-llm--lifecycle (session)
   "Return the composed transport lifecycle for SESSION."
-  (ende-llm--session-lifecycle session))
+  (ende-stream-lifecycle (ende-llm--session-stream session)))
 
 (defun ende-llm--terminal-p (session)
   "Return non-nil when SESSION's transport has settled."
-  (ende-transport-session-terminal (ende-llm--lifecycle session)))
-
-(defun ende-llm--invoke-callback (session name &rest arguments)
-  "Invoke callback NAME for SESSION with ARGUMENTS safely."
-  (apply #'ende-transport-session-invoke
-         (ende-llm--lifecycle session) name arguments))
-
-(defun ende-llm--cancel-discovery-waiter (session)
-  "Cancel SESSION's discovery waiter without disturbing other callers."
-  (let ((cancel (ende-llm--session-discovery-cancel session)))
-    (setf (ende-llm--session-discovery-cancel session) nil)
-    (when cancel (ende-ignore-errors cancel))))
-
-(defun ende-llm--cleanup-session (session)
-  "Cancel auxiliary waiters and clean resources owned by SESSION."
-  (ende-llm--cancel-discovery-waiter session)
-  (ende-transport-session-cleanup (ende-llm--lifecycle session)))
+  (ende-stream-terminal-p (ende-llm--session-stream session)))
 
 (defun ende-llm--settle (session outcome value)
   "Settle SESSION exactly once with OUTCOME and VALUE."
-  (unless (ende-llm--terminal-p session)
-    (ende-llm--cancel-discovery-waiter session)
-    (unwind-protect
-        (ende-stream-settle
-         (ende-llm--session-stream session)
-         outcome value
-         (when (or (ende-llm--session-content-parts session)
-                   (ende-llm--session-thinking-parts session)
-                   (ende-llm--session-usage session)
-                   (ende-llm--session-finish-reason session))
-           (ende-llm--result session)))
-      (unless (ende-llm--terminal-p session)
-        (ende-llm--cleanup-session session)))))
+  (let ((extra-fields
+         (list :reasoning-content
+               (and (ende-llm--session-reasoning-content-parts session)
+                    (mapconcat
+                     #'identity
+                     (reverse
+                      (ende-llm--session-reasoning-content-parts session))
+                     ""))
+               :tool-calls (ende-llm--tool-call-list session))))
+    (ende-stream-settle-generation
+     (ende-llm--session-stream session) outcome value "completion_tokens"
+     (ende-llm--session-model session) nil extra-fields
+     (or (ende-llm--session-reasoning-content-parts session)
+         (ende-llm--tool-call-list session)) nil nil)))
 
 (defun ende-llm--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -118,8 +98,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--emit-event (session event)
   "Emit EVENT for SESSION unless it has settled."
-  (unless (ende-llm--terminal-p session)
-    (ende-llm--invoke-callback session :on-event event)))
+  (ende-stream-emit (ende-llm--session-stream session) event))
 
 (defun ende-llm--emit-diagnostic (session text)
   "Emit diagnostic TEXT for SESSION when tool diagnostics are enabled."
@@ -144,7 +123,8 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--diagnostic-output-items (session)
   "Return a safe summary of SESSION's Chat Completions output items."
-  (let ((items (when (ende-llm--session-content-parts session)
+  (let ((items (when (ende-stream-session-content-parts
+                     (ende-llm--session-stream session))
                  (list "message"))))
     (dolist (call (ende-llm--tool-call-list session))
       (push (format "tool_call(%s)" (or (plist-get call :name) "<unknown>"))
@@ -168,41 +148,16 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--emit-delta (session channel text)
   "Record and emit nonempty TEXT on CHANNEL for SESSION."
-  (when (and (not (ende-llm--terminal-p session))
-             (stringp text) (> (length text) 0))
-    (if (and ende-max-output-chars
-             (> (+ (ende-llm--session-estimated-chars session) (length text))
-                ende-max-output-chars))
-        (ende-llm--fail
-         session
-         (ende-error-create
-          :kind 'resource
-          :message "generated output exceeds ende-max-output-chars"))
-      (if (eq channel :content)
-          (push text (ende-llm--session-content-parts session))
-        (push text (ende-llm--session-thinking-parts session)))
-      (cl-incf (ende-llm--session-estimated-chars session) (length text))
-      (unless (ende-llm--session-generation-start session)
-        (setf (ende-llm--session-generation-start session) (float-time)))
-      (ende-llm--emit-event
-       session (list :type :delta :channel channel :text text))
-      (let ((now (float-time)))
-        (when (and (not (ende-llm--terminal-p session))
-                   (or (null (ende-llm--session-last-usage-update session))
-                       (>= (- now
-                              (ende-llm--session-last-usage-update session))
-                           ende-usage-update-interval)))
-          (setf (ende-llm--session-last-usage-update session) now)
-          (let* ((tokens (max 1 (floor
-                                 (/ (ende-llm--session-estimated-chars session)
-                                    4.0))))
-                 (elapsed (max 0.001
-                               (- now
-                                  (ende-llm--session-generation-start session)))))
-            (ende-llm--emit-event
-             session (list :type :usage :tokens tokens
-                           :speed (/ (float tokens) elapsed)
-                           :estimated t))))))))
+  (when (ende-stream-record-delta
+         (ende-llm--session-stream session) channel text
+         (apply-partially #'ende-llm--fail session))
+    (let ((now (float-time)))
+      (when (or (null (ende-llm--session-last-usage-update session))
+                (>= (- now (ende-llm--session-last-usage-update session))
+                    ende-usage-update-interval))
+        (setf (ende-llm--session-last-usage-update session) now)
+        (ende-stream-emit-estimated-usage
+         (ende-llm--session-stream session))))))
 
 (defun ende-llm--parser-callbacks (session)
   "Return reasoning parser callbacks for SESSION."
@@ -241,41 +196,35 @@ The :callbacks argument initializes the composed transport lifecycle."
                       (ende-protocol-json-get "owned_by" json))))
     (when (or (and (stringp model)
                    (not (string= model
-                                 (or (ende-llm--session-actual-model session)
+                                 (or (ende-stream-session-actual-model
+                                      (ende-llm--session-stream session))
                                      ""))))
               (and (stringp provider)
                    (not (string= provider
-                                 (or (ende-llm--session-actual-provider session)
+                                 (or (ende-stream-session-actual-provider
+                                      (ende-llm--session-stream session))
                                      "")))))
       (when (stringp model)
-        (setf (ende-llm--session-actual-model session) model))
+        (setf (ende-stream-session-actual-model
+               (ende-llm--session-stream session)) model))
       (when (stringp provider)
-        (setf (ende-llm--session-actual-provider session) provider))
+        (setf (ende-stream-session-actual-provider
+               (ende-llm--session-stream session)) provider))
       (ende-llm--emit-event
        session
        (list :type :metadata
              :metadata (list :source :response
-                             :model (ende-llm--session-actual-model session)
+                             :model (ende-stream-session-actual-model
+                                     (ende-llm--session-stream session))
                              :provider
-                             (ende-llm--session-actual-provider session)))))))
+                             (ende-stream-session-actual-provider
+                              (ende-llm--session-stream session))))))))
 
 (defun ende-llm--handle-usage (session usage)
   "Record and emit provider USAGE for SESSION."
   (when usage
-    (setf (ende-llm--session-usage session) usage)
-    (let* ((reported-tokens
-            (ende-protocol-json-get "completion_tokens" usage))
-           (tokens (if (numberp reported-tokens) reported-tokens 0))
-           (elapsed (max 0.001
-                         (- (float-time)
-                            (or (ende-llm--session-generation-start session)
-                                (float-time))))))
-      (ende-llm--emit-event
-       session (list :type :usage :tokens tokens
-                     :speed (if (numberp reported-tokens)
-                                (/ (float tokens) elapsed)
-                              0.0)
-                     :usage usage)))))
+    (ende-stream-record-usage
+     (ende-llm--session-stream session) usage "completion_tokens")))
 
 (defun ende-llm--first-choice (choices)
   "Return the first choice from parsed JSON CHOICES."
@@ -368,7 +317,8 @@ The :callbacks argument initializes the composed transport lifecycle."
         (when tool-calls
           (ende-llm--collect-tool-calls session tool-calls))
         (when (stringp finish-reason)
-          (setf (ende-llm--session-finish-reason session) finish-reason))
+          (setf (ende-stream-session-finish-reason
+                 (ende-llm--session-stream session)) finish-reason))
         (when (stringp reasoning-content)
           (push reasoning-content
                 (ende-llm--session-reasoning-content-parts session)))
@@ -399,35 +349,16 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--result (session)
   "Build the normalized result plist for SESSION."
-  (let* ((usage (ende-llm--session-usage session))
-         (reported (and usage
-                        (ende-protocol-json-get "completion_tokens" usage)))
-         (tokens (or reported
-                     (max 0 (floor
-                             (/ (ende-llm--session-estimated-chars session)
-                                4.0)))))
-         (started (or (ende-llm--session-generation-start session)
-                      (float-time))))
-    (list :content (mapconcat #'identity
-                              (reverse
-                               (ende-llm--session-content-parts session)) "")
-          :thinking (mapconcat #'identity
-                               (reverse
-                                (ende-llm--session-thinking-parts session)) "")
-          :reasoning-content
-          (and (ende-llm--session-reasoning-content-parts session)
-               (mapconcat #'identity
-                          (reverse
-                           (ende-llm--session-reasoning-content-parts session))
-                          ""))
-          :usage usage :tokens tokens :estimated (null reported)
-          :speed (/ (float tokens)
-                    (max 0.001 (- (float-time) started)))
-          :finish-reason (ende-llm--session-finish-reason session)
-          :tool-calls (ende-llm--tool-call-list session)
-          :provider (ende-llm--session-actual-provider session)
-          :model (or (ende-llm--session-actual-model session)
-                     (ende-llm--session-model session)))))
+  (ende-stream-result
+   (ende-llm--session-stream session) "completion_tokens"
+   (ende-llm--session-model session) nil
+   (list :reasoning-content
+         (and (ende-llm--session-reasoning-content-parts session)
+              (mapconcat #'identity
+                         (reverse
+                          (ende-llm--session-reasoning-content-parts session))
+                         ""))
+         :tool-calls (ende-llm--tool-call-list session))))
 
 (defun ende-llm--handoff-to-batch (session)
   "Retry SESSION through OpenRouter Batch after its exact Batch-only error."
@@ -439,7 +370,7 @@ The :callbacks argument initializes the composed transport lifecycle."
     (if error
         (ende-llm--fail session error)
       (ende-transport-session-transfer (ende-llm--lifecycle session))
-      (ende-llm--cleanup-session session))))
+      (ende-transport-session-cleanup (ende-llm--lifecycle session)))))
 
 (defun ende-llm--finish-success (session &optional headers)
   "Validate and successfully finish SESSION, or settle it with an error."
@@ -639,14 +570,16 @@ The :callbacks argument initializes the composed transport lifecycle."
             :sentinel (apply-partially #'ende-llm--process-sentinel session))))
       (ende-transport-session-set-resources
        (ende-llm--lifecycle session) request))
-    (ende-llm--invoke-callback
-     session :on-start (apply-partially #'ende-llm--cancel session))
+    (ende-transport-session-invoke
+     (ende-llm--lifecycle session) :on-start
+     (apply-partially #'ende-llm--cancel session))
     (ende-llm--diagnose-request session request-body)
     (when (and (not (ende-llm--terminal-p session))
                ende-provider-discovery-enabled)
-      (setf (ende-llm--session-discovery-cancel session)
-            (ende-provider-discover
-             profile (apply-partially #'ende-llm--discovery-result session))))
+      (ende-transport-session-add-canceller
+       (ende-llm--lifecycle session)
+       (ende-provider-discover
+        profile (apply-partially #'ende-llm--discovery-result session))))
     (unless (ende-llm--terminal-p session)
       (process-send-string
        (ende-transport-session-process (ende-llm--lifecycle session))
@@ -690,8 +623,7 @@ The :callbacks argument initializes the composed transport lifecycle."
                  :profile profile :callbacks callbacks
                  :model (plist-get profile :model)
                  :reasoning (ende-protocol-make-reasoning)
-                 :tool-calls (make-hash-table :test #'eql)
-                 :estimated-chars 0)))
+                 :tool-calls (make-hash-table :test #'eql))))
           (condition-case startup-error
               (ende-llm--start-session session messages)
             ((error quit)

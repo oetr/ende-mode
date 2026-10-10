@@ -55,8 +55,7 @@
     (should (equal (alist-get :type (nth 2 (alist-get :input responses-body)))
                    "function_call_output"))
     (let ((session (ende-llm--make-session
-                    :tool-calls (make-hash-table :test #'eql)
-                    :estimated-chars 0)))
+                    :tool-calls (make-hash-table :test #'eql))))
       (ende-llm--collect-tool-calls
        session
        (vector (json-parse-string
@@ -73,8 +72,7 @@
                                 :arguments)
                      "{\"path\":\"main.el\"}")))
     (let* ((session (ende-codex--make-session
-                     :tool-calls (make-hash-table :test #'eql)
-                     :estimated-chars 0))
+                     :tool-calls (make-hash-table :test #'eql)))
            (event
             (json-parse-string
              "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"main.el\\\"}\"}]}}"
