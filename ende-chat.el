@@ -1923,7 +1923,7 @@ current fold state.  FINAL places the terminal assistant reply after it."
               (let ((inhibit-read-only t))
                 (atomic-change-group
                   (let* ((placeholder
-                          (ende-chat--resolve-request-destination job t))
+                          (ende-chat--resolve-request-destination job))
                          (document (car placeholder))
                          (anchor (cadr placeholder))
                          (work (and anchor
@@ -2204,7 +2204,7 @@ exact durable request ID and pending state."
                     (set-marker marker candidate buffer)
                     next))))))))))
 
-(defun ende-chat--resolve-request-destination (job &optional _local allow-edited)
+(defun ende-chat--resolve-request-destination (job &optional allow-edited)
   "Return JOB's pending reply from its live markers, or nil.
 ALLOW-EDITED is used only for ID-based failure recovery."
   (let* ((instruction (ende-job-instruction job))
@@ -2302,7 +2302,7 @@ ALLOW-EDITED is used only for ID-based failure recovery."
   "Mark JOB's pending reply as failed, if it still exists."
   (condition-case nil
       (let ((placeholder
-             (ende-chat--resolve-request-destination job nil t)))
+             (ende-chat--resolve-request-destination job t)))
         (when placeholder
           (pcase-let ((`(,_document ,headline) placeholder))
             (let ((buffer (ende-target-buffer (ende-job-target job))))
@@ -2632,7 +2632,7 @@ Keep it while another queued compaction still refers to its durable identity."
                (result-properties
                 (ende-chat--result-properties job result))
                (placeholder
-                (ende-chat--resolve-request-destination job t)))
+                (ende-chat--resolve-request-destination job)))
           (unless (and (stringp content) (not (string-empty-p content)))
             (error "Chat completion was empty"))
           (unless placeholder
@@ -3012,7 +3012,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                         (request-id (plist-get instruction :request-id))
                         (question-id (plist-get instruction :question-id))
                         (placeholder
-                         (ende-chat--resolve-request-destination job t)))
+                         (ende-chat--resolve-request-destination job)))
                    (unless placeholder
                      (error "Chat response destination no longer exists"))
                    (when (null definitions)
