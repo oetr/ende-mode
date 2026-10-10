@@ -66,7 +66,7 @@
                                  :text response))
       (ende-test--callback call :on-event
                            (list :type :usage :tokens 10 :speed 50.0))
-      (ende-test--callback call :on-done response))
+      (ende-test--callback call :on-done (list :content response)))
      ((and (listp response) response)
       (when (or (plist-get response :reported-model)
                 (plist-get response :reported-provider))

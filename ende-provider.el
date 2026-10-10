@@ -469,56 +469,6 @@ Present preference keys override PROFILE even when their value is nil."
                  effort
                  (or (plist-get profile :model) "<unknown>")
                  (ende-provider-client-name profile)))))))
-
-(defun ende-provider--legacy-control-defaults (profile)
-  "Return protocol mappings for a legacy request PROFILE without :controls.
-The selected wire protocol or explicit transport is used; endpoint hosts are
-never inspected."
-  (cond
-   ((eq (plist-get profile :wire-api) 'responses)
-    '((:reasoning-effort :path ("reasoning" "effort"))))
-   ((or (eq (plist-get profile :transport) 'openrouter-batch)
-        (memq (plist-get profile :name) '(openrouter openrouter-batch)))
-    '((:temperature :path ("temperature"))
-      (:reasoning-effort :path ("reasoning" "effort"))))
-   (t '((:temperature :path ("temperature"))))))
-
-(defun ende-provider--with-legacy-control-defaults (profile)
-  "Add protocol mappings to legacy PROFILE when no mappings are present."
-  (if (plist-member profile :controls)
-      profile
-    (plist-put profile :controls
-               (ende-provider--legacy-control-defaults profile))))
-
-(defun ende-provider-resolve-profile (options)
-  "Resolve OPTIONS to a detached effective provider profile.
-Named profiles and batch requests retain their existing option shape."
-  (cond
-   ((plist-get options :name)
-    (let ((profile
-           (if (eq (plist-get options :type) 'openai)
-               (ende-plist-merge
-                ende-provider--generic-openai-defaults (copy-tree options))
-             (copy-tree options))))
-      (ende-provider--strip-secret-fields
-       (ende-provider--with-legacy-control-defaults profile))))
-   ((eq (plist-get options :transport) 'openrouter-batch)
-    (ende-provider--strip-secret-fields
-     (ende-provider--with-legacy-control-defaults (copy-tree options))))
-   ((eq (plist-get options :type) 'openai)
-    (ende-provider--strip-secret-fields
-     (ende-plist-merge
-      ende-provider--generic-openai-defaults (copy-tree options))))
-   ((eq (plist-get options :wire-api) 'responses)
-    (ende-provider--strip-secret-fields
-     (ende-provider--with-legacy-control-defaults
-      (ende-plist-merge
-       (ende-provider--built-in-profile 'openai) options))))
-   (t
-    (ende-provider--strip-secret-fields
-     (ende-provider--with-legacy-control-defaults
-      (ende-plist-merge (ende-provider-profile) options))))))
-
 (defun ende-provider-validate-profile (profile)
   "Validate request configuration in PROFILE before network startup."
   (when (and (plist-member profile :type)
@@ -616,16 +566,12 @@ SELECTION must contain a provider symbol and a nonempty model string."
     (let* ((provider (plist-get selection :provider))
            (model (plist-get selection :model))
            (preferences-present
-            (or (plist-member selection :control-preferences)
-                (plist-member selection :reasoning-effort)))
+            (plist-member selection :control-preferences))
            (preferences
             (and preferences-present
                  (copy-tree
                   (ende-provider--validate-control-preferences
-                   (if (plist-member selection :control-preferences)
-                       (plist-get selection :control-preferences)
-                     (list :reasoning-effort
-                           (plist-get selection :reasoning-effort))))))))
+                   (plist-get selection :control-preferences))))))
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
         (append (list :provider provider :model model)
@@ -649,40 +595,6 @@ SELECTION must contain a provider symbol and a nonempty model string."
                        ende-model-selection--buffer-control-preferences)
               table))))))
 
-(defun ende-model-selection--legacy-control-preferences
-    (provider model &optional buffer)
-  "Return legacy preferences for PROVIDER and MODEL, if available.
-BUFFER defaults to the current buffer."
-  (let* ((buffer (or buffer (current-buffer)))
-         (pair (ende-model-selection--pair-key provider model))
-         (stored (and (eq ende-model-selection-scope 'buffer)
-                      (buffer-live-p buffer)
-                      (gethash (ende-model-selection--buffer-key buffer)
-                               ende-model-selection--buffer-selections)))
-         (local (and (eq ende-model-selection-scope 'buffer)
-                     (buffer-live-p buffer)
-                     (buffer-local-value
-                      'ende-model-selection--buffer-selection buffer)))
-         (selection
-          (or (and (equal pair
-                          (ende-model-selection--pair-key
-                           (plist-get local :provider)
-                           (plist-get local :model)))
-                   local)
-              (and (equal pair
-                          (ende-model-selection--pair-key
-                           (plist-get stored :provider)
-                           (plist-get stored :model)))
-                   stored)
-              (and (equal pair
-                          (ende-model-selection--pair-key
-                           (plist-get ende-model-selection--last-used :provider)
-                           (plist-get ende-model-selection--last-used :model)))
-                   ende-model-selection--last-used)))
-         (normalized (ende-model-selection--normalize selection)))
-    (when (plist-member normalized :control-preferences)
-      (cons t (copy-tree (plist-get normalized :control-preferences))))))
-
 (defun ende-model-selection--control-preference-entry
     (provider model &optional buffer)
   "Return (FOUND . PREFERENCES) for PROVIDER and MODEL.
@@ -698,26 +610,20 @@ buffer."
          (let ((preferences
                 (gethash pair ende-model-selection--shared-control-preferences
                          missing)))
-           (setq entry
-                 (if (eq preferences missing)
-                     (ende-model-selection--legacy-control-preferences
-                      provider model buffer)
-                   (cons t preferences)))))
+           (unless (eq preferences missing)
+             (setq entry (cons t preferences)))))
         ('buffer
          (let* ((table (ende-model-selection--buffer-preference-table buffer))
                 (preferences (if table (gethash pair table missing) missing)))
            (setq entry
-                 (cond
-                  ((not (eq preferences missing)) (cons t preferences))
-                  ((ende-model-selection--legacy-control-preferences
-                    provider model buffer))
-                  (t
+                 (if (not (eq preferences missing))
+                     (cons t preferences)
                    (let ((shared
                           (gethash pair
                                    ende-model-selection--shared-control-preferences
                                    missing)))
                      (unless (eq shared missing)
-                       (cons t shared))))))))
+                       (cons t shared)))))))
         (_ (error "Invalid `ende-model-selection-scope': %s"
                   ende-model-selection-scope))))
     (when entry
@@ -864,8 +770,7 @@ An unset buffer follows the current configured provider defaults."
                (equal model (plist-get selection :model))))
          (selection-preferences-p
           (and matching-selection-p
-               (or (plist-member selection :control-preferences)
-                   (plist-member selection :reasoning-effort))))
+               (plist-member selection :control-preferences)))
          (preferences
           (ende-model-selection-control-preferences provider model buffer))
          (profile (ende-provider-profile-for-selection

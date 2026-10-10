@@ -597,7 +597,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
-  (let* ((profile (ende-provider-resolve-profile options))
+  (let* ((profile (copy-tree options))
          (validation-error
           (condition-case caught
               (progn

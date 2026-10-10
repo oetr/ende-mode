@@ -24,31 +24,34 @@
 
 
 
-(ert-deftest ende-test/provider-resolves-legacy-effective-profiles ()
+(ert-deftest ende-test/provider-composes-effective-profiles ()
   (let* ((ende-provider-endpoint "http://localhost:9000/v1/chat/completions")
-         (ende-provider-model "legacy-model")
-         (local (ende-provider-resolve-profile '(:temperature 0.4)))
-         (named '(:name remote :url "https://remote.test/chat/completions"
-			:model "remote-model"))
-         (batch '(:transport openrouter-batch
-			     :batch-url "https://openrouter.ai/api/v1/batches"))
+         (ende-provider-model "configured-model")
+         (ende-provider-temperature 0.4)
+         (ende-provider-profiles
+          '((remote :url "https://remote.test/chat/completions"
+                    :model "remote-model")))
+         (local (ende-provider-profile 'local))
+         (remote (ende-provider-profile 'remote))
+         (batch (ende-provider-profile 'openrouter-batch))
          (responses
           (let ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
                 (ende-codex-model "gpt-configured"))
-            (ende-provider-resolve-profile '(:wire-api responses)))))
+            (ende-provider-profile 'openai))))
     (should (eq (plist-get local :name) 'local))
     (should (equal (plist-get local :url) ende-provider-endpoint))
-    (should (equal (plist-get local :model) "legacy-model"))
+    (should (equal (plist-get local :model) "configured-model"))
     (should (= (plist-get local :temperature) 0.4))
-    (should
-     (equal (ende-provider-resolve-profile named)
-            (append named '(:controls ((:temperature :path ("temperature")))))))
-    (should
-     (equal (ende-provider-resolve-profile batch)
-            (append batch
-                    '(:controls ((:temperature :path ("temperature"))
-                                 (:reasoning-effort
-                                  :path ("reasoning" "effort")))))))
+    (should (equal (plist-get remote :model) "remote-model"))
+    (should (equal (plist-get (ende-provider-control-descriptor
+                               remote :temperature)
+                              :path)
+                   '("temperature")))
+    (should (eq (plist-get batch :transport) 'openrouter-batch))
+    (should (equal (plist-get (ende-provider-control-descriptor
+                               batch :reasoning-effort)
+                              :path)
+                   '("reasoning" "effort")))
     (should (equal (plist-get responses :url)
                    "https://chatgpt.com/backend-api/codex/responses"))
     (should (equal (plist-get responses :model) "gpt-configured"))))
@@ -100,24 +103,20 @@
                                 (prin1-to-string snapshot)))))
 
 (ert-deftest ende-test/provider-resolves-typed-profiles-with-static-defaults ()
-  (let* ((generic '(:type openai :url "https://example.test/v1/chat/completions"
-                          :model "generic-model"))
-         (unnamed (ende-provider-resolve-profile generic))
-         (named (ende-provider-resolve-profile
-                 (append '(:name generic) (copy-tree generic))))
-         (overrides
-          (ende-provider-resolve-profile
-           '(:name generic :type openai
-		   :url "https://example.test/v1/chat/completions"
-		   :model "generic-model" :max-concurrency 3 :parallel t
-		   :stream-usage nil :require-sse nil :temperature nil)))
-         (ende-provider-profiles
-          '((generic-openai :type openai
+  (let* ((ende-provider-profiles
+          '((generic :type openai :url "https://example.test/v1/chat/completions"
+                     :model "generic-model")
+            (overrides :type openai :url "https://example.test/v1/chat/completions"
+                       :model "generic-model" :max-concurrency 3 :parallel t
+                       :stream-usage nil :require-sse nil :temperature nil)
+            (generic-openai :type openai
                             :url "https://example.test/chat/completions"
                             :model "snapshot-model" :temperature nil)))
+         (unnamed (ende-provider-profile 'generic))
+         (named (ende-provider-profile 'generic))
+         (overrides (ende-provider-profile 'overrides))
          (snapshot
-          (ende-provider-resolve-profile
-           (ende-provider-profile 'generic-openai))))
+          (ende-provider-profile-snapshot 'generic-openai)))
     (dolist (key '(:type :max-concurrency :parallel :stream-usage :require-sse))
       (should (equal (plist-get unnamed key) (plist-get named key))))
     (should (eq (plist-get unnamed :type) 'openai))
@@ -135,19 +134,17 @@
            '((generic-openai :type openai
                              :url "https://example.test/v2/chat/completions"
                              :model "changed-model" :temperature 0.5))))
-      (let ((resolved (ende-provider-resolve-profile snapshot)))
-        (should (equal (plist-get resolved :url)
-                       "https://example.test/chat/completions"))
-        (should (equal (plist-get resolved :model) "snapshot-model"))
-        (should-not (plist-get resolved :temperature)))))
+      (should (equal (plist-get snapshot :url)
+                     "https://example.test/chat/completions"))
+      (should (equal (plist-get snapshot :model) "snapshot-model"))
+      (should-not (plist-get snapshot :temperature))))
   (let* ((ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses")
          (ende-codex-model "snapshot-codex-model")
-         (snapshot (ende-provider-resolve-profile
-                    (ende-provider-profile 'openai))))
+         (snapshot (ende-provider-profile-snapshot 'openai)))
     (let* ((ende-codex-endpoint "https://chatgpt.com/changed")
            (ende-codex-model "changed-codex-model")
            (ende-provider-profiles '((openai :temperature 0.1)))
-           (resolved (ende-provider-resolve-profile snapshot)))
+           (resolved snapshot))
       (should (equal (plist-get resolved :url)
                      "https://chatgpt.com/backend-api/codex/responses"))
       (should (equal (plist-get resolved :model) "snapshot-codex-model"))

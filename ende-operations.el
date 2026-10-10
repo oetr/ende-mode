@@ -408,8 +408,8 @@ MUTATION runs in TARGET's buffer and returns the generated review overlay."
 								    (funcall mutation)))))))
 
 (defun ende--result-content (result)
-  "Extract and validate completion content from RESULT or a legacy string."
-  (let ((content (if (stringp result) result (plist-get result :content))))
+  "Extract and validate completion content from normalized RESULT."
+  (let ((content (plist-get result :content)))
     (when (and ende-max-output-chars
                (stringp content)
                (> (length content) ende-max-output-chars))
