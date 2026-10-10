@@ -2257,19 +2257,30 @@ process-group cancellation function with the active Ende job."
    (cons :type "object")
    (cons :properties
          (list
-          (cons :anchor '((:type . "string") (:minLength . 1)))
+          (cons :anchor
+                '((:type . "string")
+                  (:minLength . 1)
+                  (:description . "Text matched against the original file contents; normally identify one location.")))
           (cons :position
                 '((:type . "string")
-                  (:enum . ("before" "after" "replace"))))
+                  (:enum . ("before" "after" "replace"))
+                  (:description . "Insert before or after the anchor, or replace it.")))
           (cons :text '((:type . "string")))
-          (cons :occurrence '((:type . "integer") (:minimum . 1)))
-          (cons :all '((:type . "boolean")))))
+          (cons :occurrence
+                '((:type . "integer")
+                  (:minimum . 1)
+                  (:description . "Select a particular repeated anchor (1-based).")))
+          (cons :all
+                '((:type . "boolean")
+                  (:description . "Apply this edit to every matching occurrence.")))))
    (cons :required '("anchor" "position" "text"))
    (cons :additionalProperties :json-false)))
 
 (defconst ende-tools--edit-file-schema
   (list
    (cons :type "object")
+   (cons :description
+         "Changes disk contents without modifying an already visiting buffer.")
    (cons :properties
          (list
           (cons :path '((:type . "string")
@@ -2279,7 +2290,8 @@ process-group cancellation function with the active Ende job."
                 (list (cons :type "array")
                       (cons :minItems 1)
                       (cons :maxItems ende-tools-max-edits)
-                      (cons :description "Maximum edits per call.")
+                      (cons :description
+                            "Resolve all edits against the same original file, not sequentially; edits must not overlap.")
                       (cons :items ende-tools--edit-item-schema)))))
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))

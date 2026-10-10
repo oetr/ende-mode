@@ -166,7 +166,32 @@
                      (alist-get :parameters (alist-get :function definition)))))
            (properties (gethash "properties" schema))
            (item (gethash "items" (gethash "edits" properties)))
-           (item-properties (gethash "properties" item)))
+           (item-properties (gethash "properties" item))
+           (edits-description
+            (gethash "description" (gethash "edits" properties))))
+      (should (string-match-p "disk contents" (gethash "description" schema)))
+      (should (string-match-p "visiting buffer" (gethash "description" schema)))
+      (should (string-match-p "same original file" edits-description))
+      (should (string-match-p "not sequentially" edits-description))
+      (should (string-match-p "not overlap" edits-description))
+      (should (string-match-p "original file contents"
+                              (gethash "description"
+                                       (gethash "anchor" item-properties))))
+      (should (string-match-p "one location"
+                              (gethash "description"
+                                       (gethash "anchor" item-properties))))
+      (should (string-match-p "before or after"
+                              (gethash "description"
+                                       (gethash "position" item-properties))))
+      (should (string-match-p "replace"
+                              (gethash "description"
+                                       (gethash "position" item-properties))))
+      (should (string-match-p "particular repeated anchor"
+                              (gethash "description"
+                                       (gethash "occurrence" item-properties))))
+      (should (string-match-p "every matching occurrence"
+                              (gethash "description"
+                                       (gethash "all" item-properties))))
       (should (equal (append (gethash "required" schema) nil)
                      '("path" "edits")))
       (should (eq (gethash "additionalProperties" schema) :false))
