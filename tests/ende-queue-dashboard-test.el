@@ -695,6 +695,48 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
 				(should-not ende--active-jobs)
 				(should-not (ende-pending-jobs)))))))
 
+(ert-deftest ende-test/dashboard-status-follows-org-result-reference ()
+  (ende-test--dashboard-reset)
+  (unwind-protect
+      (with-temp-buffer
+        (org-mode)
+        (let* ((question-id "question-dashboard-history")
+               (request-id "request-dashboard-history")
+               (call
+                (ende-chat--prepare-tool-call
+                 '(:id "provider-dashboard-history" :name "read_file"
+                   :arguments "{\"path\":\"fixture.el\"}"))))
+          (insert "* Conversation\n** Question\nInspect.\n"
+                  (ende-chat--work-text 2 question-id request-id)
+                  (ende-chat--assistant-protocol-text
+                   3 question-id request-id "" '(:content "") (list call))
+                  (ende-chat--tool-result-text
+                   3 request-id call "{\"ok\":true}"))
+          (save-excursion
+            (goto-char (point-min))
+            (re-search-forward "^\\*\\* Agent: Work")
+            (org-back-to-heading t)
+            (org-entry-delete nil ende-chat-state-property))
+          (let* ((document (ende-chat--build-document))
+                 (result
+                  (car (cl-remove-if-not
+                        (lambda (headline)
+                          (ende-chat--tool-result-protocol-p document headline))
+                        (ende-chat--document-headlines document))))
+                 (job
+                  (ende--make-job
+                   :id 42 :type 'chat :state 'running
+                   :target (ende-target-create
+                            :buffer (current-buffer) :start (point-min)
+                            :end (point-max) :cursor (point-min)
+                            :review-policy 'ignore)
+                   :instruction (list :request-id request-id))))
+            (delete-region (org-element-property :begin result)
+                           (org-element-property :end result))
+            (should (equal (ende-queue-ui--last-tool-call-from-history job)
+                           '("read_file: path=\"fixture.el\"" "---"))))))
+    (ende-test--dashboard-reset)))
+
 (provide 'ende-queue-dashboard-test)
 
 ;;; ende-queue-dashboard-test.el ends here

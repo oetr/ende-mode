@@ -390,59 +390,32 @@
                  (derived-mode-p 'org-mode)))
       (with-current-buffer (ende-target-buffer target)
         (let* ((document (ende-chat--build-document))
-              (request-id (plist-get (ende-job-instruction job) :request-id))
-              (work (and request-id
-                         (ende-chat--request-work-section document request-id)))
-              (calls (and work
-                          (reverse
-                           (cl-remove-if-not
-                            (lambda (headline)
-                              (ende-chat--tool-call-protocol-p document headline))
-                            (ende-chat--children document work)))))
-              selected)
-          (while (and calls (not selected))
-            (let* ((call (pop calls))
-                   (name (ende-chat--property document call :tool-name)))
-              (unless (equal name "about_thinking")
-                (setq selected call))))
-          (when selected
-            (let* ((execution-id
-                    (ende-chat--property document selected :tool-execution-id))
-                   (result
-                    (cl-find-if
-                     (lambda (headline)
-                       (and (ende-chat--tool-result-protocol-p document headline)
-                            (equal execution-id
-                                   (ende-chat--property
-                                    document headline :tool-execution-id))))
-                     (ende-chat--children document work)))
-                   (request (ende-tool-store-get execution-id 'request))
-                   (request (and request
-                                 (ende-chat--parse-tool-payload
-                                  request execution-id 'request)))
-                   (arguments (and request (gethash "arguments" request)))
+               (request-id (plist-get (ende-job-instruction job) :request-id))
+               (execution
+                (and request-id
+                     (ende-chat--newest-tool-execution-in-history
+                      document request-id
+                      (lambda (name) (not (equal name "about_thinking")))))))
+          (when execution
+            (let* ((arguments (plist-get execution :arguments))
                    (summary (and arguments
                                  (ende-chat--tool-argument-summary arguments)))
-                   (tool (ende-chat--property document selected :tool-name))
-                   (result-payload
-                    (and result (ende-tool-store-get execution-id 'result)))
-                   (result-record
-                    (and result-payload
-                         (ende-chat--parse-tool-payload
-                          result-payload execution-id 'result)))
                    (outcome
-                    (and result-record
+                    (and (plist-get execution :result-present-p)
                          (condition-case nil
                              (json-parse-string
-                              (gethash "content" result-record)
+                              (plist-get execution :content)
                               :object-type 'plist)
                            (error nil))))
                    (status
                     (cond
-                     ((or (null result) (null result-record)) "---")
+                     ((or (not (plist-get execution
+                                          :result-reference-present-p))
+                          (not (plist-get execution :result-present-p))) "---")
                      ((eq (plist-get outcome :ok) t) "OK")
                      (t "FAILED"))))
-              (list (concat tool (if summary (concat ": " summary) ""))
+              (list (concat (plist-get execution :history-name)
+                            (if summary (concat ": " summary) ""))
                     status))))))))
 
 (defun ende-queue-ui--tool-details (job)

@@ -843,6 +843,46 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
              request-id))
     (car matches)))
 
+(defun ende-chat--newest-tool-execution-in-history
+    (document request-id include-name-p)
+  "Return the newest stored execution referenced by REQUEST-ID's Org history.
+INCLUDE-NAME-P, when non-nil, selects candidates by their Org tool name.
+The returned semantic execution includes :result-reference-present-p, which
+reflects Org history rather than the existence of a stored result payload."
+  (let ((work (ende-chat--request-work-section document request-id)))
+    (when work
+      (let* ((children (ende-chat--children document work))
+             (results (cl-remove-if-not
+                       (lambda (headline)
+                         (ende-chat--tool-result-protocol-p document headline))
+                       children))
+             (calls (reverse
+                     (cl-remove-if-not
+                      (lambda (headline)
+                        (ende-chat--tool-call-protocol-p document headline))
+                      children)))
+             selected)
+        (while (and calls (not selected))
+          (let* ((call (pop calls))
+                 (name (ende-chat--property document call :tool-name)))
+            (when (or (null include-name-p) (funcall include-name-p name))
+              (let* ((execution-id
+                      (ende-chat--property document call :tool-execution-id))
+                     (execution
+                      (ende-tool-store-load-execution execution-id))
+                     (result-reference
+                      (cl-find-if
+                       (lambda (headline)
+                         (equal execution-id
+                                (ende-chat--property
+                                 document headline :tool-execution-id)))
+                       results)))
+                (setq selected (plist-put execution :history-name name))
+                (setq selected
+                      (plist-put selected :result-reference-present-p
+                                 (and result-reference t)))))))
+        selected))))
+
 (defun ende-chat--work-ancestor (document headline)
   "Return HEADLINE's generated Agent: Work ancestor, if any."
   (let ((parent (ende-chat--parent document headline)))
@@ -1087,21 +1127,19 @@ renderer framing newlines are removed before the selected decoding is applied."
   "Reconstruct generated CALL under ASSISTANT in DOCUMENT."
   (let* ((request-id (ende-chat--property document call :request-id))
          (execution-id
-          (ende-chat--property document call :tool-execution-id))
-         (payload (ende-tool-store-get execution-id 'request)))
+          (ende-chat--property document call :tool-execution-id)))
     (unless (equal request-id
                    (ende-chat--property document assistant :request-id))
       (error "Malformed generated tool call under %s: request ID mismatch"
              (org-element-property :raw-value assistant)))
-    (if (null payload)
-        (progn
-          (setq ende-chat--expired-history-in-request t)
-          nil)
-      (let* ((record (ende-chat--parse-tool-payload payload execution-id 'request))
-             (call-id (gethash "provider_call_id" record)))
-        (list :id call-id
-              :name (gethash "tool_name" record)
-              :arguments (gethash "arguments" record))))))
+    (let ((execution (ende-tool-store-load-execution execution-id)))
+      (if (not (plist-get execution :request-present-p))
+          (progn
+            (setq ende-chat--expired-history-in-request t)
+            nil)
+        (list :id (plist-get execution :provider-call-id)
+              :name (plist-get execution :name)
+              :arguments (plist-get execution :arguments))))))
 
 (defun ende-chat--protocol-assistant-message (document headline)
   "Reconstruct the assistant message represented by HEADLINE."
@@ -1119,16 +1157,14 @@ renderer framing newlines are removed before the selected decoding is applied."
   "Reconstruct the tool-result message represented by HEADLINE."
   (let* ((execution-id
           (ende-chat--property document headline :tool-execution-id))
-         (payload (ende-tool-store-get execution-id 'result)))
-    (if (null payload)
+         (execution (ende-tool-store-load-execution execution-id)))
+    (if (not (plist-get execution :result-present-p))
         (progn
           (setq ende-chat--expired-history-in-request t)
           nil)
-      (let ((record (ende-chat--parse-tool-payload
-                     payload execution-id 'result)))
-        (list :role "tool"
-              :tool-call-id (gethash "provider_call_id" record)
-              :content (gethash "content" record))))))
+      (list :role "tool"
+            :tool-call-id (plist-get execution :provider-call-id)
+            :content (plist-get execution :content)))))
 
 (defun ende-chat--protocol-work-messages (document work)
   "Reconstruct complete tool turns in WORK from its direct child order."
@@ -1201,10 +1237,6 @@ renderer framing newlines are removed before the selected decoding is applied."
                   (result-message
                    (ende-chat--protocol-tool-result-message document result)))
               (when (and call-message result-message)
-                (unless (equal (plist-get call-message :id)
-                               (plist-get result-message :tool-call-id))
-                  (error "Malformed tool history: provider call IDs disagree for execution %s"
-                         execution-id))
                 (push (list call-message result result-message) complete)))))))
     (setq complete (nreverse complete))
     (let ((messages nil)
@@ -1222,28 +1254,6 @@ renderer framing newlines are removed before the selected decoding is applied."
       (dolist (result stored-results)
         (push result messages))
       (nreverse messages))))
-
-(defun ende-chat--parse-tool-payload (payload execution-id kind)
-  "Parse and validate stored JSON PAYLOAD for EXECUTION-ID and KIND."
-  (let* ((record
-          (condition-case error-data
-              (json-parse-string payload :object-type 'hash-table)
-            (error
-             (error "Malformed stored %s payload for execution %s: %s"
-                    kind execution-id (error-message-string error-data)))))
-         (fields (if (eq kind 'request)
-                     '("provider_call_id" "tool_name" "arguments")
-                   '("provider_call_id" "content"))))
-    (unless (and (hash-table-p record)
-                 (cl-every (lambda (field) (stringp (gethash field record)))
-                           fields)
-                 (not (string-empty-p (gethash "provider_call_id" record)))
-                 (or (eq kind 'result)
-                     (and (not (string-empty-p (gethash "tool_name" record)))
-                          (stringp (gethash "arguments" record)))))
-      (error "Malformed stored %s payload for execution %s"
-             kind execution-id))
-    record))
 
 (defun ende-chat--serialize (document question &optional current-text root)
   "Serialize QUESTION's active root into ordered role-tagged messages.
@@ -1292,6 +1302,56 @@ tests."
         (buffer-string))
     (error text)))
 
+(defun ende-chat--render-context (messages)
+  "Render semantic chat MESSAGES as readable plain text."
+  (with-temp-buffer
+    (dolist (message messages)
+      (if (and (consp message) (stringp (car message)))
+          (insert (upcase (car message)) "\n\n"
+                  (or (cdr message) "") "\n\n")
+        (let ((role (plist-get message :role))
+              (content (plist-get message :content)))
+          (if (equal role "tool")
+              (insert "TOOL RESULT\nCall ID: "
+                      (or (plist-get message :tool-call-id) "")
+                      "\n\n"
+                      (ende-chat--pretty-json-or-raw (or content ""))
+                      "\n\n")
+            (insert (upcase (format "%s" role)) "\n\n"
+                    (or content "") "\n")
+            (dolist (call (plist-get message :tool-calls))
+              (insert "\nTool call: "
+                      (format "%s" (plist-get call :name))
+                      "\nCall ID: "
+                      (format "%s" (or (plist-get call :id) ""))
+                      "\n\nArguments:\n"
+                      (ende-chat--pretty-json-or-raw
+                       (or (plist-get call :arguments) ""))
+                      "\n"))
+            (insert "\n")))))
+    (buffer-string)))
+
+;;;###autoload
+(defun ende-inspect-context-at-point ()
+  "Show the system prompt and serialized chat context at point."
+  (interactive)
+  (let* ((document (ende-chat--build-document))
+         (question (ende-chat--headline-at-point document))
+         (messages
+          (progn
+            (unless (and (eq (ende-chat--effective-role document question) 'user)
+                         (ende-chat--askable-p document question))
+              (user-error "Point is not on an askable chat section"))
+            (cons (cons "system" (ende-chat--system-prompt document))
+                  (ende-chat--serialize document question))))
+         (buffer (get-buffer-create "*ende context*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (ende-chat--render-context messages))
+        (special-mode)))
+    (pop-to-buffer buffer)))
+
 ;;;###autoload
 (defun ende-chat-inspect-tool-at-point ()
   "Show the exact stored payload referenced by the tool section at point."
@@ -1306,25 +1366,27 @@ tests."
                (ende-chat--property document headline :tool-execution-id))))
     (unless (and kind (stringp execution-id) (not (string-empty-p execution-id)))
       (user-error "Point is not on a generated tool reference"))
-    (let ((payload (ende-tool-store-get execution-id kind)))
-      (if (null payload)
+    (let* ((execution (ende-tool-store-load-execution execution-id))
+           (present (plist-get execution
+                               (if (eq kind 'request)
+                                   :request-present-p :result-present-p))))
+      (if (not present)
           (message "Tool payload has expired for execution %s" execution-id)
-        (let* ((record (ende-chat--parse-tool-payload payload execution-id kind))
-               (buffer (get-buffer-create "*ende tool payload*")))
+        (let ((buffer (get-buffer-create "*ende tool payload*")))
           (with-current-buffer buffer
             (let ((inhibit-read-only t))
               (erase-buffer)
               (insert (format "Execution: %s\nKind: %s\nProvider call ID: %s\n"
                               execution-id kind
-                              (gethash "provider_call_id" record)))
+                              (plist-get execution :provider-call-id)))
               (if (eq kind 'request)
                   (insert (format "Tool: %s\nArguments:\n%s\n"
-                                  (gethash "tool_name" record)
+                                  (plist-get execution :name)
                                   (ende-chat--pretty-json-or-raw
-                                   (gethash "arguments" record))))
+                                   (plist-get execution :arguments))))
                 (insert (format "Result:\n%s\n"
                                 (ende-chat--pretty-json-or-raw
-                                 (gethash "content" record)))))
+                                 (plist-get execution :content)))))
               (special-mode)))
           (pop-to-buffer buffer))))))
 
@@ -1752,46 +1814,6 @@ COMPACT always places a same-level context-fence sibling."
                         matches ", ")))
     (car matches)))
 
-(defun ende-chat--pending-placement-valid-p
-    (document question anchor request-id &optional compact)
-  "Return non-nil when pending ANCHOR is correctly placed after QUESTION."
-  (let* ((question-id (ende-chat--property document question :id))
-         (title (org-element-property :raw-value anchor))
-         (question-level (org-element-property :level question))
-         (work (ende-chat--work-section-p document anchor))
-         (expected-level (if compact
-                             question-level
-                           (if (= question-level 1) 2 question-level)))
-         (expected-parent
-          (if (and (= question-level 1) (not compact))
-              question
-            (ende-chat--parent document question))))
-    (and (if compact
-             (equal title ende-chat--context-fence-title)
-           (member title (list "Agent: Reply" ende-chat--work-title)))
-         (equal (ende-chat--property document anchor :request-id) request-id)
-         (equal (ende-chat--property document anchor :reply-to) question-id)
-         (equal (ende-chat--property document anchor :state) "pending")
-         (= (org-element-property :level anchor) expected-level)
-         (eq (ende-chat--parent document anchor) expected-parent)
-         (> (org-element-property :begin anchor)
-            (org-element-property :begin question))
-         (if work
-             (and (equal title ende-chat--work-title)
-                  (not compact)
-                  (equal (downcase
-                          (string-trim
-                           (or (ende-chat--property document anchor :work) "")))
-                         "t")
-                  (null (ende-chat--property document anchor :role))
-                  (null (ende-chat--property document anchor :visibility))
-                  (eq anchor
-                      (ende-chat--request-work-section document request-id)))
-           (and (not work)
-                (equal (ende-chat--property document anchor :role) "assistant")
-                (equal (ende-chat--property document anchor :visibility)
-                       "hidden"))))))
-
 (defun ende-chat--headline-header-document-at-marker (marker)
   "Return a parsed document for the headline header at MARKER, or nil."
   (when (and (markerp marker) (eq (marker-buffer marker) (current-buffer)))
@@ -1909,11 +1931,14 @@ current fold state.  FINAL places the terminal assistant reply after it."
               (widen)
               (let ((inhibit-read-only t))
                 (atomic-change-group
-                  (let* ((placeholder (ende-chat--placeholder job t))
+                  (let* ((placeholder
+                          (ende-chat--resolve-request-destination job t))
                          (document (car placeholder))
                          (anchor (cadr placeholder))
-                         (work (ende-chat--request-work-section
-                                document request-id))
+                         (work (and anchor
+                                    (ende-chat--work-section-p
+                                     document anchor)
+                                    anchor))
                          (anchor-level
                           (and anchor (org-element-property :level anchor))))
                     (setq request-end-marker
@@ -2140,10 +2165,11 @@ current fold state.  FINAL places the terminal assistant reply after it."
            start-marker end-marker)
           (ende-chat--update-request-buffer-tick job))))))
 
-(defun ende-chat--placeholder (job &optional local allow-edited)
+(defun ende-chat--resolve-request-destination
+    (job &optional local allow-edited)
   "Return JOB's current pending reply headline, or nil.
 LOCAL uses request markers while the target buffer is unchanged.
-ALLOW-EDITED skips reply-placement validation for failure recovery."
+ALLOW-EDITED lets failure recovery find a surviving request after it was moved."
   (let* ((instruction (ende-job-instruction job))
          (buffer (ende-target-buffer (ende-job-target job)))
          (target (ende-job-target job))
@@ -2151,47 +2177,87 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
          (question-id (plist-get instruction :question-id))
          (question-marker (plist-get instruction :question-marker))
          (destination-marker (ende-target-cursor-marker target))
+         (request-end-marker (plist-get instruction :request-end-marker))
          (compact (eq (ende-job-type job) 'chat-compact)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (save-excursion
           (save-restriction
             (widen)
-            (if (and local (not compact)
-                     (eql (plist-get instruction :buffer-tick)
-                          (buffer-chars-modified-tick))
-                     (ende-chat--request-markers-live-p
-                      buffer question-marker destination-marker))
-                (when-let* ((header
-                             (ende-chat--headline-header-document-at-marker
-                              destination-marker))
-                            (headline
-                             (car (ende-chat--document-headlines header))))
-                  (list header headline))
-              (let* ((document (ende-chat--build-document))
-                     (headline (ende-chat--request-state-headline
-                                document request-id "pending"))
-                     (question (ende-chat--find-by-property
-                                document ende-chat-id-property question-id))
-                     (work (and headline
-                                (ende-chat--work-section-p document headline))))
-                (when headline
-                  (unless (or allow-edited
-                              (and question
-                                   (ende-chat--pending-placement-valid-p
-                                    document question headline request-id compact)))
-                    (error "Chat response destination was edited or moved"))
-                  (set-marker destination-marker
-                              (org-element-property :begin headline) buffer)
-                  (when question
-                    (when (markerp question-marker)
+            (or (when (and local (not compact)
+                           (eql (plist-get instruction :buffer-tick)
+                                (buffer-chars-modified-tick))
+                           (ende-chat--request-markers-live-p
+                            buffer question-marker destination-marker)
+                           (or (null request-end-marker)
+                               (and (markerp request-end-marker)
+                                    (eq (marker-buffer request-end-marker)
+                                        buffer))))
+                  (when-let* ((header
+                               (ende-chat--headline-header-document-at-marker
+                                destination-marker))
+                              (headline
+                               (car (ende-chat--document-headlines header))))
+                    (list header headline)))
+                (let* ((document (ende-chat--build-document))
+                       (headline (ende-chat--request-state-headline
+                                  document request-id "pending"))
+                       (question (ende-chat--find-by-property
+                                  document ende-chat-id-property question-id))
+                       (level (and question
+                                   (org-element-property :level question)))
+                       (work (and headline
+                                  (ende-chat--work-section-p document headline))))
+                  (when headline
+                    (unless
+                        (or allow-edited
+                            (and question
+                                 (if compact
+                                     (equal (org-element-property :raw-value
+                                                                  headline)
+                                            ende-chat--context-fence-title)
+                                   (member (org-element-property :raw-value
+                                                                 headline)
+                                           (list "Agent: Reply"
+                                                 ende-chat--work-title)))
+                                 (equal (ende-chat--property
+                                         document headline :reply-to)
+                                        question-id)
+                                 (= (org-element-property :level headline)
+                                    (if compact level
+                                      (if (= level 1) 2 level)))
+                                 (eq (ende-chat--parent document headline)
+                                     (if (and (= level 1) (not compact))
+                                         question
+                                       (ende-chat--parent document question)))
+                                 (> (org-element-property :begin headline)
+                                    (org-element-property :begin question))
+                                 (if work
+                                     (and (not compact)
+                                          (null (ende-chat--property
+                                                 document headline :role))
+                                          (null (ende-chat--property
+                                                 document headline :visibility))
+                                          (eq headline
+                                              (ende-chat--request-work-section
+                                               document request-id)))
+                                   (and (equal (ende-chat--property
+                                                document headline :role)
+                                               "assistant")
+                                        (equal (ende-chat--property
+                                                document headline :visibility)
+                                               "hidden")))))
+                      (error "Chat response destination was edited or moved"))
+                    (set-marker destination-marker
+                                (org-element-property :begin headline) buffer)
+                    (when question-marker
                       (set-marker question-marker
-                                  (org-element-property :begin question) buffer)))
-                  (ende-chat--move-request-marker
-                   job :request-end-marker
-                   (and work (ende-chat--request-end document request-id)) t)
-                  (ende-chat--update-request-buffer-tick job)
-                  (list document headline))))))))))
+                                  (org-element-property :begin question) buffer))
+                    (ende-chat--move-request-marker
+                     job :request-end-marker
+                     (and work (ende-chat--request-end document request-id)) t)
+                    (ende-chat--update-request-buffer-tick job)
+                    (list document headline))))))))))
 
 (defun ende-chat--failure-text (error)
   "Return a readable failure body for ERROR."
@@ -2203,7 +2269,8 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
 (defun ende-chat--mark-failed (job &optional error)
   "Mark JOB's pending reply as failed, if it still exists."
   (condition-case nil
-      (let ((placeholder (ende-chat--placeholder job nil t)))
+      (let ((placeholder
+             (ende-chat--resolve-request-destination job nil t)))
         (when placeholder
           (pcase-let ((`(,_document ,headline) placeholder))
             (let ((buffer (ende-target-buffer (ende-job-target job))))
@@ -2363,42 +2430,23 @@ OPTIONS are passed to `json-serialize'."
         (truncate-string-to-width title width 0 nil "…")
       title)))
 
-(defun ende-chat--tool-payload-json (&rest fields)
-  "Serialize string-keyed FIELDS as controlled JSON."
-  (let ((object (make-hash-table :test #'equal)))
-    (while fields
-      (puthash (pop fields) (pop fields) object))
-    (ende-chat--json-display-text object)))
-
 (defun ende-chat--prepare-tool-call (call)
   "Store CALL's exact request and return it with a fresh execution identity."
   (let ((id (ende-chat--tool-value call :id))
         (name (ende-chat--tool-value call :name))
         (arguments (ende-chat--tool-value call :arguments)))
-    (unless (and (stringp id) (not (string-empty-p id))
-                 (stringp name) (not (string-empty-p name))
-                 (stringp arguments))
-      (error "Malformed provider tool call: %S" call))
-    (let ((execution-id (ende-tool-store--new-execution-id)))
-      (ende-tool-store-put
-       execution-id 'request
-       (ende-chat--tool-payload-json
-        "provider_call_id" id "tool_name" name "arguments" arguments))
-      (list :id id :name name :arguments arguments
-            :execution-id execution-id))))
+    (let ((execution
+           (ende-tool-store-create-execution id name arguments)))
+      (list :id (plist-get execution :provider-call-id)
+            :name (plist-get execution :name)
+            :arguments (plist-get execution :arguments)
+            :execution-id (plist-get execution :execution-id)))))
 
 (defun ende-chat--store-tool-result (call content)
   "Store CONTENT as CALL's exact result payload."
   (let ((execution-id (ende-chat--tool-value call :execution-id))
         (id (ende-chat--tool-value call :id)))
-    (unless (and (stringp execution-id) (not (string-empty-p execution-id))
-                 (stringp id) (not (string-empty-p id))
-                 (stringp content))
-      (error "Malformed tool result for execution %s" execution-id))
-    (ende-tool-store-put
-     execution-id 'result
-     (ende-chat--tool-payload-json
-      "provider_call_id" id "content" content))))
+    (ende-tool-store-store-result execution-id id content)))
 
 (defun ende-chat--tool-section-properties
     (request-id execution-id tool-name kind)
@@ -2524,7 +2572,8 @@ Keep it while another queued compaction still refers to its durable identity."
                (request-id (plist-get instruction :request-id))
                (result-properties
                 (ende-chat--result-properties job result))
-               (placeholder (ende-chat--placeholder job t)))
+               (placeholder
+                (ende-chat--resolve-request-destination job t)))
           (unless (and (stringp content) (not (string-empty-p content)))
             (error "Chat completion was empty"))
           (unless placeholder
@@ -2587,11 +2636,6 @@ Keep it while another queued compaction still refers to its durable identity."
                    (insertion-info nil))
               (when (string-blank-p (plist-get normalized :content))
                 (error "Chat completion was empty"))
-              (when (and compact
-                         (not (and question
-                                   (ende-chat--pending-placement-valid-p
-                                    document question old-headline request-id t))))
-                (error "Compaction destination was edited or moved"))
               (when question
                 (with-current-buffer buffer
                   (save-excursion
@@ -2869,7 +2913,8 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                  (let* ((instruction (ende-job-instruction job))
                         (request-id (plist-get instruction :request-id))
                         (question-id (plist-get instruction :question-id))
-                        (placeholder (ende-chat--placeholder job t)))
+                        (placeholder
+                         (ende-chat--resolve-request-destination job t)))
                    (unless placeholder
                      (error "Chat response destination no longer exists"))
                    (when (null definitions)

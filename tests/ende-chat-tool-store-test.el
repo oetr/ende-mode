@@ -47,6 +47,61 @@
           (plist-member message :tool-calls)))
    messages))
 
+(ert-deftest ende-test/chat-inspect-context-renders-persisted-tool-history ()
+  (ende-test--reset)
+  (unwind-protect
+      (with-temp-buffer
+        (org-mode)
+        (insert "* Topic\n"
+                "** Earlier user\nEarlier user context.\n"
+                "** Earlier assistant\n"
+                ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+                "Earlier assistant context.\n"
+                "** Question\nCurrent inspection question.\n")
+        (ende-test--stored-tool-history
+         (list (cons '(:id "provider-inspect-call" :name "read_file"
+                       :arguments "{\"path\":\"ende-stream.el\",\"start_line\":12,\"line_count\":3}")
+                     "{\"ok\":true,\"content\":\"INSPECTED_TOOL_RESULT\"}")))
+        (goto-char (point-max))
+        (insert "** Follow-up\nFollow-up question.\n")
+        (ende-test--chat-goto "** Follow-up")
+        (let ((source (current-buffer))
+              (source-text (buffer-string))
+              (queued-before (length ende-queue)))
+          (ende-inspect-context-at-point)
+          (with-current-buffer "*ende context*"
+            (let ((text (buffer-string)))
+              (should (derived-mode-p 'special-mode))
+              (should buffer-read-only)
+              (should (string-match-p
+                       (regexp-quote "Answer the user's requests using the supplied role-tagged conversation.")
+                       text))
+              (should (< (string-match "Earlier user context" text)
+                         (string-match "Earlier assistant context" text)))
+              (should (< (string-match "Earlier assistant context" text)
+                         (string-match "Checking both sources" text)))
+              (should (< (string-match "Checking both sources" text)
+                         (string-match "Tool call: read_file" text)))
+              (should (< (string-match "Tool call: read_file" text)
+                         (string-match "TOOL RESULT" text)))
+              (should (< (string-match "TOOL RESULT" text)
+                         (string-match "Final stored answer" text)))
+              (should (< (string-match "Final stored answer" text)
+                         (string-match "Follow-up question" text)))
+              (should (string-match-p "Tool call: read_file" text))
+              (should (string-match-p "provider-inspect-call" text))
+              (should (string-match-p "Arguments:\n{" text))
+              (should (string-match-p "\n  \\\"path\\\":" text))
+              (should (string-match-p "INSPECTED_TOOL_RESULT" text))
+              (should (string-match-p "Follow-up question" text))))
+          (should (= queued-before (length ende-queue)))
+          (should (equal source-text
+                         (with-current-buffer source (buffer-string))))))
+    (when (get-buffer "*ende context*")
+      (kill-buffer "*ende context*"))
+    (ende-test--reset)))
+
+
 (ert-deftest ende-test/chat-parallel-tool-history-keeps-payloads-out-of-org ()
   (ende-test--reset)
   (unwind-protect

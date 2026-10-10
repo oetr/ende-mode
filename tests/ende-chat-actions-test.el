@@ -91,19 +91,11 @@
      (org-mode)
      (ende-test--chat-goto "** Question")
      (let* ((job (ende-ask))
-            (instruction (ende-job-instruction job))
-            (validations 0)
-            (placement-valid-p
-             (symbol-function 'ende-chat--pending-placement-valid-p)))
+            (instruction (ende-job-instruction job)))
        (goto-char (point-max))
        (insert "Added while the request was running.\n")
-       (cl-letf (((symbol-function 'ende-chat--pending-placement-valid-p)
-                  (lambda (&rest arguments)
-                    (cl-incf validations)
-                    (apply placement-valid-p arguments))))
-         (ende-test--complete-call (car ende-test--calls)))
+       (ende-test--complete-call (car ende-test--calls))
        (should (eq (ende-job-state job) 'completed))
-       (should (= validations 1))
        (should (string-match-p
                 "Keep this note.\nAdded while the request was running."
                 (buffer-string)))
@@ -134,7 +126,7 @@
      (ende-test--chat-goto "** Question")
      (let ((job (ende-ask)))
        (pcase-let ((`(,_document ,placeholder)
-                    (ende-chat--placeholder job)))
+                    (ende-chat--resolve-request-destination job)))
          (goto-char (org-element-property :begin placeholder))
          (org-edit-headline "User-edited destination"))
        (ende-test--complete-call (car ende-test--calls))
@@ -169,7 +161,7 @@
           (ende-chat--persist-request-section job response nil nil t)))
        (should (equal before (buffer-string)))
        (should (= position (marker-position target-marker)))
-       (should (ende-chat--placeholder job))
+       (should (ende-chat--resolve-request-destination job))
        (ende-test--complete-call (car ende-test--calls))
        (should (eq (ende-job-state job) 'completed))))))
 
@@ -287,6 +279,26 @@
 
 
 
+(ert-deftest ende-test/chat-compaction-rejects-an-edited-destination ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Summary") t)))
+    (ende-test--with-buffer
+     "* Topic\nHistory\n** Instructions\nKeep decisions\n** Next\nContinue\n"
+     (org-mode)
+     (ende-test--chat-goto "** Instructions")
+     (let ((job (ende-compact)))
+       (pcase-let ((`(,_document ,destination)
+                    (ende-chat--resolve-request-destination job)))
+         (goto-char (org-element-property :begin destination))
+         (org-edit-headline "Moved context fence"))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'failed))
+       (should (string-match-p "Moved context fence" (buffer-string)))
+       (should-not (string-match-p "Summary" (buffer-string)))
+       (should (string-match-p "destination was edited or moved"
+                               (buffer-string)))))))
+
+
 (ert-deftest ende-test/chat-compaction-and-asks-share-live-context ()
   (ende-test--reset)
   (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
@@ -388,7 +400,7 @@
          (pcase outcome
            (:cancelled (ende-abort-queue))
            (:deleted
-            (pcase-let ((`(,_document ,headline) (ende-chat--placeholder job)))
+            (pcase-let ((`(,_document ,headline) (ende-chat--resolve-request-destination job)))
               (delete-region (org-element-property :begin headline)
                              (org-element-property :end headline)))))
          (ende-test--complete-call (car ende-test--calls))
