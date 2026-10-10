@@ -28,6 +28,56 @@
           (should (equal (ende-tool-store-get "execution-1" 'request) request)))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/tool-store-semantic-executions-preserve-payloads-and-presence ()
+  (let* ((directory (make-temp-file "ende-tool-store-semantic-" t))
+         (ende-tool-store-file (expand-file-name "store.sqlite3" directory))
+         (arguments "{ \"path\" : \"a.el\", \"exact\" : true }")
+         (content "{\"ok\":true,\"text\":\"exact result\"}")
+         (execution (ende-tool-store-create-execution
+                     "provider-call-unchanged" "read_file" arguments))
+         (execution-id (plist-get execution :execution-id)))
+    (unwind-protect
+        (progn
+          (should (plist-get execution :request-present-p))
+          (should-not (plist-get execution :result-present-p))
+          (should (equal (plist-get execution :provider-call-id)
+                         "provider-call-unchanged"))
+          (should (equal (plist-get execution :arguments) arguments))
+          (ende-tool-store-store-result execution-id "provider-call-unchanged"
+                                        content)
+          (let ((loaded (ende-tool-store-load-execution execution-id)))
+            (should (plist-get loaded :request-present-p))
+            (should (plist-get loaded :result-present-p))
+            (should (equal (plist-get loaded :provider-call-id)
+                           "provider-call-unchanged"))
+            (should (equal (plist-get loaded :arguments) arguments))
+            (should (equal (plist-get loaded :content) content)))
+          (let ((result-only-id "result-only"))
+            (ende-tool-store-put
+             result-only-id 'result
+             "{\"provider_call_id\":\"archived-call\",\"content\":\"archived\"}")
+            (let ((loaded (ende-tool-store-load-execution result-only-id)))
+              (should-not (plist-get loaded :request-present-p))
+              (should (plist-get loaded :result-present-p))
+              (should (equal (plist-get loaded :provider-call-id)
+                             "archived-call"))
+              (should (equal (plist-get loaded :content) "archived"))))
+          (let ((mismatched-id "mismatched-ids"))
+            (ende-tool-store-put
+             mismatched-id 'request
+             "{\"provider_call_id\":\"request-call\",\"tool_name\":\"read_file\",\"arguments\":\"{}\"}")
+            (ende-tool-store-put
+             mismatched-id 'result
+             "{\"provider_call_id\":\"result-call\",\"content\":\"done\"}")
+            (should-error (ende-tool-store-load-execution mismatched-id)))
+          (let ((malformed-id "malformed-payload"))
+            (ende-tool-store-put
+             malformed-id 'result
+             "{\"provider_call_id\":\"call\",\"content\":5}")
+            (should-error
+             (ende-tool-store-load-execution malformed-id))))
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/tool-store-rejects-unsupported-schema-version ()
   (let* ((directory (make-temp-file "ende-tool-store-version-" t))
          (file (expand-file-name "store.sqlite3" directory))

@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'sqlite)
 (require 'subr-x)
 
@@ -121,6 +122,106 @@
             database
             "SELECT payload FROM tool_payloads WHERE execution_id = ? AND kind = ?"
             (vector execution-id (symbol-name kind)))))))
+
+(defun ende-tool-store--encode-payload (&rest fields)
+  "Encode string-keyed FIELDS as the existing durable JSON representation."
+  (let ((object (make-hash-table :test #'equal)))
+    (while fields
+      (puthash (pop fields) (pop fields) object))
+    (decode-coding-string (json-serialize object) 'utf-8-unix)))
+
+(defun ende-tool-store--decode-payload (payload execution-id kind)
+  "Decode and validate PAYLOAD for EXECUTION-ID and KIND."
+  (let* ((record
+          (condition-case error-data
+              (json-parse-string payload :object-type 'hash-table)
+            (error
+             (error "Malformed stored %s payload for execution %s: %s"
+                    kind execution-id (error-message-string error-data)))))
+         (fields (if (eq kind 'request)
+                     '("provider_call_id" "tool_name" "arguments")
+                   '("provider_call_id" "content"))))
+    (unless (and (hash-table-p record)
+                 (cl-every (lambda (field) (stringp (gethash field record)))
+                           fields)
+                 (not (string-empty-p (gethash "provider_call_id" record)))
+                 (or (eq kind 'result)
+                     (not (string-empty-p (gethash "tool_name" record)))))
+      (error "Malformed stored %s payload for execution %s"
+             kind execution-id))
+    record))
+
+(defun ende-tool-store-create-execution (provider-call-id name arguments)
+  "Store a new request execution and return its semantic value."
+  (unless (and (stringp provider-call-id) (not (string-empty-p provider-call-id))
+               (stringp name) (not (string-empty-p name))
+               (stringp arguments))
+    (error "Malformed provider tool call"))
+  (let ((execution-id (ende-tool-store--new-execution-id)))
+    (ende-tool-store-put
+     execution-id 'request
+     (ende-tool-store--encode-payload
+      "provider_call_id" provider-call-id "tool_name" name
+      "arguments" arguments))
+    (list :execution-id execution-id
+          :provider-call-id provider-call-id
+          :name name
+          :arguments arguments
+          :request-present-p t
+          :result-present-p nil
+          :content nil)))
+
+(defun ende-tool-store-store-result (execution-id provider-call-id content)
+  "Store exact CONTENT for EXECUTION-ID and PROVIDER-CALL-ID."
+  (unless (and (stringp execution-id) (not (string-empty-p execution-id))
+               (stringp provider-call-id) (not (string-empty-p provider-call-id))
+               (stringp content))
+    (error "Malformed tool result for execution %s" execution-id))
+  (ende-tool-store-put
+   execution-id 'result
+   (ende-tool-store--encode-payload
+    "provider_call_id" provider-call-id "content" content)))
+
+(defun ende-tool-store-load-execution (execution-id)
+  "Load and validate EXECUTION-ID as a semantic execution plist.
+
+Request and result records are optional.  Their presence is explicit in the
+returned plist, and provider call IDs are checked when both records exist."
+  (unless (and (stringp execution-id) (not (string-empty-p execution-id)))
+    (error "Invalid tool execution identity"))
+  (let* ((payloads
+          (ende-tool-store--call-with-database
+           nil
+           (lambda (database)
+             (list
+              (caar (sqlite-select
+                     database
+                     "SELECT payload FROM tool_payloads WHERE execution_id = ? AND kind = 'request'"
+                     (vector execution-id)))
+              (caar (sqlite-select
+                     database
+                     "SELECT payload FROM tool_payloads WHERE execution_id = ? AND kind = 'result'"
+                     (vector execution-id)))))))
+         (request-payload (car payloads))
+         (result-payload (cadr payloads))
+         (request (and request-payload
+                       (ende-tool-store--decode-payload
+                        request-payload execution-id 'request)))
+         (result (and result-payload
+                      (ende-tool-store--decode-payload
+                       result-payload execution-id 'result)))
+         (request-call-id (and request (gethash "provider_call_id" request)))
+         (result-call-id (and result (gethash "provider_call_id" result))))
+    (when (and request result (not (equal request-call-id result-call-id)))
+      (error "Malformed tool history: provider call IDs disagree for execution %s"
+             execution-id))
+    (list :execution-id execution-id
+          :provider-call-id (or request-call-id result-call-id)
+          :name (and request (gethash "tool_name" request))
+          :arguments (and request (gethash "arguments" request))
+          :request-present-p (and request t)
+          :result-present-p (and result t)
+          :content (and result (gethash "content" result)))))
 
 (defun ende-tool-store--footprint ()
   "Return the configured filename and existing database files with sizes."
