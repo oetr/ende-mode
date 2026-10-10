@@ -281,6 +281,12 @@
           (ende-model-selection-save
            '(:provider alpha :model "empty-model") empty)
           (ende-model-selection-save-control-preferences
+           'alpha "empty-model" nil empty)
+          (should (equal
+                   (ende-model-selection--control-preference-entry
+                    'alpha "empty-model" empty)
+                   '(t)))
+          (ende-model-selection-save-control-preferences
            'alpha "empty-model" '(:temperature 0.2) updating)
           (should-not
            (ende-model-selection-control-preferences 'alpha "empty-model" empty))

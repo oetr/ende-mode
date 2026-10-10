@@ -166,8 +166,8 @@ Use COMMAND for the process, or a silent sleep process by default."
     (let ((native-comp-enable-subr-trampolines nil)
           (default-directory "/ssh:ende-test.invalid:/source/")
           (ende-provider-discovery-enabled nil)
-          (ende-provider--discovery-cache (make-hash-table :test #'equal))
-          (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+          (ende-provider--catalog-cache (make-hash-table :test #'equal))
+          (ende-provider--catalog-inflight (make-hash-table :test #'equal))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (auth '(:access "test-access" :refresh "test-refresh"
 			  :expires 9999999999999))

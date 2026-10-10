@@ -76,7 +76,7 @@
 				(should (null ende-queue))
 				(should-not (process-live-p (plist-get call :process)))
 				;; A late transport callback must be inert.
-				(ende-test--callback call :on-done "orphan")
+				(ende-test--callback call :on-done '(:content "orphan"))
 				(should (string= (buffer-string) "content")))))))
 
 
@@ -97,7 +97,7 @@
 			      (let ((second (nth 1 ende-test--calls)))
 				(should second)
 				(should (eq (ende-job-state ende--current-job) 'running))
-				(ende-test--callback first :on-done " stale")
+				(ende-test--callback first :on-done '(:content " stale"))
 				(ende-test--callback first :on-error "stale error")
 				(should (eq (ende-job-state ende--current-job) 'running))
 				(ende-test--complete-call second)))
@@ -114,7 +114,7 @@
 				  (call nil))
 			      (setq call (car ende-test--calls))
 			      (ende-test--complete-call call)
-			      (ende-test--callback call :on-done " X")
+			      (ende-test--callback call :on-done '(:content " X"))
 			      (should (eq (ende-job-state job) 'completed))
 			      (should (string= (buffer-string) "base X"))
 			      (should-not ende--current-job)))))
@@ -211,7 +211,7 @@
           (should (eq (ende-job-state pending) 'cancelled))
           (should-not ende--current-job)
           (should-not ende-queue)
-          (ende-test--callback (car ende-test--calls) :on-done "late")
+          (ende-test--callback (car ende-test--calls) :on-done '(:content "late"))
           (should (eq (ende-job-state active) 'cancelled)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 

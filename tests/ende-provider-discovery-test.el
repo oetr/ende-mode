@@ -13,12 +13,16 @@
 (require 'json)
 
 (ert-deftest ende-test/provider-discovery-cache-is-bounded ()
-  (let ((ende-provider--discovery-cache (make-hash-table :test #'equal))
-        (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+  (let ((ende-provider--catalog-cache (make-hash-table :test #'equal))
         (ende-provider-discovery-cache-size 2))
     (dotimes (index 5)
-      (ende-provider--finish-discovery (list index) (list :model index)))
-    (should (= (hash-table-count ende-provider--discovery-cache) 2))))
+      (when (>= (hash-table-count ende-provider--catalog-cache)
+                ende-provider-discovery-cache-size)
+        (ende-provider--prune-cache ende-provider--catalog-cache))
+      (puthash (list index)
+               (list :time (float index) :models (list (number-to-string index)))
+               ende-provider--catalog-cache))
+    (should (= (hash-table-count ende-provider--catalog-cache) 2))))
 
 
 
@@ -39,10 +43,11 @@
   (let* ((profile '(:url "http://localhost:8080/v1/chat/completions"
 			 :model "llama3"))
          (metadata
-          (ende-provider--discovery-metadata
+          (ende-provider--catalog-metadata
            profile
-           (ende-protocol-json-read-string
-            (concat
+           (ende-provider--catalog-from-payload
+            (ende-protocol-json-read-string
+             (concat
              "{\"object\":\"list\",\"data\":["
              "{\"id\":\"llama3\",\"name\":\"Llama 3\","
              "\"owned_by\":\"llama.cpp\",\"pricing\":{"
@@ -51,7 +56,7 @@
              "\"input_cache_write\":\"0.000004\","
              "\"input_cache_write_1h\":\"0.000005\","
              "\"internal_reasoning\":\"0\"}},"
-             "{\"id\":\"llama4\"}]}")))))
+             "{\"id\":\"llama4\"}]}"))))))
     (should (string= (ende-provider-models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
@@ -74,16 +79,14 @@
 
 (ert-deftest ende-test/openrouter-effort-probe-is-live-and-cache-independent ()
   (let ((ende-provider-discovery-enabled t)
-        (ende-provider--discovery-cache (make-hash-table :test #'equal))
-        (ende-provider--model-cache (make-hash-table :test #'equal))
+        (ende-provider--catalog-cache (make-hash-table :test #'equal))
         (requests nil)
         (results nil)
         (profile (ende-provider-profile 'openrouter)))
-    (puthash 'metadata 'unchanged ende-provider--discovery-cache)
-    (puthash 'models 'unchanged ende-provider--model-cache)
+    (puthash 'metadata 'unchanged ende-provider--catalog-cache)
     (cl-letf
         (((symbol-function 'ende-provider--start-live-model-request)
-          (lambda (_profile url callback &optional _discovery-key)
+          (lambda (_profile url callback)
             (push url requests)
             (funcall
              callback
@@ -106,9 +109,8 @@
       (should (equal results
                      '((("high" "low") "low" nil)
                        (("high" "low") "low" nil))))
-      (should (eq (gethash 'metadata ende-provider--discovery-cache)
-                  'unchanged))
-      (should (eq (gethash 'models ende-provider--model-cache) 'unchanged)))))
+      (should (eq (gethash 'metadata ende-provider--catalog-cache)
+                  'unchanged)))))
 
 
 
@@ -199,10 +201,11 @@
   (let* ((profile '(:url "https://example.test/v1/chat/completions"
 			 :model "requested"))
          (metadata
-          (ende-provider--discovery-metadata
+          (ende-provider--catalog-metadata
            profile
-           (ende-protocol-json-read-string
-            "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}"))))
+           (ende-provider--catalog-from-payload
+            (ende-protocol-json-read-string
+             "{\"data\":[{\"id\":\"other\",\"owned_by\":\"wrong-owner\"}]}")))))
     (should (equal (plist-get metadata :models) '("other")))
     (should-not (plist-get metadata :owner))
     (should-not (plist-get metadata :client))))
@@ -253,8 +256,12 @@
                        (with-current-buffer (plist-get captured :buffer)
                          (buffer-string))))
               (should (plist-get
-                       (ende-provider--parse-discovery-response
-                        profile (plist-get captured :buffer) headers-file)
+                       (ende-provider--catalog-metadata
+                        profile
+                        (ende-provider--catalog-from-payload
+                         (ende-protocol-json-read-string
+                          (with-current-buffer (plist-get captured :buffer)
+                            (buffer-string)))))
                        :model))
               (process-send-eof process)
               (while (process-live-p process)
@@ -284,8 +291,8 @@
             (should (string= (plist-get (car values) :model) "llama3")))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash ende-provider--discovery-cache)
-        (clrhash ende-provider--discovery-inflight)))))
+        (clrhash ende-provider--catalog-cache)
+        (clrhash ende-provider--catalog-inflight)))))
 
 
 
@@ -296,9 +303,8 @@
         (first-values nil)
         (second-values nil)
         (third-values nil)
-        (ende-provider--model-cache (make-hash-table :test #'equal))
-        (ende-provider--model-inflight (make-hash-table :test #'equal))
-        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--catalog-cache (make-hash-table :test #'equal))
+        (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
     (let* ((probe
             (lambda (callback)
@@ -345,9 +351,8 @@
             (should (equal third-values (list '("gpt-new") nil)))
             (should (= cancel-count 0)))
         (ende-provider-abort-discovery)
-        (clrhash ende-provider--model-cache)
-        (clrhash ende-provider--model-inflight)
-        (clrhash ende-provider--model-cancellations)))))
+        (clrhash ende-provider--catalog-cache)
+        (clrhash ende-provider--catalog-inflight)))))
 
 
 
@@ -357,9 +362,8 @@
         (retry-models nil)
         (retry-error nil)
         (cached-models nil)
-        (ende-provider--model-cache (make-hash-table :test #'equal))
-        (ende-provider--model-inflight (make-hash-table :test #'equal))
-        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--catalog-cache (make-hash-table :test #'equal))
+        (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
     (let* ((probe
             (lambda (callback)
@@ -403,54 +407,124 @@
       (should (equal cached-models
                      (list '("remote/first" "remote/second") nil))))))
 
-
-
 (ert-deftest ende-test/generic-model-probe-retries-after-failure ()
   (let* ((profile '(:name remote
-			  :url "http://remote.example/v1/chat/completions"))
+                    :url "http://remote.example/v1/chat/completions"))
          (requests 0)
          (first-error nil)
          (retry-models nil)
          (retry-error nil)
-         (discovery-key (ende-provider--discovery-key profile))
-         (ende-provider--discovery-cache (make-hash-table :test #'equal))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
-         (ende-provider--model-generation 0))
-    (cl-letf (((symbol-function 'ende-provider-discover)
-               (lambda (_profile callback)
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--discovery-failures (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'ende-provider--start-live-model-request)
+               (lambda (_profile _url callback)
                  (cl-incf requests)
                  (if (= requests 1)
-                     (progn
-                       (puthash discovery-key
-                                (list :time (float-time) :metadata nil)
-                                ende-provider--discovery-cache)
-                       (funcall callback nil))
-                   (funcall callback '(:models ("remote/first"))))
+                     (funcall callback nil
+                              (ende-error-create :kind 'transport
+                                                 :message "temporary"))
+                   (funcall
+                    callback
+                    (ende-protocol-json-read-string
+                     "{\"data\":[{\"id\":\"remote/first\"}]}")
+                    nil))
                  (lambda () nil))))
       (ende-provider-probe-models
-       profile
-       (lambda (_models error)
-         (setq first-error error)))
+       profile (lambda (_models error) (setq first-error error)))
       (should (= requests 1))
       (should (ende-error-p first-error))
-      (should-not (gethash discovery-key ende-provider--discovery-cache))
-      (should-not (ende-provider-cached-models profile))
-
+      (should-not (ende-provider--cached-failure-p
+                   (ende-provider--catalog-key profile)))
       (ende-provider-probe-models
-       profile
-       (lambda (models error)
-         (setq retry-models models
-               retry-error error)))
+       profile (lambda (models error)
+                 (setq retry-models models retry-error error)))
       (should (= requests 2))
       (should-not retry-error)
-      (should (equal retry-models '("remote/first")))
-      (should (equal (plist-get (ende-provider-cached-models profile)
-                                :models)
-                     '("remote/first"))))))
+      (should (equal retry-models '("remote/first"))))))
 
-
+(ert-deftest ende-test/runtime-and-model-consumers-share-one-catalog-flight ()
+  (let* ((profile '(:name remote
+                    :url "http://remote.example/v1/chat/completions"
+                    :model "remote/selected"))
+         (key (ende-provider--catalog-key profile))
+         (requests 0)
+         (live-callback nil)
+         (cancel-count 0)
+         (runtime-values nil)
+         (model-values nil)
+         (ende-provider-discovery-enabled t)
+         (ende-provider-discovery-ttl 30)
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--discovery-failures (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'ende-provider--start-live-model-request)
+               (lambda (_profile _url callback)
+                 (cl-incf requests)
+                 (setq live-callback callback)
+                 (lambda () (cl-incf cancel-count)))))
+      (let ((cancel-runtime
+             (ende-provider-discover profile
+                                     (lambda (value)
+                                       (push value runtime-values))))
+            (cancel-model
+             (ende-provider-probe-models
+              profile (lambda (models error)
+                        (push (list models error) model-values)))))
+        (should (= requests 1))
+        (funcall cancel-runtime)
+        (should (= cancel-count 0))
+        (funcall live-callback nil
+                 (ende-error-create :kind 'transport :message "offline"))
+        (should-not runtime-values)
+        (should (= (length model-values) 1))
+        (should (ende-error-p (cadar model-values)))
+        (should-not (ende-provider--cached-failure-p key))
+        (funcall cancel-model))
+      (let ((cancel-runtime
+             (ende-provider-discover profile
+                                     (lambda (value)
+                                       (push value runtime-values)))))
+        (should (= requests 2))
+        (funcall live-callback nil
+                 (ende-error-create :kind 'transport :message "offline"))
+        (should (null (car runtime-values)))
+        (should (ende-provider--cached-failure-p key))
+        (let ((metadata nil))
+          (ende-provider-discover profile (lambda (value) (setq metadata value)))
+          (should (= requests 2))
+          (should-not metadata))
+        (funcall cancel-runtime))
+      (let ((probe-result nil))
+        (ende-provider-probe-models
+         profile (lambda (models error)
+                   (setq probe-result (list models error))))
+        (should (= requests 3))
+        (funcall live-callback
+                 (ende-protocol-json-read-string
+                  "{\"data\":[{\"id\":\"remote/selected\",\"name\":\"Selected\"}]}")
+                 nil)
+        (should (equal probe-result (list '("remote/selected") nil))))
+      (ende-provider-clear-discovery-cache)
+      (let ((catalog-callback nil))
+        (ende-provider-discover
+         profile (lambda (metadata) (push metadata runtime-values)))
+        (ende-provider-probe-models
+         profile (lambda (models error)
+                   (setq catalog-callback (list models error))))
+        (should (= requests 4))
+        (funcall live-callback
+                 (ende-protocol-json-read-string
+                  "{\"data\":[{\"id\":\"remote/selected\",\"name\":\"Selected\"}]}")
+                 nil)
+        (should (equal catalog-callback '(("remote/selected") nil)))
+        (should (equal (plist-get (ende-provider-cached-models profile) :models)
+                       '("remote/selected")))
+        (should (equal (plist-get (car runtime-values) :models)
+                       '("remote/selected")))
+        (should (equal (plist-get (car (ende-provider-model-details profile))
+                                  :name)
+                       "Selected"))))))
 
 (ert-deftest ende-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
@@ -468,17 +542,17 @@
                                 :command (list "cat")
                                 :connection-type 'pipe)))))
       (unwind-protect
-          (let* ((key (ende-provider--discovery-key profile))
+          (let* ((key (ende-provider--catalog-key profile))
                  (cancel
                   (ende-provider-discover
                    profile (lambda (metadata) (setq value metadata)))))
             (should (process-live-p process))
-            (should (gethash key ende-provider--discovery-inflight))
+            (should (gethash key ende-provider--catalog-inflight))
             (funcall cancel)
             (should-not value)
             (should-not (process-live-p process))
-            (should-not (gethash key ende-provider--discovery-inflight))
-            (should-not (gethash key ende-provider--discovery-cache))
+            (should-not (gethash key ende-provider--catalog-inflight))
+            (should-not (gethash key ende-provider--catalog-cache))
             (should-not ende-provider--discovery-processes)
             (let* ((probe-value nil)
                    (probe-error nil)
@@ -493,12 +567,12 @@
               (should-not probe-value)
               (should-not probe-error)
               (should-not (process-live-p process))
-              (should-not (gethash key ende-provider--discovery-inflight))
+              (should-not (gethash key ende-provider--catalog-inflight))
               (should-not ende-provider--discovery-processes)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash ende-provider--discovery-cache)
-        (clrhash ende-provider--discovery-inflight)
+        (clrhash ende-provider--catalog-cache)
+        (clrhash ende-provider--catalog-inflight)
         (setq ende-provider--discovery-processes nil)))))
 
 (ert-deftest ende-test/provider-discovery-cancelling-one-waiter-keeps-request ()
@@ -510,8 +584,8 @@
         (first-value :pending)
         (second-value :pending)
         (ende-provider-discovery-enabled t)
-        (ende-provider--discovery-cache (make-hash-table :test #'equal))
-        (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+        (ende-provider--catalog-cache (make-hash-table :test #'equal))
+        (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--discovery-processes nil)
         (real-make-process (symbol-function 'make-process))
         (real-send-eof (symbol-function 'process-send-eof)))
@@ -535,14 +609,17 @@
                  (cancel-second
                   (ende-provider-discover
                    profile (lambda (value) (setq second-value value))))
-                 (key (ende-provider--discovery-key profile))
+                 (key (ende-provider--catalog-key profile))
                  (response-buffer (process-get process :ende-response-buffer))
                  (headers-file (process-get process :ende-headers-file))
                  (filter (process-filter process)))
             (should (= make-process-count 1))
             (funcall cancel-first)
             (should (process-live-p process))
-            (should (= (length (gethash key ende-provider--discovery-inflight)) 1))
+            (should (= (length
+                        (ende-provider--catalog-flight-waiters
+                         (gethash key ende-provider--catalog-inflight)))
+                       1))
             (with-temp-file headers-file
               (insert "HTTP/1.1 200 OK\r\n\r\n"))
             (funcall filter process "{\"data\":[{\"id\":\"llama3\"}]}")
@@ -552,7 +629,7 @@
             (should (eq first-value :pending))
             (should (plist-get second-value :models))
             (should (equal (plist-get second-value :models) '("llama3")))
-            (should-not (gethash key ende-provider--discovery-inflight))
+            (should-not (gethash key ende-provider--catalog-inflight))
             (should-not (buffer-live-p response-buffer))
             (should-not (file-exists-p headers-file))
             (funcall cancel-second))
@@ -588,11 +665,11 @@
             (should (equal values '(nil)))
             (should-not (process-live-p process))
             (should (= (hash-table-count
-                        ende-provider--discovery-inflight) 0)))
+                        ende-provider--catalog-inflight) 0)))
         (when (and (processp process) (process-live-p process))
           (delete-process process))
-        (clrhash ende-provider--discovery-cache)
-        (clrhash ende-provider--discovery-inflight)))))
+        (clrhash ende-provider--catalog-cache)
+        (clrhash ende-provider--catalog-inflight)))))
 
 (provide 'ende-provider-discovery-test)
 

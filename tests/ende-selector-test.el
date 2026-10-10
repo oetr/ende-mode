@@ -426,15 +426,17 @@
           '((remote :url "http://remote.example/v1/chat/completions")))
          (ende-selector--last-selection
           '(:provider remote :model "remote/saved"))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
          (ende-provider--model-generation 0))
     (unwind-protect
         (progn
-          (ende-provider--finish-model-discovery
-           (ende-provider--model-cache-key profile)
-           '("remote/first" "remote/saved") nil nil)
+          (puthash
+           (ende-provider--catalog-key profile)
+           (list :models '("remote/first" "remote/saved")
+                 :details '((:id "remote/first") (:id "remote/saved"))
+                 :time (float-time) :generation 1)
+           ende-provider--catalog-cache)
           (with-current-buffer buffer
             (ende-selector-mode)
             (setq ende-selector--providers '(remote)
@@ -492,9 +494,8 @@
         (ende-selector--last-selection
          '(:provider remote :model "remote/missing"))
         (ende-selector--model-validations (make-hash-table :test #'equal))
-        (ende-provider--model-cache (make-hash-table :test #'equal))
-        (ende-provider--model-inflight (make-hash-table :test #'equal))
-        (ende-provider--model-cancellations (make-hash-table :test #'equal))
+        (ende-provider--catalog-cache (make-hash-table :test #'equal))
+        (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
     (unwind-protect
         (with-current-buffer buffer
@@ -1364,9 +1365,8 @@
                       :model-discovery-function probe)))
          (ende-selector--last-selection nil)
          (ende-selector--model-validations (make-hash-table :test #'equal))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
          (ende-provider--model-generation 0))
     (unwind-protect
         (with-current-buffer buffer
@@ -1411,9 +1411,8 @@
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
          (ende-selector--model-validations (make-hash-table :test #'equal))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
          (ende-provider--model-generation 0)
          (queued nil))
     (unwind-protect
@@ -1462,11 +1461,8 @@
                             :url "https://example.test/chat/completions"
                             :model "generic-chat"
                             :models ("generic-chat" "generic-reasoner"))))
-         (ende-provider--model-inflight (make-hash-table :test #'equal))
-         (ende-provider--model-cancellations (make-hash-table :test #'equal))
-         (ende-provider--model-cache (make-hash-table :test #'equal))
-         (ende-provider--discovery-cache (make-hash-table :test #'equal))
-         (ende-provider--discovery-inflight (make-hash-table :test #'equal))
+         (ende-provider--catalog-cache (make-hash-table :test #'equal))
+         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
          (ende-selector--model-validations (make-hash-table :test #'equal)))
     (dolist (name '(local openrouter openai))
       (let ((buffer (generate-new-buffer " *ende-selector-legacy-failure*"))

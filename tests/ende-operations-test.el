@@ -160,7 +160,7 @@
               (insert "Document to summarize")
               (ende-model-selection-save
                '(:provider openrouter :model "source-model"
-                           :reasoning-effort "high"))
+                           :control-preferences (:reasoning-effort "high")))
               (let ((job (ende-summarize)))
                 (should (eq (ende-job-state job) 'running))
                 (should-not ende-test--calls)

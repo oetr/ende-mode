@@ -858,26 +858,25 @@ metadata and configured profile values."
 
 ;;;; Provider discovery
 
-(defvar ende-provider--discovery-cache (make-hash-table :test #'equal)
-  "Cached provider discovery results keyed by endpoint identity.")
+(defvar ende-provider--catalog-cache (make-hash-table :test #'equal)
+  "Successful normalized model catalogs keyed by endpoint/provider identity.")
 
-(defvar ende-provider--model-cache (make-hash-table :test #'equal)
-  "Cached provider model catalogs keyed by model-list endpoint identity.")
+(defvar ende-provider--discovery-failures (make-hash-table :test #'equal)
+  "Runtime-only discovery failure timestamps keyed by catalog identity.")
 
-(defvar ende-provider--discovery-inflight (make-hash-table :test #'equal)
-  "Callbacks waiting for an in-flight provider discovery request.")
-
-(defvar ende-provider--model-inflight (make-hash-table :test #'equal)
-  "Callbacks waiting for an in-flight model catalog request.")
-
-(defvar ende-provider--model-cancellations (make-hash-table :test #'equal)
-  "Underlying cancellation functions for in-flight model catalog requests.")
+(defvar ende-provider--catalog-inflight (make-hash-table :test #'equal)
+  "Shared catalog requests and their consumer waiters.")
 
 (defvar ende-provider--discovery-processes nil
   "Live provider discovery processes available for explicit cancellation.")
 
 (defvar ende-provider--model-generation 0
   "Monotonic generation for cached provider model catalogs.")
+
+(cl-defstruct (ende-provider--catalog-flight
+               (:constructor ende-provider--make-catalog-flight))
+  "One in-flight model-list request and all its independent consumers."
+  waiters cancel)
 
 (defconst ende-provider--model-pricing-fields
   '(("prompt" . :prompt)
@@ -887,18 +886,6 @@ metadata and configured profile values."
     ("input_cache_write" . :input-cache-write)
     ("input_cache_write_1h" . :input-cache-write-1h))
   "JSON pricing fields retained for discovered models.")
-
-(defun ende-provider--discovery-key (profile)
-  "Return a non-secret cache key for provider PROFILE."
-  (list (plist-get profile :url)
-        (plist-get profile :models-url)
-        (plist-get profile :name)
-        (plist-get profile :auth-source-host)
-        (plist-get profile :auth-source-user)
-        (plist-get profile :model)
-        (plist-get profile :display-name)
-        (secure-hash 'sha256
-                     (prin1-to-string (plist-get profile :request-headers)))))
 
 (defun ende-provider--validate-discovery-options ()
   "Validate provider discovery cache and resource options."
@@ -943,8 +930,8 @@ metadata and configured profile values."
   (or (functionp (plist-get profile :model-discovery-function))
       (ende-provider-models-url profile)))
 
-(defun ende-provider--model-cache-key (profile)
-  "Return the model catalog cache key for PROFILE.
+(defun ende-provider--catalog-key (profile)
+  "Return the model catalog key for PROFILE.
 
 The selected model is intentionally absent.  Changing it must revalidate the
 selection without starting another model-list request."
@@ -989,99 +976,6 @@ selection without starting another model-list request."
             :name (and (stringp name) (not (string-empty-p name)) name)
             :pricing (ende-provider--model-pricing entry)))))
 
-(defun ende-provider--discovery-metadata (profile payload)
-  "Extract display metadata for PROFILE from discovery PAYLOAD."
-  (let* ((entries (ende-provider--model-entries payload))
-         (details (delq nil (mapcar #'ende-provider--model-detail entries)))
-         (models (mapcar (lambda (detail) (plist-get detail :id)) details))
-         (requested (plist-get profile :model))
-         (match (cl-find-if
-                 (lambda (entry)
-                   (or (null requested)
-                       (equal (ende-protocol-json-get "id" entry)
-                              requested)))
-                 entries))
-         (provider (or (ende-protocol-json-get "provider" payload)
-                       (ende-protocol-json-get "server" payload)))
-         (model (or (and match (ende-protocol-json-get "id" match))
-                    requested))
-         (metadata (list :source :discovery
-                         :model model
-                         :models models
-                         :model-details details)))
-    (when (or match (stringp provider) models)
-      (when (stringp provider)
-        (setq metadata (plist-put metadata :provider provider)))
-      (when (and match
-                 (stringp (ende-protocol-json-get "owned_by" match)))
-        (setq metadata
-              (plist-put metadata :owner
-                         (ende-protocol-json-get "owned_by" match))))
-      (when (or match (stringp provider))
-        (setq metadata
-              (plist-put metadata :client
-                         (ende-provider-client-name profile metadata))))
-      metadata)))
-
-(defun ende-provider--parse-discovery-response (profile body headers)
-  "Parse a discovery response in BODY using response HEADERS."
-  (let ((status (car (ende-curl-response-headers headers))))
-    (when (and status (>= status 200) (< status 300)
-               (buffer-live-p body))
-      (with-current-buffer body
-        (condition-case nil
-            (ende-provider--discovery-metadata
-             profile (ende-protocol-json-read-string (buffer-string)))
-          ((error quit) nil))))))
-
-(defun ende-provider--curl-discovery-command
-    (url headers-file config-file)
-  "Build a GET command for provider discovery at URL."
-  (append
-   (ende-curl-base-command url)
-   (ende-curl-response-options headers-file)
-   (list "--request" "GET"
-         "--header" "Accept: application/json")
-   (when config-file (list "--config" config-file))
-   (ende-curl-timeout-options
-    ende-provider-discovery-timeout ende-provider-max-discovery-bytes)
-   (list "--url" url)))
-
-(defun ende-provider--invoke-discovery-callback (callback metadata)
-  "Invoke discovery CALLBACK with METADATA without propagating its errors."
-  (when callback
-    (condition-case nil
-        (funcall callback metadata)
-      ((error quit) nil))))
-
-(defun ende-provider--discovery-process (key)
-  "Return the in-flight discovery process for KEY, or nil."
-  (cl-find-if
-   (lambda (process)
-     (and (processp process)
-          (equal (process-get process :ende-discovery-key) key)))
-   ende-provider--discovery-processes))
-
-(defun ende-provider--cancel-discovery-waiter (key callback)
-  "Remove CALLBACK from discovery KEY and cancel an unused request."
-  (let ((callbacks (gethash key ende-provider--discovery-inflight))
-        (removed nil)
-        (remaining nil))
-    (dolist (waiting callbacks)
-      (if (and (not removed) (eq waiting callback))
-          (setq removed t)
-        (push waiting remaining)))
-    (when removed
-      (setq remaining (nreverse remaining))
-      (if remaining
-          (puthash key remaining ende-provider--discovery-inflight)
-        (remhash key ende-provider--discovery-inflight)
-        (let* ((process (ende-provider--discovery-process key))
-               (finish (and (processp process)
-                            (process-get process :ende-discovery-finish))))
-          (when finish
-            (funcall finish nil nil t)))))))
-
 (defun ende-provider--prune-cache (cache)
   "Remove expired and excess entries from CACHE."
   (let ((now (float-time))
@@ -1110,181 +1004,276 @@ selection without starting another model-list request."
               (remhash (car oldest) cache)
             (clrhash cache)))))))
 
-(defun ende-provider--prune-discovery-cache ()
-  "Remove expired and excess provider discovery cache entries."
-  (ende-provider--prune-cache ende-provider--discovery-cache))
-
-(defun ende-provider--cached-model-entry (key)
-  "Return the usable model catalog entry for KEY, or nil when unavailable."
-  (let* ((entry (gethash key ende-provider--model-cache))
-         (age (and entry (- (float-time) (plist-get entry :time)))))
-    (if (and entry
-             (null (plist-get entry :error))
-             (consp (plist-get entry :models))
+(defun ende-provider--cached-catalog (key)
+  "Return the unexpired successful catalog for KEY, or nil."
+  (let* ((entry (gethash key ende-provider--catalog-cache))
+         (age (and entry (- (float-time) (plist-get entry :time))))
+         (models (and entry (plist-get entry :models))))
+    (if (and entry (consp models)
              (or (null ende-provider-discovery-ttl)
                  (< age ende-provider-discovery-ttl)))
         entry
       (when entry
-        (remhash key ende-provider--model-cache))
+        (remhash key ende-provider--catalog-cache))
       nil)))
 
-(defun ende-provider--model-entry (profile)
-  "Return the cached model catalog entry for PROFILE, or nil."
-  (let ((key (ende-provider--model-cache-key profile)))
-    (and key (ende-provider--cached-model-entry key))))
+(defun ende-provider--catalog-for-profile (profile)
+  "Return PROFILE's unexpired successful catalog, or nil."
+  (let ((key (ende-provider--catalog-key profile)))
+    (and key (ende-provider--cached-catalog key))))
+
+(defun ende-provider--catalog-metadata (profile catalog)
+  "Project runtime discovery metadata for PROFILE from CATALOG."
+  (when catalog
+    (let* ((model (plist-get profile :model))
+           (models (plist-get catalog :models))
+           (details (plist-get catalog :details))
+           (match (if model
+                      (cl-find model details :key (lambda (detail)
+                                                    (plist-get detail :id))
+                               :test #'equal)
+                    (car details)))
+           (provider (plist-get catalog :provider))
+           (metadata (list :source :discovery
+                           :model (or (and match (plist-get match :id)) model)
+                           :models (copy-sequence models)
+                           :model-details (copy-tree details))))
+      (when (stringp provider)
+        (setq metadata (plist-put metadata :provider provider)))
+      (when (and match (stringp (plist-get match :owner)))
+        (setq metadata (plist-put metadata :owner
+                                  (plist-get match :owner))))
+      (when (or match (stringp provider))
+        (setq metadata
+              (plist-put metadata :client
+                         (ende-provider-client-name profile metadata))))
+      metadata)))
 
 (defun ende-provider-cached-models (profile)
   "Return a copy of PROFILE's cached model catalog, or nil.
 
 The returned plist contains `:models', `:details', `:error', and
 `:generation'.  This function never starts discovery."
-  (let ((entry (ende-provider--model-entry profile)))
+  (let ((entry (ende-provider--catalog-for-profile profile)))
     (when entry
       (list :models (copy-sequence (plist-get entry :models))
             :details (copy-tree (plist-get entry :details))
-            :error (plist-get entry :error)
+            :error nil
             :generation (plist-get entry :generation)))))
 
 (defun ende-provider-models-generation (profile)
   "Return the cached model catalog generation for PROFILE, or zero."
-  (or (plist-get (ende-provider--model-entry profile) :generation)
+  (or (plist-get (ende-provider--catalog-for-profile profile) :generation)
       ende-provider--model-generation))
 
-(defun ende-provider--finish-discovery (key metadata &optional no-cache)
-  "Notify callbacks waiting on KEY and optionally cache METADATA.
-NO-CACHE is used for cancellation, which must not suppress a later retry."
-  (unless no-cache
-    (ende-provider--prune-discovery-cache)
-    (puthash key (list :time (float-time) :metadata metadata)
-             ende-provider--discovery-cache))
-  (let ((callbacks (gethash key ende-provider--discovery-inflight)))
-    (remhash key ende-provider--discovery-inflight)
-    (dolist (callback callbacks)
-      (ende-provider--invoke-discovery-callback callback metadata))))
+(defun ende-provider-cached-metadata (profile)
+  "Return projected runtime metadata from PROFILE's cached catalog, or nil."
+  (ende-provider--catalog-metadata
+   profile (ende-provider--catalog-for-profile profile)))
 
-(defun ende-provider--invoke-model-callback (callback entry)
-  "Invoke model catalog CALLBACK with ENTRY without propagating errors."
+(defun ende-provider-model-details (profile)
+  "Return copied model details from PROFILE's cached catalog, or nil."
+  (copy-tree (plist-get (ende-provider--catalog-for-profile profile) :details)))
+
+(defun ende-provider--catalog-from-models (models)
+  "Normalize model IDs MODELS into a catalog without endpoint details."
+  (setq models (cl-remove-if-not #'stringp models))
+  (when models
+    (list :models (copy-sequence models)
+          :details (mapcar (lambda (model) (list :id model)) models))))
+
+(defun ende-provider--catalog-from-payload (payload)
+  "Normalize endpoint model-list PAYLOAD into one catalog."
+  (let* ((entries (ende-provider--model-entries payload))
+         (details
+          (delq nil
+                (mapcar
+                 (lambda (entry)
+                   (let ((detail (ende-provider--model-detail entry))
+                         (owner (ende-protocol-json-get "owned_by" entry)))
+                     (when (and detail (stringp owner))
+                       (setq detail (plist-put detail :owner owner)))
+                     detail))
+                 entries)))
+         (provider (or (ende-protocol-json-get "provider" payload)
+                       (ende-protocol-json-get "server" payload))))
+    (when details
+      (list :models (mapcar (lambda (detail) (plist-get detail :id)) details)
+            :details details
+            :provider (and (stringp provider) provider)))))
+
+(defun ende-provider--curl-discovery-command
+    (url headers-file config-file)
+  "Build a GET command for model discovery at URL."
+  (append
+   (ende-curl-base-command url)
+   (ende-curl-response-options headers-file)
+   (list "--request" "GET"
+         "--header" "Accept: application/json")
+   (when config-file (list "--config" config-file))
+   (ende-curl-timeout-options
+    ende-provider-discovery-timeout ende-provider-max-discovery-bytes)
+   (list "--url" url)))
+
+(defun ende-provider--invoke-discovery-callback (callback metadata)
+  "Invoke discovery CALLBACK with METADATA without propagating its errors."
+  (when callback
+    (condition-case nil
+        (funcall callback metadata)
+      ((error quit) nil))))
+
+(defun ende-provider--cached-failure-p (key)
+  "Return non-nil when a runtime failure for KEY remains throttled."
+  (let* ((entry (gethash key ende-provider--discovery-failures))
+         (age (and entry (- (float-time) (plist-get entry :time)))))
+    (if (and entry
+             (or (null ende-provider-discovery-ttl)
+                 (< age ende-provider-discovery-ttl)))
+        t
+      (when entry
+        (remhash key ende-provider--discovery-failures))
+      nil)))
+
+(defun ende-provider--invoke-catalog-waiter
+    (profile type callback catalog error)
+  "Notify CALLBACK of consumer TYPE with its CATALOG projection."
   (condition-case nil
-      (funcall callback
-               (and entry (copy-sequence (plist-get entry :models)))
-               (and entry (plist-get entry :error)))
+      (if (eq type 'runtime)
+          (funcall callback
+                   (and (null error)
+                        (ende-provider--catalog-metadata profile catalog)))
+        (funcall callback
+                 (and catalog (copy-sequence (plist-get catalog :models)))
+                 error))
     ((error quit) nil)))
 
-(defun ende-provider--finish-model-discovery
-    (key models details error &optional no-cache)
-  "Notify model catalog waiters for KEY and cache only successful results."
-  (setq models (cl-remove-if-not #'stringp models))
-  (when (and (null error) (null models))
-    (setq error
-          (ende-error-create
-           :kind 'discovery
-           :message "Provider returned no models")))
-  (let ((entry (and (not no-cache)
-                    (list :models (copy-sequence models)
-                          :details (copy-tree details)
-                          :error error))))
-    (when (and entry (null error))
-      (ende-provider--prune-cache ende-provider--model-cache)
-      (setq entry
-            (plist-put entry :time (float-time)))
-      (setq entry
-            (plist-put entry :generation
+(defun ende-provider--finish-catalog-flight
+    (key flight catalog error &optional no-cache)
+  "Complete FLIGHT, caching successful CATALOG and notifying its waiters."
+  (when (eq flight (gethash key ende-provider--catalog-inflight))
+    (when (and (null error)
+               (not (and catalog (consp (plist-get catalog :models)))))
+      (setq error
+            (ende-error-create :kind 'discovery
+                               :message "Provider returned no models")))
+    (when (and (null error) catalog (not no-cache))
+      (ende-provider--prune-cache ende-provider--catalog-cache)
+      (setq catalog (plist-put catalog :time (float-time)))
+      (setq catalog
+            (plist-put catalog :generation
                        (cl-incf ende-provider--model-generation)))
-      (puthash key entry ende-provider--model-cache))
-    (remhash key ende-provider--model-cancellations)
-    (let ((callbacks (gethash key ende-provider--model-inflight)))
-      (remhash key ende-provider--model-inflight)
-      (dolist (callback callbacks)
-        (ende-provider--invoke-model-callback callback entry)))))
+      (puthash key catalog ende-provider--catalog-cache)
+      (remhash key ende-provider--discovery-failures))
+    (when (and error
+               (not no-cache)
+               (cl-some (lambda (waiter)
+                          (eq (plist-get waiter :type) 'runtime))
+                        (ende-provider--catalog-flight-waiters flight)))
+      (ende-provider--prune-cache ende-provider--discovery-failures)
+      (puthash key (list :time (float-time))
+               ende-provider--discovery-failures))
+    (remhash key ende-provider--catalog-inflight)
+    (let ((waiters (ende-provider--catalog-flight-waiters flight)))
+      (setf (ende-provider--catalog-flight-waiters flight) nil)
+      (dolist (waiter waiters)
+        (ende-provider--invoke-catalog-waiter
+         (plist-get waiter :profile)
+         (plist-get waiter :type)
+         (plist-get waiter :callback)
+         catalog error)))))
 
-(defun ende-provider--cancel-model-waiter (key callback)
-  "Remove model catalog CALLBACK from KEY and cancel an unused request."
-  (let ((callbacks (gethash key ende-provider--model-inflight))
-        (removed nil)
-        (remaining nil))
-    (dolist (waiting callbacks)
-      (if (and (not removed) (eq waiting callback))
-          (setq removed t)
-        (push waiting remaining)))
-    (when removed
-      (setq remaining (nreverse remaining))
-      (if remaining
-          (puthash key remaining ende-provider--model-inflight)
-        (remhash key ende-provider--model-inflight)
-        (let ((cancel (gethash key ende-provider--model-cancellations)))
-          (remhash key ende-provider--model-cancellations)
+(defun ende-provider--cancel-catalog-waiter (key waiter)
+  "Remove WAITER from KEY and cancel its request when no consumer remains."
+  (let ((flight (gethash key ende-provider--catalog-inflight)))
+    (when flight
+      (setf (ende-provider--catalog-flight-waiters flight)
+            (cl-remove-if (lambda (entry) (eq (plist-get entry :id) waiter))
+                          (ende-provider--catalog-flight-waiters flight)))
+      (unless (ende-provider--catalog-flight-waiters flight)
+        (remhash key ende-provider--catalog-inflight)
+        (let ((cancel (ende-provider--catalog-flight-cancel flight)))
           (when cancel
             (ende-ignore-errors cancel)))))))
 
-(defun ende-provider--start-model-discovery (profile key)
-  "Start the uncached model discovery request for PROFILE and KEY."
+(defun ende-provider--start-catalog-flight (profile key flight)
+  "Start the one underlying model-list request for PROFILE and FLIGHT."
   (let ((probe (plist-get profile :model-discovery-function))
+        (url (ende-provider-models-url profile))
         (completed nil)
         (cancelled nil)
         (underlying-cancel nil))
     (cl-labels
-        ((finish (models details error)
+        ((finish (catalog error)
            (unless cancelled
              (setq completed t)
-             (ende-provider--finish-model-discovery
-              key models details error)))
+             (ende-provider--finish-catalog-flight key flight catalog error)))
          (finish-error (error)
-           (finish nil nil error)))
+           (finish nil error)))
       (condition-case startup-error
           (setq underlying-cancel
-                (if (functionp probe)
-                    (funcall
-                     probe
-                     (lambda (models error)
-                       (unless cancelled
-                         (if error
-                             (finish-error error)
-                           (finish (cl-remove-if-not #'stringp models)
-                                   nil nil)))))
-                  (ende-provider-discover
-                   profile
-                   (lambda (metadata)
+                (cond
+                 ((functionp probe)
+                  (funcall
+                   probe
+                   (lambda (models error)
                      (unless cancelled
-                       (let ((models (and metadata
-                                          (plist-get metadata :models))))
-                         (if (and (listp models) models)
-                             (finish models
-                                     (plist-get metadata :model-details)
-                                     nil)
-                           (remhash (ende-provider--discovery-key profile)
-                                    ende-provider--discovery-cache)
-                           (finish-error
-                            (ende-error-create
-                             :kind 'discovery
-                             :message "Provider returned no models")))))))))
+                       (if error
+                           (finish-error error)
+                         (let ((catalog
+                                (ende-provider--catalog-from-models models)))
+                           (if catalog
+                               (finish catalog nil)
+                             (finish-error
+                              (ende-error-create
+                               :kind 'discovery
+                               :message "Provider returned no models")))))))))
+                 (url
+                  (ende-provider--start-live-model-request
+                   profile url
+                   (lambda (payload error)
+                     (unless cancelled
+                       (if error
+                           (finish-error error)
+                         (let ((catalog
+                                (ende-provider--catalog-from-payload payload)))
+                           (if catalog
+                               (finish catalog nil)
+                             (finish-error
+                              (ende-error-create
+                               :kind 'discovery
+                               :message "Provider returned no models")))))))))
+                 (t
+                  (finish-error
+                   (ende-error-create
+                    :kind 'discovery
+                    :message
+                    "Provider has no compatible model-list endpoint")))))
         ((error quit)
          (finish-error
-          (ende-error-create
-           :kind 'startup
-           :message (error-message-string startup-error))))))
-    (unless completed
-      (puthash
-       key
-       (lambda ()
-         (setq cancelled t)
-         (when underlying-cancel
-           (ende-ignore-errors underlying-cancel)
-           (setq underlying-cancel nil)))
-       ende-provider--model-cancellations))))
+          (ende-error-create :kind 'startup
+                             :message (error-message-string startup-error)))))
+      (unless completed
+        (setf (ende-provider--catalog-flight-cancel flight)
+              (lambda ()
+                (setq cancelled t)
+                (when underlying-cancel
+                  (ende-ignore-errors underlying-cancel)
+                  (setq underlying-cancel nil))))))))
 
-(defun ende-provider-cached-metadata (profile)
-  "Return unexpired discovery metadata for PROFILE, or nil."
-  (let ((entry (ende-provider--cached-entry
-                (ende-provider--discovery-key profile))))
-    (and entry (plist-get entry :metadata))))
-
-(defun ende-provider-model-details (profile)
-  "Return copied cached model details for PROFILE, or nil."
-  (let ((catalog (ende-provider-cached-models profile)))
-    (copy-tree
-     (or (plist-get catalog :details)
-         (plist-get (ende-provider-cached-metadata profile)
-                    :model-details)))))
+(defun ende-provider--join-catalog-flight (profile key type callback)
+  "Join or start PROFILE's catalog request for consumer TYPE and CALLBACK."
+  (let* ((flight (gethash key ende-provider--catalog-inflight))
+         (start (null flight))
+         (flight (or flight (ende-provider--make-catalog-flight)))
+         (waiter (list :profile profile :type type :callback callback
+                       :id (make-symbol "catalog-waiter"))))
+    (setf (ende-provider--catalog-flight-waiters flight)
+          (cons waiter (ende-provider--catalog-flight-waiters flight)))
+    (when start
+      (puthash key flight ende-provider--catalog-inflight)
+      (ende-provider--start-catalog-flight profile key flight))
+    (apply-partially #'ende-provider--cancel-catalog-waiter
+                     key (plist-get waiter :id))))
 
 (defun ende-provider--price-per-million (value)
   "Return numeric VALUE converted from dollars per token to dollars per million.
@@ -1328,24 +1317,10 @@ formatted text before joining the parts."
     (when parts
       (concat "  " (mapconcat #'identity (nreverse parts) "  ")))))
 
-(defun ende-provider--cached-entry (key)
-  "Return the live discovery cache entry for KEY, or nil when expired."
-  (let* ((entry (gethash key ende-provider--discovery-cache))
-         (age (and entry (- (float-time) (plist-get entry :time)))))
-    (if (and entry
-             (or (null ende-provider-discovery-ttl)
-                 (< age ende-provider-discovery-ttl)))
-        entry
-      (when entry
-        (remhash key ende-provider--discovery-cache))
-      nil)))
-
-(defun ende-provider--start-live-model-request
-    (profile url callback &optional discovery-key)
+(defun ende-provider--start-live-model-request (profile url callback)
   "Request a model list from URL and call CALLBACK with (PAYLOAD ERROR).
 
-This bypasses provider discovery caches.  DISCOVERY-KEY identifies a regular
-cached-discovery request so its waiters can cancel it."
+This is the uncached request primitive used by catalog and capability probes."
   (let ((response-buf nil)
         (stderr-buf nil)
         (stderr-process nil)
@@ -1445,8 +1420,6 @@ cached-discovery request so its waiters can cancel it."
                 headers-file (plist-get request :headers-file)
                 config-file (plist-get request :config-file))
           (process-put process :ende-discovery-finish finish)
-          (when discovery-key
-            (process-put process :ende-discovery-key discovery-key))
           (push process ende-provider--discovery-processes)
           (unless finished
             (when ende-provider-discovery-timeout
@@ -1460,83 +1433,57 @@ cached-discovery request so its waiters can cancel it."
                            :message (error-message-string startup-error)))))
     (lambda () (funcall finish nil nil t))))
 
-(defun ende-provider--start-discovery (profile key url)
-  "Start an asynchronous cached discovery request for PROFILE at URL."
-  (ende-provider--start-live-model-request
-   profile url
-   (lambda (payload error)
-     (ende-provider--finish-discovery
-      key
-      (and (not error)
-           (condition-case nil
-               (ende-provider--discovery-metadata profile payload)
-             ((error quit) nil)))))
-   key))
-
 (defun ende-provider-discover (profile &optional callback)
   "Discover PROFILE metadata asynchronously and invoke CALLBACK with it.
-Results, including failed lookups, are cached for
-`ende-provider-discovery-ttl' seconds.  CALLBACK receives nil when the
-endpoint does not expose compatible metadata."
-  (let ((callback (or callback #'ignore)))
+Successful endpoint catalogs are cached; runtime failures are throttled for
+`ende-provider-discovery-ttl' seconds.  CALLBACK receives nil on failure."
+  (let* ((callback (or callback #'ignore))
+         (key (ende-provider--catalog-key profile)))
     (ende-validate-resource-options)
     (ende-provider--validate-discovery-options)
-    (if (not ende-provider-discovery-enabled)
-        (progn
-          (ende-provider--invoke-discovery-callback callback nil)
-          nil)
-      (let* ((key (ende-provider--discovery-key profile))
-             (entry (ende-provider--cached-entry key))
-             (url (ende-provider-models-url profile)))
-        (if entry
-            (progn
-              (ende-provider--invoke-discovery-callback
-               callback (plist-get entry :metadata))
-              nil)
-          (let ((waiting (gethash key ende-provider--discovery-inflight)))
-            (if waiting
-                (puthash key (cons callback waiting)
-                         ende-provider--discovery-inflight)
-              (puthash key (list callback)
-                       ende-provider--discovery-inflight)
-              (if url
-                  (ende-provider--start-discovery profile key url)
-                (ende-provider--finish-discovery key nil)))
-            (apply-partially #'ende-provider--cancel-discovery-waiter
-                             key callback)))))))
+    (cond
+     ((not ende-provider-discovery-enabled)
+      (ende-provider--invoke-discovery-callback callback nil)
+      nil)
+     ((not key)
+      (ende-provider--invoke-discovery-callback callback nil)
+      nil)
+     ((ende-provider--catalog-for-profile profile)
+      (ende-provider--invoke-discovery-callback
+       callback (ende-provider-cached-metadata profile))
+      nil)
+     ((ende-provider--cached-failure-p key)
+      (ende-provider--invoke-discovery-callback callback nil)
+      nil)
+     (t
+      (ende-provider--join-catalog-flight profile key 'runtime callback)))))
 
 (defun ende-provider-probe-models (profile callback)
   "Probe PROFILE's model-list endpoint and invoke CALLBACK with its models.
 CALLBACK receives (MODELS ERROR).  Return a cancellation function that removes
-this callback; an unused shared request is cancelled."
-  (let ((key (ende-provider--model-cache-key profile))
+this consumer; an unused shared request is cancelled.  Failures are retried."
+  (let ((key (ende-provider--catalog-key profile))
         (probe (plist-get profile :model-discovery-function)))
-    (if (or (not key)
-            (and (null probe) (not ende-provider-discovery-enabled)))
-        (progn
-          (ende-provider--invoke-model-callback
-           callback
-           (list :models nil
-                 :error
-                 (ende-error-create
-                  :kind 'discovery
-                  :message (if (not key)
-                               "Provider has no compatible model-list endpoint"
-                             "Provider model discovery is disabled"))))
-          (lambda () nil))
-      (let ((entry (ende-provider--cached-model-entry key)))
-        (if entry
-            (progn
-              (ende-provider--invoke-model-callback callback entry)
-              (lambda () nil))
-          (let ((waiting (gethash key ende-provider--model-inflight)))
-            (puthash key
-                     (cons callback waiting)
-                     ende-provider--model-inflight)
-            (unless waiting
-              (ende-provider--start-model-discovery profile key))
-            (apply-partially #'ende-provider--cancel-model-waiter
-                             key callback)))))))
+    (cond
+     ((or (not key)
+          (and (null probe) (not ende-provider-discovery-enabled)))
+      (condition-case nil
+          (funcall callback nil
+                   (ende-error-create
+                    :kind 'discovery
+                    :message (if (not key)
+                                 "Provider has no compatible model-list endpoint"
+                               "Provider model discovery is disabled")))
+        ((error quit) nil))
+      (lambda () nil))
+     ((ende-provider--catalog-for-profile profile)
+      (let ((catalog (ende-provider--catalog-for-profile profile)))
+        (condition-case nil
+            (funcall callback (copy-sequence (plist-get catalog :models)) nil)
+          ((error quit) nil)))
+      (lambda () nil))
+     (t
+      (ende-provider--join-catalog-flight profile key 'models callback)))))
 
 (defun ende-provider--invoke-reasoning-effort-callback
     (callback efforts default error)
@@ -1660,25 +1607,23 @@ over PROFILE's live probe function.  Live probes bypass model metadata caches."
   "Clear cached provider discovery results."
   (interactive)
   (ende-provider-abort-discovery)
-  (clrhash ende-provider--discovery-cache)
-  (clrhash ende-provider--model-cache)
+  (clrhash ende-provider--catalog-cache)
+  (clrhash ende-provider--discovery-failures)
   (cl-incf ende-provider--model-generation)
   (message "ende: provider discovery cache cleared"))
 
 (defun ende-provider-abort-discovery ()
   "Cancel all in-flight provider discovery requests."
   (let (keys)
-    (maphash (lambda (key _cancel) (push key keys))
-             ende-provider--model-cancellations)
+    (maphash (lambda (key _flight) (push key keys))
+             ende-provider--catalog-inflight)
     (dolist (key keys)
-      (let ((cancel (gethash key ende-provider--model-cancellations))
-            (callbacks (gethash key ende-provider--model-inflight)))
-        (remhash key ende-provider--model-cancellations)
-        (remhash key ende-provider--model-inflight)
+      (let* ((flight (gethash key ende-provider--catalog-inflight))
+             (cancel (and flight
+                          (ende-provider--catalog-flight-cancel flight))))
+        (remhash key ende-provider--catalog-inflight)
         (when cancel
-          (ende-ignore-errors cancel))
-        (dolist (callback callbacks)
-          (ende-provider--invoke-model-callback callback nil)))))
+          (ende-ignore-errors cancel))))
   (dolist (process (copy-sequence ende-provider--discovery-processes))
     (let ((finish (and (processp process)
                        (process-get process :ende-discovery-finish))))
@@ -1686,7 +1631,7 @@ over PROFILE's live probe function.  Live probes bypass model metadata caches."
           (funcall finish nil nil t)
         (when (and (processp process) (process-live-p process))
           (ende-ignore-errors #'delete-process process)))))
-  (setq ende-provider--discovery-processes nil))
+  (setq ende-provider--discovery-processes nil)))
 
 (provide 'ende-provider)
 

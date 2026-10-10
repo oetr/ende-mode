@@ -98,7 +98,11 @@
         (ende-test--callback
          call :on-event
          (list :type :partial-result :result (plist-get response :partial))))
-      (ende-test--callback call :on-done response))
+      (ende-test--callback call :on-done
+                           (if (plist-member response :content)
+                               response
+                             (plist-put (copy-sequence response)
+                                        :content ""))))
      (t
       (ende-test--callback call :on-error
                            (format "unknown mock response: %S" response))))))
@@ -323,11 +327,9 @@ non-nil, is signalled from the event callback."
         ende-summary--next-source-id 0)
   (when (boundp 'ende-openrouter-batch--groups)
     (clrhash ende-openrouter-batch--groups))
-  (clrhash ende-provider--discovery-cache)
-  (clrhash ende-provider--discovery-inflight)
-  (clrhash ende-provider--model-cache)
-  (clrhash ende-provider--model-inflight)
-  (clrhash ende-provider--model-cancellations)
+  (clrhash ende-provider--catalog-cache)
+  (clrhash ende-provider--discovery-failures)
+  (clrhash ende-provider--catalog-inflight)
   (setq ende-provider--model-generation 0)
   (clrhash ende-selector--model-validations)
   (clrhash ende-model-selection--buffer-selections)

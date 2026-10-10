@@ -193,7 +193,7 @@
               (insert "Document to summarize")
               (ende-model-selection-save
                '(:provider openrouter :model "source-model"
-                           :reasoning-effort "high"))
+                           :control-preferences (:reasoning-effort "high")))
               (let ((ende--queue-suspended t)
                     job)
                 (setq job (ende-summarize))
@@ -215,7 +215,7 @@
               (insert "Another document")
               (ende-model-selection-save
                '(:provider openrouter :model "stale-model"
-                           :reasoning-effort "high"))
+                           :control-preferences (:reasoning-effort "high")))
               (let ((job (ende-summarize)))
                 (should (eq (ende-job-state job) 'failed))
                 (should (= (length ende-test--calls) 1))
