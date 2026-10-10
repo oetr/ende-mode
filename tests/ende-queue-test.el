@@ -36,6 +36,28 @@
       (should (cl-every #'ende-job-p (ende-active-jobs)))
       (should (cl-every #'ende-job-p (ende-pending-jobs))))))
 
+(ert-deftest ende-test/queue-status-uses-active-jobs-as-its-representative ()
+  (ende-test--reset)
+  (let ((profile '(:name remote :model "fixture" :parallel t
+                         :max-concurrency 2))
+        (ende-llm-function (ende-test--fake-llm '(" done" :stall) t)))
+    (ende-test--with-buffer "base"
+      (let* ((first (ende-enqueue (ende-test--dashboard-request profile)))
+             (second (ende-enqueue (ende-test--dashboard-request profile)))
+             (status (ende-queue-status)))
+        (should (equal (plist-get status :active) (ende-job-id second)))
+        (should (equal (plist-get status :active-jobs)
+                       (list (ende-job-id second) (ende-job-id first))))
+        (ende-queue-cancel-ids (list (ende-job-id second)))
+        (setq status (ende-queue-status))
+        (should (equal (plist-get status :active) (ende-job-id first)))
+        (should (equal (plist-get status :active-jobs)
+                       (list (ende-job-id first))))
+        (ende-test--complete-call (car ende-test--calls))
+        (setq status (ende-queue-status))
+        (should-not (plist-get status :active))
+        (should-not (plist-get status :active-jobs))))))
+
 ;;;; Queue lifecycle
 
 (ert-deftest ende-test/queue-fifo-ordering-async ()
@@ -56,7 +78,7 @@
 			    (ende-test--complete-call (nth 2 ende-test--calls))
 			    (should (string= (buffer-string) "base 1 2 3"))
 			    (should (null ende-queue))
-			    (should (null ende--current-job)))))
+			    (should-not (ende-active-jobs)))))
 
 
 
@@ -69,10 +91,10 @@
 			    (let ((job (ende-insert-at-cursor)))
 			      (ende-insert-at-cursor)
 			      (let ((call (car ende-test--calls)))
-				(should ende--current-job)
+				(should (ende-active-jobs))
 				(ende-abort-queue)
 				(should (eq (ende-job-state job) 'cancelled))
-				(should-not ende--current-job)
+				(should-not (ende-active-jobs))
 				(should (null ende-queue))
 				(should-not (process-live-p (plist-get call :process)))
 				;; A late transport callback must be inert.
@@ -96,10 +118,10 @@
 			      (ende-test--complete-call first)
 			      (let ((second (nth 1 ende-test--calls)))
 				(should second)
-				(should (eq (ende-job-state ende--current-job) 'running))
+				(should (eq (ende-job-state (car (ende-active-jobs))) 'running))
 				(ende-test--callback first :on-done '(:content " stale"))
 				(ende-test--callback first :on-error "stale error")
-				(should (eq (ende-job-state ende--current-job) 'running))
+				(should (eq (ende-job-state (car (ende-active-jobs))) 'running))
 				(ende-test--complete-call second)))
 			    (should (string= (buffer-string) "base A B")))))
 
@@ -117,7 +139,7 @@
 			      (ende-test--callback call :on-done '(:content " X"))
 			      (should (eq (ende-job-state job) 'completed))
 			      (should (string= (buffer-string) "base X"))
-			      (should-not ende--current-job)))))
+			      (should-not (ende-active-jobs))))))
 
 
 
@@ -130,8 +152,7 @@
     (ende-test--with-buffer "base"
 			    (let ((job (ende-insert-at-cursor)))
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not ende--current-job)
-			      (should-not ende--current-job)))))
+			      (should-not (ende-active-jobs))))))
 
 
 
@@ -148,7 +169,7 @@
 			    (setq ende--queue-suspended nil)
 			    (cl-letf (((symbol-function 'message) #'ignore))
 			      (ende-process-next))
-			    (should-not ende--current-job)
+			    (should-not (ende-active-jobs))
 			    (should-not ende-queue))))
 
 
@@ -165,7 +186,7 @@
 						       :buffer (current-buffer)
 						       :start 1 :end 1 :cursor 1)))))
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not ende--current-job))))
+			      (should-not (ende-active-jobs)))))
   (ende-test--reset)
   (let ((ende--job-handlers (copy-tree ende--job-handlers)))
     (ende-register-job-handler
@@ -184,36 +205,71 @@
 						      :start 1 :end 1 :cursor 1)
 					     :overlay overlay))))
 			      (should (eq (ende-job-state job) 'completed))
-			      (should-not ende--current-job)
+			      (should-not (ende-active-jobs))
 			      (delete-overlay overlay)))))
 
 ;;;; Target failure paths
 
-(ert-deftest ende-test/killed-source-buffer-cancels-active-and-queued-jobs ()
+(ert-deftest ende-test/killed-source-buffer-cancels-only-its-jobs-once ()
   (ende-test--reset)
-  (let ((ende-llm-function (ende-test--fake-llm '(" X") t))
-        (buffer (generate-new-buffer " *ende-killed*"))
-        (active nil)
-        (pending nil))
+  (let* ((profile '(:name remote :model "fixture" :parallel t
+                           :max-concurrency 2))
+         (ende-llm-function (ende-test--fake-llm '(" late" " kept") t))
+         (buffer (generate-new-buffer " *ende-killed*"))
+         (other-buffer (generate-new-buffer " *ende-survivor*"))
+         (active nil)
+         (other-active nil)
+         (pending nil)
+         (cancel-count 0)
+         (settle-count 0)
+         (ende-job-event-functions
+          (list (lambda (job event)
+                  (when (and (eq job active)
+                             (eq (plist-get event :type) :settled))
+                    (setq settle-count (1+ settle-count)))))))
     (unwind-protect
         (progn
           (with-current-buffer buffer
             (insert "base")
-            (goto-char (point-max))
-            (setq active (ende-insert-at-cursor)))
+            (setq active
+                  (ende-enqueue
+                   (ende-test--dashboard-request profile))))
+          (with-current-buffer other-buffer
+            (insert "other")
+            (setq other-active
+                  (ende-enqueue
+                   (ende-test--dashboard-request profile))))
           (let ((ende--queue-suspended t))
             (with-current-buffer buffer
-              (setq pending (ende-insert-at-cursor))))
+              (setq pending
+                    (ende-enqueue
+                     (ende-test--dashboard-request profile)))))
           (should (eq (ende-job-state active) 'running))
+          (should (eq (ende-job-state other-active) 'running))
           (should (eq (ende-job-state pending) 'queued))
+          (ende-job-cancellation-set
+           active (lambda () (setq cancel-count (1+ cancel-count))))
           (kill-buffer buffer)
           (should (eq (ende-job-state active) 'cancelled))
           (should (eq (ende-job-state pending) 'cancelled))
-          (should-not ende--current-job)
-          (should-not ende-queue)
+          (should (eq (ende-job-state other-active) 'running))
+          (should (equal (ende-active-jobs) (list other-active)))
+          (should-not (memq pending ende-queue))
+          (should (= cancel-count 1))
+          (should (= settle-count 1))
           (ende-test--callback (car ende-test--calls) :on-done '(:content "late"))
-          (should (eq (ende-job-state active) 'cancelled)))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+          (ende-test--callback (car ende-test--calls) :on-error "late error")
+          (should (eq (ende-job-state active) 'cancelled))
+          (should (= cancel-count 1))
+          (should (= settle-count 1))
+          (should-not (ende-job-result active))
+          (should (eq (ende-job-state other-active) 'running))
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (should (eq (ende-job-state other-active) 'completed))
+          (should (equal (with-current-buffer other-buffer (buffer-string))
+                         "other kept")))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (buffer-live-p other-buffer) (kill-buffer other-buffer)))))
 
 
 
@@ -249,7 +305,6 @@
             (setq ende--source-buffer-jobs (list second-job))
             (add-hook 'kill-buffer-hook #'ende--source-buffer-killed nil t))
           (setq ende--active-jobs (list first-job)
-                ende--current-job first-job
                 ende-queue (list second-job)
                 ende--queue-tail ende-queue)
           (ende-abort-queue)
@@ -273,7 +328,7 @@
 			      (setq buffer-read-only t)
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not ende--current-job)
+			      (should-not (ende-active-jobs))
 			      (should (string= (buffer-string) "base"))))))
 
 
@@ -289,7 +344,7 @@
 			      (narrow-to-region (point-min) (1- (point-max)))
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not ende--current-job)))))
+			      (should-not (ende-active-jobs))))))
 
 
 
@@ -324,7 +379,7 @@
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
 			      (should (string= (buffer-string) "base"))
-			      (should-not ende--current-job)))))
+			      (should-not (ende-active-jobs))))))
 
 (ert-deftest ende-test/same-endpoint-preserves-fifo ()
   (ende-test--reset)

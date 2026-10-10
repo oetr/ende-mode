@@ -146,7 +146,7 @@
 			    (should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
 			    (should-error (ende-summarize) :type 'user-error)
 			    (should-not ende-queue)
-			    (should-not ende--current-job)
+			    (should-not (ende-active-jobs))
 			    (should-not ende-ui--managed-overlays))))
 
 (ert-deftest ende-test/changed-selection-is-skipped ()
@@ -162,7 +162,22 @@
 			      (insert "X")
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not ende--current-job)))))
+			      (should-not (ende-active-jobs))))))
+
+(ert-deftest ende-test/permitted-source-edits-do-not-invalidate-targets ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("summary") t)))
+    (ende-test--with-buffer "source"
+      (let* ((job (ende-summarize))
+             (call (car ende-test--calls)))
+        (goto-char (point-min))
+        (delete-char 1)
+        (insert "S")
+        (should (eq (ende-job-state job) 'running))
+        (ende-test--complete-call call)
+        (should (eq (ende-job-state job) 'completed))
+        (with-current-buffer ende-summary-buffer-name
+          (should (string-match-p "summary" (buffer-string))))))))
 
 (ert-deftest ende-test/direct-request-uses-and-snapshots-buffer-selection ()
   (ende-test--reset)

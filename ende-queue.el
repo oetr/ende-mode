@@ -47,12 +47,6 @@
 (defvar ende--next-dispatch-order 0
   "Next scheduler dispatch sequence assigned to a running job.")
 
-(defvar ende--current-job nil
-  "One active job retained for compatibility and status display.
-
-Callbacks must not use this variable to identify their originating job.  It
-is the scheduler's first active job; `ende--active-jobs' is authoritative.")
-
 (defvar ende--active-jobs nil
   "Active jobs, in reverse dispatch order.")
 
@@ -100,8 +94,7 @@ is the scheduler's first active job; `ende--active-jobs' is authoritative.")
 
 (defun ende--job-release-current (job)
   "Release JOB from the active set and release its target."
-  (setq ende--active-jobs (delq job ende--active-jobs)
-        ende--current-job (car ende--active-jobs))
+  (setq ende--active-jobs (delq job ende--active-jobs))
   (ende--unregister-source-job job)
   (ende-ignore-errors #'ende-target-release (ende-job-target job)))
 
@@ -512,7 +505,6 @@ When RESULT is non-nil, retain it for history and job inspection."
          (handler (alist-get type ende--job-handlers))
          (target (ende-job-target job)))
     (push job ende--active-jobs)
-    (setq ende--current-job (car ende--active-jobs))
     (setf (ende-job-state job) 'running
           (ende-job-started-at job) (float-time)
           (ende-job-dispatch-order job) (cl-incf ende--next-dispatch-order)
@@ -728,8 +720,7 @@ membership are updated before eligible work is dispatched."
               (cl-remove-if
                (lambda (entry) (and (ende-job-p entry) (memq entry live)))
                ende-queue)
-              ende--active-jobs remaining
-              ende--current-job (car remaining))
+              ende--active-jobs remaining)
         (let ((now (float-time)))
           (dolist (job live)
             (setf (ende-job-state job) 'cancelled
@@ -777,7 +768,6 @@ membership are updated before eligible work is dispatched."
           (setq ende-queue nil)
           (setq ende--queue-tail nil)
           (setq ende--active-jobs nil)
-          (setq ende--current-job nil)
           (let ((now (float-time)))
             (dolist (job jobs)
               (unless (ende-job-terminal-p job)
@@ -804,9 +794,9 @@ membership are updated before eligible work is dispatched."
 (defun ende-queue-status ()
   "Display and return a nonvisual snapshot of queue state."
   (interactive)
-  (let ((status (list :running (and ende--active-jobs t)
-                      :active (and ende--current-job
-                                   (ende-job-id ende--current-job))
+  (let* ((active (car ende--active-jobs))
+         (status (list :running (and ende--active-jobs t)
+                      :active (and active (ende-job-id active))
                       :active-jobs (mapcar #'ende-job-id ende--active-jobs)
                       :pending (length (ende-pending-jobs))
                       :fences (length (ende-queue-fences))

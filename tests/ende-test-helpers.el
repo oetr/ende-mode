@@ -314,7 +314,6 @@ non-nil, is signalled from the event callback."
         ende-queue nil
         ende--queue-tail nil
         ende--queue-suspended nil
-        ende--current-job nil
         ende--active-jobs nil
         ende--aborting nil
         ende--dispatching nil

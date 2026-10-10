@@ -105,8 +105,7 @@ exercise replaces this worksheet; killing the buffer discards it."
              (ende-job-current-p ende-rubber-duck--job))
     (let ((target (ende-job-target ende-rubber-duck--job)))
       (dolist (entry
-               `((kill-buffer-hook . ,(ende-target-kill-buffer-hook target))
-                 (before-change-functions . ,(ende-target-before-change-hook target))
+               `((before-change-functions . ,(ende-target-before-change-hook target))
                  (after-change-functions . ,(ende-target-after-change-hook target))))
         (when (cdr entry)
           (add-hook (car entry) (cdr entry) nil t))))))

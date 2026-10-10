@@ -34,7 +34,7 @@
   buffer start-marker end-marker cursor-marker placement
   source-snapshot source-digest restriction-beg restriction-end selected offset
   review-policy applying invalidated
-  kill-buffer-hook before-change-hook after-change-hook)
+  before-change-hook after-change-hook)
 
 ;;;; Creation and positions
 
@@ -320,13 +320,10 @@ each side is additionally capped by `ende-target-window-chars'."
 (defun ende-target-activate (target on-invalid &optional allow-source-changes)
   "Monitor TARGET and call ON-INVALID if it becomes unusable.
 When ALLOW-SOURCE-CHANGES is non-nil, changes to TARGET's selected source do
-not invalidate it.  The target buffer being killed remains fatal."
+not invalidate it."
   (let ((buffer (ende-target-buffer target)))
     (when (buffer-live-p buffer)
-      (let ((kill-hook
-             (lambda ()
-               (funcall on-invalid "target buffer was killed")))
-            (before-hook
+      (let ((before-hook
              (lambda (beg end)
                (when (not (ende-target-applying target))
                  (when (and (not allow-source-changes)
@@ -338,11 +335,9 @@ not invalidate it.  The target buffer being killed remains fatal."
                           (ende-target-invalidated target))
                  (funcall on-invalid
                           "selected source changed during generation")))))
-        (setf (ende-target-kill-buffer-hook target) kill-hook
-              (ende-target-before-change-hook target) before-hook
+        (setf (ende-target-before-change-hook target) before-hook
               (ende-target-after-change-hook target) after-hook)
         (with-current-buffer buffer
-          (ende-target--add-local-hook 'kill-buffer-hook kill-hook)
           (ende-target--add-local-hook
            'before-change-functions before-hook)
           (ende-target--add-local-hook
@@ -361,21 +356,17 @@ not invalidate it.  The target buffer being killed remains fatal."
 (defun ende-target--remove-hooks (target)
   "Remove lifecycle hooks installed for TARGET."
   (let ((buffer (ende-target-buffer target))
-        (kill-hook (ende-target-kill-buffer-hook target))
         (before-hook (ende-target-before-change-hook target))
         (after-hook (ende-target-after-change-hook target)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (when kill-hook
-          (ende-target--remove-local-hook 'kill-buffer-hook kill-hook))
         (when before-hook
           (ende-target--remove-local-hook
            'before-change-functions before-hook))
         (when after-hook
           (ende-target--remove-local-hook
            'after-change-functions after-hook))))
-    (setf (ende-target-kill-buffer-hook target) nil
-          (ende-target-before-change-hook target) nil
+    (setf (ende-target-before-change-hook target) nil
           (ende-target-after-change-hook target) nil)))
 
 (defun ende-target-release (target)

@@ -83,7 +83,7 @@
        (should (> scoped-target-parses 0))
        (should (> other-buffer-parses 0))))))
 
-(ert-deftest ende-test/chat-completion-rediscovers-after-unrelated-edit ()
+(ert-deftest ende-test/chat-completion-survives-unrelated-edit ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
     (ende-test--with-buffer
@@ -91,11 +91,22 @@
      (org-mode)
      (ende-test--chat-goto "** Question")
      (let* ((job (ende-ask))
-            (instruction (ende-job-instruction job)))
+            (instruction (ende-job-instruction job))
+            (target (current-buffer))
+            (whole-transcript-parses 0)
+            (parse-buffer (symbol-function 'org-element-parse-buffer)))
        (goto-char (point-max))
        (insert "Added while the request was running.\n")
-       (ende-test--complete-call (car ende-test--calls))
+       (cl-letf (((symbol-function 'org-element-parse-buffer)
+                  (lambda (&rest arguments)
+                    (when (and (eq (current-buffer) target)
+                               (= (point-min) 1)
+                               (= (point-max) (1+ (buffer-size))))
+                      (cl-incf whole-transcript-parses))
+                    (apply parse-buffer arguments))))
+         (ende-test--complete-call (car ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
+       (should (= whole-transcript-parses 0))
        (should (string-match-p
                 "Keep this note.\nAdded while the request was running."
                 (buffer-string)))
@@ -117,6 +128,31 @@
                    (org-element-property :begin reply)
                    (org-element-property :end reply)))))))))
 
+(ert-deftest ende-test/chat-compaction-survives-unrelated-edit ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Summary") t)))
+    (ende-test--with-buffer
+     "* Topic\nOriginal history.\n** Instructions\nKeep decisions.\n** Next\nContinue.\n* Notes\nPreserve this note.\n"
+     (org-mode)
+     (ende-test--chat-goto "** Instructions")
+     (let* ((job (ende-compact))
+            (request-id (plist-get (ende-job-instruction job) :request-id)))
+       (ende-test--chat-goto "* Notes")
+       (org-end-of-meta-data t)
+       (insert "Added while compaction was running.\n")
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))
+       (should (string-match-p "Added while compaction was running"
+                               (buffer-string)))
+       (let* ((document (ende-chat--build-document))
+              (fence (ende-chat--find-by-property
+                      document ende-chat-request-id-property request-id)))
+         (should (ende-chat--context-fence-p document fence))
+         (should (string-match-p "Summary"
+                                 (buffer-substring-no-properties
+                                  (org-element-property :begin fence)
+                                  (org-element-property :end fence)))))))))
+
 (ert-deftest ende-test/chat-completion-rejects-an-edited-destination ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Generated answer") t)))
@@ -136,6 +172,136 @@
        (should (string-match-p "destination was edited or moved"
                                (buffer-string)))))))
 
+
+
+(ert-deftest ende-test/chat-and-compaction-reject-invalid-destinations ()
+  (dolist (compact '(nil t))
+    (dolist (mutation '(title role visibility state parent level delete))
+      (ert-info ((format "%s destination mutation: %s"
+                         (if compact "compaction" "chat") mutation))
+        (ende-test--reset)
+        (let ((ende-llm-function
+               (ende-test--fake-llm
+                (list (if compact "Generated summary" "Generated answer")) t)))
+          (ende-test--with-buffer
+           "* Topic\n** Question\nKeep these instructions.\n** Next\nContinue.\n"
+           (org-mode)
+           (ende-test--chat-goto "** Question")
+           (let* ((job (if compact (ende-compact) (ende-ask)))
+                  (placeholder
+                   (cadr (ende-chat--resolve-request-destination job))))
+             (goto-char (org-element-property :begin placeholder))
+             (pcase mutation
+               ('title (org-edit-headline "User-edited destination"))
+               ('role (org-entry-put nil ende-chat-role-property "user"))
+               ('visibility
+                (org-entry-put nil ende-chat-visibility-property "normal"))
+               ('state (org-entry-put nil ende-chat-state-property "failed"))
+               ('parent (org-demote-subtree))
+               ('level (org-promote-subtree))
+               ('delete
+                (delete-region (org-element-property :begin placeholder)
+                               (org-element-property :end placeholder))))
+             (ende-test--complete-call (car ende-test--calls))
+             (should (eq (ende-job-state job) 'failed))
+             (should-not (string-match-p "Generated answer" (buffer-string)))
+             (should-not (string-match-p "Generated summary" (buffer-string)))
+             (should (string-match-p "Keep these instructions" (buffer-string))))))))))
+
+(ert-deftest ende-test/concurrent-chat-and-compaction-stay-in-their-buffers ()
+  (ende-test--reset)
+  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+        (ende-llm-function
+         (ende-test--fake-llm '("Compaction-only summary" "Chat-only answer") t))
+        (chat-buffer (generate-new-buffer " *ende-chat-live-location*"))
+        (compact-buffer (generate-new-buffer " *ende-compact-live-location*")))
+    (unwind-protect
+        (let (chat-job compact-job)
+          (with-current-buffer compact-buffer
+            (org-mode)
+            (insert "* Topic\nEarlier history.\n** Instructions\nRetain decisions.\n")
+            (ende-test--chat-goto "** Instructions")
+            (setq compact-job (ende-compact)))
+          (with-current-buffer chat-buffer
+            (org-mode)
+            (insert "* Topic\n** Question\nAnswer this.\n")
+            (ende-test--chat-goto "** Question")
+            (setq chat-job (ende-ask)))
+          (should (eq (ende-job-state compact-job) 'running))
+          (should (eq (ende-job-state chat-job) 'running))
+          (ende-test--complete-call (nth 1 ende-test--calls))
+          (ende-test--complete-call (nth 0 ende-test--calls))
+          (should (eq (ende-job-state compact-job) 'completed))
+          (should (eq (ende-job-state chat-job) 'completed))
+          (with-current-buffer compact-buffer
+            (should (string-match-p "Compaction-only summary" (buffer-string)))
+            (should-not (string-match-p "Chat-only answer" (buffer-string))))
+          (with-current-buffer chat-buffer
+            (should (string-match-p "Chat-only answer" (buffer-string)))
+            (should-not (string-match-p "Compaction-only summary"
+                                        (buffer-string)))))
+      (ende-test--reset)
+      (when (buffer-live-p chat-buffer) (kill-buffer chat-buffer))
+      (when (buffer-live-p compact-buffer) (kill-buffer compact-buffer)))))
+
+(ert-deftest ende-test/chat-unrelated-edits-during-async-tool-round-are-safe ()
+  (ende-test--reset)
+  (let* ((call '(:id "deferred-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Checking\",\"status\":\"Waiting\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Answer after the tool") t))
+         deferred-tool-completion)
+    (ende-test--with-buffer
+     "* Topic\n** Question\nInspect.\n** Notes\nPreserve this note.\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (request-id (plist-get (ende-job-instruction job) :request-id)))
+       (cl-letf (((symbol-function 'ende-chat--tool-response-async)
+                  (lambda (_call _configuration callback)
+                    (setq deferred-tool-completion callback))))
+         (ende-test--complete-call (car ende-test--calls))
+         (should (eq (ende-job-state job) 'running))
+         (should (functionp deferred-tool-completion))
+         (ende-test--chat-goto "** Notes")
+         (org-end-of-meta-data t)
+         (insert "Added during the asynchronous tool round.\n")
+         (funcall deferred-tool-completion "{\\\"ok\\\":true}"))
+       (should (= (length ende-test--calls) 2))
+       (ende-test--complete-call (nth 1 ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))
+       (should (string-match-p "Added during the asynchronous tool round"
+                               (buffer-string)))
+       (let* ((document (ende-chat--build-document))
+              (work (ende-chat--request-work-section document request-id))
+              (children (ende-chat--children document work))
+              (call-node (cl-find-if
+                          (lambda (node)
+                            (ende-chat--tool-call-protocol-p document node))
+                          children))
+              (result-node (cl-find-if
+                            (lambda (node)
+                              (ende-chat--tool-result-protocol-p document node))
+                            children))
+              (reply (cl-find-if
+                      (lambda (node)
+                        (and (equal (org-element-property :raw-value node)
+                                    "Agent: Reply")
+                             (equal (ende-chat--property document node :request-id)
+                                    request-id)
+                             (null (ende-chat--work-ancestor document node))))
+                      (ende-chat--document-headlines document)))
+              (call-pos (org-element-property :begin call-node))
+              (result-pos (org-element-property :begin result-node))
+              (reply-pos (org-element-property :begin reply)))
+         (should work)
+         (should call-node)
+         (should result-node)
+         (should reply)
+         (should (< call-pos result-pos reply-pos))
+         (should (eq (ende-chat--parent document call-node) work))
+         (should (eq (ende-chat--parent document result-node) work)))))))
 
 
 (ert-deftest ende-test/chat-persistence-failure-restores-the-pending-slot ()

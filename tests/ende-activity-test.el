@@ -385,7 +385,7 @@
                (first-overlay (ende-job-overlay first))
                (second-overlay (ende-job-overlay second)))
           (should (= (length (ende-active-jobs)) 2))
-          (should (eq ende--current-job second))
+          (should (eq (car (ende-active-jobs)) second))
           (ende-test--complete-call (nth 0 ende-test--calls))
           (should (equal (ende-job-activity-title first) "First task"))
           (should-not (ende-job-activity-title second))
