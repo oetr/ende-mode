@@ -83,7 +83,47 @@
        (should (> scoped-target-parses 0))
        (should (> other-buffer-parses 0))))))
 
-
+(ert-deftest ende-test/chat-completion-rediscovers-after-unrelated-edit ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     "* Root\n** Question\nAsk\n* Notes\nKeep this note.\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (instruction (ende-job-instruction job))
+            (validations 0)
+            (placement-valid-p
+             (symbol-function 'ende-chat--pending-placement-valid-p)))
+       (goto-char (point-max))
+       (insert "Added while the request was running.\n")
+       (cl-letf (((symbol-function 'ende-chat--pending-placement-valid-p)
+                  (lambda (&rest arguments)
+                    (cl-incf validations)
+                    (apply placement-valid-p arguments))))
+         (ende-test--complete-call (car ende-test--calls)))
+       (should (eq (ende-job-state job) 'completed))
+       (should (= validations 1))
+       (should (string-match-p
+                "Keep this note.\nAdded while the request was running."
+                (buffer-string)))
+       (let* ((document (ende-chat--build-document))
+              (reply
+               (cl-find-if
+                (lambda (headline)
+                  (and (equal (org-element-property :raw-value headline)
+                              "Agent: Reply")
+                       (equal (ende-chat--property document headline :request-id)
+                              (plist-get instruction :request-id))))
+                (ende-chat--document-headlines document))))
+         (should reply)
+         (should (equal (ende-chat--property document reply :reply-to)
+                        (plist-get instruction :question-id)))
+         (should (string-match-p
+                  "Answer"
+                  (buffer-substring-no-properties
+                   (org-element-property :begin reply)
+                   (org-element-property :end reply)))))))))
 
 (ert-deftest ende-test/chat-completion-rejects-an-edited-destination ()
   (ende-test--reset)

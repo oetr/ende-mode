@@ -1828,68 +1828,13 @@ COMPACT always places a same-level context-fence sibling."
               (plist-put (ende-job-instruction job)
                          :buffer-tick (buffer-chars-modified-tick)))))))
 
-(defun ende-chat--request-marker-valid-p
-    (buffer question-marker anchor-marker question-id request-id compact)
-  "Return non-nil when request markers still identify valid Org headings."
+(defun ende-chat--request-markers-live-p
+    (buffer question-marker destination-marker)
+  "Return non-nil when request markers are live in BUFFER."
   (and (markerp question-marker)
-       (markerp anchor-marker)
        (eq (marker-buffer question-marker) buffer)
-       (eq (marker-buffer anchor-marker) buffer)
-       (with-current-buffer buffer
-         (save-excursion
-           (let ((question-position (marker-position question-marker)))
-             (goto-char question-position)
-             (when (org-at-heading-p)
-               (let* ((question-level (org-outline-level))
-                      (local-question-id
-                       (org-entry-get nil ende-chat-id-property nil))
-                      (question-role
-                       (org-entry-get nil ende-chat-role-property nil))
-                      (question-parent
-                       (ende-chat--headline-parent-position question-position)))
-                 (goto-char anchor-marker)
-                 (when (org-at-heading-p)
-                   (let* ((title (org-get-heading t t t t))
-                          (level (org-outline-level))
-                          (work (equal title ende-chat--work-title))
-                          (expected-level
-                           (if compact question-level
-                             (if (= question-level 1) 2 question-level)))
-                          (expected-parent
-                           (if (and (= question-level 1) (not compact))
-                               question-position
-                             question-parent))
-                          (parent
-                           (ende-chat--headline-parent-position anchor-marker))
-                          (role (org-entry-get nil ende-chat-role-property nil))
-                          (visibility
-                           (org-entry-get nil ende-chat-visibility-property nil)))
-                     (and (equal local-question-id question-id)
-                          (or compact (equal question-role "user"))
-                          (if compact
-                              (equal title ende-chat--context-fence-title)
-                            (or (equal title "Agent: Reply") work))
-                          (equal (org-entry-get nil ende-chat-request-id-property nil)
-                                 request-id)
-                          (equal (org-entry-get nil ende-chat-reply-to-property nil)
-                                 question-id)
-                          (equal (org-entry-get nil ende-chat-state-property nil)
-                                 "pending")
-                          (= level expected-level)
-                          (eql parent expected-parent)
-                          (> (marker-position anchor-marker) question-position)
-                          (if work
-                              (and (not compact)
-                                   (equal (downcase
-                                           (string-trim
-                                            (or (org-entry-get
-                                                 nil ende-chat-work-property nil)
-                                                "")))
-                                          "t")
-                                   (null role)
-                                   (null visibility))
-                            (and (equal role "assistant")
-                                 (equal visibility "hidden")))))))))))))
+       (markerp destination-marker)
+       (eq (marker-buffer destination-marker) buffer)))
 
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
@@ -1967,10 +1912,6 @@ current fold state.  FINAL places the terminal assistant reply after it."
                   (let* ((placeholder (ende-chat--placeholder job t))
                          (document (car placeholder))
                          (anchor (cadr placeholder))
-                         (question (and document
-                                        (ende-chat--find-by-property
-                                         document ende-chat-id-property
-                                         question-id)))
                          (work (ende-chat--request-work-section
                                 document request-id))
                          (anchor-level
@@ -1980,12 +1921,6 @@ current fold state.  FINAL places the terminal assistant reply after it."
                                      :request-end-marker))
                     (unless anchor
                       (error "Chat response destination no longer exists"))
-                    (when (and question
-                               (not (ende-chat--pending-placement-valid-p
-                                     document question anchor request-id)))
-                      (error "Chat response destination was edited or moved"))
-                    (when (and work (not (eq work anchor)))
-                      (error "Chat request pending marker is not its Agent: Work section"))
                     (when work
                       (setq work-fold-marker
                             (copy-marker (org-element-property :begin work))
@@ -2183,66 +2118,27 @@ current fold state.  FINAL places the terminal assistant reply after it."
           (set-marker reasoning-marker nil))))
     insertion-info))
 
-(defun ende-chat--finish-request (job &optional insertion-info)
-  "Remove JOB's pending marker after its final assistant response is stored.
-INSERTION-INFO is returned by `ende-chat--persist-request-section' when
-available; otherwise rediscover and validate the destination."
-  (let* ((request-id (plist-get (ende-job-instruction job) :request-id))
-         (question-id (plist-get (ende-job-instruction job) :question-id))
-         (buffer (ende-target-buffer (ende-job-target job))))
+(defun ende-chat--finish-request (job insertion-info)
+  "Remove JOB's pending marker using validated INSERTION-INFO."
+  (let ((buffer (ende-target-buffer (ende-job-target job)))
+        (reply-marker (plist-get insertion-info :reply))
+        (start-marker (plist-get insertion-info :section-start))
+        (end-marker (plist-get insertion-info :section-end)))
+    (unless (and (buffer-live-p buffer)
+                 (ende-chat--request-markers-live-p
+                  buffer reply-marker start-marker)
+                 (markerp end-marker)
+                 (eq (marker-buffer end-marker) buffer))
+      (error "Chat response insertion markers are no longer live"))
     (with-current-buffer buffer
       (save-excursion
         (save-restriction
           (widen)
-          (let* ((reply-marker (plist-get insertion-info :reply))
-                 (local-p
-                  (and insertion-info
-                       (markerp reply-marker)
-                       (eq (marker-buffer reply-marker) buffer)
-                       (save-excursion
-                         (goto-char (marker-position reply-marker))
-                         (and (org-at-heading-p)
-                              (equal (org-get-heading t t t t) "Agent: Reply")
-                              (equal (org-entry-get nil
-                                                    ende-chat-request-id-property)
-                                     request-id)
-                              (equal (org-entry-get nil
-                                                    ende-chat-reply-to-property)
-                                     question-id)
-                              (equal (org-entry-get nil ende-chat-role-property)
-                                     "assistant")
-                              (equal (org-entry-get nil ende-chat-state-property)
-                                     "pending")))))
-                 (anchor
-                  (unless local-p
-                    (let* ((document (ende-chat--build-document))
-                           (headline (ende-chat--request-state-headline
-                                      document request-id "pending")))
-                      (unless headline
-                        (error "Chat request lost its pending marker"))
-                      headline)))
-                 (start-marker
-                  (if local-p
-                      (plist-get insertion-info :section-start)
-                    (copy-marker (org-element-property :begin anchor))))
-                 (end-marker
-                  (if local-p
-                      (plist-get insertion-info :section-end)
-                    (copy-marker (org-element-property :end anchor)))))
-            (unwind-protect
-                (progn
-                  (goto-char (if local-p
-                                 (marker-position reply-marker)
-                               (org-element-property :begin anchor)))
-                  (unless (equal (org-entry-get nil ende-chat-state-property)
-                                 "pending")
-                    (error "Chat request lost its pending marker"))
-                  (org-entry-delete nil ende-chat-state-property)
-                  (ende-chat--hide-control-drawers-in-region
-                   start-marker end-marker))
-              (unless local-p
-                (set-marker start-marker nil)
-                (set-marker end-marker nil)))))))))
+          (goto-char (marker-position reply-marker))
+          (org-entry-delete nil ende-chat-state-property)
+          (ende-chat--hide-control-drawers-in-region
+           start-marker end-marker)
+          (ende-chat--update-request-buffer-tick job))))))
 
 (defun ende-chat--placeholder (job &optional local allow-edited)
   "Return JOB's current pending reply headline, or nil.
@@ -2264,9 +2160,8 @@ ALLOW-EDITED skips reply-placement validation for failure recovery."
             (if (and local (not compact)
                      (eql (plist-get instruction :buffer-tick)
                           (buffer-chars-modified-tick))
-                     (ende-chat--request-marker-valid-p
-                      buffer question-marker destination-marker question-id
-                      request-id compact))
+                     (ende-chat--request-markers-live-p
+                      buffer question-marker destination-marker))
                 (when-let* ((header
                              (ende-chat--headline-header-document-at-marker
                               destination-marker))
