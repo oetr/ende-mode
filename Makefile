@@ -67,6 +67,7 @@ syntax:
 	$(EMACS_BATCH) --eval '$(strip $(CHECK_SYNTAX))' $(EL_FILES)
 
 test:
+	$(MAKE) clean
 	$(EMACS_BATCH) \
 		$(foreach file,$(TEST_FILES),-l $(file)) \
 		-f ert-run-tests-batch-and-exit
