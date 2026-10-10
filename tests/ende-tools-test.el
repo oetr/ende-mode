@@ -119,6 +119,17 @@
                (json-encode (alist-get :parameters function)))))
         (should (hash-table-p (gethash "properties" schema)))
         (should (eq (gethash "additionalProperties" schema) :false))))
+    (let* ((schema (ende-test--public-tool-schema definitions "search_project"))
+           (properties (gethash "properties" schema)))
+      (should-not (gethash "required" schema))
+      (should (= (gethash "minLength" (gethash "query" properties)) 1))
+      (should (= (gethash "minItems" (gethash "patterns" properties)) 1))
+      (should (string-match-p "literal"
+                              (gethash "description" (gethash "query" properties))))
+      (should (string-match-p "literal"
+                              (gethash "description" (gethash "patterns" properties))))
+      (should (string-match-p "Emacs regexp"
+                              (gethash "description" (gethash "regexp" properties)))))
     (dolist (case `(("list_project_files" "max_results"
                      ,ende-tools-max-listed-files)
                     ("read_file" "line_count" ,ende-tools-max-read-lines)
@@ -339,7 +350,7 @@
          (buffers nil)
          (empty-arguments (make-hash-table :test 'equal))
          (search-arguments (make-hash-table :test 'equal)))
-    (puthash "regexp" "needle" search-arguments)
+    (puthash "query" "needle" search-arguments)
     (unwind-protect
         (progn
           (with-temp-file alpha (insert "needle alpha\n"))
@@ -581,11 +592,11 @@
                  (disk-search
                   (ende-test--tool-result
                    "search_project"
-                   '(("regexp" . "DISK_TOKEN")) root))
+                   '(("query" . "DISK_TOKEN")) root))
                  (buffer-search
                   (ende-test--tool-result
                    "search_project"
-                   '(("regexp" . "BUFFER_TOKEN")) root)))
+                   '(("query" . "BUFFER_TOKEN")) root)))
             (should (string= (plist-get buffer-read :source_kind) "buffer"))
             (should (string= (plist-get buffer-read :content)
                              "BUFFER_TOKEN unsaved\n"))
@@ -623,6 +634,62 @@
       (when (file-directory-p root)
         (delete-directory root t)))))
 
+(ert-deftest ende-test/project-tools-search-supports-literal-queries-and-patterns ()
+  (let* ((root (make-temp-file "ende-tools-search-literals-" t))
+         (path (expand-file-name "search.txt" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert "foo and bar\nfoo|bar\na.b and x+y\naXb\n"))
+          (let* ((ende-project-root-directory root)
+                 (literal (ende-test--tool-result
+                           "search_project" '(("query" . "a.b")) root))
+                 (either (ende-test--tool-result
+                          "search_project" '(("patterns" . ["foo" "bar"])) root))
+                 (metacharacters (ende-test--tool-result
+                                  "search_project"
+                                  '(("patterns" . ["a.b" "x+y"])) root))
+                 (regexp (ende-test--tool-result
+                          "search_project" '(("regexp" . "foo\\|bar")) root)))
+            (should (= (length (plist-get literal :matches)) 1))
+            (should (string= (plist-get (car (append (plist-get literal :matches) nil))
+                                       :match)
+                             "a.b and x+y"))
+            (should (= (length (plist-get either :matches)) 4))
+            (should (= (length (plist-get metacharacters :matches)) 2))
+            (should (string= (plist-get (car (append (plist-get metacharacters :matches) nil))
+                                       :match)
+                             "a.b and x+y"))
+            (should (= (length (plist-get regexp :matches)) 4))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-search-requires-one-valid-search-form ()
+  (let* ((root (make-temp-file "ende-tools-search-validation-" t))
+         (path (expand-file-name "search.txt" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "content\n"))
+          (let ((ende-project-root-directory root))
+            (dolist (arguments '(nil
+                                (("query" . "one") ("regexp" . "one")
+                                 ("glob" . "*.txt"))
+                                (("query" . ""))
+                                (("patterns" . []))
+                                (("patterns" . ["ok" ""]))))
+              (let ((call (ende-tool-call "search_project" arguments root)))
+                (should-not (plist-get call :ok))))
+            (let ((none (ende-tool-call "search_project" nil root))
+                  (multiple (ende-tool-call
+                             "search_project"
+                             '(("query" . "one") ("patterns" . ["two"]))
+                             root)))
+              (should (string-match-p "exactly one" (plist-get none :error)))
+              (should (string-match-p "exactly one"
+                                      (plist-get multiple :error))))))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
 (ert-deftest ende-test/project-tools-read-search-and-cap-results ()
   (let* ((root (make-temp-file "ende-tools-search-project-" t))
          (first (expand-file-name "first.txt" root))
@@ -642,7 +709,7 @@
                         root))
                  (search (ende-test--tool-result
                           "search_project"
-                          '(("regexp" . "needle")
+                          '(("query" . "needle")
                             ("max_results" . 2)
                             ("context_before" . 1))
                           root)))

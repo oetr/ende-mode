@@ -109,7 +109,7 @@
                                      :name "project_info" :arguments "{}")
                                (list :id "call-search"
                                      :name "search_project"
-                                     :arguments "{\"regexp\":\"classified\"}")))
+                                     :arguments "{\"query\":\"classified\"}")))
                    (list :tool-calls
                          (list (list :id "call-project-round-2"
                                      :name "project_info" :arguments "{}")))

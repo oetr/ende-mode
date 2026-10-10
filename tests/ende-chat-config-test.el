@@ -717,12 +717,12 @@
                                                  root configuration)
                                  :ok))
                     (when (caddr case)
-                      (let* ((call (ende-tool-call 'search_project '(:regexp "TOKEN")
+                      (let* ((call (ende-tool-call 'search_project '(:query "TOKEN")
                                                    root configuration))
                              (matches (plist-get (plist-get call :result) :matches)))
                         (should (plist-get call :ok))
                         (should (= (length matches) 1))
-                        (should (equal (plist-get (car matches) :path) "public.el"))))))))))
+                        (should (equal (plist-get (aref matches 0) :path) "public.el"))))))))))
       (delete-directory root t))))
 
 

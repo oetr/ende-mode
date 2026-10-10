@@ -759,9 +759,34 @@ FUNCTION receives no arguments and may return any value."
                (forward-char 1)))))))
     (nreverse matches)))
 
+(defun ende-tools--search-regexp (arguments)
+  "Normalize one search form from ARGUMENTS into an Emacs regexp."
+  (let* ((forms '("query" "patterns" "regexp"))
+         (keys (mapcar #'ende-tools--property-name
+                       (ende-tools--object-keys arguments)))
+         (present (cl-remove-if-not (lambda (name) (member name keys)) forms)))
+    (unless (= (length present) 1)
+      (error "search_project requires exactly one of query, patterns, or regexp"))
+    (pcase (car present)
+      ("query"
+       (regexp-quote (ende-tools--required-string arguments "query")))
+      ("patterns"
+       (let* ((raw (ende-tools--argument arguments "patterns"))
+              (patterns (ende-tools--sequence raw)))
+         (unless (and (vectorp raw) (not (stringp raw))
+                      patterns
+                      (cl-every (lambda (pattern)
+                                  (and (stringp pattern)
+                                       (not (string-empty-p pattern))))
+                                patterns))
+           (error "patterns must be a non-empty array of non-empty strings"))
+         (mapconcat #'regexp-quote patterns "\\|")))
+      ("regexp"
+       (ende-tools--required-string arguments "regexp")))))
+
 (defun ende-tools--search-project (arguments root)
   "Search allowed project files on disk with an Emacs regexp."
-  (let* ((regexp (ende-tools--required-string arguments "regexp"))
+  (let* ((regexp (ende-tools--search-regexp arguments))
          (glob (ende-tools--argument arguments "glob"))
          (context-before
           (ende-tools--bounded-integer
@@ -2344,10 +2369,16 @@ process-group cancellation function with the active Ende job."
 
 (ende-tool-register
  'search_project
- "Search allowed project files on disk with an Emacs regexp."
+ "Search allowed project files on disk. Provide exactly one of query or patterns for literal searching, or regexp for an explicit Emacs regexp."
  `((:type . "object")
    (:properties
-    . ((:regexp . ((:type . "string")))
+    . ((:query . ((:type . "string") (:minLength . 1)
+                  (:description . "One non-empty literal string to search for; mutually exclusive with patterns and regexp.")))
+       (:patterns . ((:type . "array") (:minItems . 1)
+                     (:items . ((:type . "string") (:minLength . 1)))
+                     (:description . "Non-empty array of non-empty literal strings; matches any pattern. Mutually exclusive with query and regexp.")))
+       (:regexp . ((:type . "string")
+                   (:description . "Explicit Emacs regexp for advanced searches; mutually exclusive with query and patterns.")))
        (:glob . ((:type . "string")))
        (:context_before . ((:type . "integer") (:minimum . 0)
                            (:maximum . ,ende-tools-max-search-context-lines)
@@ -2358,7 +2389,6 @@ process-group cancellation function with the active Ende job."
        (:max_results . ((:type . "integer") (:minimum . 1)
                         (:maximum . ,ende-tools-max-search-results)
                         (:description . "Defaults to the configured maximum.")))))
-   (:required . ("regexp"))
    (:additionalProperties . :json-false))
  #'ende-tools--search-project)
 
