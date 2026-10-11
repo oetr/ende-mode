@@ -2437,15 +2437,21 @@ process-group cancellation function with the active Ende job."
 
 (ende-tool-register
  'run_command
- "Run a shell command in the current job's private development workspace."
+ (concat "Run a shell command in the current job's private development workspace. "
+         "Use this as the normal tool for builds, tests, linters, repository "
+         "inspection, temporary diagnostics, and changes intended to stay "
+         "in that workspace; use dedicated project mutation tools for desired "
+         "host-project edits.")
  ende-tools--run-command-schema
  #'ende-tools--run-command nil nil '(:async t))
 
 (ende-tool-register
  'run_host_command
  (concat "Run an arbitrary shell command directly on the host with the "
-         "permissions and environment of the Emacs process. This command is "
-         "not sandboxed.")
+         "permissions and environment of the Emacs process, bypassing the "
+         "private development workspace. Use only when host execution is "
+         "specifically required; do not use instead of edit_file, create_file, "
+         "delete_file, or apply_patch when modifying project source.")
  ende-tools--run-host-command-schema
  #'ende-tools--run-host-command nil :no-resource '(:async t))
 

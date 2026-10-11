@@ -151,6 +151,24 @@
     (should (eq (ende-tool-resource-kind
                  (ende-tool--find "run_host_command"))
                 'none))
+    (let* ((descriptions
+            (mapcar (lambda (definition)
+                      (cons (alist-get :name (alist-get :function definition))
+                            (alist-get :description
+                                       (alist-get :function definition))))
+                    definitions))
+           (run-description (cdr (assoc "run_command" descriptions)))
+           (host-description (cdr (assoc "run_host_command" descriptions))))
+      (dolist (phrase '("private development workspace"
+                        "normal tool" "builds" "tests" "linters"
+                        "repository inspection" "temporary diagnostics"
+                        "dedicated project mutation tools"))
+        (should (string-match-p (regexp-quote phrase) run-description)))
+      (dolist (phrase '("directly on the host" "bypassing the"
+                        "private development workspace"
+                        "only when host execution is specifically required"
+                        "edit_file" "create_file" "delete_file" "apply_patch"))
+        (should (string-match-p (regexp-quote phrase) host-description))))
     (should-not (ende-tool--find "edit_source"))
     (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
     (should (string-match-p "edit_file" (json-encode definitions)))
