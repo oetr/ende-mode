@@ -2381,16 +2381,16 @@ process-group cancellation function with the active Ende job."
 
 (ende-tool-register
  'search_project
- "Search allowed project files on disk. Provide exactly one of query or patterns for literal searching, or regexp for an explicit Emacs regexp."
+ "Search allowed project files on disk. Exactly one search selector is required: query, patterns, or regexp."
  `((:type . "object")
    (:properties
     . ((:query . ((:type . "string") (:minLength . 1)
-                  (:description . "One non-empty literal string to search for; mutually exclusive with patterns and regexp.")))
+                  (:description . "Literal string to search for.")))
        (:patterns . ((:type . "array") (:minItems . 1)
                      (:items . ((:type . "string") (:minLength . 1)))
-                     (:description . "Non-empty array of non-empty literal strings; matches any pattern. Mutually exclusive with query and regexp.")))
-       (:regexp . ((:type . "string")
-                   (:description . "Explicit Emacs regexp for advanced searches; mutually exclusive with query and patterns.")))
+                     (:description . "Literal strings to search for with OR semantics.")))
+       (:regexp . ((:type . "string") (:minLength . 1)
+                   (:description . "Explicit Emacs regexp for advanced searches.")))
        (:glob . ((:type . "string")))
        (:context_before . ((:type . "integer") (:minimum . 0)
                            (:maximum . ,ende-tools-max-search-context-lines)
@@ -2401,6 +2401,10 @@ process-group cancellation function with the active Ende job."
        (:max_results . ((:type . "integer") (:minimum . 1)
                         (:maximum . ,ende-tools-max-search-results)
                         (:description . "Defaults to the configured maximum.")))))
+   (:oneOf
+    . [((:required . ["query"]))
+       ((:required . ["patterns"]))
+       ((:required . ["regexp"]))])
    (:additionalProperties . :json-false))
  #'ende-tools--search-project)
 
