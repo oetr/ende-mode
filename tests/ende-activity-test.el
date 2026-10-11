@@ -208,21 +208,19 @@
             (should (equal observed-title "Checking access"))
             (should (functionp complete-work))
             (should (= (length ende-test--calls) 2))
-            (let* ((document (ende-chat--build-document))
-                   (work (ende-chat--request-work-section
-                          document (plist-get (ende-job-instruction job) :request-id)))
+            (let* ((staged (ende-chat--staged-text job))
                    (contents (buffer-string))
                    (tick (buffer-chars-modified-tick))
                    (position (point))
                    (label (ende-test--overlay-label overlay)))
-              (should work)
-              (should (ende-test--chat-headline-text-hidden-p work "--> about_thinking"))
-              (should (< (overlay-start overlay) (org-element-property :begin work)))
+              (should staged)
+              (should (string-match-p "Agent: Work" staged))
+              (should (string-match-p "--> about_thinking" staged))
+              (should (string-match-p "Agent: Reply" contents))
+              (should-not (string-match-p "Agent: Work" contents))
+              (should (< (overlay-start overlay) (length contents)))
               (should (string-match-p "Agent: forged" label))
               (should-not (invisible-p (overlay-start overlay)))
-              (should-not (cl-find "Agent: forged" (ende-chat--document-headlines document)
-                                   :key (lambda (node) (org-element-property :raw-value node))
-                                   :test #'equal))
               ;; Generic phases and animation cannot erase the report or edit the source.
               (ende--handle-llm-event job '(:type :status :status "Thinking"))
               (ende-ui--refresh-all-overlays)
@@ -292,67 +290,67 @@
                 (should (string-match-p "Reviewing" (buffer-string))))))))
     (ende-test--reset)))
 
-(ert-deftest ende-test/activity-tool-rounds-preserve-the-users-work-view ()
-  (dolist (backend '(overlays text-properties))
-    (dolist (view '(collapsed children expanded))
-      (ert-info ((format "Org backend: %s, work view: %s" backend view))
-        (ende-test--reset)
-        (unwind-protect
-            (let* ((org-fold-core-style backend)
-                   (ende-reduced-motion t)
-                   (first (ende-test--activity-call "first" "Inspecting" "Reading the request."))
-                   (second (ende-test--activity-call "second" "Reviewing" "Checking the results."))
-                   (ende-llm-function
-                    (ende-test--fake-llm
-                     (list (list :tool-calls (list first))
-                           (list :tool-calls (list second))
-                           "Review complete.") t)))
-              (with-temp-buffer
-                (org-mode)
-                (insert "* Conversation\n** Question\nInvestigate.\n")
-                (ende-test--chat-goto "** Question")
-                (let* ((job (ende-ask))
-                       (request-id (plist-get (ende-job-instruction job) :request-id)))
-                  (ende-test--complete-call (car ende-test--calls))
-                  (let* ((document (ende-chat--build-document))
-                         (work (ende-chat--request-work-section document request-id)))
-                    (should work)
-                    (should (ende-test--chat-headline-text-hidden-p work "--> about_thinking"))
-                    (goto-char (org-element-property :begin work))
-                    (pcase view
-                      ('children (org-fold-show-children))
-                      ('expanded (org-fold-show-subtree)))
-                    ;; Children-only folds the parent's body too.  Recognize
-                    ;; the user's view before any new protocol text is inserted.
-                    (should (eq (not (null (ende-chat--subtree-folded-p
-                                            (org-element-property :begin work))))
-                                (eq view 'collapsed)))
-                    (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                            work "--> about_thinking")))
-                                (eq view 'collapsed))))
-                  ;; Append another tool round, then finalize.  Neither operation
-                  ;; may reopen a collapsed container or close an expanded one.
-                  (dolist (call-index '(1 2))
-                    (ende-test--complete-call (nth call-index ende-test--calls))
-                    (let* ((document (ende-chat--build-document))
-                           (work (ende-chat--request-work-section document request-id))
-                           (calls (cl-remove-if-not
+(ert-deftest ende-test/activity-tool-rounds-remain-staged-until-final-reply ()
+  (ende-test--reset)
+  (let* ((first (ende-test--activity-call "first" "Inspecting" "Reading the request."))
+         (second (ende-test--activity-call "second" "Reviewing" "Checking the results."))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list first))
+                 (list :tool-calls (list second))
+                 "#+ENDE_CHAT_TITLE: Reviewed\nReview complete.") t)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert "* Conversation\n** \nInvestigate.\n")
+          (ende-test--chat-goto "** ")
+           (let* ((job (ende-ask))
+                  (request-id
+                   (plist-get (ende-job-instruction job) :request-id))
+                  (before (buffer-string)))
+            (ende-test--complete-call (car ende-test--calls))
+            (should (eq (ende-job-state job) 'running))
+            (should (equal (buffer-string) before))
+            (should (string-match-p "--> about_thinking"
+                                    (ende-chat--staged-text job)))
+            (ende-test--complete-call (nth 1 ende-test--calls))
+            (should (eq (ende-job-state job) 'running))
+            (should (equal (buffer-string) before))
+            (should (= (length (split-string
+                                (ende-chat--staged-text job)
+                                "--> about_thinking" t)) 3))
+             (ende-test--complete-call (nth 2 ende-test--calls))
+             (should (eq (ende-job-state job) 'completed))
+             (let* ((document (ende-chat--build-document))
+                    (work (ende-chat--request-work-section document request-id))
+                    (reply
+                     (cl-find-if
+                      (lambda (headline)
+                        (and (equal (org-element-property :raw-value headline)
+                                    "Agent: Reply")
+                             (equal (ende-chat--property
+                                     document headline :request-id)
+                                    request-id)
+                             (null (ende-chat--work-ancestor document headline))))
+                      (ende-chat--document-headlines document)))
+                    (children (ende-chat--children document work)))
+               (should work)
+               (should reply)
+               (should (string-match-p "^\\*\\* Reviewed$" (buffer-string)))
+               (should-not
+                (ende-chat--request-state-headline document request-id "pending"))
+               ;; The folded work hides its tool children while its sibling reply
+               ;; remains visible to the user.
+               (should (ende-test--chat-headline-text-hidden-p
+                        work "--> about_thinking"))
+               (should-not (ende-test--chat-headline-text-hidden-p
+                            reply "Review complete."))
+               (should (= (length (cl-remove-if-not
                                    (lambda (node)
                                      (ende-chat--tool-call-protocol-p document node))
-                                   (ende-chat--document-headlines document)))
-                           (collapsed (eq view 'collapsed)))
-                       (should work)
-                       (should (= (length calls) 2))
-                       (dolist (node calls)
-                         (should (eq (not (null (ende-test--chat-headline-text-hidden-p
-                                                 node (org-element-property :raw-value node))))
-                                     collapsed)))
-                       (should-not (string-match-p
-                                    (regexp-quote (plist-get first :arguments))
-                                    (buffer-string)))))
-                  (should (eq (ende-job-state job) 'completed)))))
-          (ende-test--reset))))))
-
+                                   children))
+                          2)))))
+      (ende-test--reset))))
 (ert-deftest ende-test/activity-is-job-scoped-through-cancellation-failure-and-late-callbacks ()
   (ende-test--reset)
   (let ((first-buffer (generate-new-buffer " *ende-activity-first*"))

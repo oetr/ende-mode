@@ -267,7 +267,15 @@
          (ende-test--chat-goto "** Notes")
          (org-end-of-meta-data t)
          (insert "Added during the asynchronous tool round.\n")
-         (funcall deferred-tool-completion "{\\\"ok\\\":true}"))
+         (funcall deferred-tool-completion "{\\\"ok\\\":true}")
+         (let ((staged (ende-chat--staged-text job)))
+           (should staged)
+           (should (string-match-p "Agent: Work" staged))
+           (should (string-match-p "about_thinking" staged))
+           (should (string-match-p "ENDE_TOOL_KIND: result" staged))
+           (should (string-match-p "Agent: Reply" (buffer-string)))
+           (should-not (string-match-p "Agent: Work" (buffer-string)))
+           (should-not (string-match-p "ENDE_TOOL_KIND" (buffer-string)))))
        (should (= (length ende-test--calls) 2))
        (ende-test--complete-call (nth 1 ende-test--calls))
        (should (eq (ende-job-state job) 'completed))
@@ -300,8 +308,362 @@
          (should result-node)
          (should reply)
          (should (< call-pos result-pos reply-pos))
-         (should (eq (ende-chat--parent document call-node) work))
-         (should (eq (ende-chat--parent document result-node) work)))))))
+          (should (eq (ende-chat--parent document call-node) work))
+          (should (eq (ende-chat--parent document result-node) work)))))))
+
+(ert-deftest ende-test/chat-intermediate-tool-round-ignores-stale-destination-marker ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-staging-rounds-" t))
+         (user-emacs-directory directory)
+         (first '(:id "round-one" :name "about_thinking"
+                  :arguments "{\"title\":\"First\",\"status\":\"Done\"}"))
+         (second '(:id "round-two" :name "about_thinking"
+                   :arguments "{\"title\":\"Second\",\"status\":\"Done\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list first))
+                 (list :tool-calls (list second))
+                 "Finished after both rounds") t)))
+    (unwind-protect
+        (ende-test--with-buffer
+         "* Root\n** Question\nInvestigate.\n"
+         (org-mode)
+         (ende-test--chat-goto "** Question")
+         (let ((job (ende-ask)))
+           (ende-test--complete-call (nth 0 ende-test--calls))
+           (should (= (length ende-test--calls) 2))
+           ;; Insert at the original destination marker.  It now names this
+           ;; unrelated heading while the pending request remains intact below.
+           (goto-char (ende-target-cursor-marker (ende-job-target job)))
+           (insert "** Notes\nInserted ahead of the pending request.\n\n")
+           (ende-test--complete-call (nth 1 ende-test--calls))
+           (should (eq (ende-job-state job) 'running))
+           (should (= (length ende-test--calls) 3))
+           (should (string-match-p "Second"
+                                   (ende-chat--staged-text job)))
+           (should-not (string-match-p "Agent: Work" (buffer-string)))
+           (should-not (string-match-p "ENDE_TOOL_KIND" (buffer-string)))
+           (ende-job-fail job "test cleanup")
+           (should (eq (ende-job-state job) 'failed))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-failure-materializes-by-durable-request-id ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-staged-failure-id-" t))
+         (user-emacs-directory directory)
+         (call '(:id "durable-failure-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Staged\",\"status\":\"Done\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Unused final") t)))
+    (unwind-protect
+        (ende-test--with-buffer
+         "* Root\n** Question\nAsk\n"
+         (org-mode)
+         (ende-test--chat-goto "** Question")
+         (let* ((job (ende-ask))
+                (request-id (plist-get (ende-job-instruction job) :request-id)))
+           (ende-test--complete-call (car ende-test--calls))
+           (set-marker (ende-target-cursor-marker (ende-job-target job))
+                       (point-min) (current-buffer))
+           (ende-job-fail job "Injected after the tool round")
+           (should (eq (ende-job-state job) 'failed))
+           (should (string-match-p "Agent: Work" (buffer-string)))
+           (should (string-match-p "Injected after the tool round"
+                                   (buffer-string)))
+           (let* ((document (ende-chat--build-document))
+                  (reply (ende-chat--request-state-headline
+                          document request-id "failed")))
+             (should reply)
+             (should (equal (ende-chat--property document reply :reply-to)
+                            (plist-get (ende-job-instruction job)
+                                       :question-id))))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-failed-materialization-retains-current-recovery ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-staged-retain-" t))
+         (user-emacs-directory directory)
+         (call '(:id "retained-work-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Durable\",\"status\":\"Done\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Unused final") t)))
+    (unwind-protect
+        (ende-test--with-buffer
+         "* Root\n** Question\nAsk\n* Other\nKeep this section.\n"
+         (org-mode)
+         (ende-test--chat-goto "** Question")
+         (let* ((job (ende-ask))
+                (request-id (plist-get (ende-job-instruction job) :request-id)))
+           (ende-test--complete-call (car ende-test--calls))
+           (let* ((file (plist-get (ende-job-instruction job) :recovery-file))
+                  (document (ende-chat--build-document))
+                  (pending (ende-chat--request-state-headline
+                            document request-id "pending")))
+             (delete-region (org-element-property :begin pending)
+                            (org-element-property :end pending))
+             (let ((before (buffer-string)))
+               (ende-job-fail job "Destination was removed")
+               (should (eq (ende-job-state job) 'failed))
+               (should (equal before (buffer-string)))
+               (should (string-match-p "Keep this section" (buffer-string)))
+               (should (file-exists-p file))
+               (let ((recovery (ende-chat--read-recovery-file file)))
+                 (should (string-match-p "Agent: Work" (cadr recovery)))
+                 (should (string-match-p "Durable"
+                                         (cadr recovery))))))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-malformed-staged-work-rolls-back-and-retains-recovery ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-staged-malformed-" t))
+         (user-emacs-directory directory)
+         (call '(:id "malformed-work-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Malformed\",\"status\":\"Done\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call))
+                 "#+ENDE_CHAT_TITLE: Renamed question\nFinal answer") t)))
+    (unwind-protect
+        (ende-test--with-buffer
+         "* Root\n** \nAsk\n"
+         (org-mode)
+         (ende-test--chat-goto "** ")
+         (let* ((job (ende-ask))
+                (request-id (plist-get (ende-job-instruction job) :request-id))
+                (before (buffer-string)))
+           (ende-test--complete-call (car ende-test--calls))
+           (with-current-buffer (ende-chat--staging-buffer job)
+             (goto-char (point-min))
+             (should (re-search-forward "^:ENDE_CHAT_WORK: t$" nil t))
+             (replace-match ":ENDE_CHAT_WORK: malformed"))
+           (ende-test--complete-call (nth 1 ende-test--calls))
+           (should (eq (ende-job-state job) 'failed))
+           (should (equal before (buffer-string)))
+           (let* ((document (ende-chat--build-document))
+                  (pending (ende-chat--request-state-headline
+                            document request-id "pending"))
+                  (file (plist-get (ende-job-instruction job) :recovery-file))
+                  (recovery (ende-chat--read-recovery-file file)))
+             (should pending)
+             (should (file-exists-p file))
+             (should (string-match-p "ENDE_CHAT_WORK: malformed"
+                                     (cadr recovery)))
+             (should (string-match-p "Final answer" (cadr recovery))))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-failure-after-tool-work-keeps-staged-transcript ()
+  (ende-test--reset)
+  (let* ((call '(:id "failed-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Working\",\"status\":\"Done\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) :error) t)))
+    (ende-test--with-buffer
+     "* Root\n** Question\nAsk\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (request-id (plist-get (ende-job-instruction job) :request-id)))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (= (length ende-test--calls) 2))
+       (ende-test--complete-call (nth 1 ende-test--calls))
+       (should (eq (ende-job-state job) 'failed))
+       (should (string-match-p "Agent: Work" (buffer-string)))
+       (should (string-match-p "Agent: Reply" (buffer-string)))
+       (should (string-match-p "mock failure" (buffer-string)))
+       (should (null (ende-chat--staging-buffer job)))
+       (let* ((document (ende-chat--build-document))
+              (reply (ende-chat--request-state-headline
+                      document request-id "failed")))
+         (should reply))))))
+
+(ert-deftest ende-test/chat-tool-boundaries-update-private-recovery-snapshot ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-recovery-test-" t))
+         (user-emacs-directory directory)
+         (call '(:id "snapshot-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Checkpoint\",\"status\":\"Test\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Final snapshot answer") t)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert "* Root\n** Question\nAsk\n")
+          (ende-test--chat-goto "** Question")
+          (let* ((job (ende-ask))
+                 (request-id (plist-get (ende-job-instruction job) :request-id))
+                 deferred-tool-completion)
+            (cl-letf (((symbol-function 'ende-chat--tool-response-async)
+                       (lambda (_call _configuration callback)
+                         (setq deferred-tool-completion callback))))
+              (ende-test--complete-call (car ende-test--calls))
+              (let* ((file (plist-get (ende-job-instruction job) :recovery-file))
+                     (first (with-temp-buffer
+                              (insert-file-contents file)
+                              (buffer-string))))
+                (should (file-exists-p file))
+                (should (equal (file-modes file) #o600))
+                (should (string-match-p request-id first))
+                (should (string-match-p "Agent: Work" first))
+                (should-not (string-match-p "ENDE_TOOL_KIND: result" first))
+                (funcall deferred-tool-completion "{\\\"ok\\\":true}")
+                (let ((latest (with-temp-buffer
+                                (insert-file-contents file)
+                                (buffer-string))))
+                  (should (string-match-p "ENDE_TOOL_KIND: result" latest))
+                  (should (not (equal first latest)))))
+              (should (= (length ende-test--calls) 2))
+              (ende-test--complete-call (nth 1 ende-test--calls))
+              (should (eq (ende-job-state job) 'completed))
+              (should-not (file-exists-p
+                           (expand-file-name
+                            (concat request-id ".org")
+                            (expand-file-name "ende/chat-recovery/"
+                                              user-emacs-directory))))
+              (should (null (ende-chat--staging-buffer job))))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-unsafe-recovery-only-opens-inspection-buffer ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-recovery-unsafe-" t))
+         (user-emacs-directory directory)
+         (recovery-directory (expand-file-name "ende/chat-recovery/" directory))
+         (file nil))
+    (unwind-protect
+        (progn
+          (make-directory recovery-directory t)
+          (setq file (expand-file-name "stale-request.org" recovery-directory))
+          (with-temp-file file
+            (insert "# ENDE_CHAT_RECOVERY: "
+                    (prin1-to-string
+                     '(:request-id "stale-request"
+                       :question-id "old-question"
+                       :source-buffer "*other-chat*"))
+                    "\n** Agent: Work\nRecovered transcript.\n"))
+          (ende-test--with-buffer
+           "* Other\n** Question\nKeep this pending.\n"
+           (org-mode)
+           (ende-test--chat-goto "** Question")
+           (let* ((job (ende-chat--enqueue
+                        (ende-chat--build-document)
+                        (ende-chat--headline-at-point
+                         (ende-chat--build-document)) nil))
+                  (before (buffer-string))
+                  (inspection-buffer nil))
+             (cl-letf (((symbol-function 'completing-read)
+                        (lambda (&rest _) file))
+                       ((symbol-function 'display-buffer)
+                        (lambda (buffer &rest _)
+                          (setq inspection-buffer buffer))))
+               (ende-chat-recover-work))
+             (should (equal before (buffer-string)))
+             (should (buffer-live-p inspection-buffer))
+             (with-current-buffer inspection-buffer
+               (should (string-match-p "Recovered transcript" (buffer-string)))
+               (should buffer-read-only))
+             (should (eq (ende-job-state job) 'running))
+             (ende-job-fail job "test cleanup"))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-safe-recovery-materializes-matching-request ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-recovery-safe-" t))
+         (user-emacs-directory directory)
+         (recovery-directory (expand-file-name "ende/chat-recovery/" directory))
+         (file nil))
+    (unwind-protect
+        (progn
+          (make-directory recovery-directory t)
+          (ende-test--with-buffer
+           "* Root\n** Question\nAsk\n"
+           (org-mode)
+           (ende-test--chat-goto "** Question")
+           (let* ((job (ende-ask))
+                  (instruction (ende-job-instruction job))
+                  (request-id (plist-get instruction :request-id))
+                  (question-id (plist-get instruction :question-id))
+                  (transcript
+                   (concat
+                    (ende-chat--work-text 2 question-id request-id)
+                    (ende-chat--assistant-protocol-text
+                     3 question-id request-id "" '(:content "Recovered turn")
+                     nil nil 'org)))
+                  (metadata
+                   (list :request-id request-id :question-id question-id
+                         :source-buffer (buffer-name))))
+             (setq file (expand-file-name (concat request-id ".org")
+                                          recovery-directory))
+             (with-temp-file file
+               (insert "# ENDE_CHAT_RECOVERY: "
+                       (prin1-to-string metadata) "\n" transcript))
+             (cl-letf (((symbol-function 'completing-read)
+                        (lambda (&rest _) file)))
+               (ende-chat-recover-work))
+             (should (eq (ende-job-state job) 'running))
+             (should (string-match-p "Recovered turn" (buffer-string)))
+             (should-not (file-exists-p file))
+             (let* ((document (ende-chat--build-document))
+                    (reply (ende-chat--request-state-headline
+                            document request-id "failed")))
+               (should reply))
+             (ende-job-fail job "test cleanup"))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/chat-recovery-opens-an-unvisited-source-file ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-recovery-unopened-" t))
+         (user-emacs-directory directory)
+         (source-file (expand-file-name "conversation.org" directory))
+         (recovery-directory
+          (expand-file-name "ende/chat-recovery/" directory))
+         (request-id "unopened-request")
+         (question-id "unopened-question")
+         (recovery-file
+          (expand-file-name (concat request-id ".org") recovery-directory))
+         (source-buffer nil)
+         (transcript
+          (concat
+           (ende-chat--work-text 2 question-id request-id)
+           (ende-chat--assistant-protocol-text
+            3 question-id request-id "" '(:content "Recovered after restart")
+            nil nil 'org))))
+    (unwind-protect
+        (progn
+          (make-directory recovery-directory t)
+          (with-temp-file source-file
+            (insert "* Root\n** Question\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: user\n"
+                    (ende-chat--response-property
+                     ende-chat-id-property question-id)
+                    ":END:\nAsk\n\n"
+                    (ende-chat--placeholder-text 2 question-id request-id)))
+          (with-temp-file recovery-file
+            (insert "# ENDE_CHAT_RECOVERY: "
+                    (prin1-to-string
+                     (list :request-id request-id :question-id question-id
+                           :source-file source-file))
+                    "\n" transcript))
+          (should-not (find-buffer-visiting source-file))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) recovery-file)))
+            (ende-chat-recover-work))
+          (setq source-buffer (find-buffer-visiting source-file))
+          (should (buffer-live-p source-buffer))
+          (with-current-buffer source-buffer
+            (let* ((document (ende-chat--build-document))
+                   (reply (ende-chat--request-state-headline
+                           document request-id "failed")))
+              (should reply)
+              (should (string-match-p "Recovered after restart"
+                                      (buffer-string)))
+              (should (buffer-modified-p))))
+          (should-not (file-exists-p recovery-file)))
+      (when (buffer-live-p source-buffer)
+        (kill-buffer source-buffer))
+      (delete-directory directory t))))
 
 
 (ert-deftest ende-test/chat-persistence-failure-restores-the-pending-slot ()
@@ -323,8 +685,8 @@
        (cl-letf (((symbol-function 'ende-chat--hide-control-drawers-in-region)
                   (lambda (&rest _arguments)
                     (error "Injected drawer-folding failure"))))
-         (should-error
-          (ende-chat--persist-request-section job response nil nil t)))
+          (should-error
+           (ende-chat--persist-ordinary-reply job response)))
        (should (equal before (buffer-string)))
        (should (= position (marker-position target-marker)))
        (should (ende-chat--resolve-request-destination job))
@@ -349,11 +711,10 @@
            ('completed (ende-test--complete-call (car ende-test--calls)))
            ('failed (ende-job-fail job "Injected failure"))
            ('cancelled (ende-abort-queue)))
-         (should (eq (ende-job-state job) outcome))
-         (should-not (marker-buffer question-marker))
-         (should-not (plist-get (ende-job-instruction job) :question-marker))
-         (should-not (plist-get (ende-job-instruction job)
-				:request-end-marker)))))))
+          (should (eq (ende-job-state job) outcome))
+          (should-not (marker-buffer question-marker))
+          (should-not (plist-get (ende-job-instruction job)
+				:question-marker)))))))
 
 
 

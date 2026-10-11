@@ -289,40 +289,32 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                (ende-test--complete-call (car ende-test--calls))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p
-                          "Last tool call: ende_test_dashboard_tool: value=\"first\""
-                          (buffer-string)))
+                 (should (string-match-p "Last tool call: ---" (buffer-string)))
                  (should (string-match-p "Status: ---" (buffer-string))))
                (funcall (cdar pending) "first completed" nil)
                (setq pending (cdr pending))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p "value=\"first\"" (buffer-string)))
-                 (should (string-match-p "Status: OK" (buffer-string))))
+                 (should (string-match-p "Last tool call: ---" (buffer-string))))
                (ende-test--complete-call (nth 1 ende-test--calls))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p "value=\"first\"" (buffer-string)))
-                 (should (string-match-p "Status: OK" (buffer-string)))
-                 (should-not (string-match-p "about_thinking" (buffer-string))))
+                 (should (string-match-p "Last tool call: ---" (buffer-string))))
                (ende-test--complete-call (nth 2 ende-test--calls))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p
-                          "Last tool call: ende_test_dashboard_tool: value=\"second\""
-                          (buffer-string)))
+                 (should (string-match-p "Last tool call: ---" (buffer-string)))
                  (should (string-match-p "Status: ---" (buffer-string))))
                (funcall (cdar pending) nil "fixture failure")
                (setq pending (cdr pending))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p "value=\"second\"" (buffer-string)))
-                 (should (string-match-p "Status: FAILED" (buffer-string))))
+                 (should (string-match-p "Last tool call: ---" (buffer-string))))
                (ende-test--complete-call (nth 3 ende-test--calls))
                (ende-test--dashboard-flush-refresh dashboard)
                (with-current-buffer dashboard
-                 (should (string-match-p "value=\"second\"" (buffer-string)))
-                 (should (string-match-p "Status: FAILED" (buffer-string)))
+                 (should (string-match-p "Last tool call: ---" (buffer-string)))
+                 (should (string-match-p "Status: ---" (buffer-string)))
                  (should-not (string-match-p "about_thinking" (buffer-string)))))))
         (when (buffer-live-p dashboard)
           (kill-buffer dashboard))

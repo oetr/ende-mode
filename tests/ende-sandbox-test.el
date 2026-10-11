@@ -223,7 +223,7 @@
                (lambda (_job) t))
               ((symbol-function 'ende-job-emit-event)
                (lambda (&rest _args) nil))
-              ((symbol-function 'ende-chat--persist-request-section)
+              ((symbol-function 'ende-chat--stage-agent-section)
                (lambda (&rest _args) nil))
               ((symbol-function 'ende-chat--tool-result-text)
                (lambda (&rest _args) "ok"))
