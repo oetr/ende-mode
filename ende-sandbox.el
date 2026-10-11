@@ -505,7 +505,8 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
 (defun ende-sandbox--result (code stdout stderr stdout-truncated
                                   stderr-truncated)
   "Build the bounded result object for one sandbox command."
-  (list :exit_code code :stdout stdout :stderr stderr
+  (list :exit_code code :process_ok (= code 0)
+        :stdout stdout :stderr stderr
         :stdout_truncated (if stdout-truncated t :json-false)
         :stderr_truncated (if stderr-truncated t :json-false)))
 

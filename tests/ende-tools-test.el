@@ -20,7 +20,7 @@
     (plist-get call :result)))
 
 (defun ende-test--project-tool-json-records
-    (name arguments field root configuration)
+    (name arguments field _root configuration)
   "Call project tool NAME and return JSON-decoded FIELD records."
   (let* ((call (list :id "call-1" :name name
                      :arguments (json-encode arguments)))
@@ -123,6 +123,10 @@
            (properties (gethash "properties" schema)))
       (should-not (gethash "required" schema))
       (should (= (gethash "minLength" (gethash "query" properties)) 1))
+      (should (= (gethash "minLength" (gethash "glob" properties)) 1))
+      (should (= (gethash "minimum" (gethash "context_before" properties)) 0))
+      (should (= (gethash "minimum" (gethash "context_after" properties)) 0))
+      (should (= ende-tools-max-search-context-lines 20))
       (should (= (gethash "minItems" (gethash "patterns" properties)) 1))
       (should (string-match-p "literal"
                               (gethash "description" (gethash "query" properties))))
@@ -169,6 +173,54 @@
                         "only when host execution is specifically required"
                         "edit_file" "create_file" "delete_file" "apply_patch"))
         (should (string-match-p (regexp-quote phrase) host-description))))
+    (let* ((schema (ende-test--public-tool-schema definitions "file_info"))
+           (path (gethash "path" (gethash "properties" schema)))
+           (read-file (ende-test--public-tool-schema definitions "read_file"))
+           (read-path (gethash "path" (gethash "properties" read-file)))
+           (read-buffer (ende-test--public-tool-schema definitions "read_buffer"))
+           (buffer-id (gethash "buffer_id" (gethash "properties" read-buffer)))
+           (list-files (ende-test--public-tool-schema definitions "list_project_files"))
+           (list-glob (gethash "glob" (gethash "properties" list-files))))
+      (should (= (gethash "minLength" path) 1))
+      (should (= (gethash "minLength" read-path) 1))
+      (should (= (gethash "minLength" buffer-id) 1))
+      (should (= (gethash "minLength" list-glob) 1)))
+    (let* ((fetch (ende-test--public-tool-schema definitions "web_fetch"))
+           (max-chars (gethash "max_chars" (gethash "properties" fetch)))
+           (patch (ende-test--public-tool-schema definitions "apply_patch"))
+           (patch-property (gethash "patch" (gethash "properties" patch)))
+           (patch-description (gethash "description" patch-property)))
+      (should (= (gethash "maximum" max-chars)
+                 ende-web-fetch-max-output-chars))
+      (should (= (gethash "maxLength" patch-property) ende-patch-max-chars))
+      (dolist (marker '("*** Begin Patch" "*** Add File" "*** Update File"
+                        "*** Delete File" "@@" "*** End Patch"))
+        (should (string-match-p (regexp-quote marker) patch-description)))
+      (should (string-match-p "exact update context" patch-description)))
+    (let* ((run (ende-test--public-tool-schema definitions "run_command"))
+           (run-cwd (gethash "description"
+                             (gethash "cwd" (gethash "properties" run))))
+           (host (ende-test--public-tool-schema definitions "run_host_command"))
+           (host-cwd (gethash "description"
+                              (gethash "cwd" (gethash "properties" host))))
+           (copy (ende-test--public-tool-schema definitions "copy_from_sandbox"))
+           (copy-properties (gethash "properties" copy))
+           (create (ende-test--public-tool-schema definitions "create_file"))
+           (create-description (gethash "description"
+                                        (gethash "path" (gethash "properties" create)))))
+      (dolist (phrase '("workspace-relative" "private workspace" "optional" "defaults to"))
+        (should (string-match-p (regexp-quote phrase) run-cwd)))
+      (dolist (phrase '("local working directory" "relative values" "project root"
+                        "absolute local directories" "optional" "default"))
+        (should (string-match-p (regexp-quote phrase) host-cwd)))
+      (dolist (phrase '("workspace-relative" "existing regular file"))
+        (should (string-match-p (regexp-quote phrase)
+                                (gethash "description" (gethash "source" copy-properties)))))
+      (dolist (phrase '("independently authorized" "project-relative" "creates a missing file"
+                        "replaces an existing regular file"))
+        (should (string-match-p (regexp-quote phrase)
+                                (gethash "description" (gethash "destination" copy-properties)))))
+      (should (string-match-p "parent directory must already exist" create-description)))
     (should-not (ende-tool--find "edit_source"))
     (should-not (plist-get (ende-tool-call "edit_source" nil) :ok))
     (should (string-match-p "edit_file" (json-encode definitions)))
@@ -228,7 +280,10 @@
       (should (= (gethash "minLength" (gethash "anchor" item-properties)) 1))
       (should-not (gethash "minLength" (gethash "text" item-properties)))
       (should (= (gethash "minimum" (gethash "occurrence" item-properties))
-                 1)))
+                 1))
+      (should (eq (gethash "const" (gethash "all" item-properties)) t))
+      (should (equal (append (gethash "required" (gethash "not" item)) nil)
+                     '("occurrence" "all"))))
     (let* ((definition
             (cl-find-if
              (lambda (candidate)
@@ -266,6 +321,93 @@
                      "string"))
       (should-not (gethash "minLength" (gethash "content" properties))))))
 
+(ert-deftest ende-test/tool-json-results-normalize-only-boolean-fields ()
+  (let* ((root (make-temp-file "ende-tool-json-results-" t))
+         (configuration
+          (ende-test--tool-access-config
+           root '((resource project (include "**"))
+                  (tools project_info read_file)
+                  (set-tool-resources read_file :resources project))))
+         (success
+          (ende-protocol-json-read-string
+           (ende-chat--tool-response
+            (list :id "ok" :name "project_info" :arguments "{}")
+            configuration)))
+         (failure
+          (ende-protocol-json-read-string
+           (ende-chat--tool-response
+            (list :id "bad" :name "read_file"
+                  :arguments "{\"path\":\"missing\"}")
+            configuration))))
+    (unwind-protect
+        (progn
+          (should (eq (ende-protocol-json-get "ok" success) t))
+          (should (eq (ende-protocol-json-get "ok" failure) :false))
+          (should-not (string-match-p "\\\"ok\\\":null"
+                                      (json-encode failure)))
+          (let* ((done nil)
+                 (async-response nil)
+                 (async-config
+                  (ende-test--tool-access-config root '((tools run_host_command)))))
+            (cl-letf (((symbol-function 'ende-tools--run-host-command-process)
+                       (lambda (_command _cwd _timeout callback _register)
+                         (funcall callback
+                                  (list :exit_code 9 :process_ok nil
+                                        :stdout "" :stderr ""
+                                        :stdout_truncated :json-false
+                                        :stderr_truncated :json-false)
+                                  nil))))
+              (ende-chat--tool-response-async
+               (list :id "async" :name "run_host_command"
+                     :arguments "{\"command\":\"exit 9\"}")
+               async-config
+               (lambda (response) (setq async-response response done t))))
+            (should done)
+            (should (eq (ende-protocol-json-get "ok"
+                                               (ende-protocol-json-read-string async-response))
+                        t))
+            (should (eq (ende-protocol-json-get
+                         "process_ok"
+                         (ende-protocol-json-get
+                          "result" (ende-protocol-json-read-string async-response)))
+                        :false)))
+          (let* ((internal (ende-tool-call "read_file"
+                                           '(("path" . "missing")) root configuration))
+                 (encoded (ende-tools--json-encode-tool-result internal)))
+            (should (null (plist-get internal :ok)))
+            (should (string-match-p "\\\"ok\\\":false" encoded)))
+          (let ((nullable
+                 (ende-protocol-json-read-string
+                  (ende-tools--json-encode-tool-result
+                   '(:ok t :visiting_buffer nil
+                     :visiting_buffer_modified nil
+                     :visiting_buffer_warning nil)))))
+            (should (eq (ende-protocol-json-get "ok" nullable) t))
+            (should (eq (ende-protocol-json-get "visiting_buffer" nullable)
+                        :false))
+            (should (null (ende-protocol-json-get
+                           "visiting_buffer_modified" nullable)))
+            (should (eq (ende-protocol-json-get
+                         "visiting_buffer_modified"
+                         (ende-protocol-json-read-string
+                          (ende-tools--json-encode-tool-result
+                           '(:ok t :visiting_buffer t
+                             :visiting_buffer_modified nil))))
+                        :false))
+            (should (eq (ende-protocol-json-get
+                         "stdout_truncated"
+                         (ende-protocol-json-read-string
+                          (ende-tools--json-encode-tool-result
+                           '(:ok t :stdout_truncated :json-false))))
+                        :false))
+            (should (null (ende-protocol-json-get
+                           "visiting_buffer_warning" nullable)))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-command-result-separates-process-success ()
+  (should (plist-get (ende-sandbox--result 0 "" "" nil nil) :process_ok))
+  (should-not (plist-get (ende-sandbox--result 7 "" "" nil nil) :process_ok)))
+
 (ert-deftest ende-test/run-host-command-config-needs-no-podman-or-resources ()
   (let* ((root (make-temp-file "ende-host-command-config-" t))
          (configuration
@@ -298,6 +440,7 @@
           (should (plist-get call :ok))
           (let ((result (plist-get call :result)))
             (should (= (plist-get result :exit_code) 7))
+            (should-not (plist-get result :process_ok))
             (should (equal (plist-get result :stdout)
                            (format "out:%s\n" cwd)))
             (should (equal (plist-get result :stderr) "err\n"))
@@ -308,6 +451,8 @@
                  '(("command" . "printf '%070000d' 0")) configuration))
           (should (plist-get call :ok))
           (let ((result (plist-get call :result)))
+            (should (= (plist-get result :exit_code) 0))
+            (should (plist-get result :process_ok))
             (should (= (length (plist-get result :stdout)) 65536))
             (should (eq (plist-get result :stdout_truncated) t))))
       (delete-directory root t))))
@@ -729,7 +874,14 @@
                              root)))
               (should (string-match-p "exactly one" (plist-get none :error)))
               (should (string-match-p "exactly one"
-                                      (plist-get multiple :error))))))
+                                      (plist-get multiple :error))))
+            (let ((above (ende-tool-call
+                          "search_project"
+                          '(("query" . "needle") ("context_before" . 21))
+                          root)))
+              (should-not (plist-get above :ok))
+              (should (string-match-p "integer from 0 to 20"
+                                      (plist-get above :error))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -1072,6 +1224,26 @@
                            (insert-file-contents path)
                            (buffer-string))
                          "ONE ONE"))
+          (with-temp-file path (insert "one one"))
+          (should-not (plist-get
+                       (ende-test--edit-file-call
+                        "main.txt"
+                        (list (ende-test--anchor-edit
+                               "one" "replace" "ONE" '("all" . :false)))
+                        root)
+                       :ok))
+          (should-not (plist-get
+                       (ende-test--edit-file-call
+                        "main.txt"
+                        (list (ende-test--anchor-edit
+                               "one" "replace" "ONE"
+                               '("occurrence" . 1) '("all" . t)))
+                        root)
+                       :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "one one"))
           (with-temp-file path (insert "remove this keep"))
           (should (plist-get
                    (ende-test--edit-file-call

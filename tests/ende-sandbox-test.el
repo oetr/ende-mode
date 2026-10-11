@@ -701,6 +701,45 @@
         (ende-sandbox--dispose sandbox))
       (delete-directory root t))))
 
+(ert-deftest ende-test/run-command-json-keeps-outer-success-for-failing-process ()
+  (let* ((root (make-temp-file "ende-run-command-json-" t))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (workspace (make-temp-file "ende-run-command-workspace-" t))
+         (configuration
+          (ende-test--sandbox-config-forms
+           root
+           '((resource project (include "**"))
+             (tools run_command)
+             (set-tool-resources run_command :resources project))
+           ende-test--sandbox-pin))
+         (sandbox (ende-sandbox--create
+                   :owner owner :root root :workspace workspace))
+         (response nil)
+         (ende-tools--execution-owner owner))
+    (unwind-protect
+        (progn
+          (puthash owner sandbox ende-sandbox--by-owner)
+          (cl-letf (((symbol-function 'ende-sandbox-run-command)
+                     (lambda (_sandbox _command _cwd _timeout callback _register)
+                       (funcall callback
+                                '(:exit_code 9 :process_ok nil :stdout ""
+                                  :stderr "" :stdout_truncated :json-false
+                                  :stderr_truncated :json-false)
+                                nil))))
+            (ende-chat--tool-response-async
+             (list :id "run-command" :name "run_command"
+                   :arguments "{\"command\":\"exit 9\"}")
+             configuration
+             (lambda (value) (setq response value))))
+          (let* ((decoded (ende-protocol-json-read-string response))
+                 (result (ende-protocol-json-get "result" decoded)))
+            (should (eq (ende-protocol-json-get "ok" decoded) t))
+            (should (eq (ende-protocol-json-get "process_ok" result) :false))))
+      (remhash owner ende-sandbox--by-owner)
+      (ende-sandbox-cleanup-owner owner)
+      (delete-directory workspace t)
+      (delete-directory root t))))
+
 (ert-deftest ende-test/sandbox-sync-does-not-bypass-run-command-scope ()
   (let* ((root (make-temp-file "ende-sandbox-sync-scope-" t))
          (source (expand-file-name "src/main.el" root))
@@ -852,6 +891,7 @@
                     '(("command" . "printf 'out'; printf 'err' >&2; exit 7"))
                     root configuration owner-one)))
               (should (= (plist-get result :exit_code) 7))
+              (should-not (plist-get result :process_ok))
               (should (equal (plist-get result :stdout) "out"))
               (should (equal
                        (ende-test--sandbox-command-stderr
@@ -861,7 +901,8 @@
                    (ende-test--sandbox-run
                     '(("command" . "mkdir -p public/build && printf built > public/build/result"))
                     root configuration owner-one)))
-              (should (= (plist-get result :exit_code) 0)))
+              (should (= (plist-get result :exit_code) 0))
+              (should (plist-get result :process_ok)))
             (let ((result
                    (ende-test--sandbox-run
                     '(("command" . "cat public/build/result"))

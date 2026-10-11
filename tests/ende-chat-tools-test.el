@@ -7,6 +7,23 @@
 (require 'ende-test-helpers)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-test/agent-prompt-enforces-verified-step-and-smaller-rollback-gates ()
+  (with-temp-buffer
+    (org-mode)
+    (let* ((document (ende-chat--build-document))
+           (prompt (ende-chat--system-prompt document)))
+    (dolist (phrase '("do not move on from a failed or unverified state"
+                      "task-dependent check"
+                      "known-good checkpoint"
+                      "failed check is a hard gate"
+                      "Roll back, reduce the size of the attempted step, and continue"
+                      "same intended goal"
+                      "smaller, simpler, or more isolated form"
+                      "genuine external blocker"))
+      (should (string-match-p (regexp-quote phrase) prompt)))
+      (should (string-match-p "Rollback ends only that failed attempt" prompt))
+      (should (string-match-p "terminate only for a genuine external blocker" prompt)))))
+
 (ert-deftest ende-test/chat-completions-tool-diagnostics-cover-local-and-openrouter ()
   (should (eq ende-tool-diagnostics t))
   (let* ((definition

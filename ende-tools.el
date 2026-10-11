@@ -44,7 +44,7 @@
   :type 'integer
   :group 'ende)
 
-(defcustom ende-tools-max-search-context-lines 3
+(defcustom ende-tools-max-search-context-lines 20
   "Maximum context lines returned around one search match."
   :type 'integer
   :group 'ende)
@@ -183,6 +183,51 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
        (root-value (ende-project-normalize-root root-value))
        (root-required (ende-project-root))
        (t nil)))))
+
+(defconst ende-tools--json-boolean-fields
+  '(:ok :accepted :truncated :visiting_buffer :buffer_modified :process_ok
+    :stdout_truncated :stderr_truncated)
+  "Tool-result fields whose values are semantically booleans.")
+
+(defun ende-tools--json-boolean-value (value)
+  "Return VALUE encoded as a JSON boolean, respecting false sentinels."
+  (if (memq value '(nil :false :json-false)) :json-false t))
+
+(defun ende-tools--json-normalize-value (value)
+  "Normalize boolean fields recursively in protocol VALUE only."
+  (cond
+   ((and (vectorp value) (not (stringp value)))
+    (vconcat (mapcar #'ende-tools--json-normalize-value (append value nil))))
+   ((and (listp value) (keywordp (car-safe value))
+         (zerop (% (length value) 2)))
+    (let ((copy (copy-sequence value))
+          (tail nil))
+      (setq tail copy)
+      (while tail
+        (let* ((field (car tail))
+               (item (cadr tail)))
+          (setcar (cdr tail)
+                  (cond
+                   ((and (eq field :visiting_buffer_modified)
+                         (or (not (plist-member value :visiting_buffer))
+                             (not (plist-get value :visiting_buffer))))
+                    item)
+                   ((memq field '(:visiting_buffer_modified :buffer_modified))
+                    (ende-tools--json-boolean-value item))
+                   ((memq field ende-tools--json-boolean-fields)
+                    (ende-tools--json-boolean-value item))
+                   (t (ende-tools--json-normalize-value item))))
+          (setq tail (cddr tail))))
+      copy))
+   (t value)))
+
+(defun ende-tools--json-tool-result (result)
+  "Copy tool RESULT with semantically boolean fields JSON-normalized."
+  (ende-tools--json-normalize-value result))
+
+(defun ende-tools--json-encode-tool-result (result)
+  "Serialize tool RESULT with boolean fields encoded as JSON booleans."
+  (json-encode (ende-tools--json-tool-result result)))
 
 (defun ende-tool--failure-result (tool caught)
   (if (eq (car-safe caught) 'ende-tool-mutation-failure)
@@ -1566,9 +1611,11 @@ Return canonical target and root-relative/public path details."
                   edit '("anchor" "position" "text" "occurrence" "all")
                   "edit item")
                  (when (and (member "all" keys)
-                            (not (memq (ende-tools--argument edit "all")
-                                       '(t :false))))
-                   (error "edit item property all must be a boolean"))
+                            (not (eq (ende-tools--argument edit "all") t)))
+                   (error "edit item property all must be true when present"))
+                 (when (and (member "occurrence" keys)
+                            (member "all" keys))
+                   (error "edit item cannot specify both occurrence and all"))
                  (ende-tools--json-object
                   edit '("anchor" "position" "text" "occurrence" "all"))))
              edits))))
@@ -2044,6 +2091,7 @@ process-group cancellation function with the active Ende job."
               callback
               (unless error
                 (list :exit_code code
+                      :process_ok (= code 0)
                       :stdout (car stdout)
                       :stderr (car stderr)
                       :stdout_truncated (if (cdr stdout) t :json-false)
@@ -2172,6 +2220,7 @@ process-group cancellation function with the active Ende job."
   '((:type . "object")
     (:properties
      . ((:path . ((:type . "string")
+                  (:minLength . 1)
                   (:description . "Project-relative path or authorized absolute path")))))
     (:required . ("path"))
     (:additionalProperties . :json-false)))
@@ -2181,7 +2230,7 @@ process-group cancellation function with the active Ende job."
     (:properties
      . ((:path . ((:type . "string")
                   (:minLength . 1)
-                  (:description . "Project-relative path or authorized absolute path")))
+                  (:description . "Project-relative path or authorized absolute path; parent directory must already exist")))
         (:content . ((:type . "string")
                      (:description . "Complete file contents; may be empty")))))
     (:required . ("path" "content"))
@@ -2200,24 +2249,25 @@ process-group cancellation function with the active Ende job."
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--apply-patch-schema
-  '((:type . "object")
+  `((:type . "object")
     (:properties
      . ((:patch . ((:type . "string")
                    (:minLength . 1)
-                   (:description . "Limited Codex-style text patch")))))
+                   (:maxLength . ,ende-patch-max-chars)
+                   (:description . "Limited patch format: *** Begin Patch, one or more *** Add File, *** Update File, or *** Delete File operations, @@ update hunks with exact update context, then *** End Patch.")))))
     (:required . ("patch"))
     (:additionalProperties . :json-false)))
 
 (defconst ende-tools--web-fetch-schema
-  '((:type . "object")
+  `((:type . "object")
     (:properties
      . ((:url . ((:type . "string")
                  (:minLength . 1)
                  (:description . "Absolute HTTP(S) URL authorized by URL resources")))
         (:max_chars . ((:type . "integer")
                        (:minimum . 1)
-                       (:maximum . 50000)
-                       (:description . "Optional lower output-character ceiling")))))
+                       (:maximum . ,ende-web-fetch-max-output-chars)
+                       (:description . "Optional returned-character ceiling, bounded by the configured maximum.")))))
     (:required . ("url"))
     (:additionalProperties . :json-false)))
 
@@ -2226,7 +2276,7 @@ process-group cancellation function with the active Ende job."
     (:properties
      . ((:command . ((:type . "string") (:minLength . 1)))
         (:cwd . ((:type . "string") (:minLength . 1)
-                 (:description . "Workspace-relative working directory")))
+                 (:description . "Optional workspace-relative working directory constrained to the current private workspace; defaults to \".\".")))
         (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
     (:required . ("command"))
     (:additionalProperties . :json-false)))
@@ -2237,7 +2287,7 @@ process-group cancellation function with the active Ende job."
      . ((:command . ((:type . "string") (:minLength . 1)))
         (:cwd . ((:type . "string") (:minLength . 1)
                  (:description
-                  . "Local working directory, relative to the project root")))
+                  . "Optional local working directory; relative values are resolved from the project root, absolute local directories are accepted, and the default is \".\".")))
         (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
     (:required . ("command"))
     (:additionalProperties . :json-false)))
@@ -2246,9 +2296,9 @@ process-group cancellation function with the active Ende job."
   '((:type . "object")
     (:properties
      . ((:source . ((:type . "string") (:minLength . 1)
-                    (:description . "Regular file path inside the job workspace")))
+                    (:description . "Workspace-relative path to an existing regular file")))
         (:destination . ((:type . "string") (:minLength . 1)
-                         (:description . "Authorized project-relative destination")))))
+                         (:description . "Independently authorized project-relative destination; creates a missing file or replaces an existing regular file")))))
     (:required . ("source" "destination"))
     (:additionalProperties . :json-false)))
 
@@ -2272,7 +2322,9 @@ process-group cancellation function with the active Ende job."
                   (:description . "Select a particular repeated anchor (1-based).")))
           (cons :all
                 '((:type . "boolean")
+                  (:const . t)
                   (:description . "Apply this edit to every matching occurrence.")))))
+   (cons :not '((:required . ["occurrence" "all"])))
    (cons :required '("anchor" "position" "text"))
    (cons :additionalProperties :json-false)))
 
@@ -2331,7 +2383,7 @@ process-group cancellation function with the active Ende job."
  "List allowed regular files on disk below the project root."
  `((:type . "object")
    (:properties
-    . ((:glob . ((:type . "string")
+    . ((:glob . ((:type . "string") (:minLength . 1)
                  (:description . "Optional project-relative wildcard")))
        (:max_results . ((:type . "integer") (:minimum . 1)
                         (:maximum . ,ende-tools-max-listed-files)
@@ -2350,7 +2402,7 @@ process-group cancellation function with the active Ende job."
  "Read a bounded, 1-based line range from an authorized file on disk."
  `((:type . "object")
    (:properties
-    . ((:path . ((:type . "string")
+    . ((:path . ((:type . "string") (:minLength . 1)
                  (:description . "Project-relative path or authorized absolute path")))
        (:start_line . ((:type . "integer") (:minimum . 1)))
        (:line_count . ((:type . "integer") (:minimum . 1)
@@ -2370,7 +2422,7 @@ process-group cancellation function with the active Ende job."
  "Read a bounded, 1-based line range from a visiting buffer, including unsaved contents."
  `((:type . "object")
    (:properties
-    . ((:buffer_id . ((:type . "string")))
+    . ((:buffer_id . ((:type . "string") (:minLength . 1)))
        (:start_line . ((:type . "integer") (:minimum . 1)))
        (:line_count . ((:type . "integer") (:minimum . 1)
                        (:maximum . ,ende-tools-max-read-lines)
@@ -2391,7 +2443,7 @@ process-group cancellation function with the active Ende job."
                      (:description . "Literal strings to search for with OR semantics.")))
        (:regexp . ((:type . "string") (:minLength . 1)
                    (:description . "Explicit Emacs regexp for advanced searches.")))
-       (:glob . ((:type . "string")))
+       (:glob . ((:type . "string") (:minLength . 1)))
        (:context_before . ((:type . "integer") (:minimum . 0)
                            (:maximum . ,ende-tools-max-search-context-lines)
                            (:description . "Defaults to the configured maximum.")))

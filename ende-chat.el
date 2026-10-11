@@ -1469,22 +1469,20 @@ permissions.\n\n"
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
 Choose a concise title for the request. Otherwise omit this keyword.\n\n"
-   "When producing code, work incrementally. Do not accumulate several production-code changes before validating them.
-For every production-code change:
-1. Make one small coherent change. Prefer changing one function or one tightly coupled behavior at a time.
-2. Immediately run the cheapest structural/syntax validation for every changed source file.
-3. Do not make another behavioral change while structural validation is failing.
-4. Once syntax is clean, run the smallest relevant focused test.
-5. Inspect the resulting diff before continuing.
-6. Keep only green checkpoints. Commit when a coherent step is green.
+   "Work in bounded, incremental steps. Core rule: do not move on from a failed or unverified state.
+For each coherent step:
+1. Make one bounded change.
+2. Verify it with the most appropriate available task-dependent check.
+3. Inspect the result when useful and establish a known-good checkpoint.
+4. Only then begin the next independent step.
 
-Do not modify project source through shell/Python/sed commands. Use the provided file-editing tools for source changes. Shell commands are for inspection and verification only.
+Verification may be a test, command, parser, compiler, inspection, comparison, query, validation tool, or any other appropriate check; do not prescribe a language, tool, version-control system, or fixed command sequence. A failed check is a hard gate: repair the current step before any independent change. An unverified change must not become the foundation for more work merely because it seems plausible.
 
-If the same syntax error or focused test is still failing after two repair edits, stop repairing the current state. Restore the last green checkpoint, reconsider the approach, and reimplement that step in a smaller form.
+If a step continues to fail after a small number of reasonable repairs, stop modifying that broken state and restore the last known-good checkpoint. Roll back, reduce the size of the attempted step, and continue: reconsider the same intended goal and retry it in a smaller, simpler, or more isolated form. Do not pile speculative repairs onto repeatedly failing work. Rollback ends only that failed attempt, not the overall task; terminate only for a genuine external blocker that prevents progress.
 
-Do not try to recover a large malformed Lisp form by repeatedly adding or removing parentheses. Restore the known-good form and reapply the intended structural change cleanly.
+When appropriate, a version-control commit may serve as a checkpoint; commits are not universal. Prefer several small verified steps over one large speculative change.
 
-Prefer several small verified patches over one large rewrite.")
+Do not modify project source through shell/Python/sed commands. Use the provided file-editing tools for source changes. Shell commands are for inspection and verification only.")
   "System prompt for Org-backed chat requests.")
 
 (defun ende-chat--system-prompt (document)
@@ -3245,7 +3243,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                (json-parse-string arguments :object-type 'hash-table)
              (error
               (list :invalid-arguments (error-message-string caught))))))
-      (json-encode
+      (ende-tools--json-encode-tool-result
        (if (hash-table-p parsed)
            (ende-tool-call name parsed (plist-get configuration :root)
                            configuration)
@@ -3267,10 +3265,12 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
         (if (hash-table-p parsed)
             (ende-tool-call-async
              name parsed (plist-get configuration :root) configuration
-             (lambda (result) (funcall callback (json-encode result))))
+             (lambda (result)
+               (funcall callback
+                        (ende-tools--json-encode-tool-result result))))
           (funcall
            callback
-           (json-encode
+           (ende-tools--json-encode-tool-result
             (list :ok nil :tool name
                   :error (format "tool arguments are not a JSON object: %s"
                                  (plist-get parsed :invalid-arguments))))))))))
