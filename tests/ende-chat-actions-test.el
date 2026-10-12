@@ -55,6 +55,24 @@
 
 ;;;; Org-backed chat
 
+(ert-deftest ende-test/chat-staging-buffer-is-read-only-but-appendable ()
+  (ende-test--reset)
+  (let* ((job (ende--make-job :instruction '(:request-id "readonly-staging")))
+         (buffer (ende-chat--staging-buffer job t)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (should (derived-mode-p 'org-mode))
+            (should buffer-read-only)
+            (should-error (insert "user edit") :type 'buffer-read-only))
+          (ende-chat--staging-append job "first")
+          (ende-chat--staging-append job " second")
+          (with-current-buffer buffer
+            (should buffer-read-only)
+            (should (equal (buffer-string) "first second"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest ende-test/chat-completion-reduces-whole-transcript-parsing ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
@@ -415,6 +433,11 @@
                                          (cadr recovery))))))))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/chat-staging-buffer-creation-remains-lazy ()
+  (let ((job (ende--make-job :instruction '(:request-id "lazy-staging"))))
+    (should-not (ende-chat--staging-buffer job))
+    (should-not (plist-get (ende-job-instruction job) :staging-buffer))))
+
 (ert-deftest ende-test/chat-malformed-staged-work-rolls-back-and-retains-recovery ()
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-staged-malformed-" t))
@@ -435,9 +458,10 @@
                 (before (buffer-string)))
            (ende-test--complete-call (car ende-test--calls))
            (with-current-buffer (ende-chat--staging-buffer job)
-             (goto-char (point-min))
-             (should (re-search-forward "^:ENDE_CHAT_WORK: t$" nil t))
-             (replace-match ":ENDE_CHAT_WORK: malformed"))
+             (let ((inhibit-read-only t))
+               (goto-char (point-min))
+               (should (re-search-forward "^:ENDE_CHAT_WORK: t$" nil t))
+               (replace-match ":ENDE_CHAT_WORK: malformed")))
            (ende-test--complete-call (nth 1 ende-test--calls))
            (should (eq (ende-job-state job) 'failed))
            (should (equal before (buffer-string)))

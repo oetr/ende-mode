@@ -224,6 +224,91 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
           (when (buffer-live-p dashboard)
             (kill-buffer dashboard)))))))
 
+(ert-deftest ende-test/dashboard-visits-live-agent-work-at-transcript-end ()
+  (save-window-excursion
+    (delete-other-windows)
+    (ende-test--dashboard-reset)
+    (with-temp-buffer
+      (org-mode)
+      (let* ((job
+              (ende--make-job
+               :id 91 :type 'chat :state 'running
+               :target (ende-target-create
+                        :buffer (current-buffer) :start (point-min)
+                        :end (point-max) :cursor (point-min)
+                        :review-policy 'ignore)
+               :instruction '(:request-id "dashboard-work")))
+             (staging (ende-chat--staging-buffer job t))
+             (dashboard nil))
+        (unwind-protect
+            (progn
+              (ende-chat--staging-append job "first staged line\n")
+              (ende-chat--staging-append job "latest staged line")
+              (setq dashboard (generate-new-buffer "*ende-dashboard-work-test*"))
+              (with-current-buffer dashboard
+                (ende-queue-ui-mode)
+                (let ((inhibit-read-only t))
+                  (insert "Job entry\n"))
+                (let ((inhibit-read-only t))
+                  (add-text-properties
+                   (point-min) (point-max)
+                   (list 'ende-queue-ui-kind 'job
+                         'ende-queue-ui-owner job))))
+              (with-current-buffer dashboard
+                (goto-char (point-min))
+                (ende-queue-ui-visit-agent-work))
+              (should (eq (window-buffer (selected-window)) staging))
+              (with-current-buffer staging
+                (should (= (point) (point-max)))
+                (should buffer-read-only))
+              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "w"))
+                          #'ende-queue-ui-visit-agent-work))
+              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "j"))
+                          #'ende-queue-ui-visit-source))
+              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "RET"))
+                          #'ende-queue-ui-visit-source))
+              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "v"))
+                          #'ende-queue-ui-switch-view)))
+          (when (buffer-live-p staging)
+            (kill-buffer staging))
+          (when (buffer-live-p dashboard)
+            (kill-buffer dashboard)))))))
+
+(ert-deftest ende-test/dashboard-agent-work-errors-without-creating-staging-buffer ()
+  (ende-test--dashboard-reset)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((job
+            (ende--make-job
+             :id 92 :type 'chat :state 'running
+             :target (ende-target-create
+                      :buffer (current-buffer) :start (point-min)
+                      :end (point-max) :cursor (point-min)
+                      :review-policy 'ignore)
+             :instruction '(:request-id "dashboard-no-work")))
+           (dashboard (generate-new-buffer "*ende-dashboard-no-work-test*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer dashboard
+              (ende-queue-ui-mode)
+              (let ((inhibit-read-only t))
+                (insert "Job entry\n"))
+              (let ((inhibit-read-only t))
+                (add-text-properties
+                 (point-min) (point-max)
+                 (list 'ende-queue-ui-kind 'job
+                       'ende-queue-ui-owner job))))
+            (with-current-buffer dashboard
+              (goto-char (point-min))
+              (let ((error-data
+                     (should-error (ende-queue-ui-visit-agent-work)
+                                   :type 'user-error)))
+                (should (string-match-p "No staged agent work yet"
+                                        (error-message-string error-data)))))
+            (should-not (plist-get (ende-job-instruction job) :staging-buffer)))
+        (when (buffer-live-p dashboard)
+          (kill-buffer dashboard))))))
+
 (ert-deftest ende-test/dashboard-chat-job-without-tools-shows-empty-tool-details ()
   (ende-test--dashboard-reset)
   (with-temp-buffer

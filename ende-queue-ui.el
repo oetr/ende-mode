@@ -862,6 +862,17 @@
     (when position
       (goto-char (min (point-max) (max (point-min) position))))))
 
+(defun ende-queue-ui-visit-agent-work ()
+  "Visit the current job's live staged transcript."
+  (interactive)
+  (let* ((job (ende-queue-ui--current-job))
+         (buffer (ende-chat--staging-buffer job)))
+    (unless buffer
+      (user-error "No staged agent work yet"))
+    (pop-to-buffer buffer)
+    (with-current-buffer buffer
+      (goto-char (point-max)))))
+
 (defun ende-queue-ui-next-entry (&optional direction)
   "Move to the next or previous job/fence entry by DIRECTION."
   (interactive)
@@ -900,7 +911,8 @@
     (princ "Ende queue dashboard\n\n")
     (princ "C-n/C-p, arrows  Move by line    n/p  Next/previous job or fence\n")
     (princ "TAB             Expand/fold     v    Switch Jobs/Buffers\n")
-    (princ "j/RET           Visit source    q    Quit window\n")
+    (princ "j/RET           Visit source    w    Visit agent work\n")
+    (princ "q               Quit window\n")
     (princ "P/R             Pause/resume    k/K  Cancel selected/all\n")
     (princ "c               Change queued policy\n")
     (princ "M-<up/down>     Reorder queued job (Jobs view only)\n")
@@ -934,6 +946,7 @@
     (define-key map (kbd "q") #'ende-queue-ui-quit)
     (define-key map (kbd "j") #'ende-queue-ui-visit-source)
     (define-key map (kbd "RET") #'ende-queue-ui-visit-source)
+    (define-key map (kbd "w") #'ende-queue-ui-visit-agent-work)
     (define-key map (kbd "P") #'ende-queue-pause)
     (define-key map (kbd "R") #'ende-queue-resume)
     (define-key map (kbd "k") #'ende-queue-ui-cancel)

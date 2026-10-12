@@ -1850,7 +1850,8 @@ COMPACT always places a same-level context-fence sibling."
              (format " *ende-chat-work:%s*"
                      (plist-get instruction :request-id))))
       (with-current-buffer buffer
-        (org-mode))
+        (org-mode)
+        (setq buffer-read-only t))
       (setf (ende-job-instruction job)
             (plist-put instruction :staging-buffer buffer)))
     (and (buffer-live-p buffer) buffer)))
@@ -1863,8 +1864,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
       (setf (ende-job-instruction job)
             (plist-put (ende-job-instruction job) :recovery-current nil)))
     (with-current-buffer buffer
-      (goto-char (point-max))
-      (insert text))
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert text)))
     (when checkpoint
       (ende-chat--checkpoint-staging job))
     buffer))
