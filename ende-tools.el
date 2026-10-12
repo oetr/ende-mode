@@ -2358,6 +2358,8 @@ process-group cancellation function with the active Ende job."
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
 
+(setq ende-tools--registry nil)
+
 (ende-tool-register
  'about_thinking
  (concat "Update your user-visible progress report with a short title and "

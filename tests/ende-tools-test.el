@@ -69,6 +69,31 @@
       (error "timed out waiting for run_host_command"))
     result))
 
+(ert-deftest ende-test/tool-registry-rebuild-removes-stale-registrations ()
+  (let ((ende-tools--registry (copy-sequence ende-tools--registry))
+        (tools-file
+         (expand-file-name "ende-tools.el"
+                           (file-name-directory (locate-library "ende.el")))))
+    (ende-tool-register
+     'ende_test_stale_registration "Stale test tool"
+     ende-tools--empty-object-schema
+     (lambda (_arguments _root) nil) nil :no-resource)
+    (should (ende-tool--find 'ende_test_stale_registration))
+    (load tools-file)
+    (should-not (ende-tool--find 'ende_test_stale_registration))
+    (should-not (ende-tool--find 'run_command))
+    (should (ende-tool--find 'run_sandbox_command))
+    (let ((definitions (ende-tool-definitions))
+          (active-names (ende-tool-active-names nil)))
+      (should (= (length definitions) (length ende-tools--registry)))
+      (should (member 'about_thinking active-names))
+      (should-not (memq 'ende_test_stale_registration active-names))
+      (should (member "run_sandbox_command"
+                      (mapcar (lambda (definition)
+                                (alist-get :name
+                                           (alist-get :function definition)))
+                              definitions))))))
+
 (defun ende-test--public-tool-schema (definitions name)
   "Return the public generated schema for tool NAME from DEFINITIONS."
   (let* ((definition
