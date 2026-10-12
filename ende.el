@@ -294,11 +294,11 @@
               (goto-char end))))))
     entry))
 
-(defun ende--eldoc-documentation ()
-  "Return short help for an Ende configuration token at point."
+(defun ende--eldoc-documentation (callback)
+  "Report Ende configuration help at point through CALLBACK."
   (let ((entry (ende--config-entry-at-point)))
     (when entry
-      (nth 2 entry))))
+      (funcall callback (nth 2 entry)))))
 
 (defun ende--refresh-fontification ()
   "Refresh the current buffer's fontification."

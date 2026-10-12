@@ -23,7 +23,9 @@
   (unless (search-forward text nil t)
     (ert-fail (format "Could not find %S" text)))
   (goto-char (- (point) (length text)))
-  (ende--eldoc-documentation))
+  (let (documentation)
+    (ende--eldoc-documentation (lambda (doc) (setq documentation doc)))
+    documentation))
 
 (ert-deftest ende-test/config-presentation-font-lock-is-block-scoped ()
   (with-temp-buffer
