@@ -40,7 +40,8 @@
 
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
-  state marker buffer websocket recorder recorder-stderr finalized partial status)
+  state marker buffer source-window transcript-window websocket recorder
+  recorder-stderr finalized partial status)
 
 
 (defvar ende-speech--active-session nil
@@ -384,15 +385,25 @@ Try JSON first, then older pactl's normal text listing."
   "Finish cleanup for SESSION; KILL-BUFFER controls transcript-buffer killing."
   (let* ((buffer (ende-speech--session-buffer session))
          (marker (ende-speech--session-marker session))
-         (source (and (markerp marker) (marker-buffer marker))))
+         (source (and (markerp marker) (marker-buffer marker)))
+         (source-window (ende-speech--session-source-window session))
+         (transcript-window (ende-speech--session-transcript-window session)))
+    (when (and (window-live-p transcript-window)
+               (not (eq transcript-window source-window))
+               (eq (window-buffer transcript-window) buffer)
+               (not (window-dedicated-p transcript-window)))
+      (delete-window transcript-window))
     (when (and kill-buffer (buffer-live-p buffer))
       (condition-case nil (kill-buffer buffer) (error nil)))
     (when (markerp marker)
       (set-marker marker nil))
     (when (eq session ende-speech--active-session)
       (setq ende-speech--active-session nil))
-    (when (and kill-buffer (buffer-live-p source))
-      (switch-to-buffer source))))
+    (when (and (buffer-live-p source)
+               (window-live-p source-window))
+      (select-window source-window)
+      (unless (eq (window-buffer source-window) source)
+        (set-window-buffer source-window source)))))
 
 (defun ende-speech--insert-at-marker (session text)
   "Insert TEXT at SESSION's saved source marker."
@@ -535,10 +546,13 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
   (let ((default-directory temporary-file-directory))
     (unless (executable-find "parec")
       (user-error "parec is unavailable; cannot record audio")))
-  (let* ((marker (copy-marker (point) t))
+  (let* ((source-window (selected-window))
+         (source-buffer (current-buffer))
+         (marker (copy-marker (point) t))
          (buffer (get-buffer-create "*ende-speech*"))
          (session (ende-speech--make-session
                    :state 'connecting :marker marker :buffer buffer
+                   :source-window source-window
                    :finalized "" :partial "" :status "Connecting...")))
     (setq ende-speech--active-session session)
     (with-current-buffer buffer
@@ -571,7 +585,18 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
        (ende-speech--terminate
         session nil (format "could not connect: %s" (error-message-string err)) t)
        (signal (car err) (cdr err))))
-    (switch-to-buffer buffer)))
+    (let ((window (display-buffer
+                   buffer
+                   '((display-buffer-pop-up-window)
+                     (inhibit-same-window . t)))))
+      (unless (and (window-live-p window)
+                   (not (eq window source-window)))
+        (ende-speech--terminate session nil nil t)
+        (user-error "Cannot show transcript without hiding the source buffer"))
+      (setf (ende-speech--session-transcript-window session) window)
+      (select-window source-window)
+      (unless (eq (window-buffer source-window) source-buffer)
+        (set-window-buffer source-window source-buffer)))))
 
 (provide 'ende-speech)
 
