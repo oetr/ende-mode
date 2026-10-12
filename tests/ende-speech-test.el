@@ -308,12 +308,16 @@
                  ende-speech-test--source-window))
      (should (eq (ende-speech--session-transcript-window session)
                  ende-speech-test--transcript-window))
+     (should (eq ende-speech-test--selected-window
+                 ende-speech-test--transcript-window))
      (should (eq (gethash ende-speech-test--source-window
                           ende-speech-test--window-buffers)
                  source))
      (should (eq (gethash ende-speech-test--transcript-window
                           ende-speech-test--window-buffers)
                  (ende-speech--session-buffer session)))
+     (should (eq ende-speech-test--selected-window
+                 ende-speech-test--transcript-window))
      (should-error
       (with-current-buffer source
         (ende-speech-start-talking))
@@ -375,7 +379,11 @@
       session "conversation.item.input_audio_transcription.completed"
       '(transcript . "world"))
      (should (equal (with-current-buffer buffer (buffer-string))
-                    "Hello world")))))
+                    "Hello world"))
+     (should (string-match-p
+              "C-c C-c accept.*C-c C-k cancel"
+              (with-current-buffer buffer
+                (ende-speech--header-line)))))))
 
 (ert-deftest ende-speech/accept-cleans-inserts-at-marker-and-ignores-events ()
   (ende-speech-test--with-session
@@ -449,6 +457,10 @@
       session "conversation.item.input_audio_transcription.delta"
       '(delta . "discard me"))
      (with-current-buffer buffer (ende-speech--reject))
+     (should (eq ende-speech-test--selected-window
+                 ende-speech-test--source-window))
+     (should (memq ende-speech-test--transcript-window
+                   ende-speech-test--deleted-windows))
      (should (equal (with-current-buffer source (buffer-string)) "abcd"))
      (should ende-speech-test--killed-recorder)
      (should ende-speech-test--closed)

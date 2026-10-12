@@ -75,11 +75,11 @@
   "Return the status line for the current transcript buffer."
   (let ((session (and (boundp 'ende-speech--active-session)
                       ende-speech--active-session)))
-    (format " Ende speech — %s"
-            (if (and session (eq (ende-speech--session-buffer session)
-                                 (current-buffer)))
-                (ende-speech--session-status session)
-              "Closed"))))
+    (if (and session (eq (ende-speech--session-buffer session)
+                         (current-buffer)))
+        (format "Ende speech — %s | C-c C-c accept | C-c C-k cancel"
+                (ende-speech--session-status session))
+      "Ende speech — closed")))
 
 (defun ende-speech--configuration-buffer ()
   "Return the live speech configuration buffer, creating it if needed."
@@ -594,7 +594,7 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
         (ende-speech--terminate session nil nil t)
         (user-error "Cannot show transcript without hiding the source buffer"))
       (setf (ende-speech--session-transcript-window session) window)
-      (select-window source-window)
+      (select-window window)
       (unless (eq (window-buffer source-window) source-buffer)
         (set-window-buffer source-window source-buffer)))))
 
