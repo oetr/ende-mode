@@ -86,7 +86,7 @@
 (defun ende-sandbox-create (owner root image files)
   "Create OWNER's tmpfs snapshot from authorized FILES below ROOT."
   (unless (and (integerp owner) (>= owner 0))
-    (error "run_command requires an active Ende job"))
+    (error "run_sandbox_command requires an active Ende job"))
   (unless (and (stringp image)
                (string-match-p
                 "\\`[[:graph:]]+@sha256:[[:xdigit:]]\\{64\\}\\'"
@@ -106,7 +106,7 @@
     (unless (and (file-directory-p ende-sandbox--root)
                  (file-writable-p ende-sandbox--root)
                  (ende-sandbox--tmpfs-p (file-truename ende-sandbox--root)))
-      (error "a writable tmpfs at /dev/shm is required for run_command"))
+      (error "a writable tmpfs at /dev/shm is required for run_sandbox_command"))
     (setq base (make-temp-file prefix t))
     (unwind-protect
         (progn

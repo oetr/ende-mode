@@ -1468,7 +1468,7 @@ Return canonical target and root-relative/public path details."
                   report))))
 
 (defun ende-tools--sync-change-sets-to-sandbox (change-sets)
-  "Mirror committed CHANGE-SETS that are authorized for `run_command'."
+  "Mirror committed CHANGE-SETS that are authorized for `run_sandbox_command'."
   (let ((sandbox (and ende-tools--execution-owner
                       (ende-sandbox-for-owner
                        ende-tools--execution-owner))))
@@ -1480,7 +1480,7 @@ Return canonical target and root-relative/public path details."
                         (lambda (change-set)
                           (let ((scope
                                  (ende-tools--path-scope-for
-                                  'run_command
+                                  'run_sandbox_command
                                   (ende-change-set-absolute-path change-set)
                                   (ende-change-set-project-root change-set)
                                   t t)))
@@ -2030,10 +2030,10 @@ Return trimmed plain text without text properties."
       (error "about_thinking requires an active agent session"))
     (list :accepted t)))
 
-(defun ende-tools--run-command (arguments root callback)
+(defun ende-tools--run-sandbox-command (arguments root callback)
   "Execute an authorized command asynchronously in the current job sandbox."
   (ende-tools--assert-properties
-   arguments '("command" "cwd" "timeout") "run_command")
+   arguments '("command" "cwd" "timeout") "run_sandbox_command")
   (let* ((owner ende-tools--execution-owner)
          (command (ende-tools--required-string arguments "command"))
          (cwd (or (ende-tools--argument arguments "cwd") "."))
@@ -2041,10 +2041,10 @@ Return trimmed plain text without text properties."
                    arguments "timeout" 300 3600))
          (sandbox (and owner (ende-sandbox-for-owner owner))))
     (unless owner
-      (error "run_command requires an active Ende job"))
+      (error "run_sandbox_command requires an active Ende job"))
     (unless sandbox
       (let ((image (plist-get ende-tools--access-config :podman-image))
-            (files (ende-tools--authorized-project-files 'run_command root)))
+            (files (ende-tools--authorized-project-files 'run_sandbox_command root)))
         (setq sandbox (ende-sandbox-create owner root image files))))
     (ende-sandbox-run-command
      sandbox command cwd timeout callback
@@ -2281,7 +2281,7 @@ process-group cancellation function with the active Ende job."
     (:required . ("url"))
     (:additionalProperties . :json-false)))
 
-(defconst ende-tools--run-command-schema
+(defconst ende-tools--run-sandbox-command-schema
   '((:type . "object")
     (:properties
      . ((:command . ((:type . "string") (:minLength . 1)))
@@ -2502,14 +2502,15 @@ process-group cancellation function with the active Ende job."
  '(:resource-kind url :requires-root nil :async t))
 
 (ende-tool-register
- 'run_command
+ 'run_sandbox_command
  (concat "Run a shell command in the current job's private development workspace. "
          "Use this as the normal tool for builds, tests, linters, repository "
          "inspection, temporary diagnostics, and changes intended to stay "
          "in that workspace; use dedicated project mutation tools for desired "
          "host-project edits.")
- ende-tools--run-command-schema
- #'ende-tools--run-command nil nil '(:async t))
+ ende-tools--run-sandbox-command-schema
+ #'ende-tools--run-sandbox-command nil nil
+ '(:resource-kind file :requires-resources nil :async t))
 
 (ende-tool-register
  'run_host_command

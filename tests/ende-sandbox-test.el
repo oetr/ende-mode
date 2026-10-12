@@ -40,9 +40,9 @@
    root
    '((resource project (include "**") (exclude "private/**"))
      (resource output (include "out/**"))
-     (tools run_command copy_from_sandbox list_project_files
+     (tools run_sandbox_command copy_from_sandbox list_project_files
             edit_file create_file delete_file)
-     (set-tool-resources run_command list_project_files edit_file
+     (set-tool-resources run_sandbox_command list_project_files edit_file
                          create_file delete_file :resources project)
      (set-tool-resources copy_from_sandbox :resources output))
    image))
@@ -95,7 +95,7 @@
 (defun ende-test--sandbox-run (arguments root configuration owner)
   "Run command ARGUMENTS for OWNER and return its structured result."
   (let ((call (ende-test--sandbox-call
-               "run_command" arguments root configuration owner)))
+               "run_sandbox_command" arguments root configuration owner)))
     (should (plist-get call :ok))
     (plist-get call :result)))
 
@@ -195,8 +195,8 @@
             (insert (format
                      (concat "#+begin_ende\n(root %S)\n(podman-image %S)\n"
                              "(resource project (include \"**\"))\n"
-                             "(tools run_command)\n"
-                             "(set-tool-resources run_command :resources project)\n"
+                             "(tools run_sandbox_command)\n"
+                             "(set-tool-resources run_sandbox_command :resources project)\n"
                              "#+end_ende\n* Parent\n** Child\n"
                              "#+begin_ende\n(podman-image %S)\n#+end_ende\n")
                      root first second))
@@ -207,10 +207,64 @@
                      (ende-chat--document-tree document)
                      (ende-chat--document-parent document) child)))
               (should (equal (plist-get configuration :podman-image) second))))
+          (let ((configuration
+                 (ende-test--sandbox-config-forms
+                  root
+                  '((tools run_sandbox_command))
+                  first)))
+            (should (memq 'run_sandbox_command
+                          (plist-get configuration :active-tools)))
+            (should-not (assq 'run_sandbox_command
+                              (plist-get configuration :tool-resources))))
+          (with-temp-buffer
+            (org-mode)
+            (insert (ende-test--chat-config-block
+                     `((root ,root) (tools run_sandbox_command)))
+                    "* Sandbox\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document) "Sandbox")))
           (should-error (ende-test--sandbox-config root nil)
                         :type 'error)
           (should-error (ende-test--sandbox-config root "ubuntu:latest")
                         :type 'error))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-command-without-resources-starts-empty ()
+  (let* ((root (make-temp-file "ende-sandbox-empty-" t))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (configuration
+          (ende-test--sandbox-config-forms
+           root '((tools run_sandbox_command)) ende-test--sandbox-pin))
+         (sandbox nil))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "project-file.txt" root)
+            (insert "not copied\n"))
+          (cl-letf (((symbol-function 'ende-sandbox-create)
+                     (lambda (job root image files)
+                       (should (= job owner))
+                       (should (equal image ende-test--sandbox-pin))
+                       (should-not files)
+                       (let* ((base (make-temp-file "ende-empty-workspace-" t))
+                              (workspace (expand-file-name "workspace" base)))
+                         (make-directory workspace)
+                         (setq sandbox
+                               (ende-sandbox--create
+                                :owner job :root root :base base
+                                :workspace workspace))
+                         (puthash job sandbox ende-sandbox--by-owner)
+                         sandbox)))
+                    ((symbol-function 'ende-sandbox-run-command)
+                     (lambda (_sandbox _command _cwd _timeout callback _register)
+                       (funcall callback '(:exit_code 0 :stdout "" :stderr "") nil))))
+            (let ((result (ende-test--sandbox-call
+                           "run_sandbox_command"
+                           '(("command" . "true")) root configuration owner)))
+              (should (plist-get result :ok))))
+          (should sandbox)
+          (should-not (directory-files
+                       (ende-sandbox-workspace sandbox) nil "[^.]")))
+      (ende-sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/chat-tool-round-binds-its-job-id-for-dispatch ()
@@ -239,6 +293,35 @@
     (should (= owner-seen (ende-job-id job)))
     (should (eq ende-tools--execution-owner 'outer-owner))))
 
+(ert-deftest ende-test/sandbox-authorization-uses-only-assigned-files ()
+  (let ((root (make-temp-file "ende-sandbox-authorization-" t)))
+    (unwind-protect
+        (progn
+          (ende-test--sandbox-make-project root)
+          (let* ((optional
+                  (ende-test--sandbox-config-forms
+                   root '((tools run_sandbox_command))
+                   ende-test--sandbox-pin))
+                 (ende-tools--access-config optional))
+            (should-not
+             (ende-tools--authorized-project-files 'run_sandbox_command root)))
+          (let* ((configuration
+                  (ende-test--sandbox-config-forms
+                   root
+                   '((resource project (include "**") (exclude "private/**"))
+                     (tools run_sandbox_command)
+                     (set-tool-resources run_sandbox_command :resources project))
+                   ende-test--sandbox-pin))
+                 (ende-tools--access-config configuration)
+                 (files (ende-tools--authorized-project-files
+                         'run_sandbox_command root)))
+            (should (= (length files) 2))
+            (should (member (expand-file-name "public/main.c" root) files))
+            (should (member (expand-file-name "public/second.txt" root) files))
+            (should-not (member (expand-file-name "private/secret.txt" root) files))
+            (should-not (member (expand-file-name ".env" root) files))))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/sandbox-snapshot-uses-tool-scope-without-list-limit ()
   (let* ((root nil)
          (owner (cl-incf ende-test--sandbox-owner))
@@ -254,7 +337,7 @@
                  (ende-tools-max-listed-files 1)
                  (ende-tools--access-config configuration)
                  (files (ende-tools--authorized-project-files
-                         'run_command root)))
+                         'run_sandbox_command root)))
             (should (= (length files) 2))
             (let* ((listing (ende-tool-call
                              "list_project_files" nil root configuration))
@@ -340,8 +423,8 @@
                   (ende-test--sandbox-config-forms
                    root
                    '((resource source (include "src/**"))
-                     (tools run_command edit_file create_file delete_file)
-                     (set-tool-resources run_command :resources source)
+                     (tools run_sandbox_command edit_file create_file delete_file)
+                     (set-tool-resources run_sandbox_command :resources source)
                      (set-tool-resources edit_file create_file delete_file
                                          :resources source))
                    ende-test--sandbox-pin))
@@ -436,8 +519,8 @@
           (ende-test--sandbox-config-forms
            root
            '((resource source (include "src/**"))
-             (tools apply_patch run_command)
-             (set-tool-resources apply_patch run_command :resources source))
+             (tools apply_patch run_sandbox_command)
+             (set-tool-resources apply_patch run_sandbox_command :resources source))
            ende-test--sandbox-pin))
          (patch (concat "*** Begin Patch\n"
                         "*** Update File: src/first.el\n@@\n-old\n+new\n"
@@ -491,8 +574,8 @@
           (ende-test--sandbox-config-forms
            root
            '((resource source (include "src/**"))
-             (tools edit_file run_command)
-             (set-tool-resources edit_file run_command :resources source))
+             (tools edit_file run_sandbox_command)
+             (set-tool-resources edit_file run_sandbox_command :resources source))
            ende-test--sandbox-pin)))
     (unwind-protect
         (progn
@@ -539,7 +622,7 @@
                                    nil)))))
             (let ((result
                    (ende-test--sandbox-call
-                    "run_command" '(("command" . "cat src/main.el"))
+                    "run_sandbox_command" '(("command" . "cat src/main.el"))
                     root configuration owner)))
               (should (plist-get result :ok))
               (should (equal (plist-get (plist-get result :result) :stdout)
@@ -565,8 +648,8 @@
            root
            '((resource source (include "src/**"))
              (resource output (include "out/**"))
-             (tools apply_patch run_command copy_from_sandbox)
-             (set-tool-resources apply_patch run_command :resources source)
+             (tools apply_patch run_sandbox_command copy_from_sandbox)
+             (set-tool-resources apply_patch run_sandbox_command :resources source)
              (set-tool-resources copy_from_sandbox :resources output))
            ende-test--sandbox-pin))
          (patch (concat "*** Begin Patch\n"
@@ -658,8 +741,8 @@
           (ende-test--sandbox-config-forms
            root
            '((resource source (include "src/**"))
-             (tools delete_file run_command)
-             (set-tool-resources delete_file run_command :resources source))
+             (tools delete_file run_sandbox_command)
+             (set-tool-resources delete_file run_sandbox_command :resources source))
            ende-test--sandbox-pin)))
     (unwind-protect
         (progn
@@ -701,16 +784,16 @@
         (ende-sandbox--dispose sandbox))
       (delete-directory root t))))
 
-(ert-deftest ende-test/run-command-json-keeps-outer-success-for-failing-process ()
-  (let* ((root (make-temp-file "ende-run-command-json-" t))
+(ert-deftest ende-test/run-sandbox-command-json-keeps-outer-success-for-failing-process ()
+  (let* ((root (make-temp-file "ende-run-sandbox-command-json-" t))
          (owner (cl-incf ende-test--sandbox-owner))
-         (workspace (make-temp-file "ende-run-command-workspace-" t))
+         (workspace (make-temp-file "ende-run-sandbox-command-workspace-" t))
          (configuration
           (ende-test--sandbox-config-forms
            root
            '((resource project (include "**"))
-             (tools run_command)
-             (set-tool-resources run_command :resources project))
+             (tools run_sandbox_command)
+             (set-tool-resources run_sandbox_command :resources project))
            ende-test--sandbox-pin))
          (sandbox (ende-sandbox--create
                    :owner owner :root root :workspace workspace))
@@ -727,7 +810,7 @@
                                   :stderr_truncated :json-false)
                                 nil))))
             (ende-chat--tool-response-async
-             (list :id "run-command" :name "run_command"
+             (list :id "run-sandbox-command" :name "run_sandbox_command"
                    :arguments "{\"command\":\"exit 9\"}")
              configuration
              (lambda (value) (setq response value))))
@@ -740,7 +823,7 @@
       (delete-directory workspace t)
       (delete-directory root t))))
 
-(ert-deftest ende-test/sandbox-sync-does-not-bypass-run-command-scope ()
+(ert-deftest ende-test/sandbox-sync-does-not-bypass-run-sandbox-command-scope ()
   (let* ((root (make-temp-file "ende-sandbox-sync-scope-" t))
          (source (expand-file-name "src/main.el" root))
          (secret (expand-file-name "private/secret.el" root))
@@ -757,8 +840,8 @@
                    root
                    '((resource source (include "src/**"))
                      (resource editable (include "private/**"))
-                     (tools run_command edit_file)
-                     (set-tool-resources run_command :resources source)
+                     (tools run_sandbox_command edit_file)
+                     (set-tool-resources run_sandbox_command :resources source)
                      (set-tool-resources edit_file :resources editable))
                     ende-test--sandbox-pin))
                  (ende-tools--execution-owner owner))
@@ -781,6 +864,43 @@
                         (insert-file-contents secret)
                         (buffer-string))
                      "secret B\n"))))
+      (ende-sandbox-cleanup-owner owner)
+      (delete-directory root t))))
+
+(ert-deftest ende-test/unresourced-sandbox-does-not-sync-project-mutations ()
+  (let* ((root (make-temp-file "ende-sandbox-unresourced-sync-" t))
+         (source (expand-file-name "src/main.el" root))
+         (owner (cl-incf ende-test--sandbox-owner))
+         (sandbox nil))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source (insert "before\n"))
+          (let* ((configuration
+                  (ende-test--sandbox-config-forms
+                   root
+                   '((resource editable (include "src/**"))
+                     (tools run_sandbox_command edit_file)
+                     (set-tool-resources edit_file :resources editable))
+                   ende-test--sandbox-pin))
+                 (ende-tools--execution-owner owner))
+            (setq sandbox (ende-test--sandbox-fixture owner root nil))
+            (let ((edited
+                   (ende-tool-call
+                    'edit_file
+                    (list :path "src/main.el"
+                          :edits (list (ende-test--anchor-edit
+                                        "before" "replace" "after")))
+                    root configuration)))
+              (should (plist-get edited :ok)))
+            (should (equal
+                     (with-temp-buffer
+                       (insert-file-contents source)
+                       (buffer-string))
+                     "after\n"))
+            (should-not
+             (file-exists-p
+              (ende-test--sandbox-workspace sandbox "src/main.el")))))
       (ende-sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
@@ -924,7 +1044,7 @@
               (should (eq (plist-get result :stderr_truncated) t)))
             (let ((bad-cwd
                    (ende-test--sandbox-call
-                    "run_command"
+                    "run_sandbox_command"
                     '(("command" . "pwd") ("cwd" . "../outside"))
                     root configuration owner-one)))
               (should-not (plist-get bad-cwd :ok))
@@ -1037,7 +1157,7 @@
                   (ende-test--sandbox-config root missing-image))
                  (result
                   (ende-test--sandbox-call
-                   "run_command" '(("command" . "touch public/changed"))
+                   "run_sandbox_command" '(("command" . "touch public/changed"))
                    root configuration owner)))
             (should-not (plist-get result :ok))
             (should-not (ende-sandbox-for-owner owner))

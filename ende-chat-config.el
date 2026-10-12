@@ -528,10 +528,10 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                      (mapconcat #'symbol-name revoked ", "))
            "")
          tool))))
-  (when (and (memq 'run_command (plist-get normalized :active-tools))
+  (when (and (memq 'run_sandbox_command (plist-get normalized :active-tools))
              (not (plist-get normalized :podman-image)))
     (ende-chat-config--error
-     "active tool run_command requires a digest-pinned podman-image")))
+     "active tool run_sandbox_command requires a digest-pinned podman-image")))
 
 (defun ende-chat-config--apply-blocks (blocks inherited)
   "Apply BLOCKS over INHERITED and return the resulting configuration."

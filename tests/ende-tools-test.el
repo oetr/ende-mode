@@ -105,11 +105,14 @@
                            (alist-get :name (alist-get :function definition)))
                          definitions)))
       (should (= (length names) (length (delete-dups (copy-sequence names)))))
+      (should-not (member "run_command" names))
+      (should (member "run_sandbox_command" names))
+      (should-not (ende-tool--find "run_command"))
       (dolist (required '("about_thinking" "project_info" "list_project_files" "file_info"
                           "read_file" "list_project_buffers" "read_buffer"
                           "search_project" "edit_file" "create_file"
                           "delete_file" "apply_patch" "web_fetch"
-                          "run_command" "run_host_command"
+                          "run_sandbox_command" "run_host_command"
                           "copy_from_sandbox"))
         (should (member required names))))
     (dolist (definition definitions)
@@ -150,8 +153,15 @@
     (should-not (ende-tool-read-only (ende-tool--find "edit_file")))
     (should-not (ende-tool-read-only (ende-tool--find "create_file")))
     (should-not (ende-tool-read-only (ende-tool--find "copy_from_sandbox")))
-    (should (ende-tool-async (ende-tool--find "run_command")))
+    (should (ende-tool-async (ende-tool--find "run_sandbox_command")))
+    (should (eq (ende-tool-resource-kind
+                 (ende-tool--find "run_sandbox_command"))
+                'file))
+    (should-not (ende-tool-requires-resources
+                 (ende-tool--find "run_sandbox_command")))
     (should (ende-tool-async (ende-tool--find "run_host_command")))
+    (should-not (ende-tool-requires-resources
+                 (ende-tool--find "run_host_command")))
     (should (eq (ende-tool-resource-kind
                  (ende-tool--find "run_host_command"))
                 'none))
@@ -161,7 +171,7 @@
                             (alist-get :description
                                        (alist-get :function definition))))
                     definitions))
-           (run-description (cdr (assoc "run_command" descriptions)))
+           (run-description (cdr (assoc "run_sandbox_command" descriptions)))
            (host-description (cdr (assoc "run_host_command" descriptions))))
       (dolist (phrase '("private development workspace"
                         "normal tool" "builds" "tests" "linters"
@@ -197,7 +207,7 @@
                         "*** Delete File" "@@" "*** End Patch"))
         (should (string-match-p (regexp-quote marker) patch-description)))
       (should (string-match-p "exact update context" patch-description)))
-    (let* ((run (ende-test--public-tool-schema definitions "run_command"))
+    (let* ((run (ende-test--public-tool-schema definitions "run_sandbox_command"))
            (run-cwd (gethash "description"
                              (gethash "cwd" (gethash "properties" run))))
            (host (ende-test--public-tool-schema definitions "run_host_command"))
@@ -288,7 +298,7 @@
             (cl-find-if
              (lambda (candidate)
                (equal (alist-get :name (alist-get :function candidate))
-                      "run_command"))
+                      "run_sandbox_command"))
              definitions))
            (schema (ende-protocol-json-read-string
                     (json-encode
