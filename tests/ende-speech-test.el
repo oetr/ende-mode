@@ -5,15 +5,17 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'ende-speech)
+(require 'ende)
 
 (defvar ende-speech-test--open-args nil)
 (defvar ende-speech-test--sent nil)
 (defvar ende-speech-test--closed nil)
 (defvar ende-speech-test--killed-recorder nil)
 (defvar ende-speech-test--made-process nil)
-
 (defvar ende-speech-test--switched-buffers nil)
-(defvar ende-speech-test--returned-to-source nil)
+(defvar ende-speech-test--switch-target nil)
+
+(defvar ende-speech-test--transcript-buffer nil)
 
 (defun ende-speech-test--with-session (function)
   "Start a mocked speech session and call FUNCTION with its session."
@@ -31,7 +33,8 @@
         (ende-speech-test--killed-recorder nil)
         (ende-speech-test--made-process nil)
         (ende-speech-test--switched-buffers nil)
-        (ende-speech-test--returned-to-source nil))
+        (ende-speech-test--switch-target nil)
+        (ende-speech-test--transcript-buffer nil))
     (unwind-protect
         (progn
           (with-current-buffer buffer
@@ -45,22 +48,12 @@
                          websocket))
                       ((symbol-function 'switch-to-buffer)
                        (lambda (target &rest _)
-                         (push target ende-speech-test--switched-buffers)))
-                      ((symbol-function 'ende-speech--clear-session)
-                       (lambda (session kill-buffer)
-                         (let ((source (marker-buffer
-                                        (ende-speech--session-marker session))))
-                           (when (and kill-buffer (buffer-live-p source))
-                             (setq ende-speech-test--returned-to-source source))
-                           (set-marker (ende-speech--session-marker session) nil)
-                           (setq ende-speech--active-session nil)))))
+                         (push target ende-speech-test--switched-buffers))))
               (ende-speech-start-talking)))
-          (setq speech-buffer (get-buffer "*ende-speech*"))
+          (setq speech-buffer (get-buffer "*ende-speech*")
+                ende-speech-test--transcript-buffer speech-buffer)
           (let ((session ende-speech--active-session))
-            (cl-letf (((symbol-function 'switch-to-buffer)
-                       (lambda (target &rest _)
-                         (push target ende-speech-test--switched-buffers)))
-                      ((symbol-function 'websocket-openp)
+            (cl-letf (((symbol-function 'websocket-openp)
                        (lambda (_) t))
                       ((symbol-function 'websocket-send-text)
                        (lambda (_ws text)
@@ -95,6 +88,60 @@
 (defun ende-speech-test--event (session type &rest data)
   "Send an event of TYPE and DATA to SESSION."
   (ende-speech--handle-event session (append `((type . ,type)) data)))
+
+(ert-deftest ende-speech/reload-discovers-modules-and-loads-source-files ()
+  (let ((directory (make-temp-file "ende-reload-test" t))
+        (real-load (symbol-function 'load))
+        loaded)
+    (unwind-protect
+        (progn
+          (dolist (file '("ende-speech.el" "ende-new-module.el"
+                          "ende-test.el" "ende-chat-benchmark.el" "ende.el"))
+            (with-temp-file (expand-file-name file directory)
+              (insert (cond
+                       ((equal file "ende-new-module.el")
+                        (concat "(require 'ende-speech)\n"
+                                "(defvar ende-new-module-loaded t)\n"
+                                "(provide 'ende-new-module)\n"))
+                       (t (format "(provide '%s)\n"
+                                  (file-name-sans-extension file)))))))
+          (with-temp-file (expand-file-name "ende-speech.elc" directory)
+            (insert "stale compiled file"))
+          (cl-letf (((symbol-function 'ende-abort-queue) #'ignore)
+                    ((symbol-function 'locate-library)
+                     (lambda (_) (expand-file-name "ende.el" directory)))
+                    ((symbol-function 'load)
+                     (lambda (file &rest arguments)
+                       (push (list file arguments) loaded)
+                       (apply real-load file arguments)))
+                    ((symbol-function 'ende--make-mode-map) #'ignore))
+            (ende-reload))
+          (let ((load-order (nreverse loaded)))
+            (let ((speech-load
+                   (cl-find-if (lambda (entry)
+                                 (string-suffix-p "/ende-speech.el" (car entry)))
+                               load-order))
+                  (new-module-load
+                   (cl-find-if (lambda (entry)
+                                 (string-suffix-p "/ende-new-module.el" (car entry)))
+                               load-order)))
+              (should speech-load)
+              (should new-module-load)
+              (should (< (cl-position speech-load load-order)
+                         (cl-position new-module-load load-order)))
+              (should (nth 2 (cadr speech-load)))
+              (should (nth 3 (cadr speech-load))))
+            (should-not (cl-some (lambda (entry)
+                                   (string-match-p "-test\\.el\\'" (car entry)))
+                                 load-order))
+            (should-not (cl-some (lambda (entry)
+                                   (string-suffix-p "/ende-chat-benchmark.el"
+                                                    (car entry)))
+                                 load-order))
+            (should (string-suffix-p "/ende.el" (caar (last load-order))))
+            (should (featurep 'ende-speech))
+            (should (bound-and-true-p ende-new-module-loaded))))
+      (delete-directory directory t))))
 
 (ert-deftest ende-speech/configuration-rendering-aligned ()
   (let ((buffer (generate-new-buffer " *ende-speech-config-test*"))
@@ -274,8 +321,11 @@
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.delta"
       '(delta . "Visible partial"))
-     (with-current-buffer buffer (ende-speech--accept))
-     (should (memq source ende-speech-test--switched-buffers))
+     (cl-letf (((symbol-function 'switch-to-buffer)
+                (lambda (target &rest _)
+                  (setq ende-speech-test--switch-target target))))
+       (with-current-buffer buffer (ende-speech--accept)))
+     (should (eq ende-speech-test--switch-target source))
      (should (equal (with-current-buffer source (buffer-string))
                     "abVisible partialcd"))
      (should ende-speech-test--killed-recorder)

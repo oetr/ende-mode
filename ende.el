@@ -331,28 +331,53 @@
   (ende--update-mode-line))
 
 ;;;###autoload
+(defun ende-reload--files (directory)
+  "Return Ende source files under DIRECTORY in require dependency order."
+  (let* ((sources
+          (cl-remove-if
+           (lambda (file)
+             (or (string-match-p "-tests?\\.el\\'" file)
+                 (equal file "ende-chat-benchmark.el")))
+           (directory-files directory nil "^ende-.*[.]el$")))
+         (features
+          (mapcar (lambda (file) (file-name-sans-extension file)) sources))
+         (dependencies (make-hash-table :test #'equal))
+         ordered
+         visiting
+         visited)
+    (dolist (file sources)
+      (with-temp-buffer
+        (insert-file-contents (expand-file-name file directory))
+        (let (required)
+          (while (re-search-forward "^(require 'ende-[[:alnum:]-]+" nil t)
+            (let ((feature (substring (match-string-no-properties 0) 10)))
+              (when (member feature features)
+                (push feature required))))
+          (puthash (file-name-sans-extension file) required dependencies))))
+    (cl-labels
+        ((visit (feature)
+           (unless (or (member feature visited) (member feature visiting))
+             (push feature visiting)
+             (dolist (dependency (gethash feature dependencies))
+               (visit dependency))
+             (setq visiting (delete feature visiting)
+                   visited (cons feature visited))
+             (push feature ordered))))
+      (dolist (feature features)
+        (unless (equal feature "ende")
+          (visit feature)))
+    (append (mapcar (lambda (feature) (concat feature ".el"))
+                    (nreverse ordered))
+            '("ende.el")))))
+
 (defun ende-reload ()
-  "Abort active jobs and reload all ende files in dependency order."
+  "Abort active jobs and reload every Ende source file in dependency order."
   (interactive)
   (ende-abort-queue)
-  (let* ((dir (or (file-name-directory (locate-library "ende.el"))
-                  (user-error "ende.el not found on load-path")))
-         (files '("ende-core.el" "ende-operation.el" "ende-protocol.el"
-                  "ende-transport.el" "ende-url.el" "ende-curl.el"
-                  "ende-stream.el" "ende-web-fetch.el"
-                  "ende-provider.el"
-                  "ende-codex.el"
-                  "ende-review.el" "ende-project.el"
-                  "ende-target.el" "ende-ui.el"
-                  "ende-openrouter-batch.el" "ende-llm.el"
-                  "ende-queue.el" "ende-edit.el" "ende-patch.el"
-                  "ende-sandbox.el" "ende-tools.el"
-                  "ende-tool-store.el" "ende-chat-config.el"
-                  "ende-summary.el" "ende-operations.el"
-                  "ende-chat.el" "ende-commands.el" "ende-rubber-duck.el"
-                  "ende-history.el" "ende-selector.el" "ende-queue-ui.el"
-                  "ende.el")))
-    (dolist (f files) (load (expand-file-name f dir)))
+  (let ((dir (or (file-name-directory (locate-library "ende.el"))
+                 (user-error "ende.el not found on load-path"))))
+    (dolist (file (ende-reload--files dir))
+      (load (expand-file-name file dir) nil t t t))
     (setq ende-mode-map (ende--make-mode-map))
     (message "ende: reloaded from %s" dir)))
 

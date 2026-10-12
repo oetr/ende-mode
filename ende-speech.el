@@ -36,9 +36,12 @@
   :type 'integer
   :group 'ende-speech)
 
+;;; Code:
+
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
   state marker buffer websocket recorder recorder-stderr finalized partial status)
+
 
 (defvar ende-speech--active-session nil
   "The one active realtime speech session, if any.")
