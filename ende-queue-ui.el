@@ -769,6 +769,15 @@
       (ende-queue-ui--assert-states-current snapshot)
       (ende-queue-cancel-ids ids))))
 
+(defun ende-queue-ui-inject-guidance ()
+  "Queue user guidance for the running chat job at point."
+  (interactive)
+  (let ((job (ende-queue-ui--current-job)))
+    (unless (ende-job-can-accept-guidance-p job)
+      (user-error "Selected job cannot accept guidance"))
+    (ende-queue-add-guidance job (read-string "Guidance: "))
+    (message "ende: guidance queued for job %d" (ende-job-id job))))
+
 (defun ende-queue-ui-cancel-all ()
   "Cancel every job through the existing broad abort behavior."
   (interactive)
@@ -915,6 +924,7 @@
     (princ "q               Quit window\n")
     (princ "P/R             Pause/resume    k/K  Cancel selected/all\n")
     (princ "c               Change queued policy\n")
+    (princ "i               Inject guidance\n")
     (princ "M-<up/down>     Reorder queued job (Jobs view only)\n")
     (princ "m/u             Mark/unmark     g    Refresh\n")))
 
@@ -947,6 +957,7 @@
     (define-key map (kbd "j") #'ende-queue-ui-visit-source)
     (define-key map (kbd "RET") #'ende-queue-ui-visit-source)
     (define-key map (kbd "w") #'ende-queue-ui-visit-agent-work)
+    (define-key map (kbd "i") #'ende-queue-ui-inject-guidance)
     (define-key map (kbd "P") #'ende-queue-pause)
     (define-key map (kbd "R") #'ende-queue-resume)
     (define-key map (kbd "k") #'ende-queue-ui-cancel)

@@ -145,6 +145,62 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
       (setq ende-queue-ui--refresh-timer nil)))
   (ende-queue-ui--refresh-callback dashboard))
 
+(ert-deftest ende-test/dashboard-injects-guidance-only-for-running-chat-at-point ()
+  (ende-test--dashboard-reset)
+  (let* ((target (ende-target-create
+                  :buffer (current-buffer) :start (point-min) :end (point-max)
+                  :cursor (point-min) :review-policy 'ignore))
+         (chat (ende--make-job :id 101 :type 'chat :state 'running
+                               :target target))
+         (other (ende--make-job :id 102 :type 'insert :state 'running
+                                :target target))
+         (queued (ende--make-job :id 103 :type 'chat :state 'queued
+                                 :target target))
+         (stale (ende--make-job :id 104 :type 'chat :state 'running
+                                :target target))
+         (dashboard (generate-new-buffer "*ende-dashboard-guidance-test*"))
+         (positions nil)
+         (prompts nil))
+    (unwind-protect
+        (progn
+          (setq ende--active-jobs (list chat other))
+          (puthash (ende-job-id other) t ende-queue-ui--marked-ids)
+          (with-current-buffer dashboard
+            (ende-queue-ui-mode)
+            (let ((inhibit-read-only t))
+              (dolist (job (list chat other queued stale))
+                (let ((start (point)))
+                  (insert (format "Job %d\n" (ende-job-id job)))
+                  (add-text-properties
+                   start (point)
+                   (list 'ende-queue-ui-kind 'job
+                         'ende-queue-ui-owner job))
+                  (push (cons job start) positions)))))
+          (cl-letf (((symbol-function #'read-string)
+                     (lambda (prompt) (push prompt prompts) "  keep this text  ")))
+            (with-current-buffer dashboard
+              (goto-char (cdr (assq chat positions)))
+              (ende-queue-ui-inject-guidance))
+            (should (equal (ende-job-pending-guidance chat)
+                           '("  keep this text  ")))
+            (should-not (ende-job-pending-guidance other))
+            (should (equal prompts '("Guidance: ")))
+            (setq prompts nil)
+            (dolist (job (list other queued stale))
+              (with-current-buffer dashboard
+                (goto-char (cdr (assq job positions)))
+                (should-error (ende-queue-ui-inject-guidance)
+                              :type 'user-error)))
+            (should-not prompts)
+            (should (eq (lookup-key ende-queue-ui-mode-map (kbd "i"))
+                        #'ende-queue-ui-inject-guidance)))
+          (should (equal (ende-job-take-pending-guidance chat)
+                         '("  keep this text  ")))
+          (should-not (ende-job-pending-guidance chat)))
+      (when (buffer-live-p dashboard)
+        (kill-buffer dashboard))
+      (ende-test--dashboard-reset))))
+
 (ert-deftest ende-test/dashboard-summary-rows-render-job-fields-in-both-views ()
   (ende-test--dashboard-reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t)))

@@ -29,7 +29,8 @@
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
-  last-usage tool-call-count activity-title activity-status activity-updated-at)
+  last-usage tool-call-count activity-title activity-status activity-updated-at
+  pending-guidance)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -91,6 +92,31 @@
       (setf (ende-job-cancel-function job) cancel-function)
     (ende--invoke-cancellation cancel-function))
   cancel-function)
+
+(defun ende-job-can-accept-guidance-p (job)
+  "Return non-nil when running chat JOB can accept user guidance."
+  (and (ende-job-current-p job)
+       (eq (ende-job-type job) 'chat)))
+
+(defun ende-job-pending-guidance-p (job)
+  "Return non-nil when JOB has guidance awaiting a chat boundary."
+  (consp (ende-job-pending-guidance job)))
+
+(defun ende-queue-add-guidance (job text)
+  "Append exact TEXT to running chat JOB's pending guidance FIFO."
+  (unless (ende-job-can-accept-guidance-p job)
+    (user-error "Selected job cannot accept guidance"))
+  (unless (and (stringp text)
+               (not (string-match-p "\\`[[:space:]]*\\'" text)))
+    (user-error "Guidance must not be empty"))
+  (setf (ende-job-pending-guidance job)
+        (nconc (ende-job-pending-guidance job) (list text)))
+  text)
+
+(defun ende-job-take-pending-guidance (job)
+  "Atomically take and clear JOB's pending guidance in insertion order."
+  (prog1 (ende-job-pending-guidance job)
+    (setf (ende-job-pending-guidance job) nil)))
 
 (defun ende--job-release-current (job)
   "Release JOB from the active set and release its target."
