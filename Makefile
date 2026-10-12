@@ -1,6 +1,10 @@
 EMACS ?= emacs
 EMACSCLIENT ?= emacsclient
 
+# Emacs package directory used by batch commands, including `make test`.
+# Override with `make test PACKAGE_USER_DIR=/path/to/elpa` if needed.
+PACKAGE_USER_DIR ?= $(HOME)/.emacs.d/elpa
+
 .DEFAULT_GOAL := check
 
 # All project Elisp files, excluding Git internals.
@@ -11,6 +15,9 @@ TEST_FILES := $(filter %-test.el %-tests.el,$(EL_FILES))
 
 EMACS_BATCH = $(EMACS) -Q --batch \
 	$(foreach dir,$(EL_DIRS),-L "$(dir)") \
+	--eval '(require (quote package))' \
+	--eval '(setq package-user-dir "$(PACKAGE_USER_DIR)")' \
+	--eval '(package-initialize)' \
 	--eval '(setq load-prefer-newer t)'
 
 
