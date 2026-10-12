@@ -185,6 +185,14 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                            '("  keep this text  ")))
             (should-not (ende-job-pending-guidance other))
             (should (equal prompts '("Guidance: ")))
+            (cl-letf (((symbol-function #'read-string)
+                       (lambda (_prompt) " \t\n")))
+              (with-current-buffer dashboard
+                (goto-char (cdr (assq chat positions)))
+                (should-error (ende-queue-ui-inject-guidance)
+                              :type 'user-error)))
+            (should (equal (ende-job-pending-guidance chat)
+                           '("  keep this text  ")))
             (setq prompts nil)
             (dolist (job (list other queued stale))
               (with-current-buffer dashboard

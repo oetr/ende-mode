@@ -3336,6 +3336,55 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                (funcall callback (nreverse round-messages))))))
       (run-next))))
 
+(defun ende-chat--consume-user-guidance (job &optional assistant-result)
+  "Consume JOB's pending guidance as a stored synthetic tool exchange.
+ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
+  (let ((guidance (ende-job-take-pending-guidance job)))
+    (when guidance
+      (let* ((instruction (ende-job-instruction job))
+             (level (1+ (plist-get instruction :response-level)))
+             (question-id (plist-get instruction :question-id))
+             (request-id (plist-get instruction :request-id))
+             (content (if assistant-result
+                          (or (plist-get assistant-result :content) "")
+                        ""))
+             (calls
+              (mapcar (lambda (_text)
+                        (ende-chat--prepare-tool-call
+                         (list :id (ende-chat--new-id "user-guidance")
+                               :name "user_guidance" :arguments "{}")))
+                      guidance))
+             (normalized-calls
+              (mapcar (lambda (call)
+                        (list :id (ende-chat--tool-value call :id)
+                              :name (ende-chat--tool-value call :name)
+                              :arguments (ende-chat--tool-value call :arguments)))
+                      calls))
+             (assistant
+              (list :role "assistant" :content content
+                    :tool-calls normalized-calls))
+             (messages (list assistant)))
+        (ende-chat--stage-agent-section
+         job
+         (ende-chat--assistant-protocol-text
+          level question-id request-id
+          (if assistant-result
+              (ende-chat--result-properties job assistant-result)
+            "")
+          (list :content content) calls)
+         t)
+        (dolist (entry (cl-mapcar #'cons calls guidance))
+          (let* ((call (car entry))
+                 (text (cdr entry))
+                 (id (ende-chat--tool-value call :id)))
+            (ende-chat--stage-agent-section
+             job (ende-chat--tool-result-text level request-id call text) t)
+            (setq messages
+                  (nconc messages
+                         (list (list :role "tool" :tool-call-id id
+                                     :content text))))))
+        messages))))
+
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
   (let* ((definitions (ende-tool-definitions))
@@ -3361,7 +3410,13 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
            (lambda ()
              (let ((calls (ende-chat--tool-call-list result)))
                (if (null calls)
-                   (ende-chat--apply-result job result)
+                   (if (ende-job-pending-guidance-p job)
+                       (let ((guidance
+                              (ende-chat--consume-user-guidance job result)))
+                         (setq messages (append messages guidance))
+                         (ende--validate-messages messages)
+                         (ende--send-llm job messages #'on-done nil t))
+                     (ende-chat--apply-result job result))
                  (let* ((instruction (ende-job-instruction job))
                          (request-id (plist-get instruction :request-id))
                          (question-id (plist-get instruction :question-id)))
@@ -3399,6 +3454,10 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                             (lambda ()
                               (setq messages
                                     (append messages round-messages))
+                              (setq messages
+                                    (append messages
+                                            (ende-chat--consume-user-guidance
+                                             job)))
                               (ende--validate-messages messages)
                               (ende--send-llm
                                 job messages #'on-done nil t)))))))))))))))

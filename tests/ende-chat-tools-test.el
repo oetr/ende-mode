@@ -180,6 +180,197 @@
       (ende-test--reset)
       (delete-directory root t))))
 
+(ert-deftest ende-test/chat-guidance-joins-an-in-flight-final-turn-and-round-trips ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          (list '(:content "I was about to give the final answer.")
+                "Final answer after guidance.")
+          t))
+        job)
+    (unwind-protect
+        (ende-test--with-buffer
+            "* Conversation\n** Question\nConsider the request.\n"
+          (org-mode)
+          (ende-test--chat-goto "** Question")
+          (setq job (ende-ask '(:name remote :model "fixture")))
+          (should (eq (ende-job-state job) 'running))
+          (ende-queue-add-guidance job "First exact guidance.\nline two")
+          (ende-queue-add-guidance job "Second guidance, unchanged.")
+          (ende-test--complete-call (car ende-test--calls))
+          (should (eq (ende-job-state job) 'running))
+          (should (= (length ende-test--calls) 2))
+          (should-not (ende-job-pending-guidance job))
+          (should (= (ende-job-tool-call-count job) 0))
+          (let* ((call (cadr ende-test--calls))
+                 (messages (ende-test--chat-protocol-messages
+                            (plist-get call :messages)))
+                 (assistant
+                  (cl-find-if
+                   (lambda (message)
+                     (plist-member message :tool-calls))
+                   messages))
+                 (results
+                  (cl-remove-if-not
+                   (lambda (message)
+                     (equal (plist-get message :role) "tool"))
+                   messages)))
+            (should-not
+             (member "user_guidance"
+                     (ende-test--tool-definition-names
+                      (plist-get (plist-get call :options)
+                                 :tool-definitions))))
+            (should (equal (plist-get assistant :role) "assistant"))
+            (should (equal (plist-get assistant :content)
+                           "I was about to give the final answer."))
+            (should (equal (mapcar (lambda (tool-call)
+                                     (plist-get tool-call :name))
+                                   (plist-get assistant :tool-calls))
+                           '("user_guidance" "user_guidance")))
+            (should (equal (mapcar (lambda (tool-call)
+                                     (plist-get tool-call :arguments))
+                                   (plist-get assistant :tool-calls))
+                           '("{}" "{}")))
+            (should (= (length (delete-dups
+                                (mapcar (lambda (tool-call)
+                                          (plist-get tool-call :id))
+                                        (plist-get assistant :tool-calls))))
+                       2))
+            (should (equal (mapcar (lambda (result)
+                                     (plist-get result :content))
+                                   results)
+                           '("First exact guidance.\nline two"
+                             "Second guidance, unchanged."))))
+          (should-not (string-match-p "First exact guidance" (buffer-string)))
+          (should-not (string-match-p "First exact guidance"
+                                      (ende-chat--staged-text job)))
+          (ende-test--complete-call (cadr ende-test--calls))
+          (should (eq (ende-job-state job) 'completed))
+          (goto-char (point-max))
+          (insert "** Follow-up\nContinue from that answer.\n")
+          (ende-test--chat-goto "** Follow-up")
+          (let* ((history (ende-chat-context-at-point))
+                 (assistant
+                  (cl-find-if
+                   (lambda (message)
+                     (and (equal (plist-get message :role) "assistant")
+                          (cl-some
+                           (lambda (tool-call)
+                             (equal (plist-get tool-call :name) "user_guidance"))
+                           (plist-get message :tool-calls))))
+                   history))
+                 (results
+                  (cl-remove-if-not
+                   (lambda (message)
+                     (equal (plist-get message :role) "tool"))
+                   history)))
+            (should assistant)
+            (should (equal (mapcar (lambda (tool-call)
+                                     (plist-get tool-call :arguments))
+                                   (plist-get assistant :tool-calls))
+                           '("{}" "{}")))
+            (should (equal (mapcar (lambda (result)
+                                     (plist-get result :content))
+                                   results)
+                           '("First exact guidance.\nline two"
+                             "Second guidance, unchanged.")))
+            (should (string-match-p
+                     "I was about to give the final answer"
+                     (ende-test--chat-context-text history)))))
+      (ende-test--reset))))
+
+(ert-deftest ende-test/chat-guidance-follows-all-results-in-an-async-tool-round ()
+  (ende-test--reset)
+  (let* ((ende-tools--registry (copy-sequence ende-tools--registry))
+         (pending nil)
+         (executed-tools nil)
+         (original-tool-response-async
+          (symbol-function #'ende-chat--tool-response-async))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls
+                       (list '(:id "real-one" :name "ende_test_guidance_tool"
+                               :arguments "{}")
+                             '(:id "real-two" :name "ende_test_guidance_tool"
+                               :arguments "{}")))
+                 "All work is complete.")
+           t))
+         job)
+    (unwind-protect
+        (progn
+          (ende-tool-register
+           'ende_test_guidance_tool "Guidance ordering fixture"
+           ende-tools--empty-object-schema
+           (lambda (_arguments _root callback) (push callback pending))
+           nil :no-resource '(:requires-root nil :async t))
+          (cl-letf (((symbol-function #'ende-chat--tool-response-async)
+                     (lambda (call configuration callback)
+                       (push (ende-chat--tool-value call :name) executed-tools)
+                       (funcall original-tool-response-async
+                                call configuration callback))))
+            (ende-test--with-buffer
+              (concat (ende-test--chat-config-block
+                       '((tools ende_test_guidance_tool)))
+                      "* Conversation\n** Question\nWork on both items.\n")
+            (org-mode)
+            (ende-test--chat-goto "** Question")
+            (setq job (ende-ask '(:name remote :model "fixture")))
+            (ende-test--complete-call (car ende-test--calls))
+            (should (= (length pending) 1))
+            (ende-queue-add-guidance job "Wait until both tools finish.")
+            (funcall (car pending) '(:first t) nil)
+            (should (= (length ende-test--calls) 1))
+            (should (= (length pending) 2))
+            (funcall (car pending) '(:second t) nil)
+            (should (= (length ende-test--calls) 2))
+            (let* ((messages (ende-test--chat-protocol-messages
+                              (plist-get (cadr ende-test--calls) :messages)))
+                   (tool-round
+                    (cl-find-if
+                     (lambda (message)
+                       (and (equal (plist-get message :role) "assistant")
+                            (cl-some
+                             (lambda (call)
+                               (equal (plist-get call :name)
+                                      "ende_test_guidance_tool"))
+                             (plist-get message :tool-calls))))
+                     messages))
+                   (assistant-index (cl-position tool-round messages :test #'eq)))
+              (should tool-round)
+              (should (equal (mapcar (lambda (call) (plist-get call :id))
+                                     (plist-get tool-round :tool-calls))
+                             '("real-one" "real-two")))
+              (should (equal
+                       (mapcar (lambda (message)
+                                 (plist-get message :tool-call-id))
+                               (seq-take
+                                (cl-remove-if-not
+                                 (lambda (message)
+                                   (equal (plist-get message :role) "tool"))
+                                 messages)
+                                2))
+                       '("real-one" "real-two")))
+              (should (equal
+                       (plist-get (nth (+ assistant-index 3) messages) :role)
+                       "assistant"))
+              (let* ((guidance-turn (nth (+ assistant-index 3) messages))
+                     (guidance-call (car (plist-get guidance-turn :tool-calls))))
+                (should (equal (plist-get guidance-turn :role) "assistant"))
+                (should (equal (plist-get guidance-call :name) "user_guidance"))
+                (should (equal (plist-get guidance-call :arguments) "{}"))
+                (should (equal (plist-get (nth (+ assistant-index 4) messages)
+                                         :tool-call-id)
+                               (plist-get guidance-call :id)))
+                (should (equal (plist-get (nth (+ assistant-index 4) messages)
+                                         :content)
+                               "Wait until both tools finish."))))
+              (should (equal (nreverse executed-tools)
+                             '("ende_test_guidance_tool"
+                               "ende_test_guidance_tool")))
+              (should (= (ende-job-tool-call-count job) 2))
+              (should-not (ende-job-pending-guidance job)))))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/chat-work-container-is-only-created-for-tool-loops ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("A plain answer.") t)))
