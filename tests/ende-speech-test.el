@@ -113,8 +113,7 @@
                     ((symbol-function 'load)
                      (lambda (file &rest arguments)
                        (push (list file arguments) loaded)
-                       (apply real-load file arguments)))
-                    ((symbol-function 'ende--make-mode-map) #'ignore))
+                       (apply real-load file arguments))))
             (ende-reload))
           (let ((load-order (nreverse loaded)))
             (let ((speech-load
