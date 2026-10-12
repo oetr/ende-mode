@@ -148,7 +148,7 @@
   (let ((podman (executable-find "podman")))
     (unless podman
       (error "Podman is not installed"))
-    (list podman "--log-level=error" "--cgroup-manager=cgroupfs"
+    (list podman "--log-level=error" "--cgroup-manager=systemd"
           "--hooks-dir" (ende-sandbox-hooks sandbox))))
 
 (defun ende-sandbox--podman-call (sandbox &rest arguments)
@@ -310,7 +310,7 @@ flags."
    (list "run" "--detach" "--pull=never" "--network=none"
          "--pid=private" "--ipc=private" "--uts=private"
          "--user=0" "--cap-drop=all"
-         "--security-opt=no-new-privileges" "--memory=2g" "--cpus=2"
+         "--security-opt=no-new-privileges" "--memory=2g"
          "--pids-limit=256" "--http-proxy=false" "--no-hosts"
          "--image-volume=ignore" "--stop-timeout=2" "--name" name
          "--volume"
