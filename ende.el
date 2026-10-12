@@ -23,6 +23,8 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'eldoc)
+(require 'org-element)
 (require 'ende-core)
 (require 'ende-operation)
 (require 'ende-provider)
@@ -106,11 +108,223 @@
 (add-hook 'ende-job-event-functions #'ende--mode-line-job-event)
 (add-hook 'ende-review-change-functions #'ende--mode-line-review-event)
 
+(defconst ende--config-vocabulary
+  '(("root" top-level "root PATH — Set the configuration root directory.")
+    ("podman-image" top-level
+     "podman-image IMAGE — Select a digest-pinned Podman image.")
+    ("group" top-level "group NAME TOOL... — Define a named tool group.")
+    ("resource" top-level "resource NAME ... — Define a named file or URL resource.")
+    ("tools" top-level "tools NAME... — Activate one or more tools or tool groups.")
+    ("clear-tools" top-level "clear-tools — Clear the active tool selection.")
+    ("set-tool-resources" top-level
+     "set-tool-resources TOOL... :resources RESOURCE... — Replace resource assignments for the selected tools.")
+    ("add-tool-resources" top-level
+     "add-tool-resources TOOL... :resources RESOURCE... — Add resource assignments for the selected tools.")
+    ("clear-tool-resources" top-level
+     "clear-tool-resources — Clear resource assignments.")
+    ("include" rule "include PATTERN — Allow paths or URLs matching PATTERN.")
+    ("exclude" rule "exclude PATTERN — Exclude paths or URLs matching PATTERN.")
+    (":type" option ":type TYPE — Select resource type: file or url.")
+    (":root" option ":root PATH — Set the root directory for a file resource.")
+    (":allow-private-addresses" option
+     ":allow-private-addresses t|nil — Allow private addresses for a URL resource.")
+    (":resources" option
+     ":resources RESOURCE... — Separate tools from resources in an assignment.")
+    ("file" value "file — A local file or directory resource.")
+    ("url" value "url — A URL resource.")
+    ("t" value "t — Enable the associated boolean option.")
+    ("nil" value "nil — Disable the associated boolean option.")
+    ("#+begin_ende" delimiter "#+begin_ende — Start an Ende configuration block.")
+    ("#+end_ende" delimiter "#+end_ende — End an Ende configuration block."))
+  "Presentation metadata for Ende configuration tokens and their help text.")
+
+(defun ende--config-block-at-p (position)
+  "Return non-nil if POSITION is inside an Org special block of type ende."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (condition-case nil
+          (let* ((element (org-element-at-point position))
+                 (block (if (eq (org-element-type element) 'special-block)
+                            element
+                          (org-element-lineage
+                           element '(special-block) t))))
+            (and block
+                 (string-equal
+                  (downcase (or (org-element-property :type block) ""))
+                  "ende")
+                 (<= (org-element-property :begin block) position)
+                 (< position (org-element-property :end block))))
+        (error nil)))))
+
+(defun ende--font-lock-match-delimiter (limit)
+  "Match Ende block delimiters before LIMIT."
+  (let ((case-fold-search t)
+        found)
+    (while (and (not found)
+                (re-search-forward
+                 "^[ \t]*\\(#\\+\\(?:begin\\|end\\)_ende\\)\\b"
+                 limit t))
+      (let ((start (match-beginning 1))
+            (end (match-end 1)))
+        (when (ende--config-block-at-p start)
+          (set-match-data (list start end start end))
+          (setq found t))
+        ;; Org parsing can move point; keep searching after rejected text.
+        (goto-char end)))
+    found))
+
+(defun ende--config-entry (token)
+  "Return vocabulary metadata for TOKEN, case-insensitively."
+  (assoc-string token ende--config-vocabulary t))
+
+(defun ende--token-character-p (character)
+  "Return non-nil if CHARACTER can be part of an Ende token."
+  (and character
+       (or (= character ?:)
+           (string-match-p "[[:alnum:]_-]" (char-to-string character)))))
+
+(defun ende--comment-before-p (position)
+  "Return non-nil if a semicolon precedes POSITION on the same line."
+  (save-excursion
+    (goto-char position)
+    (let (found)
+      (while (and (not found)
+                  (re-search-backward ";" (line-beginning-position) t))
+        (unless (nth 3 (syntax-ppss (point)))
+          (setq found t)))
+      found)))
+
+(defun ende--font-lock-match-class (class limit)
+  "Match vocabulary entries of CLASS before LIMIT."
+  (let (found)
+    (while (and (not found)
+                (re-search-forward
+                 ":[[:alnum:]_-]+\\|[[:alnum:]_-]+" limit t))
+      (let* ((start (match-beginning 0))
+             (end (match-end 0))
+             (token (match-string-no-properties 0))
+             (entry (ende--config-entry token)))
+        (when (and entry
+                   (eq (nth 1 entry) class)
+                   (not (ende--token-character-p (char-before start)))
+                   (not (ende--token-character-p (char-after end)))
+                   (not (nth 3 (syntax-ppss start)))
+                   (not (ende--comment-before-p start))
+                   (ende--config-block-at-p start))
+          (set-match-data (list start end))
+          (setq found t))
+        ;; Some syntax/parser helpers move point, so advance only after all
+        ;; candidate checks have finished.
+        (goto-char end)))
+    found))
+
+(defun ende--font-lock-match-top-level (limit)
+  "Match top-level Ende forms before LIMIT."
+  (ende--font-lock-match-class 'top-level limit))
+
+(defun ende--font-lock-match-rule (limit)
+  "Match Ende resource rules before LIMIT."
+  (ende--font-lock-match-class 'rule limit))
+
+(defun ende--font-lock-match-option (limit)
+  "Match Ende options before LIMIT."
+  (ende--font-lock-match-class 'option limit))
+
+(defun ende--font-lock-match-value (limit)
+  "Match fixed Ende values before LIMIT."
+  (ende--font-lock-match-class 'value limit))
+
+(defun ende--font-lock-match-comment (limit)
+  "Match Ende comment delimiters and text before LIMIT."
+  (let (found)
+    (while (and (not found)
+                (re-search-forward "\\(;\\)\\(.*\\)$" limit t))
+      (let ((matches (match-data))
+            (start (match-beginning 1)))
+        (when (and (not (nth 3 (syntax-ppss start)))
+                   (ende--config-block-at-p start))
+          (set-match-data matches)
+          (setq found t))
+        (unless found
+          (goto-char (1+ start)))))
+    found))
+
+(defconst ende--font-lock-keywords
+  '((ende--font-lock-match-delimiter
+     (1 font-lock-preprocessor-face t))
+    (ende--font-lock-match-top-level (0 font-lock-keyword-face t))
+    (ende--font-lock-match-rule (0 font-lock-builtin-face t))
+    (ende--font-lock-match-option (0 font-lock-type-face t))
+    (ende--font-lock-match-value (0 font-lock-constant-face t))
+    (ende--font-lock-match-comment
+     (1 font-lock-comment-delimiter-face t)
+     (2 font-lock-comment-face t)))
+  "Font-lock rules installed by `ende-mode'.")
+
+(defun ende--config-entry-at-point ()
+  "Return vocabulary metadata for the Ende token at point, or nil."
+  (let ((position (point))
+        entry)
+    (save-excursion
+      (beginning-of-line)
+      (let ((case-fold-search t))
+        (when (looking-at
+               "^[ \t]*\\(#\\+\\(?:begin\\|end\\)_ende\\)\\b")
+          (let ((start (match-beginning 1))
+                (end (match-end 1))
+                (token (match-string-no-properties 1)))
+            (when (and (<= start position) (< position end)
+                       (ende--config-block-at-p start))
+              (setq entry (ende--config-entry token))))))
+      (unless entry
+        (let ((line-end (line-end-position)))
+          (while (and (not entry)
+                      (re-search-forward
+                       ":[[:alnum:]_-]+\\|[[:alnum:]_-]+" line-end t))
+            (let ((start (match-beginning 0))
+                  (end (match-end 0))
+                  (token (match-string-no-properties 0)))
+              (when (and (<= start position) (< position end)
+                         (not (ende--token-character-p (char-before start)))
+                         (not (ende--token-character-p (char-after end)))
+                         (not (nth 3 (syntax-ppss start)))
+                         (not (ende--comment-before-p start))
+                         (ende--config-block-at-p start))
+                (setq entry (ende--config-entry token)))
+              (goto-char end))))))
+    entry))
+
+(defun ende--eldoc-documentation ()
+  "Return short help for an Ende configuration token at point."
+  (let ((entry (ende--config-entry-at-point)))
+    (when entry
+      (nth 2 entry))))
+
+(defun ende--refresh-fontification ()
+  "Refresh the current buffer's fontification."
+  (when (fboundp 'font-lock-flush)
+    (font-lock-flush (point-min) (point-max)))
+  (when (fboundp 'font-lock-ensure)
+    (font-lock-ensure (point-min) (point-max))))
+
+(defun ende--configure-presentation (enabled)
+  "Install or remove Ende presentation support according to ENABLED."
+  (if enabled
+      (progn
+        (font-lock-add-keywords nil ende--font-lock-keywords 'append)
+        (add-hook 'eldoc-documentation-functions
+                  #'ende--eldoc-documentation nil t))
+    (font-lock-remove-keywords nil ende--font-lock-keywords)
+    (remove-hook 'eldoc-documentation-functions
+                 #'ende--eldoc-documentation t))
+  (ende--refresh-fontification))
+
 ;;;###autoload
 (define-minor-mode ende-mode
   "Minor mode for queueing LLM requests."
   :lighter ende--mode-line-string
   :keymap ende-mode-map
+  (ende--configure-presentation ende-mode)
   (when ende-mode
     (ende-model-selection-initialize-buffer))
   (ende--update-mode-line))
