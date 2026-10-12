@@ -4,7 +4,7 @@
 ;; Author: Peter
 ;; Version: 0.3
 ;; Keywords: convenience, tools, llm
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "30.1") (websocket "1.12"))
 
 ;;; Commentary:
 
@@ -43,6 +43,7 @@
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-history)
+(require 'ende-speech)
 (require 'ende-selector)
 (require 'ende-queue-ui)
 
