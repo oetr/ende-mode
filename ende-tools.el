@@ -68,8 +68,8 @@
 
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
-  name description parameters handler resource-kind requires-root mutates-local async
-  always-available)
+  name description parameters handler resource-kind requires-resources requires-root
+  mutates-local async always-available)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
@@ -100,25 +100,36 @@ HANDLER receives an arguments object and a canonical project root.  NAME is a
 symbol internally and is exposed to model transports as a string.  Pass
 `:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
 the historic `:no-resource' registration form; OPTIONS may specify
-`:resource-kind' (`file', `url', or `none'), `:requires-root', `:async', and
-`:always-available'.  Always-available tools must be resource-free, rootless,
-and non-mutating; chat configuration cannot disable them."
+`:resource-kind' (`file', `url', or `none'), `:requires-resources',
+`:requires-root', `:async', and `:always-available'.  File and URL tools require
+resources by default; resource-free tools do not.  Always-available tools must
+be resource-free, rootless, and non-mutating; chat configuration cannot disable
+them."
   (unless (and (symbolp name) (functionp handler))
     (error "invalid ende tool registration: %s" name))
   (let* ((kind (or (plist-get options :resource-kind)
                    (if (eq resource-policy :no-resource) 'none 'file)))
+         (requires-resources
+          (if (plist-member options :requires-resources)
+              (plist-get options :requires-resources)
+            (not (eq kind 'none))))
          (requires-root (if (plist-member options :requires-root)
                             (plist-get options :requires-root)
                           t))
          (tool (ende-tool--create
                 :name name :description description :parameters parameters
                 :handler handler :resource-kind kind
+                :requires-resources requires-resources
                 :requires-root requires-root
                 :async (eq (plist-get options :async) t)
                 :always-available (eq (plist-get options :always-available) t)
                 :mutates-local (eq read-only :write))))
     (unless (memq kind '(file url none))
       (error "invalid ende tool resource kind: %s" kind))
+    (unless (memq requires-resources '(nil t))
+      (error "invalid ende tool resource requirement: %s" requires-resources))
+    (when (and (eq kind 'none) requires-resources)
+      (error "resource-free tool cannot require assigned resources: %s" name))
     (when (and (ende-tool-always-available tool)
                (or (not (eq kind 'none)) requires-root
                    (ende-tool-mutates-local tool)))
@@ -160,7 +171,6 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
 
 (defun ende-tool--call-root (tool root access-config)
   (let* ((tool-name (ende-tool-name tool))
-         (kind (ende-tool-resource-kind tool))
          (root-required (ende-tool-requires-root tool))
          (assigned (cdr (assq tool-name
                               (plist-get access-config :tool-resources)))))
@@ -168,7 +178,7 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
       (unless (memq tool-name (ende-tool-active-names
                                (plist-get access-config :active-tools)))
         (error "tool is not active in this chat: %s" tool-name))
-      (when (and (not (eq kind 'none)) (null assigned))
+      (when (and (ende-tool-requires-resources tool) (null assigned))
         (error "tool has no assigned resources: %s" tool-name)))
     (when (and access-config root-required
                (null (plist-get access-config :root)))

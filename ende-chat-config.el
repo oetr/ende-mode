@@ -515,7 +515,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     (unless (plist-get normalized :root)
       (ende-chat-config--error "an explicit root is required by the active tools")))
   (dolist (tool (plist-get normalized :active-tools))
-    (when (and (not (eq (ende-tool-resource-kind (ende-tool--find tool)) 'none))
+    (when (and (ende-tool-requires-resources (ende-tool--find tool))
                (null (cdr (assq tool (plist-get normalized :tool-resources)))))
       (let ((revoked (cdr (assq tool (plist-get configuration
 						:revoked-resources)))))

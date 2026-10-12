@@ -276,6 +276,76 @@
       (when (file-directory-p ende-test-root)
         (delete-directory ende-test-root t)))))
 
+(ert-deftest ende-test/chat-config-optional-resource-requirements ()
+  (let ((ende-tools--registry (copy-sequence ende-tools--registry))
+        (root (make-temp-file "ende-config-optional-resource-" t))
+        (tool-name 'ende_test_optional_file_tool))
+    (unwind-protect
+        (progn
+          (ende-tool-register
+           tool-name "Optional file-resource test tool"
+           ende-tools--empty-object-schema
+           (lambda (_arguments _root) '(:ok t)) nil nil
+           '(:resource-kind file :requires-resources nil))
+          (should-not
+           (ende-tool-requires-resources (ende-tool--find tool-name)))
+          (should (ende-tool-requires-resources (ende-tool--find 'read_file)))
+          (should (ende-tool-requires-resources (ende-tool--find 'web_fetch)))
+          (should-not (ende-tool-requires-resources
+                       (ende-tool--find 'run_host_command)))
+          (should-error
+           (ende-tool-register
+            'ende_test_invalid_resource_requirement
+            "Invalid resource requirement" ende-tools--empty-object-schema
+            (lambda (_arguments _root) '(:ok t)) nil nil
+            '(:resource-kind none :requires-resources t)))
+          (dolist (assignment
+                   '(nil
+                     ((set-tool-resources ende_test_optional_file_tool
+                                          :resources project))))
+            (with-temp-buffer
+              (org-mode)
+              (insert
+               (ende-test--chat-config-block
+                (append `((root ,root)
+                          (resource project (include "**"))
+                          (tools ende_test_optional_file_tool))
+                        assignment))
+               "* Conversation\n** Tool access\n")
+              (let* ((document (ende-chat--build-document))
+                     (configuration
+                      (ende-test--chat-config-at document "Tool access"))
+                     (call (ende-tool-call
+                            tool-name nil root configuration)))
+                (should (memq tool-name (plist-get configuration :active-tools)))
+                (should (plist-get call :ok)))))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (resource docs :type url
+                          (include "https://example.com/**"))
+                (tools ende_test_optional_file_tool)
+                (set-tool-resources ende_test_optional_file_tool
+                                    :resources docs)))
+             "* Conversation\n** Tool access\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document)
+                                        "Tool access")))
+          (with-temp-buffer
+            (org-mode)
+            (insert
+             (ende-test--chat-config-block
+              `((root ,root)
+                (tools read_file)))
+             "* Conversation\n** Tool access\n")
+            (should-error
+             (ende-test--chat-config-at (ende-chat--build-document)
+                                        "Tool access"))))
+      (delete-directory root t))))
+
+
 (ert-deftest ende-test/chat-config-file-resources-have-independent-roots ()
   (let* ((project-a (make-temp-file "ende-config-project-a-" t))
          (project-b (make-temp-file "ende-config-project-b-" t))
