@@ -44,6 +44,12 @@
     (ende-transport-session-invoke
      (ende-stream-lifecycle stream) :on-event event)))
 
+(defun ende-stream-note-generation-start (stream)
+  "Record the beginning of generation for STREAM if not already recorded."
+  (unless (ende-stream-session-generation-start stream)
+    (setf (ende-stream-session-generation-start stream) (float-time)))
+  (ende-stream-session-generation-start stream))
+
 (defun ende-stream-record-delta (stream channel text limit-callback)
   "Accumulate and emit TEXT on CHANNEL for STREAM.
 Call LIMIT-CALLBACK with a resource error if the output limit is exceeded.
@@ -66,8 +72,7 @@ Return non-nil when the delta was accepted and STREAM remains active."
             (push text (ende-stream-session-content-parts stream))
           (push text (ende-stream-session-thinking-parts stream)))
         (cl-incf (ende-stream-session-estimated-chars stream) (length text))
-        (unless (ende-stream-session-generation-start stream)
-          (setf (ende-stream-session-generation-start stream) (float-time)))
+        (ende-stream-note-generation-start stream)
         (ende-stream-emit
          stream (list :type :delta :channel channel :text text))
         (not (ende-stream-terminal-p stream))))))

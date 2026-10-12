@@ -77,62 +77,90 @@
 
 (ert-deftest ende-test/openai-streamed-function-call-is-collected-without-final-output ()
   (let* ((events nil)
+         (clock 5.0)
          (session
           (ende-codex--make-session
            :profile '(:model "gpt-test")
            :callbacks (list :on-event
                             (lambda (event) (push event events))))))
-    (dolist
-        (event
-         (list
-          (concat
-           "{\"type\":\"response.output_item.added\","
-           "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
-           "\"type\":\"function_call\",\"call_id\":\"call-1\","
-           "\"name\":\"read_file\",\"arguments\":\"\"}}")
-          (concat
-           "{\"type\":\"response.function_call_arguments.delta\","
-           "\"output_index\":0,\"item_id\":\"fc_1\","
-           "\"delta\":\"{\\\"path\\\":\"}")
-          (concat
-           "{\"type\":\"response.function_call_arguments.delta\","
-           "\"output_index\":0,\"item_id\":\"fc_1\","
-           "\"delta\":\"\\\"ende.el\\\"}\"}")
-          (concat
-           "{\"type\":\"response.function_call_arguments.done\","
-           "\"output_index\":0,\"item_id\":\"fc_1\","
-           "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}")
-          (concat
-           "{\"type\":\"response.output_item.done\","
-           "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
-           "\"type\":\"function_call\",\"call_id\":\"call-1\","
-           "\"name\":\"read_file\","
-           "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}}")
-          (concat
-           "{\"type\":\"response.completed\",\"response\":{"
-           "\"output\":[],\"usage\":{\"output_tokens\":40}}}")))
-      (ende-codex--handle-event
-       session (ende-protocol-json-read-string event)))
-    (let* ((call (car (plist-get (ende-codex--result session) :tool-calls)))
-           (diagnostics
-            (mapcar (lambda (event) (plist-get event :text))
-                    (cl-remove-if-not
-                     (lambda (event)
-                       (eq (plist-get event :type) :diagnostic))
-                     (nreverse events)))))
-      (should (equal (plist-get call :id) "call-1"))
-      (should (equal (plist-get call :name) "read_file"))
-      (should (equal (plist-get call :arguments)
-                     "{\"path\":\"ende.el\"}"))
-      (should (member
-               "OpenAI Responses response.output_item.added: function_call(read_file)"
-               diagnostics))
-      (should (member
-               "OpenAI Responses response.output_item.done: function_call(read_file)"
-               diagnostics))
-      (should (member "OpenAI Responses output items: (none)" diagnostics))
-      (should-not (string-match-p "ende\\.el"
-                                  (mapconcat #'identity diagnostics "\n"))))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+      (dolist
+          (event
+           (list
+            (concat
+             "{\"type\":\"response.output_item.added\","
+             "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
+             "\"type\":\"function_call\",\"call_id\":\"call-1\","
+             "\"name\":\"read_file\",\"arguments\":\"\"}}")
+            (concat
+             "{\"type\":\"response.function_call_arguments.delta\","
+             "\"output_index\":0,\"item_id\":\"fc_1\","
+             "\"delta\":\"\"}")
+            (concat
+             "{\"type\":\"response.function_call_arguments.delta\","
+             "\"output_index\":0,\"item_id\":\"fc_1\","
+             "\"delta\":\"{\\\"path\\\":\"}")
+            (concat
+             "{\"type\":\"response.function_call_arguments.delta\","
+             "\"output_index\":0,\"item_id\":\"fc_1\","
+             "\"delta\":\"\\\"ende.el\\\"}\"}")
+            (concat
+             "{\"type\":\"response.function_call_arguments.done\","
+             "\"output_index\":0,\"item_id\":\"fc_1\","
+             "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}")
+            (concat
+             "{\"type\":\"response.output_item.done\","
+             "\"output_index\":0,\"item\":{\"id\":\"fc_1\","
+             "\"type\":\"function_call\",\"call_id\":\"call-1\","
+             "\"name\":\"read_file\","
+             "\"arguments\":\"{\\\"path\\\":\\\"ende.el\\\"}\"}}")
+            (concat
+             "{\"type\":\"response.completed\",\"response\":{"
+             "\"output\":[],\"usage\":{\"output_tokens\":40}}}")))
+        (when (and (string-match-p "response.function_call_arguments.delta" event)
+                   (not (string-match-p "\\\"delta\\\":\\\"\\\"" event)))
+          (setq clock (if (ende-stream-session-generation-start
+                           (ende-codex--session-stream session))
+                          11.0
+                        10.0)))
+        (when (string-match-p "response.completed" event)
+          (setq clock 12.0))
+        (ende-codex--handle-event
+         session (ende-protocol-json-read-string event))
+        (when (or (string-match-p "response.output_item.added" event)
+                  (string-match-p "\\\"delta\\\":\\\"\\\"" event))
+          (should-not (ende-stream-session-generation-start
+                       (ende-codex--session-stream session)))))
+      (let* ((result (ende-codex--result session))
+             (call (car (plist-get result :tool-calls)))
+             (usage-event
+              (cl-find-if (lambda (event)
+                            (eq (plist-get event :type) :usage))
+                          events))
+             (diagnostics
+              (mapcar (lambda (event) (plist-get event :text))
+                      (cl-remove-if-not
+                       (lambda (event)
+                         (eq (plist-get event :type) :diagnostic))
+                       (nreverse events)))))
+        (should (= (ende-stream-session-generation-start
+                    (ende-codex--session-stream session))
+                   10.0))
+        (should (= (plist-get usage-event :speed) 20.0))
+        (should (= (plist-get result :speed) 20.0))
+        (should (equal (plist-get call :id) "call-1"))
+        (should (equal (plist-get call :name) "read_file"))
+        (should (equal (plist-get call :arguments)
+                       "{\"path\":\"ende.el\"}"))
+        (should (member
+                 "OpenAI Responses response.output_item.added: function_call(read_file)"
+                 diagnostics))
+        (should (member
+                 "OpenAI Responses response.output_item.done: function_call(read_file)"
+                 diagnostics))
+        (should (member "OpenAI Responses output items: (none)" diagnostics))
+        (should-not (string-match-p "ende\\.el"
+                                    (mapconcat #'identity diagnostics "\n")))))))
 
 (ert-deftest ende-test/codex-session-clears-resource-slots ()
   (let ((process-buffer (generate-new-buffer " *ende-test-codex-process*"))

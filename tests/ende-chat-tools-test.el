@@ -66,6 +66,40 @@
           (should-not (string-match-p
                        "secret\\.el" (mapconcat #'identity diagnostics "\n"))))))))
 
+(ert-deftest ende-test/chat-completions-tool-only-stream-starts-generation-timing ()
+  (let* ((clock 5.0)
+         (session
+          (ende-llm--make-session
+           :profile '(:model "test-model")
+           :callbacks nil
+           :tool-calls (make-hash-table :test #'eql))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+      ;; A call ID alone announces the call but contains no generated output.
+      (ende-llm--handle-json
+       session
+       (ende-protocol-json-read-string
+        (concat
+         "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+         "\"index\":0,\"id\":\"call-1\",\"type\":\"function\"}]}}]}")))
+      (should-not (ende-stream-session-generation-start
+                   (ende-llm--session-stream session)))
+      (setq clock 10.0)
+      (ende-llm--handle-json
+       session
+       (ende-protocol-json-read-string
+        (concat
+         "{\"choices\":[{\"delta\":{\"tool_calls\":[{"
+         "\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}")))
+      (should (= (ende-stream-session-generation-start
+                  (ende-llm--session-stream session))
+                 10.0))
+      (setq clock 12.0)
+      (ende-llm--handle-json
+       session
+       (ende-protocol-json-read-string
+        "{\"choices\":[],\"usage\":{\"completion_tokens\":40}}"))
+      (should (= (plist-get (ende-llm--result session) :speed) 20.0)))))
+
 (ert-deftest ende-test/chat-tool-messages-adapt-to-provider-protocols ()
   (let* ((transcript
           (list (list :role "assistant" :content nil

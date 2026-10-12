@@ -1118,6 +1118,10 @@ When APPEND is non-nil, append the argument delta to the stored value."
                         (if (string-suffix-p ".delta" type) "delta"
                           "arguments")
                         json)))
+        (when (and (string-suffix-p ".delta" type)
+                   (stringp arguments) (> (length arguments) 0))
+          (ende-stream-note-generation-start
+           (ende-codex--session-stream session)))
         (ende-codex--update-tool-call-arguments
          session output-index arguments
          (string-suffix-p ".delta" type)))

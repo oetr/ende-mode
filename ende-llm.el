@@ -282,6 +282,10 @@ The :callbacks argument initializes the composed transport lifecycle."
                      (plist-get previous :id)))
              (name (ende-protocol-json-get "name" function))
              (arguments (ende-protocol-json-get "arguments" function)))
+        (when (or (and (stringp name) (> (length name) 0))
+                  (and (stringp arguments) (> (length arguments) 0)))
+          (ende-stream-note-generation-start
+           (ende-llm--session-stream session)))
         (puthash index
                  (list :id id
                        :name (concat (or (plist-get previous :name) "")
