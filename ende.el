@@ -43,6 +43,7 @@
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-history)
+(require 'ende-finished)
 (require 'ende-speech)
 (require 'ende-selector)
 (require 'ende-queue-ui)
