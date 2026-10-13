@@ -490,7 +490,9 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
        ((equal type "session.updated")
         (when (eq (ende-speech--session-state session) 'configuring)
           (condition-case err
-              (ende-speech--start-recorder session)
+              (progn
+                (ende-speech--start-recorder session)
+                (ende-speech--set-status session "Listening..."))
             (error
              (ende-speech--fail
               session (format "could not start microphone: %s"

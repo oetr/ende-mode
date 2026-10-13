@@ -359,7 +359,12 @@
      (should ende-speech-test--made-process)
      (should (equal (car (plist-get ende-speech-test--made-process
                                     :command))
-                    "/mock/parec")))))
+                    "/mock/parec"))
+     (should (equal (ende-speech--session-state session) 'listening))
+     (should (string-match-p
+              "Listening"
+              (with-current-buffer (ende-speech--session-buffer session)
+                (ende-speech--header-line)))))))
 
 (ert-deftest ende-speech/delta-completed-events-render-without-duplication ()
   (ende-speech-test--with-session
