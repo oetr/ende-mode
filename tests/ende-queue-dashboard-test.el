@@ -184,7 +184,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
             (should (equal (ende-job-pending-guidance chat)
                            '("  keep this text  ")))
             (should-not (ende-job-pending-guidance other))
-            (should (equal prompts '("Guidance: ")))
+            (should (equal prompts '("Inject prompt: ")))
             (cl-letf (((symbol-function #'read-string)
                        (lambda (_prompt) " \t\n")))
               (with-current-buffer dashboard
@@ -208,6 +208,51 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
       (when (buffer-live-p dashboard)
         (kill-buffer dashboard))
       (ende-test--dashboard-reset))))
+
+(ert-deftest ende-test/dashboard-guidance-key-survives-reload ()
+  (save-window-excursion
+    (ende-test--dashboard-reset)
+    (let* ((original-i (lookup-key ende-queue-ui-mode-map (kbd "i")))
+           (target (ende-target-create
+                    :buffer (current-buffer) :start (point-min) :end (point-max)
+                    :cursor (point-min) :review-policy 'ignore))
+           (job (ende--make-job :id 105 :type 'chat :state 'running
+                                :target target
+                                :profile ende-test--dashboard-profile))
+           (dashboard (generate-new-buffer "*ende-dashboard-guidance-key-test*"))
+           prompts)
+      (unwind-protect
+          (progn
+            (setq ende--active-jobs (list job))
+            (set-window-buffer (selected-window) dashboard)
+            (with-current-buffer dashboard
+              (ende-queue-ui-mode)
+              (ende-queue-ui--render)
+              (goto-char (ende-queue-ui--position-for-key (cons 'job 105)))
+              (should (eq (ende-queue-ui--current-job) job)))
+            ;; A pre-existing dashboard map is retained by `defvar' on reload.
+            (define-key ende-queue-ui-mode-map (kbd "i") nil)
+            (should-not (eq (with-current-buffer dashboard
+                              (key-binding (kbd "i")))
+                            #'ende-queue-ui-inject-guidance))
+            (load-file (expand-file-name
+                        "ende-queue-ui.el"
+                        (file-name-directory (locate-library "ende-queue-ui"))))
+            (cl-letf (((symbol-function #'read-string)
+                       (lambda (prompt)
+                         (push prompt prompts)
+                         "Follow this instruction")))
+              (with-current-buffer dashboard
+                (should (eq (key-binding (kbd "i"))
+                            #'ende-queue-ui-inject-guidance))
+                (execute-kbd-macro (kbd "i"))))
+            (should (equal prompts '("Inject prompt: ")))
+            (should (equal (ende-job-pending-guidance job)
+                           '("Follow this instruction"))))
+        (define-key ende-queue-ui-mode-map (kbd "i") original-i)
+        (when (buffer-live-p dashboard)
+          (kill-buffer dashboard))
+        (ende-test--dashboard-reset)))))
 
 (ert-deftest ende-test/dashboard-summary-rows-render-job-fields-in-both-views ()
   (ende-test--dashboard-reset)

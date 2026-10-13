@@ -775,7 +775,7 @@
   (let ((job (ende-queue-ui--current-job)))
     (unless (ende-job-can-accept-guidance-p job)
       (user-error "Selected job cannot accept guidance"))
-    (ende-queue-add-guidance job (read-string "Guidance: "))
+    (ende-queue-add-guidance job (read-string "Inject prompt: "))
     (message "ende: guidance queued for job %d" (ende-job-id job))))
 
 (defun ende-queue-ui-cancel-all ()
@@ -971,6 +971,9 @@
     (define-key map (kbd "?") #'ende-queue-ui-help)
     map)
   "Keymap for the Ende scheduler dashboard.")
+
+;; `defvar' keeps a previously loaded dashboard map when this file is reloaded.
+(define-key ende-queue-ui-mode-map (kbd "i") #'ende-queue-ui-inject-guidance)
 
 (define-derived-mode ende-queue-ui-mode special-mode "ende-queue"
   "Read-only live views of Ende's scheduler queue."

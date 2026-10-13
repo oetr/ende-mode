@@ -108,7 +108,7 @@
     (user-error "Selected job cannot accept guidance"))
   (unless (and (stringp text)
                (not (string-match-p "\\`[[:space:]]*\\'" text)))
-    (user-error "Guidance must not be empty"))
+    (user-error "Injected prompt must not be empty"))
   (setf (ende-job-pending-guidance job)
         (nconc (ende-job-pending-guidance job) (list text)))
   text)
