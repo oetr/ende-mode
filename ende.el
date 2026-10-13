@@ -116,7 +116,12 @@
     ("group" top-level "group NAME TOOL... — Define a named tool group.")
     ("resource" top-level "resource NAME ... — Define a named file or URL resource.")
     ("tools" top-level "tools NAME... — Activate one or more tools or tool groups.")
-    ("clear-tools" top-level "clear-tools — Clear the active tool selection.")
+    ("clear-tools" top-level
+     "clear-tools [TOOL...] — Clear all tools, or selectively disable named tools.")
+    ("restrict-host-commands" top-level
+     (concat "restrict-host-commands RULE... — Restrict run_host_command. "
+             "Strings allow any arguments; :fixed-args allows only the specified "
+             "argv. Changes may prevent reuse of cached prompt prefixes."))
     ("set-tool-resources" top-level
      "set-tool-resources TOOL... :resources RESOURCE... — Replace resource assignments for the selected tools.")
     ("add-tool-resources" top-level
@@ -131,6 +136,8 @@
      ":allow-private-addresses t|nil — Allow private addresses for a URL resource.")
     (":resources" option
      ":resources RESOURCE... — Separate tools from resources in an assignment.")
+    (":fixed-args" option
+     ":fixed-args COMMAND ARG... — Allow only this exact host-command argv.")
     ("file" value "file — A local file or directory resource.")
     ("url" value "url — A URL resource.")
     ("t" value "t — Enable the associated boolean option.")

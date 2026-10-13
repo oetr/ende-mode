@@ -21,6 +21,9 @@
 (defvar ende-chat-config--block-line nil
   "Line of the configuration block currently being applied, if any.")
 
+(defvar ende-chat-config--block-state nil
+  "State used to validate order-sensitive forms in the current block.")
+
 (defun ende-chat-config--error (format-string &rest arguments)
   "Signal a configuration error formatted with FORMAT-STRING and ARGUMENTS."
   (error "ende chat config: %s%s"
@@ -364,6 +367,45 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
         (push tool tools)))
     (delete-dups (nreverse tools))))
 
+(defun ende-chat-config--host-command-rules (rules)
+  "Validate and normalize host command RULES."
+  (unless rules
+    (ende-chat-config--error "restrict-host-commands needs at least one rule"))
+  (let (open fixed)
+    (dolist (rule rules)
+      (cond
+       ((stringp rule)
+        (unless (string-match-p "\\`[[:alnum:]_+-][[:alnum:]_.+-]*\\'" rule)
+          (ende-chat-config--error
+           "host command executable must be a bare name: %S" rule))
+        (push rule open))
+       ((and (ende-chat-config--proper-list-p rule)
+             (eq (car rule) :fixed-args)
+             (cdr rule)
+             (cl-every #'stringp (cdr rule)))
+        (let ((argv (cdr rule)))
+          (unless (string-match-p
+                   "\\`[[:alnum:]_+-][[:alnum:]_.+-]*\\'" (car argv))
+            (ende-chat-config--error
+             "fixed host command executable must be a bare name: %S"
+             (car argv)))
+          (push argv fixed)))
+       (t
+        (ende-chat-config--error
+         "host command rule must be an executable string or (:fixed-args COMMAND ARG...): %S"
+         rule))))
+    (list :restricted t
+          :open (delete-dups (nreverse open))
+          :fixed (delete-dups (nreverse fixed)))))
+
+(defun ende-chat-config--host-command-enabled-p (configuration)
+  "Return non-nil when run_host_command is active in CONFIGURATION."
+  (memq 'run_host_command
+        (cl-set-difference
+         (ende-chat-config--resolve-tools
+          (plist-get configuration :active-targets) configuration)
+         (plist-get configuration :excluded-tools))))
+
 (defun ende-chat-config--resource-names (names configuration)
   "Validate resource NAMES against CONFIGURATION."
   (unless names
@@ -467,15 +509,56 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--error "tools expects one or more tool or group names"))
      (dolist (name (cdr form))
        (ende-chat-config--target-tools name configuration))
-     (plist-put configuration :active-targets
-                (delete-dups
-                 (append (plist-get configuration :active-targets)
-                         (cdr form)))))
+     (let ((selected (ende-chat-config--resolve-tools
+                      (cdr form) configuration)))
+       (when (and (plist-get ende-chat-config--block-state :restricted)
+                  (memq 'run_host_command selected))
+         (ende-chat-config--error
+          "enable run_host_command before restricting it"))
+       (setq configuration
+             (plist-put configuration :active-targets
+                        (delete-dups
+                         (append (plist-get configuration :active-targets)
+                                 (cdr form)))))
+       (setq configuration
+             (plist-put configuration :excluded-tools
+                        (cl-set-difference
+                         (plist-get configuration :excluded-tools) selected)))
+       (when (memq 'run_host_command (cdr form))
+         (setq configuration
+               (plist-put configuration :host-command-policy :unrestricted)))
+       (when (memq 'run_host_command selected)
+         (setq ende-chat-config--block-state
+               (plist-put ende-chat-config--block-state :host-enabled-local t)))
+       configuration))
     ('clear-tools
-     (unless (= (length form) 1)
-       (ende-chat-config--error "clear-tools takes no arguments"))
-     ;; Mandatory tools are added during normalization, not inherited here.
-     (plist-put configuration :active-targets nil))
+     (unless (cl-every (lambda (name)
+                         (and (symbolp name) (not (keywordp name))))
+                       (cdr form))
+       (ende-chat-config--error "clear-tools expects tool names"))
+     (if (null (cdr form))
+         (progn
+           ;; Mandatory tools are added during normalization, not inherited here.
+           (setq configuration
+                 (plist-put configuration :active-targets nil))
+           (plist-put configuration :excluded-tools nil))
+       (let ((tools (mapcar #'ende-chat-config--tool-name (cdr form))))
+         (plist-put configuration :excluded-tools
+                    (delete-dups
+                     (append (plist-get configuration :excluded-tools)
+                             tools))))))
+    ('restrict-host-commands
+     (when (plist-get ende-chat-config--block-state :restricted)
+       (ende-chat-config--error
+        "only one restrict-host-commands form is allowed per block"))
+     (unless (or (ende-chat-config--host-command-enabled-p configuration)
+                 (plist-get ende-chat-config--block-state :host-enabled-local))
+       (ende-chat-config--error
+        "restrict-host-commands requires enabled run_host_command"))
+     (let ((policy (ende-chat-config--host-command-rules (cdr form))))
+       (setq ende-chat-config--block-state
+             (plist-put ende-chat-config--block-state :restricted t))
+       (plist-put configuration :host-command-policy policy)))
     ('set-tool-resources
      (ende-chat-config--assign-resources form configuration nil))
     ('add-tool-resources
@@ -489,7 +572,8 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
   (list :root nil :podman-image nil :groups nil :resources nil
-        :active-targets nil
+        :active-targets nil :excluded-tools nil
+        :host-command-policy :unrestricted
         :grants nil :revoked-resources nil))
 
 (defun ende-chat-config--normalize (configuration)
@@ -500,8 +584,18 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
         :resources (plist-get configuration :resources)
         :active-tools
         (ende-tool-active-names
-         (ende-chat-config--resolve-tools
-          (plist-get configuration :active-targets) configuration))
+         (cl-set-difference
+          (ende-chat-config--resolve-tools
+           (plist-get configuration :active-targets) configuration)
+          (plist-get configuration :excluded-tools)))
+        :host-command-policy
+        (if (memq 'run_host_command
+                  (cl-set-difference
+                   (ende-chat-config--resolve-tools
+                    (plist-get configuration :active-targets) configuration)
+                   (plist-get configuration :excluded-tools)))
+            (plist-get configuration :host-command-policy)
+          :inactive)
         :tool-resources
         (mapcar (lambda (entry)
                   (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
@@ -546,6 +640,8 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                    (ende-chat-config--block-source (car blocks))))
            (root-count 0)
            (image-count 0)
+           (ende-chat-config--block-state
+            (list :restricted nil :host-enabled-local nil))
            group-names resource-names)
       (unless (string-empty-p
                (string-trim
