@@ -1353,6 +1353,24 @@ tests."
     (pop-to-buffer buffer)))
 
 ;;;###autoload
+(defun ende-inspect-config-at-point ()
+  "Show the effective resolved Ende configuration at point."
+  (interactive)
+  (let* ((document (ende-chat--build-document))
+         (headline (ende-chat--headline-at-point document))
+         (configuration
+          (ende-chat-config-resolve
+           (ende-chat--document-tree document)
+           (ende-chat--document-parent document) headline))
+         (buffer (get-buffer-create "*ende config*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (pp configuration (current-buffer))
+        (special-mode)))
+    (pop-to-buffer buffer)))
+
+;;;###autoload
 (defun ende-chat-inspect-tool-at-point ()
   "Show the exact stored payload referenced by the tool section at point."
   (interactive)
@@ -3387,7 +3405,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
-  (let* ((definitions (ende-tool-definitions))
+  (let* ((definitions (ende-tool-definitions configuration))
          (profile (copy-tree (ende-job-profile job)))
          (rounds 0)
          (maximum ende-chat-max-tool-rounds)

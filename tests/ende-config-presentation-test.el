@@ -103,6 +103,35 @@
       (should-not (eq (ende-test--presentation-face-at "#+begin_ende")
                       'font-lock-preprocessor-face)))))
 
+(ert-deftest ende-test/config-presentation-host-command-help-is-visible ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+begin_ende\n"
+            "(restrict-host-commands \"git\" (:fixed-args \"make\" \"test\"))\n"
+            "(clear-tools run_host_command read_file)\n"
+            "#+end_ende\n")
+    (ende-mode 1)
+    (font-lock-ensure (point-min) (point-max))
+    (let ((block-start (save-excursion
+                         (goto-char (point-min))
+                         (search-forward "#+begin_ende")
+                         (line-beginning-position))))
+      (should (eq (ende-test--presentation-face-at
+                   "restrict-host-commands" block-start)
+                  'font-lock-keyword-face))
+      (should (eq (ende-test--presentation-face-at ":fixed-args" block-start)
+                  'font-lock-type-face))
+      (should (string-match-p
+               "cached prompt prefixes"
+               (ende-test--presentation-doc-at
+                "restrict-host-commands" block-start)))
+      (should (string-match-p
+               "exact host-command argv"
+               (ende-test--presentation-doc-at ":fixed-args" block-start)))
+      (should (string-match-p
+               "selectively disable"
+               (ende-test--presentation-doc-at "clear-tools" block-start))))))
+
 (provide 'ende-config-presentation-test)
 
 ;;; ende-config-presentation-test.el ends here

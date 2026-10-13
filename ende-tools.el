@@ -158,15 +158,19 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
            (cl-loop for (name . tool) in ende-tools--registry
                     when (ende-tool-always-available tool) collect name))))
 
-(defun ende-tool-definitions ()
-  "Return registered tools in OpenAI-compatible function-tool shape."
+(defun ende-tool-definitions (&optional access-config)
+  "Return registered tools in OpenAI-compatible function-tool shape.
+Use ACCESS-CONFIG to generate its effective host-command schema."
   (mapcar
    (lambda (tool)
      (list (cons :type "function")
            (cons :function
                  (list (cons :name (symbol-name (ende-tool-name tool)))
                        (cons :description (ende-tool-description tool))
-                       (cons :parameters (ende-tool-parameters tool))))))
+                       (cons :parameters
+                             (if (eq (ende-tool-name tool) 'run_host_command)
+                                 (ende-tools--host-command-schema access-config)
+                               (ende-tool-parameters tool)))))))
    (mapcar #'cdr ende-tools--registry)))
 
 (defun ende-tool--call-root (tool root access-config)
@@ -2078,7 +2082,6 @@ process-group cancellation function with the active Ende job."
                (setcdr output t))))
          (kill-group ()
            (when (processp process)
-             ;; On Linux, `make-process' starts the shell as its session leader.
              (ignore-errors
                (signal-process (- (process-id process)) 'sigkill))))
          (clean-stderr ()
@@ -2132,7 +2135,9 @@ process-group cancellation function with the active Ende job."
                   (let ((default-directory cwd))
                     (make-process
                      :name (generate-new-buffer-name "ende-host-command")
-                     :command (list "/bin/sh" "-c" command)
+                     :command (if (stringp command)
+                                  (list "/bin/sh" "-c" command)
+                                command)
                      :buffer nil :stderr stderr-process
                      :connection-type 'pipe :coding 'utf-8-unix :noquery t
                      :filter (lambda (_proc chunk) (capture stdout chunk))
@@ -2162,17 +2167,39 @@ process-group cancellation function with the active Ende job."
     (file-name-as-directory directory)))
 
 (defun ende-tools--run-host-command (arguments root callback)
-  "Execute an arbitrary host command asynchronously from ROOT."
-  (ende-tools--assert-properties
-   arguments '("command" "cwd" "timeout") "run_host_command")
-  (let* ((command (ende-tools--required-string arguments "command"))
-         (cwd (or (ende-tools--argument arguments "cwd") "."))
-         (timeout (ende-tools--bounded-integer arguments "timeout" 300 3600)))
-    (when (string-match-p (string 0) command)
-      (error "command must not contain NUL characters"))
-    (ende-tools--run-host-command-process
-     command (ende-tools--host-command-cwd cwd root) timeout callback
-     ende-tools--register-cancellation-function)))
+  "Execute a host command asynchronously from ROOT under resolved policy."
+  (let* ((policy (plist-get ende-tools--access-config :host-command-policy))
+         (restricted (and (listp policy) (plist-get policy :restricted))))
+    (ende-tools--assert-properties
+     arguments '("command" "cwd" "timeout") "run_host_command")
+    (let* ((command-value (ende-tools--argument arguments "command"))
+           (argv
+            (when restricted
+              (unless (hash-table-p command-value)
+                (error "command must be an object with program and args"))
+              (ende-tools--assert-properties
+               command-value '("program" "args") "command")
+              (let* ((program (ende-tools--required-string command-value "program"))
+                     (raw-args (ende-tools--argument command-value "args")))
+                (unless (and (vectorp raw-args) (not (stringp raw-args))
+                             (cl-every #'stringp (append raw-args nil)))
+                  (error "command args must be an array of strings"))
+                (cons program (append raw-args nil)))))
+           (command (if restricted argv
+                      (ende-tools--required-string arguments "command")))
+           (cwd (or (ende-tools--argument arguments "cwd") "."))
+           (timeout (ende-tools--bounded-integer arguments "timeout" 300 3600)))
+      (when (and restricted
+                 (not (or (member (car argv) (plist-get policy :open))
+                          (member argv (plist-get policy :fixed)))))
+        (error "host command is not allowed by restrict-host-commands"))
+      (when (if restricted
+                (cl-some (lambda (part) (string-match-p (string 0) part)) argv)
+              (string-match-p (string 0) command))
+        (error "command must not contain NUL characters"))
+      (ende-tools--run-host-command-process
+       command (ende-tools--host-command-cwd cwd root) timeout callback
+       ende-tools--register-cancellation-function))))
 
 (defun ende-tools--copy-from-sandbox (arguments root)
   "Copy one sandbox regular file to an independently authorized host path."
@@ -2301,6 +2328,54 @@ process-group cancellation function with the active Ende job."
         (:timeout . ((:type . "integer") (:minimum . 1) (:maximum . 3600)))))
     (:required . ("command"))
     (:additionalProperties . :json-false)))
+
+(defun ende-tools--host-command-schema (access-config)
+  "Return the run_host_command schema for ACCESS-CONFIG."
+  (let ((policy (plist-get access-config :host-command-policy)))
+    (if (not (and (listp policy) (plist-get policy :restricted)))
+        ende-tools--run-host-command-schema
+      (let* ((open (plist-get policy :open))
+             (fixed (plist-get policy :fixed))
+             (branches
+              (append
+               (when open
+                 (list
+                  (list :type "object"
+                        :properties
+                        (list :program (list :enum (vconcat open))
+                              :args '(:type "array" :items (:type "string")))
+                        :description "Run the named executable with arbitrary arguments."
+                        :required '["program" "args"]
+                        :additionalProperties :json-false)))
+               (mapcar
+                (lambda (argv)
+                  (list :type "object"
+                        :properties
+                        (list :program (list :const (car argv))
+                              :args (list :const (vconcat (cdr argv))))
+                        :description "Run exactly this argv."
+                        :required '["program" "args"]
+                        :additionalProperties :json-false))
+                fixed)))
+             (branches
+              (cl-remove-if
+               (lambda (branch)
+                 (member (alist-get :const
+                                    (alist-get :program
+                                               (alist-get :properties branch)))
+                         open))
+               branches)))
+        (list :type "object"
+              :properties
+              (list :command (list :oneOf (vconcat branches))
+                    :cwd (alist-get :cwd
+                                    (alist-get :properties
+                                               ende-tools--run-host-command-schema))
+                    :timeout (alist-get :timeout
+                                        (alist-get :properties
+                                                   ende-tools--run-host-command-schema)))
+              :required '["command"]
+              :additionalProperties :json-false)))))
 
 (defconst ende-tools--copy-from-sandbox-schema
   '((:type . "object")

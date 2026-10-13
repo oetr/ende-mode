@@ -375,7 +375,8 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
     (dolist (rule rules)
       (cond
        ((stringp rule)
-        (unless (string-match-p "\\`[[:alnum:]_+-][[:alnum:]_.+-]*\\'" rule)
+        (unless (and (not (member rule '("." "..")))
+                     (string-match-p "\\`[^/[:space:][:cntrl:]]+\\'" rule))
           (ende-chat-config--error
            "host command executable must be a bare name: %S" rule))
         (push rule open))
@@ -384,8 +385,9 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
              (cdr rule)
              (cl-every #'stringp (cdr rule)))
         (let ((argv (cdr rule)))
-          (unless (string-match-p
-                   "\\`[[:alnum:]_+-][[:alnum:]_.+-]*\\'" (car argv))
+          (unless (and (not (member (car argv) '("." "..")))
+                       (string-match-p
+                        "\\`[^/[:space:][:cntrl:]]+\\'" (car argv)))
             (ende-chat-config--error
              "fixed host command executable must be a bare name: %S"
              (car argv)))
@@ -524,10 +526,13 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (plist-put configuration :excluded-tools
                         (cl-set-difference
                          (plist-get configuration :excluded-tools) selected)))
-       (when (memq 'run_host_command (cdr form))
-         (setq configuration
-               (plist-put configuration :host-command-policy :unrestricted)))
+       (when (and (plist-get ende-chat-config--block-state :restricted)
+                  (memq 'run_host_command selected))
+         (ende-chat-config--error
+          "enable run_host_command before restricting it"))
        (when (memq 'run_host_command selected)
+         (setq configuration
+               (plist-put configuration :host-command-policy :unrestricted))
          (setq ende-chat-config--block-state
                (plist-put ende-chat-config--block-state :host-enabled-local t)))
        configuration))
@@ -541,12 +546,23 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
            ;; Mandatory tools are added during normalization, not inherited here.
            (setq configuration
                  (plist-put configuration :active-targets nil))
-           (plist-put configuration :excluded-tools nil))
+           (setq configuration
+                 (plist-put configuration :excluded-tools nil))
+           (setq ende-chat-config--block-state
+                 (plist-put ende-chat-config--block-state
+                            :host-enabled-local nil))
+           configuration)
        (let ((tools (mapcar #'ende-chat-config--tool-name (cdr form))))
-         (plist-put configuration :excluded-tools
-                    (delete-dups
-                     (append (plist-get configuration :excluded-tools)
-                             tools))))))
+         (setq configuration
+               (plist-put configuration :excluded-tools
+                          (delete-dups
+                           (append (plist-get configuration :excluded-tools)
+                                   tools))))
+         (when (memq 'run_host_command tools)
+           (setq ende-chat-config--block-state
+                 (plist-put ende-chat-config--block-state
+                            :host-enabled-local nil)))
+         configuration)))
     ('restrict-host-commands
      (when (plist-get ende-chat-config--block-state :restricted)
        (ende-chat-config--error

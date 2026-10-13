@@ -119,9 +119,7 @@
     ("clear-tools" top-level
      "clear-tools [TOOL...] — Clear all tools, or selectively disable named tools.")
     ("restrict-host-commands" top-level
-     (concat "restrict-host-commands RULE... — Restrict run_host_command. "
-             "Strings allow any arguments; :fixed-args allows only the specified "
-             "argv. Changes may prevent reuse of cached prompt prefixes."))
+     "restrict-host-commands RULE... — Restrict run_host_command. Strings allow any arguments; :fixed-args allows only the specified argv. Changes may prevent reuse of cached prompt prefixes.")
     ("set-tool-resources" top-level
      "set-tool-resources TOOL... :resources RESOURCE... — Replace resource assignments for the selected tools.")
     ("add-tool-resources" top-level

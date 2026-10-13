@@ -169,6 +169,35 @@
       (delete-directory root t)
       (delete-directory child-root t))))
 
+(ert-deftest ende-test/chat-config-inspector-displays-resolved-policy ()
+  (let ((root (make-temp-file "ende-config-inspector-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert
+           (ende-test--chat-config-block
+            `((root ,root)
+              (group development run_host_command)
+              (tools development)
+              (restrict-host-commands "git" (:fixed-args "make" "test"))))
+           "* Conversation\n** Inspect me\n")
+          (goto-char (point-max))
+          (let* ((document (ende-chat--build-document))
+                 (headline (ende-chat--headline-at-point document))
+                 (expected
+                  (ende-chat-config-resolve
+                   (ende-chat--document-tree document)
+                   (ende-chat--document-parent document) headline)))
+            (ende-inspect-config-at-point)
+            (with-current-buffer "*ende config*"
+              (should (derived-mode-p 'special-mode))
+              (should buffer-read-only)
+              (goto-char (point-min))
+              (should (equal (read (current-buffer)) expected))))
+          (when (get-buffer "*ende config*")
+            (kill-buffer "*ende config*")))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/chat-config-supports-rootless-typed-url-resources ()
   (let ((tool-name 'ende-test-url-policy-probe)
         (ende-test-root (make-temp-file "ende-rootless-url-" t)))

@@ -476,6 +476,8 @@
                            ((tools run_host_command)
                             (restrict-host-commands "git status"))
                            ((tools run_host_command)
+                            (restrict-host-commands "."))
+                           ((tools run_host_command)
                             (restrict-host-commands
                              (:fixed-args "../git" "status")))
                            ((tools run_host_command)
@@ -486,11 +488,15 @@
             (insert
              (ende-test--chat-config-block
               `((root ,root)
-                (group development run_host_command about_thinking)
+                (group development run_host_command read_file edit_file)
+                (resource project (include "**"))
                 (tools development)
+                (set-tool-resources read_file :resources project)
+                (set-tool-resources edit_file :resources project)
                 (restrict-host-commands "git")))
              "* Conversation\n** Parent\n*** Selectively cleared\n"
-             (ende-test--chat-config-block '((clear-tools run_host_command)))
+             (ende-test--chat-config-block
+              '((clear-tools run_host_command read_file)))
              "*** Re-enabled\n"
              (ende-test--chat-config-block '((tools run_host_command))))
             (let* ((document (ende-chat--build-document))
@@ -501,6 +507,8 @@
               (should (memq 'run_host_command (plist-get parent :active-tools)))
               (should-not (memq 'run_host_command
                                 (plist-get cleared :active-tools)))
+              (should-not (memq 'read_file (plist-get cleared :active-tools)))
+              (should (memq 'edit_file (plist-get cleared :active-tools)))
               (should (eq (plist-get cleared :host-command-policy) :inactive))
               (should (memq 'run_host_command
                             (plist-get reenabled :active-tools)))
@@ -547,6 +555,206 @@
           (should-not (plist-get configuration :podman-image))
           (should-not (assq 'run_host_command
                             (plist-get configuration :tool-resources))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/host-command-schema-and-restricted-argv-execution ()
+  (let* ((root (make-temp-file "ende-host-argv-" t))
+         (configuration
+          (ende-test--tool-access-config
+           root '((tools run_host_command)
+                  (restrict-host-commands "printf"
+                                          (:fixed-args "true")
+                                          (:fixed-args "make" "test")
+                                          (:fixed-args "true" "foo")))))
+         (definitions (ende-tool-definitions configuration))
+         (schema (ende-test--public-tool-schema definitions "run_host_command"))
+         (command-schema
+          (ende-protocol-json-get
+           "command" (ende-protocol-json-get "properties" schema)))
+         (branches (ende-protocol-json-get "oneOf" command-schema))
+         (fixed (ende-protocol-json-get
+                 "const"
+                 (ende-protocol-json-get
+                  "args"
+                  (ende-protocol-json-get
+                   "properties" (aref branches 1)))))
+         (fixed-argv (ende-protocol-json-get
+                      "const"
+                      (ende-protocol-json-get
+                       "args"
+                       (ende-protocol-json-get
+                        "properties" (aref branches 2)))))
+         (unrestricted-schema
+          (ende-test--public-tool-schema (ende-tool-definitions)
+                                         "run_host_command")))
+    (unwind-protect
+        (progn
+          (should (equal fixed []))
+          (should (equal fixed-argv ["test"]))
+          (should (equal (ende-protocol-json-get
+                          "enum"
+                          (ende-protocol-json-get
+                           "program"
+                           (ende-protocol-json-get
+                            "properties" (aref branches 0))))
+                         ["printf"]))
+          (should (equal (ende-protocol-json-get
+                          "type"
+                          (ende-protocol-json-get
+                           "command" (ende-protocol-json-get "properties" unrestricted-schema)))
+                         "string"))
+          (should (equal (json-encode unrestricted-schema)
+                         (json-encode
+                          (ende-test--public-tool-schema
+                           (ende-tool-definitions) "run_host_command"))))
+          (should (equal
+                   (json-encode
+                    (ende-test--public-tool-schema definitions "read_file"))
+                   (json-encode
+                    (ende-test--public-tool-schema (ende-tool-definitions)
+                                                   "read_file"))))
+          (let* ((literals '("|" ";" "&&" "||" ">" "$(x)" "`x`"))
+                 (command (make-hash-table :test #'equal))
+                 (_ (puthash "program" "printf" command))
+                 (_ (puthash "args" (vconcat (cons "%s\\n" literals)) command))
+                 (call (ende-test--host-command-call
+                        (list (cons "command" command)) configuration)))
+            (should (plist-get call :ok))
+            (should (equal (plist-get (plist-get call :result) :stdout)
+                           (concat (mapconcat #'identity literals "\n") "\n"))))
+          (dolist (argv '(("python" "script.py")
+                          ("true" "extra")
+                          ("true" "bar")))
+            (let* ((command (make-hash-table :test #'equal))
+                   (_ (puthash "program" (car argv) command))
+                   (_ (puthash "args" (vconcat (cdr argv)) command))
+                   (call (ende-test--host-command-call
+                          (list (cons "command" command)) configuration)))
+              (should-not (plist-get call :ok))))
+          (let ((command (make-hash-table :test #'equal)))
+            (puthash "program" "true" command)
+            (puthash "args" ["foo"] command)
+            (should
+             (plist-get
+              (ende-test--host-command-call
+               (list (cons "command" command)) configuration)
+              :ok)))
+          (let ((missing-args (make-hash-table :test #'equal)))
+            (puthash "program" "printf" missing-args)
+            (should-not
+             (plist-get
+              (ende-test--host-command-call
+               (list (cons "command" missing-args)) configuration)
+              :ok)))
+          (let* ((changed
+                  (ende-test--tool-access-config
+                   root '((tools run_host_command)
+                          (restrict-host-commands "printf" "true"))))
+                 (changed-schema
+                  (ende-test--public-tool-schema
+                   (ende-tool-definitions changed) "run_host_command")))
+            (should-not (equal schema changed-schema)))
+          (let ((command (make-hash-table :test #'equal)))
+            (puthash "program" "true" command)
+            (puthash "args" [] command)
+            (should
+             (plist-get
+              (ende-test--host-command-call
+               (list (cons "command" command)) configuration)
+              :ok))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/restricted-host-command-policy-is-enforced-by-tool-dispatch ()
+  (let* ((root (make-temp-file "ende-host-deny-" t))
+         (configuration
+          (ende-test--tool-access-config
+           root '((tools run_host_command)
+                  (restrict-host-commands
+                   "printf" (:fixed-args "true")))))
+         (arguments (make-hash-table :test #'equal))
+         (started nil))
+    (puthash "program" "true" arguments)
+    (puthash "args" ["extra"] arguments)
+    (let ((result nil))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _)
+                   (setq started t)
+                   (error "process must not start"))))
+        (ende-tool-call-async
+         "run_host_command" `(("command" . ,arguments)) nil configuration
+         (lambda (value) (setq result value))))
+      (should-not started)
+      (should-not (plist-get result :ok))
+      (should (string-match-p "not allowed"
+                              (plist-get result :error))))))
+
+(ert-deftest ende-test/restricted-host-process-cancellation-and-timeout-stop-work ()
+  (let* ((root (make-temp-file "ende-host-direct-stop-" t))
+         (configuration
+          (ende-test--tool-access-config
+           root '((tools run_host_command)
+                  (restrict-host-commands "sh"))))
+         (cancel-file (expand-file-name "restricted-cancel.pid" root))
+         (timeout-file (expand-file-name "restricted-timeout.pid" root))
+         (process nil)
+         (cancel nil)
+         (real-make-process (symbol-function 'make-process)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest arguments)
+                     (setq process (apply real-make-process arguments))))
+                  (ende-tools--register-cancellation-function
+                   (lambda (function) (setq cancel function))))
+          (let* ((command (make-hash-table :test #'equal))
+                 (result nil))
+            (puthash "program" "sh" command)
+            (puthash "args"
+                     (vector "-c" (format "sleep 30 & echo $! > %s; wait"
+                                           (shell-quote-argument cancel-file)))
+                     command)
+            (ende-tool-call-async
+             "run_host_command" (list (cons "command" command)) nil configuration
+             (lambda (value) (setq result value)))
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (not process) (< (float-time) deadline))
+                (accept-process-output nil 0.02)))
+            (should (process-live-p process))
+            (should (functionp cancel))
+            (ende-test--wait-for-host-command-file cancel-file)
+            (let ((pid (string-to-number
+                        (with-temp-buffer
+                          (insert-file-contents cancel-file)
+                          (buffer-string)))))
+              (should (process-attributes pid))
+              (funcall cancel)
+              (should (ende-test--assert-host-process-stopped pid)))
+            (should (not (plist-get result :ok))))
+          (setq process nil cancel nil)
+          (let* ((command (make-hash-table :test #'equal))
+                 (done nil)
+                 (result nil))
+            (puthash "program" "sh" command)
+            (puthash "args"
+                     (vector "-c" (format "sleep 30 & echo $! > %s; wait"
+                                           (shell-quote-argument timeout-file)))
+                     command)
+            (ende-tool-call-async
+             "run_host_command"
+             (list (cons "command" command) (cons "timeout" 1)) nil configuration
+             (lambda (value) (setq result value done t)))
+            (let ((deadline (+ (float-time) 8)))
+              (while (and (not done) (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            (should done)
+            (should (= (plist-get (plist-get result :result) :exit_code) 124))
+            (ende-test--wait-for-host-command-file timeout-file)
+            (should (ende-test--assert-host-process-stopped
+                     (string-to-number
+                      (with-temp-buffer
+                        (insert-file-contents timeout-file)
+                        (buffer-string)))))))
+      (when (and (processp process) (process-live-p process))
+        (delete-process process))
       (delete-directory root t))))
 
 (ert-deftest ende-test/run-host-command-uses-host-cwd-and-captures-results ()
