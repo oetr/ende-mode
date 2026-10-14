@@ -262,6 +262,20 @@ ordered result slots only through the parent's saved scheduler continuation."
                  (ende-agent--send job next-messages configuration callbacks
                                   (1+ rounds)))))))))))
 
+(defun ende-agent--call-name (call callbacks)
+  "Return CALL's name using CALLBACKS."
+  (funcall (plist-get callbacks :tool-name) call))
+
+(defun ende-agent--spawn-prefix (calls callbacks)
+  "Split maximal leading spawn calls from CALLS."
+  (let ((remaining calls)
+        spawns)
+    (while (and remaining
+                (equal (ende-agent--call-name (car remaining) callbacks)
+                       "spawn_agent"))
+      (push (pop remaining) spawns))
+    (cons (nreverse spawns) remaining)))
+
 (defun ende-agent--run-tools (job calls configuration callbacks done)
   "Run CALLS sequentially for JOB and return ordered results through DONE."
   (let ((remaining (copy-sequence calls))
@@ -271,7 +285,20 @@ ordered result slots only through the parent's saved scheduler continuation."
            (if (or (null remaining) (not (ende-job-current-p job)))
                (when (and (null remaining) (ende-job-current-p job))
                  (funcall done (nreverse messages)))
-             (let* ((call (pop remaining))
+             (if (and (plist-get callbacks :execute-spawn-batch)
+                      (equal (ende-agent--call-name (car remaining) callbacks)
+                             "spawn_agent"))
+                 (let* ((split (ende-agent--spawn-prefix remaining callbacks))
+                        (batch (car split)))
+                   (setq remaining (cdr split))
+                   (funcall (plist-get callbacks :execute-spawn-batch)
+                            job batch configuration
+                            (lambda (results)
+                              (when (ende-job-execution-current-p
+                                     job (or (ende-job-execution-generation job) 0))
+                                (setq messages (nconc (nreverse results) messages))
+                                (next)))))
+               (let* ((call (pop remaining))
                     (_count
                      (ende-job-emit-event
                       job (list :type :tool-call-count
@@ -309,7 +336,7 @@ ordered result slots only through the parent's saved scheduler continuation."
                        (unless synchronous (next)))))))
                (setq synchronous nil)
                (when completed
-                 (next))))))
+                 (next)))))))
       (next))))
 
 (defun ende-agent-run (job messages configuration callbacks)

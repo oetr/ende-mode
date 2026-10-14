@@ -212,6 +212,56 @@
                      :tool-definitions))
         (ende-abort-queue)))))
 
+(ert-deftest ende-test/shared-loop-batches-only-adjacent-spawn-calls ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (batches nil)
+        (executed nil)
+        (results nil)
+        job)
+    (ende-test--with-buffer "tool source"
+      (setq job
+            (ende--make-job :id 911 :type 'agent :state 'running
+                            :target (ende-target-create
+                                     :buffer (current-buffer)
+                                     :start (point-min) :end (point-min)
+                                     :cursor (point-min))
+                            :profile '(:tool-definitions (fixture))
+                            :execution-generation 1))
+      (push job ende--active-jobs)
+      (let ((callbacks
+             (list :tool-name (lambda (call) (plist-get call :name))
+                   :execute-spawn-batch
+                   (lambda (_job calls _configuration settle)
+                     (push (mapcar (lambda (call) (plist-get call :id)) calls)
+                           batches)
+                     (funcall settle
+                              (mapcar (lambda (call)
+                                        (list :role "tool"
+                                              :tool-call-id (plist-get call :id)
+                                              :content (plist-get call :id)))
+                                      calls)))
+                   :execute-tool
+                   (lambda (call _configuration settle)
+                     (push (plist-get call :id) executed)
+                     (funcall settle (plist-get call :id)))
+                   :tool-result-message
+                   (lambda (_job call content)
+                     (list :role "tool" :tool-call-id (plist-get call :id)
+                           :content content)))))
+        (ende-agent--run-tools
+         job '((:id "A" :name "spawn_agent")
+               (:id "B" :name "spawn_agent")
+               (:id "R" :name "read_file")
+               (:id "C" :name "spawn_agent"))
+         nil callbacks (lambda (messages) (setq results messages))))
+      (should (equal (nreverse batches) '(("A" "B") ("C"))))
+      (should (equal (nreverse executed) '("R")))
+      (should (equal (mapcar (lambda (message)
+                               (plist-get message :tool-call-id))
+                             results)
+                     '("A" "B" "R" "C"))))))
+
 (ert-deftest ende-test/suspended-job-resumes-only-through-scheduler ()
   (ende-test--reset)
   (let ((handler-runs 0)
