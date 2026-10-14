@@ -33,7 +33,7 @@
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
-  last-usage tool-call-count activity-title activity-status activity-updated-at
+  last-usage tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
   scheduling-overrides owned-buffer)

@@ -38,6 +38,7 @@
 (require 'ende-provider)
 (require 'ende-tool-store)
 (require 'ende-queue)
+(require 'ende-agent)
 (require 'ende-chat-config)
 (require 'ende-target)
 (require 'ende-ui)
@@ -3360,62 +3361,19 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
 
 (defun ende-chat--execute-tool-round
     (job calls configuration level request-id assistant callback)
-  (let ((remaining calls)
-        (round-messages (list assistant)))
-    (cl-labels
-        ((run-next ()
-           (let ((continue t)
-                 (pending nil))
-             (while (and continue remaining (ende-job-current-p job))
-               (let* ((call (pop remaining))
-                      (prior-cancel (ende-job-cancel-function job))
-                      (installed-cancel nil)
-                      (ende-tools--report-activity-function
-                       (lambda (title status)
-                         (ende-job-report-activity job title status)))
-                      (ende-tools--execution-owner (ende-job-id job))
-                      (ende-tools--register-cancellation-function
-                       (lambda (cancel)
-                         (if cancel
-                             (setq installed-cancel cancel)
-                           (when (and installed-cancel
-                                      (eq installed-cancel
-                                          (ende-job-cancel-function job)))
-                             (setf (ende-job-cancel-function job)
-                                   prior-cancel)))
-                         (when cancel
-                           (ende-job-cancellation-set job cancel))))
-                      (synchronous t)
-                      (completed nil))
-                 (ende-job-emit-event
-                  job (list :type :tool-call-count
-                            :count (1+ (or (ende-job-tool-call-count job) 0))))
-                 (ende-chat--tool-response-async
-                  call configuration
-                  (lambda (tool-content)
-                    (setq completed t)
-                    (when (ende-job-current-p job)
-                      (ende--call-with-job-error
-                       job
-                       (lambda ()
-                         (ende-chat--stage-agent-section
-                          job (ende-chat--tool-result-text
-                               level request-id call tool-content) t)
-                         (push (list :role "tool"
-                                     :tool-call-id
-                                     (ende-chat--tool-value call :id)
-                                     :content tool-content)
-                               round-messages)
-                         (unless synchronous
-                           (run-next)))))))
-                 (setq synchronous nil)
-                 (unless completed
-                   (setq continue nil
-                         pending t))))
-             (when (and (ende-job-current-p job)
-                        (null remaining) (not pending))
-               (funcall callback (nreverse round-messages))))))
-      (run-next))))
+  "Compatibility adapter for JOB's shared sequential tool runner."
+  (ende-agent--run-tools
+   job calls configuration
+   (list
+    :execute-tool #'ende-chat--tool-response-async
+    :tool-result-message
+    (lambda (job call content)
+      (ende-chat--stage-agent-section
+       job (ende-chat--tool-result-text level request-id call content) t)
+      (list :role "tool" :tool-call-id (ende-chat--tool-value call :id)
+            :content content)))
+   (lambda (tool-messages)
+     (funcall callback (cons assistant tool-messages)))))
 
 (defun ende-chat--consume-user-guidance (job &optional assistant-result)
   "Consume JOB's pending guidance as a stored synthetic tool exchange.
@@ -3467,82 +3425,59 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
         messages))))
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
-  "Dispatch JOB MESSAGES with its frozen CONFIGURATION and tool loop."
-  (let* ((definitions (ende-tool-definitions configuration))
-         (profile (copy-tree (ende-job-profile job)))
-         (rounds 0)
-         (maximum ende-chat-max-tool-rounds)
-         (messages (ende-operations--add-source-metadata job messages)))
-    (when (and definitions
-               (not (and (integerp maximum) (> maximum 0))))
+  "Dispatch JOB MESSAGES with frozen CONFIGURATION through the shared loop."
+  (let ((maximum ende-chat-max-tool-rounds))
+    (unless (and (integerp maximum) (> maximum 0))
       (error "ende-chat-max-tool-rounds must be a positive integer"))
-    (when (and definitions
-               (eq (plist-get profile :transport) 'openrouter-batch))
-      (error (concat "Agent chat requires about_thinking and cannot use the "
-                     "OpenRouter batch transport; choose an interactive transport")))
-    (setq profile (plist-put profile :tool-definitions definitions))
-    (setf (ende-job-profile job) profile)
-    (ende-job-emit-event job '(:type :tool-call-count :count 0))
-    (cl-labels
-     ((on-done (result)
-        (when (ende-job-current-p job)
-          (ende--call-with-job-error
-           job
-           (lambda ()
-             (let ((calls (ende-chat--tool-call-list result)))
-               (if (null calls)
-                   (if (ende-job-pending-guidance-p job)
-                       (let ((guidance
-                              (ende-chat--consume-user-guidance job result)))
-                         (setq messages (append messages guidance))
-                         (ende--validate-messages messages)
-                         (ende--send-llm job messages #'on-done nil t))
-                     (ende-chat--apply-result job result))
-                 (let* ((instruction (ende-job-instruction job))
-                         (request-id (plist-get instruction :request-id))
-                         (question-id (plist-get instruction :question-id)))
-                    (when (null definitions)
-                      (error "The provider returned an unrequested tool call"))
-                    (when (>= rounds maximum)
-                      (error "Chat exceeded %d tool-call rounds" maximum))
-                    (let* ((level (1+ (plist-get instruction :response-level)))
-                           (content (or (plist-get result :content) ""))
-                           (stored-calls
-                            (mapcar #'ende-chat--prepare-tool-call calls))
-                           (normalized (list :content content))
-                           (assistant
-                            (list :role "assistant"
-                                  :content content
-                                  :tool-calls calls
-                                  :reasoning-content
-                                  (plist-get result :reasoning-content)))
-                           (section
-                            (ende-chat--assistant-protocol-text
-                             level question-id request-id
-                             (ende-chat--result-properties job result)
-                             normalized stored-calls)))
-                      (ende-chat--stage-agent-section job section t)
-                      (cl-incf rounds)
-                      (ende--handle-llm-event
-                       job '(:type :status :status "Running tools"))
-                      (ende-chat--execute-tool-round
-                       job stored-calls configuration level request-id assistant
-                       (lambda (round-messages)
-                         (when (and round-messages
-                                    (ende-job-current-p job))
-                           (ende--call-with-job-error
-                            job
-                            (lambda ()
-                              (setq messages
-                                    (append messages round-messages))
-                              (setq messages
-                                    (append messages
-                                            (ende-chat--consume-user-guidance
-                                             job)))
-                              (ende--validate-messages messages)
-                              (ende--send-llm
-                                job messages #'on-done nil t)))))))))))))))
-     (ende--dispatch-llm job messages #'on-done nil nil t))))
+    (let ((ende-agent-max-tool-rounds maximum))
+      (ende-agent-run
+       job messages configuration
+       (list
+        :tool-calls #'ende-chat--tool-call-list
+        :execute-tool #'ende-chat--tool-response-async
+        :assistant-message
+        (lambda (job result calls)
+          (let* ((instruction (ende-job-instruction job))
+                 (request-id (plist-get instruction :request-id))
+                 (question-id (plist-get instruction :question-id))
+                 (level (1+ (plist-get instruction :response-level)))
+                 (content (or (plist-get result :content) ""))
+                 (stored-calls (mapcar #'ende-chat--prepare-tool-call calls))
+                 (assistant
+                  (list :role "assistant" :content content :tool-calls calls
+                        :reasoning-content
+                        (plist-get result :reasoning-content))))
+            (ende-chat--stage-agent-section
+             job
+             (ende-chat--assistant-protocol-text
+              level question-id request-id
+              (ende-chat--result-properties job result)
+              (list :content content) stored-calls)
+             t)
+            (ende--handle-llm-event
+             job '(:type :status :status "Running tools"))
+            (list :message assistant :calls stored-calls)))
+        :tool-result-message
+        (lambda (job call content)
+          (let* ((instruction (ende-job-instruction job))
+                 (level (1+ (plist-get instruction :response-level)))
+                 (request-id (plist-get instruction :request-id)))
+            (ende-chat--stage-agent-section
+             job (ende-chat--tool-result-text level request-id call content) t)
+            (list :role "tool"
+                  :tool-call-id (ende-chat--tool-value call :id)
+                  :content content)))
+        :after-tool-round
+        (lambda (job messages)
+          (append messages (ende-chat--consume-user-guidance job)))
+        :before-final
+        (lambda (job result messages)
+          (if (ende-job-pending-guidance-p job)
+              (append messages
+                      (ende-chat--consume-user-guidance job result))
+            :finish))
+        :on-final (lambda (job result _messages)
+                    (ende-chat--apply-result job result)))))))
 
 (defun ende-chat--run (job)
   "Serialize and dispatch a chat JOB at the moment it starts."
