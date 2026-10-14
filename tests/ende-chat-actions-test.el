@@ -146,6 +146,82 @@
                    (org-element-property :begin reply)
                    (org-element-property :end reply)))))))))
 
+(ert-deftest ende-test/chat-question-marker-survives-top-level-insertion ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     "* Question\nAsk this.\n"
+     (org-mode)
+     (ende-test--chat-goto "* Question")
+     (let* ((job (ende-ask))
+            (instruction (ende-job-instruction job))
+            (question-id (plist-get instruction :question-id))
+            (request-id (plist-get instruction :request-id)))
+       (goto-char (point-min))
+       (insert "* Inserted section\nDo not modify this.\n\n")
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))
+       (let* ((document (ende-chat--build-document))
+              (question (ende-chat--find-by-property
+                         document ende-chat-id-property question-id))
+              (reply (ende-chat--find-by-property
+                      document ende-chat-request-id-property request-id))
+              (inserted (cl-find-if
+                         (lambda (headline)
+                           (equal (org-element-property :raw-value headline)
+                                  "Inserted section"))
+                         (ende-chat--document-headlines document))))
+         (should question)
+         (should reply)
+         (should inserted)
+         (should (equal (ende-chat--property document reply :reply-to)
+                        question-id))
+         (should (string-match-p "Do not modify this."
+                                 (ende-chat--section-text document inserted)))
+         (should (equal (org-element-property :raw-value question)
+                        "Question")))))))
+
+(ert-deftest ende-test/chat-question-marker-falls-back-to-durable-id-after-move ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))
+    (ende-test--with-buffer
+     "* Root\n** Other\nKeep this section.\n** Question\nAsk this.\n** Next\nKeep this untouched.\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((job (ende-ask))
+            (instruction (ende-job-instruction job))
+            (question-id (plist-get instruction :question-id))
+            (request-id (plist-get instruction :request-id)))
+       (let* ((document (ende-chat--build-document))
+              (question (ende-chat--find-by-property
+                         document ende-chat-id-property question-id))
+              (begin (org-element-property :begin question))
+              (end (save-excursion
+                     (goto-char begin)
+                     (org-end-of-subtree t t)
+                     (point)))
+              (subtree (delete-and-extract-region begin end)))
+         (goto-char (point-min))
+         (re-search-forward "^\\*\\* Other[ \t]*$")
+         (beginning-of-line)
+         (insert subtree))
+       (ende-test--complete-call (car ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))
+       (let* ((document (ende-chat--build-document))
+              (question (ende-chat--find-by-property
+                         document ende-chat-id-property question-id))
+              (reply (ende-chat--find-by-property
+                      document ende-chat-request-id-property request-id)))
+         (should question)
+         (should reply)
+         (should (equal (ende-chat--property document reply :reply-to)
+                        question-id))
+         (should (string-match-p "Keep this section." (buffer-string)))
+         (should (string-match-p "Keep this untouched." (buffer-string)))
+         (should
+          (< (org-element-property :begin question)
+             (org-element-property :begin reply))))))))
+
 (ert-deftest ende-test/chat-compaction-survives-unrelated-edit ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Summary") t)))

@@ -2019,8 +2019,7 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                   (ende-chat--find-by-property document ende-chat-id-property
                                                question-id))
                  (question-marker
-                  (and question (copy-marker
-                                 (org-element-property :begin question))))
+                  (and question (ende-chat--make-question-marker question)))
                  (target (ende-target-create
                           :buffer buffer :start (point-min) :end (point-max)
                           :cursor (org-element-property :begin pending)
@@ -2281,6 +2280,61 @@ When CHECKPOINT is non-nil, persist the completed boundary."
       (when (= (org-element-property :begin headline) (marker-position marker))
         (list document headline)))))
 
+(defun ende-chat--make-question-marker (question &optional marker)
+  "Create or reseat MARKER just after QUESTION's heading line."
+  (let ((marker (or marker (make-marker))))
+    (save-excursion
+      (goto-char (org-element-property :begin question))
+      (forward-line 1)
+      (set-marker marker (point) (current-buffer)))
+    marker))
+
+(defun ende-chat--question-header-document-at (position)
+  "Parse only the heading header beginning at POSITION."
+  (save-excursion
+    (goto-char position)
+    (let ((begin (point)))
+      (org-end-of-meta-data t)
+      (ende-chat--build-document-in-region begin (point)))))
+
+(defun ende-chat--resolve-question-marker (buffer marker question-id)
+  "Resolve question MARKER by its local heading, falling back to QUESTION-ID.
+The usual path parses only the marked question header.  A stale marker triggers
+one full-document lookup and is reseated when QUESTION-ID is found."
+  (unless (buffer-live-p buffer)
+    (error "Chat question no longer exists"))
+  (with-current-buffer buffer
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((marked-question
+               (when (and (markerp marker)
+                          (eq (marker-buffer marker) buffer))
+                 (condition-case nil
+                     (progn
+                       (goto-char marker)
+                       (org-back-to-heading t)
+                       (let* ((document
+                               (ende-chat--question-header-document-at
+                                (point)))
+                              (question
+                               (car (ende-chat--document-headlines document))))
+                         (and question
+                              (equal
+                               (ende-chat--property document question :id)
+                               question-id)
+                              (list document question marker))))
+                   (error nil)))))
+          (or marked-question
+              (let* ((document (ende-chat--build-document))
+                     (question
+                      (ende-chat--find-by-property
+                       document ende-chat-id-property question-id)))
+                (unless question
+                  (error "Chat question no longer exists"))
+                (list document question
+                      (ende-chat--make-question-marker question marker)))))))))
+
 (defun ende-chat--adjacent-request-header (buffer marker request-id)
   "Return the pending header at MARKER, or an adjacent heading for REQUEST-ID.
 Marker drift caused by insertion or removal at the boundary may land inside
@@ -2345,11 +2399,17 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
                       (ende-chat--validate-pending-placeholder
                        job document headline))
                     (list document headline)))
-              (unless (ende-chat--request-markers-live-p
-                       buffer question-marker destination-marker)
+              (unless (and (markerp destination-marker)
+                           (eq (marker-buffer destination-marker) buffer))
                 (error "Chat response destination no longer exists"))
                (let* ((question-pair
-                       (ende-chat--request-marker-header buffer question-marker))
+                       (ende-chat--resolve-question-marker
+                        buffer question-marker question-id))
+                      (_question-marker
+                       (setf (ende-job-instruction job)
+                             (plist-put (ende-job-instruction job)
+                                        :question-marker
+                                        (nth 2 question-pair))))
                       (destination-pair
                        (ende-chat--adjacent-request-header
                         buffer destination-marker request-id))
@@ -2932,26 +2992,29 @@ OPTIONS are passed to `json-serialize'."
          (buffer (ende-target-buffer (ende-job-target job)))
          (marker (plist-get instruction :question-marker))
          (question-id (plist-get instruction :question-id)))
-    (unless (and (buffer-live-p buffer) (markerp marker)
-                 (eq (marker-buffer marker) buffer))
-      (error "Chat question no longer exists"))
-    (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (goto-char marker)
-          (unless (org-at-heading-p)
-            (error "Chat question no longer exists"))
-          (let* ((end (save-excursion (org-end-of-subtree t t) (point)))
-                 (document (ende-chat--build-document-in-region marker end))
-                 (question (car (ende-chat--document-headlines document))))
-            (unless (and question
-                         (= (org-element-property :begin question)
-                            (marker-position marker))
-                         (equal (ende-chat--property document question :id)
-                                question-id))
-              (error "Chat question no longer exists"))
-            (list document question)))))))
+    (let* ((question-pair
+            (ende-chat--resolve-question-marker buffer marker question-id))
+           (question (cadr question-pair)))
+      (setf (ende-job-instruction job)
+            (plist-put instruction :question-marker (nth 2 question-pair)))
+      (with-current-buffer buffer
+        (save-excursion
+          (save-restriction
+            (widen)
+            (let* ((begin (org-element-property :begin question))
+                   (end (save-excursion
+                          (goto-char begin)
+                          (org-end-of-subtree t t)
+                          (point)))
+                   (document (ende-chat--build-document-in-region begin end))
+                   (scoped-question
+                    (car (ende-chat--document-headlines document))))
+              (unless (and scoped-question
+                           (equal (ende-chat--property
+                                   document scoped-question :id)
+                                  question-id))
+                (error "Chat question no longer exists"))
+              (list document scoped-question))))))))
 
 (defun ende-chat--finish-compact-instructions (document question job)
   "Hide and title QUESTION's instructions, or remove a truly empty section.
@@ -3610,7 +3673,7 @@ COMPACT requests a context fence and archives the instruction section."
                 (ende-chat--find-by-property marked ende-chat-id-property
                                              question-id)))
           (setq question-marker
-                (copy-marker (org-element-property :begin marked-question)))
+                (ende-chat--make-question-marker marked-question))
           (setq position
                 (ende-chat--insert-placeholder
                  marked marked-question question-id request-id compact))
