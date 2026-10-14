@@ -3362,7 +3362,8 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
 (defun ende-chat--execute-tool-round
     (job calls configuration level request-id assistant callback)
   "Compatibility adapter for JOB's shared sequential tool runner."
-  (ende-agent--run-tools
+  (let ((ende-tools--execution-owner (ende-job-id job)))
+    (ende-agent--run-tools
    job calls configuration
    (list
     :execute-tool #'ende-chat--tool-response-async
@@ -3373,7 +3374,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (list :role "tool" :tool-call-id (ende-chat--tool-value call :id)
             :content content)))
    (lambda (tool-messages)
-     (funcall callback (cons assistant tool-messages)))))
+     (funcall callback (cons assistant tool-messages))))))
 
 (defun ende-chat--consume-user-guidance (job &optional assistant-result)
   "Consume JOB's pending guidance as a stored synthetic tool exchange.

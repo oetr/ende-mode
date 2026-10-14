@@ -36,7 +36,7 @@
   last-usage tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
-  scheduling-overrides owned-buffer)
+  scheduling-overrides owned-buffer owned-buffer-hook)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."

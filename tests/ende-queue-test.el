@@ -92,6 +92,61 @@
         (should-not (ende-all-live-jobs))
         (should-not (ende-queue-family-markers))))))
 
+(ert-deftest ende-test/internal-agent-runs-shared-loop-on-private-target ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("child answer") t))
+        (ende--queue-suspended t)
+        (root-buffer nil)
+        family child)
+    (ende-test--with-buffer "user source"
+      (setq root-buffer (current-buffer)
+            family (ende--make-job-family
+                    :registry nil :inference-template
+                    '(:name remote :model "fixture" :parallel t
+                      :max-concurrency 2)))
+      (setq child
+            (ende--make-job
+             :id 902 :type 'agent :state 'queued :family family
+             :profile (copy-tree (ende-job-family-inference-template family))
+             :access-policy '(:root nil :active-tools (about_thinking)
+                              :tool-resources nil)
+             :instruction (list :task "inspect safely" :registry nil)
+             :schedule-path '(1)))
+      (setf (ende-job-family-root family) child
+            (ende-job-family child) family
+            (ende-job-target child) (ende-agent-private-target child))
+      (ende--queue-push family)
+      (ende--queue-insert-family-member child)
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (should (eq (ende-job-state child) 'running))
+      (let ((sent (plist-get (car ende-test--calls) :messages)))
+        (should (string-match-p "inspect safely" (cdr (assoc "user" sent))))
+        (should-not (string-match-p "user source" (format "%s" sent))))
+      (ende-test--complete-call (car ende-test--calls))
+      (should (eq (ende-job-state child) 'completed))
+      (should (equal (ende-job-result child) "child answer"))
+      (should-not (buffer-live-p (ende-job-owned-buffer child)))
+      (should (buffer-live-p root-buffer)))))
+
+(ert-deftest ende-test/private-agent-buffer-is-owned-and-invalidates-on-kill ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm nil t))
+        job source target owned)
+    (ende-test--with-buffer "source"
+      (setq source (current-buffer))
+      (setq job (ende--make-job :id 901 :type 'agent :state 'queued
+                                :access-policy '(:active-tools (about_thinking))))
+      (setq target (ende-agent-private-target job)
+            owned (ende-job-owned-buffer job))
+      (should (buffer-live-p owned))
+      (should (eq (ende-target-buffer target) owned))
+      (should-not (buffer-file-name owned))
+      (kill-buffer owned)
+      (should (eq (ende-job-state job) 'cancelled))
+      (should (buffer-live-p source))
+      (should-not (ende-job-owned-buffer job)))))
+
 (ert-deftest ende-test/family-inference-template-is-clean-and-immutable ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t))
