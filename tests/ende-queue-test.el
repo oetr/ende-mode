@@ -92,6 +92,24 @@
         (should-not (ende-all-live-jobs))
         (should-not (ende-queue-family-markers))))))
 
+(ert-deftest ende-test/family-inference-template-is-clean-and-immutable ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm nil t))
+        (profile '(:name remote :model "root-model" :temperature 0.4)))
+    (ende-test--with-buffer "base"
+      (let* ((job (ende-enqueue
+                   (ende-test--dashboard-request profile)))
+             (family (ende-job-family job))
+             (template (ende-job-family-inference-template family)))
+        (should (equal (plist-get template :model) "root-model"))
+        (should-not (plist-member template :job-id))
+        (setf (ende-job-profile job)
+              (plist-put (ende-job-profile job) :tool-definitions '(temporary)))
+        (should-not (plist-member
+                     (ende-job-family-inference-template family)
+                     :tool-definitions))
+        (ende-abort-queue)))))
+
 (ert-deftest ende-test/suspended-job-resumes-only-through-scheduler ()
   (ende-test--reset)
   (let ((handler-runs 0)

@@ -30,7 +30,7 @@
 
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
-  id type state cancel-function overlay target profile instruction
+  id type state cancel-function overlay target profile inference-template instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
   last-usage tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
@@ -618,7 +618,9 @@ bypassed by a later same-provider job."
                     (when (plist-member data :max-concurrency)
                       (list :max-concurrency
                             (plist-get data :max-concurrency)))))
+           (template (copy-tree profile))
            (job (ende--make-job
+                 :inference-template template
                  :scheduling-overrides overrides
                  :id (cl-incf ende--next-job-id)
                  :type type
@@ -639,6 +641,7 @@ Return the newly created `ende-job'."
   (let* ((job (ende--job-from-request request))
          (family (ende--make-job-family
                   :root job
+                  :inference-template (ende-job-inference-template job)
                   :origin (ende-target-buffer (ende-job-target job)))))
     (setf (ende-job-family job) family
           (ende-job-schedule-path job) nil
