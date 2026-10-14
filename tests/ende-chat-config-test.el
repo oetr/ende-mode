@@ -14,6 +14,107 @@
 
 
 
+(ert-deftest ende-test/agent-config-registry-is-isolated-and-symbolic ()
+  (let ((root-a (make-temp-file "ende-agent-a-" t))
+        (root-b (make-temp-file "ende-agent-b-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert
+           (format
+            (concat "#+begin_ende\n(root %S)\n"
+                    "(tools project_info)\n"
+                    "(agent-config worker (root %S) (clear-tools))\n"
+                    "(agent-config A (spawn-agent-config B))\n"
+                    "(agent-config B (spawn-agent-config A))\n"
+                    "(spawn-agent-config worker)\n"
+                    "#+end_ende\n* Topic\n** Question\n")
+            root-a root-b))
+          (org-mode)
+          (let* ((document (ende-chat--build-document))
+                 (question (car (last (ende-chat--document-headlines document))))
+                 (environment
+                  (ende-chat-config-resolve-environment
+                   (ende-chat--document-tree document)
+                   (ende-chat--document-parent document) question))
+                 (registry (plist-get environment :registry))
+                 (worker (cdr (assq 'worker registry))))
+            (should (equal (plist-get (plist-get environment :access-policy) :root)
+                           (file-name-as-directory
+                            (ende-project-normalize-root root-a))))
+            (should (equal (plist-get worker :root)
+                           (file-name-as-directory
+                            (ende-project-normalize-root root-b))))
+            (should (equal (plist-get worker :active-tools) '(about_thinking)))
+            (should (eq (plist-get (cdr (assq 'A registry)) :spawn-agent-config)
+                        'B))
+            (should (eq (plist-get (cdr (assq 'B registry)) :spawn-agent-config)
+                        'A))
+            (let ((presentation
+                   (ende-chat-config-capabilities environment)))
+              (should (string-match-p "Direct capabilities:" presentation))
+              (should (string-match-p
+                       "Capabilities available through configured delegation:"
+                       presentation))
+              (should (string-match-p "agent-config A:" presentation))
+              (should (string-match-p "agent-config B:" presentation))
+              (should (string-match-p "spawn-agent-config: A" presentation))
+              (should (string-match-p "spawn-agent-config: B" presentation)))))
+      (delete-directory root-a t)
+      (delete-directory root-b t))))
+
+(ert-deftest ende-test/agent-config-nearer-definition-replaces-and-sibling-is-hidden ()
+  (let ((root-a (make-temp-file "ende-agent-a-" t))
+        (root-b (make-temp-file "ende-agent-b-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert
+           (format
+            (concat "#+begin_ende\n(agent-config worker (root %S))\n"
+                    "#+end_ende\n* Earlier sibling\n"
+                    "#+begin_ende\n(agent-config secret (root %S))\n"
+                    "#+end_ende\n* Current\n"
+                    "#+begin_ende\n(spawn-agent-config worker)\n"
+                    "#+end_ende\n** Question\n"
+                    "#+begin_ende\n(agent-config worker (root %S))\n"
+                    "#+end_ende\n*** Child\n")
+            root-a root-b root-b))
+          (org-mode)
+          (let* ((document (ende-chat--build-document))
+                 (child (car (last (ende-chat--document-headlines document))))
+                 (environment
+                  (ende-chat-config-resolve-environment
+                   (ende-chat--document-tree document)
+                   (ende-chat--document-parent document) child))
+                 (registry (plist-get environment :registry)))
+            (should (equal (plist-get (cdr (assq 'worker registry)) :root)
+                           (file-name-as-directory
+                            (ende-project-normalize-root root-b))))
+            (should-not (assq 'secret registry))))
+      (delete-directory root-a t)
+      (delete-directory root-b t))))
+
+(ert-deftest ende-test/agent-config-validation-is-eager-and-isolated ()
+  (let ((root (make-temp-file "ende-agent-validation-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert
+           (format (concat "#+begin_ende\n(root %S)\n"
+                           "(resource project (include \"**\"))\n"
+                           "(tools read_file)\n"
+                           "(set-tool-resources read_file :resources project)\n"
+                           "(agent-config unused (tools read_file))\n"
+                           "#+end_ende\n* Topic\n** Question\n")
+                   root))
+          (org-mode)
+          (let* ((document (ende-chat--build-document))
+                 (question (car (last (ende-chat--document-headlines document)))))
+            (should-error
+             (ende-chat-config-resolve-environment
+              (ende-chat--document-tree document)
+              (ende-chat--document-parent document) question)
+             :type 'error)))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
   (let* ((root (make-temp-file "ende-chat-config-" t))
          (child-root (make-temp-file "ende-chat-child-config-" t))
@@ -1028,10 +1129,14 @@
                           messages)))
         (should (eq (ende-job-state job) 'completed))
         (should (string-prefix-p ende-chat--system system))
-        (should (equal system
+        (should (equal (substring system 0
+                                   (+ (length ende-chat--system)
+                                      (length "\n\nDocument-level Ende configuration:\n")
+                                      (length configuration)))
                        (concat ende-chat--system
                                "\n\nDocument-level Ende configuration:\n"
                                configuration)))
+        (should (string-match-p "Configured capabilities:" system))
         (should (string-match-p (regexp-quote "#+begin_ende") system))
         (should (string-match-p (regexp-quote "#+end_ende") system))
         (should (= (ende-test--count-matches
@@ -1051,7 +1156,10 @@
       (let* ((job (ende-ask))
              (messages (plist-get (car ende-test--calls) :messages)))
         (should (eq (ende-job-state job) 'completed))
-        (should (equal (cdr (assoc "system" messages)) ende-chat--system))))))
+        (let ((system (cdr (assoc "system" messages))))
+          (should (string-prefix-p ende-chat--system system))
+          (should (string-match-p "Direct capabilities:" system))
+          (should (string-match-p "about_thinking" system)))))))
 
 (ert-deftest ende-test/chat-sibling-configuration-remains-history-only ()
   (let ((root (make-temp-file "ende-config-sibling-" t))

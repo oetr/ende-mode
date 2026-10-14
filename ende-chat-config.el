@@ -166,6 +166,28 @@
          (org-element-property :begin block)
          end)))))
 
+(defun ende-chat-config--block-forms (block)
+  "Read the forms in configuration BLOCK."
+  (let ((parameters (string-trim
+                     (or (org-element-property :parameters block) ""))))
+    (unless (string-empty-p parameters)
+      (ende-chat-config--error "ende blocks do not accept parameters"))
+    (ende-chat-config--read-forms (ende-chat-config--block-source block))))
+
+(defun ende-chat-config--agent-definition (form)
+  "Validate and return the (NAME . BODY) definition in FORM."
+  (unless (and (ende-chat-config--proper-list-p form) (>= (length form) 2))
+    (ende-chat-config--error "malformed agent-config definition: %S" form))
+  (let ((name (ende-chat-config--name (nth 1 form) "agent config"))
+        (body (cddr form)))
+    (dolist (body-form body)
+      (unless (ende-chat-config--proper-list-p body-form)
+        (ende-chat-config--error "malformed form in agent-config %s: %S"
+                                 name body-form))
+      (when (eq (car body-form) 'agent-config)
+        (ende-chat-config--error "nested agent-config definitions are not allowed")))
+    (cons name body)))
+
 (defun ende-chat-config--copy (configuration)
   "Return an independent copy of CONFIGURATION."
   (copy-tree configuration))
@@ -503,6 +525,13 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--error "podman-image expects one image string"))
      (plist-put configuration :podman-image
                 (ende-chat-config--podman-image (cadr form))))
+    ('spawn-agent-config
+     (unless (and (= (length form) 2)
+                  (symbolp (cadr form))
+                  (not (keywordp (cadr form))))
+       (ende-chat-config--error "spawn-agent-config expects one name"))
+     (plist-put configuration :spawn-agent-config
+                (ende-chat-config--name (cadr form) "agent config")))
     ('group (ende-chat-config--define-group form configuration))
     ('resource (ende-chat-config--define-resource form configuration))
     ('tools
@@ -612,6 +641,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                    (plist-get configuration :excluded-tools)))
             (plist-get configuration :host-command-policy)
           :inactive)
+        :spawn-agent-config (plist-get configuration :spawn-agent-config)
         :tool-resources
         (mapcar (lambda (entry)
                   (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
@@ -643,7 +673,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     (ende-chat-config--error
      "active tool run_sandbox_command requires a digest-pinned podman-image")))
 
-(defun ende-chat-config--apply-blocks (blocks inherited)
+(defun ende-chat-config--apply-blocks (blocks inherited &optional supplied-forms)
   "Apply BLOCKS over INHERITED and return the resulting configuration."
   (when (> (length blocks) 1)
     (ende-chat-config--error "only one config block is allowed per Org node"))
@@ -652,10 +682,12 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     (let* ((configuration (ende-chat-config--copy inherited))
            (ende-chat-config--block-line
             (line-number-at-pos (org-element-property :begin (car blocks)) t))
-           (forms (ende-chat-config--read-forms
-                   (ende-chat-config--block-source (car blocks))))
+           (forms (or supplied-forms
+                      (ende-chat-config--block-forms (car blocks))))
            (root-count 0)
            (image-count 0)
+           (spawn-config-count 0)
+           (agent-config-names nil)
            (ende-chat-config--block-state
             (list :restricted nil :host-enabled-local nil))
            group-names resource-names)
@@ -694,12 +726,220 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (ende-chat-config--error
               "only one podman-image form is allowed per block"))
            (setq configuration
-                 (ende-chat-config--apply-form form configuration)))))
+                 (ende-chat-config--apply-form form configuration)))
+          ('agent-config
+           (let ((definition (ende-chat-config--agent-definition form)))
+             (when (assq (car definition) agent-config-names)
+               (ende-chat-config--error
+                "agent-config is defined twice in this block: %s"
+                (car definition)))
+             (push definition agent-config-names)))))
       (dolist (form forms)
-        (unless (memq (car-safe form) '(root podman-image group resource))
+        (unless (memq (car-safe form)
+                      '(root podman-image group resource agent-config))
+          (when (eq (car-safe form) 'spawn-agent-config)
+            (cl-incf spawn-config-count)
+            (when (> spawn-config-count 1)
+              (ende-chat-config--error
+               "spawn-agent-config is repeated in this block")))
           (setq configuration
                 (ende-chat-config--apply-form form configuration))))
+      (setq configuration
+            (plist-put configuration :agent-config-definitions
+                       (append (plist-get configuration
+                                          :agent-config-definitions)
+                               (nreverse agent-config-names))))
       configuration)))
+
+(defun ende-chat-config--normalize-named-policy (name body registry-names)
+  "Normalize isolated named agent policy NAME with symbolic REGISTRY-NAMES."
+  (let* ((configuration (ende-chat-config--empty))
+         (ende-chat-config--block-state
+          (list :restricted nil :host-enabled-local nil))
+         (group-names nil)
+         (resource-names nil)
+         (root-count 0)
+         (image-count 0)
+         (spawn-count 0))
+    (dolist (form body)
+      (unless (ende-chat-config--proper-list-p form)
+        (ende-chat-config--error "malformed form in agent-config %s: %S"
+                                 name form))
+      (pcase (car form)
+        ('agent-config
+         (ende-chat-config--error "nested agent-config definitions are not allowed"))
+        ('group
+         (when (memq (nth 1 form) group-names)
+           (ende-chat-config--error "group is defined twice in agent-config %s: %s"
+                                    name (nth 1 form)))
+         (setq configuration
+               (ende-chat-config--define-group form configuration))
+         (push (nth 1 form) group-names))
+        ('resource
+         (when (memq (nth 1 form) resource-names)
+           (ende-chat-config--error "resource is defined twice in agent-config %s: %s"
+                                    name (nth 1 form)))
+         (setq configuration
+               (ende-chat-config--define-resource form configuration))
+         (push (nth 1 form) resource-names))
+        ('root
+         (cl-incf root-count)
+         (when (> root-count 1)
+           (ende-chat-config--error "root is repeated in agent-config %s" name))
+         (setq configuration
+               (ende-chat-config--apply-form form configuration)))
+        ('podman-image
+         (cl-incf image-count)
+         (when (> image-count 1)
+           (ende-chat-config--error "podman-image is repeated in agent-config %s"
+                                    name))
+         (setq configuration
+               (ende-chat-config--apply-form form configuration)))))
+    (dolist (form body)
+      (unless (memq (car-safe form) '(group resource root podman-image))
+        (when (eq (car-safe form) 'spawn-agent-config)
+          (cl-incf spawn-count)
+          (when (> spawn-count 1)
+            (ende-chat-config--error
+             "spawn-agent-config is repeated in agent-config %s" name)))
+        (setq configuration
+              (ende-chat-config--apply-form form configuration))))
+    (setq configuration (ende-chat-config--validate-grant-types configuration))
+    (let ((normalized (ende-chat-config--normalize configuration)))
+      (ende-chat-config--validate-access normalized configuration)
+      (when (and (memq 'spawn_agent (plist-get normalized :active-tools))
+                 (null (plist-get configuration :spawn-agent-config)))
+        (ende-chat-config--error
+         "agent-config %s enables spawn_agent without a selected policy" name))
+      (when (and (plist-get configuration :spawn-agent-config)
+                 (not (memq (plist-get configuration :spawn-agent-config)
+                            registry-names)))
+        (ende-chat-config--error "unknown agent-config %s"
+                                 (plist-get configuration :spawn-agent-config)))
+      normalized)))
+
+(defun ende-chat-config--capability-policy-lines (label policy)
+  "Return deterministic capability lines for LABEL and normalized POLICY."
+  (let ((tools (sort (mapcar #'symbol-name
+                            (copy-sequence (plist-get policy :active-tools)))
+                     #'string<))
+        (resources (sort (copy-sequence (plist-get policy :tool-resources))
+                         (lambda (left right)
+                           (string< (symbol-name (car left))
+                                    (symbol-name (car right))))))
+        (lines nil))
+    (push (format "%s direct tools: %s" label
+                  (if tools (mapconcat #'identity tools ", ") "none"))
+          lines)
+    (when (plist-get policy :root)
+      (push (format "%s root: %s" label (plist-get policy :root)) lines))
+    (dolist (grant resources)
+      (push (format "%s grants for %s: %s" label (car grant)
+                    (mapconcat #'symbol-name (sort (copy-sequence (cdr grant))
+                                                   #'string<) ", "))
+            lines))
+    (when (memq 'run_host_command (plist-get policy :active-tools))
+      (push (format "%s host-command policy: %s" label
+                    (plist-get policy :host-command-policy)) lines))
+    (when (memq 'run_sandbox_command (plist-get policy :active-tools))
+      (push (format "%s sandbox image: %s" label
+                    (or (plist-get policy :podman-image) "missing")) lines))
+    (nreverse lines)))
+
+(defun ende-chat-config-capabilities (environment)
+  "Format canonical model-visible capabilities in frozen ENVIRONMENT."
+  (let* ((policy (plist-get environment :access-policy))
+         (registry (plist-get environment :registry))
+         (selected (plist-get environment :spawn-agent-config))
+         (direct (ende-chat-config--capability-policy-lines "You" policy))
+         (delegated
+          (cl-loop for (name . named-policy) in registry
+                   append
+                   (append
+                    (list (format "agent-config %s:" name))
+                    (ende-chat-config--capability-policy-lines
+                     (format "  %s" name) named-policy)
+                    (list (format "  spawn-agent-config: %s"
+                                  (or (plist-get named-policy
+                                                 :spawn-agent-config)
+                                      "none")))))))
+    (mapconcat #'identity
+               (append (list "Direct capabilities:") direct
+                       (list "Capabilities available through configured delegation:")
+                       delegated
+                       (when selected
+                         (list (format "Selected child policy: %s" selected)))
+                       (when (memq 'spawn_agent (plist-get policy :active-tools))
+                         (list (concat "Children may run concurrently. Writes are "
+                                       "not coordinated; avoid assigning overlapping "
+                                       "mutations unless that is intentional."))))
+               "\n")))
+
+(defun ende-chat-config--agent-registry (definitions)
+  "Normalize final visible agent DEFINITIONS with symbolic names first."
+  (let ((names (mapcar #'car definitions)))
+    (mapcar
+     (lambda (definition)
+       (cons (car definition)
+             (ende-chat-config--normalize-named-policy
+              (car definition) (cdr definition) names)))
+     definitions)))
+
+(defun ende-chat-config--merge-agent-definitions (current additions)
+  "Replace same-name CURRENT definitions with ADDITIONS in scope order."
+  (dolist (definition additions current)
+    (setq current
+          (cons definition (assq-delete-all (car definition) current)))))
+
+(defun ende-chat-config-resolve-environment (tree parent-table headline)
+  "Resolve root policy and isolated visible agent registry for HEADLINE."
+  (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
+         (ancestry nil)
+         (current headline)
+         (configuration (ende-chat-config--empty))
+         (definitions nil))
+    (while current
+      (push current ancestry)
+      (setq current (gethash current parent-table)))
+    (dolist (node (cons tree ancestry))
+      (let ((blocks (gethash node blocks-by-node)))
+        (when blocks
+          (let* ((forms (ende-chat-config--block-forms (car blocks)))
+                 (policy-forms
+                  (cl-remove-if
+                   (lambda (form) (eq (car-safe form) 'agent-config))
+                   forms))
+                 (registry-forms
+                  (cl-remove-if-not
+                   (lambda (form) (eq (car-safe form) 'agent-config))
+                   forms)))
+            (setq configuration
+                  (ende-chat-config--apply-blocks
+                   blocks configuration policy-forms)
+                  definitions
+                  (ende-chat-config--merge-agent-definitions
+                   definitions
+                   (mapcar #'ende-chat-config--agent-definition
+                           registry-forms)))))))
+    (let* ((registry-names (mapcar #'car definitions))
+           (registry
+            (ende-chat-config--agent-registry definitions))
+           (selected (plist-get configuration :spawn-agent-config))
+           (active (memq 'spawn_agent
+                         (plist-get (ende-chat-config--normalize configuration)
+                                    :active-tools))))
+      (when (and selected (not (memq selected registry-names)))
+        (ende-chat-config--error "unknown agent-config %s" selected))
+      (when (and active (null selected))
+        (ende-chat-config--error
+         "active spawn_agent requires spawn-agent-config"))
+      (setq configuration
+            (ende-chat-config--validate-grant-types configuration))
+      (let ((policy (ende-chat-config--normalize configuration)))
+        (ende-chat-config--validate-access policy configuration)
+        (list :access-policy policy
+              :spawn-agent-config selected
+              :registry registry)))))
 
 (defun ende-chat-config-resolve (tree parent-table headline)
   "Resolve chat tool configuration for HEADLINE in parsed Org TREE.

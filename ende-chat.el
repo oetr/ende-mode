@@ -3567,11 +3567,13 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                                     'user)
                                 (ende-chat--askable-p document question)))
                  (error "Chat question is no longer eligible"))
-               (let* ((tool-configuration
-                       (ende-chat-config-resolve
+               (let* ((environment
+                       (ende-chat-config-resolve-environment
                         (ende-chat--document-tree document)
                         (ende-chat--document-parent document)
                         question))
+                      (tool-configuration
+                       (plist-get environment :access-policy))
                       (messages
                        (if compact
                            (ende-chat--compact-messages
@@ -3581,13 +3583,19 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                              (plist-get instruction :request-id))
                             (plist-get instruction :source-fence))
                          (ende-chat--serialize document question)))
-                      (request
-                       (cons (cons "system" (if compact
-                                                ende-chat--compact-system
-                                              (ende-chat--system-prompt document)))
-                             messages)))
+                      (system-prompt
+                       (if compact
+                           ende-chat--compact-system
+                         (concat (ende-chat--system-prompt document)
+                                 "\n\nConfigured capabilities:\n"
+                                 (ende-chat-config-capabilities environment))))
+                      (request (cons (cons "system" system-prompt) messages)))
                  (unless messages
                    (error "Chat question has no eligible content"))
+                 (unless compact
+                   (setf (ende-job-access-policy job) tool-configuration
+                         (ende-job-family-registry (ende-job-family job))
+                         (plist-get environment :registry)))
                  (if compact
                      (ende--dispatch-llm
                       job request
