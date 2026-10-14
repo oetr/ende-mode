@@ -112,6 +112,89 @@
 
 (add-hook 'ende-job-event-functions #'ende-agent--job-event)
 
+(cl-defstruct (ende-agent-spawn-batch
+               (:constructor ende-agent--make-spawn-batch))
+  identity calls result-slots outstanding launch-open completed-p invalidated-p
+  continuation)
+
+(defvar ende-agent--next-batch-id 0)
+
+(defun ende-agent--batch-live-p (parent batch)
+  "Return non-nil when BATCH still belongs to live PARENT."
+  (and (ende-job-live-p parent)
+       (eq batch (ende-job-active-spawn-batch parent))
+       (not (ende-agent-spawn-batch-invalidated-p batch))))
+
+(defun ende-agent--batch-settle (parent batch position result)
+  "Settle BATCH result POSITION once, remaining valid while PARENT waits."
+  (when (and (ende-agent--batch-live-p parent batch)
+             (not (aref (ende-agent-spawn-batch-result-slots batch) position)))
+    (aset (ende-agent-spawn-batch-result-slots batch) position result)
+    (when (not (ende-agent-spawn-batch-launch-open batch))
+      (cl-decf (ende-agent-spawn-batch-outstanding batch))
+      (when (= (ende-agent-spawn-batch-outstanding batch) 0)
+        (ende-agent--batch-complete parent batch)))))
+
+(defun ende-agent--batch-complete (parent batch)
+  "Queue completed BATCH's parent for scheduler resumption."
+  (when (and (ende-agent--batch-live-p parent batch)
+             (= (ende-agent-spawn-batch-outstanding batch) 0)
+             (not (ende-agent-spawn-batch-launch-open batch)))
+    (setf (ende-agent-spawn-batch-completed-p batch) t)
+    (ende-job-resume-queued parent)))
+
+(defun ende-agent--launch-batch (parent calls launch done)
+  "Run LAUNCH for each CALL in one dispatch-suppressed batch transaction.
+LAUNCH receives CALL, POSITION, and a settlement callback.  DONE receives the
+ordered result slots only through the parent's saved scheduler continuation."
+  (unless (and (ende-job-current-p parent)
+               (null (ende-job-active-spawn-batch parent)))
+    (error "spawn batch requires a running parent with no active batch"))
+  (let* ((batch (ende-agent--make-spawn-batch
+                 :identity (cl-incf ende-agent--next-batch-id)
+                 :calls (copy-sequence calls)
+                 :result-slots (make-vector (length calls) nil)
+                 :outstanding 0 :launch-open t))
+         (previous-suppression ende--queue-suspended)
+         (position 0))
+    (setf (ende-job-active-spawn-batch parent) batch)
+    (let ((ende--queue-suspended t))
+      (unwind-protect
+          (progn
+            (dolist (call calls)
+              (when (ende-agent--batch-live-p parent batch)
+                (let ((index position))
+                  (cl-incf (ende-agent-spawn-batch-outstanding batch))
+                  (condition-case caught
+                      (funcall launch call index
+                               (lambda (result)
+                                 (ende-agent--batch-settle
+                                  parent batch index result)))
+                    ((error quit)
+                     (ende-agent--batch-settle
+                      parent batch index
+                      (format "tool error: %s"
+                              (ende-error-display-message caught)))))))
+              (setq position (1+ position)))
+            (setf (ende-agent-spawn-batch-launch-open batch) nil)
+            (when (> (ende-agent-spawn-batch-outstanding batch) 0)
+              (ende-job-suspend
+               parent
+               (lambda ()
+                 (let ((results (append
+                                 (ende-agent-spawn-batch-result-slots batch)
+                                 nil)))
+                   (setf (ende-job-active-spawn-batch parent) nil)
+                   (funcall done results)))))
+            (when (= (ende-agent-spawn-batch-outstanding batch) 0)
+              (setf (ende-agent-spawn-batch-completed-p batch) t)))
+        (setq ende--queue-suspended previous-suppression)))
+    (when (and (not previous-suppression)
+               (not ende-queue-paused)
+               (not ende--aborting))
+      (ende-process-next))
+    batch))
+
 (defcustom ende-agent-max-tool-rounds 100000
   "Maximum model replies requesting tools for one agent job."
   :type 'integer

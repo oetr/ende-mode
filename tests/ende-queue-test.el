@@ -129,6 +129,53 @@
       (should-not (buffer-live-p (ende-job-owned-buffer child)))
       (should (buffer-live-p root-buffer)))))
 
+(ert-deftest ende-test/spawn-batch-releases-parent-and-resumes-through-dispatch ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (calls nil)
+        (continuation-runs 0)
+        parent batch)
+    (ende-test--with-buffer "batch source"
+      (let* ((target (ende-target-create
+                      :buffer (current-buffer)
+                      :start (point-min) :end (point-min) :cursor (point-min)))
+             (family (ende--make-job-family
+                      :parallel t :max-concurrency 2 :policy-frozen-p t
+                      :origin (current-buffer)))
+             (profile '(:name remote :model "fixture" :parallel t
+                        :max-concurrency 2)))
+        (setq parent
+              (ende--make-job :id 910 :type 'agent :state 'running
+                              :family family :schedule-path nil :target target
+                              :profile profile :access-policy '(:active-tools nil)
+                              :started-at (float-time) :execution-generation 1))
+        (setf (ende-job-family-root family) parent)
+        (push parent ende--active-jobs)
+        (ende--queue-push family)
+        (setq batch
+              (ende-agent--launch-batch
+               parent '("one" "two")
+               (lambda (call _position settle)
+                 (push (cons call settle) calls))
+               (lambda (results)
+                 (cl-incf continuation-runs)
+                 (ende-job-finish parent results))))
+        (should (eq (ende-job-state parent) 'suspended))
+        (should-not (memq parent (ende-running-jobs)))
+        (should (= (ende-agent-spawn-batch-outstanding batch) 2))
+        (funcall (cdr (assoc "one" calls)) "first")
+        (should (eq (ende-job-state parent) 'suspended))
+        (let ((ende--queue-suspended t))
+          (funcall (cdr (assoc "two" calls)) "second")
+          (should (eq (ende-job-state parent) 'queued)))
+        (should (= continuation-runs 0))
+        (should (functionp (ende-job-resume-function parent)))
+        (should (eq (ende-agent-spawn-batch-completed-p batch) t))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (= continuation-runs 1))
+        (should (eq (ende-job-state parent) 'completed))))))
+
 (ert-deftest ende-test/private-agent-buffer-is-owned-and-invalidates-on-kill ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t))
