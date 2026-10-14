@@ -24,13 +24,19 @@
   (when (functionp cancel-function)
     (ende-ignore-errors cancel-function)))
 
+(cl-defstruct (ende-job-family (:constructor ende--make-job-family))
+  "A top-level job and its contiguous scheduler region."
+  root parallel max-concurrency policy-frozen-p inference-template registry origin)
+
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
   last-usage tool-call-count activity-title activity-status activity-updated-at
-  pending-guidance)
+  pending-guidance family parent children schedule-path next-child-index
+  resume-function execution-generation access-policy active-spawn-batch
+  owned-buffer)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -132,20 +138,58 @@
 (defvar ende-queue-paused nil
   "Non-nil when user-requested pause prevents new jobs from starting.")
 
-(defun ende-active-jobs ()
-  "Return a snapshot of currently active jobs.
-
-The returned list may be changed by the caller without changing scheduler
-state."
+(defun ende-running-jobs ()
+  "Return a snapshot of jobs currently consuming workers."
   (copy-sequence ende--active-jobs))
 
+(defun ende-active-jobs ()
+  "Return a snapshot of currently active jobs."
+  (ende-running-jobs))
+
+(defun ende-queued-jobs ()
+  "Return a snapshot of queued jobs awaiting scheduler dispatch."
+  (copy-sequence
+   (cl-remove-if-not
+    (lambda (job) (eq (ende-job-state job) 'queued))
+    (cl-remove-if-not #'ende-job-p ende-queue))))
+
+(defun ende-physical-waiting-jobs ()
+  "Return queued and suspended jobs in physical scheduler order."
+  (copy-sequence
+   (cl-remove-if-not
+    (lambda (job) (memq (ende-job-state job) '(queued suspended)))
+    (cl-remove-if-not #'ende-job-p ende-queue))))
+
 (defun ende-pending-jobs ()
-  "Return a snapshot of pending jobs, excluding fence entries."
-  (copy-sequence (cl-remove-if-not #'ende-job-p ende-queue)))
+  "Return queued jobs awaiting dispatch, excluding structural entries."
+  (ende-queued-jobs))
+
+(defun ende-all-live-jobs ()
+  "Return a snapshot of all live jobs in stable active and waiting order."
+  (delete-dups (append (ende-running-jobs) (ende-physical-waiting-jobs))))
+
+(defun ende-job-family-roots ()
+  "Return live top-level job representatives in scheduler order."
+  (let (roots)
+    (dolist (job (ende-all-live-jobs))
+      (let ((root (or (and (ende-job-family job)
+                           (ende-job-family-root (ende-job-family job)))
+                      job)))
+        (cl-pushnew root roots :test #'eq)))
+    (nreverse roots)))
+
+(defun ende-job-origin-buffer (job)
+  "Return JOB's user-facing family origin buffer."
+  (or (and (ende-job-family job) (ende-job-family-origin (ende-job-family job)))
+      (ende-target-buffer (ende-job-target job))))
+
+(defun ende-queue-family-markers ()
+  "Return family markers in global scheduler order."
+  (cl-remove-if-not #'ende-job-family-p ende-queue))
 
 (defun ende-queue-entries ()
-  "Return a structural snapshot of pending jobs and fences in scheduler order."
-  (copy-sequence ende-queue))
+  "Return queued jobs and fences in scheduler order, excluding family markers."
+  (copy-sequence (cl-remove-if #'ende-job-family-p ende-queue)))
 
 (defun ende-queue-fences ()
   "Return fences in scheduler order without changing scheduler state."
@@ -274,6 +318,63 @@ HANDLER receives one `ende-job' object."
 (defun ende--queue-sync-tail ()
   "Refresh the queue tail after a structural queue mutation."
   (setq ende--queue-tail (last ende-queue)))
+
+(defun ende--schedule-path-before-p (left right)
+  "Return non-nil when numeric path LEFT precedes RIGHT lexicographically."
+  (let ((left-tail left)
+        (right-tail right)
+        result)
+    (while (and left-tail right-tail (null result))
+      (cond
+       ((< (car left-tail) (car right-tail)) (setq result t))
+       ((> (car left-tail) (car right-tail)) (setq result 'after))
+       (t (setq left-tail (cdr left-tail)
+                right-tail (cdr right-tail)))))
+    (cond
+     ((eq result 'after) nil)
+     (result t)
+     ((null left-tail) right-tail)
+     (t nil))))
+
+(defun ende--queue-insert-family-member (job)
+  "Insert queued JOB into its family's contiguous path-ordered region."
+  (let* ((family (ende-job-family job))
+         (marker (and family (memq family ende-queue)))
+         (previous marker)
+         (cell (and marker (cdr marker)))
+         (path (ende-job-schedule-path job)))
+    (unless marker
+      (error "job family marker is not present"))
+    (while (and cell
+                (ende-job-p (car cell))
+                (eq (ende-job-family (car cell)) family)
+                (not (ende--schedule-path-before-p
+                      path (ende-job-schedule-path (car cell)))))
+      (setq previous cell
+            cell (cdr cell)))
+    (setcdr previous (cons job cell))
+    (ende--queue-sync-tail)
+    job))
+
+(defun ende--queue-maintain-families ()
+  "Remove markers for settled roots with no live family members."
+  (let ((changed nil)
+        (live (ende-all-live-jobs)))
+    (setq ende-queue
+          (cl-remove-if
+           (lambda (entry)
+             (when (and (ende-job-family-p entry)
+                        (let ((root (ende-job-family-root entry)))
+                          (and (ende-job-terminal-p root)
+                               (not (cl-some
+                                     (lambda (job)
+                                       (eq (ende-job-family job) entry))
+                                     live)))))
+               (setq changed t)))
+           ende-queue))
+    (when changed
+      (ende--queue-sync-tail)
+      (ende-queue-emit-event '(:type :families)))))
 
 (defun ende--same-provider-p (left right)
   "Return non-nil when job profiles LEFT and RIGHT name the same provider."
@@ -456,14 +557,21 @@ bypassed by a later same-provider job."
 (defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.
 Return the newly created `ende-job'."
-  (let ((job (ende--job-from-request request)))
+  (let* ((job (ende--job-from-request request))
+         (family (ende--make-job-family
+                  :root job
+                  :origin (ende-target-buffer (ende-job-target job)))))
+    (setf (ende-job-family job) family
+          (ende-job-schedule-path job) nil
+          (ende-job-next-child-index job) 0)
     (let ((buffer (ende-target-buffer (ende-job-target job))))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (cl-pushnew job ende--source-buffer-jobs :test #'eq)
           (add-hook 'kill-buffer-hook
                     #'ende--source-buffer-killed -50 t))))
-    (ende--queue-push job)
+    (ende--queue-push family)
+    (ende--queue-insert-family-member job)
     (ende-job-emit-event
      job
      (list :type :queued
@@ -484,6 +592,7 @@ Return the newly created `ende-job'."
     (let ((ende--queue-suspended t))
       (ende-job-emit-event job (list :type :settled :state state))
       (ende--job-release-current job)
+      (ende--queue-maintain-families)
       (ende--queue-maintain-fences)
       (ende-queue-emit-event '(:type :settled))
       ;; A transport's local cleanup may call back synchronously or enqueue work.
@@ -686,32 +795,50 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
         (setf (ende-queue-fence-jobs fence)
               (delq job (ende-queue-fence-jobs fence)))))))
 
-(defun ende-queue-move (id direction)
-  "Move queued job ID one scheduler entry by DIRECTION (-1 or 1).
+(defun ende--queue-segments ()
+  "Return the queue as ordered family, fence, and orphan-job segments."
+  (let (segments current)
+    (dolist (entry ende-queue)
+      (cond
+       ((ende-queue-fence-p entry)
+        (when current (push (nreverse current) segments) (setq current nil))
+        (push (list entry) segments))
+       ((ende-job-family-p entry)
+        (when current (push (nreverse current) segments))
+        (setq current (list entry)))
+       ((and current (ende-job-p entry))
+        (push entry current))
+       (t
+        (when current (push (nreverse current) segments) (setq current nil))
+        (push (list entry) segments))))
+    (when current (push (nreverse current) segments))
+    (nreverse segments)))
 
-The adjacent entry may be another job or a fence.  Fence positions and
-membership are updated before eligible work is dispatched."
+(defun ende-queue-move (id direction)
+  "Move never-started top-level job ID across one family or fence."
   (unless (memq direction '(-1 1))
     (error "Direction must be -1 or 1"))
   (let* ((job (ende-queue-live-job-by-id id))
-         (cell (and job (memq job ende-queue)))
-         (other (and cell (if (> direction 0) (cdr cell)
-                            (and (not (eq cell ende-queue))
-                                 (let ((previous ende-queue))
-                                   (while (not (eq (cdr previous) cell))
-                                     (setq previous (cdr previous)))
-                                   previous))))))
-    (unless (and job (eq (ende-job-state job) 'queued) cell)
-      (user-error "Job is no longer queued"))
-    (unless other
+         (family (and job (ende-job-family job)))
+         (segments (ende--queue-segments))
+         (index (cl-position-if (lambda (segment)
+                                  (eq (car segment) family))
+                                segments))
+         (other-index (and index (+ index direction))))
+    (unless (and job family (eq job (ende-job-family-root family))
+                 (null (ende-job-parent job))
+                 (null (ende-job-started-at job))
+                 (eq (ende-job-state job) 'queued)
+                 (memq family ende-queue))
+      (user-error "Only never-started top-level jobs can be moved"))
+    (unless (and other-index (>= other-index 0)
+                 (< other-index (length segments)))
       (user-error "Job is already at that end of the queue"))
-    (if (> direction 0)
-        (let ((entry (car other)))
-          (setcar other job)
-          (setcar cell entry))
-      (let ((entry (car cell)))
-        (setcar cell (car other))
-        (setcar other entry)))
+    (let ((segment (nth index segments))
+          (other (nth other-index segments)))
+      (setf (nth index segments) other
+            (nth other-index segments) segment))
+    (setq ende-queue (apply #'append segments))
     (ende--queue-update-moved-job-fences job)
     (ende--queue-sync-tail)
     (ende--queue-maintain-fences)
@@ -752,6 +879,7 @@ membership are updated before eligible work is dispatched."
             (setf (ende-job-state job) 'cancelled
                   (ende-job-finished-at job) now)))
         (ende--queue-sync-tail)
+        (ende--queue-maintain-families)
         (dolist (job live)
           (ende--unregister-source-job job)
           (ende-ignore-errors #'ende-target-release (ende-job-target job)))
@@ -809,6 +937,7 @@ membership are updated before eligible work is dispatched."
             (dolist (job jobs)
               (when (eq (ende-job-state job) 'cancelled)
                 (ende--invoke-cancellation (ende-job-cancel-function job)))))
+          (ende--queue-maintain-families)
           (dolist (function ende-queue-abort-functions)
             (ende-ignore-errors function)))
       (setq ende--aborting was-aborting)

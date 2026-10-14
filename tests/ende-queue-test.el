@@ -36,6 +36,30 @@
       (should (cl-every #'ende-job-p (ende-active-jobs)))
       (should (cl-every #'ende-job-p (ende-pending-jobs))))))
 
+(ert-deftest ende-test/family-queue-keeps-markers-and-sorts-numeric-paths ()
+  (let* ((root (ende--make-job :id 1 :state 'queued :schedule-path nil))
+         (family (ende--make-job-family :root root))
+         (ende-queue (list family root))
+         (ende--queue-tail (last ende-queue))
+         (paths '((2) (1 2) (1 1) (1)))
+         children)
+    (setf (ende-job-family root) family)
+    (dolist (path paths)
+      (let ((child (ende--make-job :id (+ 10 (length children))
+                                   :state 'queued :family family
+                                   :schedule-path path)))
+        (push child children)
+        (ende--queue-insert-family-member child)))
+    (should (equal (mapcar #'ende-job-schedule-path
+                           (ende-physical-waiting-jobs))
+                   '(nil (1) (1 1) (1 2) (2))))
+    (should (equal (mapcar #'ende-job-id (ende-queue-entries))
+                   '(1 13 12 11 10)))
+    (should (eq (car (ende-queue-family-markers)) family))
+    (should (ende--schedule-path-before-p '(1 2) '(1 10)))
+    (should (ende--schedule-path-before-p '(1) '(1 1)))
+    (should-not (ende--schedule-path-before-p '(2) '(1 9)))))
+
 (ert-deftest ende-test/queue-status-uses-active-jobs-as-its-representative ()
   (ende-test--reset)
   (let ((profile '(:name remote :model "fixture" :parallel t
