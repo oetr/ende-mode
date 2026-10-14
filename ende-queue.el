@@ -36,7 +36,7 @@
   last-usage tool-call-count activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
-  owned-buffer)
+  scheduling-overrides owned-buffer)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -86,11 +86,23 @@
   "Non-nil when JOB has reached a terminal state."
   (memq (ende-job-state job) '(completed failed cancelled skipped)))
 
+(defun ende-job-live-p (job)
+  "Return non-nil when JOB is in a live scheduler state."
+  (and (ende-job-p job)
+       (memq (ende-job-state job)
+             '(queued running suspended completed failed cancelled skipped))
+       (not (ende-job-terminal-p job))))
+
 (defun ende-job-current-p (job)
   "Non-nil when JOB is the active, still-settleable job."
   (and (memq job ende--active-jobs)
        (eq (ende-job-state job) 'running)
        (not ende--aborting)))
+
+(defun ende-job-execution-current-p (job generation)
+  "Return non-nil when JOB is running in worker GENERATION."
+  (and (ende-job-current-p job)
+       (= (or (ende-job-execution-generation job) 0) generation)))
 
 (defun ende-job-cancellation-set (job cancel-function)
   "Associate CANCEL-FUNCTION with JOB, or invoke it if JOB is stale."
@@ -100,9 +112,12 @@
   cancel-function)
 
 (defun ende-job-can-accept-guidance-p (job)
-  "Return non-nil when running chat JOB can accept user guidance."
-  (and (ende-job-current-p job)
-       (eq (ende-job-type job) 'chat)))
+  "Return non-nil when live, started chat JOB can accept user guidance."
+  (and (eq (ende-job-type job) 'chat)
+       (or (ende-job-current-p job)
+           (and (ende-job-live-p job)
+                (ende-job-started-at job)
+                (memq (ende-job-state job) '(suspended queued))))))
 
 (defun ende-job-pending-guidance-p (job)
   "Return non-nil when JOB has guidance awaiting a chat boundary."
@@ -124,9 +139,22 @@
   (prog1 (ende-job-pending-guidance job)
     (setf (ende-job-pending-guidance job) nil)))
 
+(defun ende--job-release-worker (job)
+  "Release JOB's provider worker without releasing its target or source."
+  (setq ende--active-jobs (delq job ende--active-jobs)))
+
+(defun ende--job-register-origin (job)
+  "Register JOB for cancellation when its origin buffer is killed."
+  (let ((buffer (ende-job-origin-buffer job)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (cl-pushnew job ende--source-buffer-jobs :test #'eq)
+        (add-hook 'kill-buffer-hook #'ende--source-buffer-killed -50 t))))
+  job)
+
 (defun ende--job-release-current (job)
   "Release JOB from the active set and release its target."
-  (setq ende--active-jobs (delq job ende--active-jobs))
+  (ende--job-release-worker job)
   (ende--unregister-source-job job)
   (ende-ignore-errors #'ende-target-release (ende-job-target job)))
 
@@ -161,12 +189,17 @@
     (cl-remove-if-not #'ende-job-p ende-queue))))
 
 (defun ende-pending-jobs ()
-  "Return queued jobs awaiting dispatch, excluding structural entries."
+  "Return a snapshot of queued jobs, excluding structural entries."
+  (ende-queued-jobs))
+
+(defun ende-queue-awaiting-dispatch ()
+  "Return queued jobs currently eligible for scheduler consideration."
   (ende-queued-jobs))
 
 (defun ende-all-live-jobs ()
   "Return a snapshot of all live jobs in stable active and waiting order."
-  (delete-dups (append (ende-running-jobs) (ende-physical-waiting-jobs))))
+  (cl-delete-duplicates
+   (append (ende-running-jobs) (ende-physical-waiting-jobs)) :test #'eq))
 
 (defun ende-job-family-roots ()
   "Return live top-level job representatives in scheduler order."
@@ -458,6 +491,41 @@ HANDLER receives one `ende-job' object."
         (push entry blockers))))
     (nreverse blockers)))
 
+(defun ende--family-scheduling-policy (job)
+  "Return JOB's effective family scheduling policy without freezing it."
+  (let* ((family (ende-job-family job))
+         (profile (ende-job-profile job))
+         (overrides (ende-job-scheduling-overrides job))
+         (parallel-default
+          (let ((runtime (ende-provider--runtime-value
+                          (plist-get profile :name) :parallel)))
+            (if (eq runtime :unset)
+                (ende-provider-parallel-enabled-p profile)
+              (eq runtime t))))
+         (limit-default (ende-provider-max-concurrency profile)))
+    (if (and family (ende-job-family-policy-frozen-p family))
+        (list :parallel (ende-job-family-parallel family)
+              :max-concurrency (ende-job-family-max-concurrency family))
+      (list :parallel
+            (if (plist-member overrides :parallel)
+                (plist-get overrides :parallel)
+              parallel-default)
+            :max-concurrency
+            (if (plist-member overrides :max-concurrency)
+                (plist-get overrides :max-concurrency)
+              limit-default)))))
+
+(defun ende--freeze-family-policy (job)
+  "Freeze JOB's effective scheduling policy on its family's first start."
+  (let ((family (ende-job-family job)))
+    (when (and family (not (ende-job-family-policy-frozen-p family)))
+      (let ((policy (ende--family-scheduling-policy job)))
+        (setf (ende-job-family-parallel family) (plist-get policy :parallel)
+              (ende-job-family-max-concurrency family)
+              (plist-get policy :max-concurrency)
+              (ende-job-family-policy-frozen-p family) t)))
+    family))
+
 (defun ende-job-explanation (job)
   "Return a pure readiness explanation for queued JOB.
 
@@ -469,11 +537,14 @@ if user pause were ignored."
         (provider (ende--job-provider-key job))
         (before t)
         earlier-provider)
+    (when (eq (ende-job-state job) 'suspended)
+      (push (list :kind 'suspended) blockers))
     (when (eq (ende-job-state job) 'queued)
       (dolist (entry ende-queue)
         (cond
          ((eq entry job) (setq before nil))
          ((and before (ende-job-p entry)
+               (eq (ende-job-state entry) 'queued)
                (equal provider (ende--job-provider-key entry)))
           (unless earlier-provider (setq earlier-provider entry)))))
       (dolist (fence (ende--queue-fence-blockers job))
@@ -493,9 +564,9 @@ if user pause were ignored."
                            ende--active-jobs))
               blockers))
       (let* ((active (ende--active-provider-jobs job))
-             (profile (ende-job-profile job))
-             (parallel (eq (plist-get profile :parallel) t))
-             (limit (ende-provider-max-concurrency profile)))
+             (policy (ende--family-scheduling-policy job))
+             (parallel (eq (plist-get policy :parallel) t))
+             (limit (plist-get policy :max-concurrency)))
         (when (if parallel
                   (>= (length active) limit)
                 active)
@@ -516,7 +587,8 @@ bypassed by a later same-provider job."
     (catch 'found
       (cl-loop for cell on ende-queue do
                (let ((job (car cell)))
-                 (when (ende-job-p job)
+                 (when (and (ende-job-p job)
+                            (eq (ende-job-state job) 'queued))
                    (let ((provider (ende--job-provider-key job)))
                      (unless (cl-member provider seen-providers :test #'equal)
                        (push provider seen-providers)
@@ -540,7 +612,14 @@ bypassed by a later same-provider job."
                        (plist-get data :provider)))
                  (ende-provider-profile-for-buffer buffer t))))
            (now (float-time))
+           (overrides
+            (append (when (plist-member data :parallel)
+                      (list :parallel (plist-get data :parallel)))
+                    (when (plist-member data :max-concurrency)
+                      (list :max-concurrency
+                            (plist-get data :max-concurrency)))))
            (job (ende--make-job
+                 :scheduling-overrides overrides
                  :id (cl-incf ende--next-job-id)
                  :type type
                  :state 'queued
@@ -564,12 +643,7 @@ Return the newly created `ende-job'."
     (setf (ende-job-family job) family
           (ende-job-schedule-path job) nil
           (ende-job-next-child-index job) 0)
-    (let ((buffer (ende-target-buffer (ende-job-target job))))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (cl-pushnew job ende--source-buffer-jobs :test #'eq)
-          (add-hook 'kill-buffer-hook
-                    #'ende--source-buffer-killed -50 t))))
+    (ende--job-register-origin job)
     (ende--queue-push family)
     (ende--queue-insert-family-member job)
     (ende-job-emit-event
@@ -582,43 +656,139 @@ Return the newly created `ende-job'."
 
 ;;;; Settlement and dispatch
 
+(defun ende--job-live-subtree (roots)
+  "Return live ROOTS and descendants in parent-before-child order."
+  (let ((pending (copy-sequence roots))
+        (seen nil)
+        result)
+    (while pending
+      (let ((job (pop pending)))
+        (when (and (ende-job-live-p job) (not (memq job seen)))
+          (push job seen)
+          (push job result)
+          (setq pending (nconc (copy-sequence (ende-job-children job))
+                               pending)))))
+    (nreverse result)))
+
+(defun ende--job-terminal-event (job state result error)
+  "Emit lifecycle events for JOB's terminal STATE."
+  (pcase state
+    ('completed
+     (ende-job-emit-event
+      job (list :type :done :result result
+                :content (if (stringp result) result
+                           (and (listp result) (plist-get result :content))))))
+    ('failed
+     (ende-job-emit-event
+      job (append (list :type :error :error error)
+                  (when result (list :result result)))))
+    ('cancelled (ende-job-emit-event job '(:type :cancelled)))
+    ('skipped
+     (ende-job-emit-event job (list :type :skipped :error error))))
+  (ende-job-emit-event job (list :type :settled :state state)))
+
+(defun ende--job-terminalize (roots state result error)
+  "Terminalize ROOTS and their owned descendants atomically."
+  (unless (memq state '(completed failed cancelled skipped))
+    (error "invalid terminal job state: %s" state))
+  (let* ((was-suspended ende--queue-suspended)
+         (selected (cl-delete-duplicates (copy-sequence roots) :test #'eq))
+         (jobs (ende--job-live-subtree selected))
+         (now (float-time))
+         cancellations)
+    (when (and (eq state 'completed)
+               (cl-some (lambda (job) (ende-job-children job)) selected))
+      (error "job cannot complete while it owns live descendants"))
+    (when jobs
+      (let ((ende--queue-suspended t))
+        (dolist (job jobs)
+          (push (cons job (ende-job-cancel-function job)) cancellations)
+          (setf (ende-job-state job)
+                (if (memq job selected) state 'cancelled)
+                (ende-job-result job) (and (memq job selected) result)
+                (ende-job-error job)
+                (if (memq job selected) error
+                  (ende-error-create :kind 'cancelled
+                                     :message "owning job settled"))
+                (ende-job-finished-at job) now
+                (ende-job-resume-function job) nil
+                (ende-job-cancel-function job) nil
+                (ende-job-active-spawn-batch job) nil))
+        (setq ende--active-jobs
+              (cl-set-difference ende--active-jobs jobs :test #'eq)
+              ende-queue
+              (cl-remove-if
+               (lambda (entry) (and (ende-job-p entry) (memq entry jobs)))
+               ende-queue))
+        (dolist (job jobs)
+          (when-let* ((parent (ende-job-parent job)))
+            (setf (ende-job-children parent)
+                  (delq job (ende-job-children parent))))
+          (setf (ende-job-children job) nil))
+        (ende--queue-sync-tail)
+        (dolist (job jobs)
+          (ende--unregister-source-job job)
+          (ende-ignore-errors #'ende-target-release (ende-job-target job)))
+        (ende--queue-maintain-families)
+        (ende--queue-maintain-fences)
+        (dolist (job jobs)
+          (ende--job-terminal-event
+           job (ende-job-state job) (ende-job-result job) (ende-job-error job)))
+        (ende-queue-emit-event (list :type state))
+        (dolist (entry cancellations)
+          (ende--invoke-cancellation (cdr entry))))
+      (unless (or ende--aborting was-suspended)
+        (ende-process-next)))
+    jobs))
+
 (defun ende--job-settle (job state &optional result error)
-  "Settle active JOB exactly once with STATE, RESULT, and ERROR."
-  (when (ende-job-current-p job)
-    (setf (ende-job-state job) state
-          (ende-job-result job) result
-          (ende-job-error job) error
-          (ende-job-finished-at job) (float-time))
+  "Settle live JOB exactly once with STATE, RESULT, and ERROR."
+  (ende--job-terminalize (list job) state result error))
+
+(defun ende-job-suspend (job resume-function)
+  "Release JOB's worker and queue it as suspended with RESUME-FUNCTION."
+  (unless (and (ende-job-current-p job) (functionp resume-function))
+    (error "cannot suspend job outside a running execution"))
+  (let ((was-suspended ende--queue-suspended))
     (let ((ende--queue-suspended t))
-      (ende-job-emit-event job (list :type :settled :state state))
-      (ende--job-release-current job)
-      (ende--queue-maintain-families)
-      (ende--queue-maintain-fences)
-      (ende-queue-emit-event '(:type :settled))
-      ;; A transport's local cleanup may call back synchronously or enqueue work.
-      (ende--invoke-cancellation (ende-job-cancel-function job)))
-    (unless (or ende--aborting ende--queue-suspended)
-      (ende-process-next))))
+      (setf (ende-job-resume-function job) resume-function
+            (ende-job-state job) 'suspended
+            (ende-job-status job) "Suspended")
+      (ende--job-release-worker job)
+      (ende--queue-insert-family-member job)
+      (ende-job-emit-event job '(:type :suspended))
+      (ende-queue-emit-event '(:type :suspended)))
+    (unless (or was-suspended ende--aborting)
+      (ende-process-next)))
+  job)
+
+(defun ende-job-resume-queued (job)
+  "Make suspended JOB queued at the same family/path position."
+  (when (and (ende-job-live-p job)
+             (eq (ende-job-state job) 'suspended))
+    (setf (ende-job-state job) 'queued
+          (ende-job-status job) "Waiting to resume")
+    (ende-job-emit-event job '(:type :queued-for-resumption))
+    (ende-queue-emit-event '(:type :resumption-ready))
+    (unless (or ende--queue-suspended ende--aborting)
+      (ende-process-next)))
+  job)
 
 (defun ende-job-finish (job &optional result)
-  "Complete JOB with RESULT and advance the queue."
+  "Complete running JOB with RESULT and advance the queue."
   (when (ende-job-current-p job)
-    (ende-job-emit-event
-     job (list :type :done :result result
-               :content (if (stringp result)
-                            result
-                          (and (listp result)
-                               (plist-get result :content))))))
-  (ende--job-settle job 'completed result nil))
+    (condition-case caught
+        (ende--job-settle job 'completed result nil)
+      (error
+       (ende-job-fail
+        job (ende-error-create :kind 'ownership
+                               :message (error-message-string caught)))))))
 
 (defun ende-job-fail (job error &optional result)
-  "Fail JOB with ERROR and advance the queue.
+  "Fail live JOB with ERROR and advance the queue.
 When RESULT is non-nil, retain it for history and job inspection."
-  (when (ende-job-current-p job)
+  (when (ende-job-live-p job)
     (let ((id (ende-job-id job)))
-      (ende-job-emit-event
-       job (append (list :type :error :error error)
-                   (when result (list :result result))))
       (ende--job-settle job 'failed result error)
       (condition-case nil
           (message "ende: job %d failed: %s"
@@ -626,37 +796,48 @@ When RESULT is non-nil, retain it for history and job inspection."
         ((error quit) nil)))))
 
 (defun ende-job-skip (job message)
-  "Skip active JOB with MESSAGE and advance the queue."
-  (when (ende-job-current-p job)
+  "Skip live JOB with MESSAGE and advance the queue."
+  (when (ende-job-live-p job)
     (let ((id (ende-job-id job)))
       (ende--job-settle job 'skipped nil
-                        (ende-error-create :kind 'skipped
-                                           :message message))
+                        (ende-error-create :kind 'skipped :message message))
       (message "ende: skipped job %d (%s)" id message))))
 
 (defun ende--dispatch-job (job)
-  "Start JOB and route scheduler or handler failures to settlement."
+  "Start or resume JOB and route scheduler failures to settlement."
   (let* ((type (ende-job-type job))
          (handler (alist-get type ende--job-handlers))
-         (target (ende-job-target job)))
+         (target (ende-job-target job))
+         (resuming (and (ende-job-started-at job) t))
+         (continuation (and resuming (ende-job-resume-function job)))
+         (generation (1+ (or (ende-job-execution-generation job) 0))))
+    (ende--freeze-family-policy job)
     (push job ende--active-jobs)
     (setf (ende-job-state job) 'running
-          (ende-job-started-at job) (float-time)
+          (ende-job-started-at job) (or (ende-job-started-at job) (float-time))
           (ende-job-dispatch-order job) (cl-incf ende--next-dispatch-order)
+          (ende-job-execution-generation job) generation
           (ende-job-status job) "Running")
-    (ende-job-emit-event job '(:type :started))
+    (ende-job-emit-event job (if resuming '(:type :resumed) '(:type :started)))
     (cond
+     ((and resuming (not (functionp continuation)))
+      (ende-job-fail
+       job (ende-error-create :kind 'scheduler
+                              :message "started job has no resume continuation")))
      ((not (ende-target-live-p target))
       (ende-job-skip
        job (format "%s: target buffer no longer exists" type)))
-     ((null handler)
+     ((and (not resuming) (null handler))
       (ende-job-fail
        job (ende-error-create
             :kind 'scheduler
             :message (format "unknown job handler: %s" type))))
      (t
       (condition-case caught
-          (progn
+          (if resuming
+              (progn
+                (setf (ende-job-resume-function job) nil)
+                (funcall continuation))
             (ende-target-activate
              target
              (lambda (message)
@@ -750,8 +931,7 @@ When called interactively, prompt for one of the configured providers."
 
 (defun ende-queue-live-job-by-id (id)
   "Return the live job with stable ID, or nil."
-  (cl-find id (append ende--active-jobs (ende-pending-jobs))
-           :key #'ende-job-id :test #'eql))
+  (cl-find id (ende-all-live-jobs) :key #'ende-job-id :test #'eql))
 
 (defun ende-queue-change-policy (ids policy)
   "Set queued jobs named by IDS to POLICY, then dispatch once if allowed.
@@ -769,6 +949,9 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
     (dolist (job jobs)
       (setf (ende-job-profile job)
             (plist-put (copy-tree (ende-job-profile job))
+                       :parallel (eq policy 'parallel))
+            (ende-job-scheduling-overrides job)
+            (plist-put (copy-sequence (ende-job-scheduling-overrides job))
                        :parallel (eq policy 'parallel))))
     (dolist (job jobs)
       (ende-job-emit-event job (list :type :policy :policy policy)))
@@ -853,46 +1036,10 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
   (ende--cancel-live-jobs (list job)))
 
 (defun ende--cancel-live-jobs (jobs)
-  "Atomically invalidate live JOBS, then invoke cleanup and dispatch once."
-  (let* ((active (copy-sequence ende--active-jobs))
-         (pending (ende-pending-jobs))
-         (members (append active pending))
-         (was-suspended ende--queue-suspended)
-         (live (cl-remove-if-not
-                (lambda (job)
-                  (and (ende-job-p job)
-                       (not (ende-job-terminal-p job))
-                       (memq job members)))
-                (cl-delete-duplicates (copy-sequence jobs) :test #'eq)))
-         (remaining (cl-set-difference active live :test #'eq)))
-    (when live
-      ;; Hold dispatch through lifecycle notifications and cancellation
-      ;; callbacks; the complete selected set is already invalid before either.
-      (let ((ende--queue-suspended t))
-        (setq ende-queue
-              (cl-remove-if
-               (lambda (entry) (and (ende-job-p entry) (memq entry live)))
-               ende-queue)
-              ende--active-jobs remaining)
-        (let ((now (float-time)))
-          (dolist (job live)
-            (setf (ende-job-state job) 'cancelled
-                  (ende-job-finished-at job) now)))
-        (ende--queue-sync-tail)
-        (ende--queue-maintain-families)
-        (dolist (job live)
-          (ende--unregister-source-job job)
-          (ende-ignore-errors #'ende-target-release (ende-job-target job)))
-        (dolist (job live)
-          (ende-job-emit-event job '(:type :cancelled))
-          (ende-job-emit-event job '(:type :settled :state cancelled)))
-        (ende--queue-maintain-fences)
-        (ende-queue-emit-event '(:type :cancelled))
-        (dolist (job live)
-          (ende--invoke-cancellation (ende-job-cancel-function job))))
-      (unless (or ende--aborting was-suspended)
-        (ende-process-next)))
-    live))
+  "Cancel JOBS and their owned descendants in one scheduler transaction."
+  (ende--job-terminalize jobs 'cancelled nil
+                         (ende-error-create :kind 'cancelled
+                                            :message "job cancelled")))
 
 (defun ende-queue-cancel-ids (ids)
   "Cancel live jobs identified by IDS as one dispatch-atomic mutation."
@@ -912,7 +1059,7 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
   (interactive)
   (let* ((was-aborting ende--aborting)
          (active (copy-sequence ende--active-jobs))
-         (pending (ende-pending-jobs))
+         (pending (ende-physical-waiting-jobs))
          (jobs (append active pending)))
     ;; Invalidate callbacks before invoking transport cancellation because a
     ;; transport may settle reentrantly.

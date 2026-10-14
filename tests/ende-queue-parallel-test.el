@@ -11,6 +11,32 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
+(ert-deftest ende-test/family-policy-freezes-only-on-first-dispatch ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("done") t))
+        (profile '(:name remote :model "remote-model"
+                   :max-concurrency 2 :parallel t)))
+    (ende-test--with-buffer "base"
+      (let ((ende--queue-suspended t)
+            job)
+        (setq job (ende-enqueue
+                   (ende-test--dashboard-request profile)))
+        (should-not (ende-job-family-policy-frozen-p (ende-job-family job)))
+        (ende-job-explanation job)
+        (should-not (ende-job-family-policy-frozen-p (ende-job-family job)))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (ende-job-family-policy-frozen-p (ende-job-family job)))
+        (should (eq (ende-job-family-parallel (ende-job-family job)) t))
+        (ende-provider-set-runtime-setting 'remote :parallel nil)
+        (ende-provider-set-runtime-setting 'remote :max-concurrency 1)
+        (should (eq (plist-get (ende--family-scheduling-policy job) :parallel)
+                    t))
+        (should (= (plist-get (ende--family-scheduling-policy job)
+                              :max-concurrency)
+                   2))
+        (ende-test--complete-call (car ende-test--calls))))))
+
 (ert-deftest ende-test/parallel-same-endpoint-preserves-enqueue-order ()
   (ende-test--reset)
   (let ((ende-llm-function

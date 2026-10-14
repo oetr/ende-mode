@@ -60,6 +60,77 @@
     (should (ende--schedule-path-before-p '(1) '(1 1)))
     (should-not (ende--schedule-path-before-p '(2) '(1 9)))))
 
+(ert-deftest ende-test/cancelling-parent-terminalizes-live-descendants ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        (child-cancelled nil)
+        root child)
+    (ende-test--with-buffer "base"
+      (let ((target (ende-target-create
+                     :buffer (current-buffer)
+                     :start (point-min) :end (point-min) :cursor (point-min))))
+        (setq root (ende-enqueue
+                    (list 'ownership-test :target target
+                          :profile ende-test--dashboard-profile))
+              child (ende--make-job :id 200 :type 'ownership-test
+                                    :state 'queued :family (ende-job-family root)
+                                    :parent root :schedule-path '(1)
+                                    :target target
+                                    :profile ende-test--dashboard-profile
+                                    :cancel-function
+                                    (lambda ()
+                                      (setq child-cancelled
+                                            (eq (ende-job-state child)
+                                                'cancelled)))))
+        (setf (ende-job-children root) (list child))
+        (ende--queue-insert-family-member child)
+        (ende--cancel-live-jobs (list root))
+        (should (eq (ende-job-state root) 'cancelled))
+        (should (eq (ende-job-state child) 'cancelled))
+        (should child-cancelled)
+        (should-not (ende-all-live-jobs))
+        (should-not (ende-queue-family-markers))))))
+
+(ert-deftest ende-test/suspended-job-resumes-only-through-scheduler ()
+  (ende-test--reset)
+  (let ((handler-runs 0)
+        (resumed nil)
+        (ende-llm-function (ende-test--fake-llm nil t)))
+    (ende-register-job-handler
+     'suspend-test
+     (lambda (job)
+       (cl-incf handler-runs)
+       (ende-job-suspend
+        job (lambda ()
+              (setq resumed t)
+              (ende-job-finish job "done")))))
+    (ende-test--with-buffer "base"
+      (let ((ende--queue-suspended t)
+            job)
+        (setq job
+              (ende-enqueue
+               (list 'suspend-test
+                     :target (ende-target-create
+                              :buffer (current-buffer)
+                              :start (point-min) :end (point-min)
+                              :cursor (point-min))
+                     :profile ende-test--dashboard-profile)))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (eq (ende-job-state job) 'suspended))
+        (should-not (memq job (ende-running-jobs)))
+        (should (eq (car (ende-physical-waiting-jobs)) job))
+        (should-not resumed)
+        (let ((ende--queue-suspended t))
+          (ende-job-resume-queued job)
+          (should (eq (ende-job-state job) 'queued))
+          (should-not resumed))
+        (ende-process-next)
+        (should resumed)
+        (should (= handler-runs 1))
+        (should (eq (ende-job-state job) 'completed))))))
+
 (ert-deftest ende-test/queue-status-uses-active-jobs-as-its-representative ()
   (ende-test--reset)
   (let ((profile '(:name remote :model "fixture" :parallel t
