@@ -259,6 +259,67 @@
                        (list origin))))
       (ende--cancel-live-jobs (list root)))))
 
+(ert-deftest ende-test/root-source-death-cancels-suspended-descendants ()
+  (ende-test--reset)
+  (let* ((source (generate-new-buffer " *ende-agent-origin*"))
+         (ende--queue-suspended t)
+         (ende-llm-function (ende-test--fake-llm nil t))
+         (ende-finished-jobs nil)
+         (ende-finished--live-jobs (make-hash-table :test #'eql))
+         (event-hook-count (length ende-job-event-functions))
+         root children dashboard)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "source")
+            (setq root
+                  (ende-enqueue
+                   (list 'insert
+                         :target (ende-target-create
+                                  :buffer source :start 1 :end 1 :cursor 1)
+                         :profile ende-test--dashboard-profile))))
+          (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+          (dotimes (_ 4)
+            (push (ende-job-publish-child
+                   root
+                   (cons 'agent
+                         (list :profile ende-test--dashboard-profile
+                               :instruction '(:task "descendant")
+                               :prepare #'ende-agent-private-target))
+                   (ende-job-next-child-path root))
+                  children))
+          (should (equal (buffer-local-value 'ende--source-buffer-jobs source)
+                         (list root)))
+          (should (= (length ende-job-event-functions) event-hook-count))
+          (should (cl-every
+                   (lambda (child)
+                     (eq (ende-finished--live-buffer
+                          (gethash (ende-job-id child)
+                                   ende-finished--live-jobs))
+                         source))
+                   children))
+          (setq dashboard (ende-queue-open))
+          (with-current-buffer dashboard
+            (setq ende-queue-ui-view 'buffers)
+            (ende-queue-ui--render)
+            (should (equal (mapcar #'car (ende-queue-ui--buffer-jobs))
+                           (list source))))
+          (kill-buffer source)
+          (setq source nil)
+          (should (eq (ende-job-state root) 'cancelled))
+          (should (cl-every (lambda (child)
+                              (eq (ende-job-state child) 'cancelled))
+                            children))
+          (should (cl-every (lambda (child)
+                              (not (buffer-live-p
+                                    (ende-job-owned-buffer child))))
+                            children)))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (when (buffer-live-p dashboard)
+        (kill-buffer dashboard))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/internal-agent-runs-shared-loop-on-private-target ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("child answer") t))
