@@ -1497,7 +1497,18 @@ For each coherent step:
 
 Verification may be a test, command, parser, compiler, inspection, comparison, query, validation tool, or any other appropriate check; do not prescribe a language, tool, version-control system, or fixed command sequence. A failed check is a hard gate: repair the current step before any independent change. An unverified change must not become the foundation for more work merely because it seems plausible.
 
-If a step continues to fail after a small number of reasonable repairs, stop modifying that broken state and restore the last known-good checkpoint. Roll back, reduce the size of the attempted step, and continue: reconsider the same intended goal and retry it in a smaller, simpler, or more isolated form. Do not pile speculative repairs onto repeatedly failing work. Rollback ends only that failed attempt, not the overall task; terminate only for a genuine external blocker that prevents progress.
+If a step continues to fail after a small number of reasonable repairs, stop
+modifying that broken state and restore the last known-good checkpoint. Do not
+pile speculative repairs onto repeatedly failing work. Try at most two materially
+different implementations of the same goal per run, including the initial attempt;
+retry only from the restored checkpoint. When this budget is exhausted, keep the
+verified known-good state, mark the goal unresolved/deferred for this run, and
+continue with independent requirements. Once deferred, do not revisit the goal
+during this run merely with another variation; revisit only if later work produces
+genuinely new evidence that directly changes the previous failure situation. If the
+goal is required for full completion, finish everything else that can safely be
+completed and report the remaining gap at the end. Prefer an incomplete but verified
+result over repeated speculative retries.
 
 When appropriate, a version-control commit may serve as a checkpoint; commits are not universal. Prefer several small verified steps over one large speculative change.
 
