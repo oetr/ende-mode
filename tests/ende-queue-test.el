@@ -342,6 +342,71 @@
         (should (buffer-live-p source))
         (ende--cancel-live-jobs (list parent))))))
 
+(ert-deftest ende-test/recursive-agents-settle-through-the-family-scheduler ()
+  (ende-test--reset)
+  (let* ((tool-call (lambda (id task)
+                      (list :id id :name "spawn_agent"
+                            :arguments (json-encode `((task . ,task))))))
+         (policy '(:root nil :active-tools (about_thinking spawn_agent)
+                   :tool-resources nil :spawn-agent-config worker))
+         (profile '(:name remote :model "fixture" :parallel t
+                    :max-concurrency 2))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list (funcall tool-call "root-call" "child")))
+                 (list :tool-calls (list (funcall tool-call "child-call" "grandchild")))
+                 "grandchild answer"
+                 "child answer"
+                 "root answer") t))
+         (ende--queue-suspended t)
+         root child grandchild)
+    (ende-test--with-buffer "agent source"
+      (let* ((request
+              (cons 'agent
+                    (list :profile profile :access-policy policy
+                          :instruction '(:task "root task")
+                          :prepare #'ende-agent-private-target)))
+             (family nil))
+        (setq root (ende--job-from-request request)
+              family (ende--make-job-family
+                      :root root :parallel t :max-concurrency 2
+                      :policy-frozen-p t :origin (current-buffer)
+                      :inference-template (ende-job-inference-template root)
+                      :registry `((worker . ,policy))))
+        (setf (ende-job-family root) family
+              (ende-job-schedule-path root) nil
+              (ende-job-next-child-index root) 0)
+        (ende--job-register-origin root)
+        (ende--queue-push family)
+        (ende--queue-insert-family-member root)
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (= (length ende-test--calls) 1))
+        (ende-test--complete-call (nth 0 ende-test--calls))
+        (setq child (car (ende-job-children root)))
+        (should (eq (ende-job-state root) 'suspended))
+        (should (equal (ende-job-schedule-path child) '(1)))
+        (should (= (length ende-test--calls) 2))
+        (ende-test--complete-call (nth 1 ende-test--calls))
+        (setq grandchild (car (ende-job-children child)))
+        (should (eq (ende-job-state child) 'suspended))
+        (should (equal (ende-job-schedule-path grandchild) '(1 1)))
+        (should (= (length ende-test--calls) 3))
+        (ende-test--complete-call (nth 2 ende-test--calls))
+        (should (equal (ende-job-result grandchild) "grandchild answer"))
+        (should (= (length ende-test--calls) 4))
+        (ende-test--complete-call (nth 3 ende-test--calls))
+        (should (equal (ende-job-result child) "child answer"))
+        (should (= (length ende-test--calls) 5))
+        (ende-test--complete-call (nth 4 ende-test--calls))
+        (should (equal (ende-job-result root) "root answer"))
+        (should (eq (ende-job-state root) 'completed))
+        (should (eq (ende-job-state child) 'completed))
+        (should (eq (ende-job-state grandchild) 'completed))
+        (should-not (ende-queue-family-markers))
+        (should-not (buffer-live-p (ende-job-owned-buffer child)))
+        (should-not (buffer-live-p (ende-job-owned-buffer grandchild)))))))
+
 (ert-deftest ende-test/shared-loop-spawn-batch-orders-and-resumes ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)
