@@ -342,6 +342,32 @@
         (should (buffer-live-p source))
         (ende--cancel-live-jobs (list parent))))))
 
+(ert-deftest ende-test/policy-changes-reject-delegated-jobs-atomically ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t))
+    (ende-test--with-buffer "policy root"
+      (let* ((root (ende-enqueue
+                    (ende-test--dashboard-request
+                     '(:name remote :model "fixture"))))
+             (family (ende-job-family root))
+             (before (copy-tree (ende-job-profile root)))
+             (child (ende--make-job
+                     :id 919 :type 'agent :state 'queued :family family
+                     :parent root :schedule-path '(1)
+                     :profile '(:name remote :model "fixture")
+                     :access-policy '(:active-tools nil))))
+        (setf (ende-job-family-root family) root
+              (ende-job-children root) (list child))
+        (ende--queue-insert-family-member child)
+        (should-error (ende-queue-change-policy
+                       (list (ende-job-id root) (ende-job-id child))
+                       'parallel)
+                      :type 'user-error)
+        (should (equal (ende-job-profile root) before))
+        (should-not (plist-get (ende-job-profile child) :parallel))
+        (should (eq (ende-job-state child) 'queued))
+        (ende--cancel-live-jobs (list root))))))
+
 (ert-deftest ende-test/recursive-agents-settle-through-the-family-scheduler ()
   (ende-test--reset)
   (let* ((tool-call (lambda (id task)
@@ -580,6 +606,8 @@
         (should (eq (ende-job-state job) 'suspended))
         (should-not (memq job (ende-running-jobs)))
         (should (eq (car (ende-physical-waiting-jobs)) job))
+        (should (eq (car (ende-queue-suspended-jobs)) job))
+        (should (equal (ende-all-live-jobs) (list job)))
         (should-not resumed)
         (let ((ende--queue-suspended t))
           (ende-job-resume-queued job)

@@ -881,6 +881,56 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
 				(should-not ende--active-jobs)
 				(should-not (ende-pending-jobs)))))))
 
+(ert-deftest ende-test/dashboard-shows-and-cancels-suspended-jobs ()
+  (ende-test--dashboard-reset)
+  (let ((ende-llm-function (ende-test--fake-llm nil t))
+        (ende--queue-suspended t)
+        (accepted-prompt nil)
+        job dashboard)
+    (let ((source (generate-new-buffer " *ende-suspended-dashboard-source*")))
+      (unwind-protect
+          (with-current-buffer source
+            (insert "suspended dashboard")
+            (let* ((family (ende--make-job-family :policy-frozen-p t))
+                   (target (ende-target-create
+                            :buffer (current-buffer)
+                            :start (point-min) :end (point-min)
+                            :cursor (point-min))))
+              (setq job (ende--make-job
+                         :id 918 :type 'chat :state 'suspended :family family
+                         :schedule-path nil :target target
+                         :profile ende-test--dashboard-profile
+                         :started-at (float-time) :enqueued-at (float-time)
+                         :status "Suspended"))
+              (setf (ende-job-family-root family) job
+                    (ende-job-resume-function job) (lambda () nil))
+              (ende--queue-push family)
+              (ende--queue-insert-family-member job)
+              (setq dashboard (ende-queue-open))
+              (should (eq (car (ende-queue-ui--live-jobs)) job))
+              (should (string-match-p
+                       "Suspended · 1"
+                       (with-current-buffer dashboard (buffer-string))))
+              (should (string-match-p
+                       "Suspended"
+                       (ende-test--dashboard-job-row
+                        dashboard (ende-job-id job))))
+              (with-current-buffer dashboard
+                (goto-char (ende-queue-ui--position-for-key
+                            (cons 'job (ende-job-id job))))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (prompt)
+                             (setq accepted-prompt prompt)
+                             t)))
+                  (ende-queue-ui-cancel)))
+              (should (string-match-p
+                       "0 running, 0 queued, and 1 suspended"
+                       accepted-prompt))
+              (should (eq (ende-job-state job) 'cancelled))
+              (should-not (ende-queue-family-markers))))
+        (when (buffer-live-p source)
+          (kill-buffer source))))))
+
 (ert-deftest ende-test/dashboard-status-follows-org-result-reference ()
   (ende-test--dashboard-reset)
   (unwind-protect

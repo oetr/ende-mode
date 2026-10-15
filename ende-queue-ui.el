@@ -71,7 +71,7 @@
          (lambda (left right)
            (< (or (ende-job-dispatch-order left) (ende-job-id left))
               (or (ende-job-dispatch-order right) (ende-job-id right)))))
-   (ende-pending-jobs)))
+   (ende-physical-waiting-jobs)))
 
 (defun ende-queue-ui--prune-ui-state ()
   "Drop marks and expansions for jobs that left the live scheduler."
@@ -245,13 +245,15 @@
 
 (defun ende-queue-ui--job-status (job state)
   "Return JOB's concise state/status label for STATE."
-  (if (eq state 'running)
-      (or (ende-job-activity-title job) (ende-job-status job) "Running")
-    (let* ((explanation (ende-job-explanation job))
-           (blockers (plist-get explanation :blockers)))
-      (if blockers
-          (ende-queue-ui--blocker-label (car blockers))
-        "Ready"))))
+  (pcase state
+    ('running (or (ende-job-activity-title job)
+                  (ende-job-status job) "Running"))
+    ('suspended "Suspended")
+    (_ (let* ((explanation (ende-job-explanation job))
+              (blockers (plist-get explanation :blockers)))
+         (if blockers
+             (ende-queue-ui--blocker-label (car blockers))
+           "Ready")))))
 
 (defun ende-queue-ui--tokens (job)
   "Return JOB's latest provider-reported total token count, or a dash."
@@ -315,7 +317,11 @@
                        (cons 'operation (ende-queue-ui--operation job))
                        (cons 'policy (ende-queue-ui--policy job))
                        (cons 'provider (ende-queue-ui--provider-name job))
-                       (cons 'state (if (eq state 'running) "Running" "Queued"))
+                       (cons 'state
+                             (pcase state
+                               ('running "Running")
+                               ('suspended "Suspended")
+                               (_ "Queued")))
                        (cons 'tokens (ende-queue-ui--tokens job))
                        (cons 'status (ende-queue-ui--job-status job state))
                        (cons 'time (ende-queue-ui--elapsed job state))))
@@ -521,16 +527,24 @@
   (let ((running (cl-remove-if-not
                   (lambda (job) (eq (ende-job-state job) 'running))
                   (ende-queue-ui--live-jobs)))
-        (entries (ende-queue-entries)))
+        (suspended (ende-queue-suspended-jobs))
+        (entries (cl-remove-if-not
+                  (lambda (entry)
+                    (or (ende-queue-fence-p entry)
+                        (eq (ende-job-state entry) 'queued)))
+                  (ende-queue-entries))))
     (ende-queue-ui--section
      (format "Running · %d" (length running)) running
      (lambda (job) (ende-queue-ui--job-row job 'running 'jobs)))
     (ende-queue-ui--section
-     (format "Queued · %d" (length (ende-pending-jobs))) entries
+     (format "Queued · %d" (length (ende-queued-jobs))) entries
      (lambda (entry)
        (if (ende-queue-fence-p entry)
            (ende-queue-ui--fence-row entry)
-         (ende-queue-ui--job-row entry 'queued 'jobs))))))
+         (ende-queue-ui--job-row entry 'queued 'jobs))))
+    (ende-queue-ui--section
+     (format "Suspended · %d" (length suspended)) suspended
+     (lambda (job) (ende-queue-ui--job-row job 'suspended 'jobs)))))
 
 (defun ende-queue-ui--buffer-key (job)
   "Return JOB's source buffer key, including a shared dead-buffer sentinel."
@@ -577,12 +591,14 @@
                    (lambda (job) (eq (ende-job-state job) 'running)) jobs))
          (queued (cl-remove-if-not
                   (lambda (job) (eq (ende-job-state job) 'queued)) jobs))
+         (suspended (cl-remove-if-not
+                     (lambda (job) (eq (ende-job-state job) 'suspended)) jobs))
          (folded (gethash buffer ende-queue-ui--folded-buffers)))
     (ende-queue-ui--line
-     (format "Buffer %s · %d running · %d queued"
+     (format "Buffer %s · %d running · %d queued · %d suspended"
              (ende-queue-ui--safe-name
               (unless (eq buffer 'ende-queue-ui--killed-buffer) buffer))
-             (length running) (length queued))
+             (length running) (length queued) (length suspended))
      (list 'ende-queue-ui-kind 'buffer 'ende-queue-ui-buffer buffer
            'ende-queue-ui-owner buffer)
      'ende-queue-ui-heading-face)
@@ -591,7 +607,9 @@
       (dolist (job running)
         (ende-queue-ui--job-row job 'running 'buffers))
       (dolist (job queued)
-        (ende-queue-ui--job-row job 'queued 'buffers)))))
+        (ende-queue-ui--job-row job 'queued 'buffers))
+      (dolist (job suspended)
+        (ende-queue-ui--job-row job 'suspended 'buffers)))))
 
 (defun ende-queue-ui--render-buffers ()
   "Render jobs grouped by source buffer and a shared fence section."
@@ -728,9 +746,10 @@
     (if marked marked (list (ende-queue-ui--current-job)))))
 
 (defun ende-queue-ui--job-counts (jobs)
-  "Return (RUNNING . QUEUED) counts for JOBS."
-  (cons (cl-count-if (lambda (job) (eq (ende-job-state job) 'running)) jobs)
-        (cl-count-if (lambda (job) (eq (ende-job-state job) 'queued)) jobs)))
+  "Return RUNNING, QUEUED, and SUSPENDED counts for JOBS."
+  (list (cl-count-if (lambda (job) (eq (ende-job-state job) 'running)) jobs)
+        (cl-count-if (lambda (job) (eq (ende-job-state job) 'queued)) jobs)
+        (cl-count-if (lambda (job) (eq (ende-job-state job) 'suspended)) jobs)))
 
 (defun ende-queue-ui--state-snapshot (jobs)
   "Return stable ID/state pairs for JOBS."
@@ -750,14 +769,21 @@
   "Confirm cancelling JOBS when required, labeling broad cancellation ALL."
   (let* ((counts (ende-queue-ui--job-counts jobs))
          (running (car counts))
-         (queued (cdr counts))
-         (plural (> (+ running queued) 1)))
-    (or (and (= (+ running queued) 0) t)
-        (and (not all) (= queued 1) (= running 0) t)
+         (queued (nth 1 counts))
+         (suspended (nth 2 counts))
+         (waiting (+ queued suspended))
+         (total (+ running waiting)))
+    (or (= total 0)
+        (and (not all) (= running 0) (= waiting 1)
+             (= suspended 0))
         (yes-or-no-p
-         (format "Cancel%s %d running and %d queued job%s? "
-                 (if all " all" "") running queued
-                 (if plural "s" ""))))))
+         (if (= suspended 0)
+             (format "Cancel%s %d running and %d queued job%s? "
+                     (if all " all" "") running queued
+                     (if (> total 1) "s" ""))
+           (format "Cancel%s %d running, %d queued, and %d suspended job%s? "
+                   (if all " all" "") running queued suspended
+                   (if (> total 1) "s" "")))))))
 
 (defun ende-queue-ui-cancel ()
   "Cancel marked jobs, or the job at point, after any required confirmation."

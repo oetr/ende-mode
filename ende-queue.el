@@ -196,6 +196,12 @@
   "Return queued jobs currently eligible for scheduler consideration."
   (ende-queued-jobs))
 
+(defun ende-queue-suspended-jobs ()
+  "Return suspended jobs in physical scheduler order."
+  (cl-remove-if-not
+   (lambda (job) (eq (ende-job-state job) 'suspended))
+   (ende-physical-waiting-jobs)))
+
 (defun ende-all-live-jobs ()
   "Return a snapshot of all live jobs in stable active and waiting order."
   (cl-delete-duplicates
@@ -240,7 +246,7 @@
               (< (or (ende-job-dispatch-order left) (ende-job-id left))
                  (or (ende-job-dispatch-order right) (ende-job-id right))))))
      (cl-remove-if-not (lambda (job) (memq job members))
-                       (ende-pending-jobs)))))
+                       (ende-physical-waiting-jobs)))))
 
 (defvar ende--queue-tail nil
   "Tail cons cell of `ende-queue'.")
@@ -967,7 +973,7 @@ When RESULT is non-nil, retain it for history and job inspection."
                 (lambda (job)
                   (and (ende--fence-applies-p fence job)
                        (not (ende-job-terminal-p job))))
-                (append ende--active-jobs (ende-pending-jobs))))
+                (append ende--active-jobs (ende-physical-waiting-jobs))))
          (pending (length jobs)))
     (setf (ende-queue-fence-jobs fence) jobs)
     (when (> pending 0)
@@ -1034,8 +1040,17 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
   (let ((jobs (mapcar #'ende-queue-live-job-by-id ids)))
     (unless (and jobs
                  (cl-every #'identity jobs)
-                 (cl-every (lambda (job) (eq (ende-job-state job) 'queued))
-                           jobs))
+                 (cl-every
+                  (lambda (job)
+                    (let ((family (ende-job-family job)))
+                      (and (eq (ende-job-state job) 'queued)
+                           (null (ende-job-started-at job))
+                           (null (ende-job-parent job))
+                           (or (null family)
+                               (and (eq job (ende-job-family-root family))
+                                    (not (ende-job-family-policy-frozen-p
+                                          family)))))))
+                  jobs))
       (user-error "Selected jobs changed; policy was not updated"))
     (dolist (job jobs)
       (setf (ende-job-profile job)
@@ -1191,7 +1206,8 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
          (status (list :running (and ende--active-jobs t)
                       :active (and active (ende-job-id active))
                       :active-jobs (mapcar #'ende-job-id ende--active-jobs)
-                      :pending (length (ende-pending-jobs))
+                      :pending (length (ende-queued-jobs))
+                      :suspended (length (ende-queue-suspended-jobs))
                       :fences (length (ende-queue-fences))
                       :paused ende-queue-paused)))
     (message "ende: active=%s pending=%d fences=%d"

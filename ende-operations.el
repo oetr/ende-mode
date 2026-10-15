@@ -488,7 +488,7 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
                     (ende--create-review-overlay
                      buffer ins-start ins-end display ""))))))
        (dolist (other-job (append (ende-active-jobs)
-                                  (ende-pending-jobs)))
+                                  (ende-physical-waiting-jobs)))
          (let ((other-target (ende-job-target other-job)))
            (when (and (not (eq other-job job))
                       (or (eq (ende-job-state other-job) 'queued)
