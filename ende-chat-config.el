@@ -857,10 +857,47 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     (when (plist-get policy :model)
       (push (format "%s model: %s" label (plist-get policy :model)) lines))
     (dolist (grant resources)
-      (push (format "%s grants for %s: %s" label (car grant)
-                    (mapconcat #'symbol-name (sort (copy-sequence (cdr grant))
-                                                   #'string<) ", "))
+      (let* ((names (sort (delete-dups (copy-sequence (cdr grant)))
+                          (lambda (left right)
+                            (string< (symbol-name left) (symbol-name right)))))
+             (resource-lines
+              (mapcar
+               (lambda (name)
+                 (let ((resource (ende-chat-config--lookup
+                                  name (plist-get policy :resources))))
+                   (format "%s resource %s: %s root=%s include=%s exclude=%s%s"
+                           label name (plist-get resource :type)
+                           (or (plist-get resource :root) "project root")
+                           (mapconcat #'identity
+                                      (plist-get resource :include) ", ")
+                           (if (plist-get resource :exclude)
+                               (mapconcat #'identity
+                                          (plist-get resource :exclude) ", ")
+                             "none")
+                           (if (plist-get resource :allow-private-addresses)
+                               " private-addresses=yes" ""))))
+               names)))
+        (setq lines
+              (nconc (nreverse resource-lines)
+                     (cons (format "%s grants for %s: %s" label (car grant)
+                                   (mapconcat #'symbol-name names ", "))
+                           lines)))))
+    (when (plist-get policy :root)
+      (push (format "%s project root: %s" label (plist-get policy :root))
             lines))
+    (when (plist-get policy :host-command-policy)
+      (let ((command-policy (plist-get policy :host-command-policy)))
+        (when (and (listp command-policy)
+                   (plist-get command-policy :restricted))
+          (push (format "%s host commands: open=%s fixed=%s" label
+                        (or (mapconcat #'identity
+                                       (plist-get command-policy :open) ", ")
+                            "none")
+                        (or (mapconcat
+                             (lambda (argv) (mapconcat #'identity argv " "))
+                             (plist-get command-policy :fixed) "; ")
+                            "none"))
+                lines))))
     (when (memq 'run_host_command (plist-get policy :active-tools))
       (push (format "%s host-command policy: %s" label
                     (plist-get policy :host-command-policy)) lines))
@@ -935,7 +972,15 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                  (registry-forms
                   (cl-remove-if-not
                    (lambda (form) (eq (car-safe form) 'agent-config))
-                   forms)))
+                   forms))
+                 (seen-names nil))
+            (dolist (form registry-forms)
+              (let ((name (ende-chat-config--name (nth 1 form)
+                                                  "agent config")))
+                (when (memq name seen-names)
+                  (ende-chat-config--error
+                   "agent-config is defined twice in this block: %s" name))
+                (push name seen-names)))
             (setq configuration
                   (ende-chat-config--apply-blocks
                    blocks configuration policy-forms)

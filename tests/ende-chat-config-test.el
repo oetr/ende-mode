@@ -12,6 +12,25 @@
 (require 'cl-lib)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-test/agent-config-rejects-duplicate-same-block-forms ()
+  (dolist (forms '(("(agent-config worker (clear-tools))"
+                   "(agent-config worker (clear-tools))")
+                  ("(spawn-agent-config worker)"
+                   "(spawn-agent-config worker)")))
+    (with-temp-buffer
+      (insert "#+begin_ende\n"
+              (car forms) "\n"
+              (cadr forms) "\n"
+              "#+end_ende\n* Topic\n** Question\n")
+      (org-mode)
+      (let* ((document (ende-chat--build-document))
+             (question (car (last (ende-chat--document-headlines document)))))
+        (should-error
+         (ende-chat-config-resolve-environment
+          (ende-chat--document-tree document)
+          (ende-chat--document-parent document) question)
+         :type 'error)))))
+
 
 
 (ert-deftest ende-test/agent-config-registry-is-isolated-and-symbolic ()
