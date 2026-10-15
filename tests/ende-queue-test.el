@@ -125,6 +125,37 @@
       (should (eq (ende-job-state child) 'cancelled))
       (should-not (buffer-live-p (ende-job-owned-buffer child))))))
 
+(ert-deftest ende-test/children-register-only-root-origin-and-dashboard-group ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        children root dashboard origin)
+    (ende-test--with-buffer "fanout origin"
+      (setq origin (current-buffer)
+            root (ende-enqueue
+                  (ende-test--dashboard-request ende-test--dashboard-profile)))
+      (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+      (dotimes (_ 4)
+        (push (ende-job-publish-child
+               root
+               (cons 'agent
+                     (list :profile ende-test--dashboard-profile
+                           :instruction '(:task "child")
+                           :prepare #'ende-agent-private-target))
+               (ende-job-next-child-path root))
+              children))
+      (should (equal ende--source-buffer-jobs (list root)))
+      (should (cl-every (lambda (child)
+                          (eq (ende-job-origin-buffer child) origin))
+                        children))
+      (setq dashboard (ende-queue-open))
+      (with-current-buffer dashboard
+        (setq ende-queue-ui-view 'buffers)
+        (ende-queue-ui--render)
+        (should (equal (mapcar #'car (ende-queue-ui--buffer-jobs))
+                       (list origin))))
+      (ende--cancel-live-jobs (list root)))))
+
 (ert-deftest ende-test/internal-agent-runs-shared-loop-on-private-target ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("child answer") t))
