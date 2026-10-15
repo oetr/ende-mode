@@ -14,6 +14,19 @@
 (declare-function ende-chat--tool-response-async "ende-chat")
 (declare-function ende-chat-config-capabilities "ende-chat-config" (environment))
 
+(defun ende-agent--selected-policy (parent)
+  "Return PARENT's selected frozen child policy, or signal an error."
+  (let* ((configuration (ende-job-access-policy parent))
+         (selected (plist-get configuration :spawn-agent-config))
+         (entry (and selected
+                     (assq selected
+                           (ende-job-family-registry
+                            (ende-job-family parent))))))
+    (unless (and (memq 'spawn_agent (plist-get configuration :active-tools))
+                 selected entry)
+      (error "spawn_agent requires active delegation and a selected policy"))
+    (cdr entry)))
+
 (defun ende-agent-profile-for-policy (family policy)
   "Derive a detached inference profile for POLICY in FAMILY."
   (let* ((template (copy-tree (ende-job-family-inference-template family)))
@@ -34,6 +47,28 @@
       (setq clean (plist-put clean :job-id nil)
             clean (plist-put clean :tool-definitions nil))
       clean)))
+
+(defun ende-agent--make-child (parent task)
+  "Create and publish a private child for TASK owned by PARENT."
+  (unless (and (ende-job-current-p parent)
+               (memq (ende-job-type parent) '(chat agent))
+               (stringp task) (not (string-blank-p task)))
+    (error "spawn_agent requires a live chat or agent and non-empty task"))
+  (let* ((family (ende-job-family parent))
+         (policy (ende-agent--selected-policy parent))
+         (profile (ende-agent-profile-for-policy family policy))
+         (path (ende-job-next-child-path parent))
+         (child nil))
+    (setq child
+          (ende-job-publish-child
+           parent
+           (cons 'agent
+                 (list :profile profile
+                       :access-policy (copy-tree policy)
+                       :instruction (list :task (substring-no-properties task))
+                       :prepare #'ende-agent-private-target))
+           path))
+    child))
 
 (defconst ende-agent--system-prompt
   (concat "You are a delegated Ende agent. Complete only the assigned task. "

@@ -632,6 +632,7 @@ bypassed by a later same-provider job."
                  :overlay (plist-get data :overlay)
                  :target target
                  :profile profile
+                 :access-policy (copy-tree (plist-get data :access-policy))
                  :instruction (plist-get data :instruction)
                  :enqueued-at now)))
       (unless profile
