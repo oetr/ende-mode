@@ -122,7 +122,7 @@
     ("clear-tools" top-level
      "clear-tools [TOOL...] — Clear all tools, or selectively disable named tools.")
     ("restrict-host-commands" top-level
-     "restrict-host-commands RULE... — Restrict run_host_command. Strings allow any arguments; :fixed-args allows only the specified argv. Changes may prevent reuse of cached prompt prefixes.")
+     "restrict-host-commands RULE... — Restrict run_host_command. Strings allow any arguments; :fixed-args allows only the specified argv; :prefix-args allows that argv prefix plus any remaining arguments. Changes may prevent reuse of cached prompt prefixes.")
     ("set-tool-resources" top-level
      "set-tool-resources TOOL... :resources RESOURCE... — Replace resource assignments for the selected tools.")
     ("add-tool-resources" top-level
@@ -139,6 +139,8 @@
      ":resources RESOURCE... — Separate tools from resources in an assignment.")
     (":fixed-args" option
      ":fixed-args COMMAND ARG... — Allow only this exact host-command argv.")
+    (":prefix-args" option
+     ":prefix-args COMMAND ARG... — Allow host-command argv beginning with this prefix.")
     ("file" value "file — A local file or directory resource.")
     ("url" value "url — A URL resource.")
     ("t" value "t — Enable the associated boolean option.")

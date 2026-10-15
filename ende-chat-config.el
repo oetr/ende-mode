@@ -393,7 +393,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
   "Validate and normalize host command RULES."
   (unless rules
     (ende-chat-config--error "restrict-host-commands needs at least one rule"))
-  (let (open fixed)
+  (let (open fixed prefix)
     (dolist (rule rules)
       (cond
        ((stringp rule)
@@ -403,24 +403,47 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
            "host command executable must be a bare name: %S" rule))
         (push rule open))
        ((and (ende-chat-config--proper-list-p rule)
-             (eq (car rule) :fixed-args)
+             (memq (car rule) '(:fixed-args :prefix-args))
              (cdr rule)
-             (cl-every #'stringp (cdr rule)))
+             (cl-every #'stringp (cdr rule))
+             (or (eq (car rule) :fixed-args)
+                 (cdr (cdr rule))))
         (let ((argv (cdr rule)))
           (unless (and (not (member (car argv) '("." "..")))
                        (string-match-p
                         "\\`[^/[:space:][:cntrl:]]+\\'" (car argv)))
             (ende-chat-config--error
-             "fixed host command executable must be a bare name: %S"
+             "host command executable must be a bare name: %S"
              (car argv)))
-          (push argv fixed)))
+          (if (eq (car rule) :fixed-args)
+              (push argv fixed)
+            (push argv prefix))))
        (t
         (ende-chat-config--error
-         "host command rule must be an executable string or (:fixed-args COMMAND ARG...): %S"
+         "host command rule must be an executable string, (:fixed-args COMMAND ARG...), or (:prefix-args COMMAND ARG...): %S"
          rule))))
-    (list :restricted t
-          :open (delete-dups (nreverse open))
-          :fixed (delete-dups (nreverse fixed)))))
+    (setq open (delete-dups (nreverse open))
+          fixed (delete-dups (nreverse fixed))
+          prefix (delete-dups (nreverse prefix)))
+    (setq prefix
+          (cl-remove-if
+           (lambda (argv)
+             (or (member (car argv) open)
+                 (cl-some (lambda (other)
+                            (and (not (equal argv other))
+                                 (ende-tools--argv-prefix-p other argv)))
+                          prefix)))
+           prefix)
+          fixed
+          (cl-remove-if
+           (lambda (argv)
+             (or (member (car argv) open)
+                 (cl-some (lambda (rule)
+                            (ende-tools--argv-prefix-p rule argv))
+                          prefix)))
+           fixed))
+    (append (list :restricted t :open open :fixed fixed)
+            (when prefix (list :prefix prefix)))))
 
 (defun ende-chat-config--host-command-enabled-p (configuration)
   "Return non-nil when run_host_command is active in CONFIGURATION."
@@ -889,13 +912,17 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
       (let ((command-policy (plist-get policy :host-command-policy)))
         (when (and (listp command-policy)
                    (plist-get command-policy :restricted))
-          (push (format "%s host commands: open=%s fixed=%s" label
+          (push (format "%s host commands: open=%s fixed=%s prefix=%s" label
                         (or (mapconcat #'identity
                                        (plist-get command-policy :open) ", ")
                             "none")
                         (or (mapconcat
                              (lambda (argv) (mapconcat #'identity argv " "))
                              (plist-get command-policy :fixed) "; ")
+                            "none")
+                        (or (mapconcat
+                             (lambda (argv) (mapconcat #'identity argv " "))
+                             (plist-get command-policy :prefix) "; ")
                             "none"))
                 lines))))
     (when (memq 'run_host_command (plist-get policy :active-tools))

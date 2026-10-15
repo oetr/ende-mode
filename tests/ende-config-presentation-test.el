@@ -107,7 +107,7 @@
   (with-temp-buffer
     (org-mode)
     (insert "#+begin_ende\n"
-            "(restrict-host-commands \"git\" (:fixed-args \"make\" \"test\"))\n"
+            "(restrict-host-commands \"git\" (:fixed-args \"make\" \"test\") (:prefix-args \"git\" \"status\"))\n"
             "(clear-tools run_host_command read_file)\n"
             "#+end_ende\n")
     (ende-mode 1)
@@ -121,6 +121,8 @@
                   'font-lock-keyword-face))
       (should (eq (ende-test--presentation-face-at ":fixed-args" block-start)
                   'font-lock-type-face))
+      (should (eq (ende-test--presentation-face-at ":prefix-args" block-start)
+                  'font-lock-type-face))
       (should (string-match-p
                "cached prompt prefixes"
                (ende-test--presentation-doc-at
@@ -128,6 +130,9 @@
       (should (string-match-p
                "exact host-command argv"
                (ende-test--presentation-doc-at ":fixed-args" block-start)))
+      (should (string-match-p
+               "argv beginning with this prefix"
+               (ende-test--presentation-doc-at ":prefix-args" block-start)))
       (should (string-match-p
                "selectively disable"
                (ende-test--presentation-doc-at "clear-tools" block-start))))))

@@ -2166,6 +2166,11 @@ process-group cancellation function with the active Ende job."
       (error "cwd is not an existing directory: %s" cwd))
     (file-name-as-directory directory)))
 
+(defun ende-tools--argv-prefix-p (prefix argv)
+  "Return non-nil when PREFIX is an argv-list prefix of ARGV."
+  (and (<= (length prefix) (length argv))
+       (equal prefix (cl-subseq argv 0 (length prefix)))))
+
 (defun ende-tools--run-host-command (arguments root callback)
   "Execute a host command asynchronously from ROOT under resolved policy."
   (let* ((policy (plist-get ende-tools--access-config :host-command-policy))
@@ -2191,7 +2196,10 @@ process-group cancellation function with the active Ende job."
            (timeout (ende-tools--bounded-integer arguments "timeout" 300 3600)))
       (when (and restricted
                  (not (or (member (car argv) (plist-get policy :open))
-                          (member argv (plist-get policy :fixed)))))
+                          (member argv (plist-get policy :fixed))
+                          (cl-some (lambda (prefix)
+                                     (ende-tools--argv-prefix-p prefix argv))
+                                   (plist-get policy :prefix)))))
         (error "host command is not allowed by restrict-host-commands"))
       (when (if restricted
                 (cl-some (lambda (part) (string-match-p (string 0) part)) argv)
@@ -2336,6 +2344,7 @@ process-group cancellation function with the active Ende job."
         ende-tools--run-host-command-schema
       (let* ((open (plist-get policy :open))
              (fixed (plist-get policy :fixed))
+             (prefix (plist-get policy :prefix))
              (branches
               (append
                (when open
@@ -2347,6 +2356,22 @@ process-group cancellation function with the active Ende job."
                         :description "Run the named executable with arbitrary arguments."
                         :required '["program" "args"]
                         :additionalProperties :json-false)))
+               (mapcar
+                (lambda (argv)
+                  (list :type "object"
+                        :properties
+                        (list :program (list :const (car argv))
+                              :args (list :type "array"
+                                          :items '(:type "string")
+                                          :minItems (length (cdr argv))
+                                          :description
+                                          (format
+                                           "Arguments must begin with %s; additional arguments are allowed."
+                                           (prin1-to-string (cdr argv)))))
+                        :description "Run with the required argv prefix."
+                        :required '["program" "args"]
+                        :additionalProperties :json-false))
+                prefix)
                (mapcar
                 (lambda (argv)
                   (list :type "object"
@@ -2367,7 +2392,8 @@ process-group cancellation function with the active Ende job."
                branches)))
         (list :type "object"
               :properties
-              (list :command (list :oneOf (vconcat branches))
+              (list :command (list (if prefix :anyOf :oneOf)
+                                   (vconcat branches))
                     :cwd (alist-get :cwd
                                     (alist-get :properties
                                                ende-tools--run-host-command-schema))
