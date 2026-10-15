@@ -211,6 +211,7 @@ CALLBACK receives the child's final answer and no transcript."
                              (ende-chat--tool-value call :arguments))
            :execute-tool #'ende-chat--tool-response-async
            :execute-spawn-batch #'ende-agent--spawn-batch
+           :omit-source-metadata t
            :assistant-message
            (lambda (_job result calls)
              (list :role "assistant" :content (or (plist-get result :content) "")
@@ -551,7 +552,9 @@ Chat persistence and guidance stay in those callbacks."
           (ende-job-agent-tool-rounds job) 0)
     (ende-job-emit-event job '(:type :tool-call-count :count 0))
     (ende-agent--send
-     job (ende-operations--add-source-metadata job messages)
+     job (if (plist-get callbacks :omit-source-metadata)
+             messages
+           (ende-operations--add-source-metadata job messages))
      configuration callbacks 0)))
 
 (provide 'ende-agent)

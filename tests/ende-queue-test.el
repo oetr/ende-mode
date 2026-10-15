@@ -155,7 +155,9 @@
       (should (eq (ende-job-state child) 'running))
       (let ((sent (plist-get (car ende-test--calls) :messages)))
         (should (string-match-p "inspect safely" (cdr (assoc "user" sent))))
-        (should-not (string-match-p "user source" (format "%s" sent))))
+        (should-not (string-match-p "user source" (format "%s" sent)))
+        (should-not (string-match-p "Name:"
+                                    (format "%s" sent))))
       (ende-test--complete-call (car ende-test--calls))
       (should (eq (ende-job-state child) 'completed))
       (should (equal (ende-job-result child) "child answer"))
