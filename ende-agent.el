@@ -8,6 +8,7 @@
 (require 'ende-queue)
 (require 'ende-target)
 (require 'ende-provider)
+(require 'subr-x)
 
 (declare-function ende-chat--tool-call-list "ende-chat")
 (declare-function ende-chat--tool-value "ende-chat")
@@ -48,6 +49,46 @@
             clean (plist-put clean :tool-definitions nil))
       clean)))
 
+(defun ende-agent--decode-task (arguments)
+  "Decode tool ARGUMENTS and require exactly one non-empty task string."
+  (let ((object (if (hash-table-p arguments)
+                    arguments
+                  (and (stringp arguments)
+                       (json-parse-string arguments :object-type 'hash-table)))))
+    (unless (and (hash-table-p object)
+                 (= (hash-table-count object) 1)
+                 (stringp (gethash "task" object))
+                 (not (string-blank-p (gethash "task" object))))
+      (error "spawn_agent accepts exactly one non-empty task string"))
+    (gethash "task" object)))
+
+(defun ende-agent--spawn-tool (arguments _root callback)
+  "Publish the delegated child specified by ARGUMENTS.
+CALLBACK receives the child's final answer and no transcript."
+  (unless (and (functionp callback) ende-tools--execution-owner)
+    (error "spawn_agent requires an active Ende tool execution"))
+  (let* ((owner ende-tools--execution-owner)
+         (parent (ende-queue-live-job-by-id owner))
+         (task (ende-agent--decode-task arguments))
+         (generation (and parent (ende-job-execution-generation parent))))
+    (unless (and parent (= owner (ende-job-id parent))
+                 (ende-job-execution-current-p parent generation))
+      (error "spawn_agent requires a current live chat or agent"))
+    (let ((child (ende-agent--make-child parent task)))
+      (ende-agent--observe-child
+       parent child (lambda (answer) (funcall callback answer nil))))
+    nil))
+
+(ende-tool-register
+ 'spawn_agent
+ "Delegate a non-empty task to a child using the configured named access policy."
+ '((:type . "object")
+   (:properties . ((:task . ((:type . "string") (:minLength . 1)))))
+   (:required . ["task"])
+   (:additionalProperties . :json-false))
+ #'ende-agent--spawn-tool nil :no-resource
+ '(:requires-root nil :requires-resources nil :async t))
+
 (defun ende-agent--make-child (parent task)
   "Create and publish a private child for TASK owned by PARENT."
   (unless (and (ende-job-current-p parent)
@@ -69,6 +110,35 @@
                        :prepare #'ende-agent-private-target))
            path))
     child))
+
+(defun ende-agent--terminal-answer (event)
+  "Return a child terminal EVENT as one concise tool-result string."
+  (pcase (plist-get event :type)
+    (:done (or (plist-get event :content) ""))
+    ((or :error :cancelled :skipped)
+     (format "Agent %s: %s"
+             (plist-get event :type)
+             (ende-error-display-message (plist-get event :error))))
+    (_ "Agent finished without a final answer")))
+
+(defun ende-agent--observe-child (parent child callback)
+  "Settle CALLBACK once when CHILD terminalizes, guarding both job IDs."
+  (let ((parent-id (ende-job-id parent))
+        (child-id (ende-job-id child))
+        (settled nil)
+        observer)
+    (setq observer (lambda (observed event)
+                     (when (and (not settled)
+                                (eq observed child)
+                                (= child-id (ende-job-id observed))
+                                (ende-job-terminal-p child))
+                       (setq settled t)
+                       (remove-hook 'ende-job-event-functions observer)
+                       (when (= parent-id (ende-job-id parent))
+                         (funcall callback
+                                  (ende-agent--terminal-answer event))))))
+    (add-hook 'ende-job-event-functions observer)
+    observer))
 
 (defconst ende-agent--system-prompt
   (concat "You are a delegated Ende agent. Complete only the assigned task. "
