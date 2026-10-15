@@ -72,7 +72,7 @@
 
 (defun ende--unregister-source-job (job)
   "Remove JOB from its source buffer's job registry."
-  (let ((buffer (ende-target-buffer (ende-job-target job))))
+  (let ((buffer (ende-job-origin-buffer job)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq ende--source-buffer-jobs
@@ -600,17 +600,21 @@ bypassed by a later same-provider job."
   "Create a queued job from REQUEST, a (TYPE . PLIST) value."
   (let* ((type (car request))
          (data (cdr request))
-         (target (plist-get data :target)))
-    (unless (ende-target-p target)
+         (target (plist-get data :target))
+         (prepare (plist-get data :prepare)))
+    (unless (or (ende-target-p target)
+                (and (eq type 'agent) (functionp prepare)))
       (error "ende request is missing a target"))
-    (let* ((buffer (ende-target-buffer target))
+    (let* ((buffer (and (ende-target-p target)
+                        (ende-target-buffer target)))
            (profile
             (copy-tree
              (or (plist-get data :profile)
                  (and (plist-member data :provider)
                       (ende-provider-profile-snapshot
                        (plist-get data :provider)))
-                 (ende-provider-profile-for-buffer buffer t))))
+                 (and (buffer-live-p buffer)
+                      (ende-provider-profile-for-buffer buffer t)))))
            (now (float-time))
            (overrides
             (append (when (plist-member data :parallel)
@@ -630,6 +634,13 @@ bypassed by a later same-provider job."
                  :profile profile
                  :instruction (plist-get data :instruction)
                  :enqueued-at now)))
+      (unless profile
+        (error "ende request is missing a provider profile"))
+      (when prepare
+        (funcall prepare job))
+      (unless (and (ende-target-p (ende-job-target job))
+                   (ende-target-live-p (ende-job-target job)))
+        (error "ende request preparation did not create a live target"))
       (setf (ende-job-profile job)
             (plist-put (copy-tree (ende-job-profile job))
                        :job-id (ende-job-id job)))
@@ -655,6 +666,51 @@ Return the newly created `ende-job'."
            :client (ende-provider-client-name (ende-job-profile job))
            :model (plist-get (ende-job-profile job) :model)))
     (ende-process-next)
+    job))
+
+(defun ende-job-next-child-path (parent)
+  "Reserve and return the next never-reused numeric child path for PARENT."
+  (unless (and (ende-job-p parent)
+               (ende-job-family parent)
+               (ende-job-live-p parent)
+               (ende-job-family-policy-frozen-p (ende-job-family parent)))
+    (error "agent children require a live job in a started family"))
+  (setf (ende-job-next-child-index parent)
+        (1+ (or (ende-job-next-child-index parent) 0)))
+  (append (copy-sequence (ende-job-schedule-path parent))
+          (list (ende-job-next-child-index parent))))
+
+(defun ende-job-publish-child (parent request schedule-path)
+  "Publish prepared REQUEST as PARENT's child at SCHEDULE-PATH.
+
+The family marker, queue region, and child ownership are updated before
+scheduler callbacks are permitted to observe the child."
+  (unless (and (ende-job-p parent) (ende-job-live-p parent)
+               (ende-job-family parent)
+               (equal (butlast schedule-path)
+                      (ende-job-schedule-path parent))
+               (integerp (car (last schedule-path)))
+               (= (car (last schedule-path))
+                  (ende-job-next-child-index parent))
+               (> (car (last schedule-path)) 0)
+               (ende-job-family-policy-frozen-p (ende-job-family parent)))
+    (error "invalid parent or scheduling path for delegated child"))
+  (let* ((job (ende--job-from-request request))
+         (family (ende-job-family parent)))
+      (setf (ende-job-family job) family
+            (ende-job-parent job) parent
+            (ende-job-schedule-path job) (copy-sequence schedule-path)
+            (ende-job-next-child-index job) 0
+            (ende-job-access-policy job)
+            (copy-tree (plist-get (cdr request) :access-policy))
+            (ende-job-children parent)
+            (append (ende-job-children parent) (list job)))
+    (ende--job-register-origin job)
+    (ende--queue-insert-family-member job)
+    (ende-job-emit-event
+     job (list :type :queued
+               :client (ende-provider-client-name (ende-job-profile job))
+               :model (plist-get (ende-job-profile job) :model)))
     job))
 
 ;;;; Settlement and dispatch

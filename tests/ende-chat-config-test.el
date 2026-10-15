@@ -62,6 +62,29 @@
       (delete-directory root-a t)
       (delete-directory root-b t))))
 
+(ert-deftest ende-test/agent-config-freezes-provider-and-model-selection ()
+  (let ((ende-providers '(local remote))
+        (ende-provider-profiles
+         '((remote :url "http://example.invalid/v1" :model "base-model"))))
+    (with-temp-buffer
+      (insert (concat "#+begin_ende\n"
+                      "(agent-config worker (provider remote) (model \"child-model\"))\n"
+                      "(spawn-agent-config worker)\n"
+                      "#+end_ende\n* Topic\n** Question\n"))
+      (org-mode)
+      (let* ((document (ende-chat--build-document))
+             (question (car (last (ende-chat--document-headlines document))))
+             (environment
+              (ende-chat-config-resolve-environment
+               (ende-chat--document-tree document)
+               (ende-chat--document-parent document) question))
+             (worker (cdr (assq 'worker (plist-get environment :registry))))
+             (presentation (ende-chat-config-capabilities environment)))
+        (should (eq (plist-get worker :provider) 'remote))
+        (should (equal (plist-get worker :model) "child-model"))
+        (should (string-match-p "worker provider: remote" presentation))
+        (should (string-match-p "worker model: child-model" presentation))))))
+
 (ert-deftest ende-test/agent-config-nearer-definition-replaces-and-sibling-is-hidden ()
   (let ((root-a (make-temp-file "ende-agent-a-" t))
         (root-b (make-temp-file "ende-agent-b-" t)))

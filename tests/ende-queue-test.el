@@ -92,6 +92,39 @@
         (should-not (ende-all-live-jobs))
         (should-not (ende-queue-family-markers))))))
 
+(ert-deftest ende-test/publishing-agent-child-preserves-family-and-origin ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        root child path)
+    (ende-test--with-buffer "origin"
+      (setq root
+            (ende-enqueue
+             (ende-test--dashboard-request '(:name remote :model "fixture"))))
+      (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+      (setq path (ende-job-next-child-path root)
+            child
+            (ende-job-publish-child
+             root
+             (cons 'agent
+                   (list :profile '(:name remote :model "fixture")
+                         :access-policy '(:active-tools (about_thinking))
+                         :instruction '(:task "inspect")
+                         :prepare (lambda (job)
+                                    (setf (ende-job-target job)
+                                          (ende-agent-private-target job)))))
+             path))
+      (should (equal (ende-job-schedule-path child) '(1)))
+      (should (eq (ende-job-parent child) root))
+      (should (eq (ende-job-family child) (ende-job-family root)))
+      (should (eq (ende-job-origin-buffer child) (current-buffer)))
+      (should (not (eq (ende-target-buffer (ende-job-target child))
+                       (current-buffer))))
+      (should (= (ende-job-next-child-index root) 1))
+      (ende--cancel-live-jobs (list root))
+      (should (eq (ende-job-state child) 'cancelled))
+      (should-not (buffer-live-p (ende-job-owned-buffer child))))))
+
 (ert-deftest ende-test/internal-agent-runs-shared-loop-on-private-target ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("child answer") t))

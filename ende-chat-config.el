@@ -532,6 +532,17 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--error "spawn-agent-config expects one name"))
      (plist-put configuration :spawn-agent-config
                 (ende-chat-config--name (cadr form) "agent config")))
+    ('provider
+     (unless (and (= (length form) 2) (symbolp (cadr form))
+                  (not (keywordp (cadr form)))
+                  (memq (cadr form) (ende-provider-names)))
+       (ende-chat-config--error "provider expects a configured provider name"))
+     (plist-put configuration :provider (cadr form)))
+    ('model
+     (unless (and (= (length form) 2) (stringp (cadr form))
+                  (not (string-empty-p (cadr form))))
+       (ende-chat-config--error "model expects one non-empty model string"))
+     (plist-put configuration :model (cadr form)))
     ('group (ende-chat-config--define-group form configuration))
     ('resource (ende-chat-config--define-resource form configuration))
     ('tools
@@ -617,6 +628,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
   (list :root nil :podman-image nil :groups nil :resources nil
+        :provider nil :model nil
         :active-targets nil :excluded-tools nil
         :host-command-policy :unrestricted
         :grants nil :revoked-resources nil))
@@ -624,6 +636,8 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 (defun ende-chat-config--normalize (configuration)
   "Convert resolver state CONFIGURATION to a runtime access policy."
   (list :root (plist-get configuration :root)
+        :provider (plist-get configuration :provider)
+        :model (plist-get configuration :model)
         :podman-image (plist-get configuration :podman-image)
         :groups (plist-get configuration :groups)
         :resources (plist-get configuration :resources)
@@ -794,9 +808,13 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
            (ende-chat-config--error "podman-image is repeated in agent-config %s"
                                     name))
          (setq configuration
+               (ende-chat-config--apply-form form configuration)))
+        ((or 'provider 'model)
+         (setq configuration
                (ende-chat-config--apply-form form configuration)))))
     (dolist (form body)
-      (unless (memq (car-safe form) '(group resource root podman-image))
+      (unless (memq (car-safe form)
+                    '(group resource root podman-image provider model))
         (when (eq (car-safe form) 'spawn-agent-config)
           (cl-incf spawn-count)
           (when (> spawn-count 1)
@@ -833,6 +851,11 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
           lines)
     (when (plist-get policy :root)
       (push (format "%s root: %s" label (plist-get policy :root)) lines))
+    (when (plist-get policy :provider)
+      (push (format "%s provider: %s" label (plist-get policy :provider))
+            lines))
+    (when (plist-get policy :model)
+      (push (format "%s model: %s" label (plist-get policy :model)) lines))
     (dolist (grant resources)
       (push (format "%s grants for %s: %s" label (car grant)
                     (mapconcat #'symbol-name (sort (copy-sequence (cdr grant))
