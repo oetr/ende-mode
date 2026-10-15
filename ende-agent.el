@@ -171,8 +171,8 @@
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))
-  identity calls result-slots outstanding launch-open completed-p invalidated-p
-  continuation)
+  identity generation calls result-slots settled-slots outstanding launch-open
+  completed-p invalidated-p continuation)
 
 (defvar ende-agent--next-batch-id 0)
 
@@ -185,7 +185,12 @@
 (defun ende-agent--batch-settle (parent batch position result)
   "Settle BATCH result POSITION once, remaining valid while PARENT waits."
   (when (and (ende-agent--batch-live-p parent batch)
-             (not (aref (ende-agent-spawn-batch-result-slots batch) position)))
+             (< -1 position (length (ende-agent-spawn-batch-result-slots batch)))
+             (memq (ende-job-state parent) '(running suspended))
+             (= (or (ende-job-execution-generation parent) 0)
+                (ende-agent-spawn-batch-generation batch))
+             (not (aref (ende-agent-spawn-batch-settled-slots batch) position)))
+    (aset (ende-agent-spawn-batch-settled-slots batch) position t)
     (aset (ende-agent-spawn-batch-result-slots batch) position result)
     (when (not (ende-agent-spawn-batch-launch-open batch))
       (cl-decf (ende-agent-spawn-batch-outstanding batch))
@@ -209,8 +214,10 @@ ordered result slots only through the parent's saved scheduler continuation."
     (error "spawn batch requires a running parent with no active batch"))
   (let* ((batch (ende-agent--make-spawn-batch
                  :identity (cl-incf ende-agent--next-batch-id)
+                 :generation (or (ende-job-execution-generation parent) 0)
                  :calls (copy-sequence calls)
                  :result-slots (make-vector (length calls) nil)
+                 :settled-slots (make-vector (length calls) nil)
                  :outstanding 0 :launch-open t))
          (previous-suppression ende--queue-suspended)
          (position 0))
@@ -234,17 +241,30 @@ ordered result slots only through the parent's saved scheduler continuation."
                               (ende-error-display-message caught)))))))
               (setq position (1+ position)))
             (setf (ende-agent-spawn-batch-launch-open batch) nil)
-            (when (> (ende-agent-spawn-batch-outstanding batch) 0)
-              (ende-job-suspend
-               parent
-               (lambda ()
-                 (let ((results (append
-                                 (ende-agent-spawn-batch-result-slots batch)
-                                 nil)))
-                   (setf (ende-job-active-spawn-batch parent) nil)
-                   (funcall done results)))))
-            (when (= (ende-agent-spawn-batch-outstanding batch) 0)
-              (setf (ende-agent-spawn-batch-completed-p batch) t)))
+            (setf (ende-agent-spawn-batch-outstanding batch)
+                  (cl-loop for settled across
+                           (ende-agent-spawn-batch-settled-slots batch)
+                           count (not settled)))
+            (if (> (ende-agent-spawn-batch-outstanding batch) 0)
+                (ende-job-suspend
+                 parent
+                 (lambda ()
+                   (unless (and (ende-agent--batch-live-p parent batch)
+                                (= (or (ende-job-execution-generation parent) 0)
+                                   (1+ (ende-agent-spawn-batch-generation batch))))
+                     (error "spawn batch continuation is stale"))
+                   (let ((results (append
+                                   (ende-agent-spawn-batch-result-slots batch)
+                                   nil)))
+                     (setf (ende-job-active-spawn-batch parent) nil)
+                     (funcall done results))))
+              (progn
+                (setf (ende-agent-spawn-batch-completed-p batch) t
+                      (ende-job-active-spawn-batch parent) nil)
+                (funcall done
+                         (append
+                          (ende-agent-spawn-batch-result-slots batch)
+                          nil)))))
         (setq ende--queue-suspended previous-suppression)))
     (when (and (not previous-suppression)
                (not ende-queue-paused)

@@ -209,6 +209,44 @@
         (should (= continuation-runs 1))
         (should (eq (ende-job-state parent) 'completed))))))
 
+(ert-deftest ende-test/spawn-batch-settles-synchronous-results-once ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (settled nil)
+        (continued nil)
+        parent batch)
+    (ende-test--with-buffer "batch source"
+      (let* ((target (ende-target-create
+                      :buffer (current-buffer)
+                      :start (point-min) :end (point-min) :cursor (point-min)))
+             (family (ende--make-job-family
+                      :parallel t :max-concurrency 2 :policy-frozen-p t
+                      :origin (current-buffer)))
+             (profile '(:name remote :model "fixture" :parallel t
+                        :max-concurrency 2)))
+        (setq parent
+              (ende--make-job :id 912 :type 'agent :state 'running
+                              :family family :schedule-path nil :target target
+                              :profile profile :started-at (float-time)
+                              :execution-generation 4))
+        (setf (ende-job-family-root family) parent)
+        (push parent ende--active-jobs)
+        (ende--queue-push family)
+        (setq batch
+              (ende-agent--launch-batch
+               parent '("one" "two")
+               (lambda (call position settle)
+                 (push position settled)
+                 (funcall settle call)
+                 (funcall settle "duplicate"))
+               (lambda (results)
+                 (setq continued results)
+                 (ende-job-finish parent results))))
+        (should (eq (ende-job-state parent) 'completed))
+        (should (equal (sort settled #'<) '(0 1)))
+        (should (equal continued '("one" "two")))
+        (should (eq (ende-agent-spawn-batch-completed-p batch) t))))))
+
 (ert-deftest ende-test/private-agent-buffer-is-owned-and-invalidates-on-kill ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t))
