@@ -405,6 +405,168 @@
           (should (eq (ende-chat--parent document call-node) work))
           (should (eq (ende-chat--parent document result-node) work)))))))
 
+(ert-deftest ende-test/chat-recursively-delegates-with-chat-owned-results ()
+  (ende-test--reset)
+  (let* ((spawn-call (lambda (id task)
+                       (list :id id :name "spawn_agent"
+                             :arguments (json-encode `((task . ,task))))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls
+                       (list (funcall spawn-call "root-child" "child task")))
+                 (list :tool-calls
+                       (list (funcall spawn-call "child-grandchild"
+                                      "grandchild task")))
+                 "Grandchild final only."
+                 "Child final only."
+                 "Root final answer.") t))
+         root child grandchild)
+    (ende-test--with-buffer
+     (concat (ende-test--chat-config-block
+              '((tools about_thinking spawn_agent)
+                (agent-config worker
+                              (tools about_thinking spawn_agent)
+                              (spawn-agent-config worker))
+                (spawn-agent-config worker)))
+             "* Conversation\n** Question\nRoot confidential context.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (setq root (ende-ask))
+     (should (= (length ende-test--calls) 1))
+     (ende-test--complete-call (nth 0 ende-test--calls))
+     (setq child (car (ende-job-children root)))
+     (should (eq (ende-job-state root) 'suspended))
+     (should (= (length ende-test--calls) 2))
+     (should (string-match-p
+              "child task"
+              (ende-test--chat-context-text
+               (plist-get (nth 1 ende-test--calls) :messages))))
+     (should-not (string-match-p
+                  "Root confidential context"
+                  (ende-test--chat-context-text
+                   (plist-get (nth 1 ende-test--calls) :messages))))
+     (ende-test--complete-call (nth 1 ende-test--calls))
+     (setq grandchild (car (ende-job-children child)))
+     (should (eq (ende-job-state child) 'suspended))
+     (should (= (length ende-test--calls) 3))
+     (ende-test--complete-call (nth 2 ende-test--calls))
+     (should (equal (ende-job-result grandchild) "Grandchild final only."))
+     (should (= (length ende-test--calls) 4))
+     (ende-test--complete-call (nth 3 ende-test--calls))
+     (should (equal (ende-job-result child) "Child final only."))
+     (should (= (length ende-test--calls) 5))
+     (ende-test--complete-call (nth 4 ende-test--calls))
+     (should (equal (plist-get (ende-job-result root) :content)
+                    "Root final answer."))
+     (should (eq (ende-job-state root) 'completed))
+     (should (eq (ende-job-state child) 'completed))
+     (should (eq (ende-job-state grandchild) 'completed))
+     (should (string-match-p "Root final answer" (buffer-string)))
+     (should-not (string-match-p "Grandchild final only" (buffer-string)))
+     (should-not (ende-queue-family-markers)))))
+
+(ert-deftest ende-test/chat-batches-sibling-agents-and-stores-results-in-call-order ()
+  (ende-test--reset)
+  (let* ((spawn-call (lambda (id task)
+                       (list :id id :name "spawn_agent"
+                             :arguments (json-encode `((task . ,task))))))
+         (first-call (funcall spawn-call "sibling-a" "task A"))
+         (second-call (funcall spawn-call "sibling-b" "task B"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list first-call second-call))
+                 "Sibling A final."
+                 "Sibling B final."
+                 "Root batch answer.") t))
+         (profile '(:name remote :model "fixture" :parallel t
+                    :max-concurrency 2))
+         root children)
+    (ende-test--with-buffer
+     (concat (ende-test--chat-config-block
+              '((tools about_thinking spawn_agent)
+                (agent-config worker (tools about_thinking))
+                (spawn-agent-config worker)))
+             "* Conversation\n** Question\nDelegate both checks.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (setq root (ende-ask profile))
+     (ende-test--complete-call (nth 0 ende-test--calls))
+     (setq children (copy-sequence (ende-job-children root)))
+     (should (= (length children) 2))
+     (should (equal (mapcar #'ende-job-schedule-path children) '((1) (2))))
+     (should (eq (ende-job-state root) 'suspended))
+     (should (= (length ende-test--calls) 3))
+     (ende-test--complete-call (nth 2 ende-test--calls))
+     (should (eq (ende-job-state root) 'suspended))
+     (should (= (length ende-test--calls) 3))
+     (ende-test--complete-call (nth 1 ende-test--calls))
+     (should (= (length ende-test--calls) 4))
+     (let* ((messages (ende-test--chat-protocol-messages
+                       (plist-get (nth 3 ende-test--calls) :messages)))
+            (results (cl-remove-if-not
+                      (lambda (message)
+                        (equal (plist-get message :role) "tool"))
+                      messages)))
+       (should (equal (mapcar (lambda (message)
+                                (plist-get message :tool-call-id))
+                              results)
+                      '("sibling-a" "sibling-b")))
+       (should (string-match-p "Sibling A final"
+                               (plist-get (car results) :content)))
+       (should (string-match-p "Sibling B final"
+                               (plist-get (cadr results) :content))))
+     (ende-test--complete-call (nth 3 ende-test--calls))
+     (should (eq (ende-job-state root) 'completed))
+     (should (string-match-p "Root batch answer" (buffer-string)))
+     (should-not (string-match-p "Sibling A final" (buffer-string)))
+     (should-not (string-match-p "Sibling B final" (buffer-string))))))
+
+(ert-deftest ende-test/chat-cancelling-suspended-batch-invalidates-late-children ()
+  (ende-test--reset)
+  (let* ((spawn-call (lambda (id task)
+                       (list :id id :name "spawn_agent"
+                             :arguments (json-encode `((task . ,task))))))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls
+                       (list (funcall spawn-call "cancel-a" "task A")
+                             (funcall spawn-call "cancel-b" "task B")))
+                 :stall :stall) t))
+         (profile '(:name remote :model "fixture" :parallel t
+                    :max-concurrency 2))
+         (late-count 0)
+         root children child-buffers)
+    (ende-test--with-buffer
+     (concat (ende-test--chat-config-block
+              '((tools about_thinking spawn_agent)
+                (agent-config worker (tools about_thinking))
+                (spawn-agent-config worker)))
+             "* Conversation\n** Question\nDelegate and await.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (setq root (ende-ask profile))
+     (ende-test--complete-call (nth 0 ende-test--calls))
+     (setq children (copy-sequence (ende-job-children root))
+           child-buffers (mapcar #'ende-job-owned-buffer children))
+     (should (eq (ende-job-state root) 'suspended))
+     (should (equal (mapcar #'ende-job-state children) '(running running)))
+     (should (= (length ende-test--calls) 3))
+     (ende-queue-cancel-ids (list (ende-job-id root)))
+     (should (eq (ende-job-state root) 'cancelled))
+     (should (equal (mapcar #'ende-job-state children)
+                    '(cancelled cancelled)))
+     (should-not (ende-active-jobs))
+     (should-not (ende-pending-jobs))
+     (should-not (ende-queue-family-markers))
+     (should (cl-every (lambda (buffer) (not (buffer-live-p buffer)))
+                       child-buffers))
+     (dolist (call (cdr ende-test--calls))
+       (ende-test--callback call :on-done '(:content "late child answer"))
+       (cl-incf late-count))
+     (should (= late-count 2))
+     (should (= (length ende-test--calls) 3))
+     (should-not (string-match-p "late child answer" (buffer-string))))))
+
 (ert-deftest ende-test/chat-intermediate-tool-round-ignores-stale-destination-marker ()
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-staging-rounds-" t))

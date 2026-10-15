@@ -298,6 +298,52 @@
       (should (buffer-live-p (current-buffer)))
       (ende--cancel-live-jobs (list root)))))
 
+(ert-deftest ende-test/spawn-agent-settles-if-child-cancels-during-publication ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-tools--execution-owner nil)
+        (ende-tools--register-cancellation-function nil)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        root child settlements)
+    (ende-test--with-buffer "publication cancellation"
+      (setq root (ende-enqueue
+                  (cons 'chat
+                        (append
+                         (cdr (ende-test--dashboard-request
+                               '(:name remote :model "fixture")))
+                         '(:instruction (:request-id "publication"
+                                        :question-id "question"))))))
+      (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
+            (ende-job-family-registry (ende-job-family root))
+            '((worker . (:root nil :active-tools (about_thinking)
+                         :tool-resources nil)))
+            (ende-job-access-policy root)
+            '(:active-tools (spawn_agent) :spawn-agent-config worker)
+            ende--active-jobs (list root)
+            ende-queue (delq root ende-queue))
+      (setf (ende-job-state root) 'running
+            (ende-job-execution-generation root) 1)
+      (add-hook 'ende-job-event-functions
+                (lambda (job event)
+                  (when (and (eq (ende-job-parent job) root)
+                             (eq (plist-get event :type) :queued))
+                    (setq child job)
+                    (ende-job-skip job "cancelled during publication"))))
+      (let ((ende-tools--execution-owner (ende-job-id root)))
+        (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
+                 (let ((object (make-hash-table :test #'equal)))
+                   (puthash "task" "cancel now" object) object)
+                 nil
+                 (lambda (result error)
+                   (push (list result error) settlements))))
+      (should (ende-job-p child))
+      (should (eq (ende-job-state child) 'skipped))
+      (should (= (length settlements) 1))
+      (should (string-match-p "skipped" (caar settlements)))
+      (should (null (cadar settlements)))
+      (should-not (ende-job-children root))
+      (ende--cancel-live-jobs (list root)))))
+
 (ert-deftest ende-test/failed-child-publication-cleans-private-target-and-ownership ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)

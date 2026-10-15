@@ -138,6 +138,16 @@ CALLBACK receives the child's final answer and no transcript."
                          (funcall callback
                                   (ende-agent--terminal-answer event))))))
     (add-hook 'ende-job-event-functions observer)
+    (when (ende-job-terminal-p child)
+      (funcall observer
+               child
+               (pcase (ende-job-state child)
+                 ('completed (list :type :done
+                                   :content (ende-job-result child)))
+                 ('failed (list :type :error :error (ende-job-error child)))
+                 ('cancelled '(:type :cancelled))
+                 ('skipped (list :type :skipped
+                                 :error (ende-job-error child))))))
     observer))
 
 (defconst ende-agent--system-prompt
