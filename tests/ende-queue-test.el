@@ -20,6 +20,109 @@
                 :connection-type 'pipe
                 :noquery t))
 
+(ert-deftest ende-test/delegated-settlement-is-central-and-idempotent ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-job-event-functions nil)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        root child
+        (settlements nil))
+    (ende-test--with-buffer "settlement source"
+      (setq root (ende-enqueue
+                  (ende-test--dashboard-request ende-test--dashboard-profile)))
+      (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
+            (ende-job-state root) 'running
+            ende--active-jobs (list root))
+      (dolist (state '(completed failed cancelled skipped))
+        (setq child
+              (ende-job-publish-child
+               root
+               (cons 'agent
+                     (list :profile ende-test--dashboard-profile
+                           :instruction '(:task "settle")
+                           :prepare #'ende-agent-private-target
+                           :delegated-settlement
+                           (lambda (settled)
+                             (push (ende-job-id settled) settlements))))
+               (ende-job-next-child-path root)))
+        (should (null ende-job-event-functions))
+        (ende--job-settle child state nil nil)
+        (ende--job-settle child state nil nil)
+        (should (eq (ende-job-state child) state))
+        (should-not (buffer-live-p (ende-job-owned-buffer child))))
+      (should (= (length settlements) 4))
+      (should (= (length (delete-dups settlements)) 4))
+      (ende--cancel-live-jobs (list root)))))
+
+(ert-deftest ende-test/delegated-settlement-failure-fails-live-parent ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-job-event-functions nil)
+        (ende-llm-function (ende-test--fake-llm nil t))
+        root child)
+    (ende-test--with-buffer "settlement failure"
+      (setq root (ende-enqueue
+                  (ende-test--dashboard-request ende-test--dashboard-profile)))
+      (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
+            (ende-job-state root) 'suspended)
+      (setq child
+            (ende-job-publish-child
+             root
+             (cons 'agent
+                   (list :profile ende-test--dashboard-profile
+                         :instruction '(:task "settlement failure")
+                         :prepare #'ende-agent-private-target
+                         :delegated-settlement
+                         (lambda (_job) (error "injected settlement failure"))))
+             (ende-job-next-child-path root)))
+      (ende--job-settle child 'skipped nil nil)
+      (should (eq (ende-job-state child) 'skipped))
+      (should (eq (ende-job-state root) 'failed))
+      (should-not (ende-all-live-jobs)))))
+
+(ert-deftest ende-test/model-callbacks-reject-stale-resumed-generation ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-llm-function (ende-test--fake-llm '(:stall :stall) t))
+        (ende--job-handlers
+         (cons (cons 'generation-test
+                     (lambda (job)
+                       (ende--dispatch-llm
+                        job '(("user" . "generation test")) nil nil nil t)))
+               ende--job-handlers))
+        job old-cancel new-cancel old-cancelled new-cancelled)
+    (ende-test--with-buffer "generation source"
+      (setq job (ende-enqueue
+                 (cons 'generation-test
+                       (cdr (ende-test--dashboard-request
+                             ende-test--dashboard-profile)))))
+      (setq ende--queue-suspended nil)
+      (ende-process-next)
+      (setq old-cancel (lambda () (setq old-cancelled t)))
+      (ende-test--callback (car ende-test--calls) :on-start old-cancel)
+      (ende-job-suspend
+       job (lambda ()
+             (ende--dispatch-llm
+              job '(("user" . "generation test")) nil nil nil t)))
+      (ende-job-resume-queued job)
+      (should (= (ende-job-execution-generation job) 2))
+      (setq new-cancel (lambda () (setq new-cancelled t)))
+      (ende-test--callback (cadr ende-test--calls) :on-start new-cancel)
+      (let ((first-call (car ende-test--calls)))
+        (ende-test--callback first-call :on-event
+                             '(:type :status :status "stale status"))
+        (ende-test--callback first-call :on-done '(:content "stale result"))
+        (ende-test--callback first-call :on-error "stale error"))
+      (should-not (ende-job-terminal-p job))
+      (should (equal (ende-job-status job) "Thinking"))
+      (should-not (ende-job-activity-title job))
+      (should (eq (ende-job-cancel-function job) new-cancel))
+      (ende-test--callback (car ende-test--calls) :on-start old-cancel)
+      (should old-cancelled)
+      (should (eq (ende-job-cancel-function job) new-cancel))
+      (ende--cancel-live-jobs (list job))
+      (should new-cancelled))))
+
 
 
 (ert-deftest ende-test/queue-snapshots-do-not-expose-list-state ()
