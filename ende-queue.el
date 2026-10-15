@@ -26,7 +26,8 @@
 
 (cl-defstruct (ende-job-family (:constructor ende--make-job-family))
   "A top-level job and its contiguous scheduler region."
-  root parallel max-concurrency policy-frozen-p inference-template registry origin)
+  root parallel max-concurrency policy-frozen-p inference-template registry origin
+  queue-marker queue-tail)
 
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
@@ -36,7 +37,7 @@
   last-usage tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
-  scheduling-overrides owned-buffer owned-buffer-hook)
+  scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -72,7 +73,10 @@
 
 (defun ende--unregister-source-job (job)
   "Remove JOB from its source buffer's job registry."
-  (let ((buffer (ende-job-origin-buffer job)))
+  (let ((buffer (and (null (ende-job-parent job))
+                     (ende-job-family job)
+                     (eq job (ende-job-family-root (ende-job-family job)))
+                     (ende-job-origin-buffer job))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq ende--source-buffer-jobs
@@ -104,11 +108,16 @@
   (and (ende-job-current-p job)
        (= (or (ende-job-execution-generation job) 0) generation)))
 
-(defun ende-job-cancellation-set (job cancel-function)
-  "Associate CANCEL-FUNCTION with JOB, or invoke it if JOB is stale."
-  (if (ende-job-current-p job)
-      (setf (ende-job-cancel-function job) cancel-function)
-    (ende--invoke-cancellation cancel-function))
+(defun ende-job-cancellation-set (job cancel-function &optional generation expected)
+  "Associate CANCEL-FUNCTION with JOB in GENERATION.
+When EXPECTED is non-nil, update only if it is still JOB's cancellation."
+  (let ((current (ende-job-cancel-function job)))
+    (if (and (ende-job-execution-current-p
+              job (or generation (ende-job-execution-generation job) 0))
+             (or (null expected) (eq current expected)))
+        (setf (ende-job-cancel-function job) cancel-function)
+      (when cancel-function
+        (ende--invoke-cancellation cancel-function))))
   cancel-function)
 
 (defun ende-job-can-accept-guidance-p (job)
@@ -144,8 +153,11 @@
   (setq ende--active-jobs (delq job ende--active-jobs)))
 
 (defun ende--job-register-origin (job)
-  "Register JOB for cancellation when its origin buffer is killed."
-  (let ((buffer (ende-job-origin-buffer job)))
+  "Register root JOB for cancellation when its origin buffer is killed."
+  (let ((buffer (and (null (ende-job-parent job))
+                     (ende-job-family job)
+                     (eq job (ende-job-family-root (ende-job-family job)))
+                     (ende-job-origin-buffer job))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (cl-pushnew job ende--source-buffer-jobs :test #'eq)
@@ -269,11 +281,12 @@
 (defvar ende-queue-abort-functions nil
   "Functions called after all queued jobs have been invalidated.")
 
-(defun ende-job-report-activity (job title status)
+(defun ende-job-report-activity (job title status &optional generation)
   "Report validated TITLE and STATUS for the originating agent JOB.
 Return non-nil while JOB is current, including for an unchanged report.
 Stale reports do nothing.  Transport status and scheduler state are untouched."
-  (when (ende-job-current-p job)
+  (when (ende-job-execution-current-p
+         job (or generation (ende-job-execution-generation job) 0))
     (unless (and (equal title (ende-job-activity-title job))
                  (equal status (ende-job-activity-status job)))
       (ende-job-emit-event
@@ -329,7 +342,10 @@ HANDLER receives one `ende-job' object."
     (if ende--queue-tail
         (setcdr ende--queue-tail cell)
       (setq ende-queue cell))
-    (setq ende--queue-tail cell)))
+    (setq ende--queue-tail cell)
+    (when (ende-job-family-p entry)
+      (setf (ende-job-family-queue-marker entry) cell
+            (ende-job-family-queue-tail entry) cell))))
 
 (defun ende--queue-pop ()
   "Pop and return the oldest queue entry."
@@ -350,6 +366,14 @@ HANDLER receives one `ende-job' object."
         (unless previous
           (error "queue cell is not present"))
         (setcdr previous (cdr cell))
+        (when (ende-job-family-p entry)
+          (setf (ende-job-family-queue-marker entry) nil
+                (ende-job-family-queue-tail entry) nil))
+        (when (ende-job-p entry)
+          (let ((family (ende-job-family entry)))
+            (when (and family (eq (ende-job-family-queue-tail family) cell))
+              (setf (ende-job-family-queue-tail family)
+                    previous))))
         (when (eq cell ende--queue-tail)
           (setq ende--queue-tail previous))
         entry))))
@@ -357,6 +381,21 @@ HANDLER receives one `ende-job' object."
 (defun ende--queue-sync-tail ()
   "Refresh the queue tail after a structural queue mutation."
   (setq ende--queue-tail (last ende-queue)))
+
+(defun ende--queue-refresh-family-hints ()
+  "Refresh family marker and tail cells after rebuilding queue conses."
+  (let ((family nil))
+    (cl-loop for cell on ende-queue do
+      (let ((entry (car cell)))
+        (cond
+         ((ende-job-family-p entry)
+          (setq family entry)
+          (setf (ende-job-family-queue-marker family) cell
+                (ende-job-family-queue-tail family) cell))
+         ((and family (ende-job-p entry)
+               (eq (ende-job-family entry) family))
+          (setf (ende-job-family-queue-tail family) cell))
+         (t (setq family nil)))))))
 
 (defun ende--schedule-path-before-p (left right)
   "Return non-nil when numeric path LEFT precedes RIGHT lexicographically."
@@ -378,21 +417,33 @@ HANDLER receives one `ende-job' object."
 (defun ende--queue-insert-family-member (job)
   "Insert queued JOB into its family's contiguous path-ordered region."
   (let* ((family (ende-job-family job))
-         (marker (and family (memq family ende-queue)))
+         (marker (and family
+                      (or (ende-job-family-queue-marker family)
+                          (memq family ende-queue))))
+         (tail (and family (ende-job-family-queue-tail family)))
          (previous marker)
          (cell (and marker (cdr marker)))
          (path (ende-job-schedule-path job)))
     (unless marker
       (error "job family marker is not present"))
-    (while (and cell
-                (ende-job-p (car cell))
-                (eq (ende-job-family (car cell)) family)
-                (not (ende--schedule-path-before-p
-                      path (ende-job-schedule-path (car cell)))))
-      (setq previous cell
-            cell (cdr cell)))
-    (setcdr previous (cons job cell))
-    (ende--queue-sync-tail)
+    (setf (ende-job-family-queue-marker family) marker)
+    (if (and tail (ende-job-p (car tail))
+             (not (ende--schedule-path-before-p
+                   path (ende-job-schedule-path (car tail)))))
+        (setq previous tail cell (cdr tail))
+      (while (and cell
+                  (ende-job-p (car cell))
+                  (eq (ende-job-family (car cell)) family)
+                  (not (ende--schedule-path-before-p
+                        path (ende-job-schedule-path (car cell)))))
+        (setq previous cell
+              cell (cdr cell))))
+    (let ((inserted (cons job cell)))
+      (setcdr previous inserted)
+      (when (or (eq tail previous) (null cell))
+        (setf (ende-job-family-queue-tail family) inserted))
+      (unless cell
+        (setq ende--queue-tail inserted)))
     job))
 
 (defun ende--queue-maintain-families ()
@@ -411,6 +462,7 @@ HANDLER receives one `ende-job' object."
                                      live)))))
                (setq changed t)))
            ende-queue))
+    (ende--queue-refresh-family-hints)
     (when changed
       (ende--queue-sync-tail)
       (ende-queue-emit-event '(:type :families)))))
@@ -482,6 +534,7 @@ HANDLER receives one `ende-job' object."
     (when changed
       (setq ende-queue (nreverse entries))
       (ende--queue-sync-tail)
+      (ende--queue-refresh-family-hints)
       (ende-queue-emit-event '(:type :fences)))))
 
 (defun ende--queue-fence-blockers (job)
@@ -580,9 +633,17 @@ if user pause were ignored."
     (setq blockers (nreverse blockers))
     (list :ready (null blockers) :blockers blockers)))
 
+
+
+
+
+
+
 (defun ende--job-admissible-p (job)
   "Return non-nil when JOB may start under all scheduler constraints."
   (plist-get (ende-job-explanation job) :ready))
+
+
 
 (defun ende--next-admissible-cell ()
   "Return the first scheduler entry whose provider can accept its job.
@@ -660,17 +721,22 @@ bypassed by a later same-provider job."
 
 (defun ende--job-cleanup-unpublished (job)
   "Release target and private buffer resources for unpublished JOB."
+  (when (ende-target-p (ende-job-target job))
+    (ende-ignore-errors #'ende-target-release (ende-job-target job)))
+  (ende--job-cleanup-owned-buffer job)
+  job)
+
+(defun ende--job-cleanup-owned-buffer (job)
+  "Remove JOB's private-buffer hook and destroy its owned buffer once."
   (let ((buffer (ende-job-owned-buffer job))
         (hook (ende-job-owned-buffer-hook job)))
+    (setf (ende-job-owned-buffer job) nil
+          (ende-job-owned-buffer-hook job) nil)
     (when (and hook (buffer-live-p buffer))
       (with-current-buffer buffer
         (remove-hook 'kill-buffer-hook hook t)))
-    (when (and buffer (ende-target-p (ende-job-target job)))
-      (ende-ignore-errors #'ende-target-release (ende-job-target job)))
     (when (buffer-live-p buffer)
-      (kill-buffer buffer))
-    (setf (ende-job-owned-buffer job) nil
-          (ende-job-owned-buffer-hook job) nil))
+      (kill-buffer buffer)))
   job)
 
 (defun ende-enqueue (request)
@@ -680,8 +746,11 @@ Return the newly created `ende-job'."
          (family (ende--make-job-family
                   :root job
                   :inference-template (ende-job-inference-template job)
-                  :origin (ende-target-buffer (ende-job-target job)))))
+                  :origin (ende-target-buffer (ende-job-target job))
+                  :queue-marker nil :queue-tail nil)))
     (setf (ende-job-family job) family
+          (ende-job-family-queue-marker family) nil
+          (ende-job-family-queue-tail family) nil
           (ende-job-schedule-path job) nil
           (ende-job-next-child-index job) 0)
     (ende--job-register-origin job)
@@ -728,14 +797,18 @@ scheduler callbacks are permitted to observe the child."
     (unwind-protect
         (progn
           (setf (ende-job-family job) family
+                (ende-job-family-queue-marker family)
+                (or (ende-job-family-queue-marker family)
+                    (memq family ende-queue))
                 (ende-job-parent job) parent
                 (ende-job-schedule-path job) (copy-sequence schedule-path)
                 (ende-job-next-child-index job) 0
                 (ende-job-access-policy job)
                 (copy-tree (plist-get (cdr request) :access-policy))
+                (ende-job-delegated-settlement job)
+                (plist-get (cdr request) :delegated-settlement)
                 (ende-job-children parent)
                 (append (ende-job-children parent) (list job)))
-          (ende--job-register-origin job)
           (ende--queue-insert-family-member job)
           (ende-job-emit-event
            job (list :type :queued
@@ -746,7 +819,6 @@ scheduler callbacks are permitted to observe the child."
       (unless published
         (setq ende-queue (delq job ende-queue))
         (ende--queue-sync-tail)
-        (ende--unregister-source-job job)
         (setf (ende-job-children parent)
               (delq job (ende-job-children parent)))
         (ende--job-cleanup-unpublished job)))))
@@ -800,6 +872,8 @@ scheduler callbacks are permitted to observe the child."
       (let ((ende--queue-suspended t))
         (dolist (job jobs)
           (push (cons job (ende-job-cancel-function job)) cancellations)
+          (when-let ((batch (ende-job-active-spawn-batch job)))
+            (setf (ende-agent-spawn-batch-invalidated-p batch) t))
           (setf (ende-job-state job)
                 (if (memq job selected) state 'cancelled)
                 (ende-job-result job) (and (memq job selected) result)
@@ -817,6 +891,7 @@ scheduler callbacks are permitted to observe the child."
               (cl-remove-if
                (lambda (entry) (and (ende-job-p entry) (memq entry jobs)))
                ende-queue))
+        (ende--queue-refresh-family-hints)
         (dolist (job jobs)
           (when-let* ((parent (ende-job-parent job)))
             (setf (ende-job-children parent)
@@ -825,7 +900,28 @@ scheduler callbacks are permitted to observe the child."
         (ende--queue-sync-tail)
         (dolist (job jobs)
           (ende--unregister-source-job job)
-          (ende-ignore-errors #'ende-target-release (ende-job-target job)))
+          (ende-ignore-errors #'ende-target-release (ende-job-target job))
+          (ende--job-cleanup-owned-buffer job))
+        (let (settlement-failures)
+          (dolist (job jobs)
+            (let ((settlement (ende-job-delegated-settlement job)))
+              (setf (ende-job-delegated-settlement job) nil)
+              (when settlement
+                (condition-case caught
+                    (funcall settlement job)
+                  ((error quit)
+                   (when-let ((parent (ende-job-parent job)))
+                     (when (ende-job-live-p parent)
+                       (push (cons parent caught) settlement-failures))))))))
+          (dolist (failure settlement-failures)
+            (let ((failure-job (car failure)))
+              (when (ende-job-live-p failure-job)
+                (ende--job-terminalize
+                 (list failure-job) 'failed nil
+                 (ende-error-create
+                  :kind 'ownership
+                  :message (format "delegated settlement failed: %s"
+                                   (error-message-string (cdr failure)))))))))
         (ende--queue-maintain-families)
         (ende--queue-maintain-fences)
         (dolist (job jobs)
@@ -969,11 +1065,16 @@ When RESULT is non-nil, retain it for history and job inspection."
   "Create a fence for PROVIDER, or for all providers when nil."
   (let* ((fence (ende--make-fence
                  :provider provider))
-         (jobs (cl-remove-if-not
-                (lambda (job)
-                  (and (ende--fence-applies-p fence job)
-                       (not (ende-job-terminal-p job))))
-                (append ende--active-jobs (ende-physical-waiting-jobs))))
+         (jobs (let (roots)
+                 (dolist (job (append ende--active-jobs
+                                      (ende-physical-waiting-jobs)))
+                   (when (ende--fence-applies-p fence job)
+                     (let ((root (or (and (ende-job-family job)
+                                          (ende-job-family-root
+                                           (ende-job-family job)))
+                                     job)))
+                       (cl-pushnew root roots :test #'eq))))
+                 (nreverse roots)))
          (pending (length jobs)))
     (setf (ende-queue-fence-jobs fence) jobs)
     (when (> pending 0)
@@ -1130,6 +1231,7 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
     (setq ende-queue (apply #'append segments))
     (ende--queue-update-moved-job-fences job)
     (ende--queue-sync-tail)
+    (ende--queue-refresh-family-hints)
     (ende--queue-maintain-fences)
     (ende-queue-emit-event '(:type :reordered))
     (ende-process-next)
@@ -1163,39 +1265,16 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
 (defun ende-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
   (interactive)
-  (let* ((was-aborting ende--aborting)
-         (active (copy-sequence ende--active-jobs))
-         (pending (ende-physical-waiting-jobs))
-         (jobs (append active pending)))
-    ;; Invalidate callbacks before invoking transport cancellation because a
-    ;; transport may settle reentrantly.
+  (let ((was-aborting ende--aborting))
     (setq ende--aborting t)
     (unwind-protect
         (progn
-          (setq ende-queue nil)
-          (setq ende--queue-tail nil)
-          (setq ende--active-jobs nil)
-          (let ((now (float-time)))
-            (dolist (job jobs)
-              (unless (ende-job-terminal-p job)
-                (setf (ende-job-state job) 'cancelled
-                      (ende-job-finished-at job) now))))
-          (dolist (job jobs)
-            (unless (memq (ende-job-state job) '(completed failed skipped))
-              (ende--unregister-source-job job)
-              (ende-ignore-errors #'ende-target-release (ende-job-target job))
-              (ende-job-emit-event job '(:type :cancelled))
-              (ende-job-emit-event job '(:type :settled :state cancelled))))
-          (let ((ende--queue-suspended t))
-            (dolist (job jobs)
-              (when (eq (ende-job-state job) 'cancelled)
-                (ende--invoke-cancellation (ende-job-cancel-function job)))))
-          (ende--queue-maintain-families)
+          (ende--job-terminalize
+           (ende-all-live-jobs) 'cancelled nil
+           (ende-error-create :kind 'cancelled :message "queue aborted"))
           (dolist (function ende-queue-abort-functions)
             (ende-ignore-errors function)))
       (setq ende--aborting was-aborting)
-      (setq ende-queue nil)
-      (setq ende--queue-tail nil)
       (ende-queue-emit-event '(:type :aborted))
       (message "ende: queue aborted"))))
 

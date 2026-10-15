@@ -74,22 +74,27 @@ CALLBACK receives the child's final answer and no transcript."
     (unless (and parent (= owner (ende-job-id parent))
                  (ende-job-execution-current-p parent generation))
       (error "spawn_agent requires a current live chat or agent"))
-    (let ((child (ende-agent--make-child parent task)))
-      (ende-agent--observe-child
-       parent child (lambda (answer) (funcall callback answer nil))))
+    (ende-agent--make-child
+     parent task
+     (lambda (child)
+       (when (ende-job-live-p parent)
+         (funcall callback (ende-agent--terminal-answer
+                            (ende-agent--child-terminal-event child)) nil))))
     nil))
 
 (ende-tool-register
  'spawn_agent
  "Delegate a non-empty task to a child using the configured named access policy."
  '((:type . "object")
-   (:properties . ((:task . ((:type . "string") (:minLength . 1)))))
+   (:properties . ((:task . ((:type . "string")
+                            (:description . "Task for the child agent to complete.")
+                            (:minLength . 1)))))
    (:required . ["task"])
    (:additionalProperties . :json-false))
  #'ende-agent--spawn-tool nil :no-resource
  '(:requires-root nil :requires-resources nil :async t))
 
-(defun ende-agent--make-child (parent task)
+(defun ende-agent--make-child (parent task &optional settlement)
   "Create and publish a private child for TASK owned by PARENT."
   (unless (and (ende-job-current-p parent)
                (memq (ende-job-type parent) '(chat agent))
@@ -107,6 +112,7 @@ CALLBACK receives the child's final answer and no transcript."
                  (list :profile profile
                        :access-policy (copy-tree policy)
                        :instruction (list :task (substring-no-properties task))
+                       :delegated-settlement settlement
                        :prepare #'ende-agent-private-target))
            path))
     child))
@@ -121,34 +127,13 @@ CALLBACK receives the child's final answer and no transcript."
              (ende-error-display-message (plist-get event :error))))
     (_ "Agent finished without a final answer")))
 
-(defun ende-agent--observe-child (parent child callback)
-  "Settle CALLBACK once when CHILD terminalizes, guarding both job IDs."
-  (let ((parent-id (ende-job-id parent))
-        (child-id (ende-job-id child))
-        (settled nil)
-        observer)
-    (setq observer (lambda (observed event)
-                     (when (and (not settled)
-                                (eq observed child)
-                                (= child-id (ende-job-id observed))
-                                (ende-job-terminal-p child))
-                       (setq settled t)
-                       (remove-hook 'ende-job-event-functions observer)
-                       (when (= parent-id (ende-job-id parent))
-                         (funcall callback
-                                  (ende-agent--terminal-answer event))))))
-    (add-hook 'ende-job-event-functions observer)
-    (when (ende-job-terminal-p child)
-      (funcall observer
-               child
-               (pcase (ende-job-state child)
-                 ('completed (list :type :done
-                                   :content (ende-job-result child)))
-                 ('failed (list :type :error :error (ende-job-error child)))
-                 ('cancelled '(:type :cancelled))
-                 ('skipped (list :type :skipped
-                                 :error (ende-job-error child))))))
-    observer))
+(defun ende-agent--child-terminal-event (child)
+  "Return CHILD's terminal state in the event shape used for tool results."
+  (pcase (ende-job-state child)
+    ('completed (list :type :done :content (ende-job-result child)))
+    ('failed (list :type :error :error (ende-job-error child)))
+    ('cancelled '(:type :cancelled))
+    ('skipped (list :type :skipped :error (ende-job-error child)))))
 
 (defconst ende-agent--system-prompt
   (concat "You are a delegated Ende agent. Complete only the assigned task. "
@@ -229,27 +214,7 @@ CALLBACK receives the child's final answer and no transcript."
 
 (defun ende-agent-cleanup-private-buffer (job)
   "Release JOB's private target and buffer idempotently."
-  (let ((buffer (ende-job-owned-buffer job))
-        (hook (ende-job-owned-buffer-hook job)))
-    (when hook
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (remove-hook 'kill-buffer-hook hook t)))
-      (setf (ende-job-owned-buffer-hook job) nil))
-    (when (ende-target-p (ende-job-target job))
-      (ende-ignore-errors #'ende-target-release (ende-job-target job)))
-    (when (buffer-live-p buffer)
-      (setf (ende-job-owned-buffer job) nil)
-      (kill-buffer buffer)))
-  job)
-
-(defun ende-agent--job-event (job _event)
-  "Release an internal agent's private buffer after terminalization."
-  (when (and (eq (ende-job-type job) 'agent)
-             (ende-job-terminal-p job))
-    (ende-agent-cleanup-private-buffer job)))
-
-(add-hook 'ende-job-event-functions #'ende-agent--job-event)
+  (ende--job-cleanup-owned-buffer job))
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))
@@ -363,7 +328,8 @@ DONE receives ordered tool messages after JOB is admitted again by the
 scheduler when asynchronous children have settled."
   (unless (functionp ende-agent--spawn-execute-tool)
     (error "spawn batches require an asynchronous tool dispatcher"))
-  (ende-agent--launch-batch
+  (let ((generation (or (ende-job-execution-generation job) 0)))
+    (ende-agent--launch-batch
    job calls
    (lambda (call _position settle)
      (ende-job-emit-event
@@ -372,10 +338,10 @@ scheduler when asynchronous children have settled."
      (let ((ende-tools--execution-owner (ende-job-id job))
            (ende-tools--report-activity-function
             (lambda (title status)
-              (ende-job-report-activity job title status))))
+              (ende-job-report-activity job title status generation))))
        (funcall ende-agent--spawn-execute-tool
                 call configuration settle)))
-   done))
+   done)))
 
 (defcustom ende-agent-max-tool-rounds 100000
   "Maximum model replies requesting tools for one agent job."
@@ -504,22 +470,24 @@ scheduler when asynchronous children have settled."
                     (ende-tools--execution-owner (ende-job-id job))
                     (ende-tools--report-activity-function
                      (lambda (title status)
-                       (ende-job-report-activity job title status)))
+                       (ende-job-report-activity job title status generation)))
                     (ende-tools--register-cancellation-function
                      (lambda (cancel)
-                       (if cancel
-                           (setq installed-cancel cancel)
-                         (when (and installed-cancel
-                                    (eq installed-cancel
-                                        (ende-job-cancel-function job)))
-                           (setf (ende-job-cancel-function job) prior-cancel)))
-                       (when cancel
-                         (ende-job-cancellation-set job cancel)))))
+                       (when (ende-job-execution-current-p job generation)
+                         (if cancel
+                             (progn
+                               (setq installed-cancel cancel)
+                               (ende-job-cancellation-set job cancel generation))
+                           (when (eq installed-cancel
+                                     (ende-job-cancel-function job))
+                             (ende-job-cancellation-set
+                              job prior-cancel generation installed-cancel)))))))
                (funcall (plist-get callbacks :execute-tool)
                 call configuration
                 (lambda (content)
-                  (setq completed t)
-                  (when (ende-job-execution-current-p job generation)
+                  (when (and (not completed)
+                             (ende-job-execution-current-p job generation))
+                    (setq completed t)
                     (ende--call-with-job-error
                      job
                      (lambda ()

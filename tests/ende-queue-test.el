@@ -445,9 +445,9 @@
                                          :cursor (point-min))
                                         :profile (ende-job-profile job)))
                             (ende-job-next-child-path job)))
-                     (ende-agent--observe-child
-                      job child (lambda (_answer)
-                                  (ende-job-resume-queued job)))
+                     (setf (ende-job-delegated-settlement child)
+                           (lambda (_child)
+                             (ende-job-resume-queued job)))
                      (ende-job-suspend
                       job (lambda () (ende-job-finish job "root complete")))))
              (cons 'fence-child-test

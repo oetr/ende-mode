@@ -62,9 +62,9 @@
   "Mode-line lighter showing jobs and pending reviews for the current buffer.")
 
 (defun ende--job-targets-buffer-p (job buffer)
-  "Return non-nil when active or queued JOB targets BUFFER."
+  "Return non-nil when active or queued JOB originates in BUFFER."
   (and (memq (ende-job-state job) '(queued running))
-       (eq (ende-target-buffer (ende-job-target job)) buffer)))
+       (eq (ende-job-origin-buffer job) buffer)))
 
 (defun ende--buffer-job-count (buffer)
   "Return the number of active or queued jobs targeting BUFFER."
@@ -94,10 +94,12 @@
                   (format " ende[%d]" jobs))))
         (force-mode-line-update)))))
 
-(defun ende--mode-line-job-event (job _event)
-  "Refresh the mode-line count for JOB's target buffer."
-  (ende--update-mode-line
-   (ende-target-buffer (ende-job-target job))))
+(defun ende--mode-line-job-event (job event)
+  "Refresh the origin mode-line count when EVENT can change live membership."
+  (when (memq (plist-get event :type)
+              '(:queued :started :resumed :suspended :queued-for-resumption
+                :settled))
+    (ende--update-mode-line (ende-job-origin-buffer job))))
 
 (defun ende--mode-line-review-event (buffer)
   "Refresh the mode-line count for reviews in BUFFER."

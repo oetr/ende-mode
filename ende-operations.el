@@ -149,17 +149,42 @@ result is applied."
     ((error quit) (ende-job-fail job caught))))
 
 (defun ende--llm-callbacks (job &optional on-done on-error)
-  "Return standardized LLM callback plist for JOB."
-  (list
-   :on-start (lambda (cancel-function)
-               (ende-job-cancellation-set job cancel-function))
-   :on-event (lambda (event) (ende--handle-llm-event job event))
-   :on-done (or on-done (lambda (res) (ende-job-finish job res)))
-   :on-error (or on-error (lambda (err) (ende-job-fail job err)))))
+  "Return standardized LLM callback plist for JOB's current execution."
+  (let ((generation (or (ende-job-execution-generation job) 0))
+        (settled nil)
+        cancellation)
+    (list
+     :on-start (lambda (cancel-function)
+                 (unless settled
+                   (setq cancellation cancel-function)
+                   (ende-job-cancellation-set
+                    job cancel-function generation)))
+     :on-event (lambda (event)
+                 (unless settled
+                   (ende--handle-llm-event job event generation)))
+     :on-done (lambda (result)
+                (when (and (not settled)
+                           (ende-job-execution-current-p job generation))
+                  (setq settled t)
+                  (ende-job-cancellation-set
+                   job nil generation cancellation)
+                  (funcall (or on-done
+                               (lambda (value) (ende-job-finish job value)))
+                           result)))
+     :on-error (lambda (error)
+                 (when (and (not settled)
+                            (ende-job-execution-current-p job generation))
+                   (setq settled t)
+                   (ende-job-cancellation-set
+                    job nil generation cancellation)
+                   (funcall (or on-error
+                                (lambda (value) (ende-job-fail job value)))
+                            error))))))
 
-(defun ende--handle-llm-event (job event)
+(defun ende--handle-llm-event (job event &optional generation)
   "Route normalized transport EVENT for JOB to interested subsystems."
-  (when (ende-job-current-p job)
+  (when (ende-job-execution-current-p
+         job (or generation (ende-job-execution-generation job) 0))
     (let ((type (plist-get event :type)))
       (unless (eq type :error)
         (pcase type
@@ -256,7 +281,9 @@ result is applied."
   (let* ((profile (ende-job-profile job))
          (model (plist-get profile :model))
          (context (ende-provider-reasoning-effort-context profile effort))
+         (generation (or (ende-job-execution-generation job) 0))
          (completed nil)
+         (prior-cancel (ende-job-cancel-function job))
          cancel)
     (ende--handle-llm-event
      job '(:type :status :status "Validating reasoning effort"))
@@ -264,9 +291,10 @@ result is applied."
           (ende-provider-probe-reasoning-efforts
            profile model
            (lambda (efforts _default error)
-             (setq completed t)
-             (when (ende-job-current-p job)
-               (ende-job-cancellation-set job nil)
+             (when (and (not completed)
+                        (ende-job-execution-current-p job generation))
+               (setq completed t)
+               (ende-job-cancellation-set job prior-cancel generation cancel)
                (let ((validation-error
                       (ende-provider-reasoning-effort-validation-error
                        profile effort efforts error)))
@@ -280,7 +308,7 @@ result is applied."
                    (ende--send-llm
                     job messages on-done on-error no-begin)))))))
     (unless completed
-      (ende-job-cancellation-set job cancel))))
+      (ende-job-cancellation-set job cancel generation))))
 
 (defun ende--dispatch-llm
     (job messages &optional on-done on-error no-begin messages-prepared)

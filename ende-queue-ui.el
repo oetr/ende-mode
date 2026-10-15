@@ -64,6 +64,13 @@
 (defvar-local ende-queue-ui--rendering nil
   "Non-nil while the dashboard buffer is being rebuilt.")
 
+
+
+
+
+
+
+
 (defun ende-queue-ui--live-jobs ()
   "Return all current jobs in stable active and actual pending order."
   (append
@@ -311,7 +318,7 @@
   "Render JOB in STATE for VIEW and return its one-line summary."
   (let* ((marked (gethash (ende-job-id job) ende-queue-ui--marked-ids))
          (expanded (gethash (ende-job-id job) ende-queue-ui--expanded-jobs))
-         (buffer (ende-target-buffer (ende-job-target job)))
+         (buffer (ende-job-origin-buffer job))
          (values (list (cons 'id (number-to-string (ende-job-id job)))
                        (cons 'buffer (ende-queue-ui--safe-name buffer))
                        (cons 'operation (ende-queue-ui--operation job))
@@ -347,7 +354,8 @@
 
 (defun ende-queue-ui--display-blockers (job)
   "Render useful readiness blockers for queued JOB."
-  (let ((blockers (cdr (plist-get (ende-job-explanation job) :blockers))))
+  (let ((blockers (cdr (plist-get
+                        (ende-job-explanation job) :blockers))))
     (when blockers
       (ende-queue-ui--detail-field
        "Also blocked by"
@@ -548,7 +556,7 @@
 
 (defun ende-queue-ui--buffer-key (job)
   "Return JOB's source buffer key, including a shared dead-buffer sentinel."
-  (or (ende-target-buffer (ende-job-target job)) 'ende-queue-ui--killed-buffer))
+  (or (ende-job-origin-buffer job) 'ende-queue-ui--killed-buffer))
 
 (defun ende-queue-ui--buffer-jobs ()
   "Return current job groups in a persistent source-buffer order."

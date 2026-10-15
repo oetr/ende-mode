@@ -49,9 +49,12 @@
             title))))))
 
 (defun ende-finished--track (job)
-  "Begin lightweight source tracking for JOB while its target is live."
-  (let* ((target (ende-job-target job))
-         (buffer (ende-target-buffer target)))
+  "Begin lightweight source tracking for JOB while its origin is live."
+  (let* ((root (or (and (ende-job-family job)
+                        (ende-job-family-root (ende-job-family job)))
+                   job))
+         (target (ende-job-target root))
+         (buffer (ende-job-origin-buffer job)))
     (when (and (ende-target-live-p target)
                (not (gethash (ende-job-id job) ende-finished--live-jobs)))
       (with-current-buffer buffer
