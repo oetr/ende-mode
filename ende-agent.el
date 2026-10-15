@@ -200,6 +200,7 @@ CALLBACK receives the child's final answer and no transcript."
            :tool-arguments (lambda (call)
                              (ende-chat--tool-value call :arguments))
            :execute-tool #'ende-chat--tool-response-async
+           :execute-spawn-batch #'ende-agent--spawn-batch
            :assistant-message
            (lambda (_job result calls)
              (list :role "assistant" :content (or (plist-get result :content) "")
@@ -315,32 +316,55 @@ ordered result slots only through the parent's saved scheduler continuation."
                   (cl-loop for settled across
                            (ende-agent-spawn-batch-settled-slots batch)
                            count (not settled)))
-            (if (> (ende-agent-spawn-batch-outstanding batch) 0)
-                (ende-job-suspend
-                 parent
-                 (lambda ()
-                   (unless (and (ende-agent--batch-live-p parent batch)
-                                (= (or (ende-job-execution-generation parent) 0)
-                                   (1+ (ende-agent-spawn-batch-generation batch))))
-                     (error "spawn batch continuation is stale"))
-                   (let ((results (append
-                                   (ende-agent-spawn-batch-result-slots batch)
-                                   nil)))
-                     (setf (ende-job-active-spawn-batch parent) nil)
-                     (funcall done results))))
-              (progn
-                (setf (ende-agent-spawn-batch-completed-p batch) t
-                      (ende-job-active-spawn-batch parent) nil)
-                (funcall done
-                         (append
-                          (ende-agent-spawn-batch-result-slots batch)
-                          nil)))))
+            (when (ende-agent--batch-live-p parent batch)
+              (if (> (ende-agent-spawn-batch-outstanding batch) 0)
+                  (ende-job-suspend
+                   parent
+                   (lambda ()
+                     (unless (and (ende-agent--batch-live-p parent batch)
+                                  (= (or (ende-job-execution-generation parent) 0)
+                                     (1+ (ende-agent-spawn-batch-generation batch))))
+                       (error "spawn batch continuation is stale"))
+                     (let ((results (append
+                                     (ende-agent-spawn-batch-result-slots batch)
+                                     nil)))
+                       (setf (ende-job-active-spawn-batch parent) nil)
+                       (funcall done results))))
+                (progn
+                  (setf (ende-agent-spawn-batch-completed-p batch) t
+                        (ende-job-active-spawn-batch parent) nil)
+                  (funcall done
+                           (append
+                            (ende-agent-spawn-batch-result-slots batch)
+                            nil))))))
         (setq ende--queue-suspended previous-suppression)))
     (when (and (not previous-suppression)
                (not ende-queue-paused)
                (not ende--aborting))
       (ende-process-next))
     batch))
+
+(defvar ende-agent--spawn-execute-tool nil)
+
+(defun ende-agent--spawn-batch (job calls configuration done)
+  "Execute adjacent spawn CALLS for JOB through its normal tool dispatcher.
+DONE receives ordered tool messages after JOB is admitted again by the
+scheduler when asynchronous children have settled."
+  (unless (functionp ende-agent--spawn-execute-tool)
+    (error "spawn batches require an asynchronous tool dispatcher"))
+  (ende-agent--launch-batch
+   job calls
+   (lambda (call _position settle)
+     (ende-job-emit-event
+      job (list :type :tool-call-count
+                :count (1+ (or (ende-job-tool-call-count job) 0))))
+     (let ((ende-tools--execution-owner (ende-job-id job))
+           (ende-tools--report-activity-function
+            (lambda (title status)
+              (ende-job-report-activity job title status))))
+       (funcall ende-agent--spawn-execute-tool
+                call configuration settle)))
+   done))
 
 (defcustom ende-agent-max-tool-rounds 100000
   "Maximum model replies requesting tools for one agent job."
@@ -438,13 +462,24 @@ ordered result slots only through the parent's saved scheduler continuation."
                  (let* ((split (ende-agent--spawn-prefix remaining callbacks))
                         (batch (car split)))
                    (setq remaining (cdr split))
-                   (funcall (plist-get callbacks :execute-spawn-batch)
-                            job batch configuration
-                            (lambda (results)
-                              (when (ende-job-execution-current-p
-                                     job (or (ende-job-execution-generation job) 0))
-                                (setq messages (nconc (nreverse results) messages))
-                                (next)))))
+                   (let ((ende-agent--spawn-execute-tool
+                          (plist-get callbacks :execute-tool)))
+                     (funcall (plist-get callbacks :execute-spawn-batch)
+                              job batch configuration
+                              (lambda (results)
+                                (when (ende-job-execution-current-p
+                                       job (or (ende-job-execution-generation job) 0))
+                                  (setq messages
+                                        (nconc
+                                         (nreverse
+                                          (cl-mapcar
+                                           (lambda (call content)
+                                             (ende-agent--invoke
+                                              callbacks :tool-result-message
+                                              job call content))
+                                           batch results))
+                                         messages))
+                                  (next))))))
                (let* ((call (pop remaining))
                     (_count
                      (ende-job-emit-event

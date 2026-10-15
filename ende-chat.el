@@ -3435,7 +3435,9 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
        job messages configuration
        (list
         :tool-calls #'ende-chat--tool-call-list
+        :tool-name (lambda (call) (ende-chat--tool-value call :name))
         :execute-tool #'ende-chat--tool-response-async
+        :execute-spawn-batch #'ende-agent--spawn-batch
         :assistant-message
         (lambda (job result calls)
           (let* ((instruction (ende-job-instruction job))

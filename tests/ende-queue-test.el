@@ -261,14 +261,14 @@
       (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
             (ende-job-access-policy root)
             '(:active-tools (spawn_agent) :spawn-agent-config worker))
+      (setf (ende-job-family-registry (ende-job-family root))
+            '((worker . (:root nil :active-tools (about_thinking)
+                         :tool-resources nil))))
       (setq ende--active-jobs (list root)
             ende-queue (delq root ende-queue))
       (setf (ende-job-state root) 'running
             (ende-job-execution-generation root) 1)
       (setf (ende-job-type root) 'chat)
-      (setf (ende-job-family-registry (ende-job-family root))
-            '((worker . (:root nil :active-tools (about_thinking)
-                         :tool-resources nil))))
       (let ((ende-tools--execution-owner (ende-job-id root)))
         (should-error
          (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
@@ -297,6 +297,48 @@
         (should-not (buffer-live-p (ende-job-owned-buffer child))))
       (should (buffer-live-p (current-buffer)))
       (ende--cancel-live-jobs (list root)))))
+
+(ert-deftest ende-test/shared-loop-spawn-batch-orders-and-resumes ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (settlers nil)
+        (results nil)
+        job family)
+    (ende-test--with-buffer "shared loop"
+      (setq family (ende--make-job-family :policy-frozen-p t)
+            job (ende--make-job :id 915 :type 'agent :state 'running
+                                :family family :schedule-path nil
+                                :target (ende-target-create
+                                         :buffer (current-buffer)
+                                         :start (point-min) :end (point-min)
+                                         :cursor (point-min))
+                                :profile '(:tool-definitions (fixture))
+                                :started-at (float-time)
+                                :execution-generation 1))
+      (setf (ende-job-family-root family) job)
+      (ende--queue-push family)
+      (push job ende--active-jobs)
+      (let ((callbacks
+             (list :tool-name (lambda (call) (plist-get call :name))
+                   :execute-tool (lambda (call _configuration settle)
+                                   (push (cons (plist-get call :id) settle) settlers))
+                   :tool-result-message
+                   (lambda (_job call content)
+                     (list :id (plist-get call :id) :content content))
+                   :execute-spawn-batch #'ende-agent--spawn-batch)))
+        (ende-agent--run-tools
+         job '((:id "A" :name "spawn_agent")
+               (:id "B" :name "spawn_agent"))
+         nil callbacks (lambda (messages) (setq results messages)))
+        (should (eq (ende-job-state job) 'suspended))
+        (funcall (cdr (assoc "B" settlers)) "second")
+        (funcall (cdr (assoc "A" settlers)) "first")
+        (should (eq (ende-job-state job) 'queued))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (equal (mapcar (lambda (message) (plist-get message :id))
+                               results)
+                       '("A" "B")))))))
 
 (ert-deftest ende-test/private-agent-buffer-is-owned-and-invalidates-on-kill ()
   (ende-test--reset)
