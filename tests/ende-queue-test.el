@@ -414,6 +414,71 @@
         (should (eq (ende-job-state child) 'queued))
         (ende--cancel-live-jobs (list root))))))
 
+(ert-deftest ende-test/fence-waits-for-family-through-delegation ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        root child later fence later-ran-after-root)
+    (let ((ende--job-handlers
+           (append
+            (list
+             (cons 'fence-parent-test
+                   (lambda (job)
+                     (setq fence (ende-fence-all)
+                           later
+                           (ende-enqueue
+                            (list 'fence-later-test
+                                  :target (ende-target-create
+                                           :buffer (current-buffer)
+                                           :start (point-min) :end (point-max)
+                                           :cursor (point-min))
+                                  :profile '(:name remote :model "fixture")))
+                           child
+                           (ende-job-publish-child
+                            job
+                            (cons 'fence-child-test
+                                  (list :target
+                                        (ende-target-create
+                                         :buffer (current-buffer)
+                                         :start (point-min) :end (point-min)
+                                         :cursor (point-min))
+                                        :profile (ende-job-profile job)))
+                            (ende-job-next-child-path job)))
+                     (ende-agent--observe-child
+                      job child (lambda (_answer)
+                                  (ende-job-resume-queued job)))
+                     (ende-job-suspend
+                      job (lambda () (ende-job-finish job "root complete")))))
+             (cons 'fence-child-test
+                   (lambda (job)
+                     (should (eq (ende-job-state root) 'suspended))
+                     (should (eq (ende-job-state later) 'queued))
+                     (should (memq fence (ende-queue-fences)))
+                     (ende-job-finish job "child complete")))
+             (cons 'fence-later-test
+                   (lambda (job)
+                     (setq later-ran-after-root
+                           (eq (ende-job-state root) 'completed))
+                     (ende-job-finish job "later complete"))))
+            ende--job-handlers)))
+      (ende-test--with-buffer "fenced delegation"
+        (setq root
+              (ende-enqueue
+               (list 'fence-parent-test
+                     :target (ende-target-create
+                              :buffer (current-buffer)
+                              :start (point-min) :end (point-max)
+                              :cursor (point-min))
+                     :profile '(:name remote :model "fixture"
+                                :parallel t :max-concurrency 2))))
+        (setq ende--queue-suspended nil)
+        (ende-process-next)
+        (should (eq (ende-job-state root) 'completed))
+        (should (eq (ende-job-state child) 'completed))
+        (should (eq (ende-job-state later) 'completed))
+        (should later-ran-after-root)
+        (should-not (ende-queue-fences))
+        (should-not (ende-queue-family-markers))))))
+
 (ert-deftest ende-test/recursive-agents-settle-through-the-family-scheduler ()
   (ende-test--reset)
   (let* ((tool-call (lambda (id task)
