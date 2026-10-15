@@ -637,15 +637,35 @@ bypassed by a later same-provider job."
                  :enqueued-at now)))
       (unless profile
         (error "ende request is missing a provider profile"))
-      (when prepare
-        (funcall prepare job))
-      (unless (and (ende-target-p (ende-job-target job))
-                   (ende-target-live-p (ende-job-target job)))
-        (error "ende request preparation did not create a live target"))
-      (setf (ende-job-profile job)
-            (plist-put (copy-tree (ende-job-profile job))
-                       :job-id (ende-job-id job)))
-      job)))
+      (condition-case caught
+          (progn
+            (when prepare
+              (funcall prepare job))
+            (unless (and (ende-target-p (ende-job-target job))
+                         (ende-target-live-p (ende-job-target job)))
+              (error "ende request preparation did not create a live target"))
+            (setf (ende-job-profile job)
+                  (plist-put (copy-tree (ende-job-profile job))
+                             :job-id (ende-job-id job)))
+            job)
+        ((error quit)
+         (ende--job-cleanup-unpublished job)
+         (signal (car caught) (cdr caught)))))))
+
+(defun ende--job-cleanup-unpublished (job)
+  "Release target and private buffer resources for unpublished JOB."
+  (let ((buffer (ende-job-owned-buffer job))
+        (hook (ende-job-owned-buffer-hook job)))
+    (when (and hook (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (remove-hook 'kill-buffer-hook hook t)))
+    (when (and buffer (ende-target-p (ende-job-target job)))
+      (ende-ignore-errors #'ende-target-release (ende-job-target job)))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))
+    (setf (ende-job-owned-buffer job) nil
+          (ende-job-owned-buffer-hook job) nil))
+  job)
 
 (defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.
@@ -697,22 +717,33 @@ scheduler callbacks are permitted to observe the child."
                (ende-job-family-policy-frozen-p (ende-job-family parent)))
     (error "invalid parent or scheduling path for delegated child"))
   (let* ((job (ende--job-from-request request))
-         (family (ende-job-family parent)))
-      (setf (ende-job-family job) family
-            (ende-job-parent job) parent
-            (ende-job-schedule-path job) (copy-sequence schedule-path)
-            (ende-job-next-child-index job) 0
-            (ende-job-access-policy job)
-            (copy-tree (plist-get (cdr request) :access-policy))
-            (ende-job-children parent)
-            (append (ende-job-children parent) (list job)))
-    (ende--job-register-origin job)
-    (ende--queue-insert-family-member job)
-    (ende-job-emit-event
-     job (list :type :queued
-               :client (ende-provider-client-name (ende-job-profile job))
-               :model (plist-get (ende-job-profile job) :model)))
-    job))
+         (family (ende-job-family parent))
+         (published nil))
+    (unwind-protect
+        (progn
+          (setf (ende-job-family job) family
+                (ende-job-parent job) parent
+                (ende-job-schedule-path job) (copy-sequence schedule-path)
+                (ende-job-next-child-index job) 0
+                (ende-job-access-policy job)
+                (copy-tree (plist-get (cdr request) :access-policy))
+                (ende-job-children parent)
+                (append (ende-job-children parent) (list job)))
+          (ende--job-register-origin job)
+          (ende--queue-insert-family-member job)
+          (ende-job-emit-event
+           job (list :type :queued
+                     :client (ende-provider-client-name (ende-job-profile job))
+                     :model (plist-get (ende-job-profile job) :model)))
+          (setq published t)
+          job)
+      (unless published
+        (setq ende-queue (delq job ende-queue))
+        (ende--queue-sync-tail)
+        (ende--unregister-source-job job)
+        (setf (ende-job-children parent)
+              (delq job (ende-job-children parent)))
+        (ende--job-cleanup-unpublished job)))))
 
 ;;;; Settlement and dispatch
 

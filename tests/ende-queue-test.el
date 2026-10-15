@@ -298,6 +298,50 @@
       (should (buffer-live-p (current-buffer)))
       (ende--cancel-live-jobs (list root)))))
 
+(ert-deftest ende-test/failed-child-publication-cleans-private-target-and-ownership ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        parent child-buffer source
+        (prepare-target (symbol-function 'ende-agent-private-target)))
+    (ende-test--with-buffer "publication failure"
+      (setq source (current-buffer))
+      (let ((family (ende--make-job-family
+                     :policy-frozen-p t
+                     :inference-template '(:name remote :model "fixture"))))
+        (setq parent (ende--make-job
+                      :id 916 :type 'agent :state 'running
+                      :family family :schedule-path nil
+                      :target (ende-target-create
+                               :buffer (current-buffer)
+                               :start (point-min) :end (point-min)
+                               :cursor (point-min))
+                      :profile '(:name remote :model "fixture")
+                      :access-policy '(:active-tools (spawn_agent)
+                                       :spawn-agent-config worker)
+                      :execution-generation 1))
+        (setf (ende-job-family-root family) parent
+              (ende-job-family-registry family)
+              '((worker . (:root nil :active-tools (about_thinking)
+                           :tool-resources nil)))
+              ende--active-jobs (list parent))
+        (ende--queue-push family)
+        (cl-letf (((symbol-function 'ende-agent-private-target)
+                   (lambda (job)
+                     (prog1 (funcall prepare-target job)
+                       (setq child-buffer (ende-job-owned-buffer job)))))
+                  ((symbol-function 'ende--queue-insert-family-member)
+                   (lambda (_job) (error "injected publication failure"))))
+          (should-error (ende-agent--make-child parent "inspect")
+                        :type 'error))
+        (should (= (or (ende-job-next-child-index parent) 0) 1))
+        (should-not (ende-job-children parent))
+        (should-not (ende-queue-entries))
+        (should (memq family (ende-queue-family-markers)))
+        (should (bufferp child-buffer))
+        (should-not (buffer-live-p child-buffer))
+        (should (buffer-live-p source))
+        (ende--cancel-live-jobs (list parent))))))
+
 (ert-deftest ende-test/shared-loop-spawn-batch-orders-and-resumes ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)
