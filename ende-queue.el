@@ -872,8 +872,6 @@ scheduler callbacks are permitted to observe the child."
       (let ((ende--queue-suspended t))
         (dolist (job jobs)
           (push (cons job (ende-job-cancel-function job)) cancellations)
-          (when-let ((batch (ende-job-active-spawn-batch job)))
-            (setf (ende-agent-spawn-batch-invalidated-p batch) t))
           (setf (ende-job-state job)
                 (if (memq job selected) state 'cancelled)
                 (ende-job-result job) (and (memq job selected) result)
@@ -910,7 +908,7 @@ scheduler callbacks are permitted to observe the child."
                 (condition-case caught
                     (funcall settlement job)
                   ((error quit)
-                   (when-let ((parent (ende-job-parent job)))
+                   (when-let* ((parent (ende-job-parent job)))
                      (when (ende-job-live-p parent)
                        (push (cons parent caught) settlement-failures))))))))
           (dolist (failure settlement-failures)
