@@ -245,6 +245,22 @@
                      :tool-definitions))
         (ende-abort-queue)))))
 
+(ert-deftest ende-test/agent-profile-uses-policy-without-inheriting-request-state ()
+  (let* ((family (ende--make-job-family
+                  :inference-template
+                  '(:name remote :model "root-model" :temperature 0.2
+                    :tool-definitions (root-tools) :job-id 9)))
+         (unchanged (ende-agent-profile-for-policy
+                     family '(:active-tools (about_thinking))))
+         (selected (ende-agent-profile-for-policy
+                    family '(:provider remote :model "child-model"))))
+    (should (equal (plist-get unchanged :model) "root-model"))
+    (should-not (plist-get unchanged :tool-definitions))
+    (should-not (plist-get unchanged :job-id))
+    (should (eq (plist-get selected :name) 'remote))
+    (should (equal (plist-get selected :model) "child-model"))
+    (should-not (plist-get selected :tool-definitions))))
+
 (ert-deftest ende-test/shared-loop-batches-only-adjacent-spawn-calls ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)

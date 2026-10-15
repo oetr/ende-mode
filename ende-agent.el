@@ -7,11 +7,33 @@
 (require 'ende-tools)
 (require 'ende-queue)
 (require 'ende-target)
+(require 'ende-provider)
 
 (declare-function ende-chat--tool-call-list "ende-chat")
 (declare-function ende-chat--tool-value "ende-chat")
 (declare-function ende-chat--tool-response-async "ende-chat")
 (declare-function ende-chat-config-capabilities "ende-chat-config" (environment))
+
+(defun ende-agent-profile-for-policy (family policy)
+  "Derive a detached inference profile for POLICY in FAMILY."
+  (let* ((template (copy-tree (ende-job-family-inference-template family)))
+         (configured-provider (plist-get policy :provider))
+         (provider (or configured-provider (plist-get template :name)))
+         (configured-model (plist-get policy :model))
+         (model (or configured-model
+                    (and (eq provider (plist-get template :name))
+                         (plist-get template :model))))
+         (profile
+          (cond
+           ((and (null configured-provider) (null configured-model)) template)
+           (model (ende-provider-profile-for-model provider model))
+           (t (ende-provider-profile-snapshot provider)))))
+    (unless profile
+      (error "configured child provider is unavailable: %s" provider))
+    (let ((clean (copy-tree profile)))
+      (setq clean (plist-put clean :job-id nil)
+            clean (plist-put clean :tool-definitions nil))
+      clean)))
 
 (defconst ende-agent--system-prompt
   (concat "You are a delegated Ende agent. Complete only the assigned task. "
