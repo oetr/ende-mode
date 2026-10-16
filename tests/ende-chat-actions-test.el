@@ -148,6 +148,35 @@
        (should (> scoped-target-parses 0))
        (should (> other-buffer-parses 0))))))
 
+(ert-deftest ende-test/chat-enqueue-avoids-whole-transcript-parsing ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t))
+    (ende-test--with-buffer
+     (concat "* Root\n"
+             "** Question\nAsk\n"
+             "** Existing agent section\n"
+             ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+             "Keep this drawer.\n")
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let* ((document (ende-chat--build-document))
+            (question (ende-chat--headline-at-point document))
+            (target (current-buffer))
+            (whole-transcript-parses 0)
+            (scoped-target-parses 0)
+            (parse-buffer (symbol-function 'org-element-parse-buffer)))
+       (cl-letf (((symbol-function 'org-element-parse-buffer)
+                  (lambda (&rest arguments)
+                    (when (eq (current-buffer) target)
+                      (if (and (= (point-min) 1)
+                               (= (point-max) (1+ (buffer-size))))
+                          (cl-incf whole-transcript-parses)
+                        (cl-incf scoped-target-parses)))
+                    (apply parse-buffer arguments))))
+         (ende-chat--enqueue document question nil))
+       (should (= whole-transcript-parses 0))
+       (should (> scoped-target-parses 0))))))
+
 (ert-deftest ende-test/chat-completion-survives-unrelated-edit ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))

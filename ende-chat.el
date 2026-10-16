@@ -568,6 +568,14 @@ around rendered chat sections, not arbitrary text slices."
       (save-excursion
         (ende-chat--hide-control-drawers-in-tree tree)))))
 
+(defun ende-chat--hide-control-drawers-at-heading (position)
+  "Hide control drawers in the heading header at POSITION."
+  (save-excursion
+    (goto-char position)
+    (let ((begin (point)))
+      (org-end-of-meta-data t)
+      (ende-chat--hide-control-drawers-in-region begin (point)))))
+
 (defun ende-chat--hide-reasoning-section (headline)
   "Hide HEADLINE's Org subtree without hiding its sibling reply."
   (when (derived-mode-p 'org-mode)
@@ -3615,6 +3623,9 @@ COMPACT requests a context fence and archives the instruction section."
          (committed nil))
     (save-excursion
       (atomic-change-group
+        ;; Other control drawers are still at the positions DOCUMENT parsed.
+        (ende-chat--hide-control-drawers-in-tree
+         (ende-chat--document-tree document))
         (goto-char (org-element-property :begin question))
         (let ((before (buffer-size)))
           (when (and compact (not source-fence))
@@ -3631,8 +3642,10 @@ COMPACT requests a context fence and archives the instruction section."
                  (+ (ende-chat--placeholder-position
                      document question question-id compact)
                     (- (buffer-size) before))
-                 response-level question-id request-id compact)))
-        (ende-chat--hide-control-drawers))
+                 response-level question-id request-id compact))
+          (ende-chat--hide-control-drawers-at-heading
+           (org-element-property :begin question))
+          (ende-chat--hide-control-drawers-at-heading position)))
       (unwind-protect
           (progn
             (setq target
