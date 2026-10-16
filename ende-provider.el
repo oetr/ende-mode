@@ -429,10 +429,6 @@ Present preference keys override PROFILE even when their value is nil."
   (and (not (eq (plist-get profile :thinking) 'off))
        (plist-get profile :reasoning-effort)))
 
-(defun ende-provider-reasoning-effort-context (profile effort)
-  "Return the validation context for PROFILE and EFFORT."
-  (list (plist-get profile :name) (plist-get profile :model) effort))
-
 (defun ende-provider-control-compatibility-error (profile)
   "Return a message when PROFILE requests a verified incompatible control pair."
   (when (and (eq (plist-get profile :builtin-profile) 'deepseek)
@@ -450,25 +446,6 @@ Present preference keys override PROFILE even when their value is nil."
   (ende-controls-encode nil (plist-get profile :controls) profile)
   t)
 
-(defun ende-provider-reasoning-effort-validation-error
-    (profile effort efforts error)
-  "Return an error for an unverified EFFORT, or ERROR unchanged."
-  (or error
-      (cond
-       ((null efforts)
-        (ende-error-create
-         :kind 'capability
-         :message (format "Reasoning-effort support is unknown for model %s by %s"
-                          (or (plist-get profile :model) "<unknown>")
-                          (ende-provider-client-name profile))))
-       ((not (member effort efforts))
-        (ende-error-create
-         :kind 'unsupported
-         :message
-         (format "Reasoning effort %s is not supported for model %s by %s"
-                 effort
-                 (or (plist-get profile :model) "<unknown>")
-                 (ende-provider-client-name profile)))))))
 (defun ende-provider-validate-profile (profile)
   "Validate request configuration in PROFILE before network startup."
   (when (and (plist-member profile :type)

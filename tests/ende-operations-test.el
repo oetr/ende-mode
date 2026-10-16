@@ -135,7 +135,7 @@
 			      (should (eq (ende-job-state job) 'failed))
 			      (should (string= (buffer-string) "base"))))))
 
-(ert-deftest ende-test/direct-effort-preflight-is-cancellable ()
+(ert-deftest ende-test/provider-effort-rejection-fails-through-normal-request-path ()
   (ende-test--reset)
   (let ((ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
@@ -146,29 +146,54 @@
         (ende-model-selection--buffer-control-preferences
          (make-hash-table :test #'equal))
         (ende-providers '(openrouter))
-        (ende-provider-profiles nil)
-        (ende-llm-function (ende-test--fake-llm '("unused")))
-        (effort-callback nil)
-        (cancel-count 0))
+        (ende-provider-profiles
+         '((openrouter :url "https://openrouter.ai/api/v1/chat/completions"
+                       :model "openai/gpt-4o-mini"
+                       :reasoning-effort "medium"
+                       :controls ((:reasoning-effort
+                                   :path ("reasoning" "effort"))))))
+        (ende-llm-function
+         (lambda (messages callbacks profile)
+           (setq ende-test--calls
+                 (list (list :messages messages :profile profile)))
+           (funcall (plist-get callbacks :on-error)
+                    (ende-error-create :kind 'http
+                                       :message "unsupported reasoning effort"))))
+        (probe-count 0))
     (unwind-protect
         (progn
           (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                     (lambda (_profile _model callback)
-                       (setq effort-callback callback)
-                       (lambda () (cl-incf cancel-count)))))
+                     (lambda (&rest _)
+                       (cl-incf probe-count)
+                       (ert-fail "A request must not probe effort support"))))
             (with-temp-buffer
               (insert "Document to summarize")
               (ende-model-selection-save
                '(:provider openrouter :model "source-model"
                            :control-preferences (:reasoning-effort "high")))
               (let ((job (ende-summarize)))
-                (should (eq (ende-job-state job) 'running))
-                (should-not ende-test--calls)
-                (ende-abort-queue)
-                (should (eq (ende-job-state job) 'cancelled))
-                (should (= cancel-count 1))
-                (funcall effort-callback '("high") "high" nil)
-                (should-not ende-test--calls)))))
+                (should (eq (ende-job-state job) 'failed))
+                (should (= (length ende-test--calls) 1))
+                (should (= probe-count 0))
+                (should (equal (plist-get
+                                (plist-get (car ende-test--calls) :profile)
+                                :reasoning-effort)
+                               "high"))
+                (let* ((call (car ende-test--calls))
+                       (request
+                        (ende-protocol-json-read-string
+                         (json-encode
+                          (ende-llm--request-body
+                           (plist-get call :messages)
+                           (plist-get call :profile))))))
+                  (should (equal
+                           (ende-protocol-json-get
+                            "effort"
+                            (ende-protocol-json-get "reasoning" request))
+                           "high")))
+                (should (string-match-p
+                         "unsupported reasoning effort"
+                         (ende-error-display-message (ende-job-error job))))))))
       (ende-test--reset))))
 
 (provide 'ende-operations-test)

@@ -191,50 +191,43 @@
          (make-hash-table :test #'equal))
         (ende-providers '(openrouter))
         (ende-provider-profiles nil)
-        (ende-llm-function (ende-test--fake-llm '("summary")))
-        (probes nil))
+        (ende-llm-function (ende-test--fake-llm '("summary" "summary"))))
     (unwind-protect
         (progn
-          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                     (lambda (profile model callback)
-                       (push (list (plist-get profile :name) model) probes)
-                       (funcall callback
-                                (if (equal model "stale-model")
-                                    '("low")
-                                  '("high" "low"))
-                                "low" nil)
-                       (lambda () nil))))
-            (with-temp-buffer
-              (insert "Document to summarize")
+          (with-temp-buffer
+            (insert "Document to summarize")
+            (ende-model-selection-save
+             '(:provider openrouter :model "source-model"
+                         :control-preferences (:reasoning-effort "high")))
+            (let ((ende--queue-suspended t)
+                  job)
+              (setq job (ende-summarize))
               (ende-model-selection-save
-               '(:provider openrouter :model "source-model"
-                           :control-preferences (:reasoning-effort "high")))
-              (let ((ende--queue-suspended t)
-                    job)
-                (setq job (ende-summarize))
-                (ende-model-selection-save
-                 '(:provider local :model "later-model"))
-                (setq ende--queue-suspended nil)
-                (ende-process-next)
-                (should (eq (ende-job-state job) 'completed))
-                (should (eq (plist-get (ende-job-profile job) :name)
-                            'openrouter))
-                (should (equal (plist-get (ende-job-profile job) :model)
-                               "source-model"))
-                (should (equal
-                         (plist-get (ende-job-profile job) :reasoning-effort)
-                         "high"))
-                (should (equal (caar probes) 'openrouter))
-                (should (equal (cadar probes) "source-model"))))
+               '(:provider local :model "later-model"))
+              (setq ende--queue-suspended nil)
+              (ende-process-next)
+              (should (eq (ende-job-state job) 'completed))
+              (should (eq (plist-get (ende-job-profile job) :name)
+                          'openrouter))
+              (should (equal (plist-get (ende-job-profile job) :model)
+                             "source-model"))
+              (should (equal
+                       (plist-get (ende-job-profile job) :reasoning-effort)
+                       "high"))))
             (with-temp-buffer
               (insert "Another document")
               (ende-model-selection-save
                '(:provider openrouter :model "stale-model"
                            :control-preferences (:reasoning-effort "high")))
-              (let ((job (ende-summarize)))
-                (should (eq (ende-job-state job) 'failed))
-                (should (= (length ende-test--calls) 1))
-                (should (equal (cadar probes) "stale-model"))))))
+              (let* ((job (ende-summarize))
+                     (request-profile
+                      (plist-get (car (last ende-test--calls)) :options)))
+                (should (eq (ende-job-state job) 'completed))
+                (should (= (length ende-test--calls) 2))
+                (should (equal (plist-get request-profile :model)
+                               "stale-model"))
+                (should (equal (plist-get request-profile :reasoning-effort)
+                               "high")))))
       (ende-test--reset))))
 
 (ert-deftest ende-test/insert-anchor-does-not-follow-edits-at-point ()

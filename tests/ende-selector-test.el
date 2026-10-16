@@ -570,6 +570,7 @@
 
 (ert-deftest ende-test/selector-effort-picker-remembers-setting-immediately ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
+        (probed-model nil)
         (ende-provider-profiles
          '((remote :model "remote-model"
                    :controls ((:reasoning-effort :path ("reasoning" "effort")
@@ -590,7 +591,12 @@
                 ende-selector--model-index 0
                 ende-selector--model-state :ready)
           (ende-selector--set-control-context)
-          (cl-letf (((symbol-function 'completing-read)
+          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+                     (lambda (_profile model callback)
+                       (setq probed-model model)
+                       (funcall callback '("high" "low") "low" nil)
+                       (lambda () nil)))
+                    ((symbol-function 'completing-read)
                      (lambda (prompt collection _predicate require-match
                                      _initial _history default &rest _)
 		       (should (string= prompt "Reasoning effort: "))
@@ -600,10 +606,9 @@
 		       (should (equal default "Provider default"))
 		       "high")))
             (ende-selector-select-effort))
+          (should (equal probed-model "remote-model"))
           (should (equal ende-selector--control-preferences
                          '(:reasoning-effort "high")))
-          (should (equal ende-selector--effort-validated-context
-                         '(remote "remote-model" "high")))
           (should (equal
                    (ende-model-selection-control-preferences
                     'remote "remote-model" buffer)
@@ -899,10 +904,9 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest ende-test/selector-validates-control-preferences-before-dispatch ()
+(ert-deftest ende-test/selector-dispatches-configured-effort-without-discovery ()
   (let ((source (generate-new-buffer " *ende-selector-effort-source*"))
         (selector (generate-new-buffer " *ende-selector-effort-dispatch*"))
-        (probe-callback nil)
         (queued nil)
         (ende-provider-profiles
          '((remote :model "remote-model"
@@ -930,132 +934,21 @@
                   ende-selector--model-state :ready)
             (ende-selector--set-control-context)
             (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                       (lambda (_profile _model callback)
-                         (setq probe-callback callback)
-                         (lambda () nil)))
+                       (lambda (&rest _)
+                         (ert-fail "Job dispatch must not probe effort support")))
                       ((symbol-function 'ende-enqueue-operation)
                        (lambda (type instruction profile)
                          (setq queued (list type instruction profile)))))
               (ende-selector-insert)
-              (should (eq ende-selector--effort-state :loading))
-              (should-not queued)
-              (funcall probe-callback '("high" "low") "low" nil)))
+              (should (equal (take 2 queued) '(insert nil)))))
           (should (equal (take 2 queued) '(insert nil)))
           (should (string= (plist-get (nth 2 queued) :model) "remote-model"))
           (should (string= (plist-get (nth 2 queued) :reasoning-effort) "high"))
           (should (equal
-                   (plist-get (nth 2 queued)
-                              :reasoning-effort-validated-context)
-                   '(remote "remote-model" "high")))
-          (should (equal
                    (plist-get (ende-model-selection-for-buffer source)
                               :control-preferences)
                    '(:reasoning-effort "high")))
-          (should (not (plist-get (nth 2 queued) :reasoning-effort-validated-p)))
           (should (buffer-live-p source)))
-      (dolist (buffer (list source selector))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
-
-(ert-deftest ende-test/selector-live-effort-failure-preserves-preference-for-retry ()
-  (let ((source (generate-new-buffer " *ende-selector-retry-source*"))
-        (selector (generate-new-buffer " *ende-selector-retry*"))
-        (callbacks nil)
-        (queued nil)
-        (ende-provider-profiles
-         '((remote :model "remote-model"
-                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
-        (ende-model-selection-scope 'buffer)
-        (ende-model-selection--last-used nil)
-        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
-        (ende-model-selection--shared-control-preferences
-         (make-hash-table :test #'equal))
-        (ende-model-selection--buffer-control-preferences
-         (make-hash-table :test #'equal)))
-    (unwind-protect
-        (progn
-          (with-current-buffer source
-            (ende-model-selection-save
-             '(:provider remote :model "remote-model"
-                         :control-preferences (:reasoning-effort "high"))))
-          (with-current-buffer selector
-            (ende-selector-mode)
-            (setq ende-selector--source-buffer source
-                  ende-selector--providers '(remote)
-                  ende-selector--provider-index 0
-                  ende-selector--models '("remote-model")
-                  ende-selector--model-index 0
-                  ende-selector--model-state :ready)
-            (ende-selector--set-control-context)
-            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                       (lambda (_profile _model callback)
-                         (push callback callbacks)
-                         (lambda () nil)))
-                      ((symbol-function 'ende-enqueue-operation)
-                       (lambda (&rest arguments) (setq queued arguments))))
-              (ende-selector-insert)
-              (funcall (pop callbacks)
-                       nil nil
-                       (ende-error-create :kind 'http :message "temporary"))
-              (should (eq ende-selector--effort-state :error))
-              (should-not queued)
-              (should (equal
-                       (plist-get (ende-model-selection-for-buffer source)
-                                  :control-preferences)
-                       '(:reasoning-effort "high")))
-              (ende-selector-insert)
-              (funcall (pop callbacks) '("high" "low") nil nil)))
-          (should (equal (car queued) 'insert))
-          (should (equal
-                   (plist-get (nth 2 queued) :reasoning-effort-validated-context)
-                   '(remote "remote-model" "high"))))
-      (dolist (buffer (list source selector))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
-
-(ert-deftest ende-test/selector-rejects-removed-effort-without-clearing-preference ()
-  (let ((source (generate-new-buffer " *ende-selector-effort-stale-source*"))
-        (selector (generate-new-buffer " *ende-selector-effort-stale*"))
-        (queued nil)
-        (ende-provider-profiles
-         '((remote :model "remote-model"
-                   :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
-        (ende-model-selection-scope 'buffer)
-        (ende-model-selection--last-used nil)
-        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
-        (ende-model-selection--shared-control-preferences
-         (make-hash-table :test #'equal))
-        (ende-model-selection--buffer-control-preferences
-         (make-hash-table :test #'equal)))
-    (unwind-protect
-        (progn
-          (with-current-buffer source
-            (ende-model-selection-save
-             '(:provider remote :model "remote-model"
-                         :control-preferences (:reasoning-effort "high"))))
-          (with-current-buffer selector
-            (ende-selector-mode)
-            (setq ende-selector--source-buffer source
-                  ende-selector--providers '(remote)
-                  ende-selector--provider-index 0
-                  ende-selector--models '("remote-model")
-                  ende-selector--model-index 0
-                  ende-selector--model-state :ready)
-            (ende-selector--set-control-context)
-            (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
-                       (lambda (_profile _model callback)
-                         (funcall callback '("low") nil nil)
-                         (lambda () nil)))
-                      ((symbol-function 'ende-enqueue-operation)
-                       (lambda (&rest _) (setq queued t))))
-              (ende-selector-insert))
-            (should-not queued)
-            (should (equal ende-selector--effort "high"))
-            (should (eq ende-selector--effort-state :invalid))
-            (should (equal
-                     (plist-get (ende-model-selection-for-buffer source)
-                                :control-preferences)
-                     '(:reasoning-effort "high")))))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
