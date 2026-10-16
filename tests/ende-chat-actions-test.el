@@ -73,6 +73,53 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ende-test/chat-staging-append-preserves-current-point ()
+  (ende-test--reset)
+  (let* ((job (ende--make-job
+               :instruction '(:request-id "staging-point-neutral-current")))
+         (buffer (ende-chat--staging-buffer job t)))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) buffer)
+          (ende-chat--staging-append job "First section\nSecond section\n")
+          (with-current-buffer buffer
+            (goto-char (+ (point-min) 5))
+            (let ((previous-point (point)))
+              (ende-chat--staging-append job "Third section\n")
+              (should (= (point) previous-point)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ende-test/chat-staging-append-preserves-nonselected-window-position ()
+  (ende-test--reset)
+  (let* ((job (ende--make-job
+               :instruction '(:request-id "staging-point-neutral-window")))
+         (buffer (ende-chat--staging-buffer job t))
+         (other-buffer (generate-new-buffer "*staging-window-other*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (ende-chat--staging-append
+           job "First section\nSecond section\nThird section\n")
+          (let* ((work-window (selected-window))
+                 (other-window (split-window-right)))
+            (set-window-buffer work-window buffer)
+            (set-window-buffer other-window other-buffer)
+            (with-selected-window work-window
+              (goto-char (+ (point-min) 5))
+              (set-window-start work-window (point-min) t))
+            (let ((previous-point (window-point work-window))
+                  (previous-start (window-start work-window)))
+              (select-window other-window)
+              (ende-chat--staging-append job "Fourth section\n")
+              (should (= (window-point work-window) previous-point))
+              (should (= (window-start work-window) previous-start)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (buffer-live-p other-buffer)
+        (kill-buffer other-buffer)))))
+
 (ert-deftest ende-test/chat-completion-reduces-whole-transcript-parsing ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("Answer") t)))

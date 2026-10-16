@@ -1895,8 +1895,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
             (plist-put (ende-job-instruction job) :recovery-current nil)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
-        (goto-char (point-max))
-        (insert text)))
+        (save-excursion
+          (goto-char (point-max))
+          (insert text))))
     (when checkpoint
       (ende-chat--checkpoint-staging job))
     buffer))
