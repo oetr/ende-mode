@@ -1766,10 +1766,9 @@ COMPACT selects the context-fence title."
   "Return non-nil when HEADLINE is an Ende reply to QUESTION-ID."
   (equal (ende-chat--property document headline :reply-to) question-id))
 
-(defun ende-chat--insertion-position (document question)
+(defun ende-chat--insertion-position (document question question-id)
   "Return the position where a new response placeholder belongs."
-  (let* ((question-id (ende-chat--property document question :id))
-         (end (org-element-property :end question)))
+  (let ((end (org-element-property :end question)))
     (if (= (org-element-property :level question) 1)
         end
       (let ((parent (ende-chat--parent document question)))
@@ -1803,19 +1802,16 @@ COMPACT selects the context-fence title."
           (throw 'stop nil))))
     end))
 
-(defun ende-chat--insert-placeholder
-    (document question question-id request-id &optional compact)
-  "Insert a pending reply for QUESTION and return its heading position.
-COMPACT always places a same-level context-fence sibling."
-  (let* ((level (if (and (not compact)
-                         (= (org-element-property :level question) 1))
-                    2
-                  (org-element-property :level question)))
-         (position (if compact
-                       (ende-chat--compact-insertion-position
-                        document question question-id)
-                     (ende-chat--insertion-position document question)))
-         (text (ende-chat--placeholder-text level question-id request-id compact)))
+(defun ende-chat--placeholder-position (document question question-id compact)
+  "Return the position where QUESTION's pending placeholder belongs."
+  (if compact
+      (ende-chat--compact-insertion-position document question question-id)
+    (ende-chat--insertion-position document question question-id)))
+
+(defun ende-chat--insert-placeholder (position level question-id request-id compact)
+  "Insert a pending reply at POSITION and return its heading position.
+LEVEL sets the heading depth; COMPACT selects the context-fence title."
+  (let ((text (ende-chat--placeholder-text level question-id request-id compact)))
     (save-excursion
       (goto-char position)
       (unless (bolp)
@@ -3620,22 +3616,23 @@ COMPACT requests a context fence and archives the instruction section."
     (save-excursion
       (atomic-change-group
         (goto-char (org-element-property :begin question))
-        (when (and compact (not source-fence))
-          (org-entry-put nil ende-chat-visibility-property "hidden"))
-        (unless (and compact source-fence local-role)
-          (org-entry-put nil ende-chat-role-property "user"))
-        (unless (ende-chat--property document question :id)
-          (org-entry-put nil ende-chat-id-property question-id))
-        (let* ((marked (ende-chat--build-document))
-               (marked-question
-                (ende-chat--find-by-property marked ende-chat-id-property
-                                             question-id)))
+        (let ((before (buffer-size)))
+          (when (and compact (not source-fence))
+            (org-entry-put nil ende-chat-visibility-property "hidden"))
+          (unless (and compact source-fence local-role)
+            (org-entry-put nil ende-chat-role-property "user"))
+          (unless (ende-chat--property document question :id)
+            (org-entry-put nil ende-chat-id-property question-id))
           (setq question-marker
-                (ende-chat--make-question-marker marked-question))
+                (ende-chat--make-question-marker question))
+          ;; The property writes shifted positions parsed before them.
           (setq position
                 (ende-chat--insert-placeholder
-                 marked marked-question question-id request-id compact))
-          (ende-chat--hide-control-drawers)))
+                 (+ (ende-chat--placeholder-position
+                     document question question-id compact)
+                    (- (buffer-size) before))
+                 response-level question-id request-id compact)))
+        (ende-chat--hide-control-drawers))
       (unwind-protect
           (progn
             (setq target
