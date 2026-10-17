@@ -41,7 +41,10 @@
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
   state marker buffer source-window transcript-window websocket recorder
-  recorder-stderr dictation-marker partial-start partial-end partial-text status)
+  recorder-stderr clear-pending needs-separator status)
+
+(defvar-local ende-speech--command-point nil)
+(defvar-local ende-speech--command-tick nil)
 
 
 (defvar ende-speech--active-session nil
@@ -69,6 +72,8 @@
 
 (define-derived-mode ende-speech-transcript-mode fundamental-mode "Ende-Speech"
   "Editable transcript buffer for realtime speech dictation."
+  (add-hook 'pre-command-hook #'ende-speech--before-command nil t)
+  (add-hook 'post-command-hook #'ende-speech--after-command nil t)
   (setq-local header-line-format '(:eval (ende-speech--header-line))))
 
 (defun ende-speech--header-line ()
@@ -255,73 +260,50 @@ Try JSON first, then older pactl's normal text listing."
       (with-current-buffer buffer
         (buffer-substring-no-properties (point-min) (point-max))))))
 
-(defun ende-speech--dictation-separator (position text)
-  "Return a separating space before TEXT at POSITION, if needed."
-  (if (and (> position (point-min))
-           (> (length text) 0)
-           (not (memq (char-before position) '(32 9 10 13)))
-           (not (string-match-p "\\`[ \t\n\r,.!?:;]" text)))
-      " "
-    ""))
+(defun ende-speech--before-command ()
+  "Remember point and the buffer modification tick before a command."
+  (setq ende-speech--command-point (point)
+        ende-speech--command-tick (buffer-chars-modified-tick)))
+
+(defun ende-speech--after-command ()
+  "Clear recognition after point moves without a buffer edit."
+  (let ((session ende-speech--active-session))
+    (when (and (ende-speech--session-active-p session)
+               ende-speech--command-point
+               (/= (point) ende-speech--command-point)
+               (= (buffer-chars-modified-tick) ende-speech--command-tick))
+      (ende-speech--clear-recognition session)))
+  (setq ende-speech--command-point nil
+        ende-speech--command-tick nil))
+
+(defun ende-speech--clear-recognition (session)
+  "Clear SESSION's recognition context and pause audio until acknowledged."
+  (unless (ende-speech--session-clear-pending session)
+    (setf (ende-speech--session-clear-pending session) t
+          (ende-speech--session-needs-separator session) t)
+    (ende-speech--set-status session "Clearing...")
+    (condition-case err
+        (ende-speech--send-json
+         (ende-speech--session-websocket session)
+         '((type . "input_audio_buffer.clear")))
+      (error
+       (ende-speech--fail
+        session (format "recognition reset failed: %s"
+                        (error-message-string err)))))))
 
 (defun ende-speech--handle-delta (session delta)
-  "Insert DELTA at SESSION's dictation marker and track the partial text."
+  "Insert DELTA at point in SESSION's transcript buffer."
   (let ((buffer (ende-speech--session-buffer session)))
     (when (and (buffer-live-p buffer) (not (string-empty-p delta)))
       (with-current-buffer buffer
-        (let* ((marker (ende-speech--session-dictation-marker session))
-               (position (if (and (markerp marker) (marker-position marker))
-                             (marker-position marker)
-                           (point-max)))
-               (point-at-dictation (= (point) position)))
-          (save-excursion
-            (goto-char position)
-            (unless (and (markerp (ende-speech--session-partial-end session))
-                         (marker-position
-                          (ende-speech--session-partial-end session)))
-              (insert (ende-speech--dictation-separator position delta))
-              (setf (ende-speech--session-partial-start session)
-                    (copy-marker (point))
-                    (ende-speech--session-partial-end session)
-                    (copy-marker (point) t)
-                    (ende-speech--session-partial-text session) ""))
-            (insert delta)
-            (setf (ende-speech--session-partial-text session)
-                  (concat (ende-speech--session-partial-text session) delta)))
-          (when point-at-dictation
-            (goto-char (ende-speech--session-dictation-marker session)))
-          (force-mode-line-update))))))
-
-(defun ende-speech--handle-completed (session transcript)
-  "Finalize SESSION's partial text with TRANSCRIPT, preserving manual edits."
-  (let ((buffer (ende-speech--session-buffer session)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (let* ((start (ende-speech--session-partial-start session))
-               (end (ende-speech--session-partial-end session))
-               (marker (ende-speech--session-dictation-marker session))
-               (position (and (markerp marker) (marker-position marker)))
-               (point-at-dictation (and position (= (point) position))))
-          (if (and (markerp start) (marker-position start)
-                   (markerp end) (marker-position end))
-              (when (equal (buffer-substring-no-properties start end)
-                           (ende-speech--session-partial-text session))
-                (save-excursion
-                  (goto-char start)
-                  (delete-region start end)
-                  (insert transcript)))
-            (unless (string-empty-p transcript)
-              (save-excursion
-                (goto-char (or position (point-max)))
-                (insert (ende-speech--dictation-separator
-                         (or position (point-max)) transcript)
-                        transcript))))
-          (setf (ende-speech--session-partial-start session) nil
-                (ende-speech--session-partial-end session) nil
-                (ende-speech--session-partial-text session) "")
-          (when (and point-at-dictation marker (marker-position marker))
-            (goto-char marker))
-          (force-mode-line-update))))))
+        (when (and (ende-speech--session-needs-separator session)
+                   (> (point) (point-min))
+                   (eq (char-syntax (char-before)) ?w)
+                   (not (string-match-p "\\`[ \t\n\r,.!?:;]" delta)))
+          (insert " "))
+        (insert delta)
+        (setf (ende-speech--session-needs-separator session) nil)
+        (force-mode-line-update)))))
 
 (defun ende-speech--set-status (session status)
   "Set SESSION's status line to STATUS."
@@ -369,7 +351,8 @@ Try JSON first, then older pactl's normal text listing."
                  :coding 'no-conversion
                  :filter
                  (lambda (_process chunk)
-                   (when (ende-speech--session-active-p session)
+                   (when (and (ende-speech--session-active-p session)
+                              (not (ende-speech--session-clear-pending session)))
                      (let ((websocket
                             (ende-speech--session-websocket session)))
                        (when (ende-speech--websocket-open-p websocket)
@@ -442,12 +425,6 @@ Try JSON first, then older pactl's normal text listing."
       (condition-case nil (kill-buffer buffer) (error nil)))
     (when (markerp marker)
       (set-marker marker nil))
-    (dolist (transcript-marker
-             (list (ende-speech--session-dictation-marker session)
-                   (ende-speech--session-partial-start session)
-                   (ende-speech--session-partial-end session)))
-      (when (markerp transcript-marker)
-        (set-marker transcript-marker nil)))
     (when (eq session ende-speech--active-session)
       (setq ende-speech--active-session nil))
     (when (and (buffer-live-p source)
@@ -548,14 +525,14 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
              (ende-speech--fail
               session (format "could not start microphone: %s"
                               (error-message-string err)))))))
+       ((equal type "input_audio_buffer.cleared")
+        (setf (ende-speech--session-clear-pending session) nil)
+        (ende-speech--set-status session "Listening..."))
        ((equal type "conversation.item.input_audio_transcription.delta")
         (let ((delta (ende-speech--json-get 'delta event)))
-          (when (stringp delta)
+          (when (and (not (ende-speech--session-clear-pending session))
+                     (stringp delta))
             (ende-speech--handle-delta session delta))))
-       ((equal type "conversation.item.input_audio_transcription.completed")
-        (let ((transcript (ende-speech--json-get 'transcript event)))
-          (when (stringp transcript)
-            (ende-speech--handle-completed session transcript))))
        ((equal type "error")
         (let* ((error-object (ende-speech--json-get 'error event))
                (message-text (or (ende-speech--json-get 'message error-object)
@@ -604,9 +581,7 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
     (with-current-buffer buffer
       (ende-speech-transcript-mode)
       (add-hook 'kill-buffer-hook #'ende-speech--transcript-buffer-killed nil t)
-      (let ((inhibit-read-only t)) (erase-buffer))
-      (setf (ende-speech--session-dictation-marker session)
-            (copy-marker (point) t)))
+      (let ((inhibit-read-only t)) (erase-buffer)))
     (condition-case err
         (setf (ende-speech--session-websocket session)
               (websocket-open

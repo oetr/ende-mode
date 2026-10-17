@@ -366,7 +366,7 @@
               (with-current-buffer (ende-speech--session-buffer session)
                 (ende-speech--header-line)))))))
 
-(ert-deftest ende-speech/delta-completed-events-render-without-duplication ()
+(ert-deftest ende-speech/deltas-insert-at-point-and-ignore-completion-text ()
   (ende-speech-test--with-session
    (lambda (session _source buffer)
      (ende-speech-test--event
@@ -379,12 +379,13 @@
      (should (equal (with-current-buffer buffer (buffer-string)) "Hello"))
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.delta"
-      '(delta . "world"))
+      '(delta . " world"))
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.completed"
-      '(transcript . "world"))
+      '(transcript . "different final wording"))
      (should (equal (with-current-buffer buffer (buffer-string))
                     "Hello world"))
+     (should (= (with-current-buffer buffer (point)) 12))
      (should (string-match-p
               "C-c C-c accept.*C-c C-k cancel"
               (with-current-buffer buffer
@@ -406,27 +407,75 @@
      (should (equal (with-current-buffer source (buffer-string))
                     "abtyped!cd")))))
 
-(ert-deftest ende-speech/delta-keeps-point-and-finalizes-untouched-partial ()
+(ert-deftest ende-speech/deltas-advance-current-point ()
   (ende-speech-test--with-session
    (lambda (session _source buffer)
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.delta"
       '(delta . "hello"))
-     (with-current-buffer buffer
-       (goto-char (point-min)))
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.delta"
       '(delta . " world"))
      (should (equal (with-current-buffer buffer (buffer-string)) "hello world"))
-     (should (= (with-current-buffer buffer (point)) 1))
+     (should (= (with-current-buffer buffer (point)) 12))
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.completed"
-      '(transcript . "Hello world."))
+      '(transcript . "changed completion"))
      (should (equal (with-current-buffer buffer (buffer-string))
-                    "Hello world."))
-     (should (= (with-current-buffer buffer (point)) 1)))))
+                    "hello world"))
+     (should (= (with-current-buffer buffer (point)) 12)))))
 
-(ert-deftest ende-speech/completed-event-preserves-manual-partial-edit ()
+(ert-deftest ende-speech/cursor-move-clears-and-resumes-at-point ()
+  (ende-speech-test--with-session
+   (lambda (session _source buffer)
+     (ende-speech-test--event session "session.created")
+     (ende-speech-test--event session "session.updated")
+     (with-current-buffer buffer
+       (insert "one two")
+       (ende-speech--before-command)
+       (insert "!")
+       (ende-speech--after-command)
+       (should-not (ende-speech--session-clear-pending session))
+       (ende-speech--before-command)
+       (delete-char -1)
+       (ende-speech--after-command)
+       (should-not (ende-speech--session-clear-pending session))
+       (ende-speech--before-command)
+       (goto-char (point-min))
+       (ende-speech--after-command))
+     (should (ende-speech--session-clear-pending session))
+     (should (= (cl-count "input_audio_buffer.clear"
+                          (mapcar (lambda (event) (alist-get 'type event))
+                                  (cl-remove-if-not #'listp ende-speech-test--sent))
+                          :test #'equal)
+                1))
+     (let ((filter (plist-get ende-speech-test--made-process :filter))
+           (sent-count (length ende-speech-test--sent)))
+       (funcall filter 'mock-recorder "dropped audio")
+       (should (= (length ende-speech-test--sent) sent-count)))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "stale"))
+     (should (equal (with-current-buffer buffer (buffer-string)) "one two"))
+     (with-current-buffer buffer
+       (ende-speech--before-command)
+       (goto-char (point-max))
+       (ende-speech--after-command))
+     (should (= (cl-count "input_audio_buffer.clear"
+                          (mapcar (lambda (event) (alist-get 'type event))
+                                  (cl-remove-if-not #'listp ende-speech-test--sent))
+                          :test #'equal)
+                1))
+     (ende-speech-test--event session "input_audio_buffer.cleared")
+     (should-not (ende-speech--session-clear-pending session))
+     (with-current-buffer buffer (goto-char (point-min)))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "new"))
+     (should (equal (with-current-buffer buffer (buffer-string)) "newone two"))
+     (should (= (with-current-buffer buffer (point)) 4)))))
+
+(ert-deftest ende-speech/completed-event-does-not-rewrite-visible-text ()
   (ende-speech-test--with-session
    (lambda (session _source buffer)
      (ende-speech-test--event
@@ -438,7 +487,7 @@
        (insert "right"))
      (ende-speech-test--event
       session "conversation.item.input_audio_transcription.completed"
-      '(transcript . "wrong words corrected"))
+      '(transcript . "a replacement"))
      (should (equal (with-current-buffer buffer (buffer-string))
                     "right words")))))
 
