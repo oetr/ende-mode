@@ -390,6 +390,58 @@
               (with-current-buffer buffer
                 (ende-speech--header-line)))))))
 
+(ert-deftest ende-speech/transcript-is-editable-and-accepts-manual-changes ()
+  (ende-speech-test--with-session
+   (lambda (_session source buffer)
+     (with-current-buffer buffer
+       (should-not buffer-read-only)
+       (should (eq (key-binding (kbd "C-c C-c")) #'ende-speech--accept))
+       (should (eq (key-binding (kbd "C-c C-k")) #'ende-speech--reject))
+       (insert "typed ")
+       (delete-char -1)
+       (insert "!")
+       (undo-boundary))
+     (with-current-buffer buffer
+       (ende-speech--accept))
+     (should (equal (with-current-buffer source (buffer-string))
+                    "abtyped!cd")))))
+
+(ert-deftest ende-speech/delta-keeps-point-and-finalizes-untouched-partial ()
+  (ende-speech-test--with-session
+   (lambda (session _source buffer)
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "hello"))
+     (with-current-buffer buffer
+       (goto-char (point-min)))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . " world"))
+     (should (equal (with-current-buffer buffer (buffer-string)) "hello world"))
+     (should (= (with-current-buffer buffer (point)) 1))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.completed"
+      '(transcript . "Hello world."))
+     (should (equal (with-current-buffer buffer (buffer-string))
+                    "Hello world."))
+     (should (= (with-current-buffer buffer (point)) 1)))))
+
+(ert-deftest ende-speech/completed-event-preserves-manual-partial-edit ()
+  (ende-speech-test--with-session
+   (lambda (session _source buffer)
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "wrong words"))
+     (with-current-buffer buffer
+       (goto-char (point-min))
+       (delete-char 5)
+       (insert "right"))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.completed"
+      '(transcript . "wrong words corrected"))
+     (should (equal (with-current-buffer buffer (buffer-string))
+                    "right words")))))
+
 (ert-deftest ende-speech/accept-cleans-inserts-at-marker-and-ignores-events ()
   (ende-speech-test--with-session
    (lambda (session source buffer)
