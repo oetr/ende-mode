@@ -25,10 +25,11 @@
   "Name of the finished-jobs buffer.")
 
 (cl-defstruct (ende-finished--live (:constructor ende-finished--make-live))
-  id operation buffer buffer-name marker file line title request-id)
+  id operation buffer buffer-name marker file line title request-id question-id)
 
 (cl-defstruct (ende-finished-job (:constructor ende-finished--make-job))
-  id operation state finished-at buffer buffer-name file line title request-id)
+  id operation state finished-at buffer buffer-name marker file line title
+  request-id question-id)
 
 (defvar ende-finished-jobs nil
   "Finished-job navigation snapshots, newest first.")
@@ -48,6 +49,47 @@
           (unless (string-empty-p title)
             title))))))
 
+(defun ende-finished--normalize-title (text)
+  "Collapse whitespace in TEXT and truncate it to a short display title."
+  (when (and (stringp text) (not (string-blank-p text)))
+    (let ((title (string-trim
+                  (replace-regexp-in-string "[[:space:]]+" " " text))))
+      (if (> (length title) 80)
+          (concat (substring title 0 77) "…")
+        title))))
+
+(defun ende-finished--find-chat-question (question-id)
+  "Return the position of the user question with QUESTION-ID."
+  (when (and question-id (derived-mode-p 'org-mode))
+    (save-excursion
+      (goto-char (point-min))
+      (catch 'found
+        (while (re-search-forward org-heading-regexp nil t)
+          (let ((position (match-beginning 0)))
+            (goto-char position)
+            (when (and (equal (org-entry-get nil "ENDE_CHAT_ID" nil)
+                              question-id)
+                       (equal (org-entry-get nil "ENDE_ROLE" nil) "user"))
+              (throw 'found position)))
+          (forward-line 1))
+        nil))))
+
+(defun ende-finished--chat-title (question-id)
+  "Return QUESTION-ID's actual heading, or a short excerpt of its body."
+  (when-let* ((position (ende-finished--find-chat-question question-id)))
+    (save-excursion
+      (goto-char position)
+      (let ((heading (ende-finished--normalize-title
+                      (org-get-heading t t t t))))
+        (or heading
+            (progn
+              (org-end-of-meta-data t)
+              (let ((begin (point))
+                    (end (save-excursion
+                           (org-end-of-subtree t t))))
+                (ende-finished--normalize-title
+                 (buffer-substring-no-properties begin end)))))))))
+
 (defun ende-finished--track (job)
   "Begin lightweight source tracking for JOB while its origin is live."
   (let* ((root (or (and (ende-job-family job)
@@ -60,22 +102,45 @@
       (with-current-buffer buffer
         (let* ((position (or (ende-target-cursor target) (point-min)))
                (instruction (ende-job-instruction job))
+               (chat-job (memq (ende-job-type job) '(chat chat-compact)))
                (live
                 (ende-finished--make-live
                  :id (ende-job-id job)
                  :operation (ende-job-type job)
                  :buffer buffer
                  :buffer-name (buffer-name buffer)
-                 :marker (copy-marker position)
+                 :marker (copy-marker position t)
                  :file (and buffer-file-name
                             (expand-file-name buffer-file-name))
                  :title (ende-finished--source-title position)
-                 :request-id (and (memq (ende-job-type job)
-                                        '(chat chat-compact))
-                                  (plist-get instruction :request-id)))))
+                 :request-id (and chat-job
+                                  (plist-get instruction :request-id))
+                 :question-id (and chat-job
+                                   (plist-get instruction :question-id)))))
           (puthash (ende-job-id job) live ende-finished--live-jobs)
           (add-hook 'kill-buffer-hook
                     #'ende-finished--source-buffer-killed -60 t))))))
+
+(defun ende-finished--buffer-navigation-p (buffer)
+  "Return non-nil when BUFFER has live or retained navigation markers."
+  (or (cl-some (lambda (live)
+                 (eq (ende-finished--live-buffer live) buffer))
+               (hash-table-values ende-finished--live-jobs))
+      (cl-some (lambda (job)
+                 (let ((marker (ende-finished-job-marker job)))
+                   (and (markerp marker)
+                        (eq (marker-buffer marker) buffer))))
+               ende-finished-jobs)))
+
+(defun ende-finished--update-buffer-hook (buffer)
+  "Keep the source kill hook on BUFFER while navigation state needs it."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (if (ende-finished--buffer-navigation-p buffer)
+          (add-hook 'kill-buffer-hook #'ende-finished--source-buffer-killed
+                    -60 t)
+        (remove-hook 'kill-buffer-hook #'ende-finished--source-buffer-killed
+                     t)))))
 
 (defun ende-finished--line-at-marker (marker buffer)
   "Return the line at MARKER in BUFFER, or nil if unavailable."
@@ -89,7 +154,7 @@
         (line-number-at-pos (marker-position marker) t)))))
 
 (defun ende-finished--source-buffer-killed ()
-  "Save line numbers for tracked jobs before the source buffer is killed."
+  "Save line numbers for tracked and retained jobs before BUFFER is killed."
   (let ((buffer (current-buffer)))
     (maphash
      (lambda (_id live)
@@ -97,7 +162,12 @@
          (setf (ende-finished--live-line live)
                (ende-finished--line-at-marker
                 (ende-finished--live-marker live) buffer))))
-     ende-finished--live-jobs)))
+     ende-finished--live-jobs)
+    (dolist (job ende-finished-jobs)
+      (let ((marker (ende-finished-job-marker job)))
+        (when (and (markerp marker) (eq (marker-buffer marker) buffer))
+          (setf (ende-finished-job-line job)
+                (ende-finished--line-at-marker marker buffer)))))))
 
 (defun ende-finished--untrack (live)
   "Release temporary marker state LIVE and its source-buffer hook if unused."
@@ -105,13 +175,7 @@
     (remhash (ende-finished--live-id live) ende-finished--live-jobs)
     (when (markerp (ende-finished--live-marker live))
       (set-marker (ende-finished--live-marker live) nil))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (unless (cl-some (lambda (other)
-                           (eq (ende-finished--live-buffer other) buffer))
-                         (hash-table-values ende-finished--live-jobs))
-          (remove-hook 'kill-buffer-hook
-                       #'ende-finished--source-buffer-killed t)))))
+    (ende-finished--update-buffer-hook buffer))
   nil)
 
 (defun ende-finished--record (job state)
@@ -121,12 +185,24 @@
                    (progn (ende-finished--track job)
                           (gethash id ende-finished--live-jobs))))
          (target (ende-job-target job))
+         (instruction (ende-job-instruction job))
+         (chat-job (memq (ende-job-type job) '(chat chat-compact)))
+         (request-id (and chat-job (plist-get instruction :request-id)))
+         (question-id (and chat-job (plist-get instruction :question-id)))
          (buffer (or (and live (ende-finished--live-buffer live))
                      (ende-target-buffer target)))
          (line (or (and live
                         (ende-finished--line-at-marker
                          (ende-finished--live-marker live) buffer))
                    (and live (ende-finished--live-line live))))
+         (title
+          (if (and question-id (buffer-live-p buffer))
+              (with-current-buffer buffer
+                (save-restriction
+                  (widen)
+                  (or (ende-finished--chat-title question-id)
+                      (and live (ende-finished--live-title live)))))
+            (and live (ende-finished--live-title live))))
          (snapshot
           (ende-finished--make-job
            :id id
@@ -137,16 +213,27 @@
            :buffer (and (buffer-live-p buffer) buffer)
            :buffer-name (or (and live (ende-finished--live-buffer-name live))
                             (and (buffer-live-p buffer) (buffer-name buffer)))
+           :marker (and live (markerp (ende-finished--live-marker live))
+                        (copy-marker (ende-finished--live-marker live)))
            :file (and live (ende-finished--live-file live))
            :line line
-           :title (and live (ende-finished--live-title live))
-           :request-id (and live (ende-finished--live-request-id live)))))
+           :title title
+           :request-id request-id
+           :question-id question-id)))
     (when live
       (ende-finished--untrack live))
-    (setq ende-finished-jobs
-          (cl-subseq (cons snapshot ende-finished-jobs) 0
-                     (min (max 0 ende-finished-limit)
-                          (1+ (length ende-finished-jobs)))))
+    (let* ((all (cons snapshot ende-finished-jobs))
+           (retained (cl-subseq all 0
+                                (min (max 0 ende-finished-limit)
+                                     (length all)))))
+      (dolist (evicted (nthcdr (length retained) all))
+        (let ((marker (ende-finished-job-marker evicted)))
+          (when (markerp marker)
+            (let ((marker-buffer (marker-buffer marker)))
+              (set-marker marker nil)
+              (ende-finished--update-buffer-hook marker-buffer)))))
+      (setq ende-finished-jobs retained)
+      (ende-finished--update-buffer-hook buffer))
     snapshot))
 
 (defun ende-finished--job-event (job event)
@@ -217,6 +304,19 @@
                  (or (ende-finished-job-buffer-name job) "unknown"))
         nil))))
 
+(defun ende-finished--recorded-position (job buffer)
+  "Return JOB's live source marker in BUFFER, or its saved line position."
+  (let ((marker (ende-finished-job-marker job))
+        (line (ende-finished-job-line job)))
+    (or (and (markerp marker)
+             (eq (marker-buffer marker) buffer)
+             (marker-position marker))
+        (and (integerp line) (> line 0)
+             (save-excursion
+               (goto-char (point-min))
+               (and (zerop (forward-line (1- line)))
+                    (point)))))))
+
 (defun ende-finished-visit-job (&optional job)
   "Visit JOB's best-known source location, or the selected finished job."
   (interactive)
@@ -225,6 +325,11 @@
                     (cl-find id ende-finished-jobs
                              :key #'ende-finished-job-id :test #'eql))))
          (buffer (and job (ende-finished--resolve-buffer job)))
+         (chat-job (and job
+                        (or (memq (ende-finished-job-operation job)
+                                  '(chat chat-compact))
+                            (ende-finished-job-request-id job)
+                            (ende-finished-job-question-id job))))
          position)
     (unless job
       (user-error "No finished job selected"))
@@ -232,19 +337,22 @@
       (with-current-buffer buffer
         (widen)
         (setq position
-              (or (ende-finished--find-chat-reply
-                   (ende-finished-job-request-id job))
-                  (ende-finished--find-heading
-                   (ende-finished-job-title job))
-                  (let ((line (ende-finished-job-line job)))
-                    (and (integerp line) (> line 0)
-                         (save-excursion
-                           (goto-char (point-min))
-                           (and (zerop (forward-line (1- line)))
-                                (point)))))))
+              (if chat-job
+                  (or (ende-finished--find-chat-reply
+                       (ende-finished-job-request-id job))
+                      (ende-finished--find-chat-question
+                       (ende-finished-job-question-id job))
+                      (ende-finished--recorded-position job buffer))
+                (ende-finished--recorded-position job buffer))))
+      (pop-to-buffer buffer)
+      (when-let* ((window (get-buffer-window buffer t)))
+        (select-window window)
         (when position
-          (goto-char position)))
-      (pop-to-buffer buffer))))
+          (with-selected-window window
+            (goto-char position)
+            (when (derived-mode-p 'org-mode)
+              (org-reveal))
+            (set-window-point window position)))))))
 
 (defun ende-finished--entries ()
   "Return tabulated-list rows for the retained finished jobs."
