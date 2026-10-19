@@ -179,6 +179,163 @@
       (when (file-exists-p file) (delete-file file))
       (when (buffer-live-p finished-buffer) (kill-buffer finished-buffer)))))
 
+(ert-deftest ende-test/finished-chat-navigation-survives-renamed-replies ()
+  (let* ((buffer (generate-new-buffer " *ende-finished-renamed-replies*"))
+         (finished-buffer (get-buffer-create ende-finished-buffer-name))
+         (first (ende-finished--make-job
+                 :id 9301 :operation 'chat :state 'completed
+                 :finished-at (float-time) :buffer buffer
+                 :request-id "renamed-request-1" :question-id "renamed-q1"))
+         (second (ende-finished--make-job
+                  :id 9302 :operation 'chat :state 'completed
+                  :finished-at (float-time) :buffer buffer
+                  :request-id "renamed-request-2" :question-id "renamed-q2")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (org-mode)
+            (insert "* Conversation\n"
+                    "** Question one\n:PROPERTIES:\n:ENDE_ROLE: user\n"
+                    ":ENDE_CHAT_ID: renamed-q1\n:END:\nAsk one.\n"
+                    "** A renamed assistant heading\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: assistant\n"
+                    ":ENDE_CHAT_REQUEST_ID: renamed-request-1\n:END:\n"
+                    "First response.\n"
+                    "** Question two\n:PROPERTIES:\n:ENDE_ROLE: user\n"
+                    ":ENDE_CHAT_ID: renamed-q2\n:END:\nAsk two.\n"
+                    "** Agent: Work\n:PROPERTIES:\n:ENDE_CHAT_WORK: t\n"
+                    ":ENDE_CHAT_REQUEST_ID: renamed-request-2\n:END:\n"
+                    "*** Internal assistant\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: assistant\n"
+                    ":ENDE_CHAT_REQUEST_ID: renamed-request-2\n:END:\n"
+                    "Not the reply.\n"
+                    "** Summary\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+                    ":ENDE_CHAT_REQUEST_ID: renamed-request-2\n"
+                    ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\nSummary.\n"
+                    "** Another renamed assistant heading\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: assistant\n"
+                    ":ENDE_CHAT_REQUEST_ID: renamed-request-2\n:END:\n"
+                    "Second response.\n")
+            (goto-char (point-max)))
+          (with-current-buffer finished-buffer
+            (setq ende-finished-jobs (list first second)))
+          (ende-finished-visit-job first)
+          (should (eq (window-buffer (selected-window)) buffer))
+          (should (equal (ende-finished-test--visible-heading
+                          (selected-window)) "A renamed assistant heading"))
+          (ende-finished-visit-job second)
+          (should (equal (ende-finished-test--visible-heading
+                          (selected-window)) "Another renamed assistant heading"))
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (re-search-forward "\\*\\* Summary$")
+            (org-entry-delete nil "ENDE_CHAT_CONTEXT_FENCE"))
+          ;; Without the fence property this heading is an ordinary assistant
+          ;; response for the request, even though its title says Summary.
+          (ende-finished-visit-job second)
+          (should (equal (ende-finished-test--visible-heading
+                          (selected-window)) "Summary")))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (buffer-live-p finished-buffer) (kill-buffer finished-buffer)))))
+
+(ert-deftest ende-test/finished-reload-upgrades-legacy-snapshots-once ()
+  (let* ((file (make-temp-file "ende-finished-reload-" nil ".org"))
+         (buffer nil)
+         (ende-finished-limit 10)
+         (ende-finished-jobs nil)
+         (ende-finished--live-jobs (make-hash-table :test #'eql))
+         (finished-buffer (get-buffer-create ende-finished-buffer-name))
+         marker legacy-without-marker legacy-with-marker)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* Conversation\n"
+                    "** The recovered request\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: user\n:ENDE_CHAT_ID: reload-question\n"
+                    ":END:\nPlease inspect this.\n"
+                    "** An unrelated user question\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: user\n:ENDE_CHAT_ID: unrelated-question\n"
+                    ":END:\nDo not associate this by position.\n"
+                    "** Renamed assistant response\n:PROPERTIES:\n"
+                    ":ENDE_ROLE: assistant\n"
+                    ":ENDE_CHAT_REQUEST_ID: reload-request\n"
+                    ":ENDE_CHAT_REPLY_TO: reload-question\n:END:\n"
+                    "Done.\n"))
+          (setq buffer (find-file-noselect file))
+          (with-current-buffer buffer (org-mode))
+          (setq marker (with-current-buffer buffer
+                         (copy-marker (point-min))))
+          ;; These vectors exactly model the two previous generated layouts:
+          ;; prior to markers (11 slots), and marker plus no question ID (12).
+          (setq legacy-without-marker
+                (vector 'ende-finished-job 9401 'chat 'failed 123.0 buffer
+                        (buffer-name buffer) file 5 "Agent: Reply"
+                        "reload-request"))
+          (setq legacy-with-marker
+                (vector 'ende-finished-job 9402 'chat-compact 'cancelled 124.0
+                        buffer (buffer-name buffer) marker file 6
+                        "Agent: Context Fence" "reload-request"))
+          (setq ende-finished-jobs
+                (list legacy-without-marker legacy-with-marker
+                      (vector 'ende-finished-job 9403 'chat 'failed 125.0 buffer
+                              (buffer-name buffer) file 7 "Agent: Reply"
+                              "missing-link-request")))
+          (cl-letf (((symbol-function 'message) #'ignore))
+            (ende-reload))
+          (should (cl-every #'ende-finished-job-p ende-finished-jobs))
+          (should (equal (mapcar #'ende-finished-job-id ende-finished-jobs)
+                         '(9401 9402 9403)))
+          (should (= (ende-finished-job-finished-at (car ende-finished-jobs))
+                     123.0))
+          (should (equal (ende-finished-job-request-id (car ende-finished-jobs))
+                         "reload-request"))
+          (should (eq (ende-finished-job-marker (car ende-finished-jobs)) nil))
+          (should (eq (ende-finished-job-marker (cadr ende-finished-jobs)) marker))
+          (should (eq (ende-finished-job-state (car ende-finished-jobs)) 'failed))
+          (should (equal (ende-finished-job-buffer-name (car ende-finished-jobs))
+                         (buffer-name buffer)))
+          (should (equal (ende-finished-job-file (car ende-finished-jobs)) file))
+          (should (= (ende-finished-job-line (car ende-finished-jobs)) 5))
+          (should (equal (ende-finished-job-question-id (car ende-finished-jobs))
+                         "reload-question"))
+          (should (equal (ende-finished-job-title (car ende-finished-jobs))
+                         "The recovered request"))
+          (should (equal (ende-finished-job-question-id (cadr ende-finished-jobs))
+                         "reload-question"))
+          (should-not (ende-finished-job-question-id (nth 2 ende-finished-jobs)))
+          (should (equal (ende-finished-job-title (nth 2 ende-finished-jobs))
+                         "Agent: Reply"))
+          (ende-finished-visit-job (car ende-finished-jobs))
+          (should (eq (window-buffer (selected-window)) buffer))
+          (should (equal (ende-finished-test--visible-heading
+                          (selected-window)) "Renamed assistant response"))
+          ;; A normal new chat record still uses the current struct layout.
+          (with-current-buffer buffer
+            (let* ((target (ende-target-create
+                            :buffer buffer :start (point-min) :end (point-min)
+                            :cursor (point-min) :review-policy 'ignore))
+                   (job (ende--make-job
+                         :id 9404 :type 'chat :target target
+                         :instruction '(:request-id "reload-request"
+                                        :question-id "reload-question")))
+                   (entry (progn
+                            (ende-finished--track job)
+                            (ende-finished--record job 'completed))))
+              (should (ende-finished-job-p entry))
+              (should (equal (ende-finished-job-question-id entry)
+                             "reload-question"))
+              (should (equal (ende-finished-job-title entry)
+                             "The recovered request"))))
+          (with-current-buffer finished-buffer
+            (ende-finished-mode)
+            (tabulated-list-print t)
+            (should (string-match-p "The recovered request"
+                                    (buffer-string)))))
+      (when (markerp marker) (set-marker marker nil))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (file-exists-p file) (delete-file file))
+      (when (buffer-live-p finished-buffer) (kill-buffer finished-buffer)))))
+
 (ert-deftest ende-test/finished-chat-titles-resolve-at-settlement ()
   (let ((buffer (generate-new-buffer " *ende-finished-titles*"))
         (ende-finished-limit 10)
