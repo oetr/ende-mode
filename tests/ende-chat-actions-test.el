@@ -752,6 +752,81 @@
     (should-not (ende-chat--staging-buffer job))
     (should-not (plist-get (ende-job-instruction job) :staging-buffer))))
 
+(ert-deftest ende-test/chat-reasoning-summaries-follow-tool-rounds ()
+  (ende-test--reset)
+  (let* ((call '(:id "summary-call" :name "about_thinking"
+                 :arguments "{\"title\":\"Looking\",\"status\":\"Around\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Answer") t))
+         tool-completion)
+    (ende-test--with-buffer
+     "* Chat\n** Question\nAsk\n"
+     (org-mode)
+     (ende-test--chat-goto "** Question")
+     (let ((job (ende-ask)))
+       (cl-letf (((symbol-function 'ende-chat--tool-response-async)
+                  (lambda (_call _configuration callback)
+                    (setq tool-completion callback))))
+         (ende--handle-llm-event
+          job '(:type :reasoning-summary :item "before" :text "Before tools"))
+         (ende-test--complete-call (car ende-test--calls))
+         (funcall tool-completion "{}")
+         (ende--handle-llm-event
+          job '(:type :reasoning-summary :item "after" :text "After tools"))
+         (ende--handle-llm-event
+          job '(:type :reasoning-summary :item "after" :text "After tools"
+                :complete t))
+         (ende-test--complete-call (nth 1 ende-test--calls)))
+       (should (eq (ende-job-state job) 'completed))
+       (let* ((document (ende-chat--build-document))
+              (headlines (ende-chat--document-headlines document))
+              (titles (mapcar (lambda (headline)
+                                (org-element-property :raw-value headline))
+                              headlines))
+              (summaries
+               (cl-remove-if-not
+                (lambda (headline)
+                  (equal (ende-chat--property document headline :visibility)
+                         "reasoning_summary"))
+                headlines)))
+         (should (equal (mapcar (lambda (headline)
+                                  (org-element-property :raw-value headline))
+                                summaries)
+                        '("Before tools" "After tools")))
+         (dolist (summary summaries)
+           (should (string-blank-p
+                    (ende-chat--protocol-body-string summary))))
+         (should (equal
+                  (cl-remove-if-not
+                   (lambda (title)
+                     (member title '("Before tools" "After tools"
+                                     "Agent: Work" "Agent: Reply")))
+                   titles)
+                  '("Before tools" "Agent: Work" "After tools"
+                    "Agent: Reply"))))))))
+
+(ert-deftest ende-test/chat-reasoning-summaries-never-enter-context ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+   (concat "* Chat\n"
+           "** Answer\n"
+           ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
+           "Done.\n"
+           "** Unremarkable title\n"
+           ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n"
+           "** Question\nAsk.\n")
+   (org-mode)
+   (ende-test--chat-goto "** Question")
+   (dolist (include '(nil t))
+     (let* ((ende-chat-include-reasoning include)
+            (document (ende-chat--build-document))
+            (question (ende-chat--headline-at-point document))
+            (text (ende-test--chat-context-text
+                   (ende-chat--serialize document question))))
+       (should (string-match-p "Done" text))
+       (should-not (string-match-p "Unremarkable title" text))))))
+
 (ert-deftest ende-test/chat-malformed-staged-work-rolls-back-and-retains-recovery ()
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-staged-malformed-" t))
