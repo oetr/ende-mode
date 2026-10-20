@@ -388,58 +388,6 @@
     (ende-queue-ui--detail-line
      (propertize message 'face 'font-lock-doc-face) owner indent)))
 
-(defun ende-queue-ui--last-tool-call (job)
-  "Return JOB's newest non-activity tool call and matching result status."
-  (condition-case nil
-      (ende-queue-ui--last-tool-call-from-history job)
-    (error nil)))
-
-(defun ende-queue-ui--last-tool-call-from-history (job)
-  "Return the call and result status selected from JOB's chat history."
-  (let ((target (ende-job-target job)))
-    (when (and (memq (ende-job-type job) '(chat chat-compact))
-               (ende-target-p target)
-               (buffer-live-p (ende-target-buffer target))
-               (with-current-buffer (ende-target-buffer target)
-                 (derived-mode-p 'org-mode)))
-      (with-current-buffer (ende-target-buffer target)
-        (let* ((document (ende-chat--build-document))
-               (request-id (plist-get (ende-job-instruction job) :request-id))
-               (execution
-                (and request-id
-                     (ende-chat--newest-tool-execution-in-history
-                      document request-id
-                      (lambda (name) (not (equal name "about_thinking")))))))
-          (when execution
-            (let* ((arguments (plist-get execution :arguments))
-                   (summary (and arguments
-                                 (ende-chat--tool-argument-summary arguments)))
-                   (outcome
-                    (and (plist-get execution :result-present-p)
-                         (condition-case nil
-                             (json-parse-string
-                              (plist-get execution :content)
-                              :object-type 'plist)
-                           (error nil))))
-                   (status
-                    (cond
-                     ((or (not (plist-get execution
-                                          :result-reference-present-p))
-                          (not (plist-get execution :result-present-p))) "---")
-                     ((eq (plist-get outcome :ok) t) "OK")
-                     (t "FAILED"))))
-              (list (concat (plist-get execution :history-name)
-                            (if summary (concat ": " summary) ""))
-                    status))))))))
-
-(defun ende-queue-ui--tool-details (job)
-  "Render JOB's last relevant tool call and its status."
-  (let ((last-call (ende-queue-ui--last-tool-call job)))
-    (ende-queue-ui--detail-field
-     "Last tool call" (or (car last-call) "---") job)
-    (ende-queue-ui--detail-field
-     "Status" (or (cadr last-call) "---") job)))
-
 (defun ende-queue-ui--job-details (job state)
   "Render non-redundant inert details for JOB in STATE."
   (let* ((profile (ende-job-profile job))
@@ -494,7 +442,6 @@
            job)
           (dolist (line (cdr lines))
             (ende-queue-ui--detail-line line job 8)))))
-    (ende-queue-ui--tool-details job)
     (when (and (eq state 'queued) (null latest))
       (ende-queue-ui--detail-field
        "Request preview" "live source, captured when started" job))
