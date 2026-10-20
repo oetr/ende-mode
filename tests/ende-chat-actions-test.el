@@ -68,9 +68,21 @@
             (should-error (insert "user edit") :type 'buffer-read-only))
           (ende-chat--staging-append job "first")
           (ende-chat--staging-append job " second")
+          (ende-chat--staging-append
+           job "\n** Agent: Work\n:PROPERTIES:\n:ENDE_CHAT_WORK: t\n:END:\n\n")
+          (ende-chat--staging-append
+           job "*** Section\nbody\n**** Nested\nnested body\n*** Another\nmore body\n")
           (with-current-buffer buffer
             (should buffer-read-only)
-            (should (equal (buffer-string) "first second"))))
+            (should (string-match-p "first second" (buffer-string)))
+            (should (= (how-many org-heading-regexp (point-min) (point-max)) 4))
+            (goto-char (point-min))
+            (search-forward "Agent: Work")
+            (should-not (org-invisible-p (line-beginning-position)))
+            (dolist (text '("body" "nested body" "more body"))
+              (goto-char (point-min))
+              (search-forward text)
+              (should (org-invisible-p (point))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

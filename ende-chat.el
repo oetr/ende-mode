@@ -44,6 +44,7 @@
 (require 'ende-queue)
 (require 'ende-agent)
 (require 'ende-chat-config)
+(declare-function ende-queue-open "ende-queue-ui" ())
 (require 'ende-target)
 (require 'ende-ui)
 
@@ -1989,6 +1990,68 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
   (require 'ende-queue-ui)
   (ende-queue-open))
 
+(defun ende-chat--staging-at-end (buffer function)
+  "Run FUNCTION at BUFFER's end, advancing windows that followed its old end."
+  (let* ((end (with-current-buffer buffer (point-max)))
+         (windows (get-buffer-window-list buffer nil t))
+         (following (cl-remove-if-not
+                     (lambda (window)
+                       (= (window-point window) end))
+                     windows)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (save-excursion
+          (goto-char (point-max))
+          (funcall function))))
+    (dolist (window following)
+      (when (window-live-p window)
+        (set-window-point window
+                          (with-current-buffer buffer (point-max)))))))
+
+(defun ende-chat--staging-insert (buffer text)
+  "Append TEXT to BUFFER, copying its Org subsections while folded."
+  (with-temp-buffer
+    (org-mode)
+    (insert text)
+    (let* ((headings
+            (org-element-map (org-element-parse-buffer) 'headline #'identity)))
+      (if (null headings)
+          (ende-chat--staging-at-end buffer (lambda () (insert text)))
+        (let* ((first (car headings))
+               (work-root
+                (save-excursion
+                  (goto-char (org-element-property :begin first))
+                  (org-entry-get nil ende-chat-work-property)))
+               (level (if work-root
+                          (1+ (org-element-property :level first))
+                        (org-element-property :level first)))
+               (sections
+                (cl-remove-if-not
+                 (lambda (heading)
+                   (= (org-element-property :level heading) level))
+                 headings))
+               (prefix-end
+                (if work-root
+                    (save-excursion
+                      (goto-char (org-element-property :begin first))
+                      (org-end-of-meta-data t)
+                      (point))
+                  (org-element-property :begin first))))
+          (if (null sections)
+              (ende-chat--staging-at-end buffer (lambda () (insert text)))
+            (let ((prefix (buffer-substring-no-properties
+                           (point-min) prefix-end)))
+              (unless (string-empty-p prefix)
+                (ende-chat--staging-at-end
+                 buffer (lambda () (insert prefix)))))
+            (dolist (section sections)
+              (goto-char (org-element-property :begin section))
+              (org-fold-hide-subtree)
+              (let ((inhibit-message t))
+                (org-copy-subtree 1))
+              (ende-chat--staging-at-end
+               buffer (lambda () (org-paste-subtree level))))))))))
+
 (defun ende-chat--staging-append (job text &optional checkpoint)
   "Append generated Org TEXT to JOB's private staging buffer.
 When CHECKPOINT is non-nil, save the completed semantic boundary."
@@ -1996,19 +2059,7 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
     (when (not (string-empty-p text))
       (setf (ende-job-instruction job)
             (plist-put (ende-job-instruction job) :recovery-current nil)))
-    (let* ((end (with-current-buffer buffer (point-max)))
-           (following
-            (cl-remove-if-not
-             (lambda (window) (= (window-point window) end))
-             (get-buffer-window-list buffer nil t))))
-      (with-current-buffer buffer
-        (let ((inhibit-read-only t))
-          (save-excursion
-            (goto-char (point-max))
-            (insert text))
-          (dolist (window following)
-            (when (window-live-p window)
-              (set-window-point window (point-max)))))))
+    (ende-chat--staging-insert buffer text)
     (when checkpoint
       (ende-chat--checkpoint-staging job))
     buffer))
