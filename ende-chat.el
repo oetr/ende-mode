@@ -936,16 +936,26 @@ reflects Org history rather than the existence of a stored result payload."
         (error "Malformed generated Agent: Work: container body must be empty")))
     (dolist (child children)
       (unless (equal (ende-chat--property document child :request-id) request-id)
-        (error "Malformed generated Agent: Work: child request ID mismatch"))
+        (unless (equal (ende-chat--property document child :visibility)
+                       "reasoning_summary")
+          (error "Malformed generated Agent: Work: child request ID mismatch")))
       (cond
+       ((equal (ende-chat--property document child :visibility)
+               "reasoning_summary")
+        (unless (and (equal (ende-chat--property document child :role) "assistant")
+                     (= (org-element-property :level child)
+                        (1+ (org-element-property :level work)))
+                     (null (ende-chat--children document child))
+                     (string-blank-p (ende-chat--protocol-body-string child)))
+          (error "Malformed reasoning summary in Agent: Work")))
        ((and (ende-chat--assistant-protocol-p document child)
-              (equal (org-element-property :raw-value child) "Agent: Reply"))
-         (ende-chat--protocol-assistant-message document child)
-         (push child replies))
+             (equal (org-element-property :raw-value child) "Agent: Reply"))
+        (ende-chat--protocol-assistant-message document child)
+        (push child replies))
        ((ende-chat--tool-call-protocol-p document child)
-         (ende-chat--validate-tool-reference document work child))
+        (ende-chat--validate-tool-reference document work child))
        ((ende-chat--tool-result-protocol-p document child)
-         (ende-chat--validate-tool-reference document work child))
+        (ende-chat--validate-tool-reference document work child))
        (t
         (error "Malformed generated Agent: Work: unexpected child %s"
                (org-element-property :raw-value child)))))
@@ -965,7 +975,9 @@ reflects Org history rather than the existence of a stored result payload."
                             (equal (org-element-property :raw-value headline)
                                    "Agent: Reply"))
                        (ende-chat--tool-call-protocol-p document headline)
-                       (ende-chat--tool-result-protocol-p document headline))))
+                       (ende-chat--tool-result-protocol-p document headline)
+                       (equal (ende-chat--property document headline :visibility)
+                              "reasoning_summary"))))
              (valid (or (eq headline work)
                         final-reply
                         (and within-work direct-work-child))))
@@ -1166,14 +1178,7 @@ renderer framing newlines are removed before the selected decoding is applied."
              (org-element-property :raw-value headline)
              ende-chat-role-property ende-chat-request-id-property))
     (ende-chat--message
-     'assistant
-     (ende-chat--protocol-body-string
-      headline
-      (cl-find-if
-       (lambda (child)
-         (equal (ende-chat--property document child :visibility)
-                "reasoning_summary"))
-       (ende-chat--children document headline))))))
+     'assistant (ende-chat--protocol-body-string headline))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1218,6 +1223,9 @@ renderer framing newlines are removed before the selected decoding is applied."
       (while children
         (let ((child (car children)))
           (cond
+           ((equal (ende-chat--property document child :visibility)
+                   "reasoning_summary")
+            (pop children))
            ((and (ende-chat--assistant-protocol-p document child)
                  (equal (org-element-property :raw-value child) "Agent: Reply"))
             (pop children)
@@ -2041,11 +2049,12 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                         (ende-chat--response-property ende-chat-state-property
                                                       "failed")
                         ":END:\n\n"
-                        (ende-chat--failure-text error)
-                        (ende-chat--reasoning-summaries-text
-                         job (1+ level)))))
+                        (ende-chat--failure-text error))))
           (ende-chat--commit-staged-transcript
-           job (concat transcript reply) 'staged))))))
+           job (concat transcript
+                       (ende-chat--reasoning-summaries-text job (1+ level))
+                       reply)
+           'staged))))))
 
 (defun ende-chat--recovery-files ()
   "Return persistent staged-transcript snapshots."
@@ -3126,7 +3135,13 @@ Keep it while another queued compaction still refers to its durable identity."
                (instruction (ende-job-instruction job))
                 (question-id (plist-get instruction :question-id))
                 (request-id (plist-get instruction :request-id))
-                (staged (and (not compact) (ende-chat--staged-text job)))
+                (summary-text
+                 (and (not compact)
+                      (ende-chat--reasoning-summaries-text
+                       job (1+ (plist-get instruction :response-level)))))
+                (staged (and (not compact)
+                             (or (ende-chat--staged-text job)
+                                 (not (string-empty-p (or summary-text ""))))))
                 (result-properties
                  (ende-chat--result-properties job result))
                 (placeholder
@@ -3181,9 +3196,7 @@ Keep it while another queued compaction still refers to its durable identity."
                        normalized nil nil 'org)))
                    (response (if compact
                                  (concat answer reasoning)
-                               (concat reasoning answer
-                                       (ende-chat--reasoning-summaries-text
-                                        job (1+ level)))))
+                               (concat summary-text reasoning answer)))
                    (buffer (ende-target-buffer (ende-job-target job)))
                    (question-pair
                     (when (or compact (plist-get normalized :title))
@@ -3318,8 +3331,10 @@ Keep it while another queued compaction still refers to its durable identity."
                                       (set-marker start-marker nil))
                                     (when end-marker
                                       (set-marker end-marker nil))))))))
-                      (if (ende-chat--staged-text job)
+                      (if staged
                           (progn
+                            (unless (ende-chat--staging-buffer job)
+                              (ende-chat--stage-agent-section job ""))
                             (setf (ende-job-instruction job)
                                   (plist-put
                                    (ende-job-instruction job)
