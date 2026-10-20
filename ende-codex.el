@@ -78,6 +78,16 @@
 (defconst ende-codex--models-path "/backend-api/codex/models"
   "Official Codex model discovery path.")
 
+(defun ende-codex--session-id-for-identity (identity)
+  "Return an opaque Codex session ID derived from stable IDENTITY."
+  (secure-hash 'sha256 (format "ende-codex:%s" identity)))
+
+(defun ende-codex--new-session-id ()
+  "Return a fresh Codex session ID for a job without a stable identity."
+  (ende-codex--session-id-for-identity
+   (format "job:%s:%s:%s" (emacs-pid) (float-time)
+           (random most-positive-fixnum))))
+
 (defconst ende-codex--usage-path "/backend-api/wham/usage"
   "Official ChatGPT/Codex quota path.")
 
@@ -1373,9 +1383,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
                (or (plist-get profile :url) ende-codex-endpoint)))
          (account-id (ende-codex--account-id auth))
          (residency (ende-codex--residency auth))
-         (session-id
-          (secure-hash 'sha256
-                       (format "%s-%s" (float-time) (random))))
+          (session-id (or (plist-get profile :codex-session-id)
+                          (ende-codex--new-session-id)))
           (headers
            (append
             (list (concat "Authorization: Bearer "

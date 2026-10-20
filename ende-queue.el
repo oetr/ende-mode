@@ -15,6 +15,7 @@
 (require 'ende-core)
 (require 'ende-operation)
 (require 'ende-provider)
+(require 'ende-codex)
 (require 'ende-target)
 
 ;;;; Job records
@@ -711,9 +712,17 @@ bypassed by a later same-provider job."
             (unless (and (ende-target-p (ende-job-target job))
                          (ende-target-live-p (ende-job-target job)))
               (error "ende request preparation did not create a live target"))
-            (setf (ende-job-profile job)
-                  (plist-put (copy-tree (ende-job-profile job))
-                             :job-id (ende-job-id job)))
+            (let ((profile
+                   (plist-put (copy-tree (ende-job-profile job))
+                              :job-id (ende-job-id job))))
+              (when (and (eq (plist-get profile :wire-api) 'responses)
+                         (not (eq (plist-get profile :type) 'openai)))
+                (setq profile
+                      (plist-put
+                       profile :codex-session-id
+                       (or (plist-get profile :codex-session-id)
+                           (ende-codex--new-session-id)))))
+              (setf (ende-job-profile job) profile))
             job)
         ((error quit)
          (ende--job-cleanup-unpublished job)

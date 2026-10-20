@@ -47,6 +47,8 @@
     (let ((clean (copy-tree profile)))
       (setq clean (plist-put clean :job-id nil)
             clean (plist-put clean :tool-definitions nil))
+      (when (plist-member clean :codex-session-id)
+        (setq clean (plist-put clean :codex-session-id nil)))
       clean)))
 
 (defun ende-agent--decode-task (arguments)

@@ -35,6 +35,7 @@
 (require 'ende-core)
 (require 'ende-operation)
 (require 'ende-operations)
+(require 'ende-codex)
 (require 'ende-provider)
 (require 'ende-tool-store)
 (require 'ende-queue)
@@ -3602,18 +3603,37 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (defun ende-chat--enqueue (document question profile &optional compact)
   "Queue QUESTION in DOCUMENT using PROFILE.
 COMPACT requests a context fence and archives the instruction section."
-  (let* ((data (if compact
+  (let* ((selected-profile
+          (or profile (ende-provider-profile-for-buffer (current-buffer) t)))
+         (data (if compact
                    (ende-chat--compact-data document question)
                  (ende-chat--ask-data document question)))
          (question-id (plist-get data :question-id))
+         (codex-profile-p
+          (and (eq (plist-get selected-profile :wire-api) 'responses)
+               (not (eq (plist-get selected-profile :type) 'openai))))
+         (root (and codex-profile-p (ende-chat--root document question)))
+         (conversation-id
+          (and codex-profile-p
+               (or (ende-chat--property document root :id)
+                   (and (eq root question) question-id)
+                   (ende-chat--new-id "question"))))
+         (codex-session-id
+          (and codex-profile-p
+               (ende-codex--session-id-for-identity conversation-id)))
+         (profile
+          (if codex-profile-p
+              (plist-put
+               (copy-tree selected-profile) :codex-session-id codex-session-id)
+            profile))
          (source-fence (plist-get data :source-fence))
          (type (if compact 'chat-compact 'chat))
          (request-id (ende-chat--new-id "request"))
-          (response-level
-           (if (and (not compact)
-                    (= (org-element-property :level question) 1))
-               2
-             (org-element-property :level question)))
+         (response-level
+          (if (and (not compact)
+                   (= (org-element-property :level question) 1))
+              2
+            (org-element-property :level question)))
          (local-role (ende-chat--property document question :role))
          (position nil)
          (question-marker nil)
@@ -3636,6 +3656,13 @@ COMPACT requests a context fence and archives the instruction section."
             (org-entry-put nil ende-chat-id-property question-id))
           (setq question-marker
                 (ende-chat--make-question-marker question))
+          (when (and codex-session-id
+                     (null (ende-chat--local-property
+                            root ende-chat-id-property)))
+            ;; Persist the root identity so follow-ups retain affinity after reload.
+            (save-excursion
+              (goto-char (org-element-property :begin root))
+              (org-entry-put nil ende-chat-id-property conversation-id)))
           ;; The property writes shifted positions parsed before them.
           (setq position
                 (ende-chat--insert-placeholder
@@ -3643,8 +3670,10 @@ COMPACT requests a context fence and archives the instruction section."
                      document question question-id compact)
                     (- (buffer-size) before))
                  response-level question-id request-id compact))
-          (ende-chat--hide-control-drawers-at-heading
-           (org-element-property :begin question))
+          (save-excursion
+            (goto-char question-marker)
+            (org-back-to-heading t)
+            (ende-chat--hide-control-drawers-at-heading (point)))
           (ende-chat--hide-control-drawers-at-heading position)))
       (unwind-protect
           (progn
@@ -3666,8 +3695,7 @@ COMPACT requests a context fence and archives the instruction section."
                                              :source-fence source-fence
                                              :question-marker question-marker
                                              :response-level response-level))))
-              (when profile
-                (setq data (plist-put data :profile profile)))
+              (setq data (plist-put data :profile profile))
               (setq job (ende-enqueue (cons type data))))
             (setq committed t)
             (message "ende: queued %s request %d" type (ende-job-id job))
