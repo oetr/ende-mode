@@ -1896,28 +1896,43 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
                      " ↵ ")))
 
 (cl-defstruct (ende-chat--summary (:constructor ende-chat--make-summary))
-  item text)
+  item text marker)
 
-(defun ende-chat--reasoning-summaries-text (job level)
-  "Return JOB's reasoning summaries as bodyless Org headings at LEVEL."
-  (mapconcat
-   (lambda (summary)
-     (concat (make-string level ?*) " "
-             (ende-chat--reasoning-summary-heading
-              (ende-chat--summary-text summary))
-             "\n:PROPERTIES:\n"
-             (ende-chat--response-property ende-chat-role-property "assistant")
-             (ende-chat--response-property
-              ende-chat-visibility-property "reasoning_summary")
-             ":END:\n"))
-   (cl-remove-if
-    (lambda (summary)
-      (string-blank-p (or (ende-chat--summary-text summary) "")))
-    (plist-get (ende-job-instruction job) :reasoning-summaries))
-   ""))
+(defun ende-chat--reasoning-summary-text (summary level)
+  "Return SUMMARY as a bodyless Org heading at LEVEL."
+  (concat (make-string level ?*) " "
+          (ende-chat--reasoning-summary-heading
+           (ende-chat--summary-text summary))
+          "\n:PROPERTIES:\n"
+          (ende-chat--response-property ende-chat-role-property "assistant")
+          (ende-chat--response-property
+           ende-chat-visibility-property "reasoning_summary")
+          ":END:\n"))
+
+(defun ende-chat--render-reasoning-summary (job summary)
+  "Show SUMMARY in JOB's live work transcript."
+  (unless (string-blank-p (or (ende-chat--summary-text summary) ""))
+    (let ((marker (ende-chat--summary-marker summary)))
+      (if (and (markerp marker) (marker-buffer marker))
+          (with-current-buffer (marker-buffer marker)
+            (let ((inhibit-read-only t))
+              (save-excursion
+                (goto-char marker)
+                (org-edit-headline
+                 (ende-chat--reasoning-summary-heading
+                  (ende-chat--summary-text summary))))))
+        (let* ((instruction (ende-job-instruction job))
+               (level (1+ (plist-get instruction :response-level))))
+          (ende-chat--stage-agent-section job "")
+          (let* ((buffer (ende-chat--staging-buffer job))
+                 (marker (with-current-buffer buffer
+                           (copy-marker (point-max)))))
+            (ende-chat--stage-agent-section
+             job (ende-chat--reasoning-summary-text summary level))
+            (setf (ende-chat--summary-marker summary) marker)))))))
 
 (defun ende-chat--handle-reasoning-summary (job event)
-  "Accumulate provider reasoning summary EVENT."
+  "Accumulate and display provider reasoning summary EVENT."
   (let* ((instruction (ende-job-instruction job))
          (item (plist-get event :item))
          (summaries (plist-get instruction :reasoning-summaries))
@@ -1932,7 +1947,8 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
             (concat (ende-chat--summary-text summary)
                     (plist-get event :text))))
     (setf (ende-job-instruction job)
-          (plist-put instruction :reasoning-summaries summaries))))
+          (plist-put instruction :reasoning-summaries summaries))
+    (ende-chat--render-reasoning-summary job summary)))
 
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
@@ -1940,6 +1956,10 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
     (when-let* ((marker (plist-get instruction :question-marker)))
       (set-marker marker nil)
       (setq instruction (plist-put instruction :question-marker nil)))
+    (dolist (summary (plist-get instruction :reasoning-summaries))
+      (when-let* ((marker (ende-chat--summary-marker summary)))
+        (set-marker marker nil)
+        (setf (ende-chat--summary-marker summary) nil)))
     (setf (ende-job-instruction job) instruction)))
 
 (defun ende-chat--staging-buffer (job &optional create)
@@ -2051,9 +2071,7 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                         ":END:\n\n"
                         (ende-chat--failure-text error))))
           (ende-chat--commit-staged-transcript
-           job (concat transcript
-                       (ende-chat--reasoning-summaries-text job (1+ level))
-                       reply)
+           job (concat transcript reply)
            'staged))))))
 
 (defun ende-chat--recovery-files ()
@@ -3135,13 +3153,8 @@ Keep it while another queued compaction still refers to its durable identity."
                (instruction (ende-job-instruction job))
                 (question-id (plist-get instruction :question-id))
                 (request-id (plist-get instruction :request-id))
-                (summary-text
-                 (and (not compact)
-                      (ende-chat--reasoning-summaries-text
-                       job (1+ (plist-get instruction :response-level)))))
                 (staged (and (not compact)
-                             (or (ende-chat--staged-text job)
-                                 (not (string-empty-p (or summary-text ""))))))
+                             (ende-chat--staged-text job)))
                 (result-properties
                  (ende-chat--result-properties job result))
                 (placeholder
@@ -3196,7 +3209,7 @@ Keep it while another queued compaction still refers to its durable identity."
                        normalized nil nil 'org)))
                    (response (if compact
                                  (concat answer reasoning)
-                               (concat summary-text reasoning answer)))
+                               (concat reasoning answer)))
                    (buffer (ende-target-buffer (ende-job-target job)))
                    (question-pair
                     (when (or compact (plist-get normalized :title))

@@ -788,8 +788,12 @@
            (insert "ambient callback buffer")
            (ende--handle-llm-event
             job '(:type :reasoning-summary :item "before" :text "Before "))
+           (with-current-buffer (ende-chat--staging-buffer job)
+             (should (string-match-p "Agent: Before" (buffer-string))))
            (ende--handle-llm-event
             job '(:type :reasoning-summary :item "before" :text "tools"))
+           (with-current-buffer (ende-chat--staging-buffer job)
+             (should (string-match-p "Agent: Before tools" (buffer-string))))
            (should (equal (buffer-string) "ambient callback buffer")))
          (with-current-buffer chat-buffer
            (should-not (string-match-p "Agent: Before tools"
@@ -808,6 +812,9 @@
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
                 :replace t))
+         (with-current-buffer (ende-chat--staging-buffer job)
+           (should (string-match-p "Agent: After tools" (buffer-string)))
+           (should (= 1 (how-many "Agent: After" (point-min) (point-max)))))
          (ende-test--complete-call (nth 1 ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
        (let* ((document (ende-chat--build-document))
