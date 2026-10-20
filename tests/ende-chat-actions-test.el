@@ -698,6 +698,9 @@
            (ende-test--complete-call (car ende-test--calls))
            (set-marker (ende-target-cursor-marker (ende-job-target job))
                        (point-min) (current-buffer))
+           (ende--handle-llm-event
+            job '(:type :reasoning-summary :item "failure"
+                  :text "Failure context"))
            (ende-job-fail job "Injected after the tool round")
            (should (eq (ende-job-state job) 'failed))
            (should (string-match-p "Agent: Work" (buffer-string)))
@@ -707,6 +710,12 @@
                   (reply (ende-chat--request-state-headline
                           document request-id "failed")))
              (should reply)
+             (let ((summary (car (ende-chat--children document reply))))
+               (should summary)
+               (should (equal (org-element-property :raw-value summary)
+                              "Agent: Failure context"))
+               (should (string-blank-p
+                        (ende-chat--protocol-body-string summary))))
              (should (equal (ende-chat--property document reply :reply-to)
                             (plist-get (ende-job-instruction job)
                                        :question-id))))))
@@ -772,12 +781,13 @@
          (with-temp-buffer
            (insert "ambient callback buffer")
            (ende--handle-llm-event
-            job '(:type :reasoning-summary :item "before"
-                  :text "Before tools"))
+            job '(:type :reasoning-summary :item "before" :text "Before "))
+           (ende--handle-llm-event
+            job '(:type :reasoning-summary :item "before" :text "tools"))
            (should (equal (buffer-string) "ambient callback buffer")))
          (with-current-buffer chat-buffer
-           (should (string-match-p "^\\*\\* Agent: Before tools$"
-                                   (buffer-string))))
+           (should-not (string-match-p "Agent: Before tools"
+                                       (buffer-string))))
          (ende-test--complete-call (car ende-test--calls))
          (funcall tool-completion "{}")
          (should (ende-chat--staging-buffer job))
@@ -787,22 +797,46 @@
             job '(:type :reasoning-summary :item "after" :text "After "))
            (should (equal (buffer-string) "ambient callback buffer")))
          (with-current-buffer chat-buffer
-           (should (string-match-p "^\\*\\* Agent: After $"
-                                   (buffer-string))))
+           (should-not (string-match-p "Agent: After "
+                                       (buffer-string))))
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
                 :replace t))
          (ende-test--complete-call (nth 1 ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
        (let* ((document (ende-chat--build-document))
-              (headlines (ende-chat--document-headlines document)))
+              (headlines (ende-chat--document-headlines document))
+              (work (cl-find-if
+                     (lambda (headline)
+                       (equal (org-element-property :raw-value headline)
+                              "Agent: Work"))
+                     headlines))
+              (reply (cl-find-if
+                      (lambda (headline)
+                        (equal (org-element-property :raw-value headline)
+                               "Agent: Reply"))
+                      headlines)))
+         (should work)
+         (should reply)
+         (should (= 1 (cl-count-if
+                       (lambda (headline)
+                         (equal (org-element-property :raw-value headline)
+                                "Agent: Work"))
+                       headlines)))
+         (should (= (length (ende-chat--children document reply)) 2))
+         (should (= (org-element-property :level
+                                          (car (ende-chat--children document reply)))
+                    (1+ (org-element-property :level reply))))
+         (should (eq (ende-chat--parent
+                      document (car (ende-chat--children document reply)))
+                     reply))
          (cl-flet ((title (headline)
                      (org-element-property :raw-value headline)))
            (let ((titles (mapcar #'title headlines)))
-             (should (< (cl-position "Agent: Before tools" titles :test #'equal)
-                        (cl-position "Agent: After tools" titles :test #'equal)
-                        (cl-position "Agent: Work" titles :test #'equal)
-                        (cl-position "Agent: Reply" titles :test #'equal))))
+             (should (< (cl-position "Agent: Work" titles :test #'equal)
+                        (cl-position "Agent: Reply" titles :test #'equal)
+                        (cl-position "Agent: Before tools" titles :test #'equal)
+                        (cl-position "Agent: After tools" titles :test #'equal))))
            (let ((summaries
                   (cl-remove-if-not
                    (lambda (headline)
@@ -811,22 +845,54 @@
                    headlines)))
              (should (equal (mapcar #'title summaries)
                             '("Agent: Before tools" "Agent: After tools")))
+             (should (equal (mapcar #'title (ende-chat--children document reply))
+                            '("Agent: Before tools" "Agent: After tools")))
+             (should (equal (ende-chat--protocol-body-string
+                             reply (car summaries))
+                            "Answer"))
              (dolist (summary summaries)
+               (should (eq (ende-chat--parent document summary)
+                           reply))
                (should (string-blank-p
-                        (ende-chat--protocol-body-string summary)))))))))))
+                        (ende-chat--protocol-body-string summary)))
+               (should-not (ende-chat--property document summary :id))
+               (should (equal (ende-chat--property document summary :role)
+                              "assistant")))
+             (with-current-buffer chat-buffer
+               (goto-char (org-element-property :begin reply))
+               (org-fold-show-all)
+               (org-fold-hide-subtree)
+               (goto-char (org-element-property :begin (car summaries)))
+               (should (invisible-p (line-beginning-position)))))))))))
 
 (ert-deftest ende-test/chat-reasoning-summaries-never-enter-context ()
   (ende-test--reset)
   (ende-test--with-buffer
    (concat "* Chat\n"
-           "** Answer\n"
-           ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-           "Done.\n"
-           "** Unremarkable title\n"
-           ":PROPERTIES:\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n"
+           "** Agent: Reply\n"
+           ":PROPERTIES:\n"
+           ":ENDE_ROLE: assistant\n"
+           ":ENDE_CHAT_REQUEST_ID: fixture-request\n"
+           ":ENDE_CHAT_REPLY_TO: fixture-question\n"
+           ":END:\n"
+           "Done.\n\n"
+           "*** Agent: **Unremarkable title**\n"
+           ":PROPERTIES:\n"
+           ":ENDE_ROLE: assistant\n"
+           ":ENDE_VISIBILITY: reasoning_summary\n"
+           ":END:\n"
            "** Question\nAsk.\n")
    (org-mode)
    (ende-test--chat-goto "** Question")
+   (let* ((document (ende-chat--build-document))
+          (reply (cl-find-if
+                  (lambda (headline)
+                    (equal (org-element-property :raw-value headline)
+                           "Agent: Reply"))
+                  (ende-chat--document-headlines document)))
+          (summary (car (ende-chat--children document reply))))
+     (should (eq (ende-chat--parent document summary) reply))
+     (should (equal (ende-chat--protocol-body-string reply summary) "Done.")))
    (dolist (include '(nil t))
      (let* ((ende-chat-include-reasoning include)
             (document (ende-chat--build-document))

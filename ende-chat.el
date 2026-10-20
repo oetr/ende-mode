@@ -1166,7 +1166,14 @@ renderer framing newlines are removed before the selected decoding is applied."
              (org-element-property :raw-value headline)
              ende-chat-role-property ende-chat-request-id-property))
     (ende-chat--message
-     'assistant (ende-chat--protocol-body-string headline))))
+     'assistant
+     (ende-chat--protocol-body-string
+      headline
+      (cl-find-if
+       (lambda (child)
+         (equal (ende-chat--property document child :visibility)
+                "reasoning_summary"))
+       (ende-chat--children document headline))))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1880,59 +1887,32 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
                       "\n" nil)
                      " ↵ ")))
 
-(defun ende-chat--insert-reasoning-summary-section (position level text)
-  "Insert summary TEXT as a transient headline section at POSITION."
-  (let ((marker (copy-marker position)))
-    (with-current-buffer (marker-buffer marker)
-      (save-excursion
-        (goto-char marker)
-        (unless (bolp) (insert "\n"))
-        (let ((start (point)))
-          (insert (make-string level ?*) " "
-                  (ende-chat--reasoning-summary-heading text) "\n"
-                  ":PROPERTIES:\n"
-                  (ende-chat--response-property ende-chat-role-property "assistant")
-                  (ende-chat--response-property
-                   ende-chat-visibility-property "reasoning_summary")
-                  ":END:\n")
-          (copy-marker start))))))
-
-(defun ende-chat--update-reasoning-summary-heading (marker text)
-  "Replace MARKER's headline with summary TEXT."
-  (when (and (markerp marker) (marker-buffer marker))
-    (with-current-buffer (marker-buffer marker)
-      (save-excursion
-        (goto-char marker)
-        (org-back-to-heading t)
-        (org-edit-headline (ende-chat--reasoning-summary-heading text))))))
-
 (cl-defstruct (ende-chat--summary (:constructor ende-chat--make-summary))
-  item text marker)
+  item text)
 
-(defun ende-chat--render-reasoning-summary (job text)
-  "Insert summary TEXT above JOB's pending reply and return its marker."
-  (let* ((target (ende-job-target job))
-         (instruction (ende-job-instruction job))
-         (position (or (plist-get instruction :reasoning-summary-position)
-                       (with-current-buffer (ende-target-buffer target)
-                         (copy-marker (ende-target-cursor target) t))))
-         (marker (ende-chat--insert-reasoning-summary-section
-                  position (plist-get instruction :response-level) text)))
-    (with-current-buffer (ende-target-buffer target)
-      (set-marker (ende-target-cursor-marker target)
-                  (marker-position position)))
-    (unless (plist-get (ende-job-instruction job)
-                       :reasoning-summary-position)
-      (setf (ende-job-instruction job)
-            (plist-put (ende-job-instruction job)
-                       :reasoning-summary-position position)))
-    marker))
+(defun ende-chat--reasoning-summaries-text (job level)
+  "Return JOB's reasoning summaries as bodyless Org headings at LEVEL."
+  (mapconcat
+   (lambda (summary)
+     (concat (make-string level ?*) " "
+             (ende-chat--reasoning-summary-heading
+              (ende-chat--summary-text summary))
+             "\n:PROPERTIES:\n"
+             (ende-chat--response-property ende-chat-role-property "assistant")
+             (ende-chat--response-property
+              ende-chat-visibility-property "reasoning_summary")
+             ":END:\n"))
+   (cl-remove-if
+    (lambda (summary)
+      (string-blank-p (or (ende-chat--summary-text summary) "")))
+    (plist-get (ende-job-instruction job) :reasoning-summaries))
+   ""))
 
 (defun ende-chat--handle-reasoning-summary (job event)
-  "Render provider reasoning summary EVENT as a transient headline."
-  (let* ((item (plist-get event :item))
-         (summaries (plist-get (ende-job-instruction job)
-                               :reasoning-summaries))
+  "Accumulate provider reasoning summary EVENT."
+  (let* ((instruction (ende-job-instruction job))
+         (item (plist-get event :item))
+         (summaries (plist-get instruction :reasoning-summaries))
          (summary (cl-find item summaries :test #'equal
                            :key #'ende-chat--summary-item)))
     (unless summary
@@ -1943,26 +1923,15 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
               (plist-get event :text)
             (concat (ende-chat--summary-text summary)
                     (plist-get event :text))))
-    (if-let* ((marker (ende-chat--summary-marker summary)))
-        (ende-chat--update-reasoning-summary-heading
-         marker (ende-chat--summary-text summary))
-      (setf (ende-chat--summary-marker summary)
-            (ende-chat--render-reasoning-summary
-             job (ende-chat--summary-text summary))))
     (setf (ende-job-instruction job)
-          (plist-put (ende-job-instruction job)
-                     :reasoning-summaries summaries))))
+          (plist-put instruction :reasoning-summaries summaries))))
 
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
   (let ((instruction (ende-job-instruction job)))
-    (dolist (property '(:question-marker :reasoning-summary-position))
-      (when-let* ((marker (plist-get instruction property)))
-        (set-marker marker nil)
-        (setq instruction (plist-put instruction property nil))))
-    (dolist (summary (plist-get instruction :reasoning-summaries))
-      (when-let* ((marker (ende-chat--summary-marker summary)))
-        (set-marker marker nil)))
+    (when-let* ((marker (plist-get instruction :question-marker)))
+      (set-marker marker nil)
+      (setq instruction (plist-put instruction :question-marker nil)))
     (setf (ende-job-instruction job) instruction)))
 
 (defun ende-chat--staging-buffer (job &optional create)
@@ -2072,7 +2041,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                         (ende-chat--response-property ende-chat-state-property
                                                       "failed")
                         ":END:\n\n"
-                        (ende-chat--failure-text error))))
+                        (ende-chat--failure-text error)
+                        (ende-chat--reasoning-summaries-text
+                         job (1+ level)))))
           (ende-chat--commit-staged-transcript
            job (concat transcript reply) 'staged))))))
 
@@ -3210,7 +3181,9 @@ Keep it while another queued compaction still refers to its durable identity."
                        normalized nil nil 'org)))
                    (response (if compact
                                  (concat answer reasoning)
-                               (concat reasoning answer)))
+                               (concat reasoning answer
+                                       (ende-chat--reasoning-summaries-text
+                                        job (1+ level)))))
                    (buffer (ende-target-buffer (ende-job-target job)))
                    (question-pair
                     (when (or compact (plist-get normalized :title))
@@ -3652,7 +3625,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (ende-register-job-handler 'chat-compact #'ende-chat--run)
 
 (defun ende-chat--job-event (job event)
-  "Render transient summaries and retain failure markers for chat replies."
+  "Accumulate provider summaries and retain failure markers for chat replies."
   (when (and (eq (ende-job-type job) 'chat)
              (eq (plist-get event :type) :reasoning-summary)
              (ende-job-current-p job))
