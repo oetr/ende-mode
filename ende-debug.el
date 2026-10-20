@@ -16,6 +16,7 @@
 (require 'subr-x)
 (require 'url-parse)
 (require 'ende-core)
+(require 'ende-protocol)
 
 (defvar ende-debugging-enabled nil
   "Non-nil when new streaming LLM requests should be recorded.")
@@ -30,16 +31,27 @@
   "Format TIME as a local ISO-like timestamp, or the current time."
   (format-time-string "%Y-%m-%dT%H:%M:%S%z" time))
 
+(defun ende-debug--with-file-modes (modes function)
+  "Call FUNCTION with newly created files protected by MODES."
+  (let ((original-modes (default-file-modes)))
+    (unwind-protect
+        (progn
+          (set-default-file-modes modes)
+          (funcall function))
+      (set-default-file-modes original-modes))))
+
 (defun ende-debug--new-session-directory ()
   "Create and return a private, unique debugging session directory."
   (make-directory user-emacs-directory t)
-  (let* ((prefix (format-time-string "ende-debug-%Y%m%d-%H%M%S-"))
-         (path (make-temp-name (expand-file-name prefix user-emacs-directory))))
-    (let ((default-file-modes #o700))
-      (make-directory path))
+  (let* ((prefix (expand-file-name
+                  (format-time-string "ende-debug-%Y%m%d-%H%M%S-")
+                  user-emacs-directory))
+         (path (ende-debug--with-file-modes
+                #o700 (lambda () (make-temp-file prefix t)))))
     (set-file-modes path #o700)
     path))
 
+;;;###autoload
 (defun ende-debugging-on ()
   "Enable recording of subsequent LLM requests in a new private session."
   (interactive)
@@ -49,6 +61,7 @@
   (message "ende debugging enabled; recordings: %s"
            ende-debug--session-directory))
 
+;;;###autoload
 (defun ende-debugging-off ()
   "Disable recording of new LLM requests."
   (interactive)
@@ -77,16 +90,19 @@
       (error nil))))
 
 (defun ende-debug--request-settings (request-body)
-  "Return non-conversation settings from serialized REQUEST-BODY."
+  "Return non-conversation settings from REQUEST-BODY."
   (cl-loop for (key . value) in request-body
            unless (memq key '(:messages :input :instructions :tools :model))
            collect (cons key value)))
 
-(defun ende-debug--write-file (path contents)
-  "Write CONTENTS literally to PATH with owner-only permissions."
-  (let ((default-file-modes #o600)
-        (coding-system-for-write 'no-conversion))
-    (write-region contents nil path nil 'silent))
+(defun ende-debug--write-file (path contents &optional literal)
+  "Write CONTENTS to PATH with owner-only permissions.
+When LITERAL is non-nil, preserve CONTENTS as exact bytes."
+  (ende-debug--with-file-modes
+   #o600
+   (lambda ()
+     (let ((coding-system-for-write (if literal 'no-conversion 'utf-8-unix)))
+       (write-region contents nil path nil 'silent))))
   (set-file-modes path #o600))
 
 (defun ende-debug--write-meta (record)
@@ -188,7 +204,7 @@ to associate later completion metadata, or nil when debugging is disabled."
                              :started started :metadata metadata)))
           (ende-debug--write-file
            (expand-file-name (concat stem "-request.json") directory)
-           serialized-body)
+           serialized-body t)
           (ende-debug--write-file
            (expand-file-name (concat stem "-messages.el") directory)
            (let ((print-circle t)
@@ -201,6 +217,377 @@ to associate later completion metadata, or nil when debugging is disabled."
        (message "ende debugging: could not record request: %s"
                 (error-message-string failure))
        nil))))
+
+(defun ende-debug--latest-session-directory ()
+  "Return the latest available debugging session directory."
+  (or (and (stringp ende-debug--session-directory)
+           (file-directory-p ende-debug--session-directory)
+           ende-debug--session-directory)
+      (let ((directories
+             (and (file-directory-p user-emacs-directory)
+                  (cl-remove-if-not
+                   #'file-directory-p
+                   (directory-files user-emacs-directory t
+                                    "^ende-debug-[0-9]" t)))))
+        (car (last
+              (sort directories
+                    (lambda (left right)
+                      (string< (file-name-nondirectory left)
+                               (file-name-nondirectory right)))))))))
+
+(defun ende-debug--read-bytes (path)
+  "Read PATH literally as an unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (buffer-string)))
+
+(defun ende-debug--capture-sequence (path)
+  "Return the numeric sequence encoded in metadata PATH."
+  (let ((name (file-name-nondirectory path)))
+    (when (string-match "\\`\\([0-9]+\\)-meta\\.json\\'" name)
+      (string-to-number (match-string 1 name)))))
+
+(defun ende-debug--read-capture (directory sequence)
+  "Read request SEQUENCE from DIRECTORY into a comparison record."
+  (let* ((stem (format "%04d" sequence))
+         (meta-path (expand-file-name (concat stem "-meta.json") directory))
+         (request-path (expand-file-name (concat stem "-request.json") directory))
+         (bytes (ende-debug--read-bytes request-path))
+         (request (ende-protocol-json-read-string
+                   (decode-coding-string bytes 'utf-8))))
+    (list :sequence sequence :bytes bytes :request request
+          :metadata
+          (ende-protocol-json-read-string
+           (with-temp-buffer
+             (insert-file-contents meta-path)
+             (buffer-string))))))
+
+(defun ende-debug--read-captures (directory)
+  "Return readable request captures in DIRECTORY, sorted by sequence."
+  (let ((paths (directory-files directory t "^[0-9]+-meta\\.json$" t))
+        captures)
+    (dolist (path paths)
+      (let ((sequence (ende-debug--capture-sequence path)))
+        (when sequence
+          (condition-case nil
+              (push (ende-debug--read-capture directory sequence) captures)
+            (error nil)))))
+    (sort captures (lambda (left right)
+                     (< (plist-get left :sequence)
+                        (plist-get right :sequence))))))
+
+(defun ende-debug--json-array-list (value)
+  "Return JSON array VALUE as a list, or nil when VALUE is not an array."
+  (and (ende-debug--json-array-p value) (append value nil)))
+
+(defun ende-debug--json-array-p (value)
+  "Return non-nil if VALUE is a JSON array vector."
+  (and (vectorp value) (not (stringp value))))
+
+(defun ende-debug--object-keys (object)
+  "Return sorted string keys of JSON OBJECT."
+  (when (hash-table-p object)
+    (sort (hash-table-keys object) #'string<)))
+
+(defun ende-debug--path-key (path key)
+  "Append object KEY to diagnostic PATH."
+  (if (string-empty-p (or path "")) key (concat path "." key)))
+
+(defun ende-debug--path-index (path index)
+  "Append array INDEX to diagnostic PATH."
+  (format "%s[%d]" (or path "") index))
+
+(defun ende-debug--first-difference (left right &optional path)
+  "Return the first structural JSON difference between LEFT and RIGHT.
+PATH is the current JSON path."
+  (unless (equal left right)
+    (cond
+     ((and (hash-table-p left) (hash-table-p right))
+      (let ((keys (sort (delete-dups
+                         (append (ende-debug--object-keys left)
+                                 (ende-debug--object-keys right)))
+                        #'string<))
+            difference)
+        (while (and keys (not difference))
+          (let ((key (pop keys)))
+            (if (not (and (ende-protocol-json-has-key-p key left)
+                          (ende-protocol-json-has-key-p key right)))
+                (setq difference (ende-debug--path-key path key))
+              (setq difference
+                    (ende-debug--first-difference
+                     (ende-protocol-json-get key left)
+                     (ende-protocol-json-get key right)
+                     (ende-debug--path-key path key))))))
+        difference))
+     ((and (ende-debug--json-array-p left)
+           (ende-debug--json-array-p right))
+      (let* ((left-list (ende-debug--json-array-list left))
+             (right-list (ende-debug--json-array-list right))
+             (shared (min (length left-list) (length right-list)))
+             (index 0)
+             difference)
+        (while (and (< index shared) (not difference))
+          (setq difference
+                (ende-debug--first-difference
+                 (nth index left-list) (nth index right-list)
+                 (ende-debug--path-index path index)))
+          (cl-incf index))
+        (or difference
+            (and (/= (length left-list) (length right-list))
+                 (ende-debug--path-index path shared)))))
+     (t (if (string-empty-p (or path "")) "$" path)))))
+
+(defun ende-debug--json-field (object key)
+  "Return JSON field KEY from OBJECT, preserving absent versus null."
+  (if (ende-protocol-json-has-key-p key object)
+      (cons t (ende-protocol-json-get key object))
+    (cons nil nil)))
+
+(defun ende-debug--same-json-field-p (left right key)
+  "Return non-nil when JSON field KEY has the same presence and value."
+  (let ((old (ende-debug--json-field left key))
+        (new (ende-debug--json-field right key)))
+    (and (eq (car old) (car new))
+         (or (not (car old))
+             (not (ende-debug--first-difference (cdr old) (cdr new)))))))
+
+(defun ende-debug--json-equal-p (left right)
+  "Return non-nil when LEFT and RIGHT are structurally equal JSON values."
+  (not (ende-debug--first-difference left right)))
+
+(defun ende-debug--instruction-content (request)
+  "Return top-level and system/developer instruction fields from REQUEST."
+  (let* ((key (if (ende-protocol-json-has-key-p "messages" request)
+                  "messages" "input"))
+         (messages (ende-debug--json-array-list
+                    (ende-protocol-json-get key request)))
+         (instruction-field (ende-debug--json-field request "instructions"))
+         (instructions (vector (car instruction-field)
+                               (cdr instruction-field)))
+         (roles
+          (cl-remove-if-not
+           (lambda (message)
+             (member (ende-protocol-json-get "role" message)
+                     '("system" "developer")))
+           messages)))
+    (vector instructions (vconcat roles))))
+
+(defun ende-debug--messages-prefix (previous current)
+  "Compare message arrays in PREVIOUS and CURRENT request objects.
+Return (PREFIX-IDENTICAL APPENDED-COUNT)."
+  (let* ((key (cond
+               ((ende-protocol-json-has-key-p "messages" previous) "messages")
+               ((ende-protocol-json-has-key-p "input" previous) "input")
+               ((ende-protocol-json-has-key-p "messages" current) "messages")
+               ((ende-protocol-json-has-key-p "input" current) "input")))
+         (old-value (and key (ende-protocol-json-get key previous)))
+         (new-value (and key (ende-protocol-json-get key current)))
+         (old-array (and key (ende-debug--json-array-p old-value)))
+         (new-array (and key (ende-debug--json-array-p new-value)))
+         (old (and old-array (append old-value nil)))
+         (new (and new-array (append new-value nil))))
+    (cond
+     ((and (null key) (ende-debug--json-equal-p previous current))
+      (list t 0))
+     ((and key (not old-array) (not new-array)
+           (ende-debug--same-json-field-p previous current key))
+      (list t 0))
+     ((and key old-array new-array
+           (<= (length old) (length new))
+           (cl-loop for message in old
+                    for index from 0
+                    always (ende-debug--json-equal-p
+                            message (nth index new))))
+      (list t (- (length new) (length old))))
+     (t (list nil 0)))))
+
+(defun ende-debug--common-byte-prefix-length (left right)
+  "Return the number of equal leading bytes in LEFT and RIGHT."
+  (let ((limit (min (length left) (length right)))
+        (index 0))
+    (while (and (< index limit) (= (aref left index) (aref right index)))
+      (cl-incf index))
+    index))
+
+(defun ende-debug--cache-line (capture)
+  "Return a concise provider cache utilization line for CAPTURE."
+  (let* ((metadata (plist-get capture :metadata))
+         (completion (ende-protocol-json-get "completion" metadata))
+         (input (ende-protocol-json-get "input_tokens" completion))
+         (cached (ende-protocol-json-get "cached_input_tokens" completion))
+         (cache-write
+          (ende-protocol-json-get "cache_write_tokens" completion))
+         (sequence (plist-get capture :sequence))
+         (cache-description
+          (if (numberp cached)
+              (format "%d (%s)"
+                      cached
+                      (if (and (numberp input) (> input 0))
+                          (format "%.1f%%" (* 100.0 (/ (float cached) input)))
+                        "n/a"))
+            "not reported")))
+    (format "#%-4d Input: %6s  Cached: %s%s%s"
+            sequence
+            (if (numberp input) (number-to-string input) "n/a")
+            cache-description
+            (if (numberp cache-write)
+                (format "  Cache write: %d" cache-write)
+              "")
+            (if completion
+                (format "  [%s%s]"
+                        (or (ende-protocol-json-get "outcome" completion)
+                            "unknown")
+                        (if (numberp (ende-protocol-json-get
+                                     "http_status" completion))
+                            (format ", HTTP %d"
+                                    (ende-protocol-json-get
+                                     "http_status" completion))
+                          ""))
+              "  [pending]"))))
+
+(defun ende-debug--cache-summary (capture)
+  "Return a concise cache percentage for CAPTURE."
+  (let* ((completion
+          (ende-protocol-json-get "completion"
+                                  (plist-get capture :metadata)))
+         (input (ende-protocol-json-get "input_tokens" completion))
+         (cached (ende-protocol-json-get "cached_input_tokens" completion)))
+    (cond
+     ((null completion) "pending")
+     ((not (numberp cached)) "not reported")
+     ((and (numberp input) (> input 0))
+      (format "%.1f%% (%d/%d)"
+              (* 100.0 (/ (float cached) input)) cached input))
+     (t (format "%d cached" cached)))))
+
+(defun ende-debug--changed-label (left right key)
+  "Return `changed' or `unchanged' for JSON field KEY in LEFT/RIGHT."
+  (if (ende-debug--same-json-field-p left right key)
+      "unchanged" "changed"))
+
+(defun ende-debug--session-label (left right)
+  "Compare Codex session IDs in metadata objects LEFT and RIGHT."
+  (let ((old (ende-protocol-json-get "codex_session_id" left))
+        (new (ende-protocol-json-get "codex_session_id" right)))
+    (cond
+     ((and old new) (if (equal old new) "unchanged" "changed"))
+     ((or old new) "not comparable")
+     (t "not present"))))
+
+(defun ende-debug--pair-report (previous current)
+  "Return a concise structural comparison of PREVIOUS and CURRENT captures."
+  (let* ((old-request (plist-get previous :request))
+         (new-request (plist-get current :request))
+         (old-meta (plist-get previous :metadata))
+         (new-meta (plist-get current :metadata))
+         (messages (ende-debug--messages-prefix old-request new-request))
+         (prefix-identical (car messages))
+         (appended (cadr messages))
+         (tools (ende-debug--changed-label old-request new-request "tools"))
+         (instructions-changed
+          (not (ende-debug--json-equal-p
+                (ende-debug--instruction-content old-request)
+                (ende-debug--instruction-content new-request))))
+         (settings-changed
+          (not (and (ende-debug--same-json-field-p
+                     old-request new-request "reasoning")
+                    (ende-debug--same-json-field-p
+                     old-request new-request "reasoning_effort")
+                    (equal (ende-protocol-json-get
+                            "reasoning_effort" old-meta)
+                           (ende-protocol-json-get
+                            "reasoning_effort" new-meta)))))
+         (model (ende-debug--changed-label old-request new-request "model"))
+         (reasoning (if settings-changed "changed" "unchanged"))
+         (difference (ende-debug--first-difference old-request new-request))
+         (prefix-bytes
+          (ende-debug--common-byte-prefix-length
+           (plist-get previous :bytes) (plist-get current :bytes)))
+         (old-length (length (plist-get previous :bytes)))
+         (job (ende-protocol-json-get "job_id" new-meta)))
+    (concat
+     (format "Request #%d -> #%d%s\n\n"
+             (plist-get previous :sequence) (plist-get current :sequence)
+             (if job (format " (job %s)" job) ""))
+     (format "Previous cache: %s\nCurrent cache:  %s\n\n"
+             (ende-debug--cache-summary previous)
+             (ende-debug--cache-summary current))
+     (format "Model:           %s\nReasoning:       %s\nTools:           %s\nInstructions:    %s\n"
+             model reasoning tools
+             (if instructions-changed "changed" "unchanged"))
+     (if prefix-identical
+         (format "Messages:        %d appended, previous prefix identical\n"
+                 appended)
+       "Messages:        previous prefix modified, removed, or reordered\n")
+     (format "Session ID:      %s\n"
+             (ende-debug--session-label old-meta new-meta))
+     (if difference
+         (format "\nFirst changed path:\n  %s\n" difference)
+       "\nFirst changed path: none (JSON bodies structurally identical)\n")
+     (format "Byte common prefix: %d/%d bytes (supplementary only)\n"
+             prefix-bytes old-length)
+     (if (and prefix-identical (not instructions-changed)
+              (equal tools "unchanged"))
+         (concat "\nObserved: no change to instructions, tools, or the prior message prefix.\n"
+                 "The provider cache outcome's cause is not determined by this comparison.\n\n")
+       (concat "\nObserved: prompt-relevant request structure changed.\n"
+               "This comparison does not establish whether that change caused a cache miss.\n\n")))))
+
+(defun ende-debug--capture-groups (captures)
+  "Group CAPTURES by Ende job ID, preserving per-job sequence order."
+  (let (groups)
+    (dolist (capture captures)
+      (let* ((metadata (plist-get capture :metadata))
+             (job (ende-protocol-json-get "job_id" metadata))
+             (group (cl-assoc job groups :test #'equal)))
+        (if group
+            (setcdr group (cons capture (cdr group)))
+          (push (cons job (list capture)) groups))))
+    (dolist (group groups)
+      (setcdr group (nreverse (cdr group))))
+    (nreverse groups)))
+
+(defun ende-debug--format-report (directory captures)
+  "Format a readable report for CAPTURES in DIRECTORY."
+  (concat
+   (format "Ende cache report\nSession: %s\n\n"
+           (abbreviate-file-name directory))
+   "Provider-reported usage (missing cached-token data is not zero):\n"
+   (mapconcat #'ende-debug--cache-line captures "\n")
+   "\n\n"
+   (if (cl-some (lambda (group) (> (length (cdr group)) 1))
+                (ende-debug--capture-groups captures))
+       (concat "Consecutive requests within each job:\n\n"
+               (mapconcat
+                (lambda (group)
+                  (let ((requests (cdr group)) reports)
+                    (while (cdr requests)
+                      (push (ende-debug--pair-report
+                             (car requests) (cadr requests)) reports)
+                      (setq requests (cdr requests)))
+                    (mapconcat #'identity (nreverse reports) "")))
+                (ende-debug--capture-groups captures) ""))
+     "No consecutive requests in the same job to compare.\n")))
+
+;;;###autoload
+(defun ende-debug-cache-report ()
+  "Display cache usage and structural comparisons for the latest capture."
+  (interactive)
+  (let* ((directory (ende-debug--latest-session-directory))
+         (captures (and directory (ende-debug--read-captures directory))))
+    (unless directory
+      (user-error "No Ende debugging session is available"))
+    (unless captures
+      (user-error "No readable request captures in %s" directory))
+    (let ((buffer (get-buffer-create "*Ende Cache Report*")))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (ende-debug--format-report directory captures))
+          (goto-char (point-min)))
+        (special-mode))
+      (pop-to-buffer buffer))))
 
 (provide 'ende-debug)
 

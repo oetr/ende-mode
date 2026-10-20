@@ -380,6 +380,14 @@ The :callbacks argument initializes the composed transport lifecycle."
           (ende-llm--session-profile session))))
     (if error
         (ende-llm--fail session error)
+      (when (ende-llm--session-debug-record session)
+        (ende-debug-record-completion
+         (ende-llm--session-debug-record session) 'failure
+         (ende-stream-session-usage (ende-llm--session-stream session))
+         (ende-llm--response-status session)
+         (ende-error-create :kind 'http
+                            :message "streaming request handed off to Batch"))
+        (setf (ende-llm--session-debug-record session) nil))
       (ende-transport-session-transfer (ende-llm--lifecycle session))
       (ende-transport-session-cleanup (ende-llm--lifecycle session)))))
 

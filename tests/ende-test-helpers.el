@@ -157,7 +157,7 @@ process for cancellation tests."
 
 (defun ende-test--run-stream-request
     (transport chunks &optional cancel-on-start response-limit profile
-               event-callback-error)
+               event-callback-error messages)
   "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
 When CANCEL-ON-START is non-nil, cancel from the start callback.
 RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'.  PROFILE overrides
@@ -175,7 +175,7 @@ non-nil, is signalled from the event callback."
          (order nil)
          (result nil)
          (failure nil)
-         (messages (list (cons "user" "question")))
+         (messages (or messages (list (cons "user" "question"))))
          (callbacks
           (list :on-start
                 (lambda (cancel)
