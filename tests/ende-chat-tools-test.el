@@ -200,10 +200,10 @@
               (org-mode)
               (ende-test--chat-goto "* Find classified text")
               (cl-letf (((symbol-function #'ende-tools--search-source)
-                         (lambda (source regexp before after maximum)
+                         (lambda (source regexp before after maximum accept-match)
                            (push (plist-get source :relative) visited)
                            (funcall original-search source regexp before after
-                                    maximum))))
+                                    maximum accept-match))))
                 (setq job (ende-ask))
                 (goto-char (point-min))
                 (should (search-forward

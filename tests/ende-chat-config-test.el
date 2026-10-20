@@ -961,10 +961,11 @@
                     (when (caddr case)
                       (let* ((call (ende-tool-call 'search_project '(:query "TOKEN")
                                                    root configuration))
-                             (matches (plist-get (plist-get call :result) :matches)))
+                             (files (plist-get (plist-get call :result) :files)))
                         (should (plist-get call :ok))
-                        (should (= (length matches) 1))
-                        (should (equal (plist-get (aref matches 0) :path) "public.el"))))))))))
+                        (should (= (length files) 1))
+                        (should (equal (plist-get (aref files 0) :path) "public.el"))
+                        (should (= (length (plist-get (aref files 0) :matches)) 1))))))))))
       (delete-directory root t))))
 
 

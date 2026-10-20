@@ -154,13 +154,20 @@
       (should (= (gethash "minLength" (gethash "glob" properties)) 1))
       (should (= (gethash "minimum" (gethash "context_before" properties)) 0))
       (should (= (gethash "minimum" (gethash "context_after" properties)) 0))
+      (should (string-match-p "Defaults to 0"
+                              (gethash "description"
+                                       (gethash "context_before" properties))))
+      (should (string-match-p "Defaults to 30"
+                              (gethash "description"
+                                       (gethash "max_results" properties))))
       (should (= ende-tools-max-search-context-lines 20))
+      (should (= ende-tools-max-search-output-bytes 16384))
       (should (= (gethash "minItems" (gethash "patterns" properties)) 1))
       (should (string-match-p "literal"
                               (gethash "description" (gethash "query" properties))))
       (should (string-match-p "literal"
                               (gethash "description" (gethash "patterns" properties))))
-      (should (string-match-p "Emacs regexp"
+      (should (string-match-p "Emacs"
                               (gethash "description" (gethash "regexp" properties)))))
     (dolist (case `(("list_project_files" "max_results"
                      ,ende-tools-max-listed-files)
@@ -1022,7 +1029,7 @@
                               (find-file-noselect beta)))
           (let ((ende-project-root-directory root))
             (dolist (case (list (list "list_project_files" empty-arguments "files")
-                                (list "search_project" search-arguments "matches")
+                                (list "search_project" search-arguments "files")
                                 (list "list_project_buffers" empty-arguments "buffers")))
               (let ((records (ende-test--project-tool-json-records
                               (nth 0 case) (nth 1 case) (nth 2 case)
@@ -1285,12 +1292,16 @@
             (should (string= (plist-get
                               (elt (plist-get files :files) 0) :digest)
                              (plist-get info :digest)))
-            (should (= (length (plist-get disk-search :matches)) 1))
+            (should (= (length (plist-get disk-search :files)) 1))
             (should (string= (plist-get
-                              (elt (plist-get disk-search :matches) 0)
+                              (elt (plist-get disk-search :files) 0)
                               :source_kind)
                              "file"))
-            (should (= (length (plist-get buffer-search :matches)) 0))))
+            (should (= (length (plist-get
+                                (elt (plist-get disk-search :files) 0)
+                                :matches))
+                       1))
+            (should (= (length (plist-get buffer-search :files)) 0))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
@@ -1314,16 +1325,31 @@
                                   '(("patterns" . ["a.b" "x+y"])) root))
                  (regexp (ende-test--tool-result
                           "search_project" '(("regexp" . "foo\\|bar")) root)))
-            (should (= (length (plist-get literal :matches)) 1))
-            (should (string= (plist-get (car (append (plist-get literal :matches) nil))
-                                       :match)
+            (should (= (length (plist-get
+                                (elt (plist-get literal :files) 0)
+                                :matches))
+                       1))
+            (should (string= (plist-get
+                              (elt (plist-get
+                                    (elt (plist-get literal :files) 0)
+                                    :matches) 0)
+                              :match)
                              "a.b and x+y"))
-            (should (= (length (plist-get either :matches)) 4))
-            (should (= (length (plist-get metacharacters :matches)) 2))
-            (should (string= (plist-get (car (append (plist-get metacharacters :matches) nil))
-                                       :match)
+            (should (= (cl-loop for file across (plist-get either :files)
+                                sum (length (plist-get file :matches)))
+                       4))
+            (should (= (cl-loop for file across (plist-get metacharacters :files)
+                                sum (length (plist-get file :matches)))
+                       2))
+            (should (string= (plist-get
+                              (elt (plist-get
+                                    (elt (plist-get metacharacters :files) 0)
+                                    :matches) 0)
+                              :match)
                              "a.b and x+y"))
-            (should (= (length (plist-get regexp :matches)) 4))))
+            (should (= (cl-loop for file across (plist-get regexp :files)
+                                sum (length (plist-get file :matches)))
+                       4))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -1385,12 +1411,15 @@
                           root)))
             (should (= (plist-get read :start_line) 2))
             (should (string= (plist-get read :content) "keep\n"))
-            (should (= (length (plist-get search :matches)) 2))
+            (should (= (cl-loop for file across (plist-get search :files)
+                                sum (length (plist-get file :matches)))
+                       2))
             (should (plist-get search :truncated))
-            (should (string-match-p "needle"
-                                    (plist-get
-                                     (elt (plist-get search :matches) 0)
-                                     :context)))))
+            (should (plist-member
+                     (elt (plist-get (elt (plist-get search :files) 0)
+                                    :matches)
+                          0)
+                     :context))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
