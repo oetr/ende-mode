@@ -388,6 +388,30 @@
     (should (string= (ende-protocol-json-get "type" assistant-content)
                      "output_text"))))
 
+(ert-deftest ende-test/codex-request-enables-reasoning-summaries ()
+  (let* ((body (ende-protocol-json-read-string
+                (json-encode
+                 (ende-codex--request-body
+                  (list (cons "user" "question"))
+                  '(:model "gpt-6-luna"
+                    :controls ((:reasoning-effort
+                                :path ("reasoning" "effort")))
+                    :reasoning-effort "max")))))
+         (reasoning (ende-protocol-json-get "reasoning" body)))
+    (should (equal (ende-protocol-json-get "summary" reasoning) "auto"))
+    (should (equal (ende-protocol-json-get "effort" reasoning) "max"))
+    (should (eq (ende-protocol-json-get "store" body) :false))
+    (should (eq (ende-protocol-json-get "stream" body) t))
+    (should (= (length (ende-protocol-json-get "input" body)) 1)))
+  (let ((body (ende-codex--request-body
+               (list (cons "user" "question"))
+               '(:model "gpt-6-luna"
+                 :controls ((:reasoning-effort
+                             :path ("reasoning" "effort")))
+                 :reasoning-effort "none"))))
+    (should-not (ende-protocol-json-get
+                 "summary" (ende-protocol-json-get "reasoning" body)))))
+
 (ert-deftest ende-test/codex-job-affinity-is-stable-and-transport-only ()
   (let* ((directory (make-temp-file "ende-codex-affinity-debug-" t))
          (ende-debugging-enabled t)
@@ -1044,25 +1068,34 @@
            :profile '(:model "gpt-test")
            :callbacks (list :on-event (lambda (event) (push event events))))))
     (dolist (event
-             '("{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"first \"}"
-               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_2\",\"delta\":\"second\"}"
-               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"summary\"}"
-               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"text\":\"first summary\"}"
-               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_2\",\"text\":\"second\"}"))
+             '("{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"Comparing \"}"
+               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":1,\"delta\":\"Preparing \"}"
+               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"cache rates\"}"
+               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":1,\"delta\":\"the report\"}"
+               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_index\":0,\"text\":\"Comparing cache rates\"}"
+               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"summary_index\":1,\"text\":\"Preparing the report\"}"))
       (ende-codex--handle-event
        session (ende-protocol-json-read-string event)))
-    (let ((summaries (nreverse
-                      (cl-remove-if-not
-                       (lambda (event)
-                         (eq (plist-get event :type) :reasoning-summary))
-                       events))))
+    (let* ((summaries (nreverse
+                       (cl-remove-if-not
+                        (lambda (event)
+                          (eq (plist-get event :type) :reasoning-summary))
+                        events)))
+           (records (ende-stream-session-reasoning-summaries
+                     (ende-codex--session-stream session))))
       (should (equal (mapcar (lambda (event)
                                (cons (plist-get event :item)
                                      (plist-get event :text)))
                              summaries)
-                     '(("rs_1" . "first ")
-                       ("rs_2" . "second")
-                       ("rs_1" . "summary")))))))
+                     '((("rs_1" . 0) . "Comparing ")
+                       (("rs_1" . 1) . "Preparing ")
+                       (("rs_1" . 0) . "cache rates")
+                       (("rs_1" . 1) . "the report"))))
+      (should (= (hash-table-count records) 2))
+      (should (equal (gethash '("rs_1" . 0) records)
+                     "Comparing cache rates"))
+      (should (equal (gethash '("rs_1" . 1) records)
+                     "Preparing the report")))))
 
 (ert-deftest ende-test/codex-effort-probe-uses-selected-model-capabilities ()
   (let ((calls 0)

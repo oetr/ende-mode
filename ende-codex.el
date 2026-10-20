@@ -1180,14 +1180,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (ende-codex--emit
        session '(:type :status :status "Thinking"))
       (ende-codex--emit-reasoning-summary
-       session (or (ende-protocol-json-get "item_id" json)
-                   (ende-protocol-json-get "output_index" json))
+       session (ende-codex--reasoning-summary-key json)
        (ende-protocol-json-get "delta" json)))
      ((string= type "response.reasoning_summary_text.done")
       (ende-stream-complete-reasoning-summary
        (ende-codex--session-stream session)
-       (or (ende-protocol-json-get "item_id" json)
-           (ende-protocol-json-get "output_index" json))
+       (ende-codex--reasoning-summary-key json)
        (ende-protocol-json-get "text" json)))
      ((member type '("response.completed" "response.done"))
       (ende-codex--handle-usage
@@ -1369,6 +1367,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (cons :parameters (alist-get :parameters function)))))
    definitions))
 
+(defun ende-codex--reasoning-summary-key (json)
+  "Return the identity of a reasoning-summary part in JSON."
+  (cons (or (ende-protocol-json-get "item_id" json)
+            (ende-protocol-json-get "output_index" json))
+        (or (ende-protocol-json-get "summary_index" json) 0)))
+
 (defun ende-codex--request-body (messages profile)
   "Build a Responses API request body for MESSAGES and PROFILE."
   (let ((body
@@ -1386,7 +1390,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (if ende-max-output-tokens
         (setq body (append body (list (cons :max_output_tokens
                                             ende-max-output-tokens)))))
-    (ende-controls-encode body (plist-get profile :controls) profile)))
+    (setq body (ende-controls-encode
+                body (plist-get profile :controls) profile))
+    (unless (or (eq (plist-get profile :thinking) 'off)
+                (equal (plist-get profile :reasoning-effort) "none"))
+      (setq body
+            (ende-controls--set-path
+             body '("reasoning" "summary") "auto")))
+    body))
 
 (defun ende-codex--start-generation (session messages auth)
   "Start a Codex generation for SESSION using AUTH."
