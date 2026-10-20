@@ -1173,6 +1173,37 @@ Return canonical target and root-relative/public path details."
   "Return non-nil when CHANGE-SET expects an existing source."
   (eq (ende-change-set-expected-exists change-set) t))
 
+(defun ende-tools--elisp-syntax-error (content)
+  "Return a structural syntax error in CONTENT, or nil."
+  (with-temp-buffer
+    (insert content)
+    ;; Configure the syntax table without running user or project mode hooks.
+    (delay-mode-hooks (emacs-lisp-mode))
+    (condition-case err
+        (progn
+          (check-parens)
+          nil)
+      (error
+       (format "line %d, column %d: %s"
+               (line-number-at-pos)
+               (1+ (current-column))
+               (error-message-string err))))))
+
+(defun ende-tools--validate-elisp-change-set (change-set)
+  "Reject structurally invalid proposed Elisp in CHANGE-SET."
+  (unless (or (eq (ende-change-set-operation change-set) 'delete)
+              (not (string-suffix-p ".el" (ende-change-set-path change-set))))
+    (let ((problem
+           (ende-tools--elisp-syntax-error
+            (ende-change-set-content change-set))))
+      (when (and problem
+                 (or (not (ende-tools--mutation-existing-p change-set))
+                     (not (ende-tools--elisp-syntax-error
+                           (ende-change-set-original-content change-set)))))
+        (error "Invalid Emacs Lisp in %s:\n%s\n\nMutation rejected. No files were changed."
+               (ende-change-set-path change-set)
+               problem)))))
+
 (defun ende-tools--mutation-assert-authorized (change-set path)
   "Reauthorize CHANGE-SET's complete operation scope at PATH."
   (let ((tools (ende-change-set-authorization-tools change-set))
@@ -1627,6 +1658,8 @@ Return canonical target and root-relative/public path details."
     (ende-tools--assert-change-set-limits change-sets)
     (ende-tools--assert-change-set-targets-unique change-sets)
     (ende-tools--validate-change-sets change-sets)
+    (dolist (change-set change-sets)
+      (ende-tools--validate-elisp-change-set change-set))
     (when (cl-some (lambda (root) (gethash root ende-tools--mutation-locks)) roots)
       (error "another Ende mutation is already committing in a target scope"))
     (dolist (root roots) (puthash root t ende-tools--mutation-locks))

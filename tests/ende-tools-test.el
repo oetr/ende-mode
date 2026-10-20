@@ -1890,6 +1890,84 @@
       (when (file-directory-p root)
         (delete-directory root t)))))
 
+(ert-deftest ende-test/project-tools-elisp-mutation-rejects-structural-regressions ()
+  (let* ((root (make-temp-file "ende-tools-elisp-validation-" t))
+         (source (expand-file-name "source.el" root))
+         (created (expand-file-name "created.el" root))
+         (ende-project-root-directory root))
+    (unwind-protect
+        (progn
+          (with-temp-file source
+            (insert ";; valid source\n(setq value 1)\n"))
+          (let ((original (ende-tools--literal-file-bytes source))
+                (directory-before (directory-files root nil nil t)))
+            (let ((failure
+                   (ende-test--edit-file-call
+                    "source.el"
+                    (list (ende-test--anchor-edit "1" "replace" "("))
+                    root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "Invalid Emacs Lisp"
+                                      (plist-get failure :error)))
+              (should (string-match-p "Mutation rejected"
+                                      (plist-get failure :error)))
+              (should (equal (ende-tools--literal-file-bytes source)
+                             original))
+              (should (equal (directory-files root nil nil t)
+                             directory-before)))
+            (should
+             (plist-get
+              (ende-test--edit-file-call
+               "source.el"
+               (list (ende-test--anchor-edit "1" "replace" "2"))
+               root)
+              :ok)))
+          (let ((failure
+                 (ende-test--create-file-call
+                  "created.el" "(setq value 1\n" root)))
+            (should-not (plist-get failure :ok))
+            (should-not (file-exists-p created)))
+          (should
+           (plist-get
+            (ende-test--create-file-call
+             "created.el" ";; created\n(setq value 1)\n" root)
+            :ok))
+          (should (file-exists-p created)))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-elisp-mutation-allows-repair ()
+  (let* ((root (make-temp-file "ende-tools-elisp-repair-" t))
+         (path (expand-file-name "broken.el" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file path (insert "(setq value 1\n"))
+          ;; An intermediate edit may still be structurally invalid.
+          (should
+           (plist-get
+            (ende-test--edit-file-call
+             "broken.el"
+             (list (ende-test--anchor-edit "1" "replace" "2"))
+             root)
+            :ok))
+          (should
+           (plist-get
+            (ende-test--edit-file-call
+             "broken.el"
+             (list (ende-test--anchor-edit "2\n" "replace" "2)\n"))
+             root)
+            :ok))
+          (should (null (ende-tools--elisp-syntax-error
+                         (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string)))))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents path)
+                           (buffer-string))
+                         "(setq value 2)\n")))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
 (ert-deftest ende-test/file-tools-mutate-authorized-external-files ()
   (let* ((root (make-temp-file "ende-tools-mutation-project-" t))
          (external-root (make-temp-file "ende-tools-mutation-external-" t))
@@ -2332,6 +2410,55 @@
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
         (kill-buffer buffer))
+      (when (file-directory-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/project-tools-apply-patch-validates-elisp-atomically ()
+  (let* ((root (make-temp-file "ende-tools-patch-elisp-" t))
+         (ordinary (expand-file-name "ordinary.txt" root))
+         (source (expand-file-name "source.el" root))
+         (invalid-patch
+          (concat "*** Begin Patch\n"
+                  "*** Update File: ordinary.txt\n"
+                  "@@\n before\n-old\n+changed\n"
+                  "*** Update File: source.el\n"
+                  "@@\n ;; source\n-(setq value 1)\n+(setq value 2\n"
+                  "*** End Patch\n"))
+         (valid-patch
+          (concat "*** Begin Patch\n"
+                  "*** Update File: ordinary.txt\n"
+                  "@@\n before\n-old\n+changed\n"
+                  "*** Update File: source.el\n"
+                  "@@\n ;; source\n-(setq value 1)\n+(setq value 2)\n"
+                  "*** End Patch\n")))
+    (unwind-protect
+        (progn
+          (with-temp-file ordinary (insert "before\nold\n"))
+          (with-temp-file source (insert ";; source\n(setq value 1)\n"))
+          (let ((ordinary-before (ende-tools--literal-file-bytes ordinary))
+                (source-before (ende-tools--literal-file-bytes source))
+                (directory-before (directory-files root nil nil t)))
+            (let ((failure (ende-test--apply-patch-call invalid-patch root)))
+              (should-not (plist-get failure :ok))
+              (should (string-match-p "Invalid Emacs Lisp"
+                                      (plist-get failure :error)))
+              (should (equal (ende-tools--literal-file-bytes ordinary)
+                             ordinary-before))
+              (should (equal (ende-tools--literal-file-bytes source)
+                             source-before))
+              (should (equal (directory-files root nil nil t)
+                             directory-before))))
+          (should (plist-get
+                   (ende-test--apply-patch-call valid-patch root)
+                   :ok))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents ordinary)
+                           (buffer-string))
+                         "before\nchanged\n"))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents source)
+                           (buffer-string))
+                         ";; source\n(setq value 2)\n")))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
