@@ -764,16 +764,31 @@
      "* Chat\n** Question\nAsk\n"
      (org-mode)
      (ende-test--chat-goto "** Question")
-     (let ((job (ende-ask)))
+     (let* ((job (ende-ask))
+            (chat-buffer (current-buffer)))
        (cl-letf (((symbol-function 'ende-chat--tool-response-async)
                   (lambda (_call _configuration callback)
                     (setq tool-completion callback))))
-         (ende--handle-llm-event
-          job '(:type :reasoning-summary :item "before" :text "Before tools"))
+         (with-temp-buffer
+           (insert "ambient callback buffer")
+           (ende--handle-llm-event
+            job '(:type :reasoning-summary :item "before"
+                  :text "Before tools"))
+           (should (equal (buffer-string) "ambient callback buffer")))
+         (with-current-buffer chat-buffer
+           (should (string-match-p "^\\*\\* Agent: Before tools$"
+                                   (buffer-string))))
          (ende-test--complete-call (car ende-test--calls))
          (funcall tool-completion "{}")
-         (ende--handle-llm-event
-          job '(:type :reasoning-summary :item "after" :text "After "))
+         (should (ende-chat--staging-buffer job))
+         (with-temp-buffer
+           (insert "ambient callback buffer")
+           (ende--handle-llm-event
+            job '(:type :reasoning-summary :item "after" :text "After "))
+           (should (equal (buffer-string) "ambient callback buffer")))
+         (with-current-buffer chat-buffer
+           (should (string-match-p "^\\*\\* Agent: After $"
+                                   (buffer-string))))
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
                 :replace t))
@@ -784,9 +799,9 @@
          (cl-flet ((title (headline)
                      (org-element-property :raw-value headline)))
            (let ((titles (mapcar #'title headlines)))
-             (should (< (cl-position "Before tools" titles :test #'equal)
+             (should (< (cl-position "Agent: Before tools" titles :test #'equal)
+                        (cl-position "Agent: After tools" titles :test #'equal)
                         (cl-position "Agent: Work" titles :test #'equal)
-                        (cl-position "After tools" titles :test #'equal)
                         (cl-position "Agent: Reply" titles :test #'equal))))
            (let ((summaries
                   (cl-remove-if-not
@@ -795,7 +810,7 @@
                             "reasoning_summary"))
                    headlines)))
              (should (equal (mapcar #'title summaries)
-                            '("Before tools" "After tools")))
+                            '("Agent: Before tools" "Agent: After tools")))
              (dolist (summary summaries)
                (should (string-blank-p
                         (ende-chat--protocol-body-string summary)))))))))))

@@ -1872,11 +1872,13 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
        (eq (marker-buffer destination-marker) buffer)))
 
 (defun ende-chat--reasoning-summary-heading (text)
-  "Return a one-line Org headline containing TEXT without losing characters."
-  (mapconcat #'identity
-             (split-string (replace-regexp-in-string "\r\\n?" "\n" text)
-                           "\n" nil)
-             " ↵ "))
+  "Return an Org-safe headline for provider summary TEXT."
+  (concat "Agent: "
+          (mapconcat #'identity
+                     (split-string
+                      (replace-regexp-in-string "\r\\n?" "\n" text)
+                      "\n" nil)
+                     " ↵ ")))
 
 (defun ende-chat--insert-reasoning-summary-section (position level text)
   "Insert summary TEXT as a transient headline section at POSITION."
@@ -1905,51 +1907,51 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
         (org-edit-headline (ende-chat--reasoning-summary-heading text))))))
 
 (cl-defstruct (ende-chat--summary (:constructor ende-chat--make-summary))
-  item text marker deferred)
+  item text marker)
 
 (defun ende-chat--render-reasoning-summary (job text)
   "Insert summary TEXT above JOB's pending reply and return its marker."
   (let* ((target (ende-job-target job))
          (instruction (ende-job-instruction job))
          (position (or (plist-get instruction :reasoning-summary-position)
-                       (copy-marker (ende-target-cursor target) t)))
+                       (with-current-buffer (ende-target-buffer target)
+                         (copy-marker (ende-target-cursor target) t))))
          (marker (ende-chat--insert-reasoning-summary-section
                   position (plist-get instruction :response-level) text)))
-    (set-marker (ende-target-cursor-marker target)
-                (marker-position position) (ende-target-buffer target))
-    (unless (plist-get instruction :reasoning-summary-position)
+    (with-current-buffer (ende-target-buffer target)
+      (set-marker (ende-target-cursor-marker target)
+                  (marker-position position)))
+    (unless (plist-get (ende-job-instruction job)
+                       :reasoning-summary-position)
       (setf (ende-job-instruction job)
-            (plist-put instruction :reasoning-summary-position position)))
+            (plist-put (ende-job-instruction job)
+                       :reasoning-summary-position position)))
     marker))
 
 (defun ende-chat--handle-reasoning-summary (job event)
   "Render provider reasoning summary EVENT as a transient headline."
-  (let* ((instruction (ende-job-instruction job))
-         (item (plist-get event :item))
-         (summaries (plist-get instruction :reasoning-summaries))
+  (let* ((item (plist-get event :item))
+         (summaries (plist-get (ende-job-instruction job)
+                               :reasoning-summaries))
          (summary (cl-find item summaries :test #'equal
                            :key #'ende-chat--summary-item)))
     (unless summary
-      (setq summary (ende-chat--make-summary
-                     :item item
-                     ;; Tool rounds own their output order, so a summary that
-                     ;; follows one is placed when the round is committed.
-                     :deferred (and (ende-chat--staging-buffer job) t))
+      (setq summary (ende-chat--make-summary :item item)
             summaries (append summaries (list summary))))
     (setf (ende-chat--summary-text summary)
           (if (plist-get event :replace)
               (plist-get event :text)
             (concat (ende-chat--summary-text summary)
                     (plist-get event :text))))
-    (unless (ende-chat--summary-deferred summary)
-      (if-let* ((marker (ende-chat--summary-marker summary)))
-          (ende-chat--update-reasoning-summary-heading
-           marker (ende-chat--summary-text summary))
-        (setf (ende-chat--summary-marker summary)
-              (ende-chat--render-reasoning-summary
-               job (ende-chat--summary-text summary)))))
+    (if-let* ((marker (ende-chat--summary-marker summary)))
+        (ende-chat--update-reasoning-summary-heading
+         marker (ende-chat--summary-text summary))
+      (setf (ende-chat--summary-marker summary)
+            (ende-chat--render-reasoning-summary
+             job (ende-chat--summary-text summary))))
     (setf (ende-job-instruction job)
-          (plist-put instruction :reasoning-summaries summaries))))
+          (plist-put (ende-job-instruction job)
+                     :reasoning-summaries summaries))))
 
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
@@ -2644,19 +2646,6 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
         (goto-char (org-element-property :begin question))
         (ende-chat--set-headline-title question title)))))
 
-(defun ende-chat--commit-reasoning-summaries (job reply)
-  "Place summaries staged around tool rounds directly above REPLY."
-  (let ((position (copy-marker (org-element-property :begin reply) t))
-        (level (plist-get (ende-job-instruction job) :response-level)))
-    (unwind-protect
-        (dolist (summary
-                 (plist-get (ende-job-instruction job) :reasoning-summaries))
-          (when (ende-chat--summary-deferred summary)
-            (setf (ende-chat--summary-marker summary)
-                  (ende-chat--insert-reasoning-summary-section
-                   position level (ende-chat--summary-text summary)))))
-      (set-marker position nil))))
-
 (defun ende-chat--commit-staged-transcript
     (job transcript &optional allow-edited question-title)
   "Replace JOB's pending request with complete staged TRANSCRIPT atomically.
@@ -2806,7 +2795,6 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                                        (< (org-element-property :begin section)
                                           (org-element-property :begin reply)))
                                 (error "Malformed staged Agent: Reasoning"))))
-                          (ende-chat--commit-reasoning-summaries job reply)
                           (setq work-marker
                                 (copy-marker
                                  (org-element-property :begin updated-work))
