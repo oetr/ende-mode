@@ -780,31 +780,25 @@
          (ende-test--complete-call (nth 1 ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
        (let* ((document (ende-chat--build-document))
-              (headlines (ende-chat--document-headlines document))
-              (titles (mapcar (lambda (headline)
-                                (org-element-property :raw-value headline))
-                              headlines))
-              (summaries
-               (cl-remove-if-not
-                (lambda (headline)
-                  (equal (ende-chat--property document headline :visibility)
-                         "reasoning_summary"))
-                headlines)))
-         (should (equal (mapcar (lambda (headline)
-                                  (org-element-property :raw-value headline))
-                                summaries)
-                        '("Before tools" "After tools")))
-         (dolist (summary summaries)
-           (should (string-blank-p
-                    (ende-chat--protocol-body-string summary))))
-         (should (equal
+              (headlines (ende-chat--document-headlines document)))
+         (cl-flet ((title (headline)
+                     (org-element-property :raw-value headline)))
+           (let ((titles (mapcar #'title headlines)))
+             (should (< (cl-position "Before tools" titles :test #'equal)
+                        (cl-position "Agent: Work" titles :test #'equal)
+                        (cl-position "After tools" titles :test #'equal)
+                        (cl-position "Agent: Reply" titles :test #'equal))))
+           (let ((summaries
                   (cl-remove-if-not
-                   (lambda (title)
-                     (member title '("Before tools" "After tools"
-                                     "Agent: Work" "Agent: Reply")))
-                   titles)
-                  '("Before tools" "Agent: Work" "After tools"
-                    "Agent: Reply"))))))))
+                   (lambda (headline)
+                     (equal (ende-chat--property document headline :visibility)
+                            "reasoning_summary"))
+                   headlines)))
+             (should (equal (mapcar #'title summaries)
+                            '("Before tools" "After tools")))
+             (dolist (summary summaries)
+               (should (string-blank-p
+                        (ende-chat--protocol-body-string summary)))))))))))
 
 (ert-deftest ende-test/chat-reasoning-summaries-never-enter-context ()
   (ende-test--reset)
