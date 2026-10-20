@@ -34,6 +34,7 @@
 (require 'org-fold)
 (require 'rx)
 (require 'subr-x)
+(require 'font-lock)
 (require 'ende-core)
 (require 'ende-operation)
 (require 'ende-operations)
@@ -1973,10 +1974,20 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
                      (plist-get instruction :request-id))))
       (with-current-buffer buffer
         (org-mode)
+        (setq-local font-lock-mode t)
+        (font-lock-ensure)
+        (local-set-key (kbd "q") #'ende-chat--staging-quit)
         (setq buffer-read-only t))
       (setf (ende-job-instruction job)
             (plist-put instruction :staging-buffer buffer)))
     (and (buffer-live-p buffer) buffer)))
+
+(defun ende-chat--staging-quit ()
+  "Return from the staging buffer to the queue dashboard."
+  (interactive)
+  (quit-window)
+  (require 'ende-queue-ui)
+  (ende-queue-open))
 
 (defun ende-chat--staging-append (job text &optional checkpoint)
   "Append generated Org TEXT to JOB's private staging buffer.
@@ -1985,11 +1996,19 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
     (when (not (string-empty-p text))
       (setf (ende-job-instruction job)
             (plist-put (ende-job-instruction job) :recovery-current nil)))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (save-excursion
-          (goto-char (point-max))
-          (insert text))))
+    (let* ((end (with-current-buffer buffer (point-max)))
+           (following
+            (cl-remove-if-not
+             (lambda (window) (= (window-point window) end))
+             (get-buffer-window-list buffer nil t))))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (save-excursion
+            (goto-char (point-max))
+            (insert text))
+          (dolist (window following)
+            (when (window-live-p window)
+              (set-window-point window (point-max)))))))
     (when checkpoint
       (ende-chat--checkpoint-staging job))
     buffer))
