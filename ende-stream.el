@@ -20,14 +20,15 @@
   "Protocol-independent state for one SSE response stream."
   lifecycle parser received-bytes preview-parts preview-bytes
   content-parts thinking-parts usage actual-model actual-provider
-  estimated-chars generation-start finish-reason)
+  estimated-chars generation-start finish-reason reasoning-summaries)
 
 (defun ende-stream-create (lifecycle parser)
   "Create a stream driver composed with LIFECYCLE and using PARSER."
   (ende-stream--make-session
    :lifecycle lifecycle :parser parser :received-bytes 0
    :preview-parts nil :preview-bytes 0
-   :content-parts nil :thinking-parts nil :estimated-chars 0))
+   :content-parts nil :thinking-parts nil :estimated-chars 0
+   :reasoning-summaries (make-hash-table :test #'equal)))
 
 (defun ende-stream-lifecycle (stream)
   "Return STREAM's transport lifecycle."
@@ -91,6 +92,31 @@ TOKEN-KEY names the provider-specific output-token field."
                              (/ (float tokens) (max 0.001 (- now started)))
                            0.0)
                   :usage usage))))
+
+(defun ende-stream-record-reasoning-summary (stream item text limit-callback)
+  "Emit summary TEXT for provider ITEM in STREAM."
+  (ignore limit-callback)
+  (when (and (not (ende-stream-terminal-p stream))
+             (stringp text) (> (length text) 0))
+    (let ((summaries (ende-stream-session-reasoning-summaries stream)))
+      (puthash item (concat (gethash item summaries "") text) summaries)
+      (ende-stream-note-generation-start stream)
+      (ende-stream-emit
+       stream (list :type :reasoning-summary :item item :text text))
+      (not (ende-stream-terminal-p stream)))))
+
+(defun ende-stream-complete-reasoning-summary (stream item text)
+  "Emit completed summary TEXT for ITEM unless its deltas already did so."
+  (when (and (not (ende-stream-terminal-p stream)) (stringp text))
+    (let* ((summaries (ende-stream-session-reasoning-summaries stream))
+           (existing (gethash item summaries)))
+      (unless (equal existing text)
+        (ende-stream-emit
+         stream (list :type :reasoning-summary :item item :text text
+                      :complete t :replace (and existing
+                                                 (not (string-prefix-p
+                                                       (or existing "") text)))))
+        (puthash item text summaries)))))
 
 (defun ende-stream-emit-estimated-usage (stream)
   "Emit a character-based usage estimate for STREAM."

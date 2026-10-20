@@ -1037,6 +1037,33 @@
     (should-not (ende-transport-session-terminal
                  (ende-codex--lifecycle session)))))
 
+(ert-deftest ende-test/codex-reasoning-summary-deltas-remain-item-scoped ()
+  (let* ((events nil)
+         (session
+          (ende-codex--make-session
+           :profile '(:model "gpt-test")
+           :callbacks (list :on-event (lambda (event) (push event events))))))
+    (dolist (event
+             '("{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"first \"}"
+               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_2\",\"delta\":\"second\"}"
+               "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":\"summary\"}"
+               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"text\":\"first summary\"}"
+               "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_2\",\"text\":\"second\"}"))
+      (ende-codex--handle-event
+       session (ende-protocol-json-read-string event)))
+    (let ((summaries (nreverse
+                      (cl-remove-if-not
+                       (lambda (event)
+                         (eq (plist-get event :type) :reasoning-summary))
+                       events))))
+      (should (equal (mapcar (lambda (event)
+                               (cons (plist-get event :item)
+                                     (plist-get event :text)))
+                             summaries)
+                     '(("rs_1" . "first ")
+                       ("rs_2" . "second")
+                       ("rs_1" . "summary")))))))
+
 (ert-deftest ende-test/codex-effort-probe-uses-selected-model-capabilities ()
   (let ((calls 0)
         (results nil)

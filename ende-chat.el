@@ -67,12 +67,13 @@ retain the current question as the final user message."
   :group 'ende)
 
 (defcustom ende-chat-include-reasoning nil
-  "Non-nil to include reasoning-marked Org content in chat requests.
+  "Non-nil to include reasoning-inherited Org content in chat requests.
 
-Hidden content remains excluded even when this is non-nil.  When a question is
-asked from within a reasoning subtree, its reasoning ancestors are included
-regardless of this setting.  Included reasoning keeps the effective user or
-assistant role of its enclosing section."
+Locally marked reasoning sections are transient summary markers and are always
+excluded, even when this is non-nil.  Hidden content also remains excluded.
+When a question is asked from within a reasoning subtree, its reasoning
+ancestors are included regardless of this setting.  Included reasoning keeps
+the effective user or assistant role of its enclosing section."
   :type 'boolean
   :group 'ende)
 
@@ -416,12 +417,17 @@ then treated as the user's question without changing its visibility."
          (or (not (eq visibility 'reasoning))
              (ende-chat--reasoning-ancestors document question)))))
 
+(defun ende-chat--reasoning-summary-p (document headline)
+  "Return non-nil when HEADLINE is explicitly marked as reasoning."
+  (equal (ende-chat--property document headline :visibility) "reasoning"))
+
 (defun ende-chat--eligible-p (document headline)
   "Return non-nil when HEADLINE's section may enter context."
-  (pcase (ende-chat--effective-visibility document headline)
-    ('hidden nil)
-    ('reasoning ende-chat-include-reasoning)
-    (_ t)))
+  (and (not (ende-chat--reasoning-summary-p document headline))
+       (pcase (ende-chat--effective-visibility document headline)
+         ('hidden nil)
+         ('reasoning ende-chat-include-reasoning)
+         (_ t))))
 
 (defun ende-chat--context-fence-p (document headline)
   "Return non-nil when HEADLINE locally marks a completed context fence.
@@ -699,7 +705,8 @@ ancestors are included even when ordinary reasoning context is disabled."
                   (next-owner (if role-marked headline owner))
                   (next-role (if role-marked (intern local-role) role))
                   (selected
-                   (and (>= (org-element-property :begin headline) start)
+                   (and (not (ende-chat--reasoning-summary-p document headline))
+                        (>= (org-element-property :begin headline) start)
                         (if reasoning-ancestors-only
                             (memq headline reasoning-ancestors)
                           (or (ende-chat--eligible-p document headline)
@@ -714,7 +721,11 @@ ancestors are included even when ordinary reasoning context is disabled."
                 (let ((tool-messages
                        (ende-chat--protocol-work-messages document headline)))
                   (flush)
-                  (setq messages (append (reverse tool-messages) messages))))
+                  (setq messages
+                        (append (reverse tool-messages) messages))))
+               ((and (ende-chat--reasoning-summary-p document headline)
+                     (not (memq headline reasoning-ancestors)))
+                (flush))
                ((and selected
                      (ende-chat--assistant-protocol-p document headline))
                 (flush)
@@ -760,6 +771,8 @@ all non-hidden sections within the current question subtree."
          (walk (headline root)
            (when (or (eq headline root)
                      (and (not (ende-chat--independent-subtree-p
+                                document headline))
+                          (not (ende-chat--reasoning-summary-p
                                 document headline))
                           (included-p headline)))
              (when (included-p headline)
@@ -1866,6 +1879,78 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
        (markerp destination-marker)
        (eq (marker-buffer destination-marker) buffer)))
 
+(defun ende-chat--reasoning-summary-heading (text)
+  "Return a one-line Org headline containing TEXT without losing characters."
+  (mapconcat #'identity
+             (split-string (replace-regexp-in-string "\r\\n?" "\n" text)
+                           "\n" nil)
+             " ↵ "))
+
+(defun ende-chat--insert-reasoning-summary-section (position level text)
+  "Insert summary TEXT as a transient headline section at POSITION."
+  (let ((marker (copy-marker position))
+        (text (ende-chat--reasoning-summary-heading text)))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (unless (bolp) (insert "\n"))
+        (let ((start (point)))
+          (insert (make-string level ?*) " " text "\n"
+                  ":PROPERTIES:\n"
+                  (ende-chat--response-property ende-chat-role-property "assistant")
+                  (ende-chat--response-property ende-chat-visibility-property "reasoning")
+                  ":END:\n")
+          (list (copy-marker start)))))))
+
+(defun ende-chat--update-reasoning-summary-heading (marker text)
+  "Replace MARKER's headline with summary TEXT."
+  (when (and (markerp marker) (marker-buffer marker))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (org-back-to-heading t)
+        (org-edit-headline (ende-chat--reasoning-summary-heading text))))))
+
+(defun ende-chat--handle-reasoning-summary (job event)
+  "Render summary EVENT live and remember its complete per-item text."
+  (let* ((instruction (ende-job-instruction job))
+         (target (ende-job-target job))
+         (item (plist-get event :item))
+         (states (plist-get instruction :reasoning-summary-states))
+         (state (assoc item states))
+         (text (plist-get event :text))
+         (position (or (plist-get instruction :reasoning-summary-position)
+                       (copy-marker (ende-target-cursor target) t)))
+         (buffer (ende-target-buffer target))
+         (marker (or (nth 1 state)
+                     (car (with-current-buffer buffer
+                            (ende-chat--insert-reasoning-summary-section
+                             position (plist-get instruction :response-level)
+                             text)))))
+         (full-text (if (or (plist-get event :replace)
+                            (plist-get event :complete))
+                        text
+                      (concat (or (nth 2 state) "") text))))
+    (unless (plist-get instruction :reasoning-summary-position)
+      (setq instruction
+            (plist-put instruction :reasoning-summary-position position)))
+    (set-marker (ende-target-cursor-marker target)
+                (marker-position position) buffer)
+    (when (or (plist-get event :replace)
+              (and state (plist-get event :complete)))
+      (ende-chat--update-reasoning-summary-heading marker full-text))
+    (unless state
+      (setq state (list item marker full-text
+                        (length (or (ende-chat--staged-text job) ""))))
+      (setq states (append states (list state))))
+    (setcar (cdr state) marker)
+    (setcar (cddr state) full-text)
+    (when (and (not (plist-get event :replace))
+               (not (plist-get event :complete)))
+      (ende-chat--update-reasoning-summary-heading marker full-text))
+    (setf (ende-job-instruction job)
+          (plist-put instruction :reasoning-summary-states states))))
+
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
   (let ((instruction (ende-job-instruction job)))
@@ -2555,6 +2640,41 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
       (when (string-blank-p (org-element-property :raw-value question))
         (goto-char (org-element-property :begin question))
         (ende-chat--set-headline-title question title)))))
+
+(defun ende-chat--insert-staged-reasoning-summaries (job)
+  "Place summaries received after tool activity before the final reply."
+  (let* ((states (plist-get (ende-job-instruction job) :reasoning-summary-states))
+         (buffer (ende-target-buffer (ende-job-target job)))
+         (request-id (plist-get (ende-job-instruction job) :request-id))
+         (level (plist-get (ende-job-instruction job) :response-level)))
+    (when (cl-some (lambda (state) (> (nth 3 state) 0)) states)
+      (with-current-buffer buffer
+        (let* ((document (ende-chat--build-document))
+               (reply
+                (cl-find-if
+                 (lambda (headline)
+                   (and (equal (org-element-property :raw-value headline)
+                               "Agent: Reply")
+                        (equal (ende-chat--property
+                                document headline :request-id)
+                               request-id)
+                        (null (ende-chat--work-ancestor document headline))))
+                 (ende-chat--document-headlines document)))
+               (position (and reply
+                              (copy-marker
+                               (org-element-property :begin reply) t))))
+          (unless position
+            (error "Staged final reply is missing"))
+          (dolist (state states)
+            (when (> (nth 3 state) 0)
+              (let ((marker (nth 1 state)))
+                (goto-char marker)
+                (let ((begin (point)))
+                  (org-end-of-subtree t t)
+                  (delete-region begin (point)))
+                (setcar (cdr state)
+                        (car (ende-chat--insert-reasoning-summary-section
+                              position level (nth 2 state)))))))))))
 
 (defun ende-chat--commit-staged-transcript
     (job transcript &optional allow-edited question-title)
@@ -3562,7 +3682,11 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (ende-register-job-handler 'chat-compact #'ende-chat--run)
 
 (defun ende-chat--job-event (job event)
-  "Retain a failure marker for unfinished chat replies."
+  "Render transient summaries and retain failure markers for chat replies."
+  (when (and (eq (ende-job-type job) 'chat)
+             (eq (plist-get event :type) :reasoning-summary)
+             (ende-job-current-p job))
+    (ende-chat--handle-reasoning-summary job event))
   (when (memq (ende-job-type job) '(chat chat-compact))
     (pcase (plist-get event :type)
       ((or :error :cancelled :skipped)

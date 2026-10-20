@@ -1011,6 +1011,12 @@ is queried for every call; it does not share the model catalog cache."
    (ende-codex--session-stream session) channel text
    (apply-partially #'ende-codex--fail session)))
 
+(defun ende-codex--emit-reasoning-summary (session item text)
+  "Record and emit summary TEXT for provider ITEM."
+  (ende-stream-record-reasoning-summary
+   (ende-codex--session-stream session) item text
+   (apply-partially #'ende-codex--fail session)))
+
 (defun ende-codex--handle-usage (session usage)
   "Record and emit Responses API USAGE."
   (when (hash-table-p usage)
@@ -1174,8 +1180,16 @@ When APPEND is non-nil, append the argument delta to the stored value."
      ((string= type "response.reasoning_summary_text.delta")
       (ende-codex--emit
        session '(:type :status :status "Thinking"))
-      (ende-codex--emit-delta
-       session :thinking (ende-protocol-json-get "delta" json)))
+      (ende-codex--emit-reasoning-summary
+       session (or (ende-protocol-json-get "item_id" json)
+                   (ende-protocol-json-get "output_index" json))
+       (ende-protocol-json-get "delta" json)))
+     ((string= type "response.reasoning_summary_text.done")
+      (ende-stream-complete-reasoning-summary
+       (ende-codex--session-stream session)
+       (or (ende-protocol-json-get "item_id" json)
+           (ende-protocol-json-get "output_index" json))
+       (ende-protocol-json-get "text" json)))
      ((member type '("response.completed" "response.done"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))
