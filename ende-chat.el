@@ -11,12 +11,14 @@
 ;; context is reconstructed from the current Org tree when a job starts.
 ;;
 ;; Durable headline properties include ENDE_ROLE (user or assistant) and
-;; ENDE_VISIBILITY (normal, hidden, or reasoning).  Generated response sections
-;; also retain ENDE_MODEL and, when used, ENDE_REASONING_EFFORT.  Roles inherit
-;; from the nearest marked ancestor; hidden visibility wins over every
-;; descendant.  Reasoning is normally sent only when
-;; `ende-chat-include-reasoning' is non-nil, except that a question asked from
-;; within a reasoning subtree includes its reasoning ancestors as context.
+;; ENDE_VISIBILITY (normal, hidden, reasoning, or reasoning_summary).  Generated
+;; response sections also retain ENDE_MODEL and, when used,
+;; ENDE_REASONING_EFFORT.  Roles inherit from the nearest marked ancestor;
+;; hidden visibility wins over every descendant.  Reasoning is normally sent
+;; only when `ende-chat-include-reasoning' is non-nil, except that a question
+;; asked from within a reasoning subtree includes its reasoning ancestors as
+;; context.  Reasoning summaries are transient activity markers and never enter
+;; a request.
 ;; Generated assistant/tool exchanges are stored in document order as sibling
 ;; call and result sections inside an Agent: Work container.
 ;; ENDE_CHAT_CONTEXT_FENCE marks a summary replacing earlier context.  The
@@ -67,13 +69,12 @@ retain the current question as the final user message."
   :group 'ende)
 
 (defcustom ende-chat-include-reasoning nil
-  "Non-nil to include reasoning-inherited Org content in chat requests.
+  "Non-nil to include reasoning-marked Org content in chat requests.
 
-Locally marked reasoning sections are transient summary markers and are always
-excluded, even when this is non-nil.  Hidden content also remains excluded.
-When a question is asked from within a reasoning subtree, its reasoning
-ancestors are included regardless of this setting.  Included reasoning keeps
-the effective user or assistant role of its enclosing section."
+Hidden content remains excluded even when this is non-nil.  When a question is
+asked from within a reasoning subtree, its reasoning ancestors are included
+regardless of this setting.  Included reasoning keeps the effective user or
+assistant role of its enclosing section."
   :type 'boolean
   :group 'ende)
 
@@ -251,7 +252,8 @@ discarding superseded details. Be concise but self-contained."
   "Return normalized visibility VALUE, or signal for an invalid property."
   (let ((visibility (and value (downcase (string-trim value)))))
     (unless (or (null visibility)
-                (member visibility '("normal" "hidden" "reasoning")))
+                (member visibility
+                        '("normal" "hidden" "reasoning" "reasoning_summary")))
       (error "Invalid %s on headline: %s"
              ende-chat-visibility-property
              (org-element-property :raw-value headline)))
@@ -417,17 +419,13 @@ then treated as the user's question without changing its visibility."
          (or (not (eq visibility 'reasoning))
              (ende-chat--reasoning-ancestors document question)))))
 
-(defun ende-chat--reasoning-summary-p (document headline)
-  "Return non-nil when HEADLINE is explicitly marked as reasoning."
-  (equal (ende-chat--property document headline :visibility) "reasoning"))
-
 (defun ende-chat--eligible-p (document headline)
   "Return non-nil when HEADLINE's section may enter context."
-  (and (not (ende-chat--reasoning-summary-p document headline))
-       (pcase (ende-chat--effective-visibility document headline)
-         ('hidden nil)
-         ('reasoning ende-chat-include-reasoning)
-         (_ t))))
+  (pcase (ende-chat--effective-visibility document headline)
+    ('hidden nil)
+    ('reasoning ende-chat-include-reasoning)
+    ('reasoning_summary nil)
+    (_ t)))
 
 (defun ende-chat--context-fence-p (document headline)
   "Return non-nil when HEADLINE locally marks a completed context fence.
@@ -705,8 +703,7 @@ ancestors are included even when ordinary reasoning context is disabled."
                   (next-owner (if role-marked headline owner))
                   (next-role (if role-marked (intern local-role) role))
                   (selected
-                   (and (not (ende-chat--reasoning-summary-p document headline))
-                        (>= (org-element-property :begin headline) start)
+                   (and (>= (org-element-property :begin headline) start)
                         (if reasoning-ancestors-only
                             (memq headline reasoning-ancestors)
                           (or (ende-chat--eligible-p document headline)
@@ -723,9 +720,6 @@ ancestors are included even when ordinary reasoning context is disabled."
                   (flush)
                   (setq messages
                         (append (reverse tool-messages) messages))))
-               ((and (ende-chat--reasoning-summary-p document headline)
-                     (not (memq headline reasoning-ancestors)))
-                (flush))
                ((and selected
                      (ende-chat--assistant-protocol-p document headline))
                 (flush)
@@ -771,8 +765,6 @@ all non-hidden sections within the current question subtree."
          (walk (headline root)
            (when (or (eq headline root)
                      (and (not (ende-chat--independent-subtree-p
-                                document headline))
-                          (not (ende-chat--reasoning-summary-p
                                 document headline))
                           (included-p headline)))
              (when (included-p headline)
@@ -1898,7 +1890,8 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
           (insert (make-string level ?*) " " text "\n"
                   ":PROPERTIES:\n"
                   (ende-chat--response-property ende-chat-role-property "assistant")
-                  (ende-chat--response-property ende-chat-visibility-property "reasoning")
+                  (ende-chat--response-property
+                   ende-chat-visibility-property "reasoning_summary")
                   ":END:\n")
           (list (copy-marker start)))))))
 

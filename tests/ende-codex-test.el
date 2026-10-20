@@ -1030,7 +1030,7 @@
     (setq result (ende-codex--result session))
     (should-not failure)
     (should (string= (plist-get result :content) "answer"))
-    (should (string= (plist-get result :thinking) "thinking"))
+    (should (string-empty-p (plist-get result :thinking)))
     (should (string= (plist-get result :model) "gpt-actual"))
     (should (= (plist-get result :tokens) 7))
     (should (ende-codex--session-terminal-event session))

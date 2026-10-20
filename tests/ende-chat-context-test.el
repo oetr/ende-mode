@@ -141,34 +141,8 @@
           (ende-test--chat-context-text
            (let ((ende-chat-include-reasoning t))
              (ende-chat-context-at-point)))))
-     (should-not (string-match-p "Section thought" with-reasoning))
+     (should (string-match-p "Section thought" with-reasoning))
      (should-not (string-match-p "Never send this" with-reasoning)))))
-
-(ert-deftest ende-test/chat-excludes-reasoning-summaries-by-visibility-property ()
-  (ende-test--reset)
-  (ende-test--with-buffer
-   (concat "* Root\n"
-           "** Generated-looking heading\n"
-           ":PROPERTIES:\n"
-           ":ENDE_ROLE: assistant\n"
-           ":ENDE_VISIBILITY: reasoning\n"
-           ":ENDE_CHAT_REQUEST_ID: unrelated\n"
-           ":END:\n"
-           "Must stay out of history.\n"
-           "** Assistant reply\n"
-           ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
-           ":ENDE_CHAT_REQUEST_ID: reply\n:END:\n"
-           "Answer.\n"
-           "** Question\nAsk.\n")
-   (org-mode)
-   (ende-test--chat-goto "** Question")
-   (let* ((document (ende-chat--build-document))
-          (question (ende-chat--headline-at-point document))
-          (messages (ende-chat--serialize document question))
-          (text (ende-test--chat-context-text messages)))
-     (should (string-match-p "Answer" text))
-     (should-not (string-match-p "Generated-looking heading" text))
-     (should-not (string-match-p "Must stay out of history" text)))))
 
 
 
