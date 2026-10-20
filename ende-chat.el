@@ -2674,7 +2674,7 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
                   (delete-region begin (point)))
                 (setcar (cdr state)
                         (car (ende-chat--insert-reasoning-summary-section
-                              position level (nth 2 state)))))))))))
+                              position level (nth 2 state))))))))))))
 
 (defun ende-chat--commit-staged-transcript
     (job transcript &optional allow-edited question-title)
