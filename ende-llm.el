@@ -20,6 +20,7 @@
 (require 'ende-protocol)
 (require 'ende-transport)
 (require 'ende-stream)
+(require 'ende-debug)
 (require 'ende-provider)
 (require 'ende-openrouter-batch)
 (require 'ende-codex)
@@ -44,7 +45,7 @@ normalized :tool-calls for the chat tool loop.")
                (:constructor ende-llm--allocate-session))
   "State owned by one asynchronous LLM transport request."
   profile stream model messages json-data reasoning reasoning-content-parts
-  tool-calls provider-error last-status last-usage-update)
+  tool-calls provider-error last-status last-usage-update debug-record)
 
 (defun ende-llm--make-session (&rest arguments)
   "Create a Chat Completions session from protocol ARGUMENTS.
@@ -585,9 +586,13 @@ The :callbacks argument initializes the composed transport lifecycle."
        (ende-provider-discover
         profile (apply-partially #'ende-llm--discovery-result session))))
     (unless (ende-llm--terminal-p session)
+      (setf (ende-llm--session-debug-record session)
+            (ende-debug-record-request
+             (ende-llm--session-json-data session) request-body messages profile
+             "openai-compatible" (plist-get profile :url)))
       (process-send-string
-       (ende-transport-session-process (ende-llm--lifecycle session))
-       (ende-llm--session-json-data session))
+        (ende-transport-session-process (ende-llm--lifecycle session))
+        (ende-llm--session-json-data session))
       (process-send-eof
        (ende-transport-session-process (ende-llm--lifecycle session))))))
 

@@ -22,6 +22,7 @@
 (require 'ende-protocol)
 (require 'ende-transport)
 (require 'ende-stream)
+(require 'ende-debug)
 
 (defcustom ende-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -109,7 +110,7 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile stream tool-calls terminal-event)
+  profile stream tool-calls terminal-event debug-record)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -1360,17 +1361,17 @@ When APPEND is non-nil, append the argument delta to the stored value."
                (or (plist-get profile :url) ende-codex-endpoint)))
          (account-id (ende-codex--account-id auth))
          (residency (ende-codex--residency auth))
-         (headers
-          (append
-           (list (concat "Authorization: Bearer "
-                         (plist-get auth :access))
-                 "originator: opencode"
-                 (concat "session-id: "
-                         (secure-hash 'sha256
-                                      (format "%s-%s"
-                                              (float-time) (random)))))
-           (when account-id
-             (list (concat "ChatGPT-Account-Id: " account-id)))
+         (session-id
+          (secure-hash 'sha256
+                       (format "%s-%s" (float-time) (random))))
+          (headers
+           (append
+            (list (concat "Authorization: Bearer "
+                          (plist-get auth :access))
+                  "originator: opencode"
+                  (concat "session-id: " session-id))
+            (when account-id
+              (list (concat "ChatGPT-Account-Id: " account-id)))
            (when residency
              (list (concat "x-openai-internal-codex-residency: "
                            residency)))))
@@ -1392,6 +1393,10 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (ende-transport-session-set-resources
      (ende-codex--lifecycle session) request)
     (ende-codex--diagnose-request session request-body)
+    (setf (ende-codex--session-debug-record session)
+          (ende-debug-record-request
+           body request-body messages profile
+           "codex-responses" url session-id))
     (process-send-string
      (ende-transport-session-process (ende-codex--lifecycle session)) body)
     (process-send-eof
