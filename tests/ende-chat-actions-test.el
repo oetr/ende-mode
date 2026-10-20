@@ -773,10 +773,10 @@
          (ende-test--complete-call (car ende-test--calls))
          (funcall tool-completion "{}")
          (ende--handle-llm-event
-          job '(:type :reasoning-summary :item "after" :text "After tools"))
+          job '(:type :reasoning-summary :item "after" :text "After "))
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
-                :complete t))
+                :replace t))
          (ende-test--complete-call (nth 1 ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
        (let* ((document (ende-chat--build-document))

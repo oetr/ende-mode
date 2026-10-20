@@ -93,9 +93,8 @@ TOKEN-KEY names the provider-specific output-token field."
                            0.0)
                   :usage usage))))
 
-(defun ende-stream-record-reasoning-summary (stream item text limit-callback)
+(defun ende-stream-record-reasoning-summary (stream item text)
   "Emit summary TEXT for provider ITEM in STREAM."
-  (ignore limit-callback)
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (let ((summaries (ende-stream-session-reasoning-summaries stream)))
@@ -107,15 +106,14 @@ TOKEN-KEY names the provider-specific output-token field."
 
 (defun ende-stream-complete-reasoning-summary (stream item text)
   "Emit completed summary TEXT for ITEM unless its deltas already did so."
-  (when (and (not (ende-stream-terminal-p stream)) (stringp text))
+  (when (and (not (ende-stream-terminal-p stream))
+             (stringp text) (> (length text) 0))
     (let* ((summaries (ende-stream-session-reasoning-summaries stream))
            (existing (gethash item summaries)))
       (unless (equal existing text)
         (ende-stream-emit
          stream (list :type :reasoning-summary :item item :text text
-                      :complete t :replace (and existing
-                                                 (not (string-prefix-p
-                                                       (or existing "") text)))))
+                      :replace t))
         (puthash item text summaries)))))
 
 (defun ende-stream-emit-estimated-usage (stream)

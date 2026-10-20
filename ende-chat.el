@@ -1937,7 +1937,7 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
                      :deferred (and (ende-chat--staging-buffer job) t))
             summaries (append summaries (list summary))))
     (setf (ende-chat--summary-text summary)
-          (if (or (plist-get event :replace) (plist-get event :complete))
+          (if (plist-get event :replace)
               (plist-get event :text)
             (concat (ende-chat--summary-text summary)
                     (plist-get event :text))))

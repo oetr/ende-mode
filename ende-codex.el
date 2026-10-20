@@ -1014,8 +1014,7 @@ is queried for every call; it does not share the model catalog cache."
 (defun ende-codex--emit-reasoning-summary (session item text)
   "Record and emit summary TEXT for provider ITEM."
   (ende-stream-record-reasoning-summary
-   (ende-codex--session-stream session) item text
-   (apply-partially #'ende-codex--fail session)))
+   (ende-codex--session-stream session) item text))
 
 (defun ende-codex--handle-usage (session usage)
   "Record and emit Responses API USAGE."
