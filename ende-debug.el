@@ -98,6 +98,51 @@
      (expand-file-name (concat stem "-meta.json") directory)
      (concat (json-encode meta) "\n"))))
 
+(defun ende-debug-record-completion (record outcome usage http-status value)
+  "Write RECORD's terminal OUTCOME, normalized USAGE, and HTTP-STATUS.
+VALUE is the successful result or structured transport error.  Recording
+errors are reported but never propagated into transport completion."
+  (when record
+    (condition-case failure
+        (let* ((counts (ende--usage-token-counts usage))
+               (error-kind (and (ende-error-p value)
+                                (ende-error-kind value)))
+               (state (cond
+                       ((eq outcome 'success) "success")
+                       ((eq error-kind 'cancelled) "cancelled")
+                       (t "failure")))
+               (completed (float-time))
+               (completion
+                `(("outcome" . ,state)
+                  ("error_kind" . ,(and error-kind (symbol-name error-kind)))
+                  ("http_status" . ,http-status)
+                  ("completed_timestamp" . ,(ende-debug--timestamp))
+                  ("completion_time_epoch" . ,completed)
+                  ("elapsed_seconds" . ,(- completed
+                                            (plist-get record :started)))
+                  ("input_tokens" . ,(plist-get counts :input))
+                  ("output_tokens" . ,(plist-get counts :output))
+                  ("cached_input_tokens" . ,(plist-get counts :cached))
+                  ("cached_tokens_reported" . ,(if (numberp
+                                                    (plist-get counts :cached))
+                                                   t json-false))
+                  ("cache_write_tokens" . ,(plist-get counts :cache-write))
+                  ("cache_write_tokens_reported" . ,(if (numberp
+                                                        (plist-get counts
+                                                                   :cache-write))
+                                                       t json-false))))
+               (metadata (plist-get record :metadata)))
+          (setf (plist-get record :metadata)
+                (append (cl-remove-if
+                         (lambda (entry)
+                           (equal (car entry) "completion"))
+                         metadata)
+                        (list (cons "completion" completion))))
+          (ende-debug--write-meta record))
+       ((error quit)
+        (message "ende debugging: could not record completion: %s"
+                (error-message-string failure))))))
+
 (defun ende-debug-record-request
     (serialized-body request-body messages profile transport endpoint
      &optional session-id)

@@ -176,7 +176,7 @@ KEY is a keyword for plist objects and a string key in JSON hash tables."
            when (numberp value) return value))
 
 (defun ende--usage-token-counts (usage)
-  "Return normalized input, output, cached, and total counts from USAGE.
+  "Return normalized input, output, cached, cache-write, and total counts.
 Unknown counts are nil.  Total is derived from input and output when absent."
   (let* ((input (ende--usage-number usage :input_tokens :prompt_tokens))
          (output (ende--usage-number usage :output_tokens :completion_tokens))
@@ -189,8 +189,22 @@ Unknown counts are nil.  Total is derived from input and output when absent."
                      (ende--usage-number
                       (ende--usage-get usage :prompt_tokens_details)
                       :cached_tokens)
-                     (ende--usage-number usage :prompt_cache_hit_tokens))))
-    (list :input input :output output :cached cached :total total)))
+                     (ende--usage-number usage :prompt_cache_hit_tokens)))
+         (cache-write
+          (or (ende--usage-number
+               (ende--usage-get usage :input_tokens_details)
+               :cache_write_tokens :cache_creation_input_tokens
+               :cache_creation_tokens)
+              (ende--usage-number
+               (ende--usage-get usage :prompt_tokens_details)
+               :cache_write_tokens :cache_creation_input_tokens
+               :cache_creation_tokens)
+              (ende--usage-number usage :cache_write_tokens
+                                  :cache_write_input_tokens
+                                  :cache_creation_input_tokens
+                                  :cache_creation_tokens))))
+    (list :input input :output output :cached cached
+          :cache-write cache-write :total total)))
 
 (defun ende-validate-resource-options ()
   "Validate transport resource options before starting external processes."

@@ -962,8 +962,20 @@ is queried for every call; it does not share the model catalog cache."
    (plist-get (ende-codex--session-profile session) :model) "OpenAI"
    (list :tool-calls (ende-codex--tool-call-list session))))
 
+(defun ende-codex--response-status (session)
+  "Return SESSION's HTTP response status, or nil."
+  (condition-case nil
+      (car (ende-stream-response-headers
+            (ende-codex--session-stream session)))
+    (error nil)))
+
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
+  (when (ende-codex--session-debug-record session)
+    (ende-debug-record-completion
+     (ende-codex--session-debug-record session) outcome
+     (ende-stream-session-usage (ende-codex--session-stream session))
+     (ende-codex--response-status session) value))
   (ende-stream-settle-generation
    (ende-codex--session-stream session) outcome value "output_tokens"
    (plist-get (ende-codex--session-profile session) :model) "OpenAI"
