@@ -11,6 +11,7 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 (require 'json)
+(require 'ende-chat-test-helpers)
 
 
 
@@ -386,6 +387,183 @@
                      "answer"))
     (should (string= (ende-protocol-json-get "type" assistant-content)
                      "output_text"))))
+
+(ert-deftest ende-test/codex-job-affinity-is-stable-and-transport-only ()
+  (let* ((directory (make-temp-file "ende-codex-affinity-debug-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (profile
+          '(:name openai :type codex :wire-api responses
+            :url "https://chatgpt.com/backend-api/codex/responses"
+            :model "gpt-test" :require-sse t
+            :tool-definitions
+            (((:type . "function")
+              (:function . ((:name . "inspect")
+                            (:description . "Inspect a fixture")
+                            (:parameters . ((:type . "object")))))))))
+         (messages '(("system" . "Keep the existing instructions.")
+                     ("user" . "Inspect the fixture.")))
+         (chunk
+          (concat "data: {\"type\":\"response.completed\","
+                  "\"response\":{\"usage\":{\"input_tokens\":12,"
+                  "\"output_tokens\":1}}}\n\n"))
+         (buffer-a (generate-new-buffer " *ende-codex-job-a*"))
+         (buffer-b (generate-new-buffer " *ende-codex-job-b*"))
+         (target-a (with-current-buffer buffer-a
+                     (insert "fixture A")
+                     (ende-target-create :buffer buffer-a
+                                         :start (point-min) :end (point-max)
+                                         :cursor (point-min) :review-policy 'ignore)))
+         (target-b (with-current-buffer buffer-b
+                     (insert "fixture B")
+                     (ende-target-create :buffer buffer-b
+                                         :start (point-min) :end (point-max)
+                                         :cursor (point-min) :review-policy 'ignore)))
+         job-a job-b)
+    (unwind-protect
+        (progn
+          (setq job-a
+                (ende--job-from-request
+                 (cons 'insert (list :target target-a :profile profile)))
+                job-b
+                (ende--job-from-request
+                 (cons 'insert (list :target target-b :profile profile))))
+          (let* ((session-a (plist-get (ende-job-profile job-a)
+                                       :codex-session-id))
+                 (session-b (plist-get (ende-job-profile job-b)
+                                       :codex-session-id))
+                 (round-a1
+                  (ende-test--run-stream-request
+                   'codex (list chunk) nil nil (ende-job-profile job-a)
+                   nil messages))
+                 (round-b1
+                  (ende-test--run-stream-request
+                   'codex (list chunk) nil nil (ende-job-profile job-b)
+                   nil messages))
+                 (round-a2
+                  (ende-test--run-stream-request
+                   'codex (list chunk) nil nil (ende-job-profile job-a)
+                   nil messages))
+                 (expected-body
+                  (encode-coding-string
+                   (json-encode (ende-codex--request-body
+                                 messages (ende-job-profile job-a)))
+                   'utf-8))
+                 (report
+                  (ende-debug--format-report
+                   directory (ende-debug--read-captures directory))))
+            (should (stringp session-a))
+            (should (stringp session-b))
+            (should-not (equal session-a session-b))
+            (dolist (round (list round-a1 round-b1 round-a2))
+              (should (equal (plist-get round :request-body) expected-body)))
+            (dolist (round (list round-a1 round-a2))
+              (should (string-match-p
+                       (regexp-quote (concat "session-id: " session-a))
+                       (plist-get round :config-text))))
+            (should (string-match-p
+                     (regexp-quote (concat "session-id: " session-b))
+                     (plist-get round-b1 :config-text)))
+            (should (string-match-p "Request #1 -> #3" report))
+            (should (string-match-p "Session ID:      unchanged" report))))
+      (when job-a (ende-target-release (ende-job-target job-a)))
+      (when job-b (ende-target-release (ende-job-target job-b)))
+      (when (buffer-live-p buffer-a) (kill-buffer buffer-a))
+      (when (buffer-live-p buffer-b) (kill-buffer buffer-b))
+      (delete-directory directory t))))
+
+(ert-deftest ende-test/codex-chat-affinity-uses-durable-conversation-root ()
+  (ende-test--reset)
+  (let ((profile
+         '(:name openai :type codex :wire-api responses
+           :url "https://chatgpt.com/backend-api/codex/responses"
+           :model "gpt-test"))
+        root-job follow-up-job independent-job)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ende-process-next) #'ignore))
+          (ende-test--with-buffer
+              (concat "* Main conversation\n"
+                      "** First request\nInitial request.\n"
+                      "** Follow-up\nContinue this conversation.\n"
+                      "* Independent conversation\nA separate task.\n")
+            (org-mode)
+            (ende-test--chat-goto "** First request")
+            (let* ((document (ende-chat--build-document))
+                   (question (ende-chat--headline-at-point document)))
+              (setq root-job (ende-chat--enqueue document question profile)))
+            (let ((conversation-id
+                   (save-excursion
+                     (ende-test--chat-goto "* Main conversation")
+                     (org-entry-get nil ende-chat-id-property))))
+              (should (stringp conversation-id))
+              (let* ((document (ende-chat--build-document))
+                     (question (ende-chat--find-by-property
+                                document ende-chat-id-property conversation-id)))
+                (should-not
+                 (string-match-p
+                  (regexp-quote conversation-id)
+                  (prin1-to-string (ende-chat--serialize document question)))))
+              (ende-reload)
+              (should
+               (equal conversation-id
+                      (save-excursion
+                        (ende-test--chat-goto "* Main conversation")
+                        (org-entry-get nil ende-chat-id-property))))
+              (cl-letf (((symbol-function 'ende-process-next) #'ignore))
+                (ende-test--chat-goto "** Follow-up")
+                (let* ((document (ende-chat--build-document))
+                       (question (ende-chat--headline-at-point document)))
+                  (setq follow-up-job
+                        (ende-chat--enqueue document question profile)))
+                (ende-test--chat-goto "* Independent conversation")
+                (let* ((document (ende-chat--build-document))
+                       (question (ende-chat--headline-at-point document)))
+                  (setq independent-job
+                        (ende-chat--enqueue document question profile)))
+                (should (equal
+                         (plist-get (ende-job-profile root-job) :codex-session-id)
+                         (plist-get (ende-job-profile follow-up-job)
+                                    :codex-session-id)))
+                (should-not
+                 (equal (plist-get (ende-job-profile root-job) :codex-session-id)
+                        (plist-get (ende-job-profile independent-job)
+                                   :codex-session-id)))
+                (let* ((worker-profile
+                        (ende-agent-profile-for-policy
+                         (ende-job-family root-job) nil))
+                       (worker-buffer (generate-new-buffer
+                                       " *ende-codex-worker-test*"))
+                       (worker-target
+                        (with-current-buffer worker-buffer
+                          (insert "worker")
+                          (ende-target-create
+                           :buffer worker-buffer :start (point-min)
+                           :end (point-max) :cursor (point-min)
+                           :review-policy 'ignore)))
+                       (worker-job
+                        (ende--job-from-request
+                         (cons 'agent (list :target worker-target
+                                            :profile worker-profile)))))
+                  (unwind-protect
+                      (progn
+                        (should-not
+                         (equal (plist-get worker-profile :codex-session-id)
+                                (plist-get (ende-job-profile root-job)
+                                           :codex-session-id)))
+                        (should-not
+                         (equal (plist-get (ende-job-profile worker-job)
+                                           :codex-session-id)
+                                (plist-get (ende-job-profile root-job)
+                                           :codex-session-id)))
+                        (should-not
+                         (equal (plist-get (ende-job-profile worker-job)
+                                           :codex-session-id)
+                                (plist-get (ende-job-profile independent-job)
+                                           :codex-session-id))))
+                    (ende-target-release (ende-job-target worker-job))
+                    (kill-buffer worker-buffer)))))))
+      (ende-test--reset))))
 
 
 
