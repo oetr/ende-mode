@@ -103,25 +103,35 @@
       (push (substring digits 0 end) chunks)
       (mapconcat #'identity chunks ","))))
 
-(defun ende-ui--format-paragraph (text &optional prefix limit)
-  "Return wrapped, inert plain-text TEXT with PREFIX and optional LIMIT."
+(defun ende-ui--format-paragraph (text)
+  "Return safely displayed, wrapped activity STATUS."
   (when (and (stringp text) (not (string-empty-p text)))
-    (let ((plain (substring-no-properties text)))
-      (when limit
-        (setq plain
-              (concat (substring plain 0 (min limit (length plain)))
-                      (if (> (length plain) limit) "…" ""))))
+    (with-temp-buffer
+      (insert (replace-regexp-in-string
+               "[[:cntrl:]]+" " " (substring-no-properties text)))
+      (let ((fill-column 72))
+        (fill-region (point-min) (point-max)))
+      (propertize
+       (concat "    "
+               (replace-regexp-in-string "\n" "\n    " (buffer-string))
+               "\n")
+       'face 'shadow))))
+
+(defun ende-ui--focus-paragraph (text)
+  "Format a bounded, safely displayed TEXT with a bold Focus label."
+  (when (and (stringp text) (not (string-blank-p text)))
+    (let* ((plain (substring-no-properties text))
+           (limit 800)
+           (label "Focus: "))
+      (setq plain (concat (substring plain 0 (min limit (length plain)))
+                          (if (> (length plain) limit) "…" "")))
       (with-temp-buffer
-        (insert (or prefix "")
-                (replace-regexp-in-string "[[:cntrl:]]+" " " plain))
+        (insert label (replace-regexp-in-string "[[:cntrl:]]+" " " plain))
         (let ((fill-column 72))
           (fill-region (point-min) (point-max)))
-        (propertize
-         (concat (if prefix "\n\n" "")
-                 "    "
-                 (replace-regexp-in-string "\n" "\n    " (buffer-string))
-                 "\n")
-         'face 'shadow)))))
+        (let ((paragraph (propertize (buffer-string) 'face 'shadow)))
+          (add-face-text-property 0 (length label) 'bold t paragraph)
+          (concat paragraph "\n"))))))
 
 (defun ende-ui--format-badge (ov)
   "Format cached header, metrics, and activity line content for OV."
@@ -146,16 +156,21 @@
                          (delq nil (list client model effort)) " ")
               "\n")
       'face 'ende-badge-face)
-     (when (or input cached output (and (numberp speed) (> speed 0)))
+     (when (or input (and (numberp speed) (> speed 0)))
        (propertize
-        (format "Tokens: %s/%s - %s t/s, Output: %s%s\n"
-                (or input "–") (or cached "–")
+        (format "Tokens: %s%s\n"
+                (or input "–")
                 (if (and (numberp speed) (> speed 0))
-                    (format "%.1f" speed) "–")
-                (if (and estimated output) "~" "")
-                (or output "–"))
+                    (format " - %.1f t/s" speed) ""))
         'face 'shadow))
-     (when phase
+     (when cached
+       (propertize (format "Cached: %s\n" cached) 'face 'shadow))
+     (when output
+       (propertize (format "Output: %s%s\n"
+                           (if estimated "~" "") output)
+                   'face 'shadow))
+     (when (and phase
+                (or activity (null (overlay-get ov 'reasoning-paragraph))))
        (propertize
         (concat phase (if activity (concat " — " activity) "") "\n")
         'face 'font-lock-keyword-face)))))
@@ -271,7 +286,7 @@ When APPEARANCE is `badge-only', do not apply a face to the covered text."
                         (ende-ui--activity-paragraph val)))
           (:reasoning-summary
            (overlay-put ov 'reasoning-paragraph
-                        (ende-ui--format-paragraph val "Reasoning: " 800)))
+                        (ende-ui--focus-paragraph val)))
           (:usage (overlay-put ov 'usage val))
           (:tokens (overlay-put ov 'tokens val))
           (:speed  (overlay-put ov 'speed val))

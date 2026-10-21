@@ -102,8 +102,8 @@
   (ende-test--with-buffer "source text"
     (goto-char 4)
     (let* ((job (ende--make-job
-                 :profile '(:name openai :model "gpt-6-luna"
-                           :reasoning-effort "max")))
+                 :profile '(:name generic-provider :model "generic-model"
+                           :reasoning-effort "balanced")))
            (overlay (ende-ui-create-overlay (current-buffer) (point) (point)))
            (source (buffer-string))
            (tick (buffer-chars-modified-tick))
@@ -111,26 +111,38 @@
            (ende-job-event-functions (list #'ende-ui-job-event)))
       (setf (ende-job-overlay job) overlay)
       (ende-ui-job-event
-       job '(:type :queued :client "OpenAI" :model "gpt-6-luna"))
+       job '(:type :queued :client "Provider" :model "Model"))
       (ende-ui-update-overlay
        overlay :status "Thinking" :activity-title "Inspecting event models"
        :activity-status "Provider summaries arrive as streaming events."
-       :usage '(:input_tokens 69975 :input_tokens_details (:cached_tokens 69632)
-                :output_tokens 5134)
-       :tokens 5134 :speed 83.2)
+       :usage '(:input_tokens 3200 :input_tokens_details (:cached_tokens 1200)
+                :output_tokens 240)
+       :tokens 240 :speed 32.0)
       (ende-job-emit-event
        job '(:type :reasoning-summary :item summary-1
              :text "Latest provider summary"))
       (let* ((display (overlay-get overlay 'after-string))
-             (plain (substring-no-properties display)))
-        (should (< (string-match "OpenAI gpt-6-luna max" plain)
-                   (string-match "Tokens: 69,975/69,632" plain)))
-        (should (< (string-match "Tokens: 69,975/69,632" plain)
-                   (string-match "Thinking — Inspecting event models" plain)))
-        (should (< (string-match "Thinking — Inspecting event models" plain)
-                   (string-match "Provider summaries arrive" plain)))
-        (should (< (string-match "Provider summaries arrive" plain)
-                   (string-match "Reasoning: Latest provider summary" plain)))
+             (plain (substring-no-properties display))
+             (header (string-match "Provider Model balanced" plain))
+             (tokens (string-match "Tokens:" plain))
+             (cached (string-match "Cached:" plain))
+             (output (string-match "Output:" plain))
+             (phase (string-match "Thinking — Inspecting event models" plain))
+             (activity (string-match "Provider summaries arrive" plain))
+             (focus (string-match "Focus: Latest provider summary" plain)))
+        (should (and header tokens cached output phase activity focus))
+        (should (< header tokens cached output phase activity focus))
+        (should (= (1+ (cl-count ?\n (substring plain 0 activity)))
+                   (cl-count ?\n (substring plain 0 focus))))
+        (let ((token-indent (progn
+                              (string-match "^\\( *\\)Tokens:" plain)
+                              (length (match-string 1 plain))))
+              (focus-indent (progn
+                              (string-match "^\\( *\\)Focus:" plain)
+                              (length (match-string 1 plain)))))
+          (should (= token-indent focus-indent)))
+        (let ((face (get-text-property focus 'face display)))
+          (should (or (eq face 'bold) (memq 'bold face))))
         (ende-ui-update-overlay overlay :status "Generating")
         (ende-ui--refresh-all-overlays)
         (should (string-match-p "Inspecting event models"
@@ -148,8 +160,25 @@
     (let* ((overlay (ende-ui-create-overlay (current-buffer) (point) (point)))
            (plain (ende-test--overlay-label overlay)))
       (should-not (string-match-p "Tokens:" plain))
-      (should-not (string-match-p "Reasoning:" plain))
+      (should-not (string-match-p "Focus:" plain))
       (should (string-match-p "Queued" plain))
+      (ende-ui-delete-overlay overlay))))
+
+(ert-deftest ende-test/focus-follows-metrics-when-activity-is-absent ()
+  (ende-test--reset)
+  (ende-test--with-buffer "source"
+    (let ((overlay (ende-ui-create-overlay (current-buffer) (point) (point))))
+      (ende-ui-update-overlay
+       overlay :status "Thinking" :tokens 20 :estimated t
+       :reasoning-summary "Focused work" :speed 4.0)
+      (let* ((display (overlay-get overlay 'after-string))
+             (plain (substring-no-properties display))
+             (output (string-match "Output: ~20" plain))
+             (focus (string-match "Focus: Focused work" plain)))
+        (should (and output focus))
+        (should (= (1+ (cl-count ?\n (substring plain 0 output)))
+                   (cl-count ?\n (substring plain 0 focus))))
+        (should-not (string-match-p "Thinking" plain)))
       (ende-ui-delete-overlay overlay))))
 
 (ert-deftest ende-test/spinner-fallback-and-reduced-motion-cleanup ()
@@ -195,7 +224,9 @@
        job '(:type :usage :tokens 25 :speed 5.0 :estimated t))
       (let ((plain (ende-test--overlay-label overlay)))
         (should (string-match-p
-                 "Tokens: 120/40 - 5.0 t/s, Output: ~25" plain)))
+                 "Tokens: 120 - 5.0 t/s" plain))
+        (should (string-match-p "Cached: 40" plain))
+        (should (string-match-p "Output: ~25" plain)))
       (ende-ui-delete-overlay overlay))))
 
 (provide 'ende-ui-test)
