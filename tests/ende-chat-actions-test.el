@@ -780,6 +780,24 @@
     (should-not (ende-chat--staging-buffer job))
     (should-not (plist-get (ende-job-instruction job) :staging-buffer))))
 
+(ert-deftest ende-test/chat-staging-keybinding-is-buffer-local ()
+  (let ((org-buffer (generate-new-buffer " *ende-chat-org-test*"))
+        (job (ende--make-job :instruction '(:request-id "keymap-test")))
+        staging-buffer)
+    (unwind-protect
+        (progn
+          (with-current-buffer org-buffer (org-mode))
+          (let ((org-q (with-current-buffer org-buffer (key-binding (kbd "q")))))
+            (setq staging-buffer (ende-chat--staging-buffer job t))
+            (should (eq (with-current-buffer org-buffer
+                          (key-binding (kbd "q")))
+                        org-q))
+            (should (eq (with-current-buffer staging-buffer
+                          (key-binding (kbd "q")))
+                        #'ende-chat--staging-quit))))
+      (when (buffer-live-p staging-buffer) (kill-buffer staging-buffer))
+      (kill-buffer org-buffer))))
+
 (ert-deftest ende-test/chat-staging-does-not-copy-to-kill-ring ()
   (let ((buffer (generate-new-buffer " *ende-chat-staging-test*"))
         (kill-ring '("previous entry"))
