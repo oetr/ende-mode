@@ -97,6 +97,107 @@
 			    (should (null ende-ui--managed-overlays))
 			    (should (null ende-ui--spinner-timer)))))
 
+(ert-deftest ende-test/overlay-structured-content-updates-without-buffer-edits ()
+  (ende-test--reset)
+  (ende-test--with-buffer "source text"
+    (goto-char 4)
+    (let* ((job (ende--make-job
+                 :profile '(:name openai :model "gpt-6-luna"
+                           :reasoning-effort "max")))
+           (overlay (ende-ui-create-overlay (current-buffer) (point) (point)))
+           (source (buffer-string))
+           (tick (buffer-chars-modified-tick))
+           (position (point))
+           (ende-job-event-functions (list #'ende-ui-job-event)))
+      (setf (ende-job-overlay job) overlay)
+      (ende-ui-job-event
+       job '(:type :queued :client "OpenAI" :model "gpt-6-luna"))
+      (ende-ui-update-overlay
+       overlay :status "Thinking" :activity-title "Inspecting event models"
+       :activity-status "Provider summaries arrive as streaming events."
+       :usage '(:input_tokens 69975 :input_tokens_details (:cached_tokens 69632)
+                :output_tokens 5134)
+       :tokens 5134 :speed 83.2)
+      (ende-job-emit-event
+       job '(:type :reasoning-summary :item summary-1
+             :text "Latest provider summary"))
+      (let* ((display (overlay-get overlay 'after-string))
+             (plain (substring-no-properties display)))
+        (should (< (string-match "OpenAI gpt-6-luna max" plain)
+                   (string-match "Tokens: 69,975/69,632" plain)))
+        (should (< (string-match "Tokens: 69,975/69,632" plain)
+                   (string-match "Thinking — Inspecting event models" plain)))
+        (should (< (string-match "Thinking — Inspecting event models" plain)
+                   (string-match "Provider summaries arrive" plain)))
+        (should (< (string-match "Provider summaries arrive" plain)
+                   (string-match "Reasoning: Latest provider summary" plain)))
+        (ende-ui-update-overlay overlay :status "Generating")
+        (ende-ui--refresh-all-overlays)
+        (should (string-match-p "Inspecting event models"
+                                (ende-test--overlay-label overlay)))
+        (should (string-match-p "Latest provider summary"
+                                (ende-test--overlay-label overlay))))
+      (should (equal source (buffer-string)))
+      (should (= tick (buffer-chars-modified-tick)))
+      (should (= position (point)))
+      (ende-ui-delete-overlay overlay))))
+
+(ert-deftest ende-test/overlay-hides-unavailable-optional-details ()
+  (ende-test--reset)
+  (ende-test--with-buffer "source"
+    (let* ((overlay (ende-ui-create-overlay (current-buffer) (point) (point)))
+           (plain (ende-test--overlay-label overlay)))
+      (should-not (string-match-p "Tokens:" plain))
+      (should-not (string-match-p "Reasoning:" plain))
+      (should (string-match-p "Queued" plain))
+      (ende-ui-delete-overlay overlay))))
+
+(ert-deftest ende-test/spinner-fallback-and-reduced-motion-cleanup ()
+  (ende-test--reset)
+  (let ((ende-ui--svg-spinner-frames nil)
+        (ende-ui--spinning-overlays nil))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) nil)))
+      (should (equal (ende-ui--spinner-frames)
+                     ende-ui--fallback-spinner-frames))
+      (should (equal (ende-ui--spinner-frame 0) "◴")))
+    (when (image-type-available-p 'svg)
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _) t)))
+        (let ((frame (ende-ui--spinner-frame 3)))
+          (should (imagep (get-text-property 0 'display frame)))
+          (should (= (length ende-ui--svg-spinner-frames) 12)))))
+    (ende-test--with-buffer "spinner"
+      (let ((ende-reduced-motion t)
+            (overlay (ende-ui-create-overlay
+                      (current-buffer) (point) (point))))
+        (ende-ui-update-overlay overlay :status "Thinking")
+        (should-not ende-ui--spinner-timer)
+        (should (equal (substring-no-properties
+                        (overlay-get overlay 'after-string))
+                       "◴ \nThinking\n"))
+        (ende-ui-delete-overlay overlay)
+        (should-not ende-ui--spinner-timer)))))
+
+(ert-deftest ende-test/usage-events-retain-context-for-estimated-output ()
+  (ende-test--reset)
+  (ende-test--with-buffer "usage source"
+    (let* ((job (ende--make-job :state 'running :execution-generation 1))
+           (ende--active-jobs (list job))
+           (ende-job-event-functions nil)
+           (overlay (ende-ui-create-overlay (current-buffer) (point) (point))))
+      (setf (ende-job-overlay job) overlay)
+      (ende--handle-llm-event
+       job '(:type :usage :tokens 12 :speed 6.0
+             :usage (:input_tokens 120
+                     :input_tokens_details (:cached_tokens 40)
+                     :output_tokens 12)))
+      (ende--handle-llm-event
+       job '(:type :usage :tokens 25 :speed 5.0 :estimated t))
+      (let ((plain (ende-test--overlay-label overlay)))
+        (should (string-match-p
+                 "Tokens: 120/40 - 5.0 t/s, Output: ~25" plain)))
+      (ende-ui-delete-overlay overlay))))
+
 (provide 'ende-ui-test)
 
 ;;; ende-ui-test.el ends here

@@ -200,7 +200,9 @@ result is applied."
               (ende-job-overlay job)
               :tokens (plist-get event :tokens)
               :speed (plist-get event :speed)
-              :estimated (plist-get event :estimated)))))
+              :estimated (plist-get event :estimated)
+              :usage (or (plist-get event :usage)
+                         (ende-job-last-usage job))))))
         (ende-job-emit-event job event)))))
 
 (defun ende-operations--source-metadata-block (job)
