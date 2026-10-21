@@ -2047,10 +2047,13 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
             (dolist (section sections)
               (goto-char (org-element-property :begin section))
               (org-fold-hide-subtree)
-              (let ((inhibit-message t))
-                (org-copy-subtree 1))
-              (ende-chat--staging-at-end
-               buffer (lambda () (org-paste-subtree level))))))))))
+              (let ((kill-ring nil)
+                    (kill-ring-yank-pointer nil)
+                    (interprogram-cut-function nil))
+                (let ((inhibit-message t))
+                  (org-copy-subtree 1))
+                (ende-chat--staging-at-end
+                 buffer (lambda () (org-paste-subtree level)))))))))))
 
 (defun ende-chat--staging-append (job text &optional checkpoint)
   "Append generated Org TEXT to JOB's private staging buffer.

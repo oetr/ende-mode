@@ -780,6 +780,23 @@
     (should-not (ende-chat--staging-buffer job))
     (should-not (plist-get (ende-job-instruction job) :staging-buffer))))
 
+(ert-deftest ende-test/chat-staging-does-not-copy-to-kill-ring ()
+  (let ((buffer (generate-new-buffer " *ende-chat-staging-test*"))
+        (kill-ring '("previous entry"))
+        (kill-ring-yank-pointer nil)
+        clipboard-text
+        (interprogram-cut-function
+         (lambda (text) (setq clipboard-text text))))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer (org-mode))
+          (ende-chat--staging-insert buffer "* Work\n** Summary\n")
+          (should (equal kill-ring '("previous entry")))
+          (should-not clipboard-text)
+          (with-current-buffer buffer
+            (should (string-match-p "Summary" (buffer-string)))))
+      (kill-buffer buffer))))
+
 (ert-deftest ende-test/chat-reasoning-summaries-follow-tool-rounds ()
   (ende-test--reset)
   (let* ((call '(:id "summary-call" :name "about_thinking"
