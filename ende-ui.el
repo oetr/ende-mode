@@ -120,7 +120,9 @@
 (defun ende-ui--focus-paragraph (text)
   "Format a bounded, safely displayed TEXT with a bold Focus label."
   (when (and (stringp text) (not (string-blank-p text)))
-    (let* ((plain (substring-no-properties text))
+    (let* ((plain (replace-regexp-in-string
+                   "\\*\\*\\([^*]+\\)\\*\\*" "\\1"
+                   (substring-no-properties text)))
            (limit 800)
            (label "Focus: "))
       (setq plain (concat (substring plain 0 (min limit (length plain)))
@@ -130,7 +132,7 @@
         (let ((fill-column 72))
           (fill-region (point-min) (point-max)))
         (let ((paragraph (propertize (buffer-string) 'face 'shadow)))
-          (add-face-text-property 0 (length label) 'bold t paragraph)
+          (add-face-text-property 0 (length paragraph) 'bold t paragraph)
           (concat paragraph "\n"))))))
 
 (defun ende-ui--format-badge (ov)

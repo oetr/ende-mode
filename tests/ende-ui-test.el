@@ -170,12 +170,17 @@
     (let ((overlay (ende-ui-create-overlay (current-buffer) (point) (point))))
       (ende-ui-update-overlay
        overlay :status "Thinking" :tokens 20 :estimated t
-       :reasoning-summary "Focused work" :speed 4.0)
+       :reasoning-summary "Focused **work**" :speed 4.0)
       (let* ((display (overlay-get overlay 'after-string))
              (plain (substring-no-properties display))
              (output (string-match "Output: ~20" plain))
-             (focus (string-match "Focus: Focused work" plain)))
+             (focus (string-match "Focus: Focused work" plain))
+             (focus-text-face
+              (get-text-property (+ focus (length "Focus: ")) 'face display)))
         (should (and output focus))
+        (should-not (string-match-p "\\*\\*" plain))
+        (should (or (eq focus-text-face 'bold)
+                    (memq 'bold focus-text-face)))
         (should (= (1+ (cl-count ?\n (substring plain 0 output)))
                    (cl-count ?\n (substring plain 0 focus))))
         (should-not (string-match-p "Thinking" plain)))
