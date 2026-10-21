@@ -483,6 +483,36 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should (= (length estimated) (if (eq transport 'chat) 1 0)))
         (should (plist-get out :cleaned))))))
 
+(ert-deftest ende-test/stream-speed-requires-a-valid-measured-interval ()
+  (let* ((now 10.0)
+         (events nil)
+         (lifecycle
+          (ende-transport-session-create
+           (list :on-event (lambda (event) (push event events))) nil))
+         (stream (ende-stream-create lifecycle nil))
+         (usage (json-parse-string "{\"output_tokens\":113}"
+                                   :object-type 'hash-table)))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+      (ende-stream-record-usage stream usage "output_tokens")
+      (should-not (plist-get (car events) :speed))
+      (should-not (plist-get
+                   (ende-stream-result stream "output_tokens" nil "test")
+                   :speed))
+      (setf (ende-stream-session-generation-start stream) now
+            (ende-stream-session-estimated-chars stream) 452)
+      (setq now 10.01)
+      (ende-stream-emit-estimated-usage stream)
+      (should-not (plist-get (car events) :speed))
+      (ende-stream-record-usage stream usage "output_tokens")
+      (should-not (plist-get (car events) :speed))
+      (setq now 11.0)
+      (ende-stream-record-usage stream usage "output_tokens")
+      (should (numberp (plist-get (car events) :speed)))
+      (should (numberp
+               (plist-get
+                (ende-stream-result stream "output_tokens" nil "test")
+                :speed))))))
+
 (ert-deftest ende-test/active-callback-failure-cleans-up-once ()
   (ende-test--reset)
   (dolist (transport '(chat codex))

@@ -330,8 +330,10 @@
                              (or (plist-get event :tokens) 0))
                      (format "Estimated: %s"
                              (if (plist-get event :estimated) "yes" "no"))
-                     (format "Speed: %.2f t/s"
-                             (or (plist-get event :speed) 0.0))
+                     (and (numberp (plist-get event :speed))
+                          (> (plist-get event :speed) 0)
+                          (format "Speed: %.2f t/s"
+                                  (plist-get event :speed)))
                      (ende-history--usage-message-summary raw)
                      (ende-history--usage-token-summary raw)))
          "\n")
@@ -422,19 +424,25 @@
               (when (or (listp metrics-result) finish-reason)
                 (ende-history--insert-section
                  "Metrics"
-                 (format "Tokens: %s\nEstimated: %s\nSpeed: %.2f t/s%s"
-                         (or (and (listp metrics-result)
-                                  (plist-get metrics-result :tokens))
-                             0)
-                         (if (and (listp metrics-result)
-                                  (plist-get metrics-result :estimated))
-                             "yes" "no")
-                         (or (and (listp metrics-result)
-                                  (plist-get metrics-result :speed))
-                             0.0)
-                         (if finish-reason
-                             (format "\nFinish reason: %s" finish-reason)
-                           ""))))
+                 (mapconcat
+                  #'identity
+                  (delq nil
+                        (list
+                         (format "Tokens: %s"
+                                 (or (and (listp metrics-result)
+                                          (plist-get metrics-result :tokens))
+                                     0))
+                         (format "Estimated: %s"
+                                 (if (and (listp metrics-result)
+                                          (plist-get metrics-result :estimated))
+                                     "yes" "no"))
+                         (and (numberp (plist-get metrics-result :speed))
+                              (> (plist-get metrics-result :speed) 0)
+                              (format "Speed: %.2f t/s"
+                                      (plist-get metrics-result :speed)))
+                         (and finish-reason
+                              (format "Finish reason: %s" finish-reason))))
+                  "\n")))
               (when usage
                 (ende-history--insert-section
                  "Usage" (ende-history--usage-string usage)))

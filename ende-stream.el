@@ -51,6 +51,13 @@
     (setf (ende-stream-session-generation-start stream) (float-time)))
   (ende-stream-session-generation-start stream))
 
+(defun ende-stream--speed (tokens started now)
+  "Return TOKENS per second when STARTED and NOW give a useful interval."
+  (let ((elapsed (and (numberp started) (- now started))))
+    (when (and (numberp tokens) (> tokens 0)
+               (numberp elapsed) (>= elapsed 0.1))
+      (/ (float tokens) elapsed))))
+
 (defun ende-stream-record-delta (stream channel text limit-callback)
   "Accumulate and emit TEXT on CHANNEL for STREAM.
 Call LIMIT-CALLBACK with a resource error if the output limit is exceeded.
@@ -84,13 +91,12 @@ TOKEN-KEY names the provider-specific output-token field."
   (setf (ende-stream-session-usage stream) usage)
   (let* ((reported (ende-protocol-json-get token-key usage))
          (tokens (if (numberp reported) reported 0))
-         (now (float-time))
-         (started (or (ende-stream-session-generation-start stream) now)))
+         (now (float-time)))
     (ende-stream-emit
      stream (list :type :usage :tokens tokens
-                  :speed (if (numberp reported)
-                             (/ (float tokens) (max 0.001 (- now started)))
-                           0.0)
+                  :speed (ende-stream--speed
+                          tokens (ende-stream-session-generation-start stream)
+                          now)
                   :usage usage))))
 
 (defun ende-stream-record-reasoning-summary (stream item text)
@@ -122,10 +128,10 @@ TOKEN-KEY names the provider-specific output-token field."
          (tokens (max 1 (floor
                          (/ (ende-stream-session-estimated-chars stream)
                             4.0))))
-         (started (or (ende-stream-session-generation-start stream) now)))
+         (started (ende-stream-session-generation-start stream)))
     (ende-stream-emit
      stream (list :type :usage :tokens tokens
-                  :speed (/ (float tokens) (max 0.001 (- now started)))
+                  :speed (ende-stream--speed tokens started now)
                   :estimated t))))
 
 (defun ende-stream-result
@@ -138,8 +144,7 @@ TOKEN-KEY is the provider-specific output-token field."
                      (max 0 (floor
                              (/ (ende-stream-session-estimated-chars stream)
                                 4.0)))))
-         (started (or (ende-stream-session-generation-start stream)
-                      (float-time))))
+         (started (ende-stream-session-generation-start stream)))
     (append
      (list :content (mapconcat #'identity
                                (reverse
@@ -148,7 +153,7 @@ TOKEN-KEY is the provider-specific output-token field."
                                 (reverse
                                  (ende-stream-session-thinking-parts stream)) "")
            :usage usage :tokens tokens :estimated (null reported)
-           :speed (/ (float tokens) (max 0.001 (- (float-time) started)))
+           :speed (ende-stream--speed tokens started (float-time))
            :finish-reason (ende-stream-session-finish-reason stream)
            :provider (or (ende-stream-session-actual-provider stream)
                          provider-fallback)

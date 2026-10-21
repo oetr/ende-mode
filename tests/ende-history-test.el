@@ -99,6 +99,22 @@
 				(should-not (string-match-p "msg_" text))
 				(should-not (string-match-p "attribution" text)))))))
 
+(ert-deftest ende-test/history-omits-unknown-token-speed ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          (list '(:content "answer" :tokens 113 :speed 0.0
+                  :usage (:output_tokens 113))))))
+    (ende-test--with-buffer "base"
+      (goto-char (point-max))
+      (ende-insert-at-cursor)
+      (with-current-buffer ende-history-buffer-name
+        (let ((text (buffer-string)))
+          (should (string-match-p "Stream tokens: 113" text))
+          (should (string-match-p "Tokens: 113" text))
+          (should-not (string-match-p "Speed:" text))
+          (should-not (string-match-p "0\.0+ t/s" text)))))))
+
 (ert-deftest ende-test/history-retains-failed-stream-and-summarizes-usage ()
   (ende-test--reset)
   (let ((ende-llm-function
