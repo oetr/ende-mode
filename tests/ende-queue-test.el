@@ -11,6 +11,28 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
+(ert-deftest ende-test/latest-reasoning-summary-tracks-deltas-and-replacements ()
+  (let* ((job (ende--make-job))
+         observed)
+    (let ((ende-job-event-functions
+           (list (lambda (seen-job _event)
+                   (setq observed
+                         (list (ende-job-reasoning-summary-item seen-job)
+                               (ende-job-reasoning-summary-text seen-job)))))))
+      (ende-job-emit-event
+       job '(:type :reasoning-summary :item first :text "Inspecting "))
+      (should (equal observed '(first "Inspecting ")))
+      (ende-job-emit-event
+       job '(:type :reasoning-summary :item first :text "metadata"))
+      (should (equal (ende-job-reasoning-summary-text job)
+                     "Inspecting metadata"))
+      (ende-job-emit-event
+       job '(:type :reasoning-summary :item first :text "Complete" :replace t))
+      (should (equal (ende-job-reasoning-summary-text job) "Complete"))
+      (ende-job-emit-event
+       job '(:type :reasoning-summary :item second :text "Latest"))
+      (should (equal observed '(second "Latest"))))))
+
 
 
 (defun ende-test--sleep-process ()

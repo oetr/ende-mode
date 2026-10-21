@@ -35,7 +35,8 @@
   id type state cancel-function overlay target profile inference-template instruction
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
-  last-usage tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
+  last-usage reasoning-summary-item reasoning-summary-text
+  tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
   scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement)
@@ -308,6 +309,18 @@ Stale reports do nothing.  Transport status and scheduler state are untouched."
     (:usage
      (when (plist-get event :usage)
        (setf (ende-job-last-usage job) (plist-get event :usage))))
+    (:reasoning-summary
+     (let* ((item (plist-get event :item))
+            (text (plist-get event :text))
+            (previous
+             (and (equal item (ende-job-reasoning-summary-item job))
+                  (ende-job-reasoning-summary-text job))))
+       (when (stringp text)
+         (setf (ende-job-reasoning-summary-item job) item
+               (ende-job-reasoning-summary-text job)
+               (if (plist-get event :replace)
+                   text
+                 (concat previous text))))))
     (:tool-call-count
      (let ((count (plist-get event :count)))
        (when (and (integerp count) (>= count 0))
