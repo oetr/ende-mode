@@ -675,6 +675,37 @@
               :ok))))
       (delete-directory root t))))
 
+(ert-deftest ende-test/host-command-absolute-paths-match-exactly ()
+  (let* ((root (make-temp-file "ende host " t))
+         (program (expand-file-name "printf" root)))
+    (unwind-protect
+        (progn
+          (make-symbolic-link (executable-find "printf") program)
+          (dolist (rule (list program
+                             (list :fixed-args program "%s" "hello")
+                             (list :prefix-args program "%s")))
+            (let* ((configuration
+                    (ende-test--tool-access-config
+                     root `((tools run_host_command)
+                            (restrict-host-commands ,rule))))
+                   (command (make-hash-table :test #'equal)))
+              (puthash "program" program command)
+              (puthash "args" ["%s" "hello"] command)
+              (let ((call (ende-test--host-command-call
+                           (list (cons "command" command)) configuration)))
+                (should (plist-get call :ok))
+                (should (plist-get (plist-get call :result) :process_ok))
+                (should (equal (plist-get (plist-get call :result) :stdout)
+                               "hello")))
+              (dolist (other (list "printf" (executable-find "printf")))
+                (puthash "program" other command)
+                (should-not
+                 (plist-get
+                  (ende-test--host-command-call
+                   (list (cons "command" command)) configuration)
+                  :ok))))))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/host-command-prefix-restrictions-use-argv-boundaries ()
   (let* ((root (make-temp-file "ende-host-prefix-" t))
          (configuration
