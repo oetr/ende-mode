@@ -389,6 +389,18 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
         (push tool tools)))
     (delete-dups (nreverse tools))))
 
+(defun ende-chat-config--host-command-program (program)
+  "Validate PROGRAM as a bare executable name or local absolute path."
+  (unless (and (not (member program '("." "..")))
+               (not (file-remote-p program))
+               (not (string-match-p "[[:cntrl:]]" program))
+               (or (string-match-p "\\`[^/[:space:]]+\\'" program)
+                   (and (file-name-absolute-p program)
+                        (not (string-prefix-p "~" program)))))
+    (ende-chat-config--error
+     "host command executable must be a bare name or local absolute path: %S"
+     program)))
+
 (defun ende-chat-config--host-command-rules (rules)
   "Validate and normalize host command RULES."
   (unless rules
@@ -397,10 +409,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
     (dolist (rule rules)
       (cond
        ((stringp rule)
-        (unless (and (not (member rule '("." "..")))
-                     (string-match-p "\\`[^/[:space:][:cntrl:]]+\\'" rule))
-          (ende-chat-config--error
-           "host command executable must be a bare name: %S" rule))
+        (ende-chat-config--host-command-program rule)
         (push rule open))
        ((and (ende-chat-config--proper-list-p rule)
              (memq (car rule) '(:fixed-args :prefix-args))
@@ -409,12 +418,7 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
              (or (eq (car rule) :fixed-args)
                  (cdr (cdr rule))))
         (let ((argv (cdr rule)))
-          (unless (and (not (member (car argv) '("." "..")))
-                       (string-match-p
-                        "\\`[^/[:space:][:cntrl:]]+\\'" (car argv)))
-            (ende-chat-config--error
-             "host command executable must be a bare name: %S"
-             (car argv)))
+          (ende-chat-config--host-command-program (car argv))
           (if (eq (car rule) :fixed-args)
               (push argv fixed)
             (push argv prefix))))
