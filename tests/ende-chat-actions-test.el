@@ -30,6 +30,88 @@
     (forward-line -1)
     (looking-at-p "^[[:space:]]*$")))
 
+(ert-deftest ende-test/chat-missing-title-uses-standalone-fallback ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("Answer without title" "Parser overview"))))
+    (ende-test--with-buffer
+     "* Chat\n** \nExplain how this parser works.\n** Next\nFollow up.\n"
+     (org-mode)
+     (ende-test--chat-goto "** ")
+     (let ((job (ende-ask)))
+       (should (eq (ende-job-state job) 'completed))
+       (should (= (length ende-test--calls) 2))
+       (should (= (length (plist-get (cadr ende-test--calls) :messages)) 2))
+       (should (null (plist-get (plist-get (cadr ende-test--calls) :options)
+                                :tool-definitions)))
+       (should (equal
+                (string-trim
+                 (cdr (cadr (plist-get (cadr ende-test--calls) :messages))))
+                "Explain how this parser works."))
+       (should (string-match-p "Answer without title" (buffer-string)))
+       (should (string-match-p "^\\*\\* Parser overview$" (buffer-string)))
+       (should (string-match-p "ENDE_CHAT_GENERATED_TITLE: t" (buffer-string)))
+       (let* ((document (ende-chat--build-document))
+              (next (cl-find-if
+                     (lambda (headline)
+                       (equal (org-element-property :raw-value headline) "Next"))
+                     (ende-chat--document-headlines document)))
+              (text (ende-test--chat-context-text
+                     (ende-chat--serialize document next))))
+         (should-not (string-match-p "Parser overview" text))
+         (should-not (string-match-p "Generate a concise" text))
+         (should (string-match-p "Explain how this parser works" text))
+         (should (string-match-p "Answer without title" text)))))))
+
+(ert-deftest ende-test/chat-inline-title-skips-fallback ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm
+          '("#+ENDE_CHAT_TITLE: Inline title\nAnswer"))))
+    (ende-test--with-buffer
+     "* Chat\n** \nRequest body.\n"
+     (org-mode)
+     (ende-test--chat-goto "** ")
+     (let ((job (ende-ask)))
+       (should (eq (ende-job-state job) 'completed))
+       (should (= (length ende-test--calls) 1))
+       (should (string-match-p "^\\*\\* Inline title$" (buffer-string)))))))
+
+(ert-deftest ende-test/chat-fallback-preserves-user-title-edited-in-flight ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("Answer" "Generated title") t)))
+    (ende-test--with-buffer
+     "* Chat\n** \nRequest body.\n"
+     (org-mode)
+     (ende-test--chat-goto "** ")
+     (let ((job (ende-ask)))
+       (ende-test--complete-call (car ende-test--calls))
+       (ende-test--chat-goto "** ")
+       (ende-chat--set-headline-title
+        (ende-chat--headline-at-point (ende-chat--build-document))
+        "My own title")
+       (ende-test--complete-call (cadr ende-test--calls))
+       (should (eq (ende-job-state job) 'completed))
+       (should (string-match-p "^\\*\\* My own title$" (buffer-string)))
+       (should-not
+        (string-match-p "ENDE_CHAT_GENERATED_TITLE" (buffer-string)))))))
+
+(ert-deftest ende-test/chat-title-fallback-failure-keeps-answer-successful ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("Successful answer" :error))))
+    (ende-test--with-buffer
+     "* Chat\n** \nRequest body.\n"
+     (org-mode)
+     (ende-test--chat-goto "** ")
+     (let ((job (ende-ask)))
+       (should (eq (ende-job-state job) 'completed))
+       (should (= (length ende-test--calls) 2))
+       (should (string-match-p "Successful answer" (buffer-string)))
+       (should-not (string-match-p "ENDE_CHAT_GENERATED_TITLE" (buffer-string)))
+       (should (string-match-p "^\\*\\* $" (buffer-string)))))))
+
 (ert-deftest ende-test/direct-chat-request-uses-buffer-selection ()
   (ende-test--reset)
   (let ((ende-model-selection-scope 'buffer)
@@ -430,7 +512,7 @@
 (ert-deftest ende-test/chat-unrelated-edits-during-async-tool-round-are-safe ()
   (ende-test--reset)
   (let* ((call '(:id "deferred-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Checking\",\"status\":\"Waiting\"}"))
+                     :arguments "{\"title\":\"Checking\",\"status\":\"Waiting\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Answer after the tool") t))
@@ -491,8 +573,8 @@
          (should result-node)
          (should reply)
          (should (< call-pos result-pos reply-pos))
-          (should (eq (ende-chat--parent document call-node) work))
-          (should (eq (ende-chat--parent document result-node) work)))))))
+         (should (eq (ende-chat--parent document call-node) work))
+         (should (eq (ende-chat--parent document result-node) work)))))))
 
 (ert-deftest ende-test/chat-recursively-delegates-with-chat-owned-results ()
   (ende-test--reset)
@@ -568,7 +650,7 @@
                  "Sibling B final."
                  "Root batch answer.") t))
          (profile '(:name remote :model "fixture" :parallel t
-                    :max-concurrency 2))
+			  :max-concurrency 2))
          root children)
     (ende-test--with-buffer
      (concat (ende-test--chat-config-block
@@ -622,7 +704,7 @@
                              (funcall spawn-call "cancel-b" "task B")))
                  :stall :stall) t))
          (profile '(:name remote :model "fixture" :parallel t
-                    :max-concurrency 2))
+			  :max-concurrency 2))
          (late-count 0)
          root children child-buffers)
     (ende-test--with-buffer
@@ -661,9 +743,9 @@
   (let* ((directory (make-temp-file "ende-chat-staging-rounds-" t))
          (user-emacs-directory directory)
          (first '(:id "round-one" :name "about_thinking"
-                  :arguments "{\"title\":\"First\",\"status\":\"Done\"}"))
+                      :arguments "{\"title\":\"First\",\"status\":\"Done\"}"))
          (second '(:id "round-two" :name "about_thinking"
-                   :arguments "{\"title\":\"Second\",\"status\":\"Done\"}"))
+                       :arguments "{\"title\":\"Second\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list first))
@@ -697,7 +779,7 @@
   (let* ((directory (make-temp-file "ende-chat-staged-failure-id-" t))
          (user-emacs-directory directory)
          (call '(:id "durable-failure-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Staged\",\"status\":\"Done\"}"))
+                     :arguments "{\"title\":\"Staged\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Unused final") t)))
@@ -713,7 +795,7 @@
                        (point-min) (current-buffer))
            (ende--handle-llm-event
             job '(:type :reasoning-summary :item "failure"
-                  :text "Failure context"))
+			:text "Failure context"))
            (ende-job-fail job "Injected after the tool round")
            (should (eq (ende-job-state job) 'failed))
            (should (string-match-p "Agent: Work" (buffer-string)))
@@ -745,7 +827,7 @@
   (let* ((directory (make-temp-file "ende-chat-staged-retain-" t))
          (user-emacs-directory directory)
          (call '(:id "retained-work-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Durable\",\"status\":\"Done\"}"))
+                     :arguments "{\"title\":\"Durable\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Unused final") t)))
@@ -824,7 +906,7 @@
 (ert-deftest ende-test/chat-reasoning-summaries-follow-tool-rounds ()
   (ende-test--reset)
   (let* ((call '(:id "summary-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Looking\",\"status\":\"Around\"}"))
+                     :arguments "{\"title\":\"Looking\",\"status\":\"Around\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Answer") t))
@@ -865,7 +947,7 @@
                                        (buffer-string))))
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
-                :replace t))
+                      :replace t))
          (with-current-buffer (ende-chat--staging-buffer job)
            (should (string-match-p "Agent: After tools" (buffer-string)))
            (should (= 1 (how-many "Agent: After" (point-min) (point-max)))))
@@ -956,7 +1038,7 @@
                         (and (equal (org-element-property :raw-value headline)
                                     "Agent: Reply")
                              (equal (ende-chat--property document headline
-                                                        :request-id)
+                                                         :request-id)
                                     request-id)))
                       (ende-chat--document-headlines document)))
               (summary (car (ende-chat--children document work)))
@@ -1021,7 +1103,7 @@
   (let* ((directory (make-temp-file "ende-chat-staged-malformed-" t))
          (user-emacs-directory directory)
          (call '(:id "malformed-work-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Malformed\",\"status\":\"Done\"}"))
+                     :arguments "{\"title\":\"Malformed\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call))
@@ -1058,7 +1140,7 @@
 (ert-deftest ende-test/chat-failure-after-tool-work-keeps-staged-transcript ()
   (ende-test--reset)
   (let* ((call '(:id "failed-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Working\",\"status\":\"Done\"}"))
+                     :arguments "{\"title\":\"Working\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) :error) t)))
@@ -1086,7 +1168,7 @@
   (let* ((directory (make-temp-file "ende-chat-recovery-test-" t))
          (user-emacs-directory directory)
          (call '(:id "snapshot-call" :name "about_thinking"
-                 :arguments "{\"title\":\"Checkpoint\",\"status\":\"Test\"}"))
+                     :arguments "{\"title\":\"Checkpoint\",\"status\":\"Test\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Final snapshot answer") t)))
@@ -1142,8 +1224,8 @@
             (insert "# ENDE_CHAT_RECOVERY: "
                     (prin1-to-string
                      '(:request-id "stale-request"
-                       :question-id "old-question"
-                       :source-buffer "*other-chat*"))
+				   :question-id "old-question"
+				   :source-buffer "*other-chat*"))
                     "\n** Agent: Work\nRecovered transcript.\n"))
           (ende-test--with-buffer
            "* Other\n** Question\nKeep this pending.\n"
@@ -1287,8 +1369,8 @@
        (cl-letf (((symbol-function 'ende-chat--hide-control-drawers-in-region)
                   (lambda (&rest _arguments)
                     (error "Injected drawer-folding failure"))))
-          (should-error
-           (ende-chat--persist-ordinary-reply job response)))
+         (should-error
+          (ende-chat--persist-ordinary-reply job response)))
        (should (equal before (buffer-string)))
        (should (= position (marker-position target-marker)))
        (should (ende-chat--resolve-request-destination job))
@@ -1313,9 +1395,9 @@
            ('completed (ende-test--complete-call (car ende-test--calls)))
            ('failed (ende-job-fail job "Injected failure"))
            ('cancelled (ende-abort-queue)))
-          (should (eq (ende-job-state job) outcome))
-          (should-not (marker-buffer question-marker))
-          (should-not (plist-get (ende-job-instruction job)
+         (should (eq (ende-job-state job) outcome))
+         (should-not (marker-buffer question-marker))
+         (should-not (plist-get (ende-job-instruction job)
 				:question-marker)))))))
 
 

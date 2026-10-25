@@ -60,7 +60,14 @@
                        updated updated-question :generated-title) "t"))
        (should-not (string-match-p "ENDE_CHAT_GENERATED_TITLE" (cdr (car after))))
        (should-not (string-match-p "Parser operation" (cdr (car after))))
-       (should (string-match-p "Explain how this parser works\\." section))))))
+       (should (string-match-p "Explain how this parser works\\." section))
+       (ende-chat--set-headline-title updated-question "Renamed manually")
+       (let* ((renamed (ende-chat--build-document))
+              (renamed-question (ende-chat--headline-at-point renamed))
+              (renamed-text
+               (ende-test--chat-context-text
+                (ende-chat--serialize renamed renamed-question))))
+         (should-not (string-match-p "Renamed manually" renamed-text)))))))
 
 (ert-deftest ende-test/reserved-chat-drawers-are-excluded-from-context ()
   (ende-test--reset)
@@ -369,16 +376,16 @@
      ;; These queries exercise a local fence, an ancestor fence, an earlier
      ;; branch at the same depth, later fences, and an independent root.
      (dolist (case
-	      '(("*** Q11" "C0" "Q01" "R01" "Q11")
-                ("*** Q1" "C1" "Summary detail" "Q1" "Reference")
-                ("** Q2" "C0" "Q01" "R01" "C1" "Summary detail"
-                 "Q1" "Reference" "R12" "Q2")
-                ("*** Q21" "C0" "Q01" "R01" "C1" "Summary detail"
-                 "Q1" "Reference" "R12" "Q2" "R02" "Q21")
-                ("**** Q211" "C0" "Q01" "R01" "C1" "Summary detail"
-                 "Q1" "Reference" "R12" "Q2" "R02" "Q21" "Q211")
-                ("** Q3" "C2" "Q3")
-                ("** Q4" "Other" "Q4")))
+		 '(("*** Q11" "C0" "Q01" "R01" "Q11")
+                   ("*** Q1" "C1" "Summary detail" "Q1" "Reference")
+                   ("** Q2" "C0" "Q01" "R01" "C1" "Summary detail"
+                    "Q1" "Reference" "R12" "Q2")
+                   ("*** Q21" "C0" "Q01" "R01" "C1" "Summary detail"
+                    "Q1" "Reference" "R12" "Q2" "R02" "Q21")
+                   ("**** Q211" "C0" "Q01" "R01" "C1" "Summary detail"
+                    "Q1" "Reference" "R12" "Q2" "R02" "Q21" "Q211")
+                   ("** Q3" "C2" "Q3")
+                   ("** Q4" "Other" "Q4")))
        (ende-test--chat-goto (car case))
        (let* ((messages (ende-chat-context-at-point))
               (text (ende-test--chat-context-text messages)))
