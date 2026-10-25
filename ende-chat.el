@@ -2102,7 +2102,8 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
               (org-fold-hide-subtree)
               (let ((kill-ring nil)
                     (kill-ring-yank-pointer nil)
-                    (interprogram-cut-function nil))
+                    (interprogram-cut-function nil)
+                    (interprogram-paste-function nil))
                 (let ((inhibit-message t))
                   (org-copy-subtree 1))
                 (ende-chat--staging-at-end

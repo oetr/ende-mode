@@ -803,16 +803,22 @@
         (kill-ring '("previous entry"))
         (kill-ring-yank-pointer nil)
         clipboard-text
+        clipboard-read
         (interprogram-cut-function
-         (lambda (text) (setq clipboard-text text))))
+         (lambda (text) (setq clipboard-text text)))
+        (interprogram-paste-function
+         (lambda ()
+           (setq clipboard-read t)
+           "Unrelated clipboard contents")))
     (unwind-protect
         (progn
           (with-current-buffer buffer (org-mode))
           (ende-chat--staging-insert buffer "* Work\n** Summary\n")
           (should (equal kill-ring '("previous entry")))
           (should-not clipboard-text)
+          (should-not clipboard-read)
           (with-current-buffer buffer
-            (should (string-match-p "Summary" (buffer-string)))))
+            (should (equal (buffer-string) "* Work\n** Summary\n"))))
       (kill-buffer buffer))))
 
 (ert-deftest ende-test/chat-reasoning-summaries-follow-tool-rounds ()
