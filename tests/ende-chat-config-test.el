@@ -81,6 +81,139 @@
       (delete-directory root-a t)
       (delete-directory root-b t))))
 
+(ert-deftest ende-test/agent-config-shares-definitions-not-authority ()
+  (let ((root (make-temp-file "ende-agent-definitions-" t))
+        (ende-providers '(local remote))
+        (ende-provider-profiles
+         '((remote :url "http://example.invalid/v1" :model "parent-model"))))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert
+           (ende-test--chat-config-block
+            `((root ,root)
+              (podman-image ,(concat "fixture@sha256:" (make-string 64 ?a)))
+              (provider remote)
+              (model "parent-model")
+              (group inspect web_fetch)
+              (resource docs :type url (include "https://docs.example.com/**"))
+              (tools inspect project_info run_host_command spawn_agent)
+              (set-tool-resources inspect :resources docs)
+              (restrict-host-commands "git")
+              (agent-config worker
+                            (tools inspect)
+                            (set-tool-resources inspect :resources docs))
+              (agent-config idle)
+              (spawn-agent-config worker)))
+           "* Topic\n** Question\n")
+          (let* ((document (ende-chat--build-document))
+                 (question (car (last (ende-chat--document-headlines document))))
+                 (environment
+                  (ende-chat-config-resolve-environment
+                   (ende-chat--document-tree document)
+                   (ende-chat--document-parent document) question))
+                 (parent (plist-get environment :access-policy))
+                 (registry (plist-get environment :registry))
+                 (worker (cdr (assq 'worker registry)))
+                 (idle (cdr (assq 'idle registry))))
+            (should (equal (plist-get parent :root)
+                           (ende-project-normalize-root root)))
+            (should (equal (plist-get parent :tool-resources)
+                           '((web_fetch docs))))
+            (should-not (cl-set-exclusive-or (plist-get worker :active-tools)
+                                             '(web_fetch about_thinking)))
+            (should (equal (plist-get worker :tool-resources)
+                           '((web_fetch docs))))
+            (should (equal (plist-get idle :active-tools) '(about_thinking)))
+            (should-not (plist-get idle :tool-resources))
+            (dolist (policy (list worker idle))
+              (should policy)
+              (should (equal (cdr (assq 'inspect (plist-get policy :groups)))
+                             '(web_fetch)))
+              (should (equal (plist-get
+                              (cdr (assq 'docs (plist-get policy :resources)))
+                              :include)
+                             '("https://docs.example.com/**")))
+              (dolist (field '(:root :podman-image :provider :model
+                                    :spawn-agent-config))
+                (should-not (plist-get policy field)))
+              (should (eq (plist-get policy :host-command-policy) :inactive)))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/agent-config-local-definitions-override-visible-scope ()
+  (let ((root (make-temp-file "ende-agent-overrides-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert
+           (ende-test--chat-config-block
+            `((root ,root)
+              (group inspect project_info)
+              (resource source (include "doc/**"))
+              (agent-config worker
+                            (root ,root)
+                            (tools inspect)
+                            (set-tool-resources inspect :resources source)
+                            (group inspect read_file)
+                            (resource source (include "src/**")))
+              (agent-config observer
+                            (root ,root)
+                            (tools inspect)
+                            (set-tool-resources inspect :resources source))))
+           "* Earlier sibling\n"
+           (ende-test--chat-config-block
+            '((group inspect edit_file)
+              (resource source (include "private/**"))
+              (group hidden edit_file)
+              (resource hidden (include "secret/**"))))
+           "* Topic\n"
+           (ende-test--chat-config-block
+            '((group inspect file_info read_file)
+              (resource source (include "**/*.el"))))
+           "** Question\n"
+           (ende-test--chat-config-block
+            '((resource source (include "lib/**")))))
+          (let* ((document (ende-chat--build-document))
+                 (question (car (last (ende-chat--document-headlines document))))
+                 (environment
+                  (ende-chat-config-resolve-environment
+                   (ende-chat--document-tree document)
+                   (ende-chat--document-parent document) question))
+                 (parent (plist-get environment :access-policy))
+                 (registry (plist-get environment :registry))
+                 (worker (cdr (assq 'worker registry)))
+                 (observer (cdr (assq 'observer registry))))
+            (should-not (cl-set-exclusive-or (plist-get worker :active-tools)
+                                             '(read_file about_thinking)))
+            (should (equal (cdr (assq 'inspect (plist-get worker :groups)))
+                           '(read_file)))
+            (should (equal (plist-get worker :tool-resources)
+                           '((read_file source))))
+            (should (equal (plist-get
+                            (cdr (assq 'source (plist-get worker :resources)))
+                            :include)
+                           '("src/**")))
+            (should-not (cl-set-exclusive-or
+                         (plist-get observer :active-tools)
+                         '(file_info read_file about_thinking)))
+            (should (= (length (plist-get observer :tool-resources)) 2))
+            (dolist (tool '(file_info read_file))
+              (should (equal (cdr (assq tool (plist-get observer :tool-resources)))
+                             '(source))))
+            (should-not (plist-get parent :tool-resources))
+            (dolist (policy (list parent observer))
+              (should-not (cl-set-exclusive-or
+                           (cdr (assq 'inspect (plist-get policy :groups)))
+                           '(file_info read_file)))
+              (should (equal (plist-get
+                              (cdr (assq 'source (plist-get policy :resources)))
+                              :include)
+                             '("lib/**"))))
+            (dolist (policy (list parent worker observer))
+              (should-not (assq 'hidden (plist-get policy :groups)))
+              (should-not (assq 'hidden (plist-get policy :resources))))))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/agent-config-freezes-provider-and-model-selection ()
   (let ((ende-providers '(local remote))
         (ende-provider-profiles

@@ -792,8 +792,10 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                                (nreverse agent-config-names))))
       configuration)))
 
-(defun ende-chat-config--normalize-named-policy (name body registry-names)
-  "Normalize isolated named agent policy NAME with symbolic REGISTRY-NAMES."
+(defun ende-chat-config--normalize-named-policy
+    (name body registry-names visible)
+  "Normalize isolated named agent policy NAME with symbolic REGISTRY-NAMES.
+Copy only group and resource definitions from VISIBLE."
   (let* ((configuration (ende-chat-config--empty))
          (ende-chat-config--block-state
           (list :restricted nil :host-enabled-local nil))
@@ -802,6 +804,10 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
          (root-count 0)
          (image-count 0)
          (spawn-count 0))
+    (setf (plist-get configuration :groups)
+          (copy-tree (plist-get visible :groups))
+          (plist-get configuration :resources)
+          (copy-tree (plist-get visible :resources)))
     (dolist (form body)
       (unless (ende-chat-config--proper-list-p form)
         (ende-chat-config--error "malformed form in agent-config %s: %S"
@@ -966,14 +972,14 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                                        "mutations unless that is intentional."))))
                "\n")))
 
-(defun ende-chat-config--agent-registry (definitions)
-  "Normalize final visible agent DEFINITIONS with symbolic names first."
+(defun ende-chat-config--agent-registry (definitions visible)
+  "Normalize agent DEFINITIONS using definitions from VISIBLE."
   (let ((names (mapcar #'car definitions)))
     (mapcar
      (lambda (definition)
        (cons (car definition)
              (ende-chat-config--normalize-named-policy
-              (car definition) (cdr definition) names)))
+              (car definition) (cdr definition) names visible)))
      definitions)))
 
 (defun ende-chat-config--merge-agent-definitions (current additions)
@@ -1022,7 +1028,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                            registry-forms)))))))
     (let* ((registry-names (mapcar #'car definitions))
            (registry
-            (ende-chat-config--agent-registry definitions))
+            (ende-chat-config--agent-registry definitions configuration))
            (selected (plist-get configuration :spawn-agent-config))
            (active (memq 'spawn_agent
                          (plist-get (ende-chat-config--normalize configuration)
