@@ -336,9 +336,33 @@
   :lighter ende--mode-line-string
   :keymap ende-mode-map
   (ende--configure-presentation ende-mode)
+  (ende--configure-org-template)
   (when ende-mode
     (ende-model-selection-initialize-buffer))
   (ende--update-mode-line))
+
+(defun ende--expand-config-template ()
+  "Expand `<ende' at point into an Org configuration block."
+  (when (and ende-mode
+             (derived-mode-p 'org-mode)
+             (eolp)
+             (looking-back "^[ \t]*<ende" (line-beginning-position)))
+    (let* ((start (- (point) (length "<ende")))
+           (indent (buffer-substring-no-properties
+                    (line-beginning-position) start)))
+      (delete-region start (point))
+      (insert "#+begin_ende\n" indent "\n" indent "#+end_ende")
+      (forward-line -1)
+      (end-of-line)
+      t)))
+
+(defun ende--configure-org-template ()
+  "Configure Org template expansion for the current buffer."
+  (if (and ende-mode (derived-mode-p 'org-mode))
+      (add-hook 'org-tab-first-hook
+                #'ende--expand-config-template nil t)
+    (remove-hook 'org-tab-first-hook
+                 #'ende--expand-config-template t)))
 
 ;;;###autoload
 (defun ende-reload--files (directory)
@@ -389,6 +413,10 @@
     (dolist (file (ende-reload--files dir))
       (load (expand-file-name file dir) nil t t t))
     (setq ende-mode-map (ende--make-mode-map))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when ende-mode
+          (ende--configure-org-template))))
     (message "ende: reloaded from %s" dir)))
 
 (provide 'ende)

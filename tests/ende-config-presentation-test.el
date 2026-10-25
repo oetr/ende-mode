@@ -137,6 +137,19 @@
                "selectively disable"
                (ende-test--presentation-doc-at "clear-tools" block-start))))))
 
+(ert-deftest ende-test/config-template-expansion ()
+  (with-temp-buffer
+    (org-mode)
+    (ende-mode 1)
+    (insert "  <ende")
+    (org-cycle)
+    (should (equal (buffer-string)
+                   "  #+begin_ende\n  \n  #+end_ende"))
+    (should (looking-at-p (regexp-quote "\n  #+end_ende")))
+    (ende-mode -1)
+    (should-not (memq #'ende--expand-config-template
+                      org-tab-first-hook))))
+
 (provide 'ende-config-presentation-test)
 
 ;;; ende-config-presentation-test.el ends here
