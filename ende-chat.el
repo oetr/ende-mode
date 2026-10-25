@@ -176,10 +176,15 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-thinking-property "ENDE_THINKING"
   "Org property storing the requested thinking mode for a chat response.")
 
+(defconst ende-chat-generated-title-property
+  "ENDE_CHAT_GENERATED_TITLE"
+  "Marks a generated headline title excluded from model context.")
+
 (defconst ende-chat--parsed-property-descriptors
   (list (cons ende-chat-role-property :role)
         (cons ende-chat-visibility-property :visibility)
         (cons ende-chat-id-property :id)
+        (cons ende-chat-generated-title-property :generated-title)
         (cons ende-chat-reply-to-property :reply-to)
         (cons ende-chat-request-id-property :request-id)
         (cons ende-chat-work-property :work)
@@ -656,13 +661,35 @@ around rendered chat sections, not arbitrary text slices."
             (cons (- (car range) start) (- (cdr range) start)))
           (gethash headline (ende-chat--document-exclusions document))))
 
+(defun ende-chat--empty-headline-text (headline)
+  "Return HEADLINE's canonical empty-title line, preserving its metadata."
+  (let ((todo (org-element-property :todo-keyword headline))
+        (priority (org-element-property :priority headline))
+        (tags (org-element-property :tags headline)))
+    (concat (make-string (org-element-property :level headline) ?*) " "
+            (if todo (concat todo " ") "")
+            (if priority (format "[#%c] " priority) "")
+            (if (org-element-property :commentedp headline)
+                (concat org-comment-string " ") "")
+            (if tags (concat (mapconcat #'identity tags ":") ":") ""))))
+
 (defun ende-chat--section-text (document headline)
   "Return HEADLINE's own heading and body, without control material."
   (let* ((start (org-element-property :begin headline))
          (end (ende-chat--headline-end document headline))
          (text (buffer-substring-no-properties start end))
-         (ranges (ende-chat--section-exclusions document headline start)))
-    (ende-chat--remove-ranges text ranges)))
+         (ranges (ende-chat--section-exclusions document headline start))
+         (text (ende-chat--remove-ranges text ranges))
+         (canonical-title
+          (or (equal (ende-chat--property document headline :generated-title) "t")
+              (and (eq (ende-chat--effective-role document headline) 'user)
+                   (string-blank-p
+                    (org-element-property :raw-value headline)))))
+         (newline (string-match "\n" text)))
+    (if canonical-title
+        (concat (ende-chat--empty-headline-text headline)
+                (if newline (substring text newline) ""))
+      text)))
 
 (defun ende-chat--prefix-messages
     (document root question &optional reasoning-ancestors-only)
@@ -1754,6 +1781,16 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
     (goto-char (org-element-property :begin headline))
     (org-edit-headline title)))
 
+(defun ende-chat--set-generated-title (question title)
+  "Set untitled QUESTION's generated TITLE and mark it as presentation metadata."
+  (when (and (stringp title)
+             (not (string-blank-p title))
+             (string-blank-p (org-element-property :raw-value question)))
+    (atomic-change-group
+      (goto-char (org-element-property :begin question))
+      (ende-chat--set-headline-title question title)
+      (org-entry-put nil ende-chat-generated-title-property "t"))))
+
 ;;;; Placeholder and response placement
 
 (defun ende-chat--response-property (name value)
@@ -2715,9 +2752,7 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
                       document ende-chat-id-property question-id)))
       (unless question
         (error "Chat question no longer exists"))
-      (when (string-blank-p (org-element-property :raw-value question))
-        (goto-char (org-element-property :begin question))
-        (ende-chat--set-headline-title question title)))))
+      (ende-chat--set-generated-title question title))))
 
 (defun ende-chat--commit-staged-transcript
     (job transcript &optional allow-edited question-title)
@@ -3302,10 +3337,8 @@ Keep it while another queued compaction still refers to its durable identity."
                 (with-current-buffer buffer
                   (save-excursion
                     (goto-char (org-element-property :begin question))
-                    (when (and (string-blank-p
-                                (org-element-property :raw-value question))
-                               (plist-get normalized :title))
-                      (ende-chat--set-headline-title
+                    (when (plist-get normalized :title)
+                      (ende-chat--set-generated-title
                        question (plist-get normalized :title))))))
               (unwind-protect
                   (progn

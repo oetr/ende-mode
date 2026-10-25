@@ -39,6 +39,29 @@
 
 
 
+(ert-deftest ende-test/generated-title-preserves-serialized-question ()
+  (ende-test--reset)
+  (ende-test--with-buffer
+   "* Chat\n** TODO [#A] :request:\nExplain how this parser works.\n"
+   (org-mode)
+   (ende-test--chat-goto "** TODO [#A] :request:")
+   (let* ((document (ende-chat--build-document))
+          (question (ende-chat--headline-at-point document))
+          (before (ende-chat--serialize document question)))
+     (ende-chat--set-generated-title question "Parser operation")
+     (let* ((updated (ende-chat--build-document))
+            (updated-question (ende-chat--headline-at-point updated))
+            (after (ende-chat--serialize updated updated-question))
+            (section (ende-chat--section-text updated updated-question)))
+       (should (equal before after))
+       (should (equal (org-element-property :raw-value updated-question)
+                      "Parser operation"))
+       (should (equal (ende-chat--property
+                       updated updated-question :generated-title) "t"))
+       (should-not (string-match-p "ENDE_CHAT_GENERATED_TITLE" (cdr (car after))))
+       (should-not (string-match-p "Parser operation" (cdr (car after))))
+       (should (string-match-p "Explain how this parser works\\." section))))))
+
 (ert-deftest ende-test/reserved-chat-drawers-are-excluded-from-context ()
   (ende-test--reset)
   (ende-test--with-buffer
