@@ -2749,7 +2749,7 @@ process-group cancellation function with the active Ende job."
          "permissions and environment of the Emacs process, bypassing the "
          "private development workspace. Use only when host execution is "
          "specifically required; do not use instead of edit_file, create_file, "
-         "delete_file, or apply_patch when modifying project source.")
+         "delete_file, or apply_patch when modifying project source, unless the user specifically asks you to.")
  ende-tools--run-host-command-schema
  #'ende-tools--run-host-command nil :no-resource '(:async t))
 

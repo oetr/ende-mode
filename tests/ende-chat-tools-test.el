@@ -21,7 +21,13 @@
                         "failed check is a hard gate"
                         "small number of reasonable repairs"
                         "restore the last known-good checkpoint"
-                        "Do not pile speculative repairs"))
+                        "Do not pile speculative repairs"
+                        "large encoded strings"
+                        "minified JavaScript"
+                        "deterministic, source-derived boundaries"
+                        "programmatic transformation"
+                        "If an exact-match edit fails, change methods immediately"
+                        "instead of retrying larger patches"))
         (should (string-match-p (regexp-quote phrase) prompt))))))
 
 (ert-deftest ende-test/chat-prompt-bounds-retries-and-defers-unresolved-goals ()

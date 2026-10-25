@@ -1570,7 +1570,10 @@ result over repeated speculative retries.
 
 When appropriate, a version-control commit may serve as a checkpoint; commits are not universal. Prefer several small verified steps over one large speculative change.
 
-Do not modify project source through shell/Python/sed commands. Use the provided file-editing tools for source changes. Shell commands are for inspection and verification only.")
+Prefer using the provided file-editing tools for source changes instead of using shell/Python/sed commands.
+When modifying files containing large encoded strings, minified JavaScript, generated code, or other opaque data, never reproduce that data manually in an editing request.
+Use deterministic, source-derived boundaries or a programmatic transformation.
+If an exact-match edit fails, change methods immediately instead of retrying larger patches.")
   "System prompt for Org-backed chat requests.")
 
 (defun ende-chat--system-prompt (document)
@@ -1790,6 +1793,17 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
       (goto-char (org-element-property :begin question))
       (ende-chat--set-headline-title question title)
       (org-entry-put nil ende-chat-generated-title-property "t"))))
+
+(defun ende-chat--serialized-request-text (messages)
+  "Return the body of the last serialized user message in MESSAGES."
+  (let (request)
+    (dolist (message messages)
+      (when (and (consp message) (equal (car message) "user")
+                 (stringp (cdr message)))
+        (setq request (cdr message))))
+    (when request
+      (let ((newline (string-match "\n" request)))
+        (if newline (substring request (1+ newline)) request)))))
 
 ;;;; Placeholder and response placement
 
