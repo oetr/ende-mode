@@ -13,7 +13,6 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'cus-edit)
 (require 'gnutls)
 (require 'json)
 (require 'subr-x)
@@ -137,31 +136,11 @@
             (format "%-8s - Save and quit\n" "Enter"))))
 
 (defun ende-speech--configure-save ()
-  "Save pending speech settings for future sessions and close the buffer."
+  "Apply pending speech settings for this Emacs session and close the buffer."
   (interactive)
   (ende-speech--server-url)
-  (custom-file)
-  (let* ((settings (mapcar (lambda (variable)
-                            (list variable (custom-quote (symbol-value variable))))
-                          ende-speech--configuration-variables))
-         (properties (mapcar (lambda (variable)
-                               (cons variable (copy-sequence (symbol-plist variable))))
-                             ende-speech--configuration-variables))
-         (defaults (mapcar (lambda (variable)
-                             (cons variable (default-toplevel-value variable)))
-                           ende-speech--configuration-variables))
-         (theme-settings (copy-tree (get 'user 'theme-settings)))
-         saved)
-    (unwind-protect
-        (progn
-          (apply #'custom-set-variables settings)
-          (custom-save-all)
-          (setq saved t))
-      (unless saved
-        (dolist (entry defaults)
-          (set-default-toplevel-value (car entry) (cdr entry)))
-        (dolist (entry properties) (setplist (car entry) (cdr entry)))
-        (put 'user 'theme-settings theme-settings))))
+  (dolist (variable ende-speech--configuration-variables)
+    (set-default variable (symbol-value variable)))
   (quit-window t))
 
 (defun ende-speech--configure-quit ()
