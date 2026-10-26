@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ende-queue)
 (require 'json)
 (require 'org)
 (require 'sqlite)
@@ -350,6 +351,34 @@ returned plist, and provider call IDs are checked when both records exist."
                               (format "%s (%s bytes)" (car entry) (cdr entry)))
                             files ", "))
         bytes))))
+
+;;;###autoload
+(defun ende-tool-store-purge ()
+  "Confirm and delete the current buffer's tool database and SQLite sidecars."
+  (interactive)
+  (let ((filename (ende-tool-store--filename)))
+    (when (yes-or-no-p
+           (format "Permanently purge tool payload database %s and its SQLite auxiliary files? "
+                   filename))
+      (when (cl-some
+             (lambda (job)
+               (when-let* ((file (plist-get (ende-job-instruction job)
+                                           :tool-store-file)))
+                 (or (equal filename file) (file-equal-p filename file))))
+             (ende-all-live-jobs))
+        (user-error "An active Ende job is using tool payload database %s" filename))
+      (ende-tool-store--protect-files filename)
+      (let ((exists (file-exists-p filename))
+            removed)
+        (dolist (file (ende-tool-store--files filename))
+          (when (file-exists-p file)
+            (delete-file file)
+            (setq removed t)))
+        (if exists
+            (message "Purged tool payload database and SQLite auxiliary files: %s"
+                     filename)
+          (message "Tool payload database does not exist: %s%s"
+                   filename (if removed "; removed SQLite auxiliary files" "")))))))
 
 (defun ende-tool-store--new-execution-id ()
   "Return a fresh Ende-generated ID, unique across local Emacs processes."
