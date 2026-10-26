@@ -61,6 +61,11 @@
 (defvar ende-speech--active-session nil
   "The one active realtime speech session, if any.")
 
+(defconst ende-speech--configuration-variables
+  '(ende-speech-api-path ende-speech-encryption ende-speech-input-device
+    ende-speech-port ende-speech-server)
+  "Speech settings edited in the configuration buffer.")
+
 (defvar ende-speech-configure-mode-map (make-sparse-keymap)
   "Keymap for `ende-speech-configure-mode'.")
 
@@ -69,11 +74,13 @@
 (define-key ende-speech-configure-mode-map (kbd "i") #'ende-speech--configure-input)
 (define-key ende-speech-configure-mode-map (kbd "p") #'ende-speech--configure-port)
 (define-key ende-speech-configure-mode-map (kbd "s") #'ende-speech--configure-server)
-(define-key ende-speech-configure-mode-map (kbd "q") #'quit-window)
-(define-key ende-speech-configure-mode-map (kbd "<escape>") #'quit-window)
+(define-key ende-speech-configure-mode-map (kbd "q") #'ende-speech--configure-quit)
+(define-key ende-speech-configure-mode-map (kbd "<escape>") #'ende-speech--configure-quit)
 
 (define-derived-mode ende-speech-configure-mode special-mode "Ende-Speech-Configure"
-  "Read-only settings view for realtime speech dictation.")
+  "Read-only settings view for realtime speech dictation."
+  (dolist (variable ende-speech--configuration-variables)
+    (set (make-local-variable variable) (default-value variable))))
 
 (defvar ende-speech-transcript-mode-map
   (let ((map (make-sparse-keymap)))
@@ -122,14 +129,22 @@
     (insert (format "%-8s - %-18s %s\n"
                     "p" "Port:" ende-speech-port))
     (insert (format "%-8s - %-18s %s\n"
-                    "s" "Server:" ende-speech-server))))
+                    "s" "Server:" ende-speech-server))
+    (insert "\n"
+            (format "%-8s - Quit without saving\n" "q/Esc"))))
+
+(defun ende-speech--configure-quit ()
+  "Discard pending speech settings and close the configuration buffer."
+  (interactive)
+  (quit-window t))
 
 (defun ende-speech-configure ()
   "Open the speech configuration buffer."
   (interactive)
   (let ((buffer (ende-speech--configuration-buffer)))
     (with-current-buffer buffer
-      (ende-speech-configure-mode)
+      (unless (derived-mode-p 'ende-speech-configure-mode)
+        (ende-speech-configure-mode))
       (ende-speech--render-configuration))
     (pop-to-buffer buffer)))
 
