@@ -88,6 +88,33 @@
 
 
 
+(ert-deftest ende-test/tool-store-setting-is-host-only-context ()
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name (expand-file-name "chat.org" temporary-file-directory))
+    (insert "* Question\n\nSurrounding user text.\n\n"
+            "#+ENDE_TOOL_STORE_FILE: private.sqlite3\n\n"
+            "What does this code do?\n")
+    (ende-mode 1)
+    (should (equal (ende-tool-store--filename)
+                   (expand-file-name "private.sqlite3" temporary-file-directory)))
+    (ende-test--chat-goto "* Question")
+    (let ((text (cdr (assoc "user" (ende-chat-context-at-point)))))
+      (should (string-match-p "Surrounding user text" text))
+      (should (string-match-p "What does this code do?" text))
+      (should-not (string-match-p "ENDE_TOOL_STORE_FILE" text))
+      (should-not (string-match-p "private.sqlite3" text)))
+    (let ((literal-text
+           (concat "Mention #+ENDE_TOOL_STORE_FILE: inline.sqlite3 in prose.\n"
+                   "#+begin_src org\n#+ENDE_TOOL_STORE_FILE: source.sqlite3\n#+end_src\n"
+                   "#+begin_example\n#+ENDE_TOOL_STORE_FILE: example.sqlite3\n#+end_example\n")))
+      (goto-char (point-max))
+      (insert literal-text)
+      (ende-test--chat-goto "* Question")
+      (let ((text (cdr (assoc "user" (ende-chat-context-at-point)))))
+        (should (string-suffix-p literal-text text))
+        (should-not (string-match-p "private.sqlite3" text))))))
+
 (ert-deftest ende-test/chat-reasoning-ancestors-follow-document-order ()
   (with-temp-buffer
     (org-mode)

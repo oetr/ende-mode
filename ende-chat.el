@@ -641,6 +641,16 @@ around rendered chat sections, not arbitrary text slices."
           (org-element-property :end drawer))))
      nil nil nil)
     (org-element-map
+     tree 'keyword
+     (lambda (element)
+       (when (string= (upcase (org-element-property :key element))
+                      "ENDE_TOOL_STORE_FILE")
+         (ende-chat--add-section-exclusion
+          exclusions (ende-chat--lineage-headline element)
+          (org-element-property :begin element)
+          (org-element-property :end element))))
+     nil nil nil)
+    (org-element-map
      tree 'node-property
      (lambda (element)
        (let* ((headline (ende-chat--lineage-headline element))
