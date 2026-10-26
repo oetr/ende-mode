@@ -338,6 +338,7 @@
   (ende--configure-presentation ende-mode)
   (ende--configure-org-template)
   (when ende-mode
+    (ende-tool-store--initialize-buffer)
     (ende-model-selection-initialize-buffer))
   (ende--update-mode-line))
 
@@ -416,6 +417,7 @@
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
         (when ende-mode
+          (ende-tool-store--initialize-buffer)
           (ende--configure-org-template))))
     (message "ende: reloaded from %s" dir)))
 

@@ -12,6 +12,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'org)
 (require 'sqlite)
 (require 'subr-x)
 
@@ -24,9 +25,48 @@
 (defconst ende-tool-store--schema-version 1)
 (defvar ende-tool-store--next-id 0)
 
+(defvar-local ende-tool-store--local-file nil
+  "Absolute tool store filename configured by the current Org document.")
+
+(defun ende-tool-store--initialize-buffer ()
+  "Initialize the current Org document's tool store setting."
+  (when (derived-mode-p 'org-mode)
+    (add-hook 'org-mode-hook #'ende-tool-store--initialize-buffer nil t))
+  (setq ende-tool-store--local-file
+        (when (derived-mode-p 'org-mode)
+          (let (values)
+            (org-with-wide-buffer
+             (goto-char (point-min))
+             (let ((case-fold-search t))
+               (while (re-search-forward
+                       (org-make-options-regexp '("ENDE_TOOL_STORE_FILE")) nil t)
+                 (let ((element (org-element-at-point)))
+                   (when (eq (org-element-type element) 'keyword)
+                     (push (org-element-property :value element) values))))))
+            (when (cdr values)
+              (user-error "Duplicate ENDE_TOOL_STORE_FILE declarations"))
+            (when values
+              (let ((value (string-trim (car values))))
+                (when (string-empty-p value)
+                  (user-error "ENDE_TOOL_STORE_FILE must not be empty"))
+                (unless (or buffer-file-name (file-name-absolute-p value))
+                  (user-error "Relative ENDE_TOOL_STORE_FILE requires an Org file"))
+                (let ((filename
+                       (expand-file-name
+                        value (and buffer-file-name
+                                   (file-name-directory buffer-file-name)))))
+                  (when (or (string-match-p "[\0\r\n]" filename)
+                            (directory-name-p filename)
+                            (file-directory-p filename))
+                    (user-error "ENDE_TOOL_STORE_FILE must name a file"))
+                  filename)))))))
+
+(put 'ende-tool-store--initialize-buffer 'permanent-local-hook t)
+
 (defun ende-tool-store--filename ()
-  "Return the expanded configured tool-store filename."
-  (expand-file-name ende-tool-store-file))
+  "Return the current buffer's absolute tool-store filename."
+  (or ende-tool-store--local-file
+      (expand-file-name ende-tool-store-file)))
 
 (defun ende-tool-store--check-sqlite ()
   "Signal an actionable error if this Emacs cannot use SQLite."
