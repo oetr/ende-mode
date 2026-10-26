@@ -88,19 +88,15 @@ CREATE permits making missing directories, but only the dedicated default
 Ende directory has its existing permissions changed."
   (when (file-remote-p filename)
     (user-error "Tool payload storage requires a local database: %s" filename))
-  (let* ((directory (file-name-directory filename))
-         (parent (directory-file-name directory)))
-    (while parent
-      (when (file-symlink-p parent)
-        (error "Refusing symbolic link in tool store directory: %s" parent))
-      (let ((next (directory-file-name (file-name-directory parent))))
-        (setq parent (unless (equal parent next) next))))
+  (let ((directory (file-name-directory filename)))
     (when create
       (make-directory directory t))
     (when (and (equal directory (expand-file-name "ende/" user-emacs-directory))
                (file-directory-p directory))
       (ende-tool-store--set-modes directory #o700)))
   (dolist (file (ende-tool-store--files filename))
+    (when (file-symlink-p file)
+      (error "Refusing symbolic link for tool store file: %s" file))
     (when-let* ((attributes (file-attributes file)))
       (when (or (file-attribute-type attributes)
                 (> (file-attribute-link-number attributes) 1))

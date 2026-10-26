@@ -136,7 +136,11 @@
          (user-emacs-directory (file-name-as-directory directory)))
     (unwind-protect
         (with-file-modes #o777
-          (dolist (relative '("ende/tool-payloads.sqlite3" "shared/custom.sqlite3"))
+          (make-directory (expand-file-name "shared" directory))
+          (make-symbolic-link (expand-file-name "shared" directory)
+                              (expand-file-name "linked" directory))
+          (dolist (relative '("ende/tool-payloads.sqlite3" "shared/custom.sqlite3"
+                              "linked/custom.sqlite3"))
             (let* ((ende-tool-store-file (expand-file-name relative directory))
                    (parent (file-name-directory ende-tool-store-file))
                    (dedicated (string-prefix-p "ende/" relative)))
@@ -165,12 +169,12 @@
               (let ((unrelated (expand-file-name "unrelated" directory)))
                 (with-temp-file unrelated (insert "not a database"))
                 (set-file-modes unrelated #o644)
-                (dolist (file (list ende-tool-store-file
-                                    (concat ende-tool-store-file "-wal")))
-                  (make-symbolic-link unrelated file)
-                  (should-error (ende-tool-store-get "private" 'request))
-                  (should (= (logand (file-modes unrelated) #o777) #o644))
-                  (delete-file file))))))
+                (dolist (file (ende-tool-store--files ende-tool-store-file))
+                  (dolist (link '(make-symbolic-link add-name-to-file))
+                    (funcall link unrelated file)
+                    (should-error (ende-tool-store-get "private" 'request))
+                    (should (= (logand (file-modes unrelated) #o777) #o644))
+                    (delete-file file)))))))
       (delete-directory directory t))))
 
 (provide 'ende-tool-store-test)
