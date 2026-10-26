@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'cus-edit)
 (require 'gnutls)
 (require 'json)
 (require 'subr-x)
@@ -76,6 +77,7 @@
 (define-key ende-speech-configure-mode-map (kbd "s") #'ende-speech--configure-server)
 (define-key ende-speech-configure-mode-map (kbd "q") #'ende-speech--configure-quit)
 (define-key ende-speech-configure-mode-map (kbd "<escape>") #'ende-speech--configure-quit)
+(define-key ende-speech-configure-mode-map (kbd "RET") #'ende-speech--configure-save)
 
 (define-derived-mode ende-speech-configure-mode special-mode "Ende-Speech-Configure"
   "Read-only settings view for realtime speech dictation."
@@ -131,7 +133,36 @@
     (insert (format "%-8s - %-18s %s\n"
                     "s" "Server:" ende-speech-server))
     (insert "\n"
-            (format "%-8s - Quit without saving\n" "q/Esc"))))
+            (format "%-8s - Quit without saving\n" "q/Esc")
+            (format "%-8s - Save and quit\n" "Enter"))))
+
+(defun ende-speech--configure-save ()
+  "Save pending speech settings for future sessions and close the buffer."
+  (interactive)
+  (ende-speech--server-url)
+  (custom-file)
+  (let* ((settings (mapcar (lambda (variable)
+                            (list variable (custom-quote (symbol-value variable))))
+                          ende-speech--configuration-variables))
+         (properties (mapcar (lambda (variable)
+                               (cons variable (copy-sequence (symbol-plist variable))))
+                             ende-speech--configuration-variables))
+         (defaults (mapcar (lambda (variable)
+                             (cons variable (default-toplevel-value variable)))
+                           ende-speech--configuration-variables))
+         (theme-settings (copy-tree (get 'user 'theme-settings)))
+         saved)
+    (unwind-protect
+        (progn
+          (apply #'custom-set-variables settings)
+          (custom-save-all)
+          (setq saved t))
+      (unless saved
+        (dolist (entry defaults)
+          (set-default-toplevel-value (car entry) (cdr entry)))
+        (dolist (entry properties) (setplist (car entry) (cdr entry)))
+        (put 'user 'theme-settings theme-settings))))
+  (quit-window t))
 
 (defun ende-speech--configure-quit ()
   "Discard pending speech settings and close the configuration buffer."
