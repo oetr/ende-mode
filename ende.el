@@ -337,9 +337,12 @@
   :keymap ende-mode-map
   (ende--configure-presentation ende-mode)
   (ende--configure-org-template)
-  (when ende-mode
-    (ende-tool-store--initialize-buffer)
-    (ende-model-selection-initialize-buffer))
+  (if ende-mode
+      (progn
+        (ende-tool-store--initialize-buffer)
+        (ende-model-selection-initialize-buffer))
+    (remove-hook 'org-mode-hook #'ende-tool-store--initialize-buffer t)
+    (kill-local-variable 'ende-tool-store--local-file))
   (ende--update-mode-line))
 
 (defun ende--expand-config-template ()
