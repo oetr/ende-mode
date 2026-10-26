@@ -22,7 +22,7 @@
   "Line of the configuration block currently being applied, if any.")
 
 (defvar ende-chat-config--block-state nil
-  "State used to validate order-sensitive forms in the current block.")
+  "State used to detect duplicate host policy declarations in a block.")
 
 (defun ende-chat-config--error (format-string &rest arguments)
   "Signal a configuration error formatted with FORMAT-STRING and ARGUMENTS."
@@ -403,59 +403,55 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
 
 (defun ende-chat-config--host-command-rules (rules)
   "Validate and normalize host command RULES."
-  (unless rules
-    (ende-chat-config--error "restrict-host-commands needs at least one rule"))
-  (let (open fixed prefix)
-    (dolist (rule rules)
-      (cond
-       ((stringp rule)
-        (ende-chat-config--host-command-program rule)
-        (push rule open))
-       ((and (ende-chat-config--proper-list-p rule)
-             (memq (car rule) '(:fixed-args :prefix-args))
-             (cdr rule)
-             (cl-every #'stringp (cdr rule))
-             (or (eq (car rule) :fixed-args)
-                 (cdr (cdr rule))))
-        (let ((argv (cdr rule)))
-          (ende-chat-config--host-command-program (car argv))
-          (if (eq (car rule) :fixed-args)
-              (push argv fixed)
-            (push argv prefix))))
-       (t
-        (ende-chat-config--error
-         "host command rule must be an executable string, (:fixed-args COMMAND ARG...), or (:prefix-args COMMAND ARG...): %S"
-         rule))))
-    (setq open (delete-dups (nreverse open))
-          fixed (delete-dups (nreverse fixed))
-          prefix (delete-dups (nreverse prefix)))
-    (setq prefix
-          (cl-remove-if
-           (lambda (argv)
-             (or (member (car argv) open)
-                 (cl-some (lambda (other)
-                            (and (not (equal argv other))
-                                 (ende-tools--argv-prefix-p other argv)))
-                          prefix)))
-           prefix)
-          fixed
-          (cl-remove-if
-           (lambda (argv)
-             (or (member (car argv) open)
-                 (cl-some (lambda (rule)
-                            (ende-tools--argv-prefix-p rule argv))
-                          prefix)))
-           fixed))
-    (append (list :restricted t :open open :fixed fixed)
-            (when prefix (list :prefix prefix)))))
-
-(defun ende-chat-config--host-command-enabled-p (configuration)
-  "Return non-nil when run_host_command is active in CONFIGURATION."
-  (memq 'run_host_command
-        (cl-set-difference
-         (ende-chat-config--resolve-tools
-          (plist-get configuration :active-targets) configuration)
-         (plist-get configuration :excluded-tools))))
+  (cond
+   ((equal rules '(:unrestricted)) :unrestricted)
+   ((or (null rules) (memq :unrestricted rules))
+    (ende-chat-config--error
+     "expected host command rules or sole :unrestricted"))
+   (t
+    (let (open fixed prefix)
+      (dolist (rule rules)
+        (cond
+         ((stringp rule)
+          (ende-chat-config--host-command-program rule)
+          (push rule open))
+         ((and (ende-chat-config--proper-list-p rule)
+               (memq (car rule) '(:fixed-args :prefix-args))
+               (cdr rule)
+               (cl-every #'stringp (cdr rule))
+               (or (eq (car rule) :fixed-args)
+                   (cdr (cdr rule))))
+          (let ((argv (cdr rule)))
+            (ende-chat-config--host-command-program (car argv))
+            (if (eq (car rule) :fixed-args)
+                (push argv fixed)
+              (push argv prefix))))
+         (t
+          (ende-chat-config--error
+           "host command rule must be an executable string, (:fixed-args COMMAND ARG...), or (:prefix-args COMMAND ARG...): %S"
+           rule))))
+      (setq open (delete-dups (nreverse open))
+            fixed (delete-dups (nreverse fixed))
+            prefix (delete-dups (nreverse prefix)))
+      (setq prefix
+            (cl-remove-if
+             (lambda (argv)
+               (or (member (car argv) open)
+                   (cl-some (lambda (other)
+                              (and (not (equal argv other))
+                                   (ende-tools--argv-prefix-p other argv)))
+                            prefix)))
+             prefix)
+            fixed
+            (cl-remove-if
+             (lambda (argv)
+               (or (member (car argv) open)
+                   (cl-some (lambda (rule)
+                              (ende-tools--argv-prefix-p rule argv))
+                            prefix)))
+             fixed))
+      (append (list :restricted t :open open :fixed fixed)
+              (when prefix (list :prefix prefix)))))))
 
 (defun ende-chat-config--resource-names (names configuration)
   "Validate resource NAMES against CONFIGURATION."
@@ -580,10 +576,6 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
        (ende-chat-config--target-tools name configuration))
      (let ((selected (ende-chat-config--resolve-tools
                       (cdr form) configuration)))
-       (when (and (plist-get ende-chat-config--block-state :restricted)
-                  (memq 'run_host_command selected))
-         (ende-chat-config--error
-          "enable run_host_command before restricting it"))
        (setq configuration
              (plist-put configuration :active-targets
                         (delete-dups
@@ -593,15 +585,6 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
              (plist-put configuration :excluded-tools
                         (cl-set-difference
                          (plist-get configuration :excluded-tools) selected)))
-       (when (and (plist-get ende-chat-config--block-state :restricted)
-                  (memq 'run_host_command selected))
-         (ende-chat-config--error
-          "enable run_host_command before restricting it"))
-       (when (memq 'run_host_command selected)
-         (setq configuration
-               (plist-put configuration :host-command-policy :unrestricted))
-         (setq ende-chat-config--block-state
-               (plist-put ende-chat-config--block-state :host-enabled-local t)))
        configuration))
     ('clear-tools
      (unless (cl-every (lambda (name)
@@ -615,9 +598,6 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                  (plist-put configuration :active-targets nil))
            (setq configuration
                  (plist-put configuration :excluded-tools nil))
-           (setq ende-chat-config--block-state
-                 (plist-put ende-chat-config--block-state
-                            :host-enabled-local nil))
            configuration)
        (let ((tools (mapcar #'ende-chat-config--tool-name (cdr form))))
          (setq configuration
@@ -625,22 +605,14 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                           (delete-dups
                            (append (plist-get configuration :excluded-tools)
                                    tools))))
-         (when (memq 'run_host_command tools)
-           (setq ende-chat-config--block-state
-                 (plist-put ende-chat-config--block-state
-                            :host-enabled-local nil)))
          configuration)))
     ('restrict-host-commands
-     (when (plist-get ende-chat-config--block-state :restricted)
+     (when (plist-get ende-chat-config--block-state :host-policy-defined)
        (ende-chat-config--error
         "only one restrict-host-commands form is allowed per block"))
-     (unless (or (ende-chat-config--host-command-enabled-p configuration)
-                 (plist-get ende-chat-config--block-state :host-enabled-local))
-       (ende-chat-config--error
-        "restrict-host-commands requires enabled run_host_command"))
      (let ((policy (ende-chat-config--host-command-rules (cdr form))))
        (setq ende-chat-config--block-state
-             (plist-put ende-chat-config--block-state :restricted t))
+             (plist-put ende-chat-config--block-state :host-policy-defined t))
        (plist-put configuration :host-command-policy policy)))
     ('set-tool-resources
      (ende-chat-config--assign-resources form configuration nil))
@@ -657,36 +629,33 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
   (list :root nil :podman-image nil :groups nil :resources nil
         :provider nil :model nil
         :active-targets nil :excluded-tools nil
-        :host-command-policy :unrestricted
+        :host-command-policy nil
         :grants nil :revoked-resources nil))
 
 (defun ende-chat-config--normalize (configuration)
   "Convert resolver state CONFIGURATION to a runtime access policy."
-  (list :root (plist-get configuration :root)
-        :provider (plist-get configuration :provider)
-        :model (plist-get configuration :model)
-        :podman-image (plist-get configuration :podman-image)
-        :groups (plist-get configuration :groups)
-        :resources (plist-get configuration :resources)
-        :active-tools
-        (ende-tool-active-names
-         (cl-set-difference
-          (ende-chat-config--resolve-tools
-           (plist-get configuration :active-targets) configuration)
-          (plist-get configuration :excluded-tools)))
-        :host-command-policy
-        (if (memq 'run_host_command
-                  (cl-set-difference
-                   (ende-chat-config--resolve-tools
-                    (plist-get configuration :active-targets) configuration)
-                   (plist-get configuration :excluded-tools)))
-            (plist-get configuration :host-command-policy)
-          :inactive)
-        :spawn-agent-config (plist-get configuration :spawn-agent-config)
-        :tool-resources
-        (mapcar (lambda (entry)
-                  (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
-                (plist-get configuration :grants))))
+  (let* ((active-tools
+          (ende-tool-active-names
+           (cl-set-difference
+            (ende-chat-config--resolve-tools
+             (plist-get configuration :active-targets) configuration)
+            (plist-get configuration :excluded-tools))))
+         (configured-policy (plist-get configuration :host-command-policy)))
+    (list :root (plist-get configuration :root)
+          :provider (plist-get configuration :provider)
+          :model (plist-get configuration :model)
+          :podman-image (plist-get configuration :podman-image)
+          :groups (plist-get configuration :groups)
+          :resources (plist-get configuration :resources)
+          :active-tools active-tools
+          :host-command-policy
+          (or configured-policy
+              (if (memq 'run_host_command active-tools) :unrestricted :inactive))
+          :spawn-agent-config (plist-get configuration :spawn-agent-config)
+          :tool-resources
+          (mapcar (lambda (entry)
+                    (cons (car entry) (delete-dups (mapcar #'car (cdr entry)))))
+                  (plist-get configuration :grants)))))
 
 (defun ende-chat-config--validate-access (normalized configuration)
   "Check active tools in NORMALIZED using CONFIGURATION for diagnostics."
@@ -730,7 +699,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
            (spawn-config-count 0)
            (agent-config-names nil)
            (ende-chat-config--block-state
-            (list :restricted nil :host-enabled-local nil))
+            (list :host-policy-defined nil))
            group-names resource-names)
       (unless (string-empty-p
                (string-trim
@@ -798,7 +767,7 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
 Copy only group and resource definitions from VISIBLE."
   (let* ((configuration (ende-chat-config--empty))
          (ende-chat-config--block-state
-          (list :restricted nil :host-enabled-local nil))
+          (list :host-policy-defined nil))
          (group-names nil)
          (resource-names nil)
          (root-count 0)
@@ -918,7 +887,7 @@ Copy only group and resource definitions from VISIBLE."
     (when (plist-get policy :root)
       (push (format "%s project root: %s" label (plist-get policy :root))
             lines))
-    (when (plist-get policy :host-command-policy)
+    (when (memq 'run_host_command (plist-get policy :active-tools))
       (let ((command-policy (plist-get policy :host-command-policy)))
         (when (and (listp command-policy)
                    (plist-get command-policy :restricted))

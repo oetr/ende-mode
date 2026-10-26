@@ -451,48 +451,31 @@
   (should-not (plist-get (ende-sandbox--result 7 "" "" nil nil) :process_ok)))
 
 (ert-deftest ende-test/chat-host-command-policy-resolves-with-tool-exclusions ()
-  (let ((root (make-temp-file "ende-host-policy-" t)))
+  (let ((root (make-temp-file "ende-host-policy-" t))
+        (restricted '(:restricted t :open ("git") :fixed nil)))
     (unwind-protect
         (progn
-          (let ((unrestricted
-                 (ende-test--tool-access-config
-                  root '((tools run_host_command))))
-                (restricted
-                 (ende-test--tool-access-config
-                  root '((tools run_host_command)
-                         (restrict-host-commands
-                          "git" (:fixed-args "make" "test"))))))
-            (should (eq (plist-get unrestricted :host-command-policy)
-                        :unrestricted))
-            (should (equal (plist-get restricted :host-command-policy)
-                           '(:restricted t :open ("git")
-                             :fixed (("make" "test"))))))
-          (dolist (forms '(((restrict-host-commands "git"))
-                           ((tools run_host_command)
-                            (restrict-host-commands))
+          (let ((before '((tools run_host_command)
+                          (restrict-host-commands "git")))
+                (after '((restrict-host-commands "git")
+                         (tools run_host_command)
+                         (tools run_host_command))))
+            (should (equal (ende-test--tool-access-config root before)
+                           (ende-test--tool-access-config root after))))
+          (dolist (forms '(((restrict-host-commands))
+                           ((restrict-host-commands :unrestricted "git"))
+                           ((restrict-host-commands "git" :unrestricted))
                            ((restrict-host-commands "git")
-                            (tools run_host_command))
-                           ((tools run_host_command)
-                            (restrict-host-commands "git")
-                            (restrict-host-commands "emacs"))
-                           ((tools run_host_command)
-                            (restrict-host-commands "git")
-                            (tools run_host_command))
-                           ((tools run_host_command)
-                            (restrict-host-commands "./git"))
-                           ((tools run_host_command)
-                            (restrict-host-commands "/ssh:host:/usr/bin/git"))
-                           ((tools run_host_command)
-                            (restrict-host-commands "git status"))
-                           ((tools run_host_command)
-                            (restrict-host-commands "."))
-                           ((tools run_host_command)
-                            (restrict-host-commands
+                            (clear-tools)
+                            (restrict-host-commands :unrestricted))
+                           ((restrict-host-commands "./git"))
+                           ((restrict-host-commands "/ssh:host:/usr/bin/git"))
+                           ((restrict-host-commands "git status"))
+                           ((restrict-host-commands "."))
+                           ((restrict-host-commands
                              (:fixed-args "../git" "status")))
-                           ((tools run_host_command)
-                            (restrict-host-commands (:prefix-args "git")))
-                           ((tools run_host_command)
-                            (restrict-host-commands (:fixed "git")))))
+                           ((restrict-host-commands (:prefix-args "git")))
+                           ((restrict-host-commands (:fixed "git")))))
             (should-error (ende-test--tool-access-config root forms)))
           (with-temp-buffer
             (org-mode)
@@ -501,30 +484,78 @@
               `((root ,root)
                 (group development run_host_command read_file edit_file)
                 (resource project (include "**"))
-                (tools development)
                 (set-tool-resources read_file :resources project)
-                (set-tool-resources edit_file :resources project)
-                (restrict-host-commands "git")))
-             "* Conversation\n** Parent\n*** Selectively cleared\n"
+                (set-tool-resources edit_file :resources project)))
+             "* Conversation\n** Unconfigured\n*** Default active\n"
+             (ende-test--chat-config-block '((tools run_host_command)))
+             "** Prepared\n"
+             (ende-test--chat-config-block '((restrict-host-commands "git")))
+             "*** Parent\n"
+             (ende-test--chat-config-block '((tools development)))
+             "**** Selectively cleared\n"
              (ende-test--chat-config-block
               '((clear-tools run_host_command read_file)))
-             "*** Re-enabled\n"
+             "***** Re-enabled\n"
+             (ende-test--chat-config-block '((tools run_host_command)))
+             "**** Globally cleared\n"
+             (ende-test--chat-config-block '((clear-tools)))
+             "***** Restored\n"
+             (ende-test--chat-config-block '((tools run_host_command)))
+             "*** Explicit unrestricted\n"
+             (ende-test--chat-config-block
+              '((restrict-host-commands :unrestricted)))
+             "**** Unrestricted active\n"
              (ende-test--chat-config-block '((tools run_host_command))))
-            (let* ((document (ende-chat--build-document))
-                   (parent (ende-test--chat-config-at document "Parent"))
-                   (cleared
-                    (ende-test--chat-config-at document "Selectively cleared"))
-                   (reenabled (ende-test--chat-config-at document "Re-enabled")))
-              (should (memq 'run_host_command (plist-get parent :active-tools)))
-              (should-not (memq 'run_host_command
-                                (plist-get cleared :active-tools)))
-              (should-not (memq 'read_file (plist-get cleared :active-tools)))
-              (should (memq 'edit_file (plist-get cleared :active-tools)))
-              (should (eq (plist-get cleared :host-command-policy) :inactive))
-              (should (memq 'run_host_command
-                            (plist-get reenabled :active-tools)))
-              (should (eq (plist-get reenabled :host-command-policy)
-                          :unrestricted)))))
+            (let ((document (ende-chat--build-document)))
+              (pcase-dolist
+                  (`(,title ,active ,policy)
+                   `(("Unconfigured" nil :inactive)
+                     ("Default active" t :unrestricted)
+                     ("Prepared" nil ,restricted)
+                     ("Parent" t ,restricted)
+                     ("Selectively cleared" nil ,restricted)
+                     ("Re-enabled" t ,restricted)
+                     ("Globally cleared" nil ,restricted)
+                     ("Restored" t ,restricted)
+                     ("Explicit unrestricted" nil :unrestricted)
+                     ("Unrestricted active" t :unrestricted)))
+                (ert-info ((format "Configuration at %s" title))
+                  (let* ((configuration
+                          (ende-test--chat-config-at document title))
+                         (headline
+                          (cl-find-if
+                           (lambda (node)
+                             (equal (org-element-property :raw-value node) title))
+                           (ende-chat--document-headlines document)))
+                         (environment
+                          (ende-chat-config-resolve-environment
+                           (ende-chat--document-tree document)
+                           (ende-chat--document-parent document) headline)))
+                    (should (eq (not (null (memq 'run_host_command
+                                                (plist-get configuration
+                                                           :active-tools))))
+                                active))
+                    (should (equal (plist-get configuration :host-command-policy)
+                                   policy))
+                    (should (equal (plist-get environment :access-policy)
+                                   configuration))
+                    (unless active
+                      (should-not (string-match-p
+                                   "host commands:\\|host-command policy:"
+                                   (ende-chat-config-capabilities environment)))
+                      (let ((call (ende-test--host-command-call
+                                   '(("command" . "true")) configuration)))
+                        (should-not (plist-get call :ok))
+                        (should (string-match-p "tool is not active"
+                                                (plist-get call :error))))))))
+              (let ((cleared
+                     (ende-test--chat-config-at document "Selectively cleared"))
+                    (all-cleared
+                     (ende-test--chat-config-at document "Globally cleared")))
+                (should-not (memq 'read_file (plist-get cleared :active-tools)))
+                (should (memq 'edit_file (plist-get cleared :active-tools)))
+                (should (equal (plist-get all-cleared :active-tools)
+                               '(about_thinking)))))))
       (delete-directory root t))))
 
 (ert-deftest ende-test/chat-host-command-restrictions-replace-by-block ()
@@ -541,7 +572,9 @@
            (ende-test--chat-config-block
             '((restrict-host-commands "emacs" (:fixed-args "ls"))))
            "*** Reset\n"
-           (ende-test--chat-config-block '((tools run_host_command))))
+           (ende-test--chat-config-block
+            '((restrict-host-commands :unrestricted)
+              (tools run_host_command))))
           (let* ((document (ende-chat--build-document))
                  (parent (ende-test--chat-config-at document "Parent"))
                  (replaced (ende-test--chat-config-at document "Replaced"))

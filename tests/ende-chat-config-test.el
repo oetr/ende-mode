@@ -16,7 +16,9 @@
   (dolist (forms '(("(agent-config worker (clear-tools))"
                    "(agent-config worker (clear-tools))")
                   ("(spawn-agent-config worker)"
-                   "(spawn-agent-config worker)")))
+                   "(spawn-agent-config worker)")
+                  ("(agent-config worker (restrict-host-commands \"git\")"
+                   "(restrict-host-commands :unrestricted))")))
     (with-temp-buffer
       (insert "#+begin_ende\n"
               (car forms) "\n"
@@ -104,6 +106,11 @@
                             (tools inspect)
                             (set-tool-resources inspect :resources docs))
               (agent-config idle)
+              (agent-config prepared (restrict-host-commands "emacs"))
+              (agent-config host
+                            (root ,root)
+                            (restrict-host-commands "emacs")
+                            (tools run_host_command))
               (spawn-agent-config worker)))
            "* Topic\n** Question\n")
           (let* ((document (ende-chat--build-document))
@@ -116,6 +123,13 @@
                  (registry (plist-get environment :registry))
                  (worker (cdr (assq 'worker registry)))
                  (idle (cdr (assq 'idle registry))))
+            (dolist (name '(prepared host))
+              (let ((policy (cdr (assq name registry))))
+                (should (equal (plist-get policy :host-command-policy)
+                               '(:restricted t :open ("emacs") :fixed nil)))
+                (should (eq (not (null (memq 'run_host_command
+                                            (plist-get policy :active-tools))))
+                            (eq name 'host)))))
             (should (equal (plist-get parent :root)
                            (ende-project-normalize-root root)))
             (should (equal (plist-get parent :tool-resources)
