@@ -21,13 +21,23 @@
   "Local realtime speech dictation."
   :group 'ende)
 
+(defcustom ende-speech-api-path "/v1/audio/transcriptions/realtime"
+  "WebSocket endpoint path for realtime speech transcription."
+  :type 'string
+  :group 'ende-speech)
+
+(defcustom ende-speech-encryption nil
+  "Whether to encrypt speech WebSocket connections using TLS."
+  :type 'boolean
+  :group 'ende-speech)
+
 (defcustom ende-speech-input-device nil
   "PulseAudio/PipeWire source identifier, or nil for the system default."
   :type '(choice (const :tag "System default" nil) string)
   :group 'ende-speech)
 
 (defcustom ende-speech-server "127.0.0.1"
-  "Host or IP address of the realtime speech server."
+  "Hostname or IP address of the realtime speech server."
   :type 'string
   :group 'ende-speech)
 
@@ -50,15 +60,16 @@
 (defvar ende-speech--active-session nil
   "The one active realtime speech session, if any.")
 
-(defvar ende-speech-configure-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "i") #'ende-speech--configure-input)
-    (define-key map (kbd "s") #'ende-speech--configure-server)
-    (define-key map (kbd "p") #'ende-speech--configure-port)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "<escape>") #'quit-window)
-    map)
+(defvar ende-speech-configure-mode-map (make-sparse-keymap)
   "Keymap for `ende-speech-configure-mode'.")
+
+(define-key ende-speech-configure-mode-map (kbd "a") #'ende-speech--configure-api-path)
+(define-key ende-speech-configure-mode-map (kbd "e") #'ende-speech--configure-encryption)
+(define-key ende-speech-configure-mode-map (kbd "i") #'ende-speech--configure-input)
+(define-key ende-speech-configure-mode-map (kbd "p") #'ende-speech--configure-port)
+(define-key ende-speech-configure-mode-map (kbd "s") #'ende-speech--configure-server)
+(define-key ende-speech-configure-mode-map (kbd "q") #'quit-window)
+(define-key ende-speech-configure-mode-map (kbd "<escape>") #'quit-window)
 
 (define-derived-mode ende-speech-configure-mode special-mode "Ende-Speech-Configure"
   "Read-only settings view for realtime speech dictation.")
@@ -95,12 +106,22 @@
   (let ((inhibit-read-only t))
     (erase-buffer)
     (insert (format "%-8s - %-18s %s\n"
+                    "a" "API Path:" ende-speech-api-path))
+    (insert
+     (format "%-8s - %-18s " "e" "Encryption:")
+     (propertize
+      (if ende-speech-encryption
+          "On - TLS with certificate verification"
+        "Off - voice sent unencrypted!")
+      'face (if ende-speech-encryption 'success 'error))
+     "\n")
+    (insert (format "%-8s - %-18s %s\n"
                     "i" "Input:" (or ende-speech-input-device
                                      "System default")))
     (insert (format "%-8s - %-18s %s\n"
-                    "s" "Server:" ende-speech-server))
+                    "p" "Port:" ende-speech-port))
     (insert (format "%-8s - %-18s %s\n"
-                    "p" "Port:" ende-speech-port))))
+                    "s" "Server:" ende-speech-server))))
 
 (defun ende-speech-configure ()
   "Open the speech configuration buffer."
@@ -213,6 +234,66 @@ Try JSON first, then older pactl's normal text listing."
         (user-error "Cannot list audio inputs: pactl enumeration failed"))
       (ende-speech--device-candidates (cdr devices)))))
 
+(defun ende-speech--validate-api-path (path)
+  "Return PATH if it is a valid endpoint path, otherwise signal a user error."
+  (unless (and (stringp path)
+               (string-prefix-p "/" path)
+               (not (string-match-p "[[:cntrl:]?#]" path)))
+    (user-error "API path must start with / and contain no control characters, query or fragment"))
+  path)
+
+(defun ende-speech--validate-server (host)
+  "Return HOST if it is a hostname or IP address, otherwise signal a user error."
+  (let ((address (if (and (stringp host)
+                          (string-prefix-p "[" host)
+                          (string-suffix-p "]" host))
+                     (substring host 1 -1)
+                   host))
+        (case-fold-search t))
+    (unless
+        (and (stringp address)
+             (if (string-match-p ":" address)
+                 (and (string-match-p "\\`[[:xdigit:]:.]+\\'" address)
+                      (network-lookup-address-info address 'ipv6 'numeric))
+               (and (equal host address)
+                    (<= (length (string-remove-suffix "." address)) 253)
+                    (cl-every
+                     (lambda (label)
+                       (string-match-p
+                        "\\`[a-z0-9]\\(?:[a-z0-9-]\\{0,61\\}[a-z0-9]\\)?\\'"
+                        label))
+                     (split-string (string-remove-suffix "." address) "\\."))
+                    (or (not (string-match-p
+                              "\\`[0-9]+\\(?:\\.[0-9]+\\)\\{3\\}\\.?\\'" address))
+                        (network-lookup-address-info
+                         (string-remove-suffix "." address) 'ipv4 'numeric)))))
+      (user-error "Server must be a hostname or IP address, not a URL or host:port")))
+  host)
+
+(defun ende-speech--validate-port (port)
+  "Return PORT if it is an integer from 1 to 65535, otherwise signal a user error."
+  (unless (and (integerp port) (<= 1 port 65535))
+    (user-error "Port must be an integer from 1 to 65535"))
+  port)
+
+(defun ende-speech--configure-api-path ()
+  "Set the realtime speech API path."
+  (interactive)
+  (setq ende-speech-api-path
+        (ende-speech--validate-api-path
+         (read-string "API Path: " ende-speech-api-path)))
+  (ende-speech--render-configuration))
+
+(defun ende-speech--configure-encryption ()
+  "Configure encryption for speech WebSocket connections."
+  (interactive)
+  (setq ende-speech-encryption
+        (equal (completing-read
+                "Encryption: " '("Off" "On") nil t nil nil
+                (if ende-speech-encryption "On" "Off"))
+               "On"))
+  (ende-speech--render-configuration))
+
 (defun ende-speech--configure-input ()
   "Choose a PulseAudio/PipeWire input device."
   (interactive)
@@ -235,17 +316,17 @@ Try JSON first, then older pactl's normal text listing."
   "Set the realtime speech server host."
   (interactive)
   (setq ende-speech-server
-        (read-string "Server: " ende-speech-server))
+        (ende-speech--validate-server
+         (read-string "Server: " ende-speech-server)))
   (ende-speech--render-configuration))
 
 (defun ende-speech--configure-port ()
   "Set the realtime speech server port."
   (interactive)
-  (let ((port (read-number "Port: " ende-speech-port)))
-    (unless (and (integerp port) (<= 1 port 65535))
-      (user-error "Port must be an integer from 1 to 65535"))
-    (setq ende-speech-port port)
-    (ende-speech--render-configuration)))
+  (setq ende-speech-port
+        (ende-speech--validate-port
+         (read-number "Port: " ende-speech-port)))
+  (ende-speech--render-configuration))
 
 (defun ende-speech--session-active-p (session)
   "Return non-nil if SESSION is the current non-terminal speech session."
@@ -554,13 +635,16 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
       (error nil))))
 
 (defun ende-speech--server-url ()
-  "Return the fixed realtime WebSocket endpoint URL."
-  (let ((host ende-speech-server))
+  "Validate the speech settings and return the WebSocket endpoint URL."
+  (let ((host (ende-speech--validate-server ende-speech-server)))
+    (ende-speech--validate-port ende-speech-port)
+    (ende-speech--validate-api-path ende-speech-api-path)
     (when (and (string-match-p ":" host)
                (not (string-prefix-p "[" host)))
       (setq host (concat "[" host "]")))
-    (format "ws://%s:%d/v1/audio/transcriptions/realtime"
-            host ende-speech-port)))
+    (format "%s://%s:%d%s"
+            (if ende-speech-encryption "wss" "ws")
+            host ende-speech-port ende-speech-api-path)))
 
 (defun ende-speech-start-talking ()
   "Start a realtime speech session at the current point."

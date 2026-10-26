@@ -29,6 +29,8 @@
         (recorder 'mock-recorder)
         (ende-speech-server "127.0.0.1")
         (ende-speech-port 8081)
+        (ende-speech-api-path "/speech-test")
+        (ende-speech-encryption nil)
         (ende-speech-input-device nil)
         (ende-speech-test--open-args nil)
         (ende-speech-test--sent nil)
@@ -199,20 +201,100 @@
             (should (bound-and-true-p ende-new-module-loaded))))
       (delete-directory directory t))))
 
-(ert-deftest ende-speech/configuration-rendering-aligned ()
-  (let ((buffer (generate-new-buffer " *ende-speech-config-test*"))
-        (ende-speech-input-device nil)
+(ert-deftest ende-speech/endpoint-configuration ()
+  (pcase-dolist (`(,encryption ,server ,port ,path ,expected)
+                `((nil "127.0.0.1" 8081 ,(default-value 'ende-speech-api-path)
+                       ,(concat "ws://127.0.0.1:8081"
+                                (default-value 'ende-speech-api-path)))
+                  (t "speech.example.com" 443 "/transcribe"
+                     "wss://speech.example.com:443/transcribe")
+                  (nil "speech.example.com" 9000 "/transcribe"
+                       "ws://speech.example.com:9000/transcribe")
+                  (nil "192.168.1.50" 9000 "/transcribe"
+                       "ws://192.168.1.50:9000/transcribe")
+                  (t "::1" 8081 "/transcribe"
+                     "wss://[::1]:8081/transcribe")))
+    (let ((ende-speech-encryption encryption)
+          (ende-speech-server server)
+          (ende-speech-port port)
+          (ende-speech-api-path path))
+      (should (equal (ende-speech--server-url) expected))))
+  (let ((ende-speech-server "localhost")
+        (ende-speech-port 8081)
+        (ende-speech-api-path "/transcribe"))
+    (pcase-dolist (`(,variable . ,invalid-values)
+                  '((ende-speech-server "" "ws://localhost" "host/path"
+                                        "user@host" "host name" "host\n"
+                                        "-host" "host..com" "host:80" "1::2::3"
+                                        "[localhost]" "999.999.999.999.")
+                    (ende-speech-port 0 -1 65536 1.5 "8081")
+                    (ende-speech-api-path "" "transcribe" "/path?query"
+                                          "/path#fragment" "/path\r\n" "/path\0")))
+      (dolist (value invalid-values)
+        (cl-progv (list variable) (list value)
+          (should-error (ende-speech--server-url) :type 'user-error))))))
+
+(ert-deftest ende-speech/configuration-interface ()
+  (let ((ende-speech-input-device nil)
         (ende-speech-server "127.0.0.1")
-        (ende-speech-port 8081))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-speech-configure-mode)
-          (ende-speech--render-configuration)
-          (should (equal (buffer-string)
-                         (concat "i        - Input:             System default\n"
-                                 "s        - Server:            127.0.0.1\n"
-                                 "p        - Port:              8081\n"))))
-      (kill-buffer buffer))))
+        (ende-speech-port 8081)
+        (ende-speech-api-path "/original")
+        (ende-speech-encryption nil))
+    (with-temp-buffer
+      (ende-speech-configure-mode)
+      (ende-speech--render-configuration)
+      (let (settings)
+        (goto-char (point-min))
+        (while (re-search-forward "^\\([a-z]\\) +- \\([^:]+:\\)" nil t)
+          (push (cons (match-string 1) (match-string 2)) settings))
+        (should (equal (nreverse settings)
+                       '(("a" . "API Path:") ("e" . "Encryption:")
+                         ("i" . "Input:") ("p" . "Port:") ("s" . "Server:")))))
+      (dolist (encryption '(nil t))
+        (setq ende-speech-encryption encryption)
+        (ende-speech--render-configuration)
+        (goto-char (point-min))
+        (search-forward (if encryption
+                            "On - TLS with certificate verification"
+                          "Off - voice sent unencrypted!"))
+        (should-not (text-property-not-all
+                     (match-beginning 0) (match-end 0) 'face
+                     (if encryption 'success 'error)))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt choices _predicate require-match
+                                    _initial _history default &rest _)
+                     (should (equal choices '("Off" "On")))
+                     (should require-match)
+                     (should (equal default (if encryption "On" "Off")))
+                     (if encryption "Off" "On"))))
+          (call-interactively (key-binding (kbd "e"))))
+        (should (eq ende-speech-encryption (not encryption)))
+        (should (equal ende-speech-server "127.0.0.1"))
+        (should (= ende-speech-port 8081)))
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (prompt initial &rest _)
+                   (if (equal prompt "API Path: ")
+                       (progn (should (equal initial "/original")) "/custom")
+                     "speech.example.com")))
+                ((symbol-function 'read-number) (lambda (&rest _) 443))
+                ((symbol-function 'ende-speech--discover-input-devices)
+                 (lambda () '(("Microphone" . "source.1"))))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "Microphone")))
+        (dolist (key '("a" "i" "p" "s"))
+          (call-interactively (key-binding (kbd key)))))
+      (should (equal (list ende-speech-api-path ende-speech-input-device
+                           ende-speech-port ende-speech-server)
+                     '("/custom" "source.1" 443 "speech.example.com")))
+      (dolist (value '("/custom" "source.1" "443" "speech.example.com"))
+        (should (string-match-p (regexp-quote value) (buffer-string))))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "invalid?"))
+                ((symbol-function 'read-number) (lambda (&rest _) 0)))
+        (dolist (key '("a" "p" "s"))
+          (should-error (call-interactively (key-binding (kbd key)))
+                        :type 'user-error)))
+      (should (equal (list ende-speech-api-path ende-speech-port ende-speech-server)
+                     '("/custom" 443 "speech.example.com"))))))
 
 (ert-deftest ende-speech/input-device-discovery-and-selection ()
   (let ((ende-speech-input-device nil)
@@ -301,7 +383,7 @@
   (ende-speech-test--with-session
    (lambda (session source _speech-buffer)
      (should (equal (car ende-speech-test--open-args)
-                    "ws://127.0.0.1:8081/v1/audio/transcriptions/realtime"))
+                    (ende-speech--server-url)))
      (should (= (marker-position (ende-speech--session-marker session)) 3))
      (should (eq (marker-buffer (ende-speech--session-marker session)) source))
      (should (eq (ende-speech--session-source-window session)
