@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'gnutls)
 (require 'json)
 (require 'subr-x)
 (require 'websocket)
@@ -651,6 +652,8 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
   (interactive)
   (when ende-speech--active-session
     (user-error "A speech session is already active"))
+  (when (and ende-speech-encryption (not (gnutls-available-p)))
+    (user-error "Speech encryption requires GnuTLS support"))
   (let ((default-directory temporary-file-directory))
     (unless (executable-find "parec")
       (user-error "parec is unavailable; cannot record audio")))
@@ -668,26 +671,31 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
       (let ((inhibit-read-only t)) (erase-buffer)))
     (condition-case err
         (setf (ende-speech--session-websocket session)
-              (websocket-open
-               (ende-speech--server-url)
-               :nowait t
-               :on-open (lambda (_websocket) nil)
-               :on-message
-               (lambda (websocket frame)
-                 (ende-speech--websocket-message session websocket frame))
-               :on-close
-               (lambda (_websocket)
-                 (when (ende-speech--session-active-p session)
-                   (ende-speech--fail session "WebSocket connection closed")))
-               :on-error
-               (lambda (_websocket _type error)
-                 (when (ende-speech--session-active-p session)
-                   (ende-speech--fail
-                    session (format "WebSocket error: %s"
-                                    (if (and (consp error)
-                                             (symbolp (car error)))
-                                        (error-message-string error)
-                                      error)))))))
+              ;; Async TLS captures this setting in its GnuTLS boot parameters.
+              (let ((gnutls-verify-error t))
+                (websocket-open
+                 (ende-speech--server-url)
+                 :nowait t
+                 :on-open (lambda (_websocket) nil)
+                 :on-message
+                 (lambda (websocket frame)
+                   (ende-speech--websocket-message session websocket frame))
+                 :on-close
+                 (lambda (_websocket)
+                   (when (ende-speech--session-active-p session)
+                     (ende-speech--fail
+                      session (if (eq (ende-speech--session-state session) 'connecting)
+                                  "WebSocket connection failed"
+                                "WebSocket connection closed"))))
+                 :on-error
+                 (lambda (_websocket _type error)
+                   (when (ende-speech--session-active-p session)
+                     (ende-speech--fail
+                      session (format "WebSocket error: %s"
+                                      (if (and (consp error)
+                                               (symbolp (car error)))
+                                          (error-message-string error)
+                                        error))))))))
       (error
        (ende-speech--terminate
         session nil (format "could not connect: %s" (error-message-string err)) t)
