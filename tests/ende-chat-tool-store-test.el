@@ -511,7 +511,7 @@
           (cl-letf (((symbol-function 'message)
                      (lambda (format-string &rest arguments)
                        (let ((text (apply #'format format-string arguments)))
-                          (when (string-match-p "expired" text)
+                          (when (string-match-p "Some tool payloads are unavailable" text)
                             (setq notices (cons text notices)))
                           text))))
             (ende-test--chat-goto "** Follow-up")
@@ -598,7 +598,7 @@
              (cl-letf (((symbol-function 'message)
                        (lambda (format-string &rest arguments)
                          (let ((text (apply #'format format-string arguments)))
-                           (when (string-match-p "expired" text)
+                           (when (string-match-p "Some tool payloads are unavailable" text)
                              (push text notices))
                             text)))
                        ((symbol-function 'ende-chat--tool-response-async)
@@ -647,6 +647,77 @@
                       ende-tools--empty-object-schema handler nil :no-resource
                       '(:requires-root nil)))
 
+(ert-deftest ende-test/chat-switching-stores-preserves-context-and-freezes-async-storage ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-store-switch-" t))
+         (selected (expand-file-name "selected.sqlite3" directory))
+         (ende-tools--registry (copy-sequence ende-tools--registry))
+         (ende-llm-function
+          (ende-test--fake-llm
+           '((:tool-calls ((:id "new-call" :name "ende_test_payload_boundary"
+                           :arguments "{}"))) "Continued answer") t))
+         pending notices)
+    (ende-tool-register
+     'ende_test_payload_boundary "Async store test" ende-tools--empty-object-schema
+     (lambda (_arguments _root callback) (setq pending callback))
+     nil :no-resource '(:requires-root nil :async t))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (setq buffer-file-name (expand-file-name "chat.org" directory))
+          (insert (ende-test--chat-config-block
+                   '((tools ende_test_payload_boundary)))
+                  "* Topic\n** Question\nOriginal question.\n")
+          (let ((old-calls
+                 (ende-test--stored-tool-history
+                  (list (cons '(:id "old-A" :name "read_file" :arguments "{}") "A")
+                        (cons '(:id "old-B" :name "read_file" :arguments "{}") "B")))))
+            (insert "** Follow-up\nContinue from the prose.\n")
+            (save-excursion
+              (goto-char (point-min))
+              (insert "#+ENDE_TOOL_STORE_FILE: selected.sqlite3\n"))
+            (ende-mode 1)
+            (ende-test--chat-goto "** Follow-up")
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format-string &rest arguments)
+                         (let ((text (apply #'format format-string arguments)))
+                           (when (equal text "Some tool payloads are unavailable; omitting affected tool history")
+                             (push text notices))
+                           text))))
+              (let* ((messages (ende-chat-context-at-point))
+                     (text (prin1-to-string messages)))
+                (should-not (ende-test--chat-protocol-messages messages))
+                (dolist (prose '("Original question" "Checking both sources"
+                                 "Final stored answer" "Continue from the prose"))
+                  (should (string-match-p prose text)))
+                (should (= (length notices) 1)))
+              (setq notices nil)
+              (let ((job (ende-ask)))
+                (should (= (length notices) 1))
+                (should (equal (plist-get (ende-job-instruction job) :tool-store-file)
+                               selected))
+                (with-temp-buffer
+                  (ende-test--complete-call (car ende-test--calls)))
+                (should pending)
+                (setq ende-tool-store--local-file nil)
+                (ende-queue-add-guidance job "Keep going.")
+                (with-temp-buffer (funcall pending '(:ok t) nil))
+                (ende-test--complete-call (nth 1 ende-test--calls))
+                (should (eq (ende-job-state job) 'completed))
+                (let* ((document (ende-chat--build-document))
+                       (references (ende-test--tool-headlines document 'call))
+                       (new-references (nthcdr (length old-calls) references)))
+                  (should (= (length new-references) 2))
+                  (dolist (reference new-references)
+                    (let* ((id (ende-chat--property
+                                document reference :tool-execution-id))
+                           (execution (ende-tool-store-load-execution id selected)))
+                      (should (plist-get execution :request-present-p))
+                      (should (plist-get execution :result-present-p))
+                      (should-not (ende-tool-store-get id 'request)))))))))
+      (ende-test--reset)
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/chat-tool-store-failures-respect-execution-order ()
   (dolist (failure-kind '(request result))
     (ende-test--reset)
@@ -671,10 +742,11 @@
             (ende-test--chat-goto "** Question")
             (let ((job (ende-ask)))
               (cl-letf (((symbol-function 'ende-tool-store-put)
-                         (lambda (execution-id kind payload)
+                         (lambda (execution-id kind payload &optional filename)
                            (if (eq kind failure-kind)
                                (error "%s-store-failed" kind)
-                             (funcall original-put execution-id kind payload)))))
+                             (funcall original-put execution-id kind payload
+                                      filename)))))
                 (ende-test--complete-call (car ende-test--calls)))
               (should (eq (ende-job-state job) 'failed))
               (should (string-match-p

@@ -1340,7 +1340,7 @@ ROOT supplies the source scope when the destination is a new root sibling."
                         (list (ende-chat--message 'user current-text)))))
              (expired ende-chat--expired-history-in-request))
         (when expired
-          (message "Some tool history has expired because its payloads are unavailable"))
+          (message "Some tool payloads are unavailable; omitting affected tool history"))
         messages))))
 
 (defun ende-chat-context-at-point ()
@@ -3188,23 +3188,26 @@ OPTIONS are passed to `json-serialize'."
         (truncate-string-to-width title width 0 nil "…")
       title)))
 
-(defun ende-chat--prepare-tool-call (call)
-  "Store CALL's exact request and return it with a fresh execution identity."
-  (let ((id (ende-chat--tool-value call :id))
+(defun ende-chat--prepare-tool-call (call &optional store-file)
+  "Store CALL in STORE-FILE and return it with a fresh execution identity."
+  (let ((store-file (or store-file (ende-tool-store--filename)))
+        (id (ende-chat--tool-value call :id))
         (name (ende-chat--tool-value call :name))
         (arguments (ende-chat--tool-value call :arguments)))
     (let ((execution
-           (ende-tool-store-create-execution id name arguments)))
+           (ende-tool-store-create-execution id name arguments store-file)))
       (list :id (plist-get execution :provider-call-id)
             :name (plist-get execution :name)
             :arguments (plist-get execution :arguments)
-            :execution-id (plist-get execution :execution-id)))))
+            :execution-id (plist-get execution :execution-id)
+            :store-file store-file))))
 
 (defun ende-chat--store-tool-result (call content)
   "Store CONTENT as CALL's exact result payload."
   (let ((execution-id (ende-chat--tool-value call :execution-id))
         (id (ende-chat--tool-value call :id)))
-    (ende-tool-store-store-result execution-id id content)))
+    (ende-tool-store-store-result
+     execution-id id content (ende-chat--tool-value call :store-file))))
 
 (defun ende-chat--tool-section-properties
     (request-id execution-id tool-name kind)
@@ -3708,7 +3711,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
               (mapcar (lambda (_text)
                         (ende-chat--prepare-tool-call
                          (list :id (ende-chat--new-id "user-guidance")
-                               :name "user_guidance" :arguments "{}")))
+                               :name "user_guidance" :arguments "{}")
+                         (plist-get instruction :tool-store-file)))
                       guidance))
              (normalized-calls
               (mapcar (lambda (call)
@@ -3761,7 +3765,11 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                  (question-id (plist-get instruction :question-id))
                  (level (1+ (plist-get instruction :response-level)))
                  (content (or (plist-get result :content) ""))
-                 (stored-calls (mapcar #'ende-chat--prepare-tool-call calls))
+                 (stored-calls
+                  (mapcar (lambda (call)
+                            (ende-chat--prepare-tool-call
+                             call (plist-get instruction :tool-store-file)))
+                          calls))
                  (assistant
                   (list :role "assistant" :content content :tool-calls calls
                         :reasoning-content
@@ -3808,6 +3816,10 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
             (buffer (ende-target-buffer (ende-job-target job)))
             (question-id (plist-get instruction :question-id)))
        (with-current-buffer buffer
+         (setq instruction
+               (plist-put instruction :tool-store-file
+                          (ende-tool-store--filename)))
+         (setf (ende-job-instruction job) instruction)
          (save-excursion
            (save-restriction
              (widen)

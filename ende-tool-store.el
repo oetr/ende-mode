@@ -116,9 +116,10 @@
            (error "Cannot initialize or validate tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                   filename (error-message-string error-data))))))))
 
-(defun ende-tool-store--call-with-database (create function)
-  "Call FUNCTION with an initialized database, creating it when CREATE."
-  (let* ((filename (ende-tool-store--filename))
+(defun ende-tool-store--call-with-database (create function &optional filename)
+  "Call FUNCTION with database FILENAME, creating it when CREATE.
+FILENAME defaults to the current buffer's effective store."
+  (let* ((filename (or filename (ende-tool-store--filename)))
          (database (ende-tool-store--open filename create)))
     (when database
       (unwind-protect
@@ -129,8 +130,8 @@
                     filename (error-message-string error-data))))
         (sqlite-close database)))))
 
-(defun ende-tool-store-put (execution-id kind payload)
-  "Store immutable JSON PAYLOAD for EXECUTION-ID and KIND."
+(defun ende-tool-store-put (execution-id kind payload &optional filename)
+  "Store immutable JSON PAYLOAD for EXECUTION-ID and KIND in FILENAME."
   (unless (and (stringp execution-id) (not (string-empty-p execution-id))
                (member kind '(request result))
                (stringp payload))
@@ -149,10 +150,11 @@
                             (vector execution-id kind)))))
          (unless (equal stored payload)
            (error "Conflicting immutable tool payload for execution %s (%s)"
-                  execution-id kind)))))))
+                  execution-id kind))))
+     filename)))
 
-(defun ende-tool-store-get (execution-id kind)
-  "Return the exact payload for EXECUTION-ID and KIND, or nil if absent."
+(defun ende-tool-store-get (execution-id kind &optional filename)
+  "Return EXECUTION-ID's KIND payload from FILENAME, or nil if absent."
   (unless (and (stringp execution-id) (member kind '(request result)))
     (error "Invalid tool payload identity"))
   (ende-tool-store--call-with-database
@@ -161,7 +163,8 @@
      (caar (sqlite-select
             database
             "SELECT payload FROM tool_payloads WHERE execution_id = ? AND kind = ?"
-            (vector execution-id (symbol-name kind)))))))
+            (vector execution-id (symbol-name kind)))))
+   filename))
 
 (defun ende-tool-store--encode-payload (&rest fields)
   "Encode string-keyed FIELDS as the existing durable JSON representation."
@@ -191,8 +194,9 @@
              kind execution-id))
     record))
 
-(defun ende-tool-store-create-execution (provider-call-id name arguments)
-  "Store a new request execution and return its semantic value."
+(defun ende-tool-store-create-execution
+    (provider-call-id name arguments &optional filename)
+  "Store a new request execution in FILENAME and return its semantic value."
   (unless (and (stringp provider-call-id) (not (string-empty-p provider-call-id))
                (stringp name) (not (string-empty-p name))
                (stringp arguments))
@@ -202,7 +206,8 @@
      execution-id 'request
      (ende-tool-store--encode-payload
       "provider_call_id" provider-call-id "tool_name" name
-      "arguments" arguments))
+      "arguments" arguments)
+     filename)
     (list :execution-id execution-id
           :provider-call-id provider-call-id
           :name name
@@ -211,8 +216,9 @@
           :result-present-p nil
           :content nil)))
 
-(defun ende-tool-store-store-result (execution-id provider-call-id content)
-  "Store exact CONTENT for EXECUTION-ID and PROVIDER-CALL-ID."
+(defun ende-tool-store-store-result
+    (execution-id provider-call-id content &optional filename)
+  "Store CONTENT for EXECUTION-ID and PROVIDER-CALL-ID in FILENAME."
   (unless (and (stringp execution-id) (not (string-empty-p execution-id))
                (stringp provider-call-id) (not (string-empty-p provider-call-id))
                (stringp content))
@@ -220,10 +226,11 @@
   (ende-tool-store-put
    execution-id 'result
    (ende-tool-store--encode-payload
-    "provider_call_id" provider-call-id "content" content)))
+    "provider_call_id" provider-call-id "content" content)
+   filename))
 
-(defun ende-tool-store-load-execution (execution-id)
-  "Load and validate EXECUTION-ID as a semantic execution plist.
+(defun ende-tool-store-load-execution (execution-id &optional filename)
+  "Load and validate EXECUTION-ID from FILENAME as a semantic execution plist.
 
 Request and result records are optional.  Their presence is explicit in the
 returned plist, and provider call IDs are checked when both records exist."
@@ -241,7 +248,8 @@ returned plist, and provider call IDs are checked when both records exist."
               (caar (sqlite-select
                      database
                      "SELECT payload FROM tool_payloads WHERE execution_id = ? AND kind = 'result'"
-                     (vector execution-id)))))))
+                     (vector execution-id)))))
+           filename))
          (request-payload (car payloads))
          (result-payload (cadr payloads))
          (request (and request-payload
