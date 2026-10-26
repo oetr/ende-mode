@@ -348,6 +348,18 @@ returned plist, and provider call IDs are checked when both records exist."
                             files ", "))
         bytes))))
 
+(defun ende-tool-store--job-file (job)
+  "Return live chat JOB's tool store filename, or nil for other jobs.
+Refuse an unknown destination rather than risk purging an active store."
+  (when (memq (ende-job-type job) '(chat chat-compact))
+    (or (plist-get (ende-job-instruction job) :tool-store-file)
+        (let ((target (ende-job-target job)))
+          (unless (ende-target-live-p target)
+            (user-error "Cannot determine tool payload database for active Ende job %s"
+                        (ende-job-id job)))
+          (with-current-buffer (ende-target-buffer target)
+            (ende-tool-store--filename))))))
+
 ;;;###autoload
 (defun ende-tool-store-purge ()
   "Confirm and delete the current buffer's tool database and SQLite sidecars."
@@ -358,8 +370,7 @@ returned plist, and provider call IDs are checked when both records exist."
                    filename))
       (when (cl-some
              (lambda (job)
-               (when-let* ((file (plist-get (ende-job-instruction job)
-                                           :tool-store-file)))
+               (when-let* ((file (ende-tool-store--job-file job)))
                  (or (equal filename file) (file-equal-p filename file))))
              (ende-all-live-jobs))
         (user-error "An active Ende job is using tool payload database %s" filename))
