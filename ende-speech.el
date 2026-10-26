@@ -261,11 +261,13 @@ Try JSON first, then older pactl's normal text listing."
       (ende-speech--device-candidates (cdr devices)))))
 
 (defun ende-speech--validate-api-path (path)
-  "Return PATH if it is a valid endpoint path, otherwise signal a user error."
-  (unless (and (stringp path)
-               (string-prefix-p "/" path)
-               (not (string-match-p "[[:cntrl:]?#]" path)))
-    (user-error "API path must start with / and contain no control characters, query or fragment"))
+  "Return PATH if it is a valid URL path, otherwise signal a user error."
+  (let ((case-fold-search nil))
+    (unless (and (stringp path)
+                 (string-match-p
+                  "\\`/\\(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]\\|%[0-9A-Fa-f]\\{2\\}\\)*\\'"
+                  path))
+      (user-error "API path must be an absolute URL path; percent-encode special characters")))
   path)
 
 (defun ende-speech--validate-server (host)

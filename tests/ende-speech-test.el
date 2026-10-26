@@ -220,6 +220,9 @@
           (ende-speech-port port)
           (ende-speech-api-path path))
       (should (equal (ende-speech--server-url) expected))))
+  (dolist (path '("/" "/my%20speech%20endpoint" "/api/v1/model:large"
+                  "/transcribe%2Fcustom/%c3%a9"))
+    (should (eq (ende-speech--validate-api-path path) path)))
   (let ((ende-speech-server "localhost")
         (ende-speech-port 8081)
         (ende-speech-api-path "/transcribe"))
@@ -230,7 +233,10 @@
                                         "[localhost]" "999.999.999.999.")
                     (ende-speech-port 0 -1 65536 1.5 "8081")
                     (ende-speech-api-path "" "transcribe" "/path?query"
-                                          "/path#fragment" "/path\r\n" "/path\0")))
+                                          "/path#fragment" "/path\r\n" "/path\0"
+                                          "/my speech endpoint" "/speech%"
+                                          "/speech%2" "/speech%ZZ"
+                                          "/speech<test>" "/café")))
       (dolist (value invalid-values)
         (cl-progv (list variable) (list value)
           (should-error (ende-speech--server-url) :type 'user-error))))))
