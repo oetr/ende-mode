@@ -68,6 +68,44 @@
   (or ende-tool-store--local-file
       (expand-file-name ende-tool-store-file)))
 
+(defun ende-tool-store--files (filename)
+  "Return FILENAME and its SQLite auxiliary filenames."
+  (mapcar (lambda (suffix) (concat filename suffix))
+          '("" "-wal" "-shm" "-journal")))
+
+(defun ende-tool-store--set-modes (file modes)
+  "Set FILE's MODES without following a symbolic link.
+Verify Unix permission bits on platforms that support them."
+  (set-file-modes file modes 'nofollow)
+  (unless (memq system-type '(windows-nt ms-dos))
+    (unless (= (logand (file-modes file 'nofollow) #o7777) modes)
+      (error "Cannot enforce tool store permissions on %s" file))))
+
+(defun ende-tool-store--protect-files (filename &optional create)
+  "Validate and protect FILENAME and its sidecars before SQLite uses them.
+CREATE permits making missing directories, but only the dedicated default
+Ende directory has its existing permissions changed."
+  (when (file-remote-p filename)
+    (user-error "Tool payload storage requires a local database: %s" filename))
+  (let* ((directory (file-name-directory filename))
+         (parent (directory-file-name directory)))
+    (while parent
+      (when (file-symlink-p parent)
+        (error "Refusing symbolic link in tool store directory: %s" parent))
+      (let ((next (directory-file-name (file-name-directory parent))))
+        (setq parent (unless (equal parent next) next))))
+    (when create
+      (make-directory directory t))
+    (when (and (equal directory (expand-file-name "ende/" user-emacs-directory))
+               (file-directory-p directory))
+      (ende-tool-store--set-modes directory #o700)))
+  (dolist (file (ende-tool-store--files filename))
+    (when-let* ((attributes (file-attributes file)))
+      (when (or (file-attribute-type attributes)
+                (> (file-attribute-link-number attributes) 1))
+        (error "Refusing non-regular or linked tool store file: %s" file))
+      (ende-tool-store--set-modes file #o600))))
+
 (defun ende-tool-store--check-sqlite ()
   "Signal an actionable error if this Emacs cannot use SQLite."
   (unless (and (fboundp 'sqlite-available-p) (sqlite-available-p))
@@ -97,10 +135,9 @@
 (defun ende-tool-store--open (filename create)
   "Open and validate FILENAME.  CREATE allows making a missing database."
   (ende-tool-store--check-sqlite)
+  (ende-tool-store--protect-files filename create)
   (let ((exists (file-exists-p filename)))
     (when (or exists create)
-      (when create
-        (make-directory (file-name-directory filename) t))
       (let ((database
              (condition-case error-data
                (sqlite-open filename nil)
@@ -119,16 +156,20 @@
 (defun ende-tool-store--call-with-database (create function &optional filename)
   "Call FUNCTION with database FILENAME, creating it when CREATE.
 FILENAME defaults to the current buffer's effective store."
-  (let* ((filename (or filename (ende-tool-store--filename)))
-         (database (ende-tool-store--open filename create)))
-    (when database
-      (unwind-protect
-          (condition-case error-data
-              (funcall function database)
-            (error
-             (error "Tool payload database %s failed: %s. Check the file or set `ende-tool-store-file' to a fresh database"
-                    filename (error-message-string error-data))))
-        (sqlite-close database)))))
+  ;; SQLite can create sidecars during SQL execution and connection closing.
+  (with-file-modes #o700
+    (let* ((filename (expand-file-name (or filename (ende-tool-store--filename))))
+           (database (ende-tool-store--open filename create)))
+      (when database
+        (unwind-protect
+            (condition-case error-data
+                (funcall function database)
+              (error
+               (error "Tool payload database %s failed: %s. Check the file or set `ende-tool-store-file' to a fresh database"
+                      filename (error-message-string error-data))))
+          (unwind-protect
+              (sqlite-close database)
+            (ende-tool-store--protect-files filename)))))))
 
 (defun ende-tool-store-put (execution-id kind payload &optional filename)
   "Store immutable JSON PAYLOAD for EXECUTION-ID and KIND in FILENAME."
@@ -276,9 +317,7 @@ returned plist, and provider call IDs are checked when both records exist."
   (let* ((filename (ende-tool-store--filename))
          (files (cl-remove-if-not
                  #'file-exists-p
-                 (list filename (concat filename "-wal")
-                       (concat filename "-shm")
-                       (concat filename "-journal")))))
+                 (ende-tool-store--files filename))))
     (list filename
           (mapcar (lambda (file)
                     (cons file (file-attribute-size (file-attributes file))))

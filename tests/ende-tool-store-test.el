@@ -130,6 +130,49 @@
                           (mapcar #'car (cadr (ende-tool-store--footprint))))))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/tool-store-keeps-databases-and-live-sidecars-private ()
+  (skip-unless (not (memq system-type '(windows-nt ms-dos))))
+  (let* ((directory (make-temp-file "ende-tool-store-private-" t))
+         (user-emacs-directory (file-name-as-directory directory)))
+    (unwind-protect
+        (with-file-modes #o777
+          (dolist (relative '("ende/tool-payloads.sqlite3" "shared/custom.sqlite3"))
+            (let* ((ende-tool-store-file (expand-file-name relative directory))
+                   (parent (file-name-directory ende-tool-store-file))
+                   (dedicated (string-prefix-p "ende/" relative)))
+              (make-directory parent t)
+              (set-file-modes parent #o755)
+              (ende-tool-store-put "private" 'request "exact payload")
+              (ende-tool-store--call-with-database
+               t
+               (lambda (database)
+                 (sqlite-execute database "PRAGMA journal_mode = WAL")
+                 (sqlite-execute database "UPDATE tool_payloads SET payload = payload")
+                 (dolist (file (ende-tool-store--files ende-tool-store-file))
+                   (when (file-exists-p file)
+                     (should (= (logand (file-modes file) #o777) #o600))
+                     (set-file-modes file #o666)))
+                 (when dedicated (set-file-modes parent #o777))
+                 (should (equal (ende-tool-store-get "private" 'request)
+                                "exact payload"))
+                 (should (= (logand (file-modes parent) #o777)
+                            (if dedicated #o700 #o755)))
+                 (dolist (file (ende-tool-store--files ende-tool-store-file))
+                   (when (file-exists-p file)
+                     (should (= (logand (file-modes file) #o777) #o600))))))
+              (should (= (logand (file-modes ende-tool-store-file) #o777) #o600))
+              (delete-file ende-tool-store-file)
+              (let ((unrelated (expand-file-name "unrelated" directory)))
+                (with-temp-file unrelated (insert "not a database"))
+                (set-file-modes unrelated #o644)
+                (dolist (file (list ende-tool-store-file
+                                    (concat ende-tool-store-file "-wal")))
+                  (make-symbolic-link unrelated file)
+                  (should-error (ende-tool-store-get "private" 'request))
+                  (should (= (logand (file-modes unrelated) #o777) #o644))
+                  (delete-file file))))))
+      (delete-directory directory t))))
+
 (provide 'ende-tool-store-test)
 
 ;;; ende-tool-store-test.el ends here
