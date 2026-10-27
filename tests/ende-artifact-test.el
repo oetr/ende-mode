@@ -95,7 +95,13 @@
       (let ((path (expand-file-name "image.gif" directory)))
         (with-temp-file path (insert "GIF89a"))
         (should-error (ende-artifact-content "[[file:image.gif]]" (lambda () base) "chat-123"
-                                             'user (lambda (&rest _) path)))))))
+                                             'user (lambda (&rest _) path)))
+      (let ((path (expand-file-name "note.txt" directory)))
+        (with-temp-file path (insert "Attached text"))
+        (let ((content (ende-artifact-content "See [[file:note.txt][Note]]" (lambda () base)
+                                               "chat-123" 'user (lambda (&rest _) path))))
+          (should (stringp content))
+          (should (string-match-p "Attached text" content))))))))
 
 (ert-deftest ende-artifact-provider-input-and-redaction ()
   (ende-artifact-test-with-files

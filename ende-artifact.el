@@ -218,6 +218,8 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
   (let* ((extension (cdr (assoc media '(("image/png" . "png")
                                        ("image/jpeg" . "jpg")
                                        ("image/svg+xml" . "svg")))))
+         (_validated (when (equal media "image/svg+xml")
+                       (ende-artifact--svg bytes)))
          (directory (ende-artifact-directory base chat-id t))
          (index 1) name path written complete)
     (unless extension (error "Unsupported generated image media type"))
@@ -300,7 +302,10 @@ assistant file links; user links are explicit user attachments."
           (setq position (cadr edit)))
         (when (<= position (length text))
           (push (list :type :text :text (substring text (1- position))) parts))
-        (nreverse parts)))))
+        (setq parts (nreverse parts))
+        (if (cl-every (lambda (part) (eq (plist-get part :type) :text)) parts)
+            (mapconcat (lambda (part) (plist-get part :text)) parts "")
+          parts)))))
 
 (defun ende-artifact-generated-p (text)
   "Return non-nil when TEXT has an actionable artifact or standalone SVG."
