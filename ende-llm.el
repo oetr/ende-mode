@@ -15,6 +15,7 @@
 (require 'json)
 (require 'subr-x)
 (require 'ende-core)
+(require 'ende-content)
 (require 'ende-controls)
 (require 'ende-curl)
 (require 'ende-protocol)
@@ -522,12 +523,14 @@ The :callbacks argument initializes the composed transport lifecycle."
 (defun ende-llm--message-json (message &optional profile)
   "Encode internal MESSAGE for a Chat Completions request under PROFILE."
   (if (and (consp message) (stringp (car message)))
-      `((:role . ,(car message)) (:content . ,(cdr message)))
+      `((:role . ,(car message))
+        (:content . ,(ende-content-provider-content (car message) (cdr message) 'chat profile)))
     (let ((role (plist-get message :role))
           (content (plist-get message :content))
           (calls (plist-get message :tool-calls))
           (call-id (plist-get message :tool-call-id)))
-      (append (list (cons :role role) (cons :content content))
+      (append (list (cons :role role)
+                          (cons :content (ende-content-provider-content role content 'chat profile)))
               (when (and profile
                          (eq (plist-get profile :reasoning-history-field)
                              'reasoning_content)
@@ -552,7 +555,7 @@ The :callbacks argument initializes the composed transport lifecycle."
                  (:messages . ,(mapcar
                                 (lambda (message)
                                   (ende-llm--message-json message profile))
-                                messages))
+                                (ende-content-provider-messages messages)))
                  (:stream . t)
                  ,@(when (or (not typed-openai) stream-usage)
                      '((:stream_options . ((:include_usage . t))))))))

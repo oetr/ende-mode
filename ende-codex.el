@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ende-content)
 (require 'json)
 (require 'subr-x)
 (require 'url-util)
@@ -1311,12 +1312,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--message-content (role content)
   "Return CONTENT in the Responses shape required for ROLE."
-  (if (string= role "system")
-      content
-    (list (list (cons :type (if (string= role "assistant")
-                                "output_text"
-                              "input_text"))
-                (cons :text content)))))
+  (ende-content-provider-content role content 'responses))
 
 (defun ende-codex--request-messages (messages)
   "Convert internal MESSAGES to Responses API input objects."
@@ -1354,7 +1350,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                          (cons :content
                                (ende-codex--message-content
                                 role (plist-get message :content)))))))))))
-   messages))
+   (ende-content-provider-messages messages)))
 
 (defun ende-codex--tool-definitions (definitions)
   "Convert Chat Completions DEFINITIONS to Responses API tool definitions."

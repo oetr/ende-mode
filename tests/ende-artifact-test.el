@@ -93,4 +93,25 @@
       (goto-char (point-max))
       (should-error (ende-chat-context-at-point)))))
 
+(ert-deftest ende-artifact-provider-input-and-redaction ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml"))
+           (image (ende-artifact-resolve base "chat" name))
+           (parts (list '(:type :text :text "Diagram:") image))
+           (messages (list (list :role "assistant" :content parts)))
+           (profile '(:model "vision"))
+           (chat (ende-llm--request-body messages profile))
+           (responses (ende-codex--request-messages messages))
+           (batch (ende-openrouter-batch--request-body messages profile "fixture"))
+           (url (alist-get :url (alist-get :image_url
+                                 (nth 1 (alist-get :content (nth 1 (alist-get :messages chat))))))))
+      (should (string-prefix-p "data:image/png;base64," url))
+      (should (equal (mapcar (lambda (m) (alist-get :role m)) responses) '("assistant" "user")))
+      (should (equal (alist-get :type (nth 1 (alist-get :content (nth 1 responses)))) "input_image"))
+      (should (equal (alist-get :messages (alist-get :body batch)) (alist-get :messages chat)))
+      (should (equal chat (ende-llm--request-body messages profile)))
+      (should-not (string-match-p "base64" (json-encode (ende-content-redact chat))))
+      (should-error (ende-llm--request-body messages '(:image-input nil))))))
+
 (provide 'ende-artifact-test)

@@ -16,6 +16,7 @@
 (require 'subr-x)
 (require 'url-parse)
 (require 'ende-core)
+(require 'ende-content)
 (require 'ende-protocol)
 
 (defvar ende-debugging-enabled nil
@@ -204,13 +205,15 @@ to associate later completion metadata, or nil when debugging is disabled."
                              :started started :metadata metadata)))
           (ende-debug--write-file
            (expand-file-name (concat stem "-request.json") directory)
-           serialized-body t)
+           (let ((safe (ende-content-redact request-body)))
+             (if (equal safe request-body) serialized-body
+               (json-encode safe))) t)
           (ende-debug--write-file
            (expand-file-name (concat stem "-messages.el") directory)
            (let ((print-circle t)
                  (print-level nil)
                  (print-length nil))
-             (concat (prin1-to-string messages) "\n")))
+             (concat (prin1-to-string (ende-content-redact messages)) "\n")))
           (ende-debug--write-meta record)
           record)
       ((error quit)

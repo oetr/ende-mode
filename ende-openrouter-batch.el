@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ende-content)
 (require 'json)
 (require 'subr-x)
 (require 'url-util)
@@ -327,9 +328,14 @@
   (let ((body
          `((:messages . ,(mapcar
                           (lambda (message)
-                            `((:role . ,(car message))
-                              (:content . ,(cdr message))))
-                          messages)))))
+                            (when (plist-get message :tool-calls)
+                              (error "Batch image context cannot contain tool calls"))
+                            (let ((role (ende-content-role message)))
+                              (list (cons :role role)
+                                    (cons :content
+                                          (ende-content-provider-content
+                                           role (ende-content-body message) 'chat profile)))))
+                          (ende-content-provider-messages messages))))))
     (setq body (ende-controls-encode body (plist-get profile :controls) profile))
     (when (integerp ende-max-output-tokens)
       (setq body (append body (list (cons :max_tokens
