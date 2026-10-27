@@ -226,20 +226,57 @@ Check containment even when intermediate directories are symlinks."
       (error "Attachment is not a readable regular local file: %s" path))
     (file-truename absolute)))
 
-(defun ende-artifact--load-image (path &optional expected)
-  "Load local image PATH, optionally requiring EXPECTED media type.
-Relative paths use the source Org file's directory."
-  (setq path (ende-artifact--local-path path))
-  (let* ((bytes (ende-artifact--read-bytes path))
-         (extension (downcase (or (file-name-extension path) "")))
+(defconst ende-artifact--cache-entry-limit 64)
+(defconst ende-artifact--cache-byte-limit (* 16 1024 1024))
+(defconst ende-artifact--cache-payload-limit (* 4 1024 1024))
+(defvar ende-artifact--cache (make-hash-table :test #'equal))
+(defvar ende-artifact--cache-clock 0)
+
+(defun ende-artifact-clear-cache ()
+  "Release process-local validated image metadata and provider payloads."
+  (clrhash ende-artifact--cache)
+  (setq ende-artifact--cache-clock 0))
+
+(defun ende-artifact--file-signature (path)
+  "Return PATH's practical file identity and mutable preconditions."
+  (let ((attributes (file-attributes path 'integer)))
+    (unless attributes (error "Image file does not exist: %s" path))
+    (list (file-attribute-file-identifier attributes)
+          (file-attribute-size attributes)
+          (file-attribute-modification-time attributes)
+          (file-attribute-status-change-time attributes)
+          (file-attribute-modes attributes))))
+
+(defun ende-artifact--cache-bytes ()
+  "Return the total bytes retained in the image cache."
+  (let ((size 0))
+    (maphash (lambda (_path entry)
+               (cl-incf size (length (plist-get entry :data)))
+               (dolist (payload (plist-get entry :payloads))
+                 (cl-incf size (length (cdr payload))))) ende-artifact--cache)
+    size))
+
+(defun ende-artifact--cache-room (size)
+  "Evict least recently used entries to make room for SIZE bytes."
+  (while (and (> (hash-table-count ende-artifact--cache) 0)
+              (or (>= (hash-table-count ende-artifact--cache) ende-artifact--cache-entry-limit)
+                  (> (+ size (ende-artifact--cache-bytes)) ende-artifact--cache-byte-limit)))
+    (let (oldest tick)
+      (maphash (lambda (path entry)
+                 (when (or (null tick) (< (plist-get entry :used) tick))
+                   (setq oldest path tick (plist-get entry :used)))) ende-artifact--cache)
+      (remhash oldest ende-artifact--cache))))
+
+(defun ende-artifact--validate-image (path bytes)
+  "Validate image BYTES read from PATH and return path-based metadata."
+  (let* ((extension (downcase (or (file-name-extension path) "")))
          (type (cond ((equal extension "svg") 'svg)
                      ((equal extension "png") 'png)
                      ((member extension '("jpg" "jpeg")) 'jpeg)))
          (media (cdr (assq type '((png . "image/png") (jpeg . "image/jpeg")
                                   (svg . "image/svg+xml")))))
          dimensions)
-    (unless (and media (or (null expected) (equal expected media)))
-      (error "Unsupported image format or mismatched media type"))
+    (unless media (error "Unsupported image format: %s" path))
     (setq dimensions
           (if (eq type 'svg)
               (let* ((attributes (cadr (ende-artifact--svg bytes)))
@@ -258,6 +295,72 @@ Relative paths use the source Org file's directory."
     (list :type :image :path path :media-type media
           :width (car dimensions) :height (cdr dimensions)
           :bytes (length bytes))))
+
+(defun ende-artifact--image-entry (path &optional expected)
+  "Return the current validated entry for PATH, checking EXPECTED even on hits."
+  (setq path (ende-artifact--local-path path))
+  (let* ((signature (ende-artifact--file-signature path))
+         (entry (gethash path ende-artifact--cache)))
+    (unless (equal signature (plist-get entry :signature))
+      (remhash path ende-artifact--cache)
+      (let* ((bytes (ende-artifact--read-bytes path))
+             (info (condition-case failure (ende-artifact--validate-image path bytes)
+                     (error (error "Image %s: %s" path (error-message-string failure)))))
+             (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
+        (ende-artifact--cache-room (if retain (length bytes) 0))
+        (setq entry (list :signature signature :info info :used 0
+                          :data (and retain bytes) :payloads nil))
+        (puthash path entry ende-artifact--cache)
+        ;; Oversized bytes are available to this caller, but not retained.
+        (unless retain (setq entry (plist-put (copy-sequence entry) :data bytes)))))
+    (setf (plist-get entry :used) (cl-incf ende-artifact--cache-clock))
+    (when (and expected (not (equal expected (plist-get (plist-get entry :info) :media-type))))
+      (error "Image %s has mismatched media type; expected %s" path expected))
+    entry))
+
+(defun ende-artifact--load-image (path &optional expected)
+  "Load PATH through the shared cache, optionally requiring EXPECTED media type."
+  (copy-sequence (plist-get (ende-artifact--image-entry path expected) :info)))
+
+(defun ende-artifact--image-data (path &optional expected)
+  "Return validated raster bytes for PATH and EXPECTED at the provider boundary."
+  (let* ((entry (ende-artifact--image-entry path expected))
+         (info (plist-get entry :info))
+         (path (plist-get info :path))
+         (media (plist-get info :media-type)))
+    (if (not (equal media "image/svg+xml"))
+        (cons media (or (plist-get entry :data) (ende-artifact--read-bytes path)))
+      (let* ((program (or (executable-find "rsvg-convert") (executable-find "convert")))
+             (_available
+              (unless program
+                (error "Cannot send SVG image input: install rsvg-convert (preferred) or ImageMagick convert to rasterize it")))
+             (arguments (if (equal (file-name-nondirectory program) "rsvg-convert")
+                            '("--format=png") '("svg:-" "-strip" "png:-")))
+             (key (list program (ende-artifact--file-signature program) arguments))
+             (cached (assoc key (plist-get entry :payloads))))
+        (cons "image/png"
+              (or (cdr cached)
+                  (let ((data
+                         (with-temp-buffer
+                           (set-buffer-multibyte nil)
+                           (insert (or (plist-get entry :data) (ende-artifact--read-bytes path)))
+                           (let* ((coding-system-for-read 'no-conversion)
+                                  (coding-system-for-write 'no-conversion)
+                                  (status (apply #'call-process-region
+                                                 (point-min) (point-max) program t (list t nil) nil arguments)))
+                             (unless (and (integerp status) (zerop status)
+                                          (eq (image-type-from-data (buffer-string)) 'png))
+                               (error "SVG to PNG conversion failed: %s" path))
+                             (ende-artifact--png-dimensions (buffer-string))
+                             (buffer-string)))))
+                    ;; One derived payload per entry; converter changes replace it.
+                    (when (and (eq entry (gethash path ende-artifact--cache))
+                               (<= (length data) ende-artifact--cache-payload-limit))
+                      (setf (plist-get entry :payloads) nil)
+                      (ende-artifact--cache-room (length data))
+                      (when (eq entry (gethash path ende-artifact--cache))
+                        (setf (plist-get entry :payloads) (list (cons key data)))))
+                    data)))))))
 
 (defun ende-artifact-resolve (base chat-id name)
   "Resolve creation-time shorthand NAME under BASE and CHAT-ID.

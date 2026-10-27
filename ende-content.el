@@ -43,28 +43,7 @@
 
 (defun ende-content-image-data (part)
   "Return validated PART as raster bytes and its actual media type."
-  (let* ((info (ende-artifact--load-image (plist-get part :path) (plist-get part :media-type)))
-         (path (plist-get info :path))
-         (media (plist-get info :media-type))
-         (bytes (ende-artifact--read-bytes path)))
-    (if (not (equal media "image/svg+xml")) (cons media bytes)
-      (let ((program (or (executable-find "rsvg-convert")
-                         (executable-find "convert"))))
-        (unless program
-          (error "Cannot send SVG image input: install rsvg-convert (preferred) or ImageMagick convert to rasterize it"))
-        (with-temp-buffer
-          (set-buffer-multibyte nil)
-          (insert bytes)
-          (let* ((coding-system-for-read 'no-conversion)
-                 (coding-system-for-write 'no-conversion)
-                 (arguments (if (equal (file-name-nondirectory program) "rsvg-convert")
-                                '("--format=png") '("svg:-" "-strip" "png:-")))
-                 (status (apply #'call-process-region
-                                (point-min) (point-max) program t (list t nil) nil arguments)))
-            (unless (and (integerp status) (zerop status)
-                         (eq (image-type-from-data (buffer-string)) 'png))
-              (error "SVG to PNG conversion failed"))
-            (cons "image/png" (buffer-string))))))))
+  (ende-artifact--image-data (plist-get part :path) (plist-get part :media-type)))
 
 (defun ende-content-data-url (part)
   "Encode PART only at the provider boundary."

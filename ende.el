@@ -418,6 +418,7 @@
     (dolist (file (ende-reload--files dir))
       (load (expand-file-name file dir) nil t t t))
     (setq ende-mode-map (ende--make-mode-map))
+    (ende-artifact-clear-cache)
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
         (when ende-mode
