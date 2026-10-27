@@ -9,6 +9,7 @@
 (require 'image)
 (require 'xml)
 (require 'nxml-mode)
+(require 'ende-org)
 
 (defgroup ende-artifact nil "Conversation images." :group 'ende)
 

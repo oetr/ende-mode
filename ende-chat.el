@@ -36,6 +36,7 @@
 (require 'subr-x)
 (require 'font-lock)
 (require 'ende-core)
+(require 'ende-org)
 (require 'ende-artifact)
 (require 'ende-content)
 (require 'ende-operation)
@@ -1118,7 +1119,7 @@ If an edited drawer is malformed, fall back to the line after the heading."
       (while (not (eobp))
         (let* ((line (buffer-substring-no-properties
                       (line-beginning-position) (line-end-position)))
-               (directive (ende-chat--block-directive line)))
+               (directive (ende-org--block-directive line)))
           (if open-block
               (if (and directive (eq (car directive) 'end)
                        (equal (cdr directive) open-block))
@@ -1149,7 +1150,7 @@ If an edited drawer is malformed, fall back to the line after the heading."
               (error "Malformed generated assistant content heading"))
             (push (list begin (+ begin level) (make-string new-level ?*))
                   edits)))
-        (ende-chat--apply-response-edits (buffer-string) edits)))))
+        (ende-org--apply-edits (buffer-string) edits)))))
 
 (defun ende-chat--protocol-remove-synthetic-end (headline text)
   "Remove the Org block terminator recorded on HEADLINE from TEXT."
@@ -1665,106 +1666,6 @@ title.\n\n"
 		     nil nil nil)
     (and (not (string-empty-p title)) title)))
 
-(defun ende-chat--block-directive (line)
-  "Return the block directive in LINE as (KIND . NAME), or nil."
-  (let ((case-fold-search t))
-    (cond
-     ((string-match
-       (concat "\\`#\\+begin_\\([[:alnum:]_-]+\\)"
-               "\\(?:[ \t].*\\)?[ \t\r]*\\'")
-       line)
-      (cons 'begin (downcase (match-string 1 line))))
-     ((string-match "\\`#\\+end_\\([[:alnum:]_-]+\\)[ \t\r]*\\'" line)
-      (cons 'end (downcase (match-string 1 line)))))))
-
-(defun ende-chat--org-special-line-p (line)
-  "Return non-nil when LINE needs comma-escaping inside an Org block."
-  (string-match-p "\\`\\(?:\\*\\|#\\+\\|,\\(?:\\*\\|#\\+\\|,\\)\\)"
-                  line))
-
-(defun ende-chat--mask-ranges (text ranges)
-  "Replace non-newline characters in TEXT at buffer-position RANGES.
-
-RANGES contains (BEGIN . END) pairs of Org buffer positions.  Newlines and
-character positions are preserved so parse positions remain valid for edits to
-the original text."
-  (let ((offset 0)
-        (parts nil))
-    (dolist (range (sort (copy-sequence ranges)
-                         (lambda (left right) (< (car left) (car right)))))
-      (let ((start (1- (car range)))
-            (end (1- (cdr range))))
-        (push (substring text offset start) parts)
-        (push (replace-regexp-in-string
-               "[^\n]" " " (substring text start end))
-              parts)
-        (setq offset end)))
-    (push (substring text offset) parts)
-    (apply #'concat (nreverse parts))))
-
-(defun ende-chat--response-blocks (content)
-  "Return CONTENT repaired and masked for safe Org response parsing.
-
-Only CONTENT is scanned.  Block bodies are comma-escaped and blanked in
-`:parse-content', so their contents cannot become response headlines or control
-directives.  An open block is closed at the end of CONTENT, and its synthetic
-terminator is reported so protocol serialization can remove it again."
-  (with-temp-buffer
-    (insert (or content ""))
-    (let ((open-block nil)
-          (block-start nil)
-          (synthetic-newline nil)
-          ranges)
-      (goto-char (point-min))
-      (while (< (point) (point-max))
-        (let* ((line-start (point))
-               (line-end (line-end-position))
-               (next-line (min (point-max) (1+ line-end)))
-               (directive
-                (ende-chat--block-directive
-                 (buffer-substring-no-properties line-start line-end))))
-          (if open-block
-              (if (and directive
-                       (eq (car directive) 'end)
-                       (equal (cdr directive) open-block))
-                  (progn
-                    (push (cons block-start next-line) ranges)
-                    (setq open-block nil
-                          block-start nil))
-                (when (ende-chat--org-special-line-p
-                       (buffer-substring-no-properties line-start line-end))
-                  (goto-char line-start)
-                  (insert ",")
-                  (setq next-line (min (point-max) (1+ (line-end-position))))))
-            (when (and directive (eq (car directive) 'begin))
-              (setq open-block (cdr directive)
-                    block-start line-start)))
-          (goto-char next-line)))
-      (when open-block
-        (goto-char (point-max))
-        (unless (bolp)
-          (insert "\n")
-          (setq synthetic-newline t))
-        (insert (format "#+end_%s\n" open-block))
-        (push (cons block-start (point-max)) ranges))
-      (let ((repaired (buffer-string)))
-        (list :content repaired
-              :synthetic-end open-block
-              :synthetic-newline synthetic-newline
-              :parse-content (ende-chat--mask-ranges repaired ranges))))))
-
-(defun ende-chat--apply-response-edits (content edits)
-  "Apply response EDITS to CONTENT and return the resulting string.
-
-Each edit is (BEGIN END REPLACEMENT), using Org buffer positions."
-  (with-temp-buffer
-    (insert content)
-    (dolist (edit (sort edits (lambda (left right) (> (car left) (car right)))))
-      (delete-region (nth 0 edit) (nth 1 edit))
-      (goto-char (nth 0 edit))
-      (insert (nth 2 edit)))
-    (buffer-string)))
-
 (defun ende-chat--normalize-response (content wrapper-level &optional preserve-trailing)
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
 
@@ -1773,7 +1674,7 @@ metadata required for protocol serialization.  Actual Org headlines are shifted
 uniformly beneath the host-created section wrapper;
 stars in any `#+begin_...` block are left untouched.  Unterminated blocks
 are closed at the end of CONTENT, never against text elsewhere in the chat."
-  (let* ((blocks (ende-chat--response-blocks content))
+  (let* ((blocks (ende-org--blocks content t))
          (content (plist-get blocks :content))
          (edits nil))
     (with-temp-buffer
@@ -1804,7 +1705,7 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
               :synthetic-end (plist-get blocks :synthetic-end)
               :synthetic-newline (plist-get blocks :synthetic-newline)
               :content
-              (let ((result (ende-chat--apply-response-edits content edits)))
+              (let ((result (ende-org--apply-edits content edits)))
                 (if preserve-trailing result (ende-trim-trailing result))))))))
 
 (defun ende-chat--set-headline-title (headline title)
