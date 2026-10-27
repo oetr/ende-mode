@@ -489,7 +489,13 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
                                   :svg (string-trim (substring text (1- begin) (1- end))))
                             references))
                     (forward-line 1))))))))
-      (sort references (lambda (a b) (< (plist-get a :begin) (plist-get b :begin)))))))
+      (let ((end 0) active)
+        (dolist (reference (sort references (lambda (a b) (< (plist-get a :begin) (plist-get b :begin)))))
+          ;; SVG text is part of the enclosing image, not an Org directive.
+          (when (>= (plist-get reference :begin) end)
+            (push reference active)
+            (when (plist-get reference :svg) (setq end (plist-get reference :end)))))
+        (nreverse active)))))
 
 (defun ende-artifact--parts (text references)
   "Split TEXT at resolved REFERENCES without rediscovering them."

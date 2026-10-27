@@ -204,6 +204,7 @@
     (let* ((base (ende-artifact-base))
            (xml (concat "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\""
                         " role=\"img\" aria-labelledby=\"title\"><title id=\"title\">A &amp; B</title>"
+                        "<text>\n#+ENDE_ARTIFACT: text-not-a-reference\n</text>"
                         "<defs><pattern id=\"dots\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\">"
                         "<circle cx=\"2\" cy=\"2\" r=\"1\"/></pattern></defs>"
                         "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
