@@ -63,6 +63,7 @@ from remote buffers are supported, but their processes always run locally."
     (when (string-match-p "[?#]" value)
       (error "Provider URL must not contain a query or fragment"))
     (when (and (string= scheme "http")
+               (not (plist-get profile :allow-http))
                (not (ende-curl--loopback-host-p host)))
       (error "Plain HTTP is only allowed for explicit loopback endpoints"))
     (when (and auth-host

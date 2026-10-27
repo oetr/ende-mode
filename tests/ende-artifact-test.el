@@ -235,7 +235,14 @@
 
 (ert-deftest ende-artifact-generation-http-lifecycle ()
   (ende-artifact-test-with-files
-    (let* ((ende-image-model "fixture-image-model")
+    (let* ((ende-image-provider 'studio)
+           (ende-image-endpoint "http://192.168.1.50:8080/v1/images/generations")
+           (ende-image-model "fixture-image-model")
+           (ende-provider-profiles '((studio :type openai
+                                            :auth-source-host "192.168.1.50"
+                                            :auth-source-user "ende"
+                                            :auth-source-port 8080
+                                            :request-headers ("X-Studio: image"))))
            (real-start (symbol-function 'ende-curl-start-request))
            (real-send (symbol-function 'process-send-string))
            request sent cancel parts failure (calls 0))
@@ -249,6 +256,11 @@
           (cl-letf (((symbol-function 'ende-curl--auth-secret) (lambda (_) nil))
                     ((symbol-function 'ende-curl-start-request)
                      (lambda (&rest arguments)
+                       (let ((profile (plist-get arguments :profile)))
+                         (should (eq (plist-get profile :name) ende-image-provider))
+                         (should (equal (plist-get arguments :url) ende-image-endpoint))
+                         (should (equal (plist-get profile :request-headers)
+                                        '("X-Studio: image"))))
                        (setq arguments (plist-put arguments :command
                                                   (lambda (_headers _config) '("cat"))))
                        (setq request (apply real-start arguments))

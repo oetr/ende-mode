@@ -14,19 +14,57 @@
 (declare-function ende-chat--root "ende-chat")
 (declare-function ende-chat--property "ende-chat")
 
+(defgroup ende-image nil
+  "Image generation."
+  :group 'ende-artifact)
+
+(defcustom ende-image-provider 'openrouter
+  "Provider profile supplying image request authentication and headers."
+  :type 'symbol
+  :group 'ende-image)
+
+(defcustom ende-image-endpoint "https://openrouter.ai/api/v1/images"
+  "Images API endpoint returning inline base64 image data."
+  :type 'string
+  :group 'ende-image)
+
 (defcustom ende-image-model nil
-  "OpenRouter Images model used by the opt-in generate_image tool.
+  "Model used by the opt-in generate_image tool.
 Nil disables generation even when the tool is activated."
-  :type '(choice (const nil) string) :group 'ende-artifact)
+  :type '(choice (const nil) string)
+  :group 'ende-image)
+
+(defun ende-image--provider-names ()
+  "Return available provider names, including image-only profiles."
+  (delete-dups (append '(openrouter local) (ende-provider-names)
+                       (mapcar #'car ende-provider-profiles))))
+
+(defun ende-image--profile ()
+  "Return a validated snapshot of the image request settings."
+  (unless (and ende-image-provider
+               (memq ende-image-provider (ende-image--provider-names)))
+    (user-error "Select an available image provider profile"))
+  (unless (or (null ende-image-model)
+              (and (stringp ende-image-model)
+                   (not (string-blank-p ende-image-model))))
+    (user-error "Image model must be a nonblank string or nil"))
+  (let ((profile (ende-plist-merge
+                  (ende-provider-profile-snapshot ende-image-provider)
+                  (list :url ende-image-endpoint :model ende-image-model
+                        :allow-http t))))
+    (when (plist-get profile :auth-method)
+      (user-error "Images API requires an auth-source or unauthenticated provider profile"))
+    (ende-curl--validated-url profile)
+    profile))
 
 (defun ende-image--request (prompt callback register)
   "Generate PROMPT asynchronously, calling CALLBACK with parts or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
   (unless (and (stringp ende-image-model) (not (string-blank-p ende-image-model)))
-    (error "Configure ende-image-model before using generate_image"))
-  (let* ((url "https://openrouter.ai/api/v1/images")
-         (profile (plist-put (ende-provider-profile-snapshot 'openrouter) :url url))
-         (data (json-encode `((:model . ,ende-image-model) (:prompt . ,prompt))))
+    (user-error "Configure an image model with M-x ende-image-configure"))
+  (let* ((profile (ende-image--profile))
+         (url (plist-get profile :url))
+         (data (json-encode `((:model . ,(plist-get profile :model)) (:prompt . ,prompt))))
          (lifecycle (ende-transport-session-create nil nil))
          (chunks nil) (size 0) (settled nil))
     (cl-labels
@@ -70,8 +108,8 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                                                  (gethash "b64_json" image)
                                                  (gethash "media_type" image)) parts)) images)
                                   (finish (nreverse parts) nil))
-                              (error (finish nil "OpenRouter returned unsupported or malformed image data; expected PNG or JPEG"))))
-                        (error (finish nil "OpenRouter image generation failed or returned invalid image data"))))))))
+                              (error (finish nil "Backend returned unsupported or malformed image data; expected PNG or JPEG"))))
+                        (error (finish nil "Image generation failed or returned invalid image data"))))))))
             (ende-transport-session-set-resources lifecycle request)
             (when register (funcall register (lambda () (finish nil "Image generation cancelled"))))
             (unless settled
