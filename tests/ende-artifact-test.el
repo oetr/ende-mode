@@ -282,7 +282,7 @@
            (ende-llm-function
             (ende-test--fake-llm
              (list (list :content "" :output-parts
-                         (list '(:type :text :text "Before\n")
+                         (list '(:type :text :text "* Diagram\nBefore\n")
                                (list :type :generated-image :bytes png :media-type "image/png")
                                '(:type :text :text "After\n"))
                          :tool-calls (list '(:id "activity" :name "about_thinking"
@@ -299,7 +299,7 @@
                (parts (ende-content-body assistant))
                (live (cl-find-if (lambda (message) (plist-get message :tool-calls))
                                  (plist-get (cadr ende-test--calls) :messages))))
-          (should (equal (plist-get (car parts) :text) "Before\n\n"))
+          (should (equal (plist-get (car parts) :text) "* Diagram\nBefore\n\n"))
           (should (equal png (ende-artifact--read-bytes (plist-get (nth 1 parts) :path))))
           (should (equal (ende-content-readable parts)
                          (ende-content-readable (ende-content-body live))))))))

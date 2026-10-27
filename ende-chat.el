@@ -3308,12 +3308,30 @@ OPTIONS are passed to `json-serialize'."
               result-properties
               ":END:\n\n"))))
 
+(defun ende-chat--normalized-response-properties (normalized)
+  "Return reversible Org protocol metadata for NORMALIZED content."
+  (concat
+   (when-let* ((shift (plist-get normalized :headline-shift)))
+     (ende-chat--response-property ende-chat-content-headline-shift-property
+                                  (number-to-string shift)))
+   (when-let* ((block (plist-get normalized :synthetic-end)))
+     (concat (ende-chat--response-property ende-chat-content-synthetic-end-property block)
+             (when (plist-get normalized :synthetic-newline)
+               (ende-chat--response-property ende-chat-content-synthetic-newline-property "t"))))))
+
 (defun ende-chat--assistant-protocol-text
     (level question-id request-id result-properties normalized calls
            &optional pending format)
   "Render one assistant protocol message and its ordered tool CALLS."
   (let* ((format (if (eq format 'org) 'org 'literal))
          (content (plist-get normalized :content))
+         (result-properties
+          (concat result-properties
+                  (unless (string-match-p
+                           (concat ":" ende-chat-content-headline-shift-property ":\\|:"
+                                   ende-chat-content-synthetic-end-property ":")
+                           result-properties)
+                    (ende-chat--normalized-response-properties normalized))))
          (reply
           (when (or (null calls)
                     (and (stringp content) (not (string-blank-p content))))
@@ -3419,6 +3437,17 @@ Keep it while another queued compaction still refers to its durable identity."
          (parts (and (listp result) (plist-get result :output-parts)))
          (instruction (ende-job-instruction job))
          (pending (plist-get instruction :generated-artifacts)))
+    (with-temp-buffer
+      (org-mode)
+      (insert text)
+      (setq text (ende-chat--remove-ranges
+                  text (mapcar (lambda (range) (cons (1- (car range)) (1- (cdr range))))
+                               (org-element-map (org-element-parse-buffer) 'keyword
+                                 (lambda (keyword)
+                                   (when (equal (upcase (org-element-property :key keyword))
+                                                "ENDE_ARTIFACTS_BASE_PATH")
+                                     (cons (org-element-property :begin keyword)
+                                           (org-element-property :end keyword)))))))))
     (if (not (or parts pending
                  (string-match-p "\\[\\[file:" text)
                  (ende-artifact-generated-p text))) result
