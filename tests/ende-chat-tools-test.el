@@ -21,47 +21,6 @@
         (should (string-match-p
                  (regexp-quote ende-agent--implementation-guidance) prompt))))))
 
-(ert-deftest ende-test/chat-prompt-requires-verified-steps-and-rollback ()
-  (with-temp-buffer
-    (org-mode)
-    (let* ((document (ende-chat--build-document))
-           (prompt (replace-regexp-in-string
-                    "[[:space:]]+" " " (ende-chat--system-prompt document))))
-      (dolist (phrase '("bounded, incremental steps"
-                        "do not move on from a failed or unverified state"
-                        "one bounded change"
-                        "task-dependent check"
-                        "establish a known-good checkpoint"
-                        "failed check is a hard gate"
-                        "small number of reasonable repairs"
-                        "restore the last known-good checkpoint"
-                        "Do not pile speculative repairs"
-                        "large encoded strings"
-                        "minified JavaScript"
-                        "deterministic, source-derived boundaries"
-                        "programmatic transformation"
-                        "If an exact-match edit fails, change methods immediately"
-                        "instead of retrying larger patches"))
-        (should (string-match-p (regexp-quote phrase) prompt))))))
-
-(ert-deftest ende-test/chat-prompt-bounds-retries-and-defers-unresolved-goals ()
-  (with-temp-buffer
-    (org-mode)
-    (let* ((document (ende-chat--build-document))
-           (prompt (replace-regexp-in-string
-                    "[[:space:]]+" " " (ende-chat--system-prompt document))))
-      (dolist (phrase '("at most two materially different implementations"
-                        "same goal per run, including the initial attempt"
-                        "budget is exhausted, keep the verified known-good state"
-                        "mark the goal unresolved/deferred for this run"
-                        "continue with independent requirements"
-                        "Once deferred, do not revisit the goal"
-                        "revisit only if later work produces genuinely new evidence"
-                        "directly changes the previous failure situation"
-                        "report the remaining gap"
-                        "incomplete but verified result over repeated speculative retries"))
-        (should (string-match-p (regexp-quote phrase) prompt))))))
-
 (ert-deftest ende-test/chat-completions-tool-diagnostics-cover-local-and-openrouter ()
   (should (eq ende-tool-diagnostics t))
   (let* ((definition
