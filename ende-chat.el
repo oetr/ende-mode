@@ -2915,7 +2915,9 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                             (goto-char reasoning-marker)
                             (org-fold-hide-subtree)))
                       (when old-start (set-marker old-start nil))
-                      (when old-end (set-marker old-end nil)))))))))
+                      (when old-end (set-marker old-end nil))))))
+            (when (bound-and-true-p ende-mode)
+              (ende-artifact-refresh inserted-start inserted-end)))))
       (when inserted-start (set-marker inserted-start nil))
       (when inserted-end (set-marker inserted-end nil))
       (when work-marker (set-marker work-marker nil))
@@ -3544,7 +3546,9 @@ Keep it while another queued compaction still refers to its durable identity."
                        reasoning-marker)))
                   (with-current-buffer buffer
                     (when (bound-and-true-p ende-mode)
-                      (ende-artifact-refresh)))
+                      (when insertion-info
+                        (ende-artifact-refresh (plist-get insertion-info :section-start)
+                                               (plist-get insertion-info :section-end)))))
                   (if (and (not compact)
                            (plist-get instruction :title-source)
                            (not (ende-chat--valid-title-text-p

@@ -557,9 +557,12 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
 (defvar-local ende-artifact--overlays nil)
 (defvar-local ende-artifact--timer nil)
 (defvar-local ende-artifact--dirty nil)
+(defvar-local ende-artifact--literal-regions nil)
+(defvar-local ende-artifact--analysis-valid nil)
+(defvar-local ende-artifact--structural-change nil)
 
-(defun ende-artifact--clear (&optional begin end)
-  "Remove previews and return the complete affected bounds."
+(defun ende-artifact--clear (&optional begin end retain)
+  "Return complete preview bounds, removing affected overlays unless RETAIN."
   (let ((start (or begin (point-min)))
         (finish (or end (point-max))))
     (setq ende-artifact--overlays
@@ -572,53 +575,104 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                         (>= (overlay-end overlay) begin)))
                (setq start (min start (overlay-start overlay))
                      finish (max finish (overlay-end overlay)))
-               (delete-overlay overlay)
-               t)))
+               (unless retain (delete-overlay overlay))
+               (not retain))))
            ende-artifact--overlays))
     (cons start finish)))
 
+(defun ende-artifact--release-analysis ()
+  "Release buffer-owned literal-region markers."
+  (dolist (range ende-artifact--literal-regions)
+    (set-marker (car range) nil) (set-marker (cdr range) nil))
+  (setq ende-artifact--literal-regions nil ende-artifact--analysis-valid nil
+        ende-artifact--structural-change nil))
+
+(defun ende-artifact--analyze ()
+  "Update literal regions when structure changed; return changed region bounds."
+  (unless ende-artifact--analysis-valid
+    (let* ((old (mapcar (lambda (range) (cons (marker-position (car range))
+                                             (marker-position (cdr range))))
+                        ende-artifact--literal-regions))
+           (new (plist-get (ende-org--blocks (buffer-substring-no-properties (point-min) (point-max))) :ranges))
+           (known (make-hash-table :test #'equal)) changed)
+      (dolist (range old) (puthash range t known))
+      (dolist (range new)
+        (if (gethash range known) (remhash range known) (push range changed)))
+      (maphash (lambda (range _value) (push range changed)) known)
+      (ende-artifact--release-analysis)
+      (setq ende-artifact--literal-regions
+            (mapcar (lambda (range) (cons (copy-marker (car range))
+                                          (copy-marker (cdr range) t))) new)
+            ende-artifact--analysis-valid t)
+      (when changed
+        (cons (apply #'min (mapcar #'car changed))
+              (apply #'max (mapcar #'cdr changed)))))))
+
+(defun ende-artifact--preview-text (begin end)
+  "Return BEGIN through END with known literal regions masked."
+  (let (ranges)
+    (dolist (range ende-artifact--literal-regions)
+      (when (and (< (car range) end) (> (cdr range) begin))
+        (push (cons (1+ (- (max begin (car range)) begin))
+                    (1+ (- (min end (cdr range)) begin))) ranges)))
+    (ende-org--mask-ranges (buffer-substring-no-properties begin end) ranges)))
+
 (defun ende-artifact-refresh (&optional begin end)
-  "Refresh artifact previews between BEGIN and END without previewing other links."
+  "Reconcile previews in BEGIN through END, retaining unchanged displays."
   (when (derived-mode-p 'org-mode)
     (save-excursion
       (save-restriction
         (widen)
-        (let* ((bounds (ende-artifact--clear
-                        (or begin (point-min))
-                        (or end (point-max))))
-               (begin (save-excursion
-                        (goto-char (car bounds))
-                        (line-beginning-position)))
-               (end (cdr bounds))
-               (case-fold-search t))
-          (goto-char begin)
-          (while (re-search-forward "^[ \t]*#\\+ENDE_ARTIFACT:[ \t]*\\(.*\\)$" end t)
-            (let ((marker (match-beginning 0))
-                  (next (line-beginning-position 2)))
+        (unless (or begin end) (setq ende-artifact--analysis-valid nil))
+        (let* ((changed (ende-artifact--analyze))
+               (begin (min (or begin (point-min)) (or (car changed) (point-max))))
+               (end (max (or end (point-max)) (or (cdr changed) (point-min))))
+               (bounds (ende-artifact--clear
+                        (progn (goto-char begin) (line-beginning-position 0))
+                        (progn (goto-char end) (min (point-max) (1+ (line-end-position)))) t))
+               (begin (car bounds)) (end (cdr bounds))
+               (existing (make-hash-table :test #'eql))
+               (kept (make-hash-table :test #'eq)))
+          (dolist (overlay ende-artifact--overlays)
+            (when (and (<= (overlay-start overlay) end) (>= (overlay-end overlay) begin))
+              (puthash (overlay-start overlay) overlay existing)))
+          (dolist (reference (ende-artifact--references (ende-artifact--preview-text begin end)))
+            (when (plist-get reference :path)
+              ;; A bad editor reference must not break unrelated previews.
               (condition-case nil
-                  (when (eq (org-element-type (org-element-at-point marker)) 'keyword)
-                    (let* ((link (ende-artifact--following-link marker))
-                           (part (when link
-                                   (ende-artifact--load-image
-                                    (org-link-unescape (org-element-property :path link)))))
-                           (path (plist-get part :path))
-                           (width (plist-get part :width))
-                           (height (plist-get part :height))
-                           (scale (min 1.0 (/ (float (min ende-artifact-preview-width
-                                                          (max 80 (- (window-pixel-width) 40)))) width)
-                                       (/ (float ende-artifact-preview-height) height))))
-                      (goto-char next)
-                      (when (looking-at "[ \t]*\\[\\[file:[^]\n]+\\]\\(?:\\[[^]\n]*\\]\\)?\\][ \t]*$")
-                        (let* ((image (create-image path nil nil :width (max 1 (round (* width scale)))
-                                                    :height (max 1 (round (* height scale)))))
-                               (overlay (make-overlay marker (line-end-position) nil t nil)))
-                          (overlay-put overlay 'ende-artifact t)
-                          (overlay-put overlay 'evaporate t)
-                          (overlay-put overlay 'after-string
-                                       (concat "\n" (propertize " " 'display image) "\n"))
-                          (push overlay ende-artifact--overlays)))))
-                (error nil))
-              (goto-char next))))))))
+                  (let* ((entry (ende-artifact--image-entry (plist-get reference :path)))
+                         (part (plist-get entry :info))
+                         (path (plist-get part :path))
+                         (width (plist-get part :width)) (height (plist-get part :height))
+                         (scale (min 1.0 (/ (float (min ende-artifact-preview-width
+                                                       (max 80 (- (window-pixel-width) 40)))) width)
+                                     (/ (float ende-artifact-preview-height) height)))
+                         (pixels-x (max 1 (round (* width scale))))
+                         (pixels-y (max 1 (round (* height scale))))
+                         (signature (list path (plist-get entry :signature) pixels-x pixels-y))
+                         (start (+ begin (1- (plist-get reference :begin))))
+                         (finish (+ begin (1- (plist-get reference :end))))
+                         (overlay (gethash start existing)))
+                    (unless overlay
+                      (setq overlay (make-overlay start finish nil t nil))
+                      (overlay-put overlay 'ende-artifact t)
+                      (overlay-put overlay 'evaporate t)
+                      (push overlay ende-artifact--overlays))
+                    (unless (equal signature (overlay-get overlay 'ende-artifact-signature))
+                      (let ((image (create-image path nil nil :width pixels-x :height pixels-y)))
+                        (when (display-graphic-p) (image-flush image t))
+                        (overlay-put overlay 'after-string
+                                     (concat "\n" (propertize " " 'display image) "\n"))
+                        (overlay-put overlay 'ende-artifact-signature signature)))
+                    (move-overlay overlay start finish)
+                    (puthash overlay t kept))
+                (error nil))))
+          (setq ende-artifact--overlays
+                (cl-delete-if
+                 (lambda (overlay)
+                   (when (and (<= (overlay-start overlay) end) (>= (overlay-end overlay) begin)
+                              (not (gethash overlay kept)))
+                     (delete-overlay overlay) t)) ende-artifact--overlays)))))))
 
 (defun ende-artifact--refresh-dirty (buffer)
   "Refresh BUFFER's coalesced dirty region after editing settles."
@@ -632,8 +686,24 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
               (ende-artifact-refresh (car region) (cdr region))
             (set-marker (car region) nil) (set-marker (cdr region) nil)))))))
 
+(defun ende-artifact--structure-at (begin end)
+  "Return non-nil if BEGIN through END touches a structural delimiter line."
+  (save-excursion
+    (goto-char begin)
+    (beginning-of-line)
+    (let ((limit (save-excursion (goto-char end) (line-end-position)))
+          (case-fold-search t))
+      (re-search-forward "^[ \t]*\\(?:#\\+\\(?:begin\\|end\\)_\\|\\*+[ \t]\\)" limit t))))
+
+(defun ende-artifact--before-change (begin end)
+  "Remember structural edits before delimiter text can disappear."
+  (setq ende-artifact--structural-change (ende-artifact--structure-at begin end)))
+
 (defun ende-artifact--after-change (begin end _old)
-  "Schedule a line-bounded preview update around BEGIN and END."
+  "Debounce preview edits, invalidating literal analysis for structural changes."
+  (when (or ende-artifact--structural-change (ende-artifact--structure-at begin end))
+    (setq ende-artifact--analysis-valid nil))
+  (setq ende-artifact--structural-change nil)
   (save-excursion
     (goto-char begin)
     (let ((start (line-beginning-position 0))
@@ -649,6 +719,7 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
 
 (defun ende-artifact-configure (enabled)
   "Install or remove buffer-local artifact presentation according to ENABLED."
+  (remove-hook 'before-change-functions #'ende-artifact--before-change t)
   (remove-hook 'after-change-functions #'ende-artifact--after-change t)
   (remove-hook 'kill-buffer-hook #'ende-artifact--disable t)
   (when (timerp ende-artifact--timer) (cancel-timer ende-artifact--timer))
@@ -657,8 +728,10 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
     (set-marker (car ende-artifact--dirty) nil)
     (set-marker (cdr ende-artifact--dirty) nil)
     (setq ende-artifact--dirty nil))
-  (ende-artifact--clear)
+  (ende-artifact--release-analysis)
+  (unless enabled (ende-artifact--clear))
   (when (and enabled (derived-mode-p 'org-mode))
+    (add-hook 'before-change-functions #'ende-artifact--before-change nil t)
     (add-hook 'after-change-functions #'ende-artifact--after-change nil t)
     (add-hook 'kill-buffer-hook #'ende-artifact--disable nil t)
     (ende-artifact-refresh)))
