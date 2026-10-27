@@ -26,8 +26,7 @@ REGISTER attaches cancellation to the existing tool lifecycle."
     (error "Configure ende-image-model before using generate_image"))
   (let* ((url "https://openrouter.ai/api/v1/images")
          (profile (plist-put (ende-provider-profile-snapshot 'openrouter) :url url))
-         (data (json-encode `((:model . ,ende-image-model) (:prompt . ,prompt)
-                              (:n . 1) (:output_format . "png"))))
+         (data (json-encode `((:model . ,ende-image-model) (:prompt . ,prompt))))
          (lifecycle (ende-transport-session-create nil nil))
          (chunks nil) (size 0) (settled nil))
     (cl-labels
@@ -64,10 +63,14 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                                  parts)
                             (unless (and (or (vectorp images) (listp images)) (> (length images) 0))
                               (error "Image request failed"))
-                            (mapc (lambda (image)
-                                    (push (ende-content-generated-image
-                                           (gethash "b64_json" image) (gethash "media_type" image)) parts)) images)
-                            (finish (nreverse parts) nil))
+                            (condition-case nil
+                                (progn
+                                  (mapc (lambda (image)
+                                          (push (ende-content-generated-image
+                                                 (gethash "b64_json" image)
+                                                 (gethash "media_type" image)) parts)) images)
+                                  (finish (nreverse parts) nil))
+                              (error (finish nil "OpenRouter returned unsupported or malformed image data; expected PNG or JPEG"))))
                         (error (finish nil "OpenRouter image generation failed or returned invalid image data"))))))))
             (ende-transport-session-set-resources lifecycle request)
             (when register (funcall register (lambda () (finish nil "Image generation cancelled"))))
