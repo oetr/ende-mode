@@ -442,14 +442,23 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
 (defvar-local ende-artifact--dirty nil)
 
 (defun ende-artifact--clear (&optional begin end)
-  "Remove Ende previews, optionally only between BEGIN and END."
-  (setq ende-artifact--overlays
-        (cl-delete-if
-         (lambda (overlay)
-           (when (or (null begin) (null (overlay-buffer overlay))
-                     (and (<= (overlay-start overlay) end)
-                          (>= (overlay-end overlay) begin)))
-             (delete-overlay overlay) t)) ende-artifact--overlays)))
+  "Remove previews and return the complete affected bounds."
+  (let ((start (or begin (point-min)))
+        (finish (or end (point-max))))
+    (setq ende-artifact--overlays
+          (cl-delete-if
+           (lambda (overlay)
+             (cond
+              ((null (overlay-buffer overlay)) t)
+              ((or (null begin)
+                   (and (<= (overlay-start overlay) end)
+                        (>= (overlay-end overlay) begin)))
+               (setq start (min start (overlay-start overlay))
+                     finish (max finish (overlay-end overlay)))
+               (delete-overlay overlay)
+               t)))
+           ende-artifact--overlays))
+    (cons start finish)))
 
 (defun ende-artifact-refresh (&optional begin end)
   "Refresh artifact previews between BEGIN and END without previewing other links."
@@ -457,9 +466,14 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
     (save-excursion
       (save-restriction
         (widen)
-        (let ((begin (or begin (point-min))) (end (or end (point-max)))
-              (case-fold-search t))
-          (ende-artifact--clear begin end)
+        (let* ((bounds (ende-artifact--clear
+                        (or begin (point-min))
+                        (or end (point-max))))
+               (begin (save-excursion
+                        (goto-char (car bounds))
+                        (line-beginning-position)))
+               (end (cdr bounds))
+               (case-fold-search t))
           (goto-char begin)
           (while (re-search-forward "^[ \t]*#\\+ENDE_ARTIFACT:[ \t]*\\(.*\\)$" end t)
             (let ((name (string-trim (match-string-no-properties 1)))
@@ -482,7 +496,7 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
                       (when (looking-at "[ \t]*\\[\\[file:[^]\n]+\\]\\(?:\\[[^]\n]*\\]\\)?\\][ \t]*$")
                         (let* ((image (create-image path nil nil :width (max 1 (round (* width scale)))
                                                     :height (max 1 (round (* height scale)))))
-                               (overlay (make-overlay next (line-end-position) nil t nil)))
+                               (overlay (make-overlay marker (line-end-position) nil t nil)))
                           (overlay-put overlay 'ende-artifact t)
                           (overlay-put overlay 'evaporate t)
                           (overlay-put overlay 'after-string
