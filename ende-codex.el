@@ -1224,11 +1224,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
          session
          (ende-error-create
           :kind 'provider
-          :message (format "%s"
-                           (or (ende-protocol-json-get "message" error)
-                               (ende-protocol-json-get "code" error)
-                               "ChatGPT request failed"))
-          :details error)))))))
+          :message (ende-transport-safe-error-text
+                    (format "%s"
+                            (or (ende-protocol-json-get "message" error)
+                                (ende-protocol-json-get "code" error)
+                                "ChatGPT request failed")))
+          :details (ende-content-redact error))))))))
 
 (defun ende-codex--http-error (session &optional response-status)
   "Return a structured HTTP error for SESSION."

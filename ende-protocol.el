@@ -148,8 +148,11 @@ Thinking and content deltas are emitted through CALLBACKS."
                         (ende-protocol-json-read-string payload)
                       ((error quit)
                        (signal 'error
-                               (list (format "malformed SSE JSON: %s"
-                                             (error-message-string err))))))))
+                               (list (if (string-match-p
+                                          "data:image/\\|b64_json\\|image_generation_call" payload)
+                                         "Malformed SSE JSON containing image data (payload redacted)"
+                                       (format "malformed SSE JSON: %s"
+                                               (error-message-string err)))))))))
           (list :type :json :value json))))))
 
 (defun ende-protocol--sse-handle-line (parser line)

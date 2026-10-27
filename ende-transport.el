@@ -141,10 +141,19 @@
             (setq high (1- middle)))))
       (substring text 0 low))))
 
+(defun ende-transport-safe-error-text (text)
+  "Prevent image-bearing provider payloads from entering error messages."
+  (if (and (stringp text)
+           (let ((case-fold-search t))
+             (string-match-p "data:image/\\|b64_json\\|image_generation_call" text)))
+      "Provider error contained image data (payload redacted)"
+    text))
+
 (defun ende-transport-error-detail (preview)
   "Return a useful provider error detail parsed from PREVIEW, or nil."
   (condition-case nil
-      (let* ((payload (ende-protocol-json-read-string preview))
+      (let* ((preview (ende-transport-safe-error-text preview))
+             (payload (ende-protocol-json-read-string preview))
              (error-payload (ende-protocol-json-get "error" payload)))
         (or (ende-protocol-json-get "message" error-payload)
             (ende-protocol-json-get "detail" error-payload)

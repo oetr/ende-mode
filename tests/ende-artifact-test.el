@@ -351,4 +351,12 @@
     (should (string-match-p "Answer" normalized))
     (should-not (string-match-p "evil\\|/etc/" normalized))))
 
+(ert-deftest ende-artifact-errors-do-not-echo-image-payloads ()
+  (let ((payload "data:image/png;base64,SECRET_IMAGE_BYTES"))
+    (should-not (string-match-p "SECRET_IMAGE_BYTES" (ende-transport-safe-error-text payload)))
+    (let* ((parser (ende-protocol-make-sse))
+           (failure (should-error
+                     (ende-protocol-sse-feed parser (concat "data: {\"image\":\"" payload "\n\n")))))
+      (should-not (string-match-p "SECRET_IMAGE_BYTES" (error-message-string failure))))))
+
 (provide 'ende-artifact-test)

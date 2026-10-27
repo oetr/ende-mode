@@ -182,8 +182,9 @@ The :callbacks argument initializes the composed transport lifecycle."
 (defun ende-llm--handle-provider-error (session json-error)
   "Settle SESSION from a provider JSON-ERROR value."
   (let* ((reported-message
-          (format "%s" (or (ende-protocol-json-get "message" json-error)
-                           json-error)))
+          (ende-transport-safe-error-text
+           (format "%s" (or (ende-protocol-json-get "message" json-error)
+                             "Provider request failed"))))
          (status (ende-llm--response-status session))
          (http-error (and status (or (< status 200) (>= status 300))))
          (error (ende-error-create
@@ -192,7 +193,7 @@ The :callbacks argument initializes the composed transport lifecycle."
                               (format "HTTP status %s: %s"
                                       status reported-message)
                             reported-message)
-                 :details json-error)))
+                 :details (ende-content-redact json-error))))
     (setf (ende-llm--session-provider-error session) error)
     (ende-llm--fail session error)))
 
