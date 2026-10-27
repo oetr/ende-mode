@@ -321,5 +321,106 @@ assistant file links; user links are explicit user attachments."
         (insert (nth 2 edit))))
     (buffer-string)))
 
+(defvar-local ende-artifact--overlays nil)
+(defvar-local ende-artifact--timer nil)
+(defvar-local ende-artifact--dirty nil)
+
+(defun ende-artifact--clear (&optional begin end)
+  "Remove Ende previews, optionally only between BEGIN and END."
+  (setq ende-artifact--overlays
+        (cl-delete-if
+         (lambda (overlay)
+           (when (or (null begin) (null (overlay-buffer overlay))
+                     (and (<= (overlay-start overlay) end)
+                          (>= (overlay-end overlay) begin)))
+             (delete-overlay overlay) t)) ende-artifact--overlays)))
+
+(defun ende-artifact-refresh (&optional begin end)
+  "Refresh artifact previews between BEGIN and END without previewing other links."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((begin (or begin (point-min))) (end (or end (point-max)))
+              (case-fold-search t))
+          (ende-artifact--clear begin end)
+          (goto-char begin)
+          (while (re-search-forward "^[ \t]*#\\+ENDE_ARTIFACT:[ \t]*\\(.*\\)$" end t)
+            (let ((name (string-trim (match-string-no-properties 1)))
+                  (marker (match-beginning 0))
+                  (next (line-beginning-position 2)))
+              (condition-case nil
+                  (when (eq (org-element-type (org-element-at-point marker)) 'keyword)
+                    (let* ((id (save-excursion
+                                 (goto-char marker) (org-back-to-heading t)
+                                 (while (> (org-current-level) 1) (org-up-heading-safe))
+                                 (org-entry-get nil "ENDE_CHAT_ID")))
+                           (part (ende-artifact-resolve (ende-artifact-base) id name))
+                           (path (plist-get part :path))
+                           (width (plist-get part :width))
+                           (height (plist-get part :height))
+                           (scale (min 1.0 (/ (float (min ende-artifact-preview-width
+                                                          (max 80 (- (window-pixel-width) 40)))) width)
+                                       (/ (float ende-artifact-preview-height) height))))
+                      (goto-char next)
+                      (when (looking-at "[ \t]*\\[\\[file:[^]\n]+\\]\\(?:\\[[^]\n]*\\]\\)?\\][ \t]*$")
+                        (let* ((image (create-image path nil nil :width (max 1 (round (* width scale)))
+                                                    :height (max 1 (round (* height scale)))))
+                               (overlay (make-overlay next (line-end-position) nil t nil)))
+                          (overlay-put overlay 'ende-artifact t)
+                          (overlay-put overlay 'evaporate t)
+                          (overlay-put overlay 'after-string
+                                       (concat "\n" (propertize " " 'display image) "\n"))
+                          (push overlay ende-artifact--overlays)))))
+                (error nil))
+              (goto-char next))))))))
+
+(defun ende-artifact--refresh-dirty (buffer)
+  "Refresh BUFFER's coalesced dirty region after editing settles."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ende-artifact--timer nil)
+      (when ende-artifact--dirty
+        (let ((region ende-artifact--dirty))
+          (setq ende-artifact--dirty nil)
+          (unwind-protect
+              (ende-artifact-refresh (car region) (cdr region))
+            (set-marker (car region) nil) (set-marker (cdr region) nil)))))))
+
+(defun ende-artifact--after-change (begin end _old)
+  "Schedule a line-bounded preview update around BEGIN and END."
+  (save-excursion
+    (goto-char begin)
+    (let ((start (line-beginning-position 0))
+          (finish (progn (goto-char end) (line-beginning-position 3))))
+      (if ende-artifact--dirty
+          (progn
+            (set-marker (car ende-artifact--dirty) (min start (car ende-artifact--dirty)))
+            (set-marker (cdr ende-artifact--dirty) (max finish (cdr ende-artifact--dirty))))
+        (setq ende-artifact--dirty (cons (copy-marker start) (copy-marker finish t))))))
+  (unless ende-artifact--timer
+    (setq ende-artifact--timer
+          (run-with-idle-timer 0.4 nil #'ende-artifact--refresh-dirty (current-buffer)))))
+
+(defun ende-artifact-configure (enabled)
+  "Install or remove buffer-local artifact presentation according to ENABLED."
+  (remove-hook 'after-change-functions #'ende-artifact--after-change t)
+  (remove-hook 'kill-buffer-hook #'ende-artifact--disable t)
+  (when (timerp ende-artifact--timer) (cancel-timer ende-artifact--timer))
+  (setq ende-artifact--timer nil)
+  (when ende-artifact--dirty
+    (set-marker (car ende-artifact--dirty) nil)
+    (set-marker (cdr ende-artifact--dirty) nil)
+    (setq ende-artifact--dirty nil))
+  (ende-artifact--clear)
+  (when (and enabled (derived-mode-p 'org-mode))
+    (add-hook 'after-change-functions #'ende-artifact--after-change nil t)
+    (add-hook 'kill-buffer-hook #'ende-artifact--disable nil t)
+    (ende-artifact-refresh)))
+
+(defun ende-artifact--disable ()
+  "Release buffer-owned artifact presentation resources."
+  (ende-artifact-configure nil))
+
 (provide 'ende-artifact)
 ;;; ende-artifact.el ends here

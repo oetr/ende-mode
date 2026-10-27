@@ -3676,6 +3676,9 @@ Keep it while another queued compaction still refers to its durable identity."
                     (with-current-buffer buffer
                       (ende-chat--hide-reasoning-section-at-marker
                        reasoning-marker)))
+                  (with-current-buffer buffer
+                    (when (bound-and-true-p ende-mode)
+                      (ende-artifact-refresh)))
                   (if (and (not compact)
                            (plist-get instruction :title-source)
                            (not (ende-chat--valid-title-text-p

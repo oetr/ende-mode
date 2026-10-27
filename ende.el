@@ -336,6 +336,7 @@
   :lighter ende--mode-line-string
   :keymap ende-mode-map
   (ende--configure-presentation ende-mode)
+  (ende-artifact-configure ende-mode)
   (ende--configure-org-template)
   (if ende-mode
       (progn
@@ -421,7 +422,8 @@
       (with-current-buffer buffer
         (when ende-mode
           (ende-tool-store--initialize-buffer)
-          (ende--configure-org-template))))
+          (ende--configure-org-template)
+          (ende-artifact-configure t))))
     (message "ende: reloaded from %s" dir)))
 
 (provide 'ende)

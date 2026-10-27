@@ -180,4 +180,25 @@
           (should (string-match-p "image/png" (ende-chat--render-context (ende-chat-context-at-point))))))))
   (ende-test--reset))
 
+(ert-deftest ende-artifact-preview-lifecycle ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml")))
+      (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\n#+ENDE_ARTIFACT: " name "\n"
+              (ende-artifact-link base "chat" name buffer-file-name) "\n"
+              "#+begin_src svg\n" ende-artifact-test-svg "\n#+end_src\n")
+      (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
+        (ende-mode 1)
+        (should (= 1 (length ende-artifact--overlays)))
+        (ende-artifact-configure t)
+        (should (= 1 (length ende-artifact--overlays)))
+        (should (= 1 (cl-count #'ende-artifact--after-change after-change-functions)))
+        (goto-char (point-max))
+        (insert "Edited text\n")
+        (should ende-artifact--timer)
+        (ende-mode -1)
+        (should-not ende-artifact--timer)
+        (should-not ende-artifact--overlays)
+        (should-not (memq #'ende-artifact--after-change after-change-functions))))))
+
 (provide 'ende-artifact-test)
