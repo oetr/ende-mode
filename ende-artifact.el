@@ -88,7 +88,7 @@ Check containment even when intermediate directories are symlinks."
            (root (car nodes))
            (allowed '(svg g defs title desc rect circle ellipse line polyline
                           polygon path text tspan linearGradient radialGradient
-                          stop clipPath mask marker use symbol)))
+                          stop clipPath mask marker use symbol pattern)))
       (unless (and (= (length nodes) 1) (eq (car-safe root) 'svg)
                    (equal (cdr (assq 'xmlns (cadr root)))
                           "http://www.w3.org/2000/svg"))
@@ -116,6 +116,7 @@ Check containment even when intermediate directories are symlinks."
                                      "dominant-baseline" "alignment-baseline" "xml:space"
                                      "style" "offset" "stop-color" "stop-opacity"
                                      "gradientUnits" "gradientTransform" "spreadMethod"
+                                     "patternUnits" "patternContentUnits" "patternTransform"
                                      "fx" "fy" "clip-path" "clip-rule" "clipPathUnits"
                                      "mask" "maskUnits" "maskContentUnits" "marker-start"
                                      "marker-mid" "marker-end" "markerWidth" "markerHeight"

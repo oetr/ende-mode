@@ -1,6 +1,7 @@
 ;;; ende-artifact-test.el --- Conversation image tests -*- lexical-binding: t; -*-
 (require 'ert)
 (require 'ende-artifact)
+(require 'ende-content)
 
 (defconst ende-artifact-test-svg
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"blue\"/></svg>")
@@ -82,6 +83,40 @@
          (ende-artifact--svg
           (concat "<svg xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" "
                   attribute "></svg>")))))))
+
+(ert-deftest ende-artifact-static-svg-pattern-roundtrip ()
+  (ende-artifact-test-with-files
+    (let* ((xml (concat
+                 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\">"
+                 "<defs><pattern id=\"dots\" x=\"0\" y=\"0\" width=\"8\" height=\"8\""
+                 " patternUnits=\"userSpaceOnUse\" patternContentUnits=\"userSpaceOnUse\""
+                 " patternTransform=\"rotate(15)\">"
+                 "<circle cx=\"2\" cy=\"2\" r=\"1\" fill=\"navy\"/></pattern></defs>"
+                 "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
+           (base (ende-artifact-base))
+           (prepared (ende-artifact-prepare-text xml base "patterns" buffer-file-name))
+           (parts (ende-artifact-content
+                   prepared (lambda () base) "patterns" 'assistant
+                   (lambda (&rest _) (ert-fail "Artifact link treated as an attachment"))))
+           (image (cl-find :image parts :key (lambda (part) (plist-get part :type))))
+           (raster (ende-content-image-data image)))
+      (should (string-match-p (regexp-quote "#+ENDE_ARTIFACT: image-001.svg") prepared))
+      (should (equal xml (ende-artifact--read-bytes (plist-get image :path))))
+      (should (equal (car raster) "image/png"))
+      (should (eq (image-type-from-data (cdr raster)) 'png)))
+    (let ((prefix (concat "<svg xmlns=\"http://www.w3.org/2000/svg\""
+                          " xmlns:xlink=\"http://www.w3.org/1999/xlink\"><defs>")))
+      (dolist (attribute '("href=\"#dots\"" "xlink:href=\"#dots\""))
+        (should (ende-artifact--svg
+                 (concat prefix "<pattern id=\"copy\" " attribute "/>"
+                         "</defs></svg>"))))
+      (dolist (pattern '("<pattern href=\"https://example.com/tile.svg#dots\"/>"
+                         "<pattern xlink:href=\"tile.svg#dots\"/>"
+                         "<pattern href=\"file:/etc/passwd\"/>"
+                         "<pattern onload=\"alert(1)\"/>"
+                         "<pattern><script>alert(1)</script></pattern>"
+                         "<pattern><image href=\"https://example.com/tile.png\"/></pattern>"))
+        (should-error (ende-artifact--svg (concat prefix pattern "</defs></svg>")))))))
 
 (require 'ende-chat)
 
