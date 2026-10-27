@@ -147,6 +147,69 @@ Check containment even when intermediate directories are symlinks."
         (walk root))
       root)))
 
+(defun ende-artifact--u16be (bytes offset)
+  "Read an unsigned big-endian 16-bit integer from BYTES at OFFSET."
+  (logior (ash (aref bytes offset) 8) (aref bytes (1+ offset))))
+
+(defun ende-artifact--u32be (bytes offset)
+  "Read an unsigned big-endian 32-bit integer from BYTES at OFFSET."
+  (logior (ash (ende-artifact--u16be bytes offset) 16)
+          (ende-artifact--u16be bytes (+ offset 2))))
+
+(defun ende-artifact--png-dimensions (bytes)
+  "Return PNG dimensions from BYTES, requiring a complete, valid IHDR."
+  (unless (and (>= (length bytes) 33)
+               (string-prefix-p "\211PNG\r\n\032\n" bytes)
+               (= (ende-artifact--u32be bytes 8) 13)
+               (equal (substring bytes 12 16) "IHDR")
+               (memq (aref bytes 24)
+                     (cdr (assq (aref bytes 25)
+                                '((0 1 2 4 8 16) (2 8 16) (3 1 2 4 8)
+                                  (4 8 16) (6 8 16)))))
+               (= (aref bytes 26) 0) (= (aref bytes 27) 0)
+               (memq (aref bytes 28) '(0 1)))
+    (error "Malformed or truncated PNG header"))
+  (let ((width (ende-artifact--u32be bytes 16))
+        (height (ende-artifact--u32be bytes 20)))
+    (unless (and (<= 1 width #x7fffffff) (<= 1 height #x7fffffff))
+      (error "Invalid PNG dimensions"))
+    (cons width height)))
+
+(defun ende-artifact--jpeg-dimensions (bytes)
+  "Return JPEG dimensions by walking BYTES to a supported frame header."
+  (let ((size (length bytes)) (offset 2))
+    (unless (and (>= size 4) (string-prefix-p "\377\330" bytes))
+      (error "Malformed or truncated JPEG header"))
+    (catch 'dimensions
+      (while (< offset size)
+        (unless (= (aref bytes offset) #xff)
+          (error "Invalid JPEG marker boundary"))
+        (while (and (< offset size) (= (aref bytes offset) #xff))
+          (cl-incf offset))
+        (when (= offset size) (error "Truncated JPEG marker"))
+        (let ((marker (aref bytes offset)))
+          (cl-incf offset)
+          (cond
+           ((or (= marker 0) (<= #xd0 marker #xda))
+            (error "JPEG has no supported frame header"))
+           ((= marker #x01))
+           (t
+            (unless (<= (+ offset 2) size) (error "Truncated JPEG segment"))
+            (let* ((length (ende-artifact--u16be bytes offset))
+                   (end (+ offset length)))
+              (unless (and (>= length 2) (<= end size))
+                (error "Invalid JPEG segment length"))
+              (when (memq marker '(#xc0 #xc1 #xc2 #xc3 #xc5 #xc6 #xc7
+                                        #xc9 #xca #xcb #xcd #xce #xcf))
+                (unless (and (>= length 8) (> (aref bytes (+ offset 7)) 0)
+                             (= length (+ 8 (* 3 (aref bytes (+ offset 7))))))
+                  (error "Malformed JPEG frame header"))
+                (throw 'dimensions
+                       (cons (ende-artifact--u16be bytes (+ offset 5))
+                             (ende-artifact--u16be bytes (+ offset 3)))))
+              (setq offset end))))))
+      (error "JPEG has no supported frame header"))))
+
 (defun ende-artifact-image-info (path &optional expected)
   "Validate image PATH, optionally requiring EXPECTED media type.
 Return a path-based image part; no encoded image data is retained."
@@ -163,31 +226,19 @@ Return a path-based image part; no encoded image data is retained."
          dimensions)
     (unless (and media (or (null expected) (equal expected media)))
       (error "Unsupported image format or mismatched media type"))
-    (if (eq type 'svg)
-        (ende-artifact--svg bytes)
-      (unless (eq (image-type-from-data bytes) type)
-        (error "Image content does not match its format")))
     (setq dimensions
-          (if (display-graphic-p)
-              (image-size (create-image bytes type t) t)
-            (if (eq type 'svg)
-                (let* ((attributes (cadr (ende-artifact--svg bytes)))
-                       (view (split-string (or (cdr (assq 'viewBox attributes))
-                                               "0 0 300 150") "[, \t\n]+" t)))
-                  (cons (string-to-number (or (cdr (assq 'width attributes))
-                                             (nth 2 view) "300"))
-                        (string-to-number (or (cdr (assq 'height attributes))
-                                             (nth 3 view) "150"))))
-              (unless (executable-find "identify")
-                (error "Image validation requires a graphical Emacs or ImageMagick identify"))
-              (with-temp-buffer
-                (unless (zerop (call-process "identify" nil (list t nil) nil
-                                            "-regard-warnings" "-format" "%w %h"
-                                            path))
-                  (error "Malformed raster image"))
-                (let ((numbers (split-string (buffer-string))))
-                  (cons (string-to-number (or (car numbers) "0"))
-                        (string-to-number (or (cadr numbers) "0"))))))))
+          (if (eq type 'svg)
+              (let* ((attributes (cadr (ende-artifact--svg bytes)))
+                     (view (split-string (or (cdr (assq 'viewBox attributes))
+                                             "0 0 300 150") "[, \t\n]+" t)))
+                (cons (string-to-number (or (cdr (assq 'width attributes))
+                                            (nth 2 view) "300"))
+                      (string-to-number (or (cdr (assq 'height attributes))
+                                            (nth 3 view) "150"))))
+            (unless (eq (image-type-from-data bytes) type)
+              (error "Image content does not match its format"))
+            (if (eq type 'png) (ende-artifact--png-dimensions bytes)
+              (ende-artifact--jpeg-dimensions bytes))))
     (unless (and dimensions (> (car dimensions) 0) (> (cdr dimensions) 0))
       (error "Malformed image content"))
     (list :type :image :path path :media-type media

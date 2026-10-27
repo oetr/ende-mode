@@ -6,6 +6,16 @@
 (defconst ende-artifact-test-svg
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"blue\"/></svg>")
 
+(defconst ende-artifact-test-png
+  (base64-decode-string
+   "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAFElEQVQI12NkYPjPwMDAxMDAgKAAEkIBBbnAb5QAAAAASUVORK5CYII="))
+
+(defconst ende-artifact-test-jpeg
+  (base64-decode-string
+   (concat "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/"
+           "2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAADAAIDAREAAhEBAxEB/"
+           "8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAGCf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AD3VTB3/2Q==")))
+
 (defmacro ende-artifact-test-with-files (&rest body)
   "Run BODY in an Org buffer visiting a temporary conversation."
   (declare (indent 0) (debug t))
@@ -16,6 +26,30 @@
            (setq buffer-file-name (expand-file-name "chat.org" directory))
            ,@body)
        (delete-directory directory t))))
+
+(ert-deftest ende-artifact-raster-metadata ()
+  (ende-artifact-test-with-files
+    (let ((base (ende-artifact-base))
+          (exec-path nil))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+        (dolist (fixture `(("image/png" . ,ende-artifact-test-png)
+                           ("image/jpeg" . ,ende-artifact-test-jpeg)))
+          (let* ((media (car fixture))
+                 (bytes (cdr fixture))
+                 (name (ende-artifact-store base "raster" bytes media))
+                 (part (ende-artifact-resolve base "raster" name)))
+            (should (= (plist-get part :width) 2))
+            (should (= (plist-get part :height) 3))
+            (should (equal (ende-content-image-data part) fixture))
+            (should-error (ende-artifact-store base "raster" (substring bytes 0 24) media))
+            (should-error (ende-artifact-store base "raster" "not an image" media))))
+        (let* ((bytes (concat (substring ende-artifact-test-jpeg 0 2)
+                              (unibyte-string #xff #xe1 0 8 #xff #xc0 0 1 0 0)
+                              (substring ende-artifact-test-jpeg 2)))
+               (name (ende-artifact-store base "raster" bytes "image/jpeg")))
+          (should (= (plist-get (ende-artifact-resolve base "raster" name) :width) 2))
+          (aset bytes 5 #xff)
+          (should-error (ende-artifact-store base "raster" bytes "image/jpeg")))))))
 
 (ert-deftest ende-artifact-paths-and-validation ()
   (ende-artifact-test-with-files
