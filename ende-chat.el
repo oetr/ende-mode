@@ -3426,9 +3426,7 @@ Keep it while another queued compaction still refers to its durable identity."
                                                 "ENDE_ARTIFACTS_BASE_PATH")
                                      (cons (org-element-property :begin keyword)
                                            (org-element-property :end keyword)))))))))
-    (if (not (or parts pending
-                 (string-match-p "\\[\\[file:" text)
-                 (ende-artifact-generated-p text))) result
+    (if (not (or parts pending (ende-artifact-generated-p text))) result
       (let ((buffer (ende-target-buffer (ende-job-target job))))
         (with-current-buffer buffer
           (save-excursion

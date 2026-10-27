@@ -120,6 +120,17 @@
             (should (equal base (expand-file-name setting directory)))
             (should (file-exists-p (plist-get (ende-artifact-resolve base "chat" name) :path)))))))))
 
+(ert-deftest ende-artifact-citations-stay-text ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Topic\n")
+    (let* ((document (ende-chat--build-document))
+           (headline (car (ende-chat--document-headlines document)))
+           (text "See [[file:missing.el::42][source]] and [[file:missing.svg][diagram]].")
+           (result (list :content text)))
+      (should (equal text (ende-chat--content document headline text 'assistant)))
+      (should (eq result (ende-chat--prepare-image-result (ende--make-job) result))))))
+
 (ert-deftest ende-artifact-org-multimodal-and-attachments ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
