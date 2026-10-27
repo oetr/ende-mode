@@ -1606,6 +1606,10 @@ uses the user's configured image model. Do not set artifact storage configuratio
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
 Choose a concise title for the request. Otherwise omit this keyword.\n\n"
+   ende-agent--implementation-guidance
+   "\n\nResolve implementation choices with the user before editing. When delegating,
+include any explicit user overrides relevant to the assigned task and bring
+unresolved choices back to the user.\n\n"
    "Work in bounded, incremental steps. Core rule: do not move on from a failed or unverified state.
 For each coherent step:
 1. Make one bounded change.

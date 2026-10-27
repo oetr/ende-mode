@@ -7,6 +7,20 @@
 (require 'ende-test-helpers)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-test/chat-and-agents-share-implementation-guidance-after-reload ()
+  (let ((ende-agent--implementation-guidance "")
+        (ende-agent--system-prompt "")
+        (ende-chat--system ""))
+    (ende-reload)
+    (should-not (string-empty-p ende-agent--implementation-guidance))
+    (with-temp-buffer
+      (org-mode)
+      (dolist (prompt (list (ende-chat--system-prompt
+                            (ende-chat--build-document))
+                           ende-agent--system-prompt))
+        (should (string-match-p
+                 (regexp-quote ende-agent--implementation-guidance) prompt))))))
+
 (ert-deftest ende-test/chat-prompt-requires-verified-steps-and-rollback ()
   (with-temp-buffer
     (org-mode)
