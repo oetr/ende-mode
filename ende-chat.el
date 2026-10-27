@@ -711,25 +711,13 @@ around rendered chat sections, not arbitrary text slices."
               (if userp "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" "#\\+ENDE_ARTIFACT:")
               text))
         text
-      (let* ((root (ende-chat--root document headline))
-             (chat-id (ende-chat--property document root :id))
-             (source-buffer (current-buffer)))
+      (let ((source-buffer (current-buffer)))
         (ende-artifact-content
-         text (lambda () (with-current-buffer source-buffer (ende-artifact-base)))
-         chat-id
+         text
          (when userp
            (lambda (target)
              (with-current-buffer source-buffer
-               (when (file-remote-p target)
-                 (error "Remote file attachments are unsupported"))
-               (unless (or (file-name-absolute-p target) buffer-file-name)
-                 (error "Relative file attachments require an Org file"))
-               (let ((path (expand-file-name
-                            target (and buffer-file-name
-                                        (file-name-directory buffer-file-name)))))
-                 (unless (and (file-regular-p path) (file-readable-p path))
-                   (error "File attachment is not a readable regular file"))
-                 path)))))))))
+               (ende-artifact--local-path target)))))))))
 
 (defun ende-chat--prefix-messages
     (document root question &optional reasoning-ancestors-only)

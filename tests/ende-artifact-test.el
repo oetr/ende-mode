@@ -42,9 +42,8 @@
             (should (= (plist-get part :width) 2))
             (should (= (plist-get part :height) 3))
             (should (equal (ende-content-image-data part) fixture))
-            (should (equal (ende-content-image-data
-                            (plist-put (copy-sequence part) :path "/not-the-artifact"))
-                           fixture))
+            (should-error (ende-content-image-data
+                           (plist-put (copy-sequence part) :path "/not-the-artifact")))
             (should-error (ende-artifact-store base "raster" (substring bytes 0 24) media))
             (should-error (ende-artifact-store base "raster" "not an image" media))))
         (let* ((bytes (concat (substring ende-artifact-test-jpeg 0 2)
@@ -160,21 +159,44 @@
         (should (string-match-p "Original" (ende-content-readable (ende-content-body user))))
         (should (= 1 (cl-count :image (ende-content-body user) :key (lambda (p) (plist-get p :type))))))
       (should-error (ende-artifact-content
-                     (concat "#+ENDE_ARTIFACT: " name "\nNo link.\n")
-                     (lambda () base) "chat-123"))
+                     (concat "#+ENDE_ARTIFACT: " name "\nNo link.\n")))
       (delete-file (plist-get (ende-artifact-resolve base "chat-123" name) :path))
       (goto-char (point-max))
       (should-error (ende-chat-context-at-point))
       (let ((path (expand-file-name "image.gif" directory)))
         (with-temp-file path (insert "GIF89a"))
-        (should-error (ende-artifact-content "[[file:image.gif]]" (lambda () base) "chat-123"
-                                             (lambda (_) path))))
+        (should-error (ende-artifact-content "[[file:image.gif]]" (lambda (_) path))))
       (let ((path (expand-file-name "note.txt" directory)))
         (with-temp-file path (insert "Attached text"))
-        (let ((content (ende-artifact-content "See [[file:note.txt][Note]]" (lambda () base)
-                                              "chat-123" (lambda (_) path))))
+        (let ((content (ende-artifact-content "See [[file:note.txt][Note]]" (lambda (_) path))))
           (should (stringp content))
           (should (string-match-p "Attached text" content)))))))
+
+(ert-deftest ende-artifact-portable-reference ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
+           (source (plist-get (ende-artifact-resolve base "source" name) :path)))
+      (ende-artifact-store base "destination" ende-artifact-test-png "image/png")
+      (insert "* Other question\n:PROPERTIES:\n:ENDE_CHAT_ID: destination\n:END:\n"
+              "#+ENDE_ARTIFACT: unrelated-label.svg\n"
+              (org-link-make-string
+               (concat "file:" (org-link-escape (file-relative-name source directory)) "::42")
+               "Copied image") "\n")
+      (goto-char (point-max))
+      (let* ((messages (ende-chat-context-at-point))
+             (images (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image))
+                                       (ende-content-body (car messages)))))
+        (should (= 1 (length images)))
+        (should (equal source (plist-get (car images) :path))))
+      (cl-letf (((symbol-function 'create-image)
+                 (lambda (path &rest _) (should (equal path source)) '(image :type png))))
+        (ende-artifact-refresh)
+        (should (= 1 (length ende-artifact--overlays))))
+      (delete-file source)
+      (should-error (ende-chat-context-at-point))
+      (ende-artifact-refresh)
+      (should-not ende-artifact--overlays))))
 
 (ert-deftest ende-artifact-svg-safety-and-rasterization ()
   (ende-artifact-test-with-files
@@ -186,7 +208,7 @@
                         "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
            (code (concat "#+begin_src svg\n" xml "\n#+end_src\n"))
            (prepared (ende-artifact-prepare-text (concat xml "\n" code) base "chat" buffer-file-name))
-           (parts (ende-artifact-content prepared (lambda () base) "chat"
+           (parts (ende-artifact-content prepared
                                           (lambda (_) (ert-fail "Generated link became an attachment"))))
            (image (car parts)))
       (should (equal (ende-artifact--read-bytes (plist-get image :path)) xml))
@@ -199,7 +221,7 @@
                                            (concat "<svg xmlns=\"http://www.w3.org/2000/svg\">" payload "</svg>")
                                            "image/svg+xml")))
       (let ((exec-path nil))
-        (should (ende-artifact-resolve base "chat" (plist-get image :name)))
+        (should (ende-artifact--load-image (plist-get image :path)))
         (let ((failure (should-error (ende-content-data-url image))))
           (should (string-match-p "install rsvg-convert.*ImageMagick" (error-message-string failure)))))
       (when (or (executable-find "rsvg-convert") (executable-find "convert"))

@@ -43,10 +43,7 @@
 
 (defun ende-content-image-data (part)
   "Return validated PART as raster bytes and its actual media type."
-  (let* ((info (if (plist-get part :artifact-base)
-                   (ende-artifact-resolve (plist-get part :artifact-base)
-                                          (plist-get part :chat-id) (plist-get part :name))
-                 (ende-artifact-image-info (plist-get part :path) (plist-get part :media-type))))
+  (let* ((info (ende-artifact--load-image (plist-get part :path) (plist-get part :media-type)))
          (path (plist-get info :path))
          (media (plist-get info :media-type))
          (bytes (ende-artifact--read-bytes path)))

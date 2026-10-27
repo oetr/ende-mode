@@ -210,12 +210,25 @@ Check containment even when intermediate directories are symlinks."
               (setq offset end))))))
       (error "JPEG has no supported frame header"))))
 
-(defun ende-artifact-image-info (path &optional expected)
-  "Validate image PATH, optionally requiring EXPECTED media type.
-Return a path-based image part; no encoded image data is retained."
-  (unless (and (not (file-remote-p path))
-               (file-regular-p path) (file-readable-p path))
-    (error "Image is not a readable regular local file"))
+(defun ende-artifact--local-path (path)
+  "Resolve local PATH against the source Org file and check readability."
+  (when (or (file-remote-p path)
+            (and buffer-file-name (file-remote-p buffer-file-name)
+                 (not (file-name-absolute-p path))))
+    (error "Remote file attachments are unsupported: %s" path))
+  (unless (or (file-name-absolute-p path) buffer-file-name)
+    (error "Relative file attachments require an Org file: %s" path))
+  (let ((absolute (expand-file-name
+                   path (and buffer-file-name
+                             (file-name-directory buffer-file-name)))))
+    (unless (and (file-regular-p absolute) (file-readable-p absolute))
+      (error "Attachment is not a readable regular local file: %s" path))
+    (file-truename absolute)))
+
+(defun ende-artifact--load-image (path &optional expected)
+  "Load local image PATH, optionally requiring EXPECTED media type.
+Relative paths use the source Org file's directory."
+  (setq path (ende-artifact--local-path path))
   (let* ((bytes (ende-artifact--read-bytes path))
          (extension (downcase (or (file-name-extension path) "")))
          (type (cond ((equal extension "svg") 'svg)
@@ -246,8 +259,8 @@ Return a path-based image part; no encoded image data is retained."
           :bytes (length bytes))))
 
 (defun ende-artifact-resolve (base chat-id name)
-  "Resolve and validate NAME using only BASE and CHAT-ID.
-Errors identify the reference and expected directory, never link targets."
+  "Resolve creation-time shorthand NAME under BASE and CHAT-ID.
+Keep generated filenames contained in their output directory."
   (let ((directory (expand-file-name (or chat-id "<missing-id>") base)))
     (condition-case failure
         (progn
@@ -261,8 +274,7 @@ Errors identify the reference and expected directory, never link targets."
                                       (file-truename directory))
                                      (file-truename path))
               (error "artifact escapes its conversation directory"))
-            (append (ende-artifact-image-info path)
-                    (list :artifact-base base :chat-id chat-id :name name))))
+            (ende-artifact--load-image path)))
       (error (error "Artifact %s in conversation %s, expected directory %s: %s"
                     name chat-id directory (error-message-string failure))))))
 
@@ -302,10 +314,27 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
                    path)))
     (org-link-make-string (concat "file:" (org-link-escape target)) name)))
 
-(defun ende-artifact-content (text base-function chat-id &optional resolve-file)
+(defun ende-artifact--following-link (position)
+  "Return the sole file link on the line after marker POSITION, or nil."
+  (save-excursion
+    (goto-char position)
+    (forward-line 1)
+    (skip-chars-forward " \t")
+    (let* ((begin (point))
+           (link (org-element-context))
+           (end (and (eq (org-element-type link) 'link)
+                     (- (org-element-property :end link)
+                        (org-element-property :post-blank link)))))
+      (when (and end (equal (org-element-property :type link) "file")
+                 (= begin (org-element-property :begin link))
+                 (<= end (line-end-position))
+                 (string-blank-p (buffer-substring-no-properties end (line-end-position))))
+        link))))
+
+(defun ende-artifact-content (text &optional resolve-file)
   "Parse TEXT into ordered parts, retaining strings for text-only content.
-BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments."
-  (let (edits consumed)
+Explicit attachments use their file link; RESOLVE-FILE enables user attachments."
+  (let ((source-file buffer-file-name) edits consumed)
     (with-temp-buffer
       (insert text)
       (org-mode)
@@ -317,11 +346,12 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
                      (begin (org-element-property :begin element))
                      (next (save-excursion (goto-char begin) (forward-line 1) (point)))
                      (end (save-excursion (goto-char next) (min (point-max) (1+ (line-end-position)))))
-                     (line (buffer-substring-no-properties next end))
-                     (part (ende-artifact-resolve (funcall base-function) chat-id name)))
-                (unless (string-match-p
-                         "\\`[ \t]*\\[\\[file:[^]\n]+\\]\\(?:\\[[^]\n]*\\]\\)?\\][ \t]*\n?\\'" line)
-                  (error "Artifact %s in conversation %s needs a following file link" name chat-id))
+                     (link (ende-artifact--following-link begin))
+                     (part (let ((buffer-file-name source-file))
+                             (unless link
+                               (error "Artifact %s needs a following file link" name))
+                             (ende-artifact--load-image
+                              (org-link-unescape (org-element-property :path link))))))
                 (push (cons next end) consumed)
                 (push (list begin end part) edits)))))
         (when resolve-file
@@ -337,7 +367,7 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
                          (end (- (org-element-property :end link)
                                  (org-element-property :post-blank link)))
                          (part (if (member extension '("png" "jpg" "jpeg" "svg"))
-                                   (ende-artifact-image-info path)
+                                   (ende-artifact--load-image path)
                                  (let ((bytes (ende-artifact--read-bytes path)))
                                    (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
                                              (image-type-from-data bytes)
@@ -423,14 +453,12 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
             (let* ((name (string-trim (org-element-property :value keyword)))
                    (begin (org-element-property :begin keyword))
                    (next (save-excursion (goto-char begin) (forward-line 1) (point)))
-                   (end (save-excursion
-                          (goto-char next)
-                          (if (looking-at "[ \t]*\\[\\[file:")
-                              (min (point-max) (1+ (line-end-position))) next))))
-              (ende-artifact-resolve base chat-id name)
-              (push (list begin end
-                          (concat "#+ENDE_ARTIFACT: " name "\n"
-                                  (ende-artifact-link base chat-id name org-file) "\n")) edits)))))
+                   (link (ende-artifact--following-link begin)))
+              (unless link
+                (ende-artifact-resolve base chat-id name)
+                (push (list begin next
+                            (concat "#+ENDE_ARTIFACT: " name "\n"
+                                    (ende-artifact-link base chat-id name org-file) "\n")) edits))))))
       (dolist (edit (sort edits (lambda (a b) (> (car a) (car b)))))
         (delete-region (car edit) (cadr edit))
         (goto-char (car edit))
@@ -476,16 +504,14 @@ BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments.
                (case-fold-search t))
           (goto-char begin)
           (while (re-search-forward "^[ \t]*#\\+ENDE_ARTIFACT:[ \t]*\\(.*\\)$" end t)
-            (let ((name (string-trim (match-string-no-properties 1)))
-                  (marker (match-beginning 0))
+            (let ((marker (match-beginning 0))
                   (next (line-beginning-position 2)))
               (condition-case nil
                   (when (eq (org-element-type (org-element-at-point marker)) 'keyword)
-                    (let* ((id (save-excursion
-                                 (goto-char marker) (org-back-to-heading t)
-                                 (while (> (org-current-level) 1) (org-up-heading-safe))
-                                 (org-entry-get nil "ENDE_CHAT_ID")))
-                           (part (ende-artifact-resolve (ende-artifact-base) id name))
+                    (let* ((link (ende-artifact--following-link marker))
+                           (part (when link
+                                   (ende-artifact--load-image
+                                    (org-link-unescape (org-element-property :path link)))))
                            (path (plist-get part :path))
                            (width (plist-get part :width))
                            (height (plist-get part :height))
