@@ -135,9 +135,6 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-tool-kind-property "ENDE_TOOL_KIND"
   "Org property identifying a generated tool call or result section.")
 
-(defconst ende-chat-content-format-property "ENDE_CHAT_CONTENT_FORMAT"
-  "Org property describing the lossless representation of assistant content.")
-
 (defconst ende-chat-content-headline-shift-property
   "ENDE_CHAT_CONTENT_HEADLINE_SHIFT"
   "Org property recording a reversible assistant-content heading shift.")
@@ -195,7 +192,6 @@ discarding superseded details. Be concise but self-contained."
         (cons ende-chat-tool-execution-id-property :tool-execution-id)
         (cons ende-chat-tool-name-property :tool-name)
         (cons ende-chat-tool-kind-property :tool-kind)
-        (cons ende-chat-content-format-property :content-format)
         (cons ende-chat-content-headline-shift-property :content-headline-shift)
         (cons ende-chat-content-synthetic-end-property :content-synthetic-end)
         (cons ende-chat-content-synthetic-newline-property :content-synthetic-newline)
@@ -1098,18 +1094,6 @@ If an edited drawer is malformed, fall back to the line after the heading."
         (forward-line 1)
         (point)))))
 
-(defun ende-chat--protocol-body-literal (text)
-  "Decode the Org-safe literal representation in TEXT."
-  (with-temp-buffer
-    (insert text)
-    (goto-char (point-min))
-    (while (not (eobp))
-      (when (looking-at
-             ",\\(?:\\*+[ \t]\\|#\\+\\|,\\|:[[:alnum:]_@#%]+:[ \t]*$\\)")
-        (delete-char 1))
-      (forward-line 1))
-    (buffer-string)))
-
 (defun ende-chat--protocol-unescape-org-blocks (text)
   "Undo comma escapes added inside Org blocks in TEXT."
   (with-temp-buffer
@@ -1124,7 +1108,8 @@ If an edited drawer is malformed, fall back to the line after the heading."
               (if (and directive (eq (car directive) 'end)
                        (equal (cdr directive) open-block))
                   (setq open-block nil)
-                (when (looking-at ",\\(?:\\*+[ \t]\\|#\\+\\|,\\)")
+                (skip-chars-forward " \t")
+                (when (looking-at ",\\(?:\\*\\|#\\+\\|,\\)")
                   (delete-char 1)))
             (when (and directive (eq (car directive) 'begin))
               (setq open-block (cdr directive))))
@@ -1133,13 +1118,13 @@ If an edited drawer is malformed, fall back to the line after the heading."
 
 (defun ende-chat--protocol-reverse-headline-shift (text shift)
   "Reverse the generated Org heading SHIFT in TEXT."
-  (unless (and (integerp shift) (>= shift 0))
+  (unless (integerp shift)
     (error "Malformed generated assistant content heading shift: %S" shift))
   (if (= shift 0)
       text
     (with-temp-buffer
       (org-mode)
-      (insert text)
+      (insert (plist-get (ende-org--blocks text) :parse-content))
       (let (edits)
         (dolist (headline (org-element-map (org-element-parse-buffer)
 					   'headline #'identity))
@@ -1150,32 +1135,10 @@ If an edited drawer is malformed, fall back to the line after the heading."
               (error "Malformed generated assistant content heading"))
             (push (list begin (+ begin level) (make-string new-level ?*))
                   edits)))
-        (ende-org--apply-edits (buffer-string) edits)))))
+        (ende-org--apply-edits text edits)))))
 
-(defun ende-chat--protocol-remove-synthetic-end (headline text)
-  "Remove the Org block terminator recorded on HEADLINE from TEXT."
-  (let ((block (ende-chat--local-property
-                headline ende-chat-content-synthetic-end-property))
-        (synthetic-newline
-         (ende-chat--local-property
-          headline ende-chat-content-synthetic-newline-property)))
-    (if (null block)
-        text
-      (let ((suffix (concat "#+end_" block "\n")))
-        (if (not (string-suffix-p suffix text))
-            text
-          (setq text (substring text 0 (- (length text) (length suffix))))
-          (when (and (equal synthetic-newline "t")
-                     (string-suffix-p "\n" text))
-            (setq text (substring text 0 -1)))
-          text)))))
-
-(defun ende-chat--protocol-body-string
-    (headline &optional first-child format)
-  "Return the body text stored on HEADLINE.
-FIRST-CHILD bounds the body before nested Org sections.
-FORMAT selects the host-owned literal or structured-Org representation. The
-renderer framing newlines are removed before the selected decoding is applied."
+(defun ende-chat--protocol-safe-body (headline &optional first-child)
+  "Read HEADLINE's safe Org body, bounded by FIRST-CHILD when supplied."
   (let* ((start (ende-chat--protocol-body-start headline))
          (end (or (and first-child
                        (org-element-property :begin first-child))
@@ -1183,34 +1146,13 @@ renderer framing newlines are removed before the selected decoding is applied."
          (text (buffer-substring-no-properties start end)))
     (when (string-suffix-p "\n\n" text)
       (setq text (substring text 0 -2)))
-    (let* ((selected-format
-            (or format
-                (ende-chat--local-property
-                 headline ende-chat-content-format-property)
-                "literal"))
-           (format-name (if (symbolp selected-format)
-                            (symbol-name selected-format)
-                          selected-format)))
-      (cond
-       ((equal format-name "literal")
-        (ende-chat--protocol-body-literal text))
-       ((equal format-name "org")
-        (setq text
-              (ende-chat--protocol-remove-synthetic-end
-               headline
-               (condition-case nil
-                   (ende-chat--protocol-unescape-org-blocks text)
-                 (error text))))
-        (let ((shift (ende-chat--local-property
-                      headline ende-chat-content-headline-shift-property)))
-          (when (and shift (string-match-p "\\`[0-9]+\\'" shift))
-            (setq text
-                  (condition-case nil
-                      (ende-chat--protocol-reverse-headline-shift
-                       text (string-to-number shift))
-                    (error text)))))
-        text)
-       (t text)))))
+    text))
+
+(defun ende-chat--protocol-body-string (headline &optional first-child)
+  "Restore HEADLINE's text presentation without interpreting decoded text."
+  (ende-chat--restore-response-parts
+   (ende-chat--protocol-safe-body headline first-child)
+   (ende-chat--protocol-transform headline)))
 
 (defun ende-chat--protocol-tool-call (document assistant call)
   "Reconstruct generated CALL under ASSISTANT in DOCUMENT."
@@ -1230,6 +1172,34 @@ renderer framing newlines are removed before the selected decoding is applied."
               :name (plist-get execution :name)
               :arguments (plist-get execution :arguments))))))
 
+(defun ende-chat--restore-response-parts (parts normalized)
+  "Restore presentation in already split PARTS using NORMALIZED metadata.
+Decoded text is never sent back to artifact discovery."
+  (let* ((stringp (stringp parts))
+         (parts (if stringp (list (list :type :text :text parts)) (copy-tree parts)))
+         (last (car (last parts)))
+         (block (plist-get normalized :synthetic-end))
+         (suffix (and block (concat "#+end_" block "\n"))))
+    (dolist (part parts)
+      (when (eq (plist-get part :type) :text)
+        (let ((text (plist-get part :text)))
+          (setq text (ende-chat--protocol-reverse-headline-shift
+                      text (or (plist-get normalized :headline-shift) 0)))
+          (when (and (eq part last) suffix (string-suffix-p suffix text))
+            (setq text (substring text 0 (- (length text) (length suffix))))
+            (when (and (plist-get normalized :synthetic-newline) (string-suffix-p "\n" text))
+              (setq text (substring text 0 -1))))
+          (setf (plist-get part :text) (ende-chat--protocol-unescape-org-blocks text)))))
+    (if stringp (plist-get (car parts) :text) parts)))
+
+(defun ende-chat--protocol-transform (headline)
+  "Return HEADLINE's recorded presentation transformation."
+  (let ((shift (ende-chat--local-property headline ende-chat-content-headline-shift-property)))
+    (list :headline-shift (and shift (string-to-number shift))
+          :synthetic-end (ende-chat--local-property headline ende-chat-content-synthetic-end-property)
+          :synthetic-newline (equal "t" (ende-chat--local-property
+                                         headline ende-chat-content-synthetic-newline-property)))))
+
 (defun ende-chat--protocol-assistant-message (document headline)
   "Reconstruct the assistant message represented by HEADLINE."
   (let ((request-id (ende-chat--property document headline :request-id))
@@ -1240,8 +1210,9 @@ renderer framing newlines are removed before the selected decoding is applied."
              (org-element-property :raw-value headline)
              ende-chat-role-property ende-chat-request-id-property))
     (ende-chat--message
-     'assistant (ende-chat--content document headline
-                                    (ende-chat--protocol-body-string headline)))))
+     'assistant (ende-chat--restore-response-parts
+                 (ende-chat--content document headline (ende-chat--protocol-safe-body headline))
+                 (ende-chat--protocol-transform headline)))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1666,7 +1637,7 @@ title.\n\n"
 		     nil nil nil)
     (and (not (string-empty-p title)) title)))
 
-(defun ende-chat--normalize-response (content wrapper-level &optional preserve-trailing)
+(defun ende-chat--normalize-response (content wrapper-level &optional preserve-trailing blocks)
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
 
 The returned plist includes `:content', an optional `:title', and the reversible
@@ -1674,7 +1645,7 @@ metadata required for protocol serialization.  Actual Org headlines are shifted
 uniformly beneath the host-created section wrapper;
 stars in any `#+begin_...` block are left untouched.  Unterminated blocks
 are closed at the end of CONTENT, never against text elsewhere in the chat."
-  (let* ((blocks (ende-org--blocks content t))
+  (let* ((blocks (or blocks (ende-org--blocks content t)))
          (content (plist-get blocks :content))
          (edits nil))
     (with-temp-buffer
@@ -3041,7 +3012,7 @@ RESULT-PROPERTIES are the request's durable metadata lines."
 
 (defun ende-chat--assistant-text
     (level question-id request-id result-properties normalized
-           &optional compact literal)
+           &optional compact)
   "Return the host-owned assistant reply wrapper for NORMALIZED.
 RESULT-PROPERTIES are the request's durable metadata lines.
 COMPACT marks the completed response as a context fence."
@@ -3060,22 +3031,8 @@ COMPACT marks the completed response as a context fence."
               (ende-chat--response-property ende-chat-context-fence-property "t"))
             result-properties
             ":END:\n\n"
-            (if literal (ende-chat--org-literal-text body) body)
+            body
             "\n\n")))
-
-(defun ende-chat--org-literal-text (text)
-  "Return TEXT with lines escaped so they cannot change the Org tree."
-  (unless (stringp text)
-    (error "Generated tool content must be a string"))
-  (with-temp-buffer
-    (insert text)
-    (goto-char (point-min))
-    (while (not (eobp))
-      (when (looking-at
-             "\\(?:\\*+[ \t]\\|#\\+\\|,\\|:[[:alnum:]_@#%]+:[ \t]*$\\)")
-        (insert ","))
-      (forward-line 1))
-    (buffer-string)))
 
 (defun ende-chat--json-display-text (object &rest options)
   "Return OBJECT serialized as JSON and decoded as Emacs text.
@@ -3188,10 +3145,9 @@ OPTIONS are passed to `json-serialize'."
 
 (defun ende-chat--assistant-protocol-text
     (level question-id request-id result-properties normalized calls
-           &optional pending format)
+           &optional pending)
   "Render one assistant protocol message and its ordered tool CALLS."
-  (let* ((format (if (eq format 'org) 'org 'literal))
-         (content (plist-get normalized :content))
+  (let* ((content (plist-get normalized :content))
          (result-properties
           (concat result-properties
                   (unless (string-match-p
@@ -3205,13 +3161,10 @@ OPTIONS are passed to `json-serialize'."
             (ende-chat--assistant-text
              level question-id request-id
              (concat result-properties
-                     (ende-chat--response-property
-                      ende-chat-content-format-property
-                      (symbol-name format))
                      (when pending
                        (ende-chat--response-property ende-chat-state-property
                                                      "pending")))
-             normalized nil (not (eq format 'org)))))
+             normalized)))
          (call-sections
           (mapconcat (lambda (call)
                        (ende-chat--tool-call-text
@@ -3298,64 +3251,74 @@ Keep it while another queued compaction still refers to its durable identity."
         (ende-chat--set-headline-title
          question ende-chat--compact-instructions-title))))))
 
-(defun ende-chat--prepare-image-result (job result)
-  "Store JOB's generated images before any live or persisted message uses them."
-  (let* ((text (or (ende--result-content result) ""))
-         (parts (and (listp result) (plist-get result :output-parts)))
-         (instruction (ende-job-instruction job))
-         (pending (plist-get instruction :generated-artifacts)))
-    (with-temp-buffer
-      (org-mode)
-      (insert text)
-      (setq text (ende-chat--remove-ranges
-                  text (mapcar (lambda (range) (cons (1- (car range)) (1- (cdr range))))
-                               (org-element-map (org-element-parse-buffer) 'keyword
-                                 (lambda (keyword)
-                                   (when (equal (upcase (org-element-property :key keyword))
-                                                "ENDE_ARTIFACTS_BASE_PATH")
-                                     (cons (org-element-property :begin keyword)
-                                           (org-element-property :end keyword)))))))))
-    (if (not (or parts pending (ende-artifact-generated-p text))) result
-      (let ((buffer (ende-target-buffer (ende-job-target job))))
-        (with-current-buffer buffer
-          (save-excursion
-            (save-restriction
-              (widen)
-              (let* ((document (ende-chat--build-document))
-                     (question (ende-chat--find-by-property
-                                document ende-chat-id-property
-                                (plist-get instruction :question-id)))
-                     (root (ende-chat--root document question))
-                     (id (ende-chat--property document root :id))
-                     (needs-storage (or pending
-                                        (cl-some (lambda (part) (eq (plist-get part :type) :generated-image)) parts)
-                                        (ende-artifact-generated-p text)))
-                     (base (and needs-storage (ende-artifact-base)))
-                     (org-file buffer-file-name)
-                     (text
-                      (if parts
-                          (mapconcat
-                           (lambda (part)
-                             (pcase (plist-get part :type)
-                               (:text (plist-get part :text))
-                               (:generated-image
-                                (concat "\n#+ENDE_ARTIFACT: "
-                                        (ende-artifact-store base id (plist-get part :bytes)
-                                                             (plist-get part :media-type)) "\n"))
-                               (_ (error "Unsupported generated response part")))) parts "")
-                        text)))
-                (dolist (name pending)
-                  (unless (string-match-p (concat "#\\+ENDE_ARTIFACT:[ \t]*"
-                                                  (regexp-quote name) "[ \t]*$") text)
-                    (setq text (concat text "\n#+ENDE_ARTIFACT: " name "\n"))))
-                (when base
-                  (setq text (ende-artifact-prepare-text text base id org-file)))
-                (setf (ende-job-instruction job)
-                      (plist-put instruction :generated-artifacts nil))
-                (let ((result (if (listp result) (copy-sequence result) nil)))
-                  (setq result (plist-put result :content text))
-                  (setq result (plist-put result :output-parts nil))
-                  (plist-put result :image-content (ende-chat--content document question text 'assistant)))))))))))
+(defun ende-chat--prepare-response (job result level &optional trim)
+  "Prepare JOB's RESULT as normalized Org and ordered context parts at LEVEL."
+  (let* ((instruction (ende-job-instruction job))
+         (pending (plist-get instruction :generated-artifacts))
+         (buffer (ende-target-buffer (ende-job-target job)))
+         (org-file (and (buffer-live-p buffer) (buffer-local-value 'buffer-file-name buffer)))
+         (output (or (and (listp result) (plist-get result :output-parts))
+                     (list (list :type :text :text (or (ende--result-content result) "")))))
+         storage chunks run last-blocks)
+    (cl-labels
+        ((storage ()
+           (or storage
+               (setq storage
+                     (with-current-buffer buffer
+                       (save-excursion
+                         (save-restriction
+                           (widen)
+                           (let* ((document (ende-chat--build-document))
+                                  (question (ende-chat--find-by-property
+                                             document ende-chat-id-property
+                                             (plist-get instruction :question-id))))
+                             (list (ende-artifact-base)
+                                   (ende-chat--property document
+                                                        (ende-chat--root document question) :id)))))))))
+         (flush ()
+           (when run
+             (setq last-blocks (ende-org--blocks (apply #'concat (nreverse run)) t))
+             (push (plist-get last-blocks :content) chunks)
+             (setq run nil))))
+      (dolist (part output)
+        (pcase (plist-get part :type)
+          (:text (push (plist-get part :text) run))
+          (:generated-image
+           (flush)
+           (pcase-let* ((`(,base ,id) (storage))
+                        (name (ende-artifact-store base id (plist-get part :bytes)
+                                                   (plist-get part :media-type))))
+             (push (concat "\n#+ENDE_ARTIFACT: " name "\n"
+                           (ende-artifact-link base id name org-file) "\n") chunks))
+           (setq last-blocks nil))
+          (_ (error "Unsupported generated response part"))))
+      (flush)
+      (let* ((text (apply #'concat (nreverse chunks)))
+             (blocks (ende-org--blocks text))
+             (_metadata
+              (setq blocks (plist-put blocks :synthetic-end (plist-get last-blocks :synthetic-end))
+                    blocks (plist-put blocks :synthetic-newline (plist-get last-blocks :synthetic-newline))))
+             (normalized (ende-chat--normalize-response text level (not trim) blocks))
+             (resolved
+              (if (buffer-live-p buffer)
+                  (with-current-buffer buffer
+                    (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file))
+                (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file)))
+             (references (plist-get resolved :references))
+             (parts (plist-get resolved :parts))
+             (persisted (plist-get resolved :content)))
+        (dolist (name pending)
+          (pcase-let* ((`(,base ,id) (storage))
+                       (part (ende-artifact-resolve base id name)))
+            (unless (cl-find (plist-get part :path) references
+                             :key (lambda (ref) (plist-get (plist-get ref :part) :path)) :test #'equal)
+              (setq persisted
+                    (concat persisted "\n#+ENDE_ARTIFACT: " name "\n"
+                            (ende-artifact-link base id name org-file) "\n")
+                    parts (ende-content-concat (list parts (list part)))))))
+        (setq normalized (plist-put normalized :content persisted))
+        (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
+        (list :normalized normalized :parts (ende-chat--restore-response-parts parts normalized))))))
 
 (defun ende-chat--apply-result (job result)
   "Persist JOB's final assistant protocol message and finish the request."
@@ -3365,8 +3328,6 @@ Keep it while another queued compaction still refers to its durable identity."
                 (when-let* ((names (plist-get (ende-job-instruction job) :reply-artifacts)))
                   (setf (ende-job-instruction job)
                         (plist-put (ende-job-instruction job) :generated-artifacts names))))
-               (result (ende-chat--prepare-image-result job result))
-               (content (ende--result-content result))
                (compact (eq (ende-job-type job) 'chat-compact))
                (thinking (and (listp result) (plist-get result :thinking)))
                (instruction (ende-job-instruction job))
@@ -3379,16 +3340,14 @@ Keep it while another queued compaction still refers to its durable identity."
                (placeholder
                 (unless staged
                   (ende-chat--resolve-request-destination job))))
-          (unless (and (stringp content) (not (string-empty-p content)))
-            (error "Chat completion was empty"))
           (unless (or staged placeholder)
             (error "Chat response destination no longer exists"))
           (let* ((old-headline (cadr placeholder))
                  (level (if staged
                             (plist-get instruction :response-level)
                           (org-element-property :level old-headline)))
-                 (normalized
-                  (ende-chat--normalize-response content level (not compact)))
+                 (prepared (ende-chat--prepare-response job result level compact))
+                 (normalized (plist-get prepared :normalized))
                  (reasoning-level (if compact (1+ level) level))
                  (normalized-thinking
                   (and (stringp thinking)
@@ -3425,7 +3384,7 @@ Keep it while another queued compaction still refers to its durable identity."
                        normalized t)
                     (ende-chat--assistant-protocol-text
                      level question-id request-id protocol-properties
-                     normalized nil nil 'org)))
+                     normalized nil)))
                  (response (if compact
                                (concat answer reasoning)
                              (concat reasoning answer)))
@@ -3714,15 +3673,11 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
 ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
   (let ((guidance (ende-job-take-pending-guidance job)))
     (when guidance
-      (let* ((assistant-result (and assistant-result
-                                  (ende-chat--prepare-image-result job assistant-result)))
-             (instruction (ende-job-instruction job))
+      (let* ((instruction (ende-job-instruction job))
              (level (1+ (plist-get instruction :response-level)))
+             (prepared (ende-chat--prepare-response job (or assistant-result '(:content "")) level))
              (question-id (plist-get instruction :question-id))
              (request-id (plist-get instruction :request-id))
-             (content (if assistant-result
-                          (or (plist-get assistant-result :content) "")
-                        ""))
              (calls
               (mapcar (lambda (_text)
                         (ende-chat--prepare-tool-call
@@ -3737,7 +3692,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                               :arguments (ende-chat--tool-value call :arguments)))
                       calls))
              (assistant
-              (list :role "assistant" :content (or (plist-get assistant-result :image-content) content)
+              (list :role "assistant" :content (plist-get prepared :parts)
                     :tool-calls normalized-calls))
              (messages (list assistant)))
         (ende-chat--stage-agent-section
@@ -3747,7 +3702,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
           (if assistant-result
               (ende-chat--result-properties job assistant-result)
             "")
-          (ende-chat--normalize-response content level t) calls nil 'org)
+          (plist-get prepared :normalized) calls)
          t)
         (dolist (entry (cl-mapcar #'cons calls guidance))
           (let* ((call (car entry))
@@ -3780,15 +3735,14 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                  (request-id (plist-get instruction :request-id))
                  (question-id (plist-get instruction :question-id))
                  (level (1+ (plist-get instruction :response-level)))
-                 (result (ende-chat--prepare-image-result job result))
-                 (content (or (plist-get result :content) ""))
+                 (prepared (ende-chat--prepare-response job result level))
                  (stored-calls
                   (mapcar (lambda (call)
                             (ende-chat--prepare-tool-call
                              call (plist-get instruction :tool-store-file)))
                           calls))
                  (assistant
-                  (list :role "assistant" :content (or (plist-get result :image-content) content) :tool-calls calls
+                  (list :role "assistant" :content (plist-get prepared :parts) :tool-calls calls
                         :reasoning-content
                         (plist-get result :reasoning-content))))
             (ende-chat--stage-agent-section
@@ -3796,7 +3750,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
              (ende-chat--assistant-protocol-text
               level question-id request-id
               (ende-chat--result-properties job result)
-              (ende-chat--normalize-response content level t) stored-calls nil 'org)
+              (plist-get prepared :normalized) stored-calls)
              t)
             (ende--handle-llm-event
              job '(:type :status :status "Running tools"))
@@ -3816,12 +3770,13 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
           (let ((pending (plist-get (ende-job-instruction job) :generated-artifacts)))
             (append messages
                     (when pending
-                      (let* ((result (ende-chat--prepare-image-result job '(:content "")))
-                             (instruction (ende-job-instruction job)))
+                      (let* ((instruction (ende-job-instruction job))
+                             (prepared (ende-chat--prepare-response
+                                        job '(:content "") (1+ (plist-get instruction :response-level)))))
                         (setf (ende-job-instruction job)
                               (plist-put instruction :reply-artifacts
                                          (append (plist-get instruction :reply-artifacts) pending)))
-                        (list (list :role "assistant" :content (plist-get result :image-content)))))
+                        (list (list :role "assistant" :content (plist-get prepared :parts)))))
                     (ende-chat--consume-user-guidance job))))
         :before-final
         (lambda (job result messages)

@@ -128,7 +128,8 @@
            (text "See [[file:missing.el::42][source]] and [[file:missing.svg][diagram]].")
            (result (list :content text)))
       (should (equal text (ende-chat--content document headline text 'assistant)))
-      (should (eq result (ende-chat--prepare-image-result (ende--make-job) result))))))
+      (should (equal text (plist-get (ende-chat--prepare-response
+                                      (ende--make-job :target (ende-target--create :buffer (current-buffer))) result 2) :parts))))))
 
 (ert-deftest ende-artifact-org-multimodal-and-attachments ()
   (ende-artifact-test-with-files
@@ -207,13 +208,12 @@
                         "<circle cx=\"2\" cy=\"2\" r=\"1\"/></pattern></defs>"
                         "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
            (code (concat "#+begin_src svg\n" xml "\n#+end_src\n"))
-           (prepared (ende-artifact-prepare-text (concat xml "\n" code) base "chat" buffer-file-name))
-           (parts (ende-artifact-content prepared
-                                          (lambda (_) (ert-fail "Generated link became an attachment"))))
+           (prepared (ende-artifact-prepare-text (concat xml "\n" code) (lambda () (list base "chat")) buffer-file-name))
+           (parts (plist-get prepared :parts))
            (image (car parts)))
       (should (equal (ende-artifact--read-bytes (plist-get image :path)) xml))
-      (should (string-suffix-p code prepared))
-      (should-not (ende-artifact-generated-p code))
+      (should (string-suffix-p code (plist-get prepared :content)))
+      (should (equal code (plist-get (ende-artifact-prepare-text code (lambda () (ert-fail "Literal storage")) buffer-file-name) :parts)))
       (dolist (payload '("<script/>" "<foreignObject/>" "<use href=\"file:/etc/passwd\"/>"
                          "<pattern href=\"https://example.test/tile.svg\"/>"
                          "<rect onload=\"alert(1)\"/>" "<rect style=\"fill:url(https://example.test/a)\"/>"))
@@ -228,6 +228,72 @@
         (let ((data (ende-content-image-data image)))
           (should (equal (car data) "image/png"))
           (should (eq (image-type-from-data (cdr data)) 'png)))))))
+
+(ert-deftest ende-artifact-structural-persistence ()
+  (ende-test--reset)
+  (unwind-protect
+      (ende-artifact-test-with-files
+        (let* ((base (ende-artifact-base))
+               (name (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
+               (link (ende-artifact-link base "source" name buffer-file-name))
+               (literal (concat "  #+BeGiN_example\n"
+                                "  #+ENDE_ARTIFACT: ../invalid.svg\n"
+                                "  * Literal heading\n" ende-artifact-test-svg "\n"))
+               (source (concat "Before\n#+ENDE_ARTIFACT: arbitrary-label\n" link "\n"
+                               "* Real heading\n" literal "  #+END_EXAMPLE\n"
+                               "#+begin_src org\n#+ENDE_ARTIFACT: missing.png\n"
+                               ende-artifact-test-svg))
+               (ende-llm-function
+                (ende-test--fake-llm
+                 (list (list :content source :tool-calls
+                             '((:id "inspection" :name "project_info" :arguments "{}")))
+                       (list :output-parts
+                             (list (list :type :text :text source)
+                                   (list :type :generated-image :bytes ende-artifact-test-png
+                                         :media-type "image/png")
+                                   (list :type :text :text "After native image\n** Last heading\n")))))))
+          (insert (ende-test--chat-config-block `((root ,directory) (tools project_info)))
+                  "* Topic\n** Question\n:PROPERTIES:\n:ENDE_CHAT_ID: destination\n:END:\nAsk\n")
+          (goto-char (point-max))
+          (let ((job (ende-ask)))
+            (should (eq (ende-job-state job) 'completed)))
+          (let* ((live (plist-get (nth 1 ende-test--calls) :messages))
+                 (turn (cl-find-if (lambda (message) (plist-get message :tool-calls)) live)))
+            (should (= 1 (cl-count :image (ende-content-body turn)
+                                         :key (lambda (part) (plist-get part :type)))))
+            (should (string-match-p (regexp-quote "* Real heading")
+                                    (ende-content-readable (ende-content-body turn)))))
+          (goto-char (point-max))
+          (insert "\n** Follow up\nContinue\n")
+          (let* ((history (ende-chat-context-at-point))
+                 (images (cl-mapcan
+                          (lambda (message)
+                            (let ((body (ende-content-body message)))
+                              (unless (stringp body)
+                                (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image)) body))))
+                          history))
+                 (text (mapconcat (lambda (message) (ende-content-readable (ende-content-body message))) history "\n")))
+            (should (= 3 (length images)))
+            (should (string-match-p (regexp-quote literal) text))
+            (should (string-match-p (regexp-quote "* Real heading") text))
+            (should (string-match-p (regexp-quote "** Last heading") text))
+            (let* ((final (ende-content-body
+                           (car (last (cl-remove-if-not
+                                       (lambda (message) (equal "assistant" (ende-content-role message))) history)))))
+                   (types (mapcar (lambda (part) (plist-get part :type)) final)))
+              (should (equal types '(:text :image :text :image :text)))))
+          (let* ((job (ende--make-job
+                       :target (ende-target--create :buffer (current-buffer))
+                       :instruction (list :question-id "destination" :generated-artifacts (list name))))
+                 ;; Pending host data must not be appended inside the raw block.
+                 (pending-base (ende-artifact-directory base "destination" t)))
+            (copy-file (plist-get (ende-artifact-resolve base "source" name) :path)
+                       (expand-file-name name pending-base))
+            (let ((prepared (ende-chat--prepare-response job (list :content literal) 1)))
+              (should (= 1 (cl-count :image (plist-get prepared :parts)
+                                           :key (lambda (part) (plist-get part :type)))))))
+          (should (equal literal (ende-artifact-content literal #'ende-artifact--local-path)))))
+    (ende-test--reset)))
 
 (ert-deftest ende-artifact-incremental-refresh-matches-full ()
   (ende-artifact-test-with-files

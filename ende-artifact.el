@@ -332,139 +332,124 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
                  (string-blank-p (buffer-substring-no-properties end (line-end-position))))
         link))))
 
-(defun ende-artifact-content (text &optional resolve-file)
-  "Parse TEXT into ordered parts, retaining strings for text-only content.
-Explicit attachments use their file link; RESOLVE-FILE enables user attachments."
-  (let ((source-file buffer-file-name) edits consumed)
-    (with-temp-buffer
-      (insert text)
-      (org-mode)
-      (let ((tree (org-element-parse-buffer)))
-        (org-element-map tree 'keyword
-          (lambda (element)
-            (when (equal (upcase (org-element-property :key element)) "ENDE_ARTIFACT")
-              (let* ((name (string-trim (org-element-property :value element)))
-                     (begin (org-element-property :begin element))
-                     (next (save-excursion (goto-char begin) (forward-line 1) (point)))
-                     (end (save-excursion (goto-char next) (min (point-max) (1+ (line-end-position)))))
-                     (link (ende-artifact--following-link begin))
-                     (part (let ((buffer-file-name source-file))
-                             (unless link
-                               (error "Artifact %s needs a following file link" name))
-                             (ende-artifact--load-image
-                              (org-link-unescape (org-element-property :path link))))))
-                (push (cons next end) consumed)
-                (push (list begin end part) edits)))))
-        (when resolve-file
-          (org-element-map tree 'link
-            (lambda (link)
-              (let ((begin (org-element-property :begin link)))
-                (when (and (equal (org-element-property :type link) "file")
-                           (not (cl-some (lambda (range) (and (<= (car range) begin)
-                                                              (< begin (cdr range)))) consumed)))
-                  (let* ((target (org-link-unescape (org-element-property :path link)))
-                         (path (funcall resolve-file target))
-                         (extension (downcase (or (file-name-extension path) "")))
-                         (end (- (org-element-property :end link)
-                                 (org-element-property :post-blank link)))
-                         (part (if (member extension '("png" "jpg" "jpeg" "svg"))
-                                   (ende-artifact--load-image path)
-                                 (let ((bytes (ende-artifact--read-bytes path)))
-                                   (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
-                                             (image-type-from-data bytes)
-                                             (string-match-p (string 0) bytes))
-                                     (error "Unsupported file attachment format; use PNG, JPEG, SVG or text"))
-                                   (list :type :text :text
-                                         (concat "\nAttached file contents:\n"
-                                                 (decode-coding-string bytes 'utf-8) "\n"))))))
-                    (push (list end end part) edits)))))))))
-    (if (null edits) text
-      (let ((position 1) parts)
-        (dolist (edit (sort edits (lambda (a b) (< (car a) (car b)))))
-          (when (< position (car edit))
-            (push (list :type :text :text (substring text (1- position) (1- (car edit)))) parts))
-          (push (nth 2 edit) parts)
-          (setq position (cadr edit)))
-        (when (<= position (length text))
-          (push (list :type :text :text (substring text (1- position))) parts))
-        (setq parts (nreverse parts))
-        (if (cl-every (lambda (part) (eq (plist-get part :type) :text)) parts)
-            (mapconcat (lambda (part) (plist-get part :text)) parts "")
-          parts)))))
-
-(defun ende-artifact-generated-p (text)
-  "Return non-nil when TEXT has an actionable artifact or standalone SVG."
+(defun ende-artifact--references (text &optional generated attachments)
+  "Discover active references in TEXT, using source buffer coordinates.
+GENERATED includes standalone SVG and bare generation-time names.
+ATTACHMENTS includes ordinary user file links.  No files are read or written."
   (with-temp-buffer
-    (insert text)
     (org-mode)
-    (or (org-element-map (org-element-parse-buffer) 'keyword
-          (lambda (keyword)
-            (equal (upcase (org-element-property :key keyword)) "ENDE_ARTIFACT")) nil t)
-        (progn
-          (goto-char (point-min))
-          (let (found)
-            (while (and (not found) (re-search-forward "^[ \t]*<svg[ \t\n>]" nil t))
-              (unless (org-element-lineage
-                       (org-element-context)
-                       '(src-block example-block quote-block fixed-width code verbatim special-block) t)
-                (setq found t)))
-            found)))))
-
-(defun ende-artifact-prepare-text (text base chat-id org-file)
-  "Store standalone SVG in TEXT and resolve generated markers to Org links."
-  (with-temp-buffer
-    (insert text)
-    (org-mode)
-    (goto-char (point-min))
-    (while (re-search-forward "^[ \t]*<svg\\(?:[ \t\n>]\\)" nil t)
-      (let* ((begin (match-beginning 0))
-             (context (org-element-context))
-             (excluded (org-element-lineage context
-                                           '(src-block example-block quote-block
-                                             fixed-width code verbatim special-block) t)))
-        (unless excluded
-          (goto-char begin)
-          (let ((xml-begin (progn (skip-chars-forward " \t") (point)))
-                (end (let ((source (buffer-substring-no-properties begin (point-max))))
-                       (with-temp-buffer
-                         (insert source)
-                         (let ((nxml-auto-insert-xml-declaration-flag nil)
-                               (inhibit-message t))
-                           (nxml-mode))
-                         (goto-char (point-min))
-                         (skip-chars-forward " \t")
-                         (condition-case nil
-                             (progn (nxml-forward-element) (+ begin (1- (point))))
-                           (error nil))))))
-            (unless end (error "Incomplete generated SVG fragment"))
-            (if (not (save-excursion (goto-char end) (looking-at "[ \t]*$")))
-                (goto-char end)
-              (let* ((xml (buffer-substring-no-properties xml-begin end))
-                     (name (ende-artifact-store base chat-id
-                                                (encode-coding-string xml 'utf-8)
-                                                "image/svg+xml")))
-                (delete-region begin end)
-                (insert "#+ENDE_ARTIFACT: " name)
-                (goto-char begin)
-                (forward-line 1)))))))
-    (let ((tree (org-element-parse-buffer)) edits)
+    (insert (plist-get (ende-org--blocks text) :parse-content))
+    (let ((tree (org-element-parse-buffer))
+          (consumed (make-hash-table :test #'eql)) references)
       (org-element-map tree 'keyword
-        (lambda (keyword)
-          (when (equal (upcase (org-element-property :key keyword)) "ENDE_ARTIFACT")
-            (let* ((name (string-trim (org-element-property :value keyword)))
-                   (begin (org-element-property :begin keyword))
-                   (next (save-excursion (goto-char begin) (forward-line 1) (point)))
-                   (link (ende-artifact--following-link begin)))
-              (unless link
-                (ende-artifact-resolve base chat-id name)
-                (push (list begin next
-                            (concat "#+ENDE_ARTIFACT: " name "\n"
-                                    (ende-artifact-link base chat-id name org-file) "\n")) edits))))))
-      (dolist (edit (sort edits (lambda (a b) (> (car a) (car b)))))
-        (delete-region (car edit) (cadr edit))
-        (goto-char (car edit))
-        (insert (nth 2 edit))))
-    (buffer-string)))
+        (lambda (element)
+          (when (equal (upcase (org-element-property :key element)) "ENDE_ARTIFACT")
+            (let* ((begin (org-element-property :begin element))
+                   (name (string-trim (org-element-property :value element)))
+                   (link (ende-artifact--following-link begin))
+                   (end (save-excursion
+                          (goto-char begin) (forward-line (if link 2 1)) (point))))
+              (when link (puthash (org-element-property :begin link) t consumed))
+              (push (list :part nil :begin begin :end end :name name
+                          :path (and link (org-link-unescape (org-element-property :path link))))
+                    references)))))
+      (when attachments
+        (org-element-map tree 'link
+          (lambda (link)
+            (when (and (equal (org-element-property :type link) "file")
+                       (not (gethash (org-element-property :begin link) consumed)))
+              (let ((end (- (org-element-property :end link)
+                            (org-element-property :post-blank link))))
+                (push (list :part nil :begin end :end end :attachment t
+                            :path (org-link-unescape (org-element-property :path link))) references))))))
+      (when generated
+        (goto-char (point-min))
+        (let ((case-fold-search nil))
+          (while (re-search-forward "^[ \t]*<svg[ \t\n>]" nil t)
+            (let ((begin (match-beginning 0)))
+              (unless (org-element-lineage (org-element-context)
+                                          '(fixed-width code verbatim) t)
+                (let ((end (with-temp-buffer
+                             (insert (substring text (1- begin)))
+                             (let ((nxml-auto-insert-xml-declaration-flag nil)
+                                   (inhibit-message t))
+                               (nxml-mode))
+                             (goto-char (point-min))
+                             (skip-chars-forward " \t")
+                             (condition-case nil
+                                 (progn (nxml-forward-element) (+ begin (1- (point))))
+                               (error (error "Incomplete generated SVG fragment"))))))
+                  (goto-char end)
+                  (when (looking-at "[ \t]*$")
+                    (let ((finish (min (point-max) (1+ (line-end-position)))))
+                      (push (list :part nil :begin begin :end finish
+                                  :svg (string-trim (substring text (1- begin) (1- end))))
+                            references))
+                    (forward-line 1))))))))
+      (sort references (lambda (a b) (< (plist-get a :begin) (plist-get b :begin)))))))
+
+(defun ende-artifact--parts (text references)
+  "Split TEXT at resolved REFERENCES without rediscovering them."
+  (let ((position 1) parts)
+    (dolist (reference references)
+      (let ((begin (plist-get reference :begin)))
+        (when (< position begin)
+          (push (list :type :text :text (substring text (1- position) (1- begin))) parts))
+        (push (plist-get reference :part) parts)
+        (setq position (plist-get reference :end))))
+    (when (<= position (length text))
+      (push (list :type :text :text (substring text (1- position))) parts))
+    (setq parts (nreverse parts))
+    (if (cl-every (lambda (part) (eq (plist-get part :type) :text)) parts)
+        (mapconcat (lambda (part) (plist-get part :text)) parts "")
+      parts)))
+
+(defun ende-artifact-content (text &optional resolve-file)
+  "Read safe TEXT into ordered parts without altering its source.
+Explicit references use their file link; RESOLVE-FILE enables user attachments."
+  (let ((references (ende-artifact--references text nil resolve-file)))
+    (dolist (reference references)
+      (let* ((target (plist-get reference :path))
+             (path (if (plist-get reference :attachment)
+                       (funcall resolve-file target) target))
+             (extension (and path (downcase (or (file-name-extension path) "")))))
+        (unless path
+          (error "Artifact %s needs a following file link" (plist-get reference :name)))
+        (setf (plist-get reference :part)
+              (if (or (not (plist-get reference :attachment))
+                      (member extension '("png" "jpg" "jpeg" "svg")))
+                  (ende-artifact--load-image path)
+                (let ((bytes (ende-artifact--read-bytes path)))
+                  (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
+                            (image-type-from-data bytes) (string-match-p (string 0) bytes))
+                    (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
+                  (list :type :text :text
+                        (concat "\nAttached file contents:\n"
+                                (decode-coding-string bytes 'utf-8) "\n")))))))
+    (ende-artifact--parts text references)))
+
+(defun ende-artifact-prepare-text (text storage org-file)
+  "Resolve normalized TEXT once into persisted Org and ordered content parts.
+STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
+  (let ((references (ende-artifact--references text t)) edits)
+    (dolist (reference references)
+      (let ((path (plist-get reference :path)))
+        (if path
+            (setf (plist-get reference :part) (ende-artifact--load-image path))
+          (pcase-let* ((`(,base ,id) (funcall storage))
+                       (name (if (plist-get reference :svg)
+                                 (ende-artifact-store
+                                  base id (encode-coding-string (plist-get reference :svg) 'utf-8)
+                                  "image/svg+xml")
+                               (plist-get reference :name)))
+                       (part (ende-artifact-resolve base id name)))
+            (setf (plist-get reference :part) part)
+            (push (list (plist-get reference :begin) (plist-get reference :end)
+                        (concat "#+ENDE_ARTIFACT: " name "\n"
+                                (ende-artifact-link base id name org-file) "\n")) edits)))))
+    (list :content (ende-org--apply-edits text edits)
+          :parts (ende-artifact--parts text references)
+          :references references)))
 
 (defvar-local ende-artifact--overlays nil)
 (defvar-local ende-artifact--timer nil)

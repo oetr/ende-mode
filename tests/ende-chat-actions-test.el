@@ -881,8 +881,8 @@
       (kill-buffer org-buffer))))
 
 (ert-deftest ende-test/chat-staging-does-not-copy-to-kill-ring ()
-  (let ((buffer (generate-new-buffer " *ende-chat-staging-test*"))
-        (kill-ring '("previous entry"))
+  (let* ((buffer (generate-new-buffer " *ende-chat-staging-test*"))
+         (kill-ring '("previous entry"))
         (kill-ring-yank-pointer nil)
         clipboard-text
         clipboard-read
@@ -1274,7 +1274,7 @@
                     (ende-chat--work-text 2 question-id request-id)
                     (ende-chat--assistant-protocol-text
                      3 question-id request-id "" '(:content "Recovered turn")
-                     nil nil 'org)))
+                     nil)))
                   (metadata
                    (list :request-id request-id :question-id question-id
                          :source-buffer (buffer-name))))
@@ -1313,7 +1313,7 @@
            (ende-chat--work-text 2 question-id request-id)
            (ende-chat--assistant-protocol-text
             3 question-id request-id "" '(:content "Recovered after restart")
-            nil nil 'org))))
+            nil))))
     (unwind-protect
         (progn
           (make-directory recovery-directory t)

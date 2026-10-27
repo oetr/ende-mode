@@ -59,7 +59,7 @@ REPAIR escapes block bodies and closes open blocks at this text's boundary."
           (insert (format "#+end_%s\n" open-block)))
         (push (cons block-start (point-max)) ranges))
       (let ((content (buffer-string)))
-        (list :content content :ranges (nreverse ranges)
+        (list :content content :ranges (reverse ranges)
               :synthetic-end (and repair open-block)
               :synthetic-newline synthetic-newline
               :parse-content (ende-org--mask-ranges content ranges))))))
