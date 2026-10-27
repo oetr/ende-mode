@@ -706,39 +706,30 @@ around rendered chat sections, not arbitrary text slices."
 
 (defun ende-chat--content (document headline text &optional origin)
   "Reconstruct image content in TEXT belonging to HEADLINE."
-  (if (not (string-match-p "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" text)) text
-   (let* ((root (ende-chat--root document headline))
-         (chat-id (ende-chat--property document root :id))
-         (role (or origin (ende-chat--effective-role document headline)))
-         (authority (let ((node headline))
-                      (while (and node
-                                  (eq (ende-chat--effective-role document node) 'assistant))
-                        (setq node (ende-chat--parent document node)))
-                      node))
-         (source buffer-file-name)
-         (source-buffer (current-buffer)))
-    (ende-artifact-content
-     text (lambda () (with-current-buffer source-buffer (ende-artifact-base)))
-     chat-id role
-     (lambda (target origin)
-       (when (file-remote-p target) (error "Remote file attachments are unsupported"))
-       (unless (or (file-name-absolute-p target) source)
-         (error "Relative file attachments require an Org file"))
-       (let ((path (expand-file-name target (and source (file-name-directory source)))))
-         (unless (eq origin 'user)
-           (let* ((policy
-                   (plist-get (ende-chat-config-resolve-environment
-                               (ende-chat--document-tree document)
-                               (ende-chat--document-parent document) authority)
-                              :access-policy))
-                  (ende-tools--access-config policy)
-                  (project (plist-get policy :root)))
-             (unless (and project (memq 'read_file (plist-get policy :active-tools))
-                          (ende-tools--path-authorized-for-p 'read_file path project))
-               (error "Assistant file attachment is not authorized by read_file resources"))))
-         (unless (and (file-regular-p path) (file-readable-p path))
-           (error "File attachment is not a readable regular file"))
-         path))))))
+  (let ((userp (eq (or origin (ende-chat--effective-role document headline)) 'user)))
+    (if (not (string-match-p
+              (if userp "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" "#\\+ENDE_ARTIFACT:")
+              text))
+        text
+      (let* ((root (ende-chat--root document headline))
+             (chat-id (ende-chat--property document root :id))
+             (source-buffer (current-buffer)))
+        (ende-artifact-content
+         text (lambda () (with-current-buffer source-buffer (ende-artifact-base)))
+         chat-id
+         (when userp
+           (lambda (target)
+             (with-current-buffer source-buffer
+               (when (file-remote-p target)
+                 (error "Remote file attachments are unsupported"))
+               (unless (or (file-name-absolute-p target) buffer-file-name)
+                 (error "Relative file attachments require an Org file"))
+               (let ((path (expand-file-name
+                            target (and buffer-file-name
+                                        (file-name-directory buffer-file-name)))))
+                 (unless (and (file-regular-p path) (file-readable-p path))
+                   (error "File attachment is not a readable regular file"))
+                 path)))))))))
 
 (defun ende-chat--prefix-messages
     (document root question &optional reasoning-ancestors-only)

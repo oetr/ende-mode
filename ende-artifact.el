@@ -302,10 +302,9 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
                    path)))
     (org-link-make-string (concat "file:" (org-link-escape target)) name)))
 
-(defun ende-artifact-content (text base-function chat-id role authorize)
+(defun ende-artifact-content (text base-function chat-id &optional resolve-file)
   "Parse TEXT into ordered parts, retaining strings for text-only content.
-BASE-FUNCTION lazily resolves document storage.  AUTHORIZE checks standalone
-assistant file links; user links are explicit user attachments."
+BASE-FUNCTION resolves artifact storage; RESOLVE-FILE resolves user attachments."
   (let (edits consumed)
     (with-temp-buffer
       (insert text)
@@ -325,28 +324,29 @@ assistant file links; user links are explicit user attachments."
                   (error "Artifact %s in conversation %s needs a following file link" name chat-id))
                 (push (cons next end) consumed)
                 (push (list begin end part) edits)))))
-        (org-element-map tree 'link
-          (lambda (link)
-            (let ((begin (org-element-property :begin link)))
-              (when (and (equal (org-element-property :type link) "file")
-                         (not (cl-some (lambda (range) (and (<= (car range) begin)
-                                                            (< begin (cdr range)))) consumed)))
-                (let* ((target (org-link-unescape (org-element-property :path link)))
-                       (path (funcall authorize target role))
-                       (extension (downcase (or (file-name-extension path) "")))
-                       (end (- (org-element-property :end link)
-                               (org-element-property :post-blank link)))
-                       (part (if (member extension '("png" "jpg" "jpeg" "svg"))
-                                 (ende-artifact-image-info path)
-                               (let ((bytes (ende-artifact--read-bytes path)))
-                                 (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
-                                           (image-type-from-data bytes)
-                                           (string-match-p (string 0) bytes))
-                                   (error "Unsupported file attachment format; use PNG, JPEG, SVG or text"))
-                                 (list :type :text :text
-                                       (concat "\nAttached file contents:\n"
-                                               (decode-coding-string bytes 'utf-8) "\n"))))))
-                  (push (list end end part) edits))))))))
+        (when resolve-file
+          (org-element-map tree 'link
+            (lambda (link)
+              (let ((begin (org-element-property :begin link)))
+                (when (and (equal (org-element-property :type link) "file")
+                           (not (cl-some (lambda (range) (and (<= (car range) begin)
+                                                              (< begin (cdr range)))) consumed)))
+                  (let* ((target (org-link-unescape (org-element-property :path link)))
+                         (path (funcall resolve-file target))
+                         (extension (downcase (or (file-name-extension path) "")))
+                         (end (- (org-element-property :end link)
+                                 (org-element-property :post-blank link)))
+                         (part (if (member extension '("png" "jpg" "jpeg" "svg"))
+                                   (ende-artifact-image-info path)
+                                 (let ((bytes (ende-artifact--read-bytes path)))
+                                   (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
+                                             (image-type-from-data bytes)
+                                             (string-match-p (string 0) bytes))
+                                     (error "Unsupported file attachment format; use PNG, JPEG, SVG or text"))
+                                   (list :type :text :text
+                                         (concat "\nAttached file contents:\n"
+                                                 (decode-coding-string bytes 'utf-8) "\n"))))))
+                    (push (list end end part) edits)))))))))
     (if (null edits) text
       (let ((position 1) parts)
         (dolist (edit (sort edits (lambda (a b) (< (car a) (car b)))))

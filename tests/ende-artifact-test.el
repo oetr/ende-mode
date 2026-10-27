@@ -124,11 +124,13 @@
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "chat-123" ende-artifact-test-svg "image/svg+xml"))
-           (standalone (expand-file-name "original.svg" directory)))
+           (standalone (expand-file-name "original.svg" directory))
+           (citation "[[file:original.svg][Original]]"))
       (copy-file (plist-get (ende-artifact-resolve base "chat-123" name) :path) standalone)
       (insert "#+ENDE_ARTIFACTS_BASE_PATH: .ende-artifacts/\n"
               "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat-123\n:END:\nExplain.\n"
               "** Assistant\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\nBefore image.\n"
+              citation "\n"
               "#+ENDE_ARTIFACT: " name "\n"
               (ende-artifact-link base "chat-123" name buffer-file-name) "\nAfter image.\n"
               "** Follow up\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\nCompare.\n"
@@ -139,34 +141,27 @@
              (user (nth 2 messages))
              (parts (ende-content-body assistant)))
         (should (equal (mapcar #'ende-content-role messages) '("user" "assistant" "user")))
-        (should (equal (plist-get (nth 1 parts) :media-type) "image/svg+xml"))
+        (should (= 1 (cl-count :image parts :key (lambda (part) (plist-get part :type)))))
         (dolist (part parts)
           (when (eq (plist-get part :type) :text)
-            (should-not (string-match-p "ENDE_ARTIFACT\\|file:\\|.ende-artifacts" (plist-get part :text)))))
+            (should-not (string-match-p "ENDE_ARTIFACT\\|.ende-artifacts" (plist-get part :text)))))
+        (should (string-match-p (regexp-quote citation) (ende-content-readable parts)))
         (should (string-match-p "Original" (ende-content-readable (ende-content-body user))))
         (should (= 1 (cl-count :image (ende-content-body user) :key (lambda (p) (plist-get p :type))))))
       (should-error (ende-artifact-content
                      (concat "#+ENDE_ARTIFACT: " name "\nNo link.\n")
-                     (lambda () base) "chat-123" 'user #'ignore))
-      (goto-char (point-min))
-      (search-forward "Before image.")
-      (insert "\n[[file:original.svg]]")
-      (goto-char (point-max))
-      (should-error (ende-chat-context-at-point))
-      (goto-char (point-min))
-      (search-forward "\n[[file:original.svg]]")
-      (replace-match "" t t)
+                     (lambda () base) "chat-123"))
       (delete-file (plist-get (ende-artifact-resolve base "chat-123" name) :path))
       (goto-char (point-max))
       (should-error (ende-chat-context-at-point))
       (let ((path (expand-file-name "image.gif" directory)))
         (with-temp-file path (insert "GIF89a"))
         (should-error (ende-artifact-content "[[file:image.gif]]" (lambda () base) "chat-123"
-                                             'user (lambda (&rest _) path))))
+                                             (lambda (_) path))))
       (let ((path (expand-file-name "note.txt" directory)))
         (with-temp-file path (insert "Attached text"))
         (let ((content (ende-artifact-content "See [[file:note.txt][Note]]" (lambda () base)
-                                              "chat-123" 'user (lambda (&rest _) path))))
+                                              "chat-123" (lambda (_) path))))
           (should (stringp content))
           (should (string-match-p "Attached text" content)))))))
 
@@ -180,8 +175,8 @@
                         "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
            (code (concat "#+begin_src svg\n" xml "\n#+end_src\n"))
            (prepared (ende-artifact-prepare-text (concat xml "\n" code) base "chat" buffer-file-name))
-           (parts (ende-artifact-content prepared (lambda () base) "chat" 'assistant
-                                         (lambda (&rest _) (ert-fail "Generated link became an attachment"))))
+           (parts (ende-artifact-content prepared (lambda () base) "chat"
+                                          (lambda (_) (ert-fail "Generated link became an attachment"))))
            (image (car parts)))
       (should (equal (ende-artifact--read-bytes (plist-get image :path)) xml))
       (should (string-suffix-p code prepared))
