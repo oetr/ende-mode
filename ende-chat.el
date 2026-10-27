@@ -45,6 +45,7 @@
 (require 'ende-tool-store)
 (require 'ende-queue)
 (require 'ende-agent)
+(require 'ende-image)
 (require 'ende-chat-config)
 (declare-function ende-queue-open "ende-queue-ui" ())
 (require 'ende-target)
@@ -1024,7 +1025,9 @@ reflects Org history rather than the existence of a stored result payload."
           (error "Malformed reasoning summary in Agent: Work")))
        ((and (ende-chat--assistant-protocol-p document child)
              (equal (org-element-property :raw-value child) "Agent: Reply"))
-        (ende-chat--protocol-assistant-message document child)
+        (unless (equal (ende-chat--property document child :role) "assistant")
+          (error "Malformed generated assistant protocol role"))
+        (ende-chat--protocol-body-string child)
         (push child replies))
        ((ende-chat--tool-call-protocol-p document child)
         (ende-chat--validate-tool-reference document work child))
@@ -1590,6 +1593,11 @@ activation, and resource definitions and tool-resource assignments constrain
 what enabled tools may access. Ende independently enforces tool and resource
 permissions.\n\n"
    ende-chat--org-format
+   "\n\nFor diagrams, you may output complete standalone static SVG documents outside
+code or quote blocks; Ende saves these as image artifacts. You may reference
+existing conversation images with #+ENDE_ARTIFACT: FILENAME (no path). Never
+invent filenames for files that do not exist. generate_image is optional and
+uses the user's configured image model. Do not set artifact storage configuration."
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
 Choose a concise title for the request. Otherwise omit this keyword.\n\n"
@@ -3895,7 +3903,20 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                   :content content)))
         :after-tool-round
         (lambda (job messages)
-          (append messages (ende-chat--consume-user-guidance job)))
+          (let ((pending (plist-get (ende-job-instruction job) :generated-artifacts)))
+            (append messages
+                    (when pending
+                      (let* ((result (ende-chat--prepare-image-result job '(:content "")))
+                             (instruction (ende-job-instruction job))
+                             (level (1+ (plist-get instruction :response-level))))
+                        (ende-chat--stage-agent-section
+                         job (ende-chat--assistant-protocol-text
+                              level (plist-get instruction :question-id)
+                              (plist-get instruction :request-id) ""
+                              (ende-chat--normalize-response (plist-get result :content) level t)
+                              nil nil 'org) t)
+                        (list (list :role "assistant" :content (plist-get result :image-content)))))
+                    (ende-chat--consume-user-guidance job))))
         :before-final
         (lambda (job result messages)
           (if (ende-job-pending-guidance-p job)

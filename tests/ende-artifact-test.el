@@ -148,4 +148,36 @@
           (should (equal png (ende-artifact--read-bytes (plist-get image :path))))))))
   (ende-test--reset))
 
+(ert-deftest ende-artifact-opt-in-generation-tool-loop ()
+  (ende-test--reset)
+  (ende-artifact-test-with-files
+    (let* ((svg (ende-artifact-store (ende-artifact-base) "fixture" ende-artifact-test-svg "image/svg+xml"))
+           (png (cdr (ende-content-image-data (ende-artifact-resolve (ende-artifact-base) "fixture" svg))))
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list (list :content "Generating."
+                         :tool-calls (list '(:id "generate" :name "generate_image" :arguments "{\"prompt\":\"blue box\"}")))
+                   "It is a blue box.")))
+           (pending nil))
+      (insert "#+begin_ende\n(tools generate_image)\n#+end_ende\n* Topic\nDraw a box.\n")
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'ende-image--request)
+                 (lambda (_prompt callback _register) (setq pending callback))))
+        (let ((job (ende-ask)))
+          (should (eq (ende-job-state job) 'running))
+          (should pending)
+          (funcall pending (list (list :type :generated-image :bytes png :media-type "image/png")) nil)
+          (should (eq (ende-job-state job) 'completed))
+          (let* ((second (plist-get (cadr ende-test--calls) :messages))
+                 (images (cl-mapcan (lambda (m) (let ((body (ende-content-body m)))
+                                                  (and (listp body)
+                                                       (cl-remove-if-not (lambda (p) (eq (plist-get p :type) :image)) body)))) second)))
+            (should (= 1 (length images)))
+            (should (equal png (ende-artifact--read-bytes (plist-get (car images) :path)))))
+          (should (string-match-p (regexp-quote "#+ENDE_ARTIFACT:") (buffer-string)))
+          (goto-char (point-max))
+          (insert "** Follow up\nExplain.\n")
+          (should (string-match-p "image/png" (ende-chat--render-context (ende-chat-context-at-point))))))))
+  (ende-test--reset))
+
 (provide 'ende-artifact-test)
