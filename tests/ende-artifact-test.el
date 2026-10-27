@@ -326,7 +326,14 @@
             (let ((prepared (ende-chat--prepare-response job (list :content literal) 1)))
               (should (= 1 (cl-count :image (plist-get prepared :parts)
                                            :key (lambda (part) (plist-get part :type)))))))
-          (should (equal literal (ende-artifact-content literal #'ende-artifact--local-path)))))
+          (should (equal literal (ende-artifact-content literal #'ende-artifact--local-path)))
+          (erase-buffer)
+          (insert "* Topic\n** User\n  #+BeGiN_example\n"
+                  "*** Literal child\n#+ende_artifact: missing.png\n[[file:missing.png]]\n"
+                  "** Follow up\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\nContinue\n")
+          (goto-char (point-max))
+          (let ((history (ende-chat-context-at-point)))
+            (should (cl-every (lambda (message) (stringp (ende-content-body message))) history)))))
     (ende-test--reset)))
 
 (ert-deftest ende-artifact-incremental-refresh-matches-full ()

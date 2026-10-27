@@ -703,7 +703,8 @@ around rendered chat sections, not arbitrary text slices."
 
 (defun ende-chat--content (document headline text &optional origin)
   "Reconstruct image content in TEXT belonging to HEADLINE."
-  (let ((userp (eq (or origin (ende-chat--effective-role document headline)) 'user)))
+  (let ((userp (eq (or origin (ende-chat--effective-role document headline)) 'user))
+        (case-fold-search t))
     (if (not (string-match-p
               (if userp "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" "#\\+ENDE_ARTIFACT:")
               text))
@@ -743,7 +744,9 @@ ancestors are included even when ordinary reasoning context is disabled."
         ((flush ()
            (when parts
              (push (ende-chat--message
-                    message-role (ende-content-concat (nreverse parts)))
+                    message-role
+                    (ende-chat--content document message-owner
+                                        (apply #'concat (nreverse parts)) message-role))
                    messages)
              (setq parts nil
                    message-owner nil
@@ -793,8 +796,7 @@ ancestors are included even when ordinary reasoning context is disabled."
                    (flush)
                    (setq message-owner next-owner
                          message-role next-role))
-                 (push (ende-chat--content
-                        document headline (ende-chat--section-text document headline)) parts))
+                 (push (ende-chat--section-text document headline) parts))
                (dolist (child (ende-chat--fenced-siblings
                                document (ende-chat--children document headline)
                                question-begin))
