@@ -54,6 +54,35 @@
                    (concat "<svg xmlns=\"http://www.w3.org/2000/svg\">"
                            payload "</svg>")))))
 
+(ert-deftest ende-artifact-accessible-svg-roundtrip ()
+  (ende-artifact-test-with-files
+    (let* ((xml (concat
+                 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"260\""
+                 " role=\"img\" aria-label=\"Hello illustration\""
+                 " aria-labelledby=\"svg-title\" aria-describedby=\"svg-desc\""
+                 " aria-hidden=\"false\" focusable=\"false\">"
+                 "<title id=\"svg-title\">Hello</title>"
+                 "<desc id=\"svg-desc\">A blue rounded rectangle.</desc>"
+                 "<rect width=\"600\" height=\"260\" rx=\"20\" fill=\"navy\"/>"
+                 "<text x=\"40\" y=\"80\" fill=\"white\">Hello</text></svg>"))
+           (base (ende-artifact-base))
+           (prepared (ende-artifact-prepare-text
+                      xml base "accessible" buffer-file-name))
+           (parts (ende-artifact-content
+                   prepared (lambda () base) "accessible" 'assistant
+                   (lambda (&rest _) (ert-fail "Artifact link treated as an attachment"))))
+           (image (cl-find :image parts :key (lambda (part) (plist-get part :type)))))
+      (should image)
+      (should (string-match-p (regexp-quote "#+ENDE_ARTIFACT: image-001.svg") prepared))
+      (should (equal xml (ende-artifact--read-bytes (plist-get image :path))))
+      (dolist (attribute '("onload=\"alert(1)\""
+                           "href=\"https://example.com/image.svg\""
+                           "style=\"fill:url(file:/etc/passwd)\""))
+        (should-error
+         (ende-artifact--svg
+          (concat "<svg xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" "
+                  attribute "></svg>")))))))
+
 (require 'ende-chat)
 
 (ert-deftest ende-artifact-org-multimodal-and-attachments ()

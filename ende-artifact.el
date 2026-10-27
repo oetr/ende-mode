@@ -104,6 +104,8 @@ Check containment even when intermediate directories are symlinks."
                        (case-fold-search t))
                    (unless (member key
                                    '("xmlns" "xmlns:xlink" "id" "class" "viewBox"
+                                     "role" "aria-label" "aria-labelledby" "aria-describedby"
+                                     "aria-hidden" "focusable"
                                      "width" "height" "x" "y" "x1" "y1" "x2" "y2"
                                      "cx" "cy" "r" "rx" "ry" "d" "points" "dx" "dy"
                                      "fill" "fill-opacity" "fill-rule" "stroke"
