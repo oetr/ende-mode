@@ -3467,7 +3467,11 @@ Keep it while another queued compaction still refers to its durable identity."
   "Persist JOB's final assistant protocol message and finish the request."
   (when (ende-job-current-p job)
     (condition-case failure
-        (let* ((result (ende-chat--prepare-image-result job result))
+        (let* ((_attachments
+                (when-let* ((names (plist-get (ende-job-instruction job) :reply-artifacts)))
+                  (setf (ende-job-instruction job)
+                        (plist-put (ende-job-instruction job) :generated-artifacts names))))
+               (result (ende-chat--prepare-image-result job result))
                (content (ende--result-content result))
                (compact (eq (ende-job-type job) 'chat-compact))
                (thinking (and (listp result) (plist-get result :thinking)))
@@ -3919,14 +3923,10 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
             (append messages
                     (when pending
                       (let* ((result (ende-chat--prepare-image-result job '(:content "")))
-                             (instruction (ende-job-instruction job))
-                             (level (1+ (plist-get instruction :response-level))))
-                        (ende-chat--stage-agent-section
-                         job (ende-chat--assistant-protocol-text
-                              level (plist-get instruction :question-id)
-                              (plist-get instruction :request-id) ""
-                              (ende-chat--normalize-response (plist-get result :content) level t)
-                              nil nil 'org) t)
+                             (instruction (ende-job-instruction job)))
+                        (setf (ende-job-instruction job)
+                              (plist-put instruction :reply-artifacts
+                                         (append (plist-get instruction :reply-artifacts) pending)))
                         (list (list :role "assistant" :content (plist-get result :image-content)))))
                     (ende-chat--consume-user-guidance job))))
         :before-final

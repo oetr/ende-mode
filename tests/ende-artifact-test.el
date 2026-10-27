@@ -177,6 +177,13 @@
             (should (= 1 (length images)))
             (should (equal png (ende-artifact--read-bytes (plist-get (car images) :path)))))
           (should (string-match-p (regexp-quote "#+ENDE_ARTIFACT:") (buffer-string)))
+          (let* ((document (ende-chat--build-document))
+                 (reply (cl-find-if
+                         (lambda (headline)
+                           (and (equal (org-element-property :raw-value headline) "Agent: Reply")
+                                (null (ende-chat--work-ancestor document headline))))
+                         (ende-chat--document-headlines document))))
+            (should (string-match-p "ENDE_ARTIFACT" (ende-chat--protocol-body-string reply))))
           (goto-char (point-max))
           (insert "** Follow up\nExplain.\n")
           (should (string-match-p "image/png" (ende-chat--render-context (ende-chat-context-at-point))))))))
