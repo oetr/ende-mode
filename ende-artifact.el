@@ -8,6 +8,7 @@
 (require 'org-element)
 (require 'image)
 (require 'xml)
+(require 'nxml-mode)
 
 (defgroup ende-artifact nil "Conversation images." :group 'ende)
 
@@ -330,17 +331,20 @@ assistant file links; user links are explicit user attachments."
         (unless excluded
           (goto-char begin)
           (let ((xml-begin (progn (skip-chars-forward " \t") (point)))
-                (end (save-excursion
-                       (goto-char begin) (skip-chars-forward " \t")
-                       (let ((limit (save-excursion (search-forward ">" nil t))))
-                         (when (and limit
-                                    (not (string-match-p "<!\\|<\\?"
-                                                         (buffer-substring-no-properties begin limit))))
-                           (condition-case nil
-                               (progn (xml-parse-tag-1) (point))
-                             (error nil)))))))
+                (end (let ((source (buffer-substring-no-properties begin (point-max))))
+                       (with-temp-buffer
+                         (insert source)
+                         (let ((nxml-auto-insert-xml-declaration-flag nil)
+                               (inhibit-message t))
+                           (nxml-mode))
+                         (goto-char (point-min))
+                         (skip-chars-forward " \t")
+                         (condition-case nil
+                             (progn (nxml-forward-element) (+ begin (1- (point))))
+                           (error nil))))))
             (unless end (error "Incomplete generated SVG fragment"))
-            (when (save-excursion (goto-char end) (looking-at "[ \t]*$"))
+            (if (not (save-excursion (goto-char end) (looking-at "[ \t]*$")))
+                (goto-char end)
               (let* ((xml (buffer-substring-no-properties xml-begin end))
                      (name (ende-artifact-store base chat-id
                                                 (encode-coding-string xml 'utf-8)

@@ -127,7 +127,14 @@
            (prepared (ende-artifact-prepare-text raw base "chat" buffer-file-name)))
       (should (= 1 (length (directory-files (ende-artifact-directory base "chat") nil "^image-"))))
       (should (string-match-p (regexp-quote "#+begin_src svg\n<svg") prepared))
-      (should-not (string-match-p "Before\n<svg" prepared)))
+      (should-not (string-match-p "Before\n<svg" prepared))
+      (let* ((xml "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><text>A &amp; B</text></svg>")
+             (prepared (ende-artifact-prepare-text xml base "entities" buffer-file-name))
+             (path (plist-get (ende-artifact-resolve base "entities" "image-001.svg") :path)))
+        (should (string-match-p "ENDE_ARTIFACT" prepared))
+        (should (equal xml (ende-artifact--read-bytes path))))
+      (let ((code (concat "#+begin_quote\n" xml "\n#+end_quote\n")))
+        (should-not (ende-artifact-generated-p code))))
     (let* ((png (cdr (ende-content-image-data
                       (ende-artifact-resolve (ende-artifact-base) "chat" "image-001.svg"))))
            (ende-llm-function
