@@ -220,8 +220,10 @@ Check containment even when intermediate directories are symlinks."
   (unless (or (file-name-absolute-p path) buffer-file-name)
     (error "Relative file attachments require an Org file: %s" path))
   (let ((absolute (expand-file-name
-                   path (and buffer-file-name
+                   path (and (not (file-name-absolute-p path)) buffer-file-name
                              (file-name-directory buffer-file-name)))))
+    (when (file-remote-p absolute)
+      (error "Remote file attachments are unsupported: %s" path))
     (unless (and (file-regular-p absolute) (file-readable-p absolute))
       (error "Attachment is not a readable regular local file: %s" path))
     (file-truename absolute)))
@@ -388,8 +390,6 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
   (let* ((extension (cdr (assoc media '(("image/png" . "png")
                                        ("image/jpeg" . "jpg")
                                        ("image/svg+xml" . "svg")))))
-         (_validated (when (equal media "image/svg+xml")
-                       (ende-artifact--svg bytes)))
          (directory (ende-artifact-directory base chat-id t))
          (index 1) name path written complete)
     (unless extension (error "Unsupported generated image media type"))
@@ -652,7 +652,12 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                          (signature (list path (plist-get entry :signature) pixels-x pixels-y))
                          (start (+ begin (1- (plist-get reference :begin))))
                          (finish (+ begin (1- (plist-get reference :end))))
-                         (overlay (gethash start existing)))
+                         (overlay (or (gethash start existing)
+                                      (cl-find-if
+                                       (lambda (candidate)
+                                         (and (overlay-get candidate 'ende-artifact)
+                                              (not (gethash candidate kept))))
+                                       (overlays-at (max start (1- finish)))))))
                     (unless overlay
                       (setq overlay (make-overlay start finish nil t nil))
                       (overlay-put overlay 'ende-artifact t)

@@ -179,8 +179,8 @@
            (name (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
            (source (plist-get (ende-artifact-resolve base "source" name) :path)))
       (ende-artifact-store base "destination" ende-artifact-test-png "image/png")
-      (insert "* Other question\n:PROPERTIES:\n:ENDE_CHAT_ID: destination\n:END:\n"
-              "#+ENDE_ARTIFACT: unrelated-label.svg\n"
+      (insert "* Other question\n"
+              "#+ende_artifact: unrelated-label.svg\n"
               (org-link-make-string
                (concat "file:" (org-link-escape (file-relative-name source directory)) "::42")
                "Copied image") "\n")
@@ -386,6 +386,24 @@
                 (should (equal overlays ende-artifact--overlays))
                 (should-not (eq display (overlay-get overlay 'after-string)))
                 (should (= 1 validations)))))
+          (let* ((overlay (car ende-artifact--overlays))
+                 (display (overlay-get overlay 'after-string)))
+            (goto-char (overlay-start overlay))
+            (insert " ")
+            (check-refresh 2)
+            (should (memq overlay ende-artifact--overlays))
+            (should (eq display (overlay-get overlay 'after-string))))
+          (let* ((second (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml"))
+                 (overlay (car ende-artifact--overlays))
+                 (old-signature (overlay-get overlay 'ende-artifact-signature)))
+            (goto-char (overlay-start overlay))
+            (forward-line 1)
+            (let ((begin (point)))
+              (delete-region begin (line-end-position))
+              (insert (ende-artifact-link base "chat" second buffer-file-name)))
+            (check-refresh 2)
+            (should (memq overlay ende-artifact--overlays))
+            (should-not (equal old-signature (overlay-get overlay 'ende-artifact-signature))))
           (goto-char (point-max))
           (insert "\n** Follow up\n")
           (check-refresh 2)
