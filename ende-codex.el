@@ -1328,11 +1328,11 @@ When APPEND is non-nil, append the argument delta to the stored value."
    (apply-partially #'ende-codex--finish-response session)
    (apply-partially #'ende-codex--header-error session)))
 
-(defun ende-codex--message-content (role content)
+(defun ende-codex--message-content (role content &optional profile)
   "Return CONTENT in the Responses shape required for ROLE."
-  (ende-content-provider-content role content 'responses))
+  (ende-content-provider-content role content 'responses profile))
 
-(defun ende-codex--request-messages (messages)
+(defun ende-codex--request-messages (messages &optional profile)
   "Convert internal MESSAGES to Responses API input objects."
   (cl-mapcan
    (lambda (message)
@@ -1340,7 +1340,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (list (list (cons :role (car message))
                      (cons :content
                            (ende-codex--message-content
-                            (car message) (cdr message)))))
+                            (car message) (cdr message) profile))))
        (let ((calls (plist-get message :tool-calls))
              (content (plist-get message :content))
              (call-id (plist-get message :tool-call-id)))
@@ -1351,7 +1351,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
               (list (list (cons :role "assistant")
                           (cons :content
                                 (ende-codex--message-content
-                                 "assistant" content)))))
+                                 "assistant" content profile)))))
             (mapcar (lambda (call)
                       (list (cons :type "function_call")
                             (cons :call_id (plist-get call :id))
@@ -1367,7 +1367,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (list (list (cons :role role)
                          (cons :content
                                (ende-codex--message-content
-                                role (plist-get message :content)))))))))))
+                                role (plist-get message :content) profile))))))))))
    (ende-content-provider-messages messages)))
 
 (defun ende-codex--tool-definitions (definitions)
@@ -1391,7 +1391,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
   "Build a Responses API request body for MESSAGES and PROFILE."
   (let ((body
          (list (cons :model (plist-get profile :model))
-               (cons :input (ende-codex--request-messages messages))
+               (cons :input (ende-codex--request-messages messages profile))
                (cons :store json-false)
                (cons :stream t))))
     (when (plist-get profile :tool-definitions)

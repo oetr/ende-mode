@@ -710,6 +710,11 @@ around rendered chat sections, not arbitrary text slices."
    (let* ((root (ende-chat--root document headline))
          (chat-id (ende-chat--property document root :id))
          (role (or origin (ende-chat--effective-role document headline)))
+         (authority (let ((node headline))
+                      (while (and node
+                                  (eq (ende-chat--effective-role document node) 'assistant))
+                        (setq node (ende-chat--parent document node)))
+                      node))
          (source buffer-file-name)
          (source-buffer (current-buffer)))
     (ende-artifact-content
@@ -724,7 +729,7 @@ around rendered chat sections, not arbitrary text slices."
            (let* ((policy
                    (plist-get (ende-chat-config-resolve-environment
                                (ende-chat--document-tree document)
-                               (ende-chat--document-parent document) headline)
+                               (ende-chat--document-parent document) authority)
                               :access-policy))
                   (ende-tools--access-config policy)
                   (project (plist-get policy :root)))
