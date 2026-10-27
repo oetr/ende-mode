@@ -233,6 +233,37 @@
         (should (= 1 (length ende-artifact--overlays)))
         (ende-mode -1)))))
 
+(ert-deftest ende-image-configuration-lifecycle ()
+  (let* ((ende-image-provider 'local)
+         (ende-image-endpoint "https://images.example.test/v1/images")
+         (ende-image-model nil)
+         (ende-provider-profiles '((studio :type openai)))
+         (initial (mapcar #'default-value ende-image--configuration-variables))
+         (draft '(studio "http://192.168.1.50:8080/v1/images" "image-model"))
+         buffer)
+    (save-window-excursion
+      (unwind-protect
+          (dolist (save '(nil t))
+            (ende-image-configure)
+            (setq buffer (current-buffer))
+            (should (text-property-any (point-min) (point-max) 'face 'success))
+            (cl-mapc #'set ende-image--configuration-variables draft)
+            (ende-image--render-configuration)
+            (should (text-property-any (point-min) (point-max) 'face 'error))
+            (should (equal initial (mapcar #'default-value ende-image--configuration-variables)))
+            (if save
+                (progn
+                  (let ((ende-image-endpoint "not-a-url"))
+                    (should-error (ende-image--configure-save)))
+                  (should (buffer-live-p buffer))
+                  (should (equal initial (mapcar #'default-value ende-image--configuration-variables)))
+                  (ende-image--configure-save))
+              (ende-image--configure-quit))
+            (should-not (buffer-live-p buffer))
+            (should (equal (if save draft initial)
+                           (mapcar #'default-value ende-image--configuration-variables))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest ende-artifact-generation-http-lifecycle ()
   (ende-artifact-test-with-files
     (let* ((ende-image-provider 'studio)

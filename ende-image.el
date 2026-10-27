@@ -57,6 +57,93 @@ Nil disables generation even when the tool is activated."
     (ende-curl--validated-url profile)
     profile))
 
+(defconst ende-image--configuration-variables
+  '(ende-image-provider ende-image-endpoint ende-image-model)
+  "Image settings edited in the configuration buffer.")
+
+(defvar ende-image-configure-mode-map (make-sparse-keymap)
+  "Keymap for `ende-image-configure-mode'.")
+
+(define-key ende-image-configure-mode-map (kbd "p") #'ende-image--configure-provider)
+(define-key ende-image-configure-mode-map (kbd "e") #'ende-image--configure-endpoint)
+(define-key ende-image-configure-mode-map (kbd "m") #'ende-image--configure-model)
+(define-key ende-image-configure-mode-map (kbd "RET") #'ende-image--configure-save)
+(define-key ende-image-configure-mode-map (kbd "q") #'ende-image--configure-quit)
+(define-key ende-image-configure-mode-map (kbd "<escape>") #'ende-image--configure-quit)
+
+(define-derived-mode ende-image-configure-mode special-mode "Ende-Image-Configure"
+  "Read-only settings view for image generation."
+  (dolist (variable ende-image--configuration-variables)
+    (set (make-local-variable variable) (default-value variable))))
+
+(defun ende-image--render-configuration ()
+  "Render the image settings in the current configuration buffer."
+  (let ((inhibit-read-only t)
+        (encrypted (equal (downcase (or (url-type (url-generic-parse-url
+                                                 ende-image-endpoint)) ""))
+                          "https")))
+    (erase-buffer)
+    (insert (format "%-8s - %-18s %s\n" "p" "Provider profile:" ende-image-provider)
+            (format "%-8s - %-18s %s\n" "e" "Endpoint:" ende-image-endpoint)
+            (format "%-8s - %-18s " "" "Encryption:")
+            (propertize (if encrypted
+                            "On - TLS with certificate verification"
+                          "Off - prompt and image sent unencrypted!")
+                        'face (if encrypted 'success 'error))
+            "\n"
+            (format "%-8s - %-18s %s\n" "m" "Model:" (or ende-image-model "Disabled"))
+            "\n"
+            (format "%-8s - Quit without saving\n" "q/Esc")
+            (format "%-8s - Save and quit\n" "Enter"))))
+
+(defun ende-image--configure-provider ()
+  "Choose the provider profile for image authentication and headers."
+  (interactive)
+  (setq ende-image-provider
+        (intern (completing-read "Image provider profile: "
+                                 (mapcar #'symbol-name (ende-image--provider-names))
+                                 nil t nil nil (symbol-name ende-image-provider))))
+  (ende-image--render-configuration))
+
+(defun ende-image--configure-endpoint ()
+  "Set the Images API endpoint."
+  (interactive)
+  (let ((endpoint (string-trim (read-string "Image endpoint: " ende-image-endpoint))))
+    (ende-curl--validated-url (list :url endpoint :allow-http t))
+    (setq ende-image-endpoint endpoint))
+  (ende-image--render-configuration))
+
+(defun ende-image--configure-model ()
+  "Set the image model, or disable generation with an empty value."
+  (interactive)
+  (let ((model (string-trim (read-string "Image model (empty disables generation): "
+                                       ende-image-model))))
+    (setq ende-image-model (unless (string-empty-p model) model)))
+  (ende-image--render-configuration))
+
+(defun ende-image--configure-save ()
+  "Apply pending image settings for this Emacs session and close the buffer."
+  (interactive)
+  (ende-image--profile)
+  (dolist (variable ende-image--configuration-variables)
+    (set-default variable (symbol-value variable)))
+  (quit-window t))
+
+(defun ende-image--configure-quit ()
+  "Discard pending image settings and close the configuration buffer."
+  (interactive)
+  (quit-window t))
+
+(defun ende-image-configure ()
+  "Open the image generation configuration buffer."
+  (interactive)
+  (let ((buffer (get-buffer-create "*ende-image-configure*")))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'ende-image-configure-mode)
+        (ende-image-configure-mode))
+      (ende-image--render-configuration))
+    (pop-to-buffer buffer)))
+
 (defun ende-image--request (prompt callback register)
   "Generate PROMPT asynchronously, calling CALLBACK with parts or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
