@@ -282,10 +282,14 @@ assistant file links; user links are explicit user attachments."
                                (org-element-property :post-blank link)))
                        (part (if (member extension '("png" "jpg" "jpeg" "svg"))
                                  (ende-artifact-image-info path)
-                               (list :type :text :text
-                                     (concat "\nAttached file contents:\n"
-                                             (decode-coding-string
-                                              (ende-artifact--read-bytes path) 'utf-8) "\n")))))
+                               (let ((bytes (ende-artifact--read-bytes path)))
+                                 (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
+                                           (image-type-from-data bytes)
+                                           (string-match-p (string 0) bytes))
+                                   (error "Unsupported file attachment format; use PNG, JPEG, SVG or text"))
+                                 (list :type :text :text
+                                       (concat "\nAttached file contents:\n"
+                                               (decode-coding-string bytes 'utf-8) "\n"))))))
                   (push (list end end part) edits))))))))
     (if (null edits) text
       (let ((position 1) parts)

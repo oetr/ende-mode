@@ -91,7 +91,11 @@
               "** Reply\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
               "[[file:/etc/hosts]]\n** Next\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\nContinue.\n")
       (goto-char (point-max))
-      (should-error (ende-chat-context-at-point)))))
+      (should-error (ende-chat-context-at-point))
+      (let ((path (expand-file-name "image.gif" directory)))
+        (with-temp-file path (insert "GIF89a"))
+        (should-error (ende-artifact-content "[[file:image.gif]]" (lambda () base) "chat-123"
+                                             'user (lambda (&rest _) path)))))))
 
 (ert-deftest ende-artifact-provider-input-and-redaction ()
   (ende-artifact-test-with-files
