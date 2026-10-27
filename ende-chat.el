@@ -36,6 +36,8 @@
 (require 'subr-x)
 (require 'font-lock)
 (require 'ende-core)
+(require 'ende-artifact)
+(require 'ende-content)
 (require 'ende-operation)
 (require 'ende-operations)
 (require 'ende-codex)
@@ -643,8 +645,8 @@ around rendered chat sections, not arbitrary text slices."
     (org-element-map
      tree 'keyword
      (lambda (element)
-       (when (string= (upcase (org-element-property :key element))
-                      "ENDE_TOOL_STORE_FILE")
+       (when (member (upcase (org-element-property :key element))
+                     '("ENDE_TOOL_STORE_FILE" "ENDE_ARTIFACTS_BASE_PATH"))
          (ende-chat--add-section-exclusion
           exclusions (ende-chat--lineage-headline element)
           (org-element-property :begin element)
@@ -701,6 +703,37 @@ around rendered chat sections, not arbitrary text slices."
                 (if newline (substring text newline) ""))
       text)))
 
+(defun ende-chat--content (document headline text)
+  "Reconstruct image content in TEXT belonging to HEADLINE."
+  (if (not (string-match-p "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" text)) text
+   (let* ((root (ende-chat--root document headline))
+         (chat-id (ende-chat--property document root :id))
+         (role (ende-chat--effective-role document headline))
+         (source buffer-file-name)
+         (source-buffer (current-buffer)))
+    (ende-artifact-content
+     text (lambda () (with-current-buffer source-buffer (ende-artifact-base)))
+     chat-id role
+     (lambda (target origin)
+       (when (file-remote-p target) (error "Remote file attachments are unsupported"))
+       (unless (or (file-name-absolute-p target) source)
+         (error "Relative file attachments require an Org file"))
+       (let ((path (expand-file-name target (and source (file-name-directory source)))))
+         (unless (eq origin 'user)
+           (let* ((policy
+                   (plist-get (ende-chat-config-resolve-environment
+                               (ende-chat--document-tree document)
+                               (ende-chat--document-parent document) headline)
+                              :access-policy))
+                  (ende-tools--access-config policy)
+                  (project (plist-get policy :root)))
+             (unless (and project (memq 'read_file (plist-get policy :active-tools))
+                          (ende-tools--path-authorized-for-p 'read_file path project))
+               (error "Assistant file attachment is not authorized by read_file resources"))))
+         (unless (and (file-regular-p path) (file-readable-p path))
+           (error "File attachment is not a readable regular file"))
+         path))))))
+
 (defun ende-chat--prefix-messages
     (document root question &optional reasoning-ancestors-only)
   "Serialize eligible history before QUESTION within ROOT.
@@ -728,7 +761,7 @@ ancestors are included even when ordinary reasoning context is disabled."
         ((flush ()
            (when parts
              (push (ende-chat--message
-                    message-role (mapconcat #'identity (nreverse parts) ""))
+                    message-role (ende-content-concat (nreverse parts)))
                    messages)
              (setq parts nil
                    message-owner nil
@@ -778,7 +811,8 @@ ancestors are included even when ordinary reasoning context is disabled."
                    (flush)
                    (setq message-owner next-owner
                          message-role next-role))
-                 (push (ende-chat--section-text document headline) parts))
+                 (push (ende-chat--content
+                        document headline (ende-chat--section-text document headline)) parts))
                (dolist (child (ende-chat--fenced-siblings
                                document (ende-chat--children document headline)
                                question-begin))
@@ -833,7 +867,8 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
 
 (defun ende-chat--message (role text)
   "Return one role-tagged chat message for TEXT."
-  (cons (symbol-name role) text))
+  (if (stringp text) (cons (symbol-name role) text)
+    (list :role (symbol-name role) :content text)))
 
 (defun ende-chat--protocol-title-p (headline prefix)
   "Return non-nil when HEADLINE's title begins with PREFIX."
@@ -1217,7 +1252,8 @@ renderer framing newlines are removed before the selected decoding is applied."
              (org-element-property :raw-value headline)
              ende-chat-role-property ende-chat-request-id-property))
     (ende-chat--message
-     'assistant (ende-chat--protocol-body-string headline))))
+     'assistant (ende-chat--content document headline
+                                    (ende-chat--protocol-body-string headline)))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1255,7 +1291,7 @@ renderer framing newlines are removed before the selected decoding is applied."
                      (nconc messages
                             (ende-chat--protocol-tool-turn-messages
                              document work prose calls results)))
-             (when (and (stringp prose) (not (string-blank-p prose)))
+             (when (and prose (not (ende-content-empty-p prose)))
                (setq messages
                      (nconc messages
                             (list (ende-chat--message 'assistant prose))))))))
@@ -1270,8 +1306,8 @@ renderer framing newlines are removed before the selected decoding is applied."
             (pop children)
             (let* ((prose
                     (and (ende-chat--eligible-p document child)
-                         (cdr (ende-chat--protocol-assistant-message
-                               document child))))
+                         (ende-content-body (ende-chat--protocol-assistant-message
+                                             document child))))
                    (calls (take-calls)))
               (if calls
                   (add-turn prose calls (take-results))
@@ -1314,7 +1350,7 @@ renderer framing newlines are removed before the selected decoding is applied."
            (cl-loop for result in results
                     for pair = (cl-find result complete :key #'cadr :test #'eq)
                     when pair collect (nth 2 pair))))
-      (when (or stored-calls (and prose (not (string-blank-p prose))))
+      (when (or stored-calls (and prose (not (ende-content-empty-p prose))))
         (push (if stored-calls
                   (list :role "assistant" :content (or prose "")
                         :tool-calls stored-calls)
@@ -1344,10 +1380,11 @@ ROOT supplies the source scope when the destination is a new root sibling."
       (let* ((current-text (or current-text
                                (ende-chat--current-text
                                 document question nil reasoning-ancestors)))
+             (content (ende-chat--content document question current-text))
              (messages
               (append (or prefix reasoning-prefix)
-                      (unless (string-blank-p current-text)
-                        (list (ende-chat--message 'user current-text)))))
+                      (unless (ende-content-empty-p content)
+                        (list (ende-chat--message 'user content)))))
              (expired ende-chat--expired-history-in-request))
         (when expired
           (message "Some tool payloads are unavailable; omitting affected tool history"))
@@ -1377,7 +1414,7 @@ tests."
     (dolist (message messages)
       (if (and (consp message) (stringp (car message)))
           (insert (upcase (car message)) "\n\n"
-                  (or (cdr message) "") "\n\n")
+                  (ende-content-readable (cdr message)) "\n\n")
         (let ((role (plist-get message :role))
               (content (plist-get message :content)))
           (if (equal role "tool")
@@ -1387,7 +1424,7 @@ tests."
                       (ende-chat--pretty-json-or-raw (or content ""))
                       "\n\n")
             (insert (upcase (format "%s" role)) "\n\n"
-                    (or content "") "\n")
+                    (ende-content-readable content) "\n")
             (dolist (call (plist-get message :tool-calls))
               (insert "\nTool call: "
                       (format "%s" (plist-get call :name))
@@ -1620,7 +1657,10 @@ title.\n\n"
     (org-element-map tree '(keyword node-property)
 		     (lambda (element)
 		       (cond
-			((ende-chat--title-keyword-p element)
+			((or (ende-chat--title-keyword-p element)
+                             (and (eq (org-element-type element) 'keyword)
+                                  (equal (upcase (org-element-property :key element))
+                                         "ENDE_ARTIFACTS_BASE_PATH")))
 			 (let ((begin (org-element-property :begin element)))
 			   (save-excursion
 			     (goto-char begin)
@@ -1818,9 +1858,8 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
   "Return the body of the last serialized user message in MESSAGES."
   (let (request)
     (dolist (message messages)
-      (when (and (consp message) (equal (car message) "user")
-                 (stringp (cdr message)))
-        (setq request (cdr message))))
+      (when (equal (ende-content-role message) "user")
+        (setq request (ende-content-readable (ende-content-body message)))))
     (when request
       (let* ((newline (string-match "\n" request))
              (body (if newline (substring request (1+ newline)) request)))
@@ -3948,6 +3987,10 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (defun ende-chat--enqueue (document question profile &optional compact)
   "Queue QUESTION in DOCUMENT using PROFILE.
 COMPACT requests a context fence and archives the instruction section."
+  (setq question (or (cl-find (org-element-property :begin question)
+                              (ende-chat--document-headlines document)
+                              :key (lambda (h) (org-element-property :begin h)))
+                     question))
   (let* ((selected-profile
           (or profile (ende-provider-profile-for-buffer (current-buffer) t)))
          (data (if compact
@@ -3957,12 +4000,11 @@ COMPACT requests a context fence and archives the instruction section."
          (codex-profile-p
           (and (eq (plist-get selected-profile :wire-api) 'responses)
                (not (eq (plist-get selected-profile :type) 'openai))))
-         (root (and codex-profile-p (ende-chat--root document question)))
+         (root (ende-chat--root document question))
          (conversation-id
-          (and codex-profile-p
-               (or (ende-chat--property document root :id)
-                   (and (eq root question) question-id)
-                   (ende-chat--new-id "question"))))
+          (or (ende-chat--property document root :id)
+              (and (eq root question) question-id)
+              (ende-chat--new-id "question")))
          (codex-session-id
           (and codex-profile-p
                (ende-codex--session-id-for-identity conversation-id)))
@@ -4001,13 +4043,14 @@ COMPACT requests a context fence and archives the instruction section."
             (org-entry-put nil ende-chat-id-property question-id))
           (setq question-marker
                 (ende-chat--make-question-marker question))
-          (when (and codex-session-id
+          (when (and conversation-id
                      (null (ende-chat--local-property
                             root ende-chat-id-property)))
             ;; Persist the root identity so follow-ups retain affinity after reload.
             (save-excursion
               (goto-char (org-element-property :begin root))
-              (org-entry-put nil ende-chat-id-property conversation-id)))
+              (org-entry-put nil ende-chat-id-property conversation-id)
+              (ende-chat--hide-control-drawers-at-heading (point))))
           ;; The property writes shifted positions parsed before them.
           (setq position
                 (ende-chat--insert-placeholder

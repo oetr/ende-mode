@@ -41,7 +41,7 @@
        (ende-test--complete-call (car ende-test--calls))
        (should (eq (ende-job-state job) 'completed)))
      (let ((control-drawers (ende-test--chat-control-drawers)))
-       (should (= (length control-drawers) 3))
+       (should (= (length control-drawers) 4))
        (should-not (ende-test--chat-control-drawer-hidden-p
                     (car control-drawers)))
        (should (ende-test--chat-control-drawer-hidden-p

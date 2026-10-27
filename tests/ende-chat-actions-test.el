@@ -1739,13 +1739,13 @@
     (ende-test--with-buffer "* Root\n** Question\nAsk\n"
 			    (org-mode)
 			    (ende-test--chat-goto "** Question")
-			    (let ((point-before (point)))
+			    (let ((point-before (copy-marker (point))))
 			      (setq ende--queue-suspended t)
 			      (let ((first (ende-ask))
 				    (second (ende-ask)))
 				(should (= (point) point-before))
 				(let ((drawers (ende-test--chat-control-drawers)))
-				  (should (= (length drawers) 3))
+				  (should (= (length drawers) 4))
 				  (should (cl-every #'ende-test--chat-control-drawer-hidden-p
 						    drawers)))
 				(let ((headlines (ende-test--chat-response-headlines)))
@@ -1799,7 +1799,7 @@
        "* Root\n** Question\nAsk\n** Work\nKeep editing\n"
        (org-mode)
        (ende-test--chat-goto "** Question")
-       (let ((question-point (point)))
+       (let ((question-point (copy-marker (point))))
          (setq ende--queue-suspended t)
          (let ((job (ende-ask)))
            (should (= (point) question-point))

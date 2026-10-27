@@ -214,5 +214,65 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
         (when (and written (file-exists-p path) (not (file-symlink-p path)))
           (delete-file path))))))
 
+(defun ende-artifact-link (base chat-id name org-file)
+  "Construct the ordinary Org link for NAME relative to ORG-FILE."
+  (let* ((path (expand-file-name name (ende-artifact-directory base chat-id)))
+         (target (if org-file
+                     (file-relative-name path (file-name-directory org-file))
+                   path)))
+    (org-link-make-string (concat "file:" (org-link-escape target)) name)))
+
+(defun ende-artifact-content (text base-function chat-id role authorize)
+  "Parse TEXT into ordered parts, retaining strings for text-only content.
+BASE-FUNCTION lazily resolves document storage.  AUTHORIZE checks standalone
+assistant file links; user links are explicit user attachments."
+  (let (edits consumed)
+    (with-temp-buffer
+      (insert text)
+      (org-mode)
+      (let ((tree (org-element-parse-buffer)))
+        (org-element-map tree 'keyword
+          (lambda (element)
+            (when (equal (upcase (org-element-property :key element)) "ENDE_ARTIFACT")
+              (let* ((name (string-trim (org-element-property :value element)))
+                     (begin (org-element-property :begin element))
+                     (next (save-excursion (goto-char begin) (forward-line 1) (point)))
+                     (end (save-excursion (goto-char next) (min (point-max) (1+ (line-end-position)))))
+                     (line (buffer-substring-no-properties next end))
+                     (part (ende-artifact-resolve (funcall base-function) chat-id name)))
+                (unless (string-match-p
+                         "\\`[ \t]*\\[\\[file:[^]\n]+\\]\\(?:\\[[^]\n]*\\]\\)?\\][ \t]*\n?\\'" line)
+                  (error "Artifact %s in conversation %s needs a following file link" name chat-id))
+                (push (cons next end) consumed)
+                (push (list begin end part) edits)))))
+        (org-element-map tree 'link
+          (lambda (link)
+            (let ((begin (org-element-property :begin link)))
+              (when (and (equal (org-element-property :type link) "file")
+                         (not (cl-some (lambda (range) (and (<= (car range) begin)
+                                                            (< begin (cdr range)))) consumed)))
+                (let* ((target (org-link-unescape (org-element-property :path link)))
+                       (path (funcall authorize target role))
+                       (extension (downcase (or (file-name-extension path) "")))
+                       (end (- (org-element-property :end link)
+                               (org-element-property :post-blank link)))
+                       (part (if (member extension '("png" "jpg" "jpeg" "svg"))
+                                 (ende-artifact-image-info path)
+                               (list :type :text :text
+                                     (concat "\nAttached file contents:\n"
+                                             (decode-coding-string
+                                              (ende-artifact--read-bytes path) 'utf-8) "\n")))))
+                  (push (list end end part) edits))))))))
+    (if (null edits) text
+      (let ((position 1) parts)
+        (dolist (edit (sort edits (lambda (a b) (< (car a) (car b)))))
+          (when (< position (car edit))
+            (push (list :type :text :text (substring text (1- position) (1- (car edit)))) parts))
+          (push (nth 2 edit) parts)
+          (setq position (cadr edit)))
+        (when (<= position (length text))
+          (push (list :type :text :text (substring text (1- position))) parts))
+        (nreverse parts)))))
+
 (provide 'ende-artifact)
 ;;; ende-artifact.el ends here
