@@ -297,6 +297,24 @@ assistant file links; user links are explicit user attachments."
           (push (list :type :text :text (substring text (1- position))) parts))
         (nreverse parts)))))
 
+(defun ende-artifact-generated-p (text)
+  "Return non-nil when TEXT has an actionable artifact or standalone SVG."
+  (with-temp-buffer
+    (insert text)
+    (org-mode)
+    (or (org-element-map (org-element-parse-buffer) 'keyword
+          (lambda (keyword)
+            (equal (upcase (org-element-property :key keyword)) "ENDE_ARTIFACT")) nil t)
+        (progn
+          (goto-char (point-min))
+          (let (found)
+            (while (and (not found) (re-search-forward "^[ \t]*<svg[ \t\n>]" nil t))
+              (unless (org-element-lineage
+                       (org-element-context)
+                       '(src-block example-block quote-block fixed-width code verbatim special-block) t)
+                (setq found t)))
+            found)))))
+
 (defun ende-artifact-prepare-text (text base chat-id org-file)
   "Store standalone SVG in TEXT and resolve generated markers to Org links."
   (with-temp-buffer
@@ -312,7 +330,15 @@ assistant file links; user links are explicit user attachments."
         (unless excluded
           (goto-char begin)
           (let ((xml-begin (progn (skip-chars-forward " \t") (point)))
-                (end (save-excursion (when (search-forward "</svg>" nil t) (point)))))
+                (end (save-excursion
+                       (goto-char begin) (skip-chars-forward " \t")
+                       (let ((limit (save-excursion (search-forward ">" nil t))))
+                         (when (and limit
+                                    (not (string-match-p "<!\\|<\\?"
+                                                         (buffer-substring-no-properties begin limit))))
+                           (condition-case nil
+                               (progn (xml-parse-tag-1) (point))
+                             (error nil)))))))
             (unless end (error "Incomplete generated SVG fragment"))
             (when (save-excursion (goto-char end) (looking-at "[ \t]*$"))
               (let* ((xml (buffer-substring-no-properties xml-begin end))

@@ -14,6 +14,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ende-core)
+(require 'ende-content)
 (require 'ende-operation)
 (require 'ende-edit)
 (require 'ende-summary)
@@ -226,13 +227,11 @@ result is applied."
          "\n\n")))))
 
 (defun ende-operations--latest-user-message (messages)
-  "Return the last string-valued user message in MESSAGES, or nil."
+  "Return a readable rendering of the last user message in MESSAGES."
   (let (latest)
     (dolist (message messages)
-      (when (and (consp message)
-                 (equal (car message) "user")
-                 (stringp (cdr message)))
-        (setq latest (cdr message))))
+      (when (equal (ende-content-role message) "user")
+        (setq latest (ende-content-readable (ende-content-body message)))))
     latest))
 
 (defun ende-operations--add-source-metadata (job messages)
@@ -248,15 +247,13 @@ result is applied."
         (mapcar
          (lambda (message)
            (if (and (not added)
-                    (consp message)
-                    (equal (car message) "user"))
+                    (equal (ende-content-role message) "user"))
                (progn
                  (setq added t)
-                 (cons (car message)
-                       (concat block
-                               (if (stringp (cdr message))
-                                   (cdr message)
-                                 (format "%s" (cdr message))))))
+                 (let ((content (ende-content-concat
+                                 (list block (ende-content-body message)))))
+                   (if (stringp content) (cons "user" content)
+                     (list :role "user" :content content))))
              message))
          messages)))))
 
@@ -288,8 +285,9 @@ multi-turn operation."
                    (> ende-max-request-chars 0)))
     (error "ende-max-request-chars must be nil or a positive integer"))
   (let ((chars (cl-loop for message in messages
-                        sum (+ (length (format "%s" (car message)))
-                               (length (format "%s" (cdr message)))))))
+                        sum (+ (length (or (ende-content-role message) ""))
+                               (length (ende-content-readable (ende-content-body message)))
+                               (length (format "%s" (plist-get message :tool-calls)))))))
     (when (and ende-max-request-chars
                (> chars ende-max-request-chars))
       (error "request is %d characters; ende-max-request-chars is %d"

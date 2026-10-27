@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'ende-content)
 (require 'outline)
 (require 'subr-x)
 (require 'ende-core)
@@ -79,7 +80,8 @@
 (defun ende-history--prompt-string (messages)
   "Format MESSAGES for storage in a history entry."
   (mapconcat (lambda (message)
-               (format "%s:\n%s" (car message) (cdr message)))
+               (format "%s:\n%s" (ende-content-role message)
+                       (ende-content-readable (ende-content-body message))))
              messages "\n\n"))
 
 (defun ende-history--entry (job)
@@ -112,7 +114,7 @@
 (defun ende-history--record-partial-result (entry result)
   "Record normalized partial RESULT in ENTRY."
   (when (and result (listp result))
-    (setf (ende-history--entry-partial-result entry) result
+    (setf (ende-history--entry-partial-result entry) (ende-content-redact result)
           (ende-history--entry-finish-reason entry)
           (plist-get result :finish-reason))
     (let ((content (plist-get result :content))

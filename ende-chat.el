@@ -3415,8 +3415,8 @@ Keep it while another queued compaction still refers to its durable identity."
          (instruction (ende-job-instruction job))
          (pending (plist-get instruction :generated-artifacts)))
     (if (not (or parts pending
-                 (let ((case-fold-search t))
-                   (string-match-p "#\\+ENDE_ARTIFACT:\\|\\[\\[file:\\|^[ \t]*<svg\\b" text)))) result
+                 (string-match-p "\\[\\[file:" text)
+                 (ende-artifact-generated-p text))) result
       (let ((buffer (ende-target-buffer (ende-job-target job))))
         (with-current-buffer buffer
           (save-excursion
@@ -3428,7 +3428,10 @@ Keep it while another queued compaction still refers to its durable identity."
                                 (plist-get instruction :question-id)))
                      (root (ende-chat--root document question))
                      (id (ende-chat--property document root :id))
-                     (base (ende-artifact-base))
+                     (needs-storage (or pending
+                                        (cl-some (lambda (part) (eq (plist-get part :type) :generated-image)) parts)
+                                        (ende-artifact-generated-p text)))
+                     (base (and needs-storage (ende-artifact-base)))
                      (org-file buffer-file-name)
                      (text
                       (if parts
@@ -3446,7 +3449,8 @@ Keep it while another queued compaction still refers to its durable identity."
                   (unless (string-match-p (concat "#\\+ENDE_ARTIFACT:[ \t]*"
                                                   (regexp-quote name) "[ \t]*$") text)
                     (setq text (concat text "\n#+ENDE_ARTIFACT: " name "\n"))))
-                (setq text (ende-artifact-prepare-text text base id org-file))
+                (when base
+                  (setq text (ende-artifact-prepare-text text base id org-file)))
                 (setf (ende-job-instruction job)
                       (plist-put instruction :generated-artifacts nil))
                 (let ((result (if (listp result) (copy-sequence result) nil)))

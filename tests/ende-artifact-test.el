@@ -201,4 +201,20 @@
         (should-not ende-artifact--overlays)
         (should-not (memq #'ende-artifact--after-change after-change-functions))))))
 
+(ert-deftest ende-artifact-context-metadata-and-history-are-readable ()
+  (ende-artifact-test-with-files
+    (let* ((name (ende-artifact-store (ende-artifact-base) "chat" ende-artifact-test-svg "image/svg+xml"))
+           (part (ende-artifact-resolve (ende-artifact-base) "chat" name))
+           (messages (list (list :role "user" :content
+                                 (list '(:type :text :text "Look:") part)))))
+      (should (string-match-p (regexp-quote "image/svg+xml") (ende-operations--latest-user-message messages)))
+      (should (string-match-p (regexp-quote "image/svg+xml") (ende-history--prompt-string messages)))
+      (cl-letf (((symbol-function 'ende-operations--source-metadata-block)
+                 (lambda (_) "Source metadata\n"))
+                ((symbol-function 'ende-job-latest-user-set) #'ignore))
+        (let ((result (ende-operations--add-source-metadata nil messages)))
+          (should (equal (plist-get (car (ende-content-body (car result))) :text) "Source metadata\n"))
+          (should (eq (nth 2 (ende-content-body (car result))) part))))
+      (should (eq messages (ende--validate-messages messages))))))
+
 (provide 'ende-artifact-test)
