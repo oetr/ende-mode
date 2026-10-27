@@ -425,6 +425,23 @@
             (check-refresh 2))
           (ende-mode -1))))))
 
+(ert-deftest ende-artifact-preview-follows-folding ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml"))
+           (reference (concat "#+ENDE_ARTIFACT: " name "\n"
+                              (ende-artifact-link base "chat" name buffer-file-name))))
+      (insert "* Topic\n** First\n" reference "\n** Last\n" reference)
+      (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
+        (ende-artifact-refresh)
+        (should (= 2 (length ende-artifact--overlays)))
+        (goto-char (point-min))
+        (dotimes (_ 3)
+          (org-cycle)
+          (dolist (overlay ende-artifact--overlays)
+            (should (eq (not (invisible-p (overlay-start overlay)))
+                        (not (invisible-p (overlay-end overlay)))))))))))
+
 (ert-deftest ende-artifact-preview-lifecycle ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
