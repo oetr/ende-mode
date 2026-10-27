@@ -43,18 +43,18 @@
 
 (defun ende-content-image-data (part)
   "Return validated PART as raster bytes and its actual media type."
-  (let* ((path (plist-get part :path))
-         (info (if (plist-get part :artifact-base)
+  (let* ((info (if (plist-get part :artifact-base)
                    (ende-artifact-resolve (plist-get part :artifact-base)
                                           (plist-get part :chat-id) (plist-get part :name))
-                 (ende-artifact-image-info path (plist-get part :media-type))))
+                 (ende-artifact-image-info (plist-get part :path) (plist-get part :media-type))))
+         (path (plist-get info :path))
          (media (plist-get info :media-type))
          (bytes (ende-artifact--read-bytes path)))
     (if (not (equal media "image/svg+xml")) (cons media bytes)
       (let ((program (or (executable-find "rsvg-convert")
                          (executable-find "convert"))))
         (unless program
-          (error "SVG image input requires rsvg-convert or ImageMagick convert"))
+          (error "Cannot send SVG image input: install rsvg-convert (preferred) or ImageMagick convert to rasterize it"))
         (with-temp-buffer
           (set-buffer-multibyte nil)
           (insert bytes)

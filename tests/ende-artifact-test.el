@@ -41,6 +41,9 @@
             (should (= (plist-get part :width) 2))
             (should (= (plist-get part :height) 3))
             (should (equal (ende-content-image-data part) fixture))
+            (should (equal (ende-content-image-data
+                            (plist-put (copy-sequence part) :path "/not-the-artifact"))
+                           fixture))
             (should-error (ende-artifact-store base "raster" (substring bytes 0 24) media))
             (should-error (ende-artifact-store base "raster" "not an image" media))))
         (let* ((bytes (concat (substring ende-artifact-test-jpeg 0 2)
