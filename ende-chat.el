@@ -704,12 +704,12 @@ around rendered chat sections, not arbitrary text slices."
                 (if newline (substring text newline) ""))
       text)))
 
-(defun ende-chat--content (document headline text)
+(defun ende-chat--content (document headline text &optional origin)
   "Reconstruct image content in TEXT belonging to HEADLINE."
   (if (not (string-match-p "#\\+ENDE_ARTIFACT:\\|\\[\\[file:" text)) text
    (let* ((root (ende-chat--root document headline))
          (chat-id (ende-chat--property document root :id))
-         (role (ende-chat--effective-role document headline))
+         (role (or origin (ende-chat--effective-role document headline)))
          (source buffer-file-name)
          (source-buffer (current-buffer)))
     (ende-artifact-content
@@ -3416,7 +3416,7 @@ Keep it while another queued compaction still refers to its durable identity."
          (pending (plist-get instruction :generated-artifacts)))
     (if (not (or parts pending
                  (let ((case-fold-search t))
-                   (string-match-p "#\\+ENDE_ARTIFACT:\\|^[ \t]*<svg\\b" text)))) result
+                   (string-match-p "#\\+ENDE_ARTIFACT:\\|\\[\\[file:\\|^[ \t]*<svg\\b" text)))) result
       (let ((buffer (ende-target-buffer (ende-job-target job))))
         (with-current-buffer buffer
           (save-excursion
@@ -3452,7 +3452,7 @@ Keep it while another queued compaction still refers to its durable identity."
                 (let ((result (if (listp result) (copy-sequence result) nil)))
                   (setq result (plist-put result :content text))
                   (setq result (plist-put result :output-parts nil))
-                  (plist-put result :image-content (ende-chat--content document question text)))))))))))
+                  (plist-put result :image-content (ende-chat--content document question text 'assistant)))))))))))
 
 (defun ende-chat--apply-result (job result)
   "Persist JOB's final assistant protocol message and finish the request."
@@ -3840,7 +3840,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
           (if assistant-result
               (ende-chat--result-properties job assistant-result)
             "")
-          (list :content content) calls)
+          (ende-chat--normalize-response content level t) calls nil 'org)
          t)
         (dolist (entry (cl-mapcar #'cons calls guidance))
           (let* ((call (car entry))
@@ -3889,7 +3889,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
              (ende-chat--assistant-protocol-text
               level question-id request-id
               (ende-chat--result-properties job result)
-              (list :content content) stored-calls)
+              (ende-chat--normalize-response content level t) stored-calls nil 'org)
              t)
             (ende--handle-llm-event
              job '(:type :status :status "Running tools"))

@@ -99,7 +99,28 @@ Check containment even when intermediate directories are symlinks."
                  (error "Unsupported SVG element: %s" (car node)))
                (dolist (attribute (cadr node))
                  (let ((key (symbol-name (car attribute)))
-                       (value (cdr attribute)))
+                       (value (cdr attribute))
+                       (case-fold-search t))
+                   (unless (member key
+                                   '("xmlns" "xmlns:xlink" "id" "class" "viewBox"
+                                     "width" "height" "x" "y" "x1" "y1" "x2" "y2"
+                                     "cx" "cy" "r" "rx" "ry" "d" "points" "dx" "dy"
+                                     "fill" "fill-opacity" "fill-rule" "stroke"
+                                     "stroke-width" "stroke-opacity" "stroke-linecap"
+                                     "stroke-linejoin" "stroke-dasharray" "stroke-dashoffset"
+                                     "opacity" "transform" "font-family" "font-size"
+                                     "font-weight" "font-style" "text-anchor"
+                                     "dominant-baseline" "alignment-baseline" "xml:space"
+                                     "style" "offset" "stop-color" "stop-opacity"
+                                     "gradientUnits" "gradientTransform" "spreadMethod"
+                                     "fx" "fy" "clip-path" "clip-rule" "clipPathUnits"
+                                     "mask" "maskUnits" "maskContentUnits" "marker-start"
+                                     "marker-mid" "marker-end" "markerWidth" "markerHeight"
+                                     "refX" "refY" "orient" "markerUnits" "preserveAspectRatio"
+                                     "href" "xlink:href" "color" "vector-effect"))
+                     (error "Unsupported SVG attribute: %s" key))
+                   (when (and (equal key "style") (string-match-p "[/<>]" value))
+                     (error "Unsupported SVG CSS syntax"))
                    (when (or (string-prefix-p "on" (downcase key))
                              (member key '("xml:base" "src"))
                              (and (string-match-p "\\(?:^\\|:\\)href\\'" key)
@@ -112,11 +133,12 @@ Check containment even when intermediate directories are symlinks."
                      (error "Unsafe SVG attribute: %s" key))
                    (let ((start 0) (case-fold-search t))
                      (while (string-match "url[ \t\n]*(\\([^)]*\\))" value start)
-                       (unless (string-match-p
-                                "\\`#[[:alnum:]_.-]+\\'"
-                                (string-trim (match-string 1 value)))
-                         (error "External SVG CSS resource"))
-                       (setq start (match-end 0))))))
+                       (let ((reference (match-string 1 value))
+                             (next (match-end 0)))
+                         (unless (string-match-p "\\`#[[:alnum:]_.-]+\\'"
+                                                 (string-trim reference))
+                           (error "External SVG CSS resource"))
+                         (setq start next))))))
                (mapc #'walk (cddr node)))))
         (walk root))
       root)))
@@ -184,7 +206,8 @@ Errors identify the reference and expected directory, never link targets."
                                       (file-truename directory))
                                      (file-truename path))
               (error "artifact escapes its conversation directory"))
-            (ende-artifact-image-info path)))
+            (append (ende-artifact-image-info path)
+                    (list :artifact-base base :chat-id chat-id :name name))))
       (error (error "Artifact %s in conversation %s, expected directory %s: %s"
                     name chat-id directory (error-message-string failure))))))
 
@@ -280,7 +303,7 @@ assistant file links; user links are explicit user attachments."
     (insert text)
     (org-mode)
     (goto-char (point-min))
-    (while (re-search-forward "^[ \t]*<svg\\b" nil t)
+    (while (re-search-forward "^[ \t]*<svg\\(?:[ \t\n>]\\)" nil t)
       (let* ((begin (match-beginning 0))
              (context (org-element-context))
              (excluded (org-element-lineage context
