@@ -274,5 +274,52 @@ assistant file links; user links are explicit user attachments."
           (push (list :type :text :text (substring text (1- position))) parts))
         (nreverse parts)))))
 
+(defun ende-artifact-prepare-text (text base chat-id org-file)
+  "Store standalone SVG in TEXT and resolve generated markers to Org links."
+  (with-temp-buffer
+    (insert text)
+    (org-mode)
+    (goto-char (point-min))
+    (while (re-search-forward "^[ \t]*<svg\\b" nil t)
+      (let* ((begin (match-beginning 0))
+             (context (org-element-context))
+             (excluded (org-element-lineage context
+                                           '(src-block example-block quote-block
+                                             fixed-width code verbatim special-block) t)))
+        (unless excluded
+          (goto-char begin)
+          (let ((xml-begin (progn (skip-chars-forward " \t") (point)))
+                (end (save-excursion (when (search-forward "</svg>" nil t) (point)))))
+            (unless end (error "Incomplete generated SVG fragment"))
+            (when (save-excursion (goto-char end) (looking-at "[ \t]*$"))
+              (let* ((xml (buffer-substring-no-properties xml-begin end))
+                     (name (ende-artifact-store base chat-id
+                                                (encode-coding-string xml 'utf-8)
+                                                "image/svg+xml")))
+                (delete-region begin end)
+                (insert "#+ENDE_ARTIFACT: " name)
+                (goto-char begin)
+                (forward-line 1)))))))
+    (let ((tree (org-element-parse-buffer)) edits)
+      (org-element-map tree 'keyword
+        (lambda (keyword)
+          (when (equal (upcase (org-element-property :key keyword)) "ENDE_ARTIFACT")
+            (let* ((name (string-trim (org-element-property :value keyword)))
+                   (begin (org-element-property :begin keyword))
+                   (next (save-excursion (goto-char begin) (forward-line 1) (point)))
+                   (end (save-excursion
+                          (goto-char next)
+                          (if (looking-at "[ \t]*\\[\\[file:")
+                              (min (point-max) (1+ (line-end-position))) next))))
+              (ende-artifact-resolve base chat-id name)
+              (push (list begin end
+                          (concat "#+ENDE_ARTIFACT: " name "\n"
+                                  (ende-artifact-link base chat-id name org-file) "\n")) edits)))))
+      (dolist (edit (sort edits (lambda (a b) (> (car a) (car b)))))
+        (delete-region (car edit) (cadr edit))
+        (goto-char (car edit))
+        (insert (nth 2 edit))))
+    (buffer-string)))
+
 (provide 'ende-artifact)
 ;;; ende-artifact.el ends here

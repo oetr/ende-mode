@@ -266,6 +266,8 @@ The :callbacks argument initializes the composed transport lifecycle."
                    (list delta choice)
                    '("content" "text"))
                   (ende-protocol-json-get "content" message))
+     :images (or (ende-protocol-json-get "images" delta)
+                 (ende-protocol-json-get "images" message))
      :tool-calls (or (ende-protocol-json-get "tool_calls" delta)
                      (ende-protocol-json-get "tool_calls" message)))))
 
@@ -328,6 +330,11 @@ The :callbacks argument initializes the composed transport lifecycle."
              (tool-calls (plist-get event :tool-calls)))
         (when tool-calls
           (ende-llm--collect-tool-calls session tool-calls))
+        (when (and content (not (stringp content)))
+          (dolist (part (ende-content-output-parts content nil))
+            (if (eq (plist-get part :type) :text)
+                (ende-llm--emit-delta session :content (plist-get part :text))
+              (ende-stream-record-image (ende-llm--session-stream session) part))))
         (when (stringp finish-reason)
           (setf (ende-stream-session-finish-reason
                  (ende-llm--session-stream session)) finish-reason))
@@ -344,7 +351,9 @@ The :callbacks argument initializes the composed transport lifecycle."
                    (stringp content) (> (length content) 0))
           (ende-protocol-reasoning-feed
            (ende-llm--session-reasoning session) content
-           (ende-llm--parser-callbacks session)))))))
+           (ende-llm--parser-callbacks session)))
+        (dolist (part (ende-content-output-parts nil (plist-get event :images)))
+          (ende-stream-record-image (ende-llm--session-stream session) part))))))
 
 (defun ende-llm--handle-events (session events)
   "Handle parsed SSE EVENTS for SESSION."

@@ -1128,7 +1128,25 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (output-index (ende-protocol-json-get "output_index" json))
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
+    (when (equal type "response.output_item.done")
+      (when (equal (ende-protocol-json-get "type" item) "image_generation_call")
+        (ende-stream-record-image
+         (ende-codex--session-stream session)
+         (ende-content-generated-image (ende-protocol-json-get "result" item)))))
     (when (member type '("response.completed" "response.done"))
+      (when (cl-some (lambda (entry)
+                      (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
+                    (ende-codex--output-items output))
+        (setf (ende-stream-session-output-parts (ende-codex--session-stream session))
+              (reverse
+               (cl-mapcan
+                (lambda (entry)
+                  (pcase (ende-protocol-json-get "type" entry)
+                    ("message" (ende-content-output-parts
+                                (ende-protocol-json-get "content" entry) nil))
+                    ("image_generation_call"
+                     (list (ende-content-generated-image (ende-protocol-json-get "result" entry))))))
+                (ende-codex--output-items output)))))
       (unless (ende-codex--session-terminal-event session)
         (ende-codex--emit-diagnostic
          session

@@ -114,4 +114,38 @@
       (should-not (string-match-p "base64" (json-encode (ende-content-redact chat))))
       (should-error (ende-llm--request-body messages '(:image-input nil))))))
 
+(require 'ende-chat-test-helpers)
+
+(ert-deftest ende-artifact-generated-roundtrip-and-svg-boundaries ()
+  (ende-test--reset)
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (xml ende-artifact-test-svg)
+           (raw (concat "Before\n" xml "\nAfter\n#+begin_src svg\n" xml "\n#+end_src\n"))
+           (prepared (ende-artifact-prepare-text raw base "chat" buffer-file-name)))
+      (should (= 1 (length (directory-files (ende-artifact-directory base "chat") nil "^image-"))))
+      (should (string-match-p (regexp-quote "#+begin_src svg\n<svg") prepared))
+      (should-not (string-match-p "Before\n<svg" prepared)))
+    (let* ((png (cdr (ende-content-image-data
+                      (ende-artifact-resolve (ende-artifact-base) "chat" "image-001.svg"))))
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list (list :content "" :output-parts
+                         (list (list :type :text :text "Here is the image.\n")
+                               (list :type :generated-image :bytes png :media-type "image/png")))))))
+      (erase-buffer)
+      (insert "* Conversation\nMake a diagram.\n")
+      (goto-char (point-min))
+      (let ((job (ende-ask)))
+        (should (eq (ende-job-state job) 'completed))
+        (should (string-match-p (regexp-quote "#+ENDE_ARTIFACT: image-001.png") (buffer-string)))
+        (goto-char (point-max))
+        (insert "** Follow up\nWhat is blue?\n")
+        (let* ((messages (ende-chat-context-at-point))
+               (image (cl-find :image (ende-content-body (nth 1 messages))
+                               :key (lambda (p) (plist-get p :type)))))
+          (should image)
+          (should (equal png (ende-artifact--read-bytes (plist-get image :path))))))))
+  (ende-test--reset))
+
 (provide 'ende-artifact-test)

@@ -19,7 +19,7 @@
                (:constructor ende-stream--make-session))
   "Protocol-independent state for one SSE response stream."
   lifecycle parser received-bytes preview-parts preview-bytes
-  content-parts thinking-parts usage actual-model actual-provider
+  content-parts output-parts thinking-parts usage actual-model actual-provider
   estimated-chars generation-start finish-reason reasoning-summaries)
 
 (defun ende-stream-create (lifecycle parser)
@@ -77,13 +77,21 @@ Return non-nil when the delta was accepted and STREAM remains active."
           nil)
       (progn
         (if (eq channel :content)
-            (push text (ende-stream-session-content-parts stream))
+            (progn
+              (push text (ende-stream-session-content-parts stream))
+              (push (list :type :text :text text)
+                    (ende-stream-session-output-parts stream)))
           (push text (ende-stream-session-thinking-parts stream)))
         (cl-incf (ende-stream-session-estimated-chars stream) (length text))
         (ende-stream-note-generation-start stream)
         (ende-stream-emit
          stream (list :type :delta :channel channel :text text))
         (not (ende-stream-terminal-p stream))))))
+
+(defun ende-stream-record-image (stream part)
+  "Record generated image PART without emitting its bytes as an event."
+  (ende-stream-note-generation-start stream)
+  (push part (ende-stream-session-output-parts stream)))
 
 (defun ende-stream-record-usage (stream usage token-key)
   "Record USAGE on STREAM and emit its normalized usage event.
@@ -159,11 +167,15 @@ TOKEN-KEY is the provider-specific output-token field."
                          provider-fallback)
            :model (or (ende-stream-session-actual-model stream)
                       model-fallback))
+     (when (cl-some (lambda (part) (eq (plist-get part :type) :generated-image))
+                    (ende-stream-session-output-parts stream))
+       (list :output-parts (reverse (ende-stream-session-output-parts stream))))
      extra-fields)))
 
 (defun ende-stream-has-result-p (stream &optional protocol-state allow-finish)
   "Return non-nil if STREAM or PROTOCOL-STATE has partial result data."
-  (or (ende-stream-session-content-parts stream)
+  (or (ende-stream-session-output-parts stream)
+      (ende-stream-session-content-parts stream)
       (ende-stream-session-thinking-parts stream)
       (ende-stream-session-usage stream)
       (and allow-finish

@@ -3400,11 +3400,58 @@ Keep it while another queued compaction still refers to its durable identity."
         (ende-chat--set-headline-title
          question ende-chat--compact-instructions-title))))))
 
+(defun ende-chat--prepare-image-result (job result)
+  "Store JOB's generated images before any live or persisted message uses them."
+  (let* ((text (or (ende--result-content result) ""))
+         (parts (and (listp result) (plist-get result :output-parts)))
+         (instruction (ende-job-instruction job))
+         (pending (plist-get instruction :generated-artifacts)))
+    (if (not (or parts pending
+                 (let ((case-fold-search t))
+                   (string-match-p "#\\+ENDE_ARTIFACT:\\|^[ \t]*<svg\\b" text)))) result
+      (let ((buffer (ende-target-buffer (ende-job-target job))))
+        (with-current-buffer buffer
+          (save-excursion
+            (save-restriction
+              (widen)
+              (let* ((document (ende-chat--build-document))
+                     (question (ende-chat--find-by-property
+                                document ende-chat-id-property
+                                (plist-get instruction :question-id)))
+                     (root (ende-chat--root document question))
+                     (id (ende-chat--property document root :id))
+                     (base (ende-artifact-base))
+                     (org-file buffer-file-name)
+                     (text
+                      (if parts
+                          (mapconcat
+                           (lambda (part)
+                             (pcase (plist-get part :type)
+                               (:text (plist-get part :text))
+                               (:generated-image
+                                (concat "\n#+ENDE_ARTIFACT: "
+                                        (ende-artifact-store base id (plist-get part :bytes)
+                                                             (plist-get part :media-type)) "\n"))
+                               (_ (error "Unsupported generated response part")))) parts "")
+                        text)))
+                (dolist (name pending)
+                  (unless (string-match-p (concat "#\\+ENDE_ARTIFACT:[ \t]*"
+                                                  (regexp-quote name) "[ \t]*$") text)
+                    (setq text (concat text "\n#+ENDE_ARTIFACT: " name "\n"))))
+                (setq text (ende-artifact-prepare-text text base id org-file))
+                (setf (ende-job-instruction job)
+                      (plist-put instruction :generated-artifacts nil))
+                (let ((result (if (listp result) (copy-sequence result) nil)))
+                  (setq result (plist-put result :content text))
+                  (setq result (plist-put result :output-parts nil))
+                  (plist-put result :image-content (ende-chat--content document question text)))))))))))
+
 (defun ende-chat--apply-result (job result)
   "Persist JOB's final assistant protocol message and finish the request."
   (when (ende-job-current-p job)
     (condition-case failure
-        (let* ((content (ende--result-content result))
+        (let* ((result (ende-chat--prepare-image-result job result))
+               (content (ende--result-content result))
                (compact (eq (ende-job-type job) 'chat-compact))
                (thinking (and (listp result) (plist-get result :thinking)))
                (instruction (ende-job-instruction job))
@@ -3749,7 +3796,9 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
 ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
   (let ((guidance (ende-job-take-pending-guidance job)))
     (when guidance
-      (let* ((instruction (ende-job-instruction job))
+      (let* ((assistant-result (and assistant-result
+                                  (ende-chat--prepare-image-result job assistant-result)))
+             (instruction (ende-job-instruction job))
              (level (1+ (plist-get instruction :response-level)))
              (question-id (plist-get instruction :question-id))
              (request-id (plist-get instruction :request-id))
@@ -3770,7 +3819,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                               :arguments (ende-chat--tool-value call :arguments)))
                       calls))
              (assistant
-              (list :role "assistant" :content content
+              (list :role "assistant" :content (or (plist-get assistant-result :image-content) content)
                     :tool-calls normalized-calls))
              (messages (list assistant)))
         (ende-chat--stage-agent-section
@@ -3813,6 +3862,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                  (request-id (plist-get instruction :request-id))
                  (question-id (plist-get instruction :question-id))
                  (level (1+ (plist-get instruction :response-level)))
+                 (result (ende-chat--prepare-image-result job result))
                  (content (or (plist-get result :content) ""))
                  (stored-calls
                   (mapcar (lambda (call)
@@ -3820,7 +3870,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                              call (plist-get instruction :tool-store-file)))
                           calls))
                  (assistant
-                  (list :role "assistant" :content content :tool-calls calls
+                  (list :role "assistant" :content (or (plist-get result :image-content) content) :tool-calls calls
                         :reasoning-content
                         (plist-get result :reasoning-content))))
             (ende-chat--stage-agent-section

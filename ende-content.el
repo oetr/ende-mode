@@ -4,6 +4,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ende-artifact)
+(require 'ende-protocol)
 
 (defun ende-content-role (message)
   "Return MESSAGE's role."
@@ -137,6 +138,43 @@ all their assistant content and before the corresponding results."
    ((consp value) (cons (ende-content-redact (car value)) (ende-content-redact (cdr value))))
    ((vectorp value) (vconcat (mapcar #'ende-content-redact value)))
    (t value)))
+
+(defun ende-content-generated-image (data &optional media)
+  "Decode provider image DATA, optionally checking MEDIA, without exposing bytes."
+  (unless (stringp data) (error "Provider image data is missing"))
+  (when (string-prefix-p "data:" data)
+    (unless (string-match "\\`data:\\(image/[[:alnum:]+.-]+\\);base64," data)
+      (error "Unsupported generated image data URL"))
+    (setq media (match-string 1 data) data (substring data (match-end 0))))
+  (let* ((bytes (condition-case nil (base64-decode-string data)
+                  (error (error "Malformed generated image encoding"))))
+         (type (image-type-from-data bytes))
+         (actual (cdr (assq type '((png . "image/png") (jpeg . "image/jpeg"))))))
+    (unless (and actual (or (null media) (equal media actual)))
+      (error "Unsupported generated image content or media type"))
+    (list :type :generated-image :bytes bytes :media-type actual)))
+
+(defun ende-content-output-parts (text images)
+  "Normalize provider TEXT and IMAGES in their documented output order."
+  (let (parts)
+    (cond
+     ((stringp text) (unless (string-empty-p text)
+                       (push (list :type :text :text text) parts)))
+     ((or (listp text) (vectorp text))
+      (mapc (lambda (part)
+              (let ((type (ende-protocol-json-get "type" part)))
+                (cond
+                 ((member type '("text" "output_text"))
+                  (push (list :type :text :text (ende-protocol-json-get "text" part)) parts))
+                 ((member type '("image_url" "image"))
+                  (push (ende-content-generated-image
+                         (ende-protocol-json-get "url" (ende-protocol-json-get "image_url" part))) parts))
+                 (t (error "Unsupported provider output content part"))))) text))
+     (t (error "Unsupported provider response content")))
+    (mapc (lambda (image)
+            (push (ende-content-generated-image
+                   (ende-protocol-json-get "url" (ende-protocol-json-get "image_url" image))) parts)) images)
+    (nreverse parts)))
 
 (provide 'ende-content)
 ;;; ende-content.el ends here

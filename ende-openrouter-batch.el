@@ -758,9 +758,10 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
          (usage (ende-protocol-json-get "usage" body))
          (reported-model (ende-protocol-json-get "model" body))
          (finish-reason (ende-protocol-json-get "finish_reason" choice)))
-    (unless (stringp content)
-      (error "Batch completion has no text content"))
-    (list :content content
+    (let* ((parts (ende-content-output-parts content (ende-protocol-json-get "images" message)))
+           (text (mapconcat (lambda (p) (if (eq (plist-get p :type) :text)
+                                           (plist-get p :text) "")) parts "")))
+     (list :content text :output-parts parts
           :thinking (and (stringp reasoning) reasoning)
           :usage (or usage batch-usage)
           :batch-usage batch-usage
@@ -773,7 +774,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
           :speed 0.0
           :finish-reason finish-reason
           :provider (ende-provider-client-name profile)
-          :model (or reported-model (plist-get profile :model)))))
+          :model (or reported-model (plist-get profile :model))))))
 
 (defun ende-openrouter-batch--result-error (result)
   "Return the structured error represented by RESULT, or nil."
