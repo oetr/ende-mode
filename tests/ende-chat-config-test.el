@@ -985,7 +985,7 @@
                     (should (equal configuration
                                    (ende-test--chat-config-at document (car case))))
                     (should (plist-get
-                             (ende-tool-call 'project_info nil root configuration)
+                             (ende-test--tool-call 'project_info nil root configuration)
                              :ok))
                     (dolist (path '("main.el" "src/public.el" "src/private/secret.el"))
                       (let ((result (ende-tool-call 'read_file (list :path path)
@@ -1106,8 +1106,8 @@
                                                  root configuration)
                                  :ok))
                     (when (caddr case)
-                      (let* ((call (ende-tool-call 'search_project '(:query "TOKEN")
-                                                   root configuration))
+                      (let* ((call (ende-test--tool-call 'search_project '(:query "TOKEN")
+                                                         root configuration))
                              (files (plist-get (plist-get call :result) :files)))
                         (should (plist-get call :ok))
                         (should (= (length files) 1))

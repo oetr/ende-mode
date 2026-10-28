@@ -12,11 +12,11 @@
 
 (ert-deftest ende-worker/round-trip-keeps-the-event-loop-free ()
   (let* ((tick nil)
-        (done nil)
-        (value nil)
-        (failure nil)
-        (cancel nil)
-        (timer (run-at-time 0 nil (lambda () (setq tick t)))))
+         (done nil)
+         (value nil)
+         (failure nil)
+         (cancel nil)
+         (timer (run-at-time 0 nil (lambda () (setq tick t)))))
     (unwind-protect
         (progn
           (setq cancel

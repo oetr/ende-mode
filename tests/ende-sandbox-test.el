@@ -339,7 +339,7 @@
                  (files (ende-tools--authorized-project-files
                          'run_sandbox_command root)))
             (should (= (length files) 2))
-            (let* ((listing (ende-tool-call
+            (let* ((listing (ende-test--tool-call
                              "list_project_files" nil root configuration))
                    (result (plist-get listing :result)))
               (should (plist-get listing :ok))

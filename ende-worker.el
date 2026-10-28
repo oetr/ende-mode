@@ -20,7 +20,8 @@
          (condition-case caught
              (pcase-let ((`(,library ,function ,arguments ,bindings)
                           (read (read-string ""))))
-               (require library)
+               (let ((load-prefer-newer t))
+                 (require library))
                (list :value
                      (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
                        (apply function arguments))))

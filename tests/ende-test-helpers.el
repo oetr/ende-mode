@@ -49,6 +49,29 @@
        (overlay-get overlay 'after-string)
        "")))
 
+(defun ende-test--wait-for (predicate)
+  "Wait for asynchronous PREDICATE to become true."
+  (let ((deadline (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (should (funcall predicate))))
+
+(defun ende-test--tool-call (name arguments root &optional configuration)
+  "Wait for tool NAME's result under CONFIGURATION in ROOT."
+  (let* ((done nil)
+         (result nil)
+         (cancel nil)
+         (ende-tools--register-cancellation-function
+          (lambda (function) (setq cancel function))))
+    (unwind-protect
+        (progn
+          (ende-tool-call-async
+           name arguments root configuration
+           (lambda (value) (setq result value done t)))
+          (ende-test--wait-for (lambda () done))
+          result)
+      (when cancel (funcall cancel)))))
+
 (defun ende-test--complete-call (call)
   "Complete asynchronous fake CALL using its queued response."
   (let ((response (plist-get call :response)))

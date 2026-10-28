@@ -15,16 +15,24 @@
 
 (defun ende-test--tool-result (name arguments root)
   "Invoke tool NAME and return its successful result in ROOT."
-  (let ((call (ende-tool-call name arguments root)))
+  (let ((call (ende-test--tool-call name arguments root)))
     (should (plist-get call :ok))
     (plist-get call :result)))
+
+(defun ende-test--tool-response (call configuration)
+  "Wait for the JSON response to CALL under CONFIGURATION."
+  (let (response)
+    (ende-chat--tool-response-async
+     call configuration (lambda (value) (setq response value)))
+    (ende-test--wait-for (lambda () response))
+    response))
 
 (defun ende-test--project-tool-json-records
     (name arguments field _root configuration)
   "Call project tool NAME and return JSON-decoded FIELD records."
   (let* ((call (list :id "call-1" :name name
                      :arguments (json-encode arguments)))
-         (response (ende-chat--tool-response call configuration))
+         (response (ende-test--tool-response call configuration))
          (decoded (ende-protocol-json-read-string response)))
     (should (eq (ende-protocol-json-get "ok" decoded) t))
     (ende-protocol-json-get
@@ -372,7 +380,7 @@
                   (set-tool-resources read_file :resources project))))
          (success
           (ende-protocol-json-read-string
-           (ende-chat--tool-response
+           (ende-test--tool-response
             (list :id "ok" :name "project_info" :arguments "{}")
             configuration)))
          (failure
@@ -1079,6 +1087,29 @@
         (funcall timeout-cancel))
       (delete-directory root t))))
 
+(ert-deftest ende-test/project-tools-run-in-the-background-after-reload ()
+  (let ((root (make-temp-file "ende-background-tools-" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "source.txt" root) (insert "needle\n"))
+          (ende-reload)
+          (dolist (case '(("project_info" nil)
+                          ("list_project_files" nil)
+                          ("search_project" (:query "needle"))))
+            (let (done result cancel)
+              (let ((ende-tools--register-cancellation-function
+                     (lambda (function) (setq cancel function))))
+                (unwind-protect
+                    (progn
+                      (ende-tool-call-async
+                       (car case) (cadr case) root nil
+                       (lambda (value) (setq result value done t)))
+                      (should-not done)
+                      (ende-test--wait-for (lambda () done))
+                      (should (plist-get result :ok)))
+                  (when cancel (funcall cancel)))))))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/project-tool-collections-encode-as-json-arrays ()
   (let* ((root (make-temp-file "ende-tools-json-collections-" t))
          (alpha (expand-file-name "alpha.txt" root))
@@ -1209,8 +1240,8 @@
                              public-path)))
             (dolist (denied (list excluded-read outside-read unrelated-read))
               (should-not (plist-get denied :ok)))
-            (let* ((listed (ende-tool-call 'list_project_files nil
-                                           root configuration))
+            (let* ((listed (ende-test--tool-call 'list_project_files nil
+                                                 root configuration))
                    (paths (mapcar (lambda (record) (plist-get record :path))
                                   (plist-get (plist-get listed :result) :files))))
               (should (plist-get listed :ok))
@@ -1432,17 +1463,17 @@
                                 (("query" . ""))
                                 (("patterns" . []))
                                 (("patterns" . ["ok" ""]))))
-              (let ((call (ende-tool-call "search_project" arguments root)))
+              (let ((call (ende-test--tool-call "search_project" arguments root)))
                 (should-not (plist-get call :ok))))
-            (let ((none (ende-tool-call "search_project" nil root))
-                  (multiple (ende-tool-call
+            (let ((none (ende-test--tool-call "search_project" nil root))
+                  (multiple (ende-test--tool-call
                              "search_project"
                              '(("query" . "one") ("patterns" . ["two"]))
                              root)))
               (should (string-match-p "exactly one" (plist-get none :error)))
               (should (string-match-p "exactly one"
                                       (plist-get multiple :error))))
-            (let ((above (ende-tool-call
+            (let ((above (ende-test--tool-call
                           "search_project"
                           '(("query" . "needle") ("context_before" . 21))
                           root)))

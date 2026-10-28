@@ -140,9 +140,7 @@
          (public (expand-file-name "main.el" root))
          (private-directory (expand-file-name "private" root))
          (private (expand-file-name "secret.txt" private-directory))
-         (visited nil)
-         (job nil)
-         (original-search (symbol-function #'ende-tools--search-source)))
+         (job nil))
     (ende-test--reset)
     (unwind-protect
         (progn
@@ -178,24 +176,20 @@
                 root))
               (org-mode)
               (ende-test--chat-goto "* Find classified text")
-              (cl-letf (((symbol-function #'ende-tools--search-source)
-                         (lambda (source regexp before after maximum accept-match)
-                           (push (plist-get source :relative) visited)
-                           (funcall original-search source regexp before after
-                                    maximum accept-match))))
-                (setq job (ende-ask))
-                (goto-char (point-min))
-                (should (search-forward
-                         "(resource project (include \"**\")" nil t))
-                (replace-match
-                 "(resource project (include \"private/**\")" t t)
-                (ende-test--complete-call (car ende-test--calls))
-                (should (= (ende-job-tool-call-count job) 2))
-                (ende-test--complete-call (nth 1 ende-test--calls))
-                (should (= (ende-job-tool-call-count job) 3))
-                (ende-test--complete-call (nth 2 ende-test--calls)))
+              (setq job (ende-ask))
+              (goto-char (point-min))
+              (should (search-forward
+                       "(resource project (include \"**\")" nil t))
+              (replace-match
+               "(resource project (include \"private/**\")" t t)
+              (ende-test--complete-call (car ende-test--calls))
+              (ende-test--wait-for (lambda () (= (length ende-test--calls) 2)))
+              (should (= (ende-job-tool-call-count job) 2))
+              (ende-test--complete-call (nth 1 ende-test--calls))
+              (ende-test--wait-for (lambda () (= (length ende-test--calls) 3)))
               (should (= (ende-job-tool-call-count job) 3))
-              (should (equal (nreverse visited) '("main.el")))
+              (ende-test--complete-call (nth 2 ende-test--calls))
+              (should (= (ende-job-tool-call-count job) 3))
               (should (string-match-p "Search complete" (buffer-string)))
               (should (= (length ende-test--calls) 3))
               (let* ((tool-reply

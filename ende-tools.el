@@ -16,6 +16,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 (require 'ende-core)
 (require 'ende-edit)
 (require 'ende-project)
@@ -271,9 +272,7 @@ Use ACCESS-CONFIG to generate its effective host-command schema."
                  (ende-tools--access-config access-config)
                  (ende-tools--access-tool tool-name))
             (when (ende-tool-async tool)
-              (if (null access-config)
-                  (error "URL is not authorized by this chat's URL resources")
-                (error "tool %s requires asynchronous dispatch" tool-name)))
+              (error "tool %s requires asynchronous dispatch" tool-name))
             (list :ok t :tool (symbol-name tool-name)
                   :result (funcall (ende-tool-handler tool) arguments root)))
         ((ende-tool-mutation-failure error quit)
@@ -659,6 +658,48 @@ FUNCTION receives no arguments and may return any value."
               :truncated (< actual-end total))))))
 
 ;;;; Read tools
+
+(defun ende-tools--project-result (tool result root excluded-path-patterns)
+  "Add live buffer state to TOOL's disk RESULT from ROOT."
+  (let* ((ende-project-excluded-path-patterns excluded-path-patterns)
+         (buffers (ende-project-buffers root)))
+    (if (eq tool 'project_info)
+        (plist-put result :buffer_count (length buffers))
+      (let ((visiting (make-hash-table :test #'equal)))
+        (dolist (buffer buffers)
+          (let ((path (ende-project-buffer-path buffer)))
+            (unless (gethash path visiting)
+              (puthash path buffer visiting))))
+        (seq-doseq (record (plist-get result :files))
+          (let ((buffer (gethash (expand-file-name (plist-get record :path) root)
+                                 visiting)))
+            (plist-put record :visiting_buffer (and buffer t))
+            (plist-put record :visiting_buffer_modified
+                       (and buffer (buffer-modified-p buffer)))))
+        result))))
+
+(defun ende-tools--run-project-tool (function arguments root callback)
+  "Run disk FUNCTION in a worker, then return live metadata through CALLBACK."
+  (let ((tool ende-tools--access-tool)
+        (excluded-path-patterns ende-project-excluded-path-patterns))
+    (ende-worker-run
+     'ende-tools function (list arguments root)
+     (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+             '(ende-tools--access-config ende-tools--access-tool
+               ende-project-excluded-path-patterns ende-project-max-file-bytes
+               ende-tools-max-listed-files ende-tools-max-search-files
+               ende-tools-max-search-results ende-tools-max-search-output-bytes
+               ende-tools-max-search-context-lines case-fold-search))
+     (lambda (result error)
+       (if error
+           (funcall callback nil error)
+         (let ((reply
+                (condition-case caught
+                    (list :value (ende-tools--project-result
+                                  tool result root excluded-path-patterns))
+                  ((error quit) (list :error (error-message-string caught))))))
+           (funcall callback (plist-get reply :value) (plist-get reply :error)))))
+     ende-tools--register-cancellation-function)))
 
 (defun ende-tools--project-info (_arguments root)
   "Return basic information about project ROOT."
@@ -2618,7 +2659,9 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'project_info
  "Return the current project root and compact source counts."
- ende-tools--empty-object-schema #'ende-tools--project-info nil :no-resource)
+ ende-tools--empty-object-schema
+ (apply-partially #'ende-tools--run-project-tool #'ende-tools--project-info)
+ nil :no-resource '(:async t))
 
 (ende-tool-register
  'list_project_files
@@ -2632,7 +2675,8 @@ process-group cancellation function with the active Ende job."
                         (:description . "Defaults to the configured maximum.")))
        (:include_metadata . ((:type . "boolean")))))
    (:additionalProperties . :json-false))
- #'ende-tools--list-project-files)
+ (apply-partially #'ende-tools--run-project-tool #'ende-tools--list-project-files)
+ nil nil '(:async t))
 
 (ende-tool-register
  'file_info
@@ -2700,7 +2744,8 @@ process-group cancellation function with the active Ende job."
        ((:required . ["patterns"]))
        ((:required . ["regexp"]))])
    (:additionalProperties . :json-false))
- #'ende-tools--search-project)
+ (apply-partially #'ende-tools--run-project-tool #'ende-tools--search-project)
+ nil nil '(:async t))
 
 (ende-tool-register
  'edit_file

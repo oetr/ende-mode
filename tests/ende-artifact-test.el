@@ -358,6 +358,7 @@
                   "* Topic\n** Question\n:PROPERTIES:\n:ENDE_CHAT_ID: destination\n:END:\nAsk\n")
           (goto-char (point-max))
           (let ((job (ende-ask)))
+            (ende-test--wait-for (lambda () (ende-job-terminal-p job)))
             (should (eq (ende-job-state job) 'completed)))
           (should-not (string-match-p "#\\+CAPTION:" (buffer-string)))
           (let* ((live (plist-get (nth 1 ende-test--calls) :messages))
@@ -700,6 +701,7 @@
                   (when normalized
                     (should (= 2 (ende-test--count-matches (regexp-quote normalized) (ende-content-readable body)))))
                   (ende-test--complete-call (cadr ende-test--calls))
+                  (ende-test--wait-for (lambda () (= (length ende-test--calls) 3)))
                   (should (equal descriptors (plist-get (ende-job-instruction job) :reply-artifacts)))
                   (should-not (plist-get (ende-job-instruction job) :generated-artifacts))
                   (let* ((turn (cl-find-if
