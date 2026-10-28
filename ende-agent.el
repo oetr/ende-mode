@@ -7,6 +7,7 @@
 (require 'ende-tools)
 (require 'ende-image)
 (require 'ende-queue)
+(require 'ende-work-buffer)
 (require 'ende-target)
 (require 'ende-provider)
 (require 'subr-x)
@@ -185,6 +186,8 @@ include any explicit user overrides relevant to the assigned task.")
                    (ende-agent--owned-buffer-killed job owned-buffer))))
       (setf (ende-job-owned-buffer-hook job) hook)
       (with-current-buffer buffer
+        (org-mode)
+        (ende-work-buffer-mode 1)
         (setq-local default-directory
                     (or (plist-get (ende-job-access-policy job) :root)
                         default-directory))
@@ -238,10 +241,6 @@ include any explicit user overrides relevant to the assigned task.")
              (ende-job-finish child (or (plist-get result :content) "")))))))
 
 (ende-register-job-handler 'agent #'ende-agent--run-child)
-
-(defun ende-agent-cleanup-private-buffer (job)
-  "Release JOB's private target and buffer idempotently."
-  (ende--job-cleanup-owned-buffer job))
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))

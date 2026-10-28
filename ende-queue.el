@@ -17,6 +17,7 @@
 (require 'ende-provider)
 (require 'ende-codex)
 (require 'ende-target)
+(require 'ende-work-buffer)
 
 ;;;; Job records
 
@@ -745,11 +746,12 @@ bypassed by a later same-provider job."
   "Release target and private buffer resources for unpublished JOB."
   (when (ende-target-p (ende-job-target job))
     (ende-ignore-errors #'ende-target-release (ende-job-target job)))
-  (ende--job-cleanup-owned-buffer job)
+  (when-let* ((buffer (ende--job-release-owned-buffer job)))
+    (kill-buffer buffer))
   job)
 
-(defun ende--job-cleanup-owned-buffer (job)
-  "Remove JOB's private-buffer hook and destroy its owned buffer once."
+(defun ende--job-release-owned-buffer (job)
+  "Detach JOB's private-buffer ownership and return its surviving buffer."
   (let ((buffer (ende-job-owned-buffer job))
         (hook (ende-job-owned-buffer-hook job)))
     (setf (ende-job-owned-buffer job) nil
@@ -757,9 +759,7 @@ bypassed by a later same-provider job."
     (when (and hook (buffer-live-p buffer))
       (with-current-buffer buffer
         (remove-hook 'kill-buffer-hook hook t)))
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer)))
-  job)
+    (and (buffer-live-p buffer) buffer)))
 
 (defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.
@@ -920,8 +920,7 @@ scheduler callbacks are permitted to observe the child."
         (ende--queue-sync-tail)
         (dolist (job jobs)
           (ende--unregister-source-job job)
-          (ende-ignore-errors #'ende-target-release (ende-job-target job))
-          (ende--job-cleanup-owned-buffer job))
+          (ende-ignore-errors #'ende-target-release (ende-job-target job)))
         (let (settlement-failures)
           (dolist (job jobs)
             (let ((settlement (ende-job-delegated-settlement job)))
@@ -946,7 +945,8 @@ scheduler callbacks are permitted to observe the child."
         (ende--queue-maintain-fences)
         (dolist (job jobs)
           (ende--job-terminal-event
-           job (ende-job-state job) (ende-job-result job) (ende-job-error job)))
+           job (ende-job-state job) (ende-job-result job) (ende-job-error job))
+          (ende-work-buffer-retire (ende--job-release-owned-buffer job)))
         (ende-queue-emit-event (list :type state))
         (dolist (entry cancellations)
           (ende--invoke-cancellation (cdr entry))))

@@ -2296,7 +2296,7 @@ When CHECKPOINT is non-nil, persist the completed boundary."
       (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun ende-chat--dispose-staging-buffer (job event)
-  "Kill JOB's staging buffer after final settlement."
+  "Retire JOB's staging buffer after safely preserving its transcript."
   (when (eq (plist-get event :type) :settled)
     (let* ((instruction (ende-job-instruction job))
            (buffer (plist-get instruction :staging-buffer))
@@ -2308,7 +2308,7 @@ When CHECKPOINT is non-nil, persist the completed boundary."
       (when (and (buffer-live-p buffer)
                  (or materialized
                      (and snapshot-current file (file-exists-p file))))
-        (kill-buffer buffer)
+        (ende-work-buffer-retire buffer)
         (setq instruction (plist-put instruction :staging-buffer nil)))
       (when materialized
         (setq instruction
