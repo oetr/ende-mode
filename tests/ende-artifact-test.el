@@ -362,8 +362,13 @@
            (result (list :content
                          (concat ende-artifact-test-svg
                                  "\n<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>\n"))))
-      (should-error (ende-chat--prepare-response job result 2)
-                    :type 'ende-artifact-validation-error)
+      (let* ((failure (should-error (ende-chat--prepare-response job result 2)
+                                    :type 'ende-artifact-validation-error))
+             (message (ende-chat--failure-text failure)))
+        (should (string-match-p "Artifact .* in conversation chat:" message))
+        (should-not (string-match-p (regexp-quote directory) message))
+        (should-not (string-match-p "ende-artifact-validation-error\\|Invalid artifact" message))
+        (should (string-match-p "Unsupported SVG element" message)))
       (should (equal (directory-files (ende-artifact-directory base "chat")
                                       nil directory-files-no-dot-files-regexp)
                      (list existing))))))

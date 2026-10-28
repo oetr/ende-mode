@@ -293,9 +293,13 @@ owned buffer."
           (format "%s: %s" kind message)
         message)))
    ((stringp error) (ende--safe-message-string error))
-   ((and (consp error) (eq (car error) 'error))
+   ((and (consp error) (symbolp (car error))
+         (memq 'error (get (car error) 'error-conditions)))
     (condition-case nil
-        (ende--safe-message-string (error-message-string error))
+        (ende--safe-message-string
+         (if (and (stringp (cadr error)) (null (cddr error)))
+             (cadr error)
+           (error-message-string error)))
       (error (ende--safe-message-string error))))
    (t (ende--safe-message-string error))))
 

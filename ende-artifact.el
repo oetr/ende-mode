@@ -335,7 +335,7 @@ Check containment even when intermediate directories are symlinks."
              (info (condition-case failure (ende-artifact--validate-image path bytes)
                      (error
                       (signal 'ende-artifact-validation-error
-                              (list (format "Image %s: %s" path (error-message-string failure)))))))
+                              (list (error-message-string failure))))))
              (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
         (ende-artifact--cache-room (if retain (length bytes) 0))
         (setq entry (list :signature signature :info info :used 0
@@ -411,8 +411,11 @@ Keep generated filenames contained in their output directory."
             (ende-artifact--load-image path)))
       (error
        (signal (car failure)
-               (list (format "Artifact %s in conversation %s, expected directory %s: %s"
-                             name chat-id directory (error-message-string failure))))))))
+               (list (format "Artifact %s in conversation %s: %s"
+                             name chat-id
+                             (if (eq (car failure) 'ende-artifact-validation-error)
+                                 (cadr failure)
+                               (error-message-string failure)))))))))
 
 (defun ende-artifact-store (base chat-id bytes media)
   "Exclusively store validated BYTES of MEDIA under BASE and CHAT-ID.

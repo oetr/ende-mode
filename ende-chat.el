@@ -3706,7 +3706,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                          "Return a corrected complete response. Use only supported static SVG; "
                          "simplify it or omit the image if necessary. "
                          "Do not repeat completed tool actions.")
-                 (error-message-string failure)))))
+                 (ende-error-display-message failure)))))
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with frozen CONFIGURATION through the shared loop."
