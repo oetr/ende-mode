@@ -432,6 +432,7 @@
            (reference (concat "#+ENDE_ARTIFACT: " name "\n"
                               (ende-artifact-link base "chat" name buffer-file-name))))
       (insert "* Topic\n** First\n" reference "\n** Last\n" reference)
+      (font-lock-ensure)
       (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
         (ende-artifact-refresh)
         (should (= 2 (length ende-artifact--overlays)))

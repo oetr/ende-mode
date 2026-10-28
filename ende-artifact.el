@@ -657,11 +657,10 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                          (pixels-y (max 1 (round (* height scale))))
                          (signature (list path (plist-get entry :signature) pixels-x pixels-y))
                          (start (+ begin (1- (plist-get reference :begin))))
-                         ;; Anchor before the link, inside Org's foldable text.
+                         ;; Keep the anchor outside link syntax and inside the fold.
                          (finish (save-excursion
                                    (goto-char start)
-                                   (forward-line 1)
-                                   (point)))
+                                   (line-end-position)))
                          (overlay (or (gethash start existing)
                                       (cl-find-if
                                        (lambda (candidate)
