@@ -22,6 +22,8 @@
   "Maximum inline preview height in pixels."
   :type 'integer :group 'ende-artifact)
 
+(defconst ende-artifact--svg-byte-limit (* 4 1024 1024))
+
 (defun ende-artifact--valid-name-p (name)
   "Return non-nil for a simple artifact NAME."
   (and (stringp name)
@@ -76,11 +78,18 @@ Check containment even when intermediate directories are symlinks."
   "Read PATH without character conversion."
   (with-temp-buffer
     (set-buffer-multibyte nil)
-    (insert-file-contents-literally path)
+    (if (equal (downcase (or (file-name-extension path) "")) "svg")
+        (progn
+          (insert-file-contents-literally path nil 0 (1+ ende-artifact--svg-byte-limit))
+          (when (> (buffer-size) ende-artifact--svg-byte-limit)
+            (error "SVG exceeds the size limit")))
+      (insert-file-contents-literally path))
     (buffer-string)))
 
 (defun ende-artifact--svg (bytes)
   "Parse and validate static SVG BYTES, rejecting unsupported active content."
+  (when (> (string-bytes bytes) ende-artifact--svg-byte-limit)
+    (error "SVG exceeds the size limit"))
   (with-temp-buffer
     (insert (decode-coding-string bytes 'utf-8))
     (goto-char (point-min))
@@ -88,6 +97,7 @@ Check containment even when intermediate directories are symlinks."
       (error "SVG declarations, entities and processing instructions are unsupported"))
     (let* ((nodes (xml-parse-region (point-min) (point-max)))
            (root (car nodes))
+           (elements 0)
            (allowed '(svg g defs title desc style rect circle ellipse line polyline
                           polygon path text tspan linearGradient radialGradient
                           stop clipPath mask marker use symbol pattern)))
@@ -96,8 +106,10 @@ Check containment even when intermediate directories are symlinks."
                           "http://www.w3.org/2000/svg"))
         (error "Expected one complete SVG document with the SVG namespace"))
       (cl-labels
-          ((walk (node)
+          ((walk (node depth)
              (when (consp node)
+               (when (or (> (cl-incf elements) 20000) (> depth 64))
+                 (error "SVG exceeds the complexity limit"))
                (unless (memq (car node) allowed)
                  (error "Unsupported SVG element: %s" (car node)))
                (dolist (attribute (cadr node))
@@ -106,8 +118,8 @@ Check containment even when intermediate directories are symlinks."
                    (cond
                     ((member key '("xmlns" "xmlns:xlink"))
                      (unless (equal value (if (equal key "xmlns")
-                                             "http://www.w3.org/2000/svg"
-                                           "http://www.w3.org/1999/xlink"))
+                                              "http://www.w3.org/2000/svg"
+                                            "http://www.w3.org/1999/xlink"))
                        (error "Unsupported SVG namespace: %s" value)))
                     ((equal key "style") (ende-css-validate value))
                     ((member key ende-css-properties)
@@ -135,8 +147,9 @@ Check containment even when intermediate directories are symlinks."
                  (unless (cl-every #'stringp (cddr node))
                    (error "SVG stylesheets must contain only CSS text"))
                  (ende-css-validate (apply #'concat (cddr node)) 'stylesheet))
-               (mapc #'walk (cddr node)))))
-        (walk root))
+               (dolist (child (cddr node))
+                 (walk child (1+ depth))))))
+        (walk root 0))
       root)))
 
 (defun ende-artifact--u16be (bytes offset)
@@ -285,6 +298,10 @@ Check containment even when intermediate directories are symlinks."
               (ende-artifact--jpeg-dimensions bytes))))
     (unless (and dimensions (> (car dimensions) 0) (> (cdr dimensions) 0))
       (error "Malformed image content"))
+    (when (and (eq type 'svg)
+               (or (> (car dimensions) 8192) (> (cdr dimensions) 8192)
+                   (> (* (car dimensions) (cdr dimensions)) (* 16 1024 1024))))
+      (error "SVG exceeds the dimension limit"))
     (list :type :image :path path :media-type media
           :width (car dimensions) :height (cdr dimensions)
           :bytes (length bytes))))
@@ -723,7 +740,10 @@ ARTIFACTS supplies descriptors, overridden by explicit reference captions."
                       (overlay-put overlay 'evaporate t)
                       (push overlay ende-artifact--overlays))
                     (unless (equal signature (overlay-get overlay 'ende-artifact-signature))
-                      (let ((image (create-image path nil nil :width pixels-x :height pixels-y))
+                      (let ((image (if (equal (plist-get part :media-type) "image/svg+xml")
+                                       (create-image (plist-get entry :data) 'svg t
+                                                     :width pixels-x :height pixels-y)
+                                     (create-image path nil nil :width pixels-x :height pixels-y)))
                             ;; The link's end can remain visible outside a fold.
                             (collapse `(when (invisible-p (overlay-start ,overlay)) . "")))
                         (when (display-graphic-p) (image-flush image t))

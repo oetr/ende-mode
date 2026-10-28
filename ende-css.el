@@ -168,7 +168,7 @@ CONTEXT is `stylesheet', `value', or the default `declarations'."
                   ((memq (char-after) '(?\" ?\')) (ende-css--string))
                   ((name-p)
                    (let ((name (downcase (ende-css--identifier))))
-                     (when (eq (char-after) ?\()
+                     (when (eq (ende-css--skip) ?\()
                        (forward-char)
                        (if (equal name "url")
                            (ende-css--url)

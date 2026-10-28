@@ -20,10 +20,16 @@
                   ("fill: u\\72l('\\66ile:/secret')")
                   ("fill: url(/* comment */#paint)")
                   ("font: expression(alert(1))")
+                  ("font: expression /* comment */ (alert(1))")
                   ("fill: var(--unvalidated)")
                   ("rect { fill: red;" . stylesheet)
                   ("fill: red; /* incomplete")))
     (should-error (ende-css-validate (car case) (cdr case)))))
+
+(ert-deftest ende-css-bounds-work ()
+  (should-error (ende-css-validate (make-string (* 1024 1024) ?\s)))
+  (should-error (ende-css-validate
+                 (concat "opacity: " (make-string 100 ?\() "1" (make-string 100 ?\))))))
 
 (provide 'ende-css-test)
 

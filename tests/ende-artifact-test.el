@@ -340,6 +340,17 @@
         (delete-file path)
         (should-error (ende-artifact--load-image path))))))
 
+(ert-deftest ende-artifact-svg-bounds-work ()
+  (should-error (ende-artifact--svg (make-string (* 8 1024 1024) ?\s)))
+  (should-error
+   (ende-artifact--svg
+    (concat "<svg xmlns=\"http://www.w3.org/2000/svg\">"
+            (apply #'concat (make-list 100 "<g>"))
+            (apply #'concat (make-list 100 "</g>")) "</svg>")))
+  (should-error
+   (ende-artifact--validate-image
+    "large.svg" "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100000\" height=\"100000\"/>")))
+
 (ert-deftest ende-artifact-structural-persistence ()
   (ende-test--reset)
   (unwind-protect
