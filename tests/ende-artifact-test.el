@@ -387,7 +387,8 @@
               (should (equal types '(:text :image :text :image :text)))))
           (let* ((job (ende--make-job
                        :target (ende-target--create :buffer (current-buffer))
-                       :instruction (list :question-id "destination" :generated-artifacts (list name))))
+                       :instruction (list :question-id "destination" :generated-artifacts
+                                          (list (list :name name :caption nil)))))
                  ;; Pending host data must not be appended inside the raw block.
                  (pending-base (ende-artifact-directory base "destination" t)))
             (copy-file (plist-get (ende-artifact-resolve base "source" name) :path)
@@ -601,6 +602,93 @@
             (should (equal (if save draft initial)
                            (mapcar #'default-value ende-image--configuration-variables))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest ende-artifact-caption-lifecycle ()
+  (ende-test--reset)
+  (unwind-protect
+      (dolist (scenario '((nil nil nil) ("" nil nil)
+                          ("  Tool\ncaption  " nil "Tool caption")
+                          ("Tool caption" "" "Tool caption")
+                          ("Tool caption" "#+CAPTION:\n" nil)
+                          ("Tool caption" "#+CAPTION: Override\n" "Override")))
+        (ende-test--reset)
+        (ende-artifact-test-with-files
+          (pcase-let* ((`(,caption ,caption-line ,expected) scenario)
+                       (normalized (ende-artifact--caption caption))
+                       (base (ende-artifact-base))
+                       (source (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
+                       (arguments (append '((:prompt . "Draw a box."))
+                                          (when caption (list (cons :caption caption)))))
+                       (ende-llm-function
+                        (ende-test--fake-llm
+                         (list (list :tool-calls
+                                     (list (list :id "image" :name "generate_image"
+                                                 :arguments (json-encode arguments))))
+                               (list :content "#+ENDE_ARTIFACT: image-001.png\n"
+                                     :tool-calls '((:id "inspect" :name "project_info" :arguments "{}")))
+                               (list :content
+                                     (concat "Final reply\n"
+                                             (ende-artifact-render base "source" source buffer-file-name "Copied source")
+                                             (when caption-line
+                                               (concat "#+ENDE_ARTIFACT: image-001.png\n" caption-line)))))
+                         t)))
+            (insert (ende-test--chat-config-block `((root ,directory) (tools generate_image project_info)))
+                    "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: generated\n:END:\n** Question\nDraw\n")
+            (goto-char (point-max))
+            (cl-letf (((symbol-function 'ende-image--request)
+                       (lambda (prompt callback _register)
+                         (should (equal prompt "Draw a box."))
+                         (funcall callback
+                                  (list (list :bytes ende-artifact-test-png :media-type "image/png")
+                                        (list :bytes ende-artifact-test-png :media-type "image/png")) nil))))
+              (let ((job (ende-ask)))
+                (ende-test--complete-call (car ende-test--calls))
+                (let* ((descriptors (list (list :name "image-001.png" :caption normalized)
+                                          (list :name "image-002.png" :caption normalized)))
+                       (handoff (car (last (plist-get (cadr ende-test--calls) :messages))))
+                       (body (ende-content-body handoff)))
+                  (should-not (plist-get (ende-job-instruction job) :generated-artifacts))
+                  (should (equal descriptors (plist-get (ende-job-instruction job) :reply-artifacts)))
+                  (should (= 2 (cl-count :image body :key (lambda (part) (plist-get part :type)))))
+                  (when normalized
+                    (should (= 2 (ende-test--count-matches (regexp-quote normalized) (ende-content-readable body)))))
+                  (ende-test--complete-call (cadr ende-test--calls))
+                  (should (equal descriptors (plist-get (ende-job-instruction job) :reply-artifacts)))
+                  (should-not (plist-get (ende-job-instruction job) :generated-artifacts))
+                  (let* ((turn (cl-find-if
+                                (lambda (message)
+                                  (equal (plist-get (car (plist-get message :tool-calls)) :id) "inspect"))
+                                (plist-get (nth 2 ende-test--calls) :messages)))
+                         (parts (ende-content-body turn)))
+                    (should (= 1 (cl-count :image parts :key (lambda (part) (plist-get part :type)))))
+                    (when normalized
+                      (should (string-match-p (regexp-quote normalized) (ende-content-readable parts)))))
+                  (ende-test--complete-call (nth 2 ende-test--calls))
+                  (should (eq (ende-job-state job) 'completed)))
+                (let* ((headline (car (last (ende-test--chat-response-headlines))))
+                       (text (buffer-substring-no-properties (org-element-property :begin headline)
+                                                             (org-element-property :end headline)))
+                       (references (ende-artifact--references text))
+                       (images (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image))
+                                                (ende-artifact-content text))))
+                  ;; The copied source has the same filename as the generated image.
+                  (should (= 3 (length references) (length images)))
+                  (should (equal (mapcar (lambda (part) (plist-get part :path)) images)
+                                 (list (plist-get (ende-artifact-resolve base "source" source) :path)
+                                       (plist-get (ende-artifact-resolve base "generated" "image-001.png") :path)
+                                       (plist-get (ende-artifact-resolve base "generated" "image-002.png") :path))))
+                  (should (equal (mapcar (lambda (ref) (plist-get ref :caption)) references)
+                                 (list "Copied source" expected normalized)))
+                  (should-not (string-match-p "^[ \t]*#\\+CAPTION:[ \t]*$" text))
+                  (goto-char (point-max))
+                  (insert "\n** Follow up\nContinue\n")
+                  (let* ((history (ende-chat-context-at-point))
+                         (final (car (last (cl-remove-if-not
+                                           (lambda (message) (equal (ende-content-role message) "assistant")) history)))))
+                    (should (equal images
+                                   (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image))
+                                                     (ende-content-body final)))))))))))
+    (ende-test--reset)))
 
 (ert-deftest ende-artifact-generation-http-lifecycle ()
   (ende-artifact-test-with-files

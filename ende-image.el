@@ -206,8 +206,9 @@ REGISTER attaches cancellation to the existing tool lifecycle."
 
 (defun ende-image--generate (arguments _root callback)
   "Generate only into the current conversation; never accept model paths."
-  (ende-tools--assert-properties arguments '("prompt") "generate_image")
+  (ende-tools--assert-properties arguments '("prompt" "caption") "generate_image")
   (let* ((prompt (ende-tools--required-string arguments "prompt"))
+         (caption (ende-artifact--caption (ende-tools--argument arguments "caption")))
          (job (and ende-tools--execution-owner
                    (ende-queue-live-job-by-id ende-tools--execution-owner)))
          (buffer (and job (ende-target-buffer (ende-job-target job))))
@@ -227,23 +228,26 @@ REGISTER attaches cancellation to the existing tool lifecycle."
            (if error (funcall callback nil error)
              (when (ende-job-execution-current-p job generation)
                (condition-case nil
-                   (let (names)
+                   (let (artifacts)
                      (dolist (part parts)
-                       (push (ende-artifact-store base id (plist-get part :bytes)
-                                                  (plist-get part :media-type)) names))
-                     (setq names (nreverse names))
+                       (push (list :name (ende-artifact-store base id (plist-get part :bytes)
+                                                             (plist-get part :media-type))
+                                   :caption caption) artifacts))
+                     (setq artifacts (nreverse artifacts))
                      (setf (ende-job-instruction job)
                            (plist-put (ende-job-instruction job) :generated-artifacts
-                                      (append (plist-get (ende-job-instruction job) :generated-artifacts) names)))
-                     (funcall callback (list :ok t :artifact (car names) :status "created") nil))
+                                      (append (plist-get (ende-job-instruction job) :generated-artifacts) artifacts)))
+                     (funcall callback (list :ok t :artifact (plist-get (car artifacts) :name)
+                                             :status "created") nil))
                  (error (funcall callback nil "Generated image could not be validated or stored"))))))
          ende-tools--register-cancellation-function)))))
 
 (ende-tool-register
  'generate_image
- "Generate an image from a prompt using the user-configured image model. Return an artifact filename; emit #+ENDE_ARTIFACT: FILENAME to attach it."
+ "Generate an image from a prompt using the user-configured image model. Caption is optional; an omitted or empty caption means no displayed caption. Return an artifact filename; emit #+ENDE_ARTIFACT: FILENAME to attach it."
  '((:type . "object")
-   (:properties . ((:prompt . ((:type . "string") (:minLength . 1)))))
+   (:properties . ((:prompt . ((:type . "string") (:minLength . 1)))
+                   (:caption . ((:type . "string")))))
    (:required . ["prompt"]) (:additionalProperties . :json-false))
  #'ende-image--generate :write :no-resource
  '(:requires-root nil :requires-resources nil :async t))

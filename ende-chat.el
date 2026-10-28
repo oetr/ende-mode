@@ -1542,9 +1542,13 @@ independently enforces tool and resource permissions.\n\n"
    ende-chat--org-format
    "\n\nYou may output complete standalone static SVG diagrams outside code or quote
 blocks; Ende saves them as image artifacts. Reference existing conversation
-images with #+ENDE_ARTIFACT: FILENAME (no path); never invent filenames.
+images with #+ENDE_ARTIFACT: FILENAME using their real artifact filenames.
+Captions are optional. Pass caption to generate_image when wanted; an omitted
+or empty caption produces no CAPTION line. An explicit #+CAPTION: line immediately
+after an artifact marker overrides the tool caption; an empty one clears it.
 generate_image is optional and uses the user's configured image model.
-Do not set artifact storage configuration."
+Never invent filenames or paths, construct storage links, or configure artifact
+storage. Ende owns artifact paths."
    "\n\nIf the final user headline is untitled and has a request body, begin with
 exactly one line: #+ENDE_CHAT_TITLE: Short title
 Choose a concise title for the request. Otherwise omit this keyword.\n\n"
@@ -3259,6 +3263,7 @@ Keep it while another queued compaction still refers to its durable identity."
   "Prepare JOB's RESULT as normalized Org and ordered context parts at LEVEL."
   (let* ((instruction (ende-job-instruction job))
          (pending (plist-get instruction :generated-artifacts))
+         (artifacts (append pending (plist-get instruction :reply-artifacts)))
          (buffer (ende-target-buffer (ende-job-target job)))
          (org-file (and (buffer-live-p buffer) (buffer-local-value 'buffer-file-name buffer)))
          (output (or (and (listp result) (plist-get result :output-parts))
@@ -3305,19 +3310,22 @@ Keep it while another queued compaction still refers to its durable identity."
              (resolved
               (if (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file))
-                (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file)))
-             (references (plist-get resolved :references))
+                    (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts))
+                (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts)))
+             (paths (mapcar (lambda (ref) (plist-get (plist-get ref :part) :path))
+                            (plist-get resolved :references)))
              (parts (plist-get resolved :parts))
              (persisted (plist-get resolved :content)))
-        (dolist (name pending)
+        (dolist (artifact pending)
           (pcase-let* ((`(,base ,id) (storage))
+                       (name (plist-get artifact :name))
                        (part (ende-artifact-resolve base id name)))
-            (unless (cl-find (plist-get part :path) references
-                             :key (lambda (ref) (plist-get (plist-get ref :part) :path)) :test #'equal)
-              (setq persisted
-                    (concat persisted "\n" (ende-artifact-render base id name org-file))
-                    parts (ende-content-concat (list parts (list part)))))))
+            (unless (member (plist-get part :path) paths)
+              (let ((block (ende-artifact-render base id name org-file (plist-get artifact :caption))))
+                (setq persisted (concat persisted "\n" block)
+                      parts (ende-content-concat
+                             (list parts (with-current-buffer buffer (ende-artifact-content block))))))
+              (push (plist-get part :path) paths))))
         (setq normalized (plist-put normalized :content persisted))
         (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
         (list :normalized normalized :parts (ende-chat--restore-response-parts parts normalized))))))
@@ -3327,9 +3335,11 @@ Keep it while another queued compaction still refers to its durable identity."
   (when (ende-job-current-p job)
     (condition-case failure
         (let* ((_attachments
-                (when-let* ((names (plist-get (ende-job-instruction job) :reply-artifacts)))
+                (when-let* ((artifacts (plist-get (ende-job-instruction job) :reply-artifacts)))
                   (setf (ende-job-instruction job)
-                        (plist-put (ende-job-instruction job) :generated-artifacts names))))
+                        (plist-put (ende-job-instruction job) :generated-artifacts
+                                   (append (plist-get (ende-job-instruction job) :generated-artifacts)
+                                           artifacts)))))
                (compact (eq (ende-job-type job) 'chat-compact))
                (thinking (and (listp result) (plist-get result :thinking)))
                (instruction (ende-job-instruction job))
@@ -3778,8 +3788,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                              (prepared (ende-chat--prepare-response
                                         job '(:content "") (1+ (plist-get instruction :response-level)))))
                         (setf (ende-job-instruction job)
-                              (plist-put instruction :reply-artifacts
-                                         (append (plist-get instruction :reply-artifacts) pending)))
+                              (plist-put (ende-job-instruction job) :reply-artifacts
+                                         (append (plist-get (ende-job-instruction job) :reply-artifacts) pending)))
                         (list (list :role "assistant" :content (plist-get prepared :parts)))))
                     (ende-chat--consume-user-guidance job))))
         :before-final

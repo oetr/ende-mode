@@ -547,7 +547,10 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
       (let ((begin (plist-get reference :begin)))
         (when (< position begin)
           (push (list :type :text :text (substring text (1- position) (1- begin))) parts))
-        (when-let* ((caption (ende-artifact--caption (plist-get reference :caption))))
+        (when-let* ((caption (ende-artifact--caption
+                             (if (plist-member reference :resolved-caption)
+                                 (plist-get reference :resolved-caption)
+                               (plist-get reference :caption)))))
           (push (list :type :text :text (concat caption "\n")) parts))
         (push (plist-get reference :part) parts)
         (setq position (plist-get reference :end))))
@@ -582,12 +585,19 @@ Explicit references use their file link; RESOLVE-FILE enables user attachments."
                                 (decode-coding-string bytes 'utf-8) "\n")))))))
     (ende-artifact--parts text references)))
 
-(defun ende-artifact-prepare-text (text storage org-file)
+(defun ende-artifact-prepare-text (text storage org-file &optional artifacts)
   "Resolve normalized TEXT once into persisted Org and ordered content parts.
-STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
+STORAGE lazily returns (BASE CHAT-ID) for creation-time references only.
+ARTIFACTS supplies descriptors, overridden by explicit reference captions."
   (let ((references (ende-artifact--references text t)) edits)
     (dolist (reference references)
-      (let* ((path (plist-get reference :path))
+      (let* ((generated (cl-find (plist-get reference :name) artifacts
+                                :key (lambda (artifact) (plist-get artifact :name)) :test #'equal))
+             (caption (ende-artifact--caption
+                       (if (plist-member reference :caption)
+                           (plist-get reference :caption)
+                         (plist-get generated :caption))))
+             (path (plist-get reference :path))
              (part
               (if path (ende-artifact--load-image path)
                 (pcase-let* ((`(,base ,id) (funcall storage))
@@ -599,12 +609,13 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                   (ende-artifact-resolve base id name))))
              (directory (directory-file-name (file-name-directory (plist-get part :path)))))
         (setf (plist-get reference :part) part)
+        (nconc reference (list :resolved-caption caption))
         ;; Complete references retain their resolved location, even across questions.
         (push (list (plist-get reference :begin) (plist-get reference :end)
                     (ende-artifact-render
                      (file-name-directory directory) (file-name-nondirectory directory)
                      (file-name-nondirectory (plist-get part :path)) org-file
-                     (plist-get reference :caption))) edits)))
+                     caption)) edits)))
     (list :content (ende-org--apply-edits text edits)
           :parts (ende-artifact--parts text references)
           :references references)))
