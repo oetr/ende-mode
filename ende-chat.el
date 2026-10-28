@@ -3231,74 +3231,78 @@ Keep it while another queued compaction still refers to its durable identity."
 
 (defun ende-chat--prepare-response (job result level &optional trim)
   "Prepare JOB's RESULT as normalized Org and ordered context parts at LEVEL."
-  (let* ((instruction (ende-job-instruction job))
-         (pending (plist-get instruction :generated-artifacts))
-         (artifacts (append pending (plist-get instruction :reply-artifacts)))
-         (buffer (ende-target-buffer (ende-job-target job)))
-         (org-file (and (buffer-live-p buffer) (buffer-local-value 'buffer-file-name buffer)))
-         (output (or (and (listp result) (plist-get result :output-parts))
-                     (list (list :type :text :text (or (ende--result-content result) "")))))
-         storage chunks run last-blocks)
-    (cl-labels
-        ((storage ()
-           (or storage
-               (setq storage
+  (ende-artifact--call-with-transaction
+   (lambda ()
+     (let* ((instruction (ende-job-instruction job))
+            (pending (plist-get instruction :generated-artifacts))
+            (artifacts (append pending (plist-get instruction :reply-artifacts)))
+            (buffer (ende-target-buffer (ende-job-target job)))
+            (org-file (and (buffer-live-p buffer) (buffer-local-value 'buffer-file-name buffer)))
+            (output (or (and (listp result) (plist-get result :output-parts))
+                        (list (list :type :text :text (or (ende--result-content result) "")))))
+            storage chunks run last-blocks)
+       (cl-labels
+           ((storage ()
+              (or storage
+                  (setq storage
+                        (with-current-buffer buffer
+                          (save-excursion
+                            (save-restriction
+                              (widen)
+                              (let* ((document (ende-chat--build-document))
+                                     (question (ende-chat--find-by-property
+                                                document ende-chat-id-property
+                                                (plist-get instruction :question-id))))
+                                (list (ende-artifact-base)
+                                      (ende-chat--property document
+                                                           (ende-chat--root document question) :id)))))))))
+            (flush ()
+              (when run
+                (setq last-blocks (ende-org--blocks (apply #'concat (nreverse run)) t))
+                (push (plist-get last-blocks :content) chunks)
+                (setq run nil))))
+         (dolist (part output)
+           (pcase (plist-get part :type)
+             (:text (push (plist-get part :text) run))
+             (:generated-image
+              (flush)
+              (pcase-let* ((`(,base ,id) (storage))
+                           (name (ende-artifact-store base id (plist-get part :bytes)
+                                                      (plist-get part :media-type))))
+                (push (concat "\n" (ende-artifact-render base id name org-file)) chunks))
+              (setq last-blocks nil))
+             (_ (error "Unsupported generated response part"))))
+         (flush)
+         (let* ((text (apply #'concat (nreverse chunks)))
+                (blocks (ende-org--blocks text))
+                (_metadata
+                 (setq blocks (plist-put blocks :synthetic-end (plist-get last-blocks :synthetic-end))
+                       blocks (plist-put blocks :synthetic-newline (plist-get last-blocks :synthetic-newline))))
+                (normalized (ende-chat--normalize-response text level (not trim) blocks))
+                (resolved
+                 (if (buffer-live-p buffer)
                      (with-current-buffer buffer
-                       (save-excursion
-                         (save-restriction
-                           (widen)
-                           (let* ((document (ende-chat--build-document))
-                                  (question (ende-chat--find-by-property
-                                             document ende-chat-id-property
-                                             (plist-get instruction :question-id))))
-                             (list (ende-artifact-base)
-                                   (ende-chat--property document
-                                                        (ende-chat--root document question) :id)))))))))
-         (flush ()
-           (when run
-             (setq last-blocks (ende-org--blocks (apply #'concat (nreverse run)) t))
-             (push (plist-get last-blocks :content) chunks)
-             (setq run nil))))
-      (dolist (part output)
-        (pcase (plist-get part :type)
-          (:text (push (plist-get part :text) run))
-          (:generated-image
-           (flush)
-           (pcase-let* ((`(,base ,id) (storage))
-                        (name (ende-artifact-store base id (plist-get part :bytes)
-                                                   (plist-get part :media-type))))
-             (push (concat "\n" (ende-artifact-render base id name org-file)) chunks))
-           (setq last-blocks nil))
-          (_ (error "Unsupported generated response part"))))
-      (flush)
-      (let* ((text (apply #'concat (nreverse chunks)))
-             (blocks (ende-org--blocks text))
-             (_metadata
-              (setq blocks (plist-put blocks :synthetic-end (plist-get last-blocks :synthetic-end))
-                    blocks (plist-put blocks :synthetic-newline (plist-get last-blocks :synthetic-newline))))
-             (normalized (ende-chat--normalize-response text level (not trim) blocks))
-             (resolved
-              (if (buffer-live-p buffer)
-                  (with-current-buffer buffer
-                    (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts))
-                (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts)))
-             (paths (mapcar (lambda (ref) (plist-get (plist-get ref :part) :path))
-                            (plist-get resolved :references)))
-             (parts (plist-get resolved :parts))
-             (persisted (plist-get resolved :content)))
-        (dolist (artifact pending)
-          (pcase-let* ((`(,base ,id) (storage))
-                       (name (plist-get artifact :name))
-                       (part (ende-artifact-resolve base id name)))
-            (unless (member (plist-get part :path) paths)
-              (let ((block (ende-artifact-render base id name org-file (plist-get artifact :caption))))
-                (setq persisted (concat persisted "\n" block)
-                      parts (ende-content-concat
-                             (list parts (with-current-buffer buffer (ende-artifact-content block))))))
-              (push (plist-get part :path) paths))))
-        (setq normalized (plist-put normalized :content persisted))
-        (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
-        (list :normalized normalized :parts (ende-chat--restore-response-parts parts normalized))))))
+                       (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts))
+                   (ende-artifact-prepare-text (plist-get normalized :content) #'storage org-file artifacts)))
+                (paths (mapcar (lambda (ref) (plist-get (plist-get ref :part) :path))
+                               (plist-get resolved :references)))
+                (parts (plist-get resolved :parts))
+                (persisted (plist-get resolved :content)))
+           (dolist (artifact pending)
+             (pcase-let* ((`(,base ,id) (storage))
+                          (name (plist-get artifact :name))
+                          (part (ende-artifact-resolve base id name)))
+               (unless (member (plist-get part :path) paths)
+                 (let ((block (ende-artifact-render base id name org-file (plist-get artifact :caption))))
+                   (setq persisted (concat persisted "\n" block)
+                         parts (ende-content-concat
+                                (list parts (with-current-buffer buffer (ende-artifact-content block))))))
+                 (push (plist-get part :path) paths))))
+           (setq normalized (plist-put normalized :content persisted))
+           (let ((prepared (list :normalized normalized
+                                 :parts (ende-chat--restore-response-parts parts normalized))))
+             (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
+             prepared)))))))
 
 (defun ende-chat--apply-result (job result)
   "Persist JOB's final assistant protocol message and finish the request."

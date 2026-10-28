@@ -24,6 +24,8 @@
 
 (defconst ende-artifact--svg-byte-limit (* 4 1024 1024))
 
+(define-error 'ende-artifact-validation-error "Invalid artifact")
+
 (defun ende-artifact--valid-name-p (name)
   "Return non-nil for a simple artifact NAME."
   (and (stringp name)
@@ -82,7 +84,7 @@ Check containment even when intermediate directories are symlinks."
         (progn
           (insert-file-contents-literally path nil 0 (1+ ende-artifact--svg-byte-limit))
           (when (> (buffer-size) ende-artifact--svg-byte-limit)
-            (error "SVG exceeds the size limit")))
+            (signal 'ende-artifact-validation-error '("SVG exceeds the size limit"))))
       (insert-file-contents-literally path))
     (buffer-string)))
 
@@ -243,6 +245,22 @@ Check containment even when intermediate directories are symlinks."
   (clrhash ende-artifact--cache)
   (setq ende-artifact--cache-clock 0))
 
+(defvar ende-artifact--record-stored-file nil)
+
+(defun ende-artifact--call-with-transaction (function)
+  "Call FUNCTION, removing newly stored artifacts if it fails."
+  (let* ((files nil)
+         (ende-artifact--record-stored-file (lambda (path) (push path files)))
+         complete)
+    (unwind-protect
+        (prog1 (funcall function)
+          (setq complete t))
+      (unless complete
+        (dolist (path files)
+          (remhash path ende-artifact--cache)
+          (when (and (file-exists-p path) (not (file-symlink-p path)))
+            (delete-file path)))))))
+
 (defun ende-artifact--file-signature (path)
   "Return PATH's practical file identity and mutable preconditions."
   (let ((attributes (file-attributes path 'integer)))
@@ -315,7 +333,9 @@ Check containment even when intermediate directories are symlinks."
       (remhash path ende-artifact--cache)
       (let* ((bytes (ende-artifact--read-bytes path))
              (info (condition-case failure (ende-artifact--validate-image path bytes)
-                     (error (error "Image %s: %s" path (error-message-string failure)))))
+                     (error
+                      (signal 'ende-artifact-validation-error
+                              (list (format "Image %s: %s" path (error-message-string failure)))))))
              (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
         (ende-artifact--cache-room (if retain (length bytes) 0))
         (setq entry (list :signature signature :info info :used 0
@@ -389,8 +409,10 @@ Keep generated filenames contained in their output directory."
                                      (file-truename path))
               (error "artifact escapes its conversation directory"))
             (ende-artifact--load-image path)))
-      (error (error "Artifact %s in conversation %s, expected directory %s: %s"
-                    name chat-id directory (error-message-string failure))))))
+      (error
+       (signal (car failure)
+               (list (format "Artifact %s in conversation %s, expected directory %s: %s"
+                             name chat-id directory (error-message-string failure))))))))
 
 (defun ende-artifact-store (base chat-id bytes media)
   "Exclusively store validated BYTES of MEDIA under BASE and CHAT-ID.
@@ -412,6 +434,8 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
             (write-region bytes nil path nil 'silent nil 'excl))
           (setq written t)
           (ende-artifact-resolve base chat-id name)
+          (when ende-artifact--record-stored-file
+            (funcall ende-artifact--record-stored-file path))
           (setq complete t)
           name)
       (unless complete
@@ -532,7 +556,9 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
                              (skip-chars-forward " \t")
                              (condition-case nil
                                  (progn (nxml-forward-element) (+ begin (1- (point))))
-                               (error (error "Incomplete generated SVG fragment"))))))
+                               (error
+                                (signal 'ende-artifact-validation-error
+                                        '("Incomplete generated SVG fragment")))))))
                   (goto-char end)
                   (when (looking-at "[ \t]*$")
                     (let ((finish (min (point-max) (1+ (line-end-position)))))

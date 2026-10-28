@@ -351,6 +351,23 @@
    (ende-artifact--validate-image
     "large.svg" "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100000\" height=\"100000\"/>")))
 
+(ert-deftest ende-artifact-response-preparation-is-atomic ()
+  (ende-artifact-test-with-files
+    (insert "* Question\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\nAsk\n")
+    (let* ((base (ende-artifact-base))
+           (existing (ende-artifact-store base "chat" ende-artifact-test-png "image/png"))
+           (job (ende--make-job
+                 :target (ende-target--create :buffer (current-buffer))
+                 :instruction '(:question-id "chat")))
+           (result (list :content
+                         (concat ende-artifact-test-svg
+                                 "\n<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>\n"))))
+      (should-error (ende-chat--prepare-response job result 2)
+                    :type 'ende-artifact-validation-error)
+      (should (equal (directory-files (ende-artifact-directory base "chat")
+                                      nil directory-files-no-dot-files-regexp)
+                     (list existing))))))
+
 (ert-deftest ende-artifact-structural-persistence ()
   (ende-test--reset)
   (unwind-protect
