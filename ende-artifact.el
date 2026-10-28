@@ -10,6 +10,7 @@
 (require 'xml)
 (require 'nxml-mode)
 (require 'ende-org)
+(require 'ende-css)
 
 (defgroup ende-artifact nil "Conversation images." :group 'ende)
 
@@ -87,7 +88,7 @@ Check containment even when intermediate directories are symlinks."
       (error "SVG declarations, entities and processing instructions are unsupported"))
     (let* ((nodes (xml-parse-region (point-min) (point-max)))
            (root (car nodes))
-           (allowed '(svg g defs title desc rect circle ellipse line polyline
+           (allowed '(svg g defs title desc style rect circle ellipse line polyline
                           polygon path text tspan linearGradient radialGradient
                           stop clipPath mask marker use symbol pattern)))
       (unless (and (= (length nodes) 1) (eq (car-safe root) 'svg)
@@ -101,49 +102,39 @@ Check containment even when intermediate directories are symlinks."
                  (error "Unsupported SVG element: %s" (car node)))
                (dolist (attribute (cadr node))
                  (let ((key (symbol-name (car attribute)))
-                       (value (cdr attribute))
-                       (case-fold-search t))
-                   (unless (member key
-                                   '("xmlns" "xmlns:xlink" "id" "class" "viewBox"
-                                     "role" "aria-label" "aria-labelledby" "aria-describedby"
-                                     "aria-hidden" "focusable"
-                                     "width" "height" "x" "y" "x1" "y1" "x2" "y2"
-                                     "cx" "cy" "r" "rx" "ry" "d" "points" "dx" "dy"
-                                     "fill" "fill-opacity" "fill-rule" "stroke"
-                                     "stroke-width" "stroke-opacity" "stroke-linecap"
-                                     "stroke-linejoin" "stroke-dasharray" "stroke-dashoffset"
-                                     "opacity" "transform" "font-family" "font-size"
-                                     "font-weight" "font-style" "text-anchor"
-                                     "dominant-baseline" "alignment-baseline" "xml:space"
-                                     "style" "offset" "stop-color" "stop-opacity"
-                                     "gradientUnits" "gradientTransform" "spreadMethod"
-                                     "patternUnits" "patternContentUnits" "patternTransform"
-                                     "fx" "fy" "clip-path" "clip-rule" "clipPathUnits"
-                                     "mask" "maskUnits" "maskContentUnits" "marker-start"
-                                     "marker-mid" "marker-end" "markerWidth" "markerHeight"
-                                     "refX" "refY" "orient" "markerUnits" "preserveAspectRatio"
-                                     "href" "xlink:href" "color" "vector-effect"))
-                     (error "Unsupported SVG attribute: %s" key))
-                   (when (and (equal key "style") (string-match-p "[/<>]" value))
-                     (error "Unsupported SVG CSS syntax"))
-                   (when (or (string-prefix-p "on" (downcase key))
-                             (member key '("xml:base" "src"))
-                             (and (string-match-p "\\(?:^\\|:\\)href\\'" key)
-                                  (not (string-match-p
-                                        "\\`#[[:alnum:]_.-]+\\'" value)))
-                             (string-match-p "@\\|\\\\" value)
-                             (and (not (member key '("xmlns" "xmlns:xlink")))
-                                  (string-match-p
-                                   "\\(?:https?:\\|file:\\|data:\\|ftp:\\|//\\)" value)))
-                     (error "Unsafe SVG attribute: %s" key))
-                   (let ((start 0) (case-fold-search t))
-                     (while (string-match "url[ \t\n]*(\\([^)]*\\))" value start)
-                       (let ((reference (match-string 1 value))
-                             (next (match-end 0)))
-                         (unless (string-match-p "\\`#[[:alnum:]_.-]+\\'"
-                                                 (string-trim reference))
-                           (error "External SVG CSS resource"))
-                         (setq start next))))))
+                       (value (cdr attribute)))
+                   (cond
+                    ((member key '("xmlns" "xmlns:xlink"))
+                     (unless (equal value (if (equal key "xmlns")
+                                             "http://www.w3.org/2000/svg"
+                                           "http://www.w3.org/1999/xlink"))
+                       (error "Unsupported SVG namespace: %s" value)))
+                    ((equal key "style") (ende-css-validate value))
+                    ((member key ende-css-properties)
+                     (ende-css-validate value 'value))
+                    ((member key '("href" "xlink:href"))
+                     (unless (ende-css-local-reference-p value)
+                       (error "External SVG reference")))
+                    ((and (eq (car node) 'style) (equal key "type"))
+                     (unless (equal value "text/css")
+                       (error "Unsupported SVG stylesheet type")))
+                    ((and (eq (car node) 'style) (equal key "media"))
+                     (ende-css-validate value 'value))
+                    ((not (member key
+                                  '("id" "class" "viewBox" "role" "aria-label"
+                                    "aria-labelledby" "aria-describedby" "aria-hidden"
+                                    "focusable" "x1" "y1" "x2" "y2" "points" "dx" "dy"
+                                    "xml:space" "offset" "gradientUnits"
+                                    "gradientTransform" "spreadMethod" "patternUnits"
+                                    "patternContentUnits" "patternTransform" "fx" "fy"
+                                    "clipPathUnits" "maskUnits" "maskContentUnits"
+                                    "markerWidth" "markerHeight" "refX" "refY" "orient"
+                                    "markerUnits" "preserveAspectRatio")))
+                     (error "Unsupported SVG attribute: %s" key)))))
+               (when (eq (car node) 'style)
+                 (unless (cl-every #'stringp (cddr node))
+                   (error "SVG stylesheets must contain only CSS text"))
+                 (ende-css-validate (apply #'concat (cddr node)) 'stylesheet))
                (mapc #'walk (cddr node)))))
         (walk root))
       root)))

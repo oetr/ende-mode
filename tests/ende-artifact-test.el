@@ -271,10 +271,14 @@
     (let* ((base (ende-artifact-base))
            (xml (concat "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\""
                         " role=\"img\" aria-labelledby=\"title\"><title id=\"title\">A &amp; B</title>"
+                        "<style type=\"text/css\"><![CDATA["
+                        ".painted { fill: url('#dots'); stroke: rgb(0, 0, 0); }"
+                        "]]></style>"
                         "<text>\n#+ENDE_ARTIFACT: text-not-a-reference\n</text>"
                         "<defs><pattern id=\"dots\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\">"
                         "<circle cx=\"2\" cy=\"2\" r=\"1\"/></pattern></defs>"
-                        "<rect width=\"80\" height=\"40\" fill=\"url(#dots)\"/></svg>"))
+                        "<rect class=\"painted\" width=\"80\" height=\"40\""
+                        " style=\"opacity: .8; /* Inline styling */ stroke-width: 1\"/></svg>"))
            (code (concat "#+begin_src svg\n" xml "\n#+end_src\n"))
            (prepared (ende-artifact-prepare-text (concat xml "\n" code) (lambda () (list base "chat")) buffer-file-name))
            (parts (plist-get prepared :parts))
@@ -284,7 +288,12 @@
       (should (equal code (plist-get (ende-artifact-prepare-text code (lambda () (ert-fail "Literal storage")) buffer-file-name) :parts)))
       (dolist (payload '("<script/>" "<foreignObject/>" "<use href=\"file:/etc/passwd\"/>"
                          "<pattern href=\"https://example.test/tile.svg\"/>"
-                         "<rect onload=\"alert(1)\"/>" "<rect style=\"fill:url(https://example.test/a)\"/>"))
+                         "<rect onload=\"alert(1)\"/>"
+                         "<style>@import 'theme.css';</style>"
+                         "<style>rect { fill: url(../secret.svg); }</style>"
+                         "<rect fill=\"u\\72l('file:/secret')\"/>"
+                         "<rect xmlns=\"http://www.w3.org/1999/xhtml\"/>"
+                         "<rect style=\"fill:url(https://example.test/a)\"/>"))
         (should-error (ende-artifact-store base "chat"
                                            (concat "<svg xmlns=\"http://www.w3.org/2000/svg\">" payload "</svg>")
                                            "image/svg+xml")))
@@ -539,7 +548,10 @@
 (ert-deftest ende-artifact-preview-lifecycle ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
-           (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml")))
+           (svg (replace-regexp-in-string
+                 "<rect" "<style>rect { fill: blue; }</style><rect"
+                 ende-artifact-test-svg))
+           (name (ende-artifact-store base "chat" svg "image/svg+xml")))
       (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\n"
               (ende-artifact-render base "chat" name buffer-file-name "Reload caption")
               "#+begin_src svg\n" ende-artifact-test-svg "\n#+end_src\n")
