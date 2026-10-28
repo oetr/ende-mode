@@ -603,6 +603,34 @@
                            (mapcar #'default-value ende-image--configuration-variables))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest ende-image-request-contract ()
+  (let ((profile '(:model "fixture-image-model")))
+    (dolist (fields '(((:prompt . "Draw a box."))
+                         ((:prompt . "Draw a box.") (:negative_prompt . "")
+                          (:width . 768) (:height . 1024) (:seed . 0)
+                          (:steps . 20) (:cfg_scale . 0) (:sample_method . "euler")
+                          (:batch_count . 2) (:caption . "Local caption"))))
+      (let* ((arguments (json-parse-string (json-encode fields)))
+             (original (copy-hash-table arguments))
+             (body (ende-image--request-body arguments profile))
+             (expected (json-parse-string
+                        (json-encode
+                         (cons '(:model . "fixture-image-model")
+                               (assq-delete-all :caption (copy-tree fields)))))))
+        (should (= (hash-table-count body) (hash-table-count expected)))
+        (maphash (lambda (name value) (should (equal value (gethash name body))))
+                 expected)
+        (should (= (hash-table-count arguments) (hash-table-count original)))
+        (maphash (lambda (name value) (should (equal value (gethash name arguments))))
+                 original)))
+    (should (= -7 (gethash "seed" (ende-image--request-body
+                                  '(:prompt "Draw a box." :seed -7) profile))))
+    (dolist (arguments '(nil (:prompt "") (:prompt "Draw" :width 0)
+                         (:prompt "Draw" :seed 1.5) (:prompt "Draw" :cfg_scale nil)
+                         (:prompt "Draw" :sample_method "")
+                         (:prompt "Draw" :model "untrusted-model")))
+      (should-error (ende-image--request-body arguments profile)))))
+
 (ert-deftest ende-artifact-caption-lifecycle ()
   (ende-test--reset)
   (unwind-protect
@@ -636,8 +664,9 @@
                     "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: generated\n:END:\n** Question\nDraw\n")
             (goto-char (point-max))
             (cl-letf (((symbol-function 'ende-image--request)
-                       (lambda (prompt callback _register)
-                         (should (equal prompt "Draw a box."))
+                       (lambda (request-arguments callback _register)
+                         (should (equal (ende-tools--argument request-arguments "prompt")
+                                        "Draw a box."))
                          (funcall callback
                                   (list (list :bytes ende-artifact-test-png :media-type "image/png")
                                         (list :bytes ende-artifact-test-png :media-type "image/png")) nil))))
@@ -727,7 +756,7 @@
                        (setq sent data)
                        (funcall real-send process response))))
             (ende-image--request
-             "Draw a box."
+             '(:prompt "Draw a box.")
              (lambda (value error) (cl-incf calls) (setq parts value failure error))
              (lambda (function) (setq cancel function))))
           (let ((data (json-parse-string sent)))

@@ -34,6 +34,20 @@ Nil disables generation even when the tool is activated."
   :type '(choice (const nil) string)
   :group 'ende-image)
 
+(defconst ende-image--request-properties
+  '((:prompt . ((:type . "string") (:minLength . 1)))
+    (:negative_prompt . ((:type . "string")))
+    (:width . ((:type . "integer") (:minimum . 1)))
+    (:height . ((:type . "integer") (:minimum . 1)))
+    (:seed . ((:type . "integer")))
+    (:steps . ((:type . "integer") (:minimum . 1)))
+    (:cfg_scale . ((:type . "number")))
+    (:sample_method . ((:type . "string") (:minLength . 1)
+                       (:description . "Backend sampler name.")))
+    (:batch_count . ((:type . "integer") (:minimum . 1)
+                     (:description . "Number of images to request; requires server support."))))
+  "Generation fields accepted by the image tool.")
+
 (defun ende-image--provider-names ()
   "Return available provider names, including image-only profiles."
   (delete-dups (append '(openrouter local) (ende-provider-names)
@@ -144,14 +158,41 @@ Nil disables generation even when the tool is activated."
       (ende-image--render-configuration))
     (pop-to-buffer buffer)))
 
-(defun ende-image--request (prompt callback register)
-  "Generate PROMPT asynchronously, calling CALLBACK with parts or an error.
+(defun ende-image--request-body (arguments profile)
+  "Return a validated image request body for ARGUMENTS and PROFILE."
+  (let* ((fields
+          (mapcar (lambda (entry)
+                    (ende-tools--property-name (car entry)))
+                  ende-image--request-properties))
+         (body (ende-tools--json-object arguments fields)))
+    (ende-tools--assert-properties
+     arguments (cons "caption" fields) "generate_image")
+    (ende-tools--required-string arguments "prompt")
+    (maphash
+     (lambda (name value)
+       (unless
+           (pcase name
+             ((or "width" "height" "steps" "batch_count")
+              (and (integerp value) (> value 0)))
+             ("seed" (integerp value))
+             ("cfg_scale" (numberp value))
+             ("sample_method"
+              (and (stringp value) (not (string-empty-p value))))
+             (_ (stringp value)))
+         (error "Invalid generate_image argument %s" name)))
+     body)
+    (when-let* ((model (plist-get profile :model)))
+      (puthash "model" model body))
+    body))
+
+(defun ende-image--request (arguments callback register)
+  "Generate from ARGUMENTS, calling CALLBACK with parts or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
   (unless (and (stringp ende-image-model) (not (string-blank-p ende-image-model)))
     (user-error "Configure an image model with M-x ende-image-configure"))
   (let* ((profile (ende-image--profile))
          (url (plist-get profile :url))
-         (data (json-encode `((:model . ,(plist-get profile :model)) (:prompt . ,prompt))))
+         (data (json-encode (ende-image--request-body arguments profile)))
          (lifecycle (ende-transport-session-create nil nil))
          (chunks nil) (size 0) (settled nil))
     (cl-labels
@@ -206,9 +247,7 @@ REGISTER attaches cancellation to the existing tool lifecycle."
 
 (defun ende-image--generate (arguments _root callback)
   "Generate only into the current conversation; never accept model paths."
-  (ende-tools--assert-properties arguments '("prompt" "caption") "generate_image")
-  (let* ((prompt (ende-tools--required-string arguments "prompt"))
-         (caption (ende-artifact--caption (ende-tools--argument arguments "caption")))
+  (let* ((caption (ende-artifact--caption (ende-tools--argument arguments "caption")))
          (job (and ende-tools--execution-owner
                    (ende-queue-live-job-by-id ende-tools--execution-owner)))
          (buffer (and job (ende-target-buffer (ende-job-target job))))
@@ -223,7 +262,7 @@ REGISTER attaches cancellation to the existing tool lifecycle."
              (id (ende-chat--property document (ende-chat--root document question) :id))
              (base (ende-artifact-base)))
         (ende-image--request
-         prompt
+         arguments
          (lambda (parts error)
            (if error (funcall callback nil error)
              (when (ende-job-execution-current-p job generation)
@@ -245,9 +284,10 @@ REGISTER attaches cancellation to the existing tool lifecycle."
 (ende-tool-register
  'generate_image
  "Generate an image from a prompt using the user-configured image model. Caption is optional; an omitted or empty caption means no displayed caption. Return an artifact filename; emit #+ENDE_ARTIFACT: FILENAME to attach it."
- '((:type . "object")
-   (:properties . ((:prompt . ((:type . "string") (:minLength . 1)))
-                   (:caption . ((:type . "string")))))
+ `((:type . "object")
+   (:description . "Optional generation fields are backend-dependent; omitted fields use server defaults.")
+   (:properties . ,(append ende-image--request-properties
+                          '((:caption . ((:type . "string"))))))
    (:required . ["prompt"]) (:additionalProperties . :json-false))
  #'ende-image--generate :write :no-resource
  '(:requires-root nil :requires-resources nil :async t))
