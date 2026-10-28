@@ -1161,7 +1161,13 @@
        (let* ((document (ende-chat--build-document))
               (reply (ende-chat--request-state-headline
                       document request-id "failed")))
-         (should reply))))))
+         (should reply)
+         (should-not (ende-chat--property document reply :visibility)))
+       (goto-char (point-max))
+       (insert "\n** Follow up\nContinue\n")
+       (should (string-match-p "mock failure"
+                               (ende-test--chat-context-text
+                                (ende-chat-context-at-point))))))))
 
 (ert-deftest ende-test/chat-tool-boundaries-update-private-recovery-snapshot ()
   (ende-test--reset)
@@ -1722,13 +1728,18 @@
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '(:error))))
     (ende-test--with-buffer "* Root\n** Question\nOriginal text\n"
-			    (org-mode)
-			    (ende-test--chat-goto "** Question")
-			    (let ((job (ende-ask)))
-			      (should (eq (ende-job-state job) 'failed)))
-			    (should (string-match-p "Original text" (buffer-string)))
-			    (should (string-match-p ":ENDE_CHAT_STATE: failed" (buffer-string)))
-			    (should (string-match-p ":ENDE_VISIBILITY: hidden" (buffer-string))))))
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (let ((job (ende-ask)))
+        (should (eq (ende-job-state job) 'failed)))
+      (should (string-match-p "Original text" (buffer-string)))
+      (should (string-match-p ":ENDE_CHAT_STATE: failed" (buffer-string)))
+      (should-not (string-match-p ":ENDE_VISIBILITY: hidden" (buffer-string)))
+      (goto-char (point-max))
+      (insert "\n** Follow up\nContinue\n")
+      (should (string-match-p "mock failure"
+                              (ende-test--chat-context-text
+                               (ende-chat-context-at-point)))))))
 
 
 

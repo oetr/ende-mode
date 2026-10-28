@@ -2143,8 +2143,6 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                         ":PROPERTIES:\n"
                         (ende-chat--response-property ende-chat-role-property
                                                       "assistant")
-                        (ende-chat--response-property ende-chat-visibility-property
-                                                      "hidden")
                         (ende-chat--response-property ende-chat-reply-to-property
                                                       question-id)
                         (ende-chat--response-property ende-chat-request-id-property
@@ -2843,14 +2841,8 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                                                (equal (ende-chat--property
                                                        updated reply :state)
                                                       "failed"))
-					   (if (equal (ende-chat--property
-                                                       updated reply :state)
-                                                      "failed")
-                                               (equal (ende-chat--property
-                                                       updated reply :visibility)
-                                                      "hidden")
-                                             (null (ende-chat--property
-                                                    updated reply :visibility))))
+                                           (null (ende-chat--property
+                                                  updated reply :visibility)))
 				(error "Malformed staged final Agent: Reply"))
                               (unless (<= (length reasoning) 1)
 				(error "Multiple reasoning sections for chat request %s"
@@ -2918,6 +2910,7 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                       (atomic-change-group
                         (goto-char (org-element-property :begin headline))
                         (org-entry-put nil ende-chat-state-property "failed")
+                        (org-entry-delete nil ende-chat-visibility-property)
                         (let* ((updated (ende-chat--build-document))
                                (failed
                                 (ende-chat--request-state-headline
@@ -2926,12 +2919,9 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                                             :request-id)
                                  "failed")))
                           (when failed
-                            (when (equal (ende-chat--property
-                                          updated failed :visibility)
-                                         "hidden")
-                              (goto-char (org-element-property :end failed))
-                              (unless (bolp) (insert "\n"))
-                              (insert (ende-chat--failure-text error)))
+                            (goto-char (org-element-property :end failed))
+                            (unless (bolp) (insert "\n"))
+                            (insert (ende-chat--failure-text error))
                             (ende-chat--hide-control-drawers))))))))))))
     ((error quit) nil)))
 
