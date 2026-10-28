@@ -34,6 +34,7 @@
 (require 'ende-target)
 (require 'ende-ui)
 (require 'ende-llm)
+(require 'ende-work-buffer)
 (require 'ende-queue)
 (require 'ende-patch)
 (require 'ende-web-fetch)

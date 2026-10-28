@@ -876,7 +876,7 @@
                         org-q))
             (should (eq (with-current-buffer staging-buffer
                           (key-binding (kbd "q")))
-                        #'ende-chat--staging-quit))))
+                        #'ende-work-buffer-quit))))
       (when (buffer-live-p staging-buffer) (kill-buffer staging-buffer))
       (kill-buffer org-buffer))))
 
