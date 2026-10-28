@@ -853,15 +853,16 @@
       (goto-char (min (point-max) (max (point-min) position))))))
 
 (defun ende-queue-ui-visit-agent-work ()
-  "Visit the current job's live staged transcript."
+  "Visit the work buffer belonging to the job at point."
   (interactive)
   (let* ((job (ende-queue-ui--current-job))
-         (buffer (ende-chat--staging-buffer job)))
-    (unless buffer
-      (user-error "No staged agent work yet"))
+         (buffer (pcase (ende-job-type job)
+                   ('agent (ende-job-owned-buffer job))
+                   ('chat (ende-chat--staging-buffer job)))))
+    (unless (buffer-live-p buffer)
+      (user-error "No work buffer available"))
     (pop-to-buffer buffer)
-    (with-current-buffer buffer
-      (goto-char (point-max)))))
+    (goto-char (point-max))))
 
 (defun ende-queue-ui-next-entry (&optional direction)
   "Move to the next or previous job/fence entry by DIRECTION."

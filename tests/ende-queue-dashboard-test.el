@@ -333,71 +333,121 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
           (when (buffer-live-p dashboard)
             (kill-buffer dashboard)))))))
 
-(ert-deftest ende-test/dashboard-visits-live-agent-work-at-transcript-end ()
+(ert-deftest ende-test/dashboard-inspects-agent-and-chat-work-without-editing ()
   (save-window-excursion
     (delete-other-windows)
     (ende-test--dashboard-reset)
-    (with-temp-buffer
-      (org-mode)
-      (let* ((job
-              (ende--make-job
-               :id 91 :type 'chat :state 'running
-               :target (ende-target-create
-                        :buffer (current-buffer) :start (point-min)
-                        :end (point-max) :cursor (point-min)
-                        :review-policy 'ignore)
-               :instruction '(:request-id "dashboard-work")))
-             (staging (ende-chat--staging-buffer job t))
-             (dashboard nil))
-        (unwind-protect
-            (progn
-              (ende-chat--staging-append job "first staged line\n")
-              (ende-chat--staging-append job "latest staged line")
-              (setq dashboard (generate-new-buffer "*ende-dashboard-work-test*"))
-              (with-current-buffer dashboard
-                (ende-queue-ui-mode)
-                (let ((inhibit-read-only t))
-                  (insert "Job entry\n"))
-                (let ((inhibit-read-only t))
-                  (add-text-properties
-                   (point-min) (point-max)
-                   (list 'ende-queue-ui-kind 'job
-                         'ende-queue-ui-owner job))))
-              (with-current-buffer dashboard
-                (goto-char (point-min))
-                (ende-queue-ui-visit-agent-work))
-              (should (eq (window-buffer (selected-window)) staging))
-              (with-current-buffer staging
-                (should (= (point) (point-max)))
-                (should font-lock-mode)
-                (should buffer-read-only)
-                (let ((window (selected-window)))
-                  (ende-chat--staging-append job " followed")
-                  (should (= (window-point window) (point-max)))
-                  (goto-char (point-min))
-                  (let ((position (point)))
-                    (ende-chat--staging-append job " left alone")
-                    (should (= (point) position))))
-                (should (eq (key-binding (kbd "q"))
-                            #'ende-work-buffer-quit))
-                (kill-buffer dashboard)
-                (setq dashboard nil)
-                (ende-work-buffer-quit)
-                (setq dashboard ende-queue-ui--buffer)
-                (should (buffer-live-p dashboard))
-                (should (eq (window-buffer (selected-window)) dashboard)))
-              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "w"))
-                          #'ende-queue-ui-visit-agent-work))
-              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "j"))
-                          #'ende-queue-ui-visit-source))
-              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "RET"))
-                          #'ende-queue-ui-visit-source))
-              (should (eq (lookup-key ende-queue-ui-mode-map (kbd "v"))
-                          #'ende-queue-ui-switch-view)))
-          (when (buffer-live-p staging)
-            (kill-buffer staging))
-          (when (buffer-live-p dashboard)
-            (kill-buffer dashboard)))))))
+    (let* ((directory (make-temp-file "ende-work-inspection-" t))
+           (user-emacs-directory directory)
+           (task "Inspect the private task.")
+           (assistant "Inspecting the tool round.\n#+end_example\n* Supplied heading")
+           (status "Checking the output.\n#+end_example\n* Supplied heading")
+           (reasoning "Private reasoning must not appear in the log.")
+           (call (list :id "progress" :name "about_thinking"
+                       :arguments (json-encode (list :title "Checking work" :status status))))
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list (list :tool-calls
+                         (list (list :id "spawn" :name "spawn_agent"
+                                     :arguments (json-encode (list :task task)))))
+                   (list :content assistant :tool-calls (list call)
+                         :reasoning-content reasoning)
+                   "Private final reply." "Parent final reply.") t))
+           root child staging owned dashboard source)
+      (unwind-protect
+          (ende-test--with-buffer
+           (concat (ende-test--chat-config-block
+                    '((tools spawn_agent)
+                      (agent-config worker)
+                      (spawn-agent-config worker)))
+                   "* Question\nDelegate an inspection.\n")
+           (org-mode)
+           (ende-test--chat-goto "* Question")
+           (setq source (current-buffer)
+                 root (ende-ask))
+           (ende-test--complete-call (car ende-test--calls))
+           (setq child (car (ende-job-children root))
+                 staging (ende-chat--staging-buffer root)
+                 owned (ende-job-owned-buffer child)
+                 dashboard (ende-queue-open))
+           (should (eq (ende-target-buffer (ende-job-target child)) owned))
+           (with-current-buffer dashboard
+             (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id root))))
+             (ende-queue-ui-visit-agent-work))
+           (should (eq (window-buffer (selected-window)) staging))
+           (with-current-buffer staging
+             (should (= (point) (point-max)))
+             (should-error (insert "user edit") :type 'buffer-read-only))
+           (with-current-buffer dashboard
+             (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id child))))
+             (ende-queue-ui-visit-agent-work))
+           (should (eq (window-buffer (selected-window)) owned))
+           (with-current-buffer owned
+             (should (derived-mode-p 'org-mode))
+             (should font-lock-mode)
+             (should (= (point) (point-max)))
+             (should-error (insert "user edit") :type 'buffer-read-only)
+             (should (string-match-p (regexp-quote task) (buffer-string))))
+           (delete-other-windows)
+           (let* ((reader (selected-window))
+                  (follower (split-window-right)))
+             (set-window-buffer follower owned)
+             (set-window-point follower (with-current-buffer owned (point-max)))
+             (with-current-buffer owned (goto-char (+ (point-min) 2)))
+             (let ((position (window-point reader))
+                   (start (window-start reader)))
+               (ende-test--complete-call (nth 1 ende-test--calls))
+               (should (eq (selected-window) reader))
+               (should (= (window-point reader) position))
+               (should (= (window-start reader) start))
+               (should (= (window-point follower) (with-current-buffer owned (point-max)))))
+             (with-current-buffer owned
+               (let* ((document (org-element-parse-buffer))
+                      (bodies (org-element-map document 'example-block
+                                (lambda (block)
+                                  (org-unescape-code-in-string
+                                   (org-element-property :value block))))))
+                 (dolist (text (list assistant status "about_thinking" "accepted"))
+                   (should (cl-some (lambda (body) (string-match-p (regexp-quote text) body))
+                                    bodies)))
+                 (should-not (member "Supplied heading"
+                                     (org-element-map document 'headline
+                                       (lambda (node) (org-element-property :raw-value node)))))
+                 (should-not (string-match-p (regexp-quote reasoning) (buffer-string)))))
+             (let* ((messages (plist-get (nth 2 ende-test--calls) :messages))
+                    (sent (nth 2 messages)))
+               (should (equal (plist-get sent :content) assistant))
+               (should (equal (plist-get sent :tool-calls) (list call)))
+               (should (equal (plist-get sent :reasoning-content) reasoning))
+               (should (equal (plist-get (nth 3 messages) :tool-call-id) "progress")))
+             (ende-work-buffer-quit)
+             (should (eq (window-buffer (selected-window)) dashboard))
+             (should (eq (window-buffer follower) owned))
+             (should (eq (ende-job-state child) 'running))
+             (with-current-buffer dashboard
+               (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id child))))
+               (ende-queue-ui-visit-agent-work))
+             (should (= (window-point (selected-window))
+                        (with-current-buffer owned (point-max))))
+             (ende-test--complete-call (nth 2 ende-test--calls))
+             (should (eq (ende-job-state child) 'completed))
+             (with-current-buffer owned
+               (should buffer-read-only)
+               (should (string-match-p "Private final reply" (buffer-string)))
+               (should (string-match-p "completed" (buffer-string))))
+             (let ((parent-messages (prin1-to-string (plist-get (nth 3 ende-test--calls) :messages))))
+               (should-not (string-match-p (regexp-quote assistant) parent-messages))
+               (should-not (string-match-p "Checking work" parent-messages)))
+             (with-current-buffer source
+               (should-not (string-match-p "Checking work" (buffer-string))))
+             (ende-test--complete-call (nth 3 ende-test--calls)))
+           (should (eq (lookup-key ende-queue-ui-mode-map (kbd "w"))
+                       #'ende-queue-ui-visit-agent-work)))
+        (ende-test--dashboard-reset)
+        (dolist (buffer (list staging owned))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))
+        (ende-work-buffer--collect)
+        (delete-directory directory t)))))
 
 (ert-deftest ende-test/work-buffers-outlive-jobs-only-while-displayed ()
   (save-window-excursion
@@ -409,7 +459,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
             (ende-test--fake-llm
              '((:tool-calls ((:id "spawn" :name "spawn_agent"
                                  :arguments "{\"task\":\"Inspect privately\"}")))
-               "Agent finished" "Chat finished") t))
+               :error "Chat finished") t))
            root child staging owned)
       (unwind-protect
           (ende-test--with-buffer
@@ -449,8 +499,11 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                  (set-window-buffer second buffer)
                  (ende-test--complete-call (nth index ende-test--calls))
                  (setq index (1+ index))
-                 (should (eq (ende-job-state job) 'completed))
+                 (should (eq (ende-job-state job) (if (eq job child) 'failed 'completed)))
                  (should (buffer-live-p buffer))
+                 (when (eq job child)
+                   (with-current-buffer buffer
+                     (should (string-match-p "mock failure" (buffer-string)))))
                  (should-not (ende-job-cancel-function job))
                  (should-not (memq job (ende-all-live-jobs)))
                  (should-not (ende-job-owned-buffer job))
@@ -514,6 +567,12 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
              (should-not (ende-job-owned-buffer child))
              (should-not (ende-chat--staging-buffer root))
              (should-not (ende-all-live-jobs))
+             (with-current-buffer owned
+               (should (string-match-p
+                        (regexp-quote (ende-error-display-message (ende-job-error child)))
+                        (buffer-string))))
+             (dolist (observer '(ende-agent--work-event ende-chat--dispose-staging-buffer))
+               (should (= (cl-count observer ende-job-event-functions) 1)))
              (dolist (hook '(window-buffer-change-functions delete-frame-functions))
                (should (= (cl-count #'ende-work-buffer--windows-changed
                                     (symbol-value hook))
@@ -564,14 +623,20 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                  (point-min) (point-max)
                  (list 'ende-queue-ui-kind 'job
                        'ende-queue-ui-owner job))))
-            (with-current-buffer dashboard
-              (goto-char (point-min))
-              (let ((error-data
-                     (should-error (ende-queue-ui-visit-agent-work)
-                                   :type 'user-error)))
-                (should (string-match-p "No staged agent work yet"
-                                        (error-message-string error-data)))))
-            (should-not (plist-get (ende-job-instruction job) :staging-buffer)))
+            (dolist (type '(chat agent))
+              (setf (ende-job-type job) type)
+              (let ((dead (generate-new-buffer " *ende-dead-work-test*")))
+                (kill-buffer dead)
+                (dolist (buffer (list nil dead))
+                  (setf (ende-job-owned-buffer job) buffer
+                        (ende-job-instruction job)
+                        (plist-put (ende-job-instruction job) :staging-buffer buffer))
+                  (with-current-buffer dashboard
+                    (goto-char (point-min))
+                    (should-error (ende-queue-ui-visit-agent-work) :type 'user-error))
+                  (should (eq (ende-job-owned-buffer job) buffer))
+                  (should (eq (plist-get (ende-job-instruction job) :staging-buffer)
+                              buffer))))))
         (when (buffer-live-p dashboard)
           (kill-buffer dashboard))))))
 

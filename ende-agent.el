@@ -176,6 +176,36 @@ include any explicit user overrides relevant to the assigned task.")
              (ende-job-live-p job))
     (ende--cancel-live-jobs (list job))))
 
+(defun ende-agent--work-section (job title text)
+  "Append escaped TEXT beneath a fixed, host-owned TITLE in JOB's work log."
+  (when-let* ((buffer (ende-job-owned-buffer job))
+              ((buffer-live-p buffer)))
+    (ende-work-buffer-at-end
+     buffer
+     (lambda ()
+       (insert "* " title "\n\n"
+               "#+begin_example\n"
+               (org-escape-code-in-string (or text ""))
+               "\n#+end_example\n\n")))))
+
+(defun ende-agent--work-event (job event)
+  "Record public progress and terminal status EVENT in agent JOB's work log."
+  (when (and (eq (ende-job-type job) 'agent)
+             (buffer-live-p (ende-job-owned-buffer job)))
+    (pcase (plist-get event :type)
+      (:agent-activity
+       (ende-agent--work-section
+        job "Progress" (concat (plist-get event :title) "\n\n"
+                               (plist-get event :status))))
+      (:settled
+       (ende-agent--work-section
+        job "Status"
+        (concat (symbol-name (plist-get event :state))
+                (when-let* ((error (ende-job-error job)))
+                  (concat ": " (ende-error-display-message error)))))))))
+
+(add-hook 'ende-job-event-functions #'ende-agent--work-event)
+
 (defun ende-agent-private-target (job)
   "Create JOB's private execution buffer and target."
   (let ((buffer (generate-new-buffer
@@ -192,6 +222,7 @@ include any explicit user overrides relevant to the assigned task.")
                     (or (plist-get (ende-job-access-policy job) :root)
                         default-directory))
         (add-hook 'kill-buffer-hook hook nil t)
+        (ende-agent--work-section job "Task" (plist-get (ende-job-instruction job) :task))
         (setf (ende-job-target job)
               (ende-target-create
                :buffer buffer :start (point-min) :end (point-max)
@@ -228,17 +259,28 @@ include any explicit user overrides relevant to the assigned task.")
            :execute-spawn-batch #'ende-agent--spawn-batch
            :omit-source-metadata t
            :assistant-message
-           (lambda (_job result calls)
+           (lambda (child result calls)
+             (ende-agent--work-section child "Assistant" (plist-get result :content))
+             (dolist (call calls)
+               (ende-agent--work-section
+                child "Tool request"
+                (format "%s\n\n%s" (ende-chat--tool-value call :name)
+                        (ende-chat--tool-value call :arguments))))
              (list :role "assistant" :content (or (plist-get result :content) "")
                    :tool-calls calls
                    :reasoning-content (plist-get result :reasoning-content)))
            :tool-result-message
-           (lambda (_job call content)
+           (lambda (child call content)
+             (ende-agent--work-section
+              child "Tool result"
+              (format "%s\n\n%s" (ende-chat--tool-value call :name) content))
              (list :role "tool" :tool-call-id
                    (ende-chat--tool-value call :id) :content content))
            :on-final
            (lambda (child result _messages)
-             (ende-job-finish child (or (plist-get result :content) "")))))))
+             (let ((answer (or (plist-get result :content) "")))
+               (ende-agent--work-section child "Reply" answer)
+               (ende-job-finish child answer)))))))
 
 (ende-register-job-handler 'agent #'ende-agent--run-child)
 
