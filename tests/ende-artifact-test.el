@@ -679,7 +679,7 @@
                     "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: generated\n:END:\n** Question\nDraw\n")
             (goto-char (point-max))
             (cl-letf (((symbol-function 'ende-image--request)
-                       (lambda (request-arguments callback _register)
+                       (lambda (request-arguments _profile callback _register)
                          (should (equal (ende-tools--argument request-arguments "prompt")
                                         "Draw a box."))
                          (funcall callback
@@ -746,6 +746,41 @@
                                                      (ende-content-body final)))))))))))
     (ende-test--reset)))
 
+(ert-deftest ende-image-settings-are-frozen-per-run ()
+  (let ((ende-image-api 'stable-diffusion)
+        (ende-image-auth-profile nil)
+        (ende-image-endpoint "http://127.0.0.1:8080/sdapi/v1/txt2img")
+        (ende-image-model nil))
+    (ende-test--reset)
+    (unwind-protect
+        (ende-artifact-test-with-files
+          (ende-reload)
+          (insert (ende-test--chat-config-block `((root ,directory) (tools generate_image)))
+                  "* Topic\n** Question\nDraw a box.\n")
+          (goto-char (point-max))
+          (let* ((ende-llm-function
+                  (ende-test--fake-llm
+                   '((:tool-calls ((:id "image" :name "generate_image"
+                                   :arguments "{\"prompt\":\"Draw a box.\"}")))
+                     (:content "#+ENDE_ARTIFACT: image-001.png\n")) t))
+                 (job (ende-ask))
+                 (settings (ende-image--profile))
+                 (definitions (plist-get (ende-job-profile job) :tool-definitions)))
+            (setq ende-image-api 'openai
+                  ende-image-endpoint "https://images.example.test/v1/images"
+                  ende-image-model "another-model")
+            (should-not (equal definitions (ende-tool-definitions)))
+            (cl-letf (((symbol-function 'ende-image--request)
+                       (lambda (_arguments profile callback _register)
+                         (should (equal profile settings))
+                         (funcall callback
+                                  (list (list :bytes ende-artifact-test-png
+                                              :media-type "image/png")) nil))))
+              (ende-test--complete-call (car ende-test--calls))
+              (ende-test--complete-call (cadr ende-test--calls)))
+            (should (eq (ende-job-state job) 'completed))))
+      (ende-test--reset))))
+
 (ert-deftest ende-artifact-generation-http-lifecycle ()
   (ende-artifact-test-with-files
     (let* ((ende-image-api 'openai)
@@ -784,7 +819,7 @@
                        (setq sent data)
                        (funcall real-send process response))))
             (ende-image--request
-             '(:prompt "Draw a box.")
+             '(:prompt "Draw a box.") (ende-image--profile)
              (lambda (value error) (cl-incf calls) (setq parts value failure error))
              (lambda (function) (setq cancel function))))
           (let ((data (json-parse-string sent)))

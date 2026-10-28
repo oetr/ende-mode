@@ -5,6 +5,7 @@
 (require 'cl-lib)
 (require 'ende-operations)
 (require 'ende-tools)
+(require 'ende-image)
 (require 'ende-queue)
 (require 'ende-target)
 (require 'ende-provider)
@@ -533,9 +534,12 @@ CALLBACKS supplies :tool-calls, :execute-tool, :on-final,
 :assistant-message, :tool-request, and :tool-result-message functions, with
 optional :before-final and :after-tool-round message transforms.
 Chat persistence and guidance stay in those callbacks."
-  (let* ((definitions (ende-tool-definitions configuration))
-         (profile (plist-put (copy-tree (ende-job-profile job))
-                             :tool-definitions definitions)))
+  (let* ((image-profile (when (memq 'generate_image (plist-get configuration :active-tools))
+                          (ende-image--profile)))
+         (definitions (ende-tool-definitions configuration))
+         (profile (ende-plist-merge (copy-tree (ende-job-profile job))
+                                    (list :tool-definitions definitions
+                                          :image-profile image-profile))))
     (when (and definitions
                (or (not (memq 'about_thinking
                               (plist-get configuration :active-tools)))

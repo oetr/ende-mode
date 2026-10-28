@@ -264,11 +264,10 @@
       (error (error "%s returned unsupported or malformed image data; expected PNG or JPEG"
                     name)))))
 
-(defun ende-image--request (arguments callback register)
-  "Generate from ARGUMENTS, calling CALLBACK with parts or an error.
+(defun ende-image--request (arguments profile callback register)
+  "Generate from ARGUMENTS using PROFILE, calling CALLBACK with parts or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
-  (let* ((profile (ende-image--profile))
-         (url (plist-get profile :url))
+  (let* ((url (plist-get profile :url))
          (data (json-encode (ende-image--request-body arguments profile)))
          (lifecycle (ende-transport-session-create nil nil))
          (chunks nil) (size 0) (settled nil))
@@ -331,7 +330,7 @@ REGISTER attaches cancellation to the existing tool lifecycle."
              (id (ende-chat--property document (ende-chat--root document question) :id))
              (base (ende-artifact-base)))
         (ende-image--request
-         arguments
+         arguments (plist-get (ende-job-profile job) :image-profile)
          (lambda (parts error)
            (if error (funcall callback nil error)
              (when (ende-job-execution-current-p job generation)
