@@ -121,9 +121,15 @@ all their assistant content and before the corresponding results."
     (let ((copy (copy-hash-table value)))
       (maphash (lambda (key item)
                  (puthash key
-                          (if (member key '("b64_json" "result"))
-                              (if (stringp item) "[provider payload redacted]" (ende-content-redact item))
-                            (ende-content-redact item)) copy)) value)
+                          (cond
+                           ((member key '("b64_json" "result"))
+                            (if (stringp item) "[provider payload redacted]"
+                              (ende-content-redact item)))
+                           ((and (equal key "images") (or (vectorp item) (listp item)))
+                            (vconcat (mapcar (lambda (image)
+                                              (if (stringp image) "[provider payload redacted]"
+                                                (ende-content-redact image))) item)))
+                           (t (ende-content-redact item))) copy)) value)
       copy))
    ((consp value) (cons (ende-content-redact (car value)) (ende-content-redact (cdr value))))
    ((vectorp value) (vconcat (mapcar #'ende-content-redact value)))

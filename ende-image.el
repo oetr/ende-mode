@@ -18,9 +18,15 @@
   "Image generation."
   :group 'ende-artifact)
 
-(defcustom ende-image-provider 'openrouter
-  "Provider profile supplying image request authentication and headers."
-  :type 'symbol
+(defcustom ende-image-api 'openai
+  "API used to encode image requests and decode responses."
+  :type '(choice (const :tag "OpenAI-compatible" openai)
+                 (const :tag "Stable Diffusion" stable-diffusion))
+  :group 'ende-image)
+
+(defcustom ende-image-auth-profile 'openrouter
+  "Optional provider profile supplying authentication and headers."
+  :type '(choice (const :tag "None" nil) symbol)
   :group 'ende-image)
 
 (defcustom ende-image-endpoint "https://openrouter.ai/api/v1/images"
@@ -33,51 +39,82 @@
   :type '(choice (const :tag "Server default" nil) string)
   :group 'ende-image)
 
-(defconst ende-image--request-properties
+(defconst ende-image--common-properties
   '((:prompt . ((:type . "string") (:minLength . 1)))
     (:negative_prompt . ((:type . "string")))
     (:width . ((:type . "integer") (:minimum . 1)))
     (:height . ((:type . "integer") (:minimum . 1)))
     (:seed . ((:type . "integer")))
     (:steps . ((:type . "integer") (:minimum . 1)))
-    (:cfg_scale . ((:type . "number")))
-    (:sample_method . ((:type . "string") (:minLength . 1)
-                       (:description . "Backend sampler name.")))
-    (:batch_count . ((:type . "integer") (:minimum . 1)
-                     (:description . "Number of images to request; requires server support."))))
-  "Generation fields accepted by the image tool.")
+    (:cfg_scale . ((:type . "number"))))
+  "Generation fields shared by image APIs.")
 
-(defun ende-image--provider-names ()
-  "Return available provider names, including image-only profiles."
-  (delete-dups (append '(openrouter local) (ende-provider-names)
+(defconst ende-image--apis
+  '((openai
+     :name "OpenAI-compatible" :model t
+     :images-key "data" :decode-image ende-image--openai-image
+     :properties
+     ((:sample_method . ((:type . "string") (:minLength . 1)))
+      (:batch_count . ((:type . "integer") (:minimum . 1)))))
+    (stable-diffusion
+     :name "Stable Diffusion"
+     :images-key "images" :decode-image ende-content-generated-image
+     :properties
+     ((:sampler_name . ((:type . "string") (:minLength . 1)))
+      (:scheduler . ((:type . "string") (:minLength . 1)))
+      (:batch_size . ((:type . "integer") (:minimum . 1))))))
+  "Image API schemas and response adapters.")
+
+(defun ende-image--adapter (&optional api)
+  "Return the adapter for API, defaulting to the selected API."
+  (or (alist-get (or api ende-image-api) ende-image--apis)
+      (user-error "Unknown image API: %s" (or api ende-image-api))))
+
+(defun ende-image--request-properties (adapter)
+  "Return generation properties supported by ADAPTER."
+  (append ende-image--common-properties (plist-get adapter :properties)))
+
+(defun ende-image--schema (_configuration)
+  "Return the selected image API's tool schema."
+  `((:type . "object")
+    (:properties . ,(append (ende-image--request-properties (ende-image--adapter))
+                           '((:caption . ((:type . "string"))))))
+    (:required . ["prompt"]) (:additionalProperties . :json-false)))
+
+(defun ende-image--auth-profile-names ()
+  "Return profiles available for image authentication and headers."
+  (delete-dups (append '(openrouter) (ende-provider-names)
                        (mapcar #'car ende-provider-profiles))))
 
 (defun ende-image--profile ()
   "Return a validated snapshot of the image request settings."
-  (unless (and ende-image-provider
-               (memq ende-image-provider (ende-image--provider-names)))
-    (user-error "Select an available image provider profile"))
-  (unless (or (null ende-image-model)
-              (and (stringp ende-image-model)
-                   (not (string-blank-p ende-image-model))))
-    (user-error "Image model must be a nonblank string or nil"))
-  (let ((profile (ende-plist-merge
-                  (ende-provider-profile-snapshot ende-image-provider)
-                  (list :url ende-image-endpoint :model ende-image-model
-                        :allow-http t))))
-    (when (plist-get profile :auth-method)
-      (user-error "Images API requires an auth-source or unauthenticated provider profile"))
-    (ende-curl--validated-url profile)
-    profile))
+  (let* ((adapter (ende-image--adapter))
+         (model (and (plist-get adapter :model) ende-image-model)))
+    (when (and ende-image-auth-profile
+               (not (memq ende-image-auth-profile (ende-image--auth-profile-names))))
+      (user-error "Select an available authentication profile"))
+    (unless (or (null model)
+                (and (stringp model) (not (string-blank-p model))))
+      (user-error "Image model must be a nonblank string or nil"))
+    (let ((profile (ende-plist-merge
+                    (when ende-image-auth-profile
+                      (ende-provider-profile-snapshot ende-image-auth-profile))
+                    (list :url ende-image-endpoint :model model
+                          :image-api ende-image-api :allow-http t))))
+      (when (plist-get profile :auth-method)
+        (user-error "Images API requires an auth-source or unauthenticated profile"))
+      (ende-curl--validated-url profile)
+      profile)))
 
 (defconst ende-image--configuration-variables
-  '(ende-image-provider ende-image-endpoint ende-image-model)
+  '(ende-image-api ende-image-auth-profile ende-image-endpoint ende-image-model)
   "Image settings edited in the configuration buffer.")
 
 (defvar ende-image-configure-mode-map (make-sparse-keymap)
   "Keymap for `ende-image-configure-mode'.")
 
-(define-key ende-image-configure-mode-map (kbd "p") #'ende-image--configure-provider)
+(define-key ende-image-configure-mode-map (kbd "a") #'ende-image--configure-api)
+(define-key ende-image-configure-mode-map (kbd "p") #'ende-image--configure-auth-profile)
 (define-key ende-image-configure-mode-map (kbd "e") #'ende-image--configure-endpoint)
 (define-key ende-image-configure-mode-map (kbd "m") #'ende-image--configure-model)
 (define-key ende-image-configure-mode-map (kbd "RET") #'ende-image--configure-save)
@@ -92,11 +129,14 @@
 (defun ende-image--render-configuration ()
   "Render the image settings in the current configuration buffer."
   (let ((inhibit-read-only t)
+        (adapter (ende-image--adapter))
         (encrypted (equal (downcase (or (url-type (url-generic-parse-url
                                                  ende-image-endpoint)) ""))
                           "https")))
     (erase-buffer)
-    (insert (format "%-8s - %-18s %s\n" "p" "Provider profile:" ende-image-provider)
+    (insert (format "%-8s - %-18s %s\n" "a" "API:" (plist-get adapter :name))
+            (format "%-8s - %-18s %s\n" "p" "Authentication:"
+                    (or ende-image-auth-profile "None"))
             (format "%-8s - %-18s %s\n" "e" "Endpoint:" ende-image-endpoint)
             (format "%-8s - %-18s " "" "Encryption:")
             (propertize (if encrypted
@@ -104,18 +144,38 @@
                           "Off - prompt and image sent unencrypted!")
                         'face (if encrypted 'success 'error))
             "\n"
-            (format "%-8s - %-18s %s\n" "m" "Model:" (or ende-image-model "Server default"))
+            (format "%-8s - %-18s %s\n"
+                    (if (plist-get adapter :model) "m" "") "Model:"
+                    (if (plist-get adapter :model)
+                        (or ende-image-model "Server default")
+                      "Server-loaded"))
             "\n"
             (format "%-8s - Quit without saving\n" "q/Esc")
             (format "%-8s - Save and quit\n" "Enter"))))
 
-(defun ende-image--configure-provider ()
-  "Choose the provider profile for image authentication and headers."
+(defun ende-image--configure-api ()
+  "Choose the image API without changing connection settings."
   (interactive)
-  (setq ende-image-provider
-        (intern (completing-read "Image provider profile: "
-                                 (mapcar #'symbol-name (ende-image--provider-names))
-                                 nil t nil nil (symbol-name ende-image-provider))))
+  (let ((choices (mapcar (lambda (entry)
+                          (cons (plist-get (cdr entry) :name) (car entry)))
+                        ende-image--apis)))
+    (setq ende-image-api
+          (cdr (assoc (completing-read "Image API: " choices nil t nil nil
+                                       (plist-get (ende-image--adapter) :name))
+                      choices))))
+  (ende-image--render-configuration))
+
+(defun ende-image--configure-auth-profile ()
+  "Choose an optional profile for image authentication and headers."
+  (interactive)
+  (let ((choices (cons '("None")
+                       (mapcar (lambda (name) (cons (symbol-name name) name))
+                               (ende-image--auth-profile-names)))))
+    (setq ende-image-auth-profile
+          (cdr (assoc (completing-read "Authentication profile: " choices nil t nil nil
+                                       (if ende-image-auth-profile
+                                           (symbol-name ende-image-auth-profile) "None"))
+                      choices))))
   (ende-image--render-configuration))
 
 (defun ende-image--configure-endpoint ()
@@ -129,6 +189,8 @@
 (defun ende-image--configure-model ()
   "Set the image model, or use the server default with an empty value."
   (interactive)
+  (unless (plist-get (ende-image--adapter) :model)
+    (user-error "This API uses the server-loaded model"))
   (let ((model (string-trim (read-string "Image model (empty uses server default): "
                                        ende-image-model))))
     (setq ende-image-model (unless (string-empty-p model) model)))
@@ -159,30 +221,48 @@
 
 (defun ende-image--request-body (arguments profile)
   "Return a validated image request body for ARGUMENTS and PROFILE."
-  (let* ((fields
-          (mapcar (lambda (entry)
-                    (ende-tools--property-name (car entry)))
-                  ende-image--request-properties))
+  (let* ((adapter (ende-image--adapter (plist-get profile :image-api)))
+         (properties (ende-image--request-properties adapter))
+         (fields (mapcar (lambda (entry) (ende-tools--property-name (car entry)))
+                         properties))
          (body (ende-tools--json-object arguments fields)))
-    (ende-tools--assert-properties
-     arguments (cons "caption" fields) "generate_image")
+    (ende-tools--assert-properties arguments (cons "caption" fields) "generate_image")
     (ende-tools--required-string arguments "prompt")
-    (maphash
-     (lambda (name value)
-       (unless
-           (pcase name
-             ((or "width" "height" "steps" "batch_count")
-              (and (integerp value) (> value 0)))
-             ("seed" (integerp value))
-             ("cfg_scale" (numberp value))
-             ("sample_method"
-              (and (stringp value) (not (string-empty-p value))))
-             (_ (stringp value)))
-         (error "Invalid generate_image argument %s" name)))
-     body)
-    (when-let* ((model (plist-get profile :model)))
+    (dolist (entry properties)
+      (let* ((name (ende-tools--property-name (car entry)))
+             (schema (cdr entry))
+             (value (gethash name body :absent)))
+        (unless (eq value :absent)
+          (unless (and (pcase (alist-get :type schema)
+                         ("string" (stringp value))
+                         ("integer" (integerp value))
+                         ("number" (numberp value)))
+                       (or (null (alist-get :minimum schema))
+                           (>= value (alist-get :minimum schema)))
+                       (or (null (alist-get :minLength schema))
+                           (>= (length value) (alist-get :minLength schema))))
+            (error "Invalid generate_image argument %s" name)))))
+    (when-let* ((model (and (plist-get adapter :model) (plist-get profile :model))))
       (puthash "model" model body))
     body))
+
+(defun ende-image--openai-image (image)
+  "Decode one inline image object from the Images API."
+  (ende-content-generated-image (gethash "b64_json" image)
+                                (gethash "media_type" image)))
+
+(defun ende-image--response (body profile)
+  "Normalize image response BODY using PROFILE's API."
+  (let* ((adapter (ende-image--adapter (plist-get profile :image-api)))
+         (name (plist-get adapter :name))
+         (key (plist-get adapter :images-key))
+         (images (and (hash-table-p body) (gethash key body))))
+    (unless (and (or (vectorp images) (listp images)) (> (length images) 0))
+      (error "%s response is missing a nonempty %s array" name key))
+    (condition-case nil
+        (mapcar (plist-get adapter :decode-image) images)
+      (error (error "%s returned unsupported or malformed image data; expected PNG or JPEG"
+                    name)))))
 
 (defun ende-image--request (arguments callback register)
   "Generate from ARGUMENTS, calling CALLBACK with parts or an error.
@@ -221,19 +301,11 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                                  (body (and (zerop (process-exit-status process))
                                             status (<= 200 status) (< status 300)
                                             (json-parse-string (apply #'concat (nreverse chunks))
-                                                               :object-type 'hash-table)))
-                                 (images (and body (gethash "data" body)))
-                                 parts)
-                            (unless (and (or (vectorp images) (listp images)) (> (length images) 0))
-                              (error "Image request failed"))
-                            (condition-case nil
-                                (progn
-                                  (mapc (lambda (image)
-                                          (push (ende-content-generated-image
-                                                 (gethash "b64_json" image)
-                                                 (gethash "media_type" image)) parts)) images)
-                                  (finish (nreverse parts) nil))
-                              (error (finish nil "Backend returned unsupported or malformed image data; expected PNG or JPEG"))))
+                                                               :object-type 'hash-table))))
+                            (unless body (error "Image request failed"))
+                            (condition-case failure
+                                (finish (ende-image--response body profile) nil)
+                              (error (finish nil (error-message-string failure)))))
                         (error (finish nil "Image generation failed or returned invalid image data"))))))))
             (ende-transport-session-set-resources lifecycle request)
             (when register (funcall register (lambda () (finish nil "Image generation cancelled"))))
@@ -288,11 +360,7 @@ REGISTER attaches cancellation to the existing tool lifecycle."
 (ende-tool-register
  'generate_image
  "Generate one or more images from a prompt using the user-configured image backend. Sampling options depend on that backend; omitted generation options use server defaults. Caption is optional local presentation metadata, never sent to the backend; an omitted or empty caption means no displayed caption. The result contains artifact filenames in the artifacts array. Emit one #+ENDE_ARTIFACT: FILENAME marker for each image being attached."
- `((:type . "object")
-   (:description . "Optional generation fields are backend-dependent; omitted fields use server defaults.")
-   (:properties . ,(append ende-image--request-properties
-                          '((:caption . ((:type . "string"))))))
-   (:required . ["prompt"]) (:additionalProperties . :json-false))
+ #'ende-image--schema
  #'ende-image--generate :write :no-resource
  '(:requires-root nil :requires-resources nil :async t))
 
