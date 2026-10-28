@@ -1546,7 +1546,7 @@ images with #+ENDE_ARTIFACT: FILENAME using their real artifact filenames.
 Captions are optional. Pass caption to generate_image when wanted; an omitted
 or empty caption produces no CAPTION line. An explicit #+CAPTION: line immediately
 after an artifact marker overrides the tool caption; an empty one clears it.
-generate_image is optional and uses the user's configured image model.
+generate_image is optional and uses the user's configured image backend.
 Never invent filenames or paths, construct storage links, or configure artifact
 storage. Ende owns artifact paths."
    "\n\nIf the final user headline is untitled and has a request body, begin with

@@ -29,9 +29,8 @@
   :group 'ende-image)
 
 (defcustom ende-image-model nil
-  "Model used by the opt-in generate_image tool.
-Nil disables generation even when the tool is activated."
-  :type '(choice (const nil) string)
+  "Image model to request, or nil to use the server default."
+  :type '(choice (const :tag "Server default" nil) string)
   :group 'ende-image)
 
 (defconst ende-image--request-properties
@@ -105,7 +104,7 @@ Nil disables generation even when the tool is activated."
                           "Off - prompt and image sent unencrypted!")
                         'face (if encrypted 'success 'error))
             "\n"
-            (format "%-8s - %-18s %s\n" "m" "Model:" (or ende-image-model "Disabled"))
+            (format "%-8s - %-18s %s\n" "m" "Model:" (or ende-image-model "Server default"))
             "\n"
             (format "%-8s - Quit without saving\n" "q/Esc")
             (format "%-8s - Save and quit\n" "Enter"))))
@@ -128,9 +127,9 @@ Nil disables generation even when the tool is activated."
   (ende-image--render-configuration))
 
 (defun ende-image--configure-model ()
-  "Set the image model, or disable generation with an empty value."
+  "Set the image model, or use the server default with an empty value."
   (interactive)
-  (let ((model (string-trim (read-string "Image model (empty disables generation): "
+  (let ((model (string-trim (read-string "Image model (empty uses server default): "
                                        ende-image-model))))
     (setq ende-image-model (unless (string-empty-p model) model)))
   (ende-image--render-configuration))
@@ -188,8 +187,6 @@ Nil disables generation even when the tool is activated."
 (defun ende-image--request (arguments callback register)
   "Generate from ARGUMENTS, calling CALLBACK with parts or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
-  (unless (and (stringp ende-image-model) (not (string-blank-p ende-image-model)))
-    (user-error "Configure an image model with M-x ende-image-configure"))
   (let* ((profile (ende-image--profile))
          (url (plist-get profile :url))
          (data (json-encode (ende-image--request-body arguments profile)))
