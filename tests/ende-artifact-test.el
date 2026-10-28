@@ -368,6 +368,33 @@
                                       nil directory-files-no-dot-files-regexp)
                      (list existing))))))
 
+(ert-deftest ende-artifact-chat-repair-is-bounded ()
+  (let* ((rejected "<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>\n")
+         (diagnostic (error-message-string
+                      (should-error (ende-artifact--validate-image "rejected.svg" rejected)))))
+    (unwind-protect
+        (dolist (response (list ende-artifact-test-svg rejected :error))
+          (ende-test--reset)
+          (ende-artifact-test-with-files
+            (insert "* Question\nDraw\n")
+            (goto-char (point-max))
+            (let* ((ende-llm-function
+                    (ende-test--fake-llm
+                     (if (eq response :error) (list :error) (list rejected response))))
+                   (job (ende-ask)))
+              (should (eq (ende-job-state job)
+                          (if (equal response ende-artifact-test-svg) 'completed 'failed)))
+              (should (= (length ende-test--calls) (if (eq response :error) 1 2)))
+              (unless (eq response :error)
+                (let* ((messages (plist-get (cadr ende-test--calls) :messages))
+                       (feedback (car (last messages))))
+                  (should (equal (ende-content-body (nth (- (length messages) 2) messages)) rejected))
+                  (should (equal (ende-content-role feedback) "user"))
+                  (should (string-match-p (regexp-quote diagnostic) (ende-content-body feedback)))))
+              (when (eq (ende-job-state job) 'completed)
+                (should (= 1 (length (directory-files-recursively (ende-artifact-base) "\\.svg\\'"))))))))
+      (ende-test--reset))))
+
 (ert-deftest ende-artifact-structural-persistence ()
   (ende-test--reset)
   (unwind-protect
