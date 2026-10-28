@@ -3,6 +3,8 @@
 (require 'ende-artifact)
 (require 'ende-content)
 (require 'ende-chat-test-helpers)
+(require 'ox-html)
+(require 'ox-latex)
 
 (defconst ende-artifact-test-svg
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"blue\"/></svg>")
@@ -85,6 +87,74 @@
         (should-not (string-match-p "base64" (ende-transport-safe-error-text url)))
         (should-not (string-match-p "base64" (error-message-string failure)))))))
 
+(ert-deftest ende-artifact-round-trip-and-native-export ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "figures" ende-artifact-test-png "image/png"))
+           (path (plist-get (ende-artifact-resolve base "figures" name) :path))
+           (storage (lambda () (list base "figures"))))
+      (dolist (caption '("  The *road* goes on\r\nand on...  " nil "" " \t\r\n "))
+        (let* ((normalized (ende-artifact--caption caption))
+               (block (ende-artifact-render base "figures" name buffer-file-name caption))
+               (shorthand (concat "Before\n#+ENDE_ARTIFACT: " name "\n"
+                                  (when caption
+                                    (concat "#+CAPTION: " (or normalized "") "\n"))
+                                  "After\n"))
+               (prepared (ende-artifact-prepare-text shorthand storage buffer-file-name))
+               (persisted (plist-get prepared :content))
+               (reference (car (ende-artifact--references block)))
+               (html (org-export-string-as (concat block "Following prose\n") 'html t))
+               (latex (org-export-string-as (concat block "Following prose\n") 'latex t)))
+          (should (equal persisted (concat "Before\n" block "After\n")))
+          (should (string-suffix-p "\n\n" block))
+          (should (string-match-p "\nfile:\\./.ende-artifacts/figures/image-001.png\n\n" block))
+          (should (= (plist-get reference :end) (1+ (length block))))
+          (should (equal (substring block (1- (plist-get reference :link-begin))
+                                    (1- (plist-get reference :link-end)))
+                         "file:./.ende-artifacts/figures/image-001.png"))
+          (should (equal (plist-get prepared :parts) (ende-artifact-content persisted)))
+          (should (equal (cl-find :image (plist-get prepared :parts)
+                                  :key (lambda (part) (plist-get part :type)))
+                         (ende-artifact-resolve base "figures" name)))
+          (let ((text (ende-content-readable (plist-get prepared :parts))))
+            (should-not (string-match-p "ENDE_ARTIFACT\\|CAPTION:\\|file:" text))
+            (when normalized (should (string-match-p (regexp-quote normalized) text))))
+          (should (= 1 (cl-count :image (ende-artifact-content persisted #'ende-artifact--local-path)
+                                       :key (lambda (part) (plist-get part :type)))))
+          (should (equal persisted
+                         (plist-get (ende-artifact-prepare-text
+                                     persisted (lambda () (ert-fail "Persisted reference used storage"))
+                                     buffer-file-name) :content)))
+          (should (string-match-p "<img " html))
+          (should (string-match-p (regexp-quote "\\includegraphics") latex))
+          (if normalized
+              (progn
+                (should (equal (plist-get reference :caption) normalized))
+                (should (string-match-p "The <b>road</b> goes on and on" html))
+                (should (string-match-p (regexp-quote "\\caption") latex))
+                (should (string-match-p (regexp-quote "The \\textbf{road} goes on and on") latex)))
+            (should-not (plist-member reference :caption))
+            (should-not (string-match-p "CAPTION:" persisted))
+            (should-not (string-match-p (regexp-quote "\\caption") latex)))))
+      (let* ((text (concat "#+ENDE_ARTIFACT: " name "\n#+CAPTION:\n"))
+             (reference (car (ende-artifact--references text))))
+        (should (plist-member reference :caption))
+        (should (equal "" (plist-get reference :caption))))
+      (should-error (ende-artifact--caption 42))
+      (should (equal "Title #+NAME: not-a-directive"
+                     (ende-artifact--caption "Title\n#+NAME: not-a-directive")))
+      (should (string-match-p "\nfile:/" (ende-artifact-render base "figures" name nil)))
+      (should (string-match-p "\nfile:\\.\\./"
+                              (ende-artifact-render base "figures" name
+                                                    (expand-file-name "sub/chat.org" directory))))
+      (dolist (subdirectory '("has space" "has\ttab" "has\nnewline" "has::search"))
+        (let ((failure (should-error
+                        (ende-artifact-render (expand-file-name subdirectory directory)
+                                              "figures" name buffer-file-name))))
+          (should (string-match-p "plain Org file link" (error-message-string failure)))))
+      (should (equal path (plist-get (car (ende-artifact-content
+                                         (ende-artifact-render base "figures" name buffer-file-name))) :path))))))
+
 (ert-deftest ende-artifact-storage-and-isolation ()
   (ende-artifact-test-with-files
     (let* ((default-directory temporary-file-directory)
@@ -142,8 +212,7 @@
               "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat-123\n:END:\nExplain.\n"
               "** Assistant\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\nBefore image.\n"
               citation "\n"
-              "#+ENDE_ARTIFACT: " name "\n"
-              (ende-artifact-link base "chat-123" name buffer-file-name) "\nAfter image.\n"
+              (ende-artifact-render base "chat-123" name buffer-file-name) "After image.\n"
               "** Follow up\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\nCompare.\n"
               "[[file:original.svg][Original]]\n")
       (goto-char (point-max))
@@ -180,16 +249,14 @@
            (source (plist-get (ende-artifact-resolve base "source" name) :path)))
       (ende-artifact-store base "destination" ende-artifact-test-png "image/png")
       (insert "* Other question\n"
-              "#+ende_artifact: unrelated-label.svg\n"
-              (org-link-make-string
-               (concat "file:" (org-link-escape (file-relative-name source directory)) "::42")
-               "Copied image") "\n")
+              (ende-artifact-render base "source" name buffer-file-name "Copied image"))
       (goto-char (point-max))
       (let* ((messages (ende-chat-context-at-point))
              (images (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image))
                                        (ende-content-body (car messages)))))
         (should (= 1 (length images)))
-        (should (equal source (plist-get (car images) :path))))
+        (should (equal source (plist-get (car images) :path)))
+        (should (string-match-p "Copied image" (ende-content-readable (ende-content-body (car messages))))))
       (cl-letf (((symbol-function 'create-image)
                  (lambda (path &rest _) (should (equal path source)) '(image :type png))))
         (ende-artifact-refresh)
@@ -270,11 +337,11 @@
       (ende-artifact-test-with-files
         (let* ((base (ende-artifact-base))
                (name (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
-               (link (ende-artifact-link base "source" name buffer-file-name))
+               (reference (ende-artifact-render base "source" name buffer-file-name))
                (literal (concat "  #+BeGiN_example\n"
                                 "  #+ENDE_ARTIFACT: ../invalid.svg\n"
                                 "  * Literal heading\n" ende-artifact-test-svg "\n"))
-               (source (concat "Before\n#+ENDE_ARTIFACT: arbitrary-label\n" link "\n"
+               (source (concat "Before\n" reference
                                "* Real heading\n" literal "  #+END_EXAMPLE\n"
                                "#+begin_src org\n#+ENDE_ARTIFACT: missing.png\n"
                                ende-artifact-test-svg))
@@ -292,6 +359,7 @@
           (goto-char (point-max))
           (let ((job (ende-ask)))
             (should (eq (ende-job-state job) 'completed)))
+          (should-not (string-match-p "#\\+CAPTION:" (buffer-string)))
           (let* ((live (plist-get (nth 1 ende-test--calls) :messages))
                  (turn (cl-find-if (lambda (message) (plist-get message :tool-calls)) live)))
             (should (= 1 (cl-count :image (ende-content-body turn)
@@ -330,7 +398,7 @@
           (should (equal literal (ende-artifact-content literal #'ende-artifact--local-path)))
           (erase-buffer)
           (insert "* Topic\n** User\n  #+BeGiN_example\n"
-                  "*** Literal child\n#+ende_artifact: missing.png\n[[file:missing.png]]\n"
+                  "*** Literal child\n#+ende_artifact: missing.png\nfile:./missing.png\n\n"
                   "** Follow up\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\nContinue\n")
           (goto-char (point-max))
           (let ((history (ende-chat-context-at-point)))
@@ -343,8 +411,7 @@
            (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml")))
       (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\n")
       (dotimes (_ 2)
-        (insert "#+ENDE_ARTIFACT: " name "\n"
-                (ende-artifact-link base "chat" name buffer-file-name) "\n"))
+        (insert (ende-artifact-render base "chat" name buffer-file-name)))
       (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
         (cl-labels
             ((spans ()
@@ -400,8 +467,18 @@
             (goto-char (overlay-start overlay))
             (forward-line 1)
             (let ((begin (point)))
+              (insert "#+CAPTION: Preview caption\n")
+              (check-refresh 2)
+              (should (memq overlay ende-artifact--overlays))
+              (goto-char begin)
+              (delete-region begin (line-beginning-position 2))
+              (check-refresh 2)
+              (goto-char begin)
+              (insert "#+CAPTION: Preview caption\n")
+              (check-refresh 2))
+            (let ((begin (point)))
               (delete-region begin (line-end-position))
-              (insert (ende-artifact-link base "chat" second buffer-file-name)))
+              (insert "file:./.ende-artifacts/chat/" second))
             (check-refresh 2)
             (should (memq overlay ende-artifact--overlays))
             (should-not (equal old-signature (overlay-get overlay 'ende-artifact-signature))))
@@ -409,7 +486,7 @@
           (insert "\n** Follow up\n")
           (check-refresh 2)
           (goto-char (point-min))
-          (search-forward "[[file:")
+          (search-forward "file:")
           (delete-char -1)
           (check-refresh 1)
           (insert ":")
@@ -429,8 +506,7 @@
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml"))
-           (reference (concat "#+ENDE_ARTIFACT: " name "\n"
-                              (ende-artifact-link base "chat" name buffer-file-name))))
+           (reference (ende-artifact-render base "chat" name buffer-file-name "Preview caption")))
       (insert "* Topic\n** First\n" reference "\n** Last\n" reference)
       (font-lock-ensure)
       (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
@@ -440,7 +516,7 @@
           (goto-char (overlay-end overlay))
           (should (eolp))
           (beginning-of-line)
-          (should (looking-at-p "\\[\\[file:")))
+          (should (looking-at-p "file:")))
         (save-window-excursion
           (set-window-buffer (selected-window) (current-buffer))
           (dolist (action '(org-fold-hide-subtree org-fold-show-children org-fold-show-subtree))
@@ -462,8 +538,8 @@
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml")))
-      (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\n#+ENDE_ARTIFACT: " name "\n"
-              (ende-artifact-link base "chat" name buffer-file-name) "\n"
+      (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: chat\n:END:\n"
+              (ende-artifact-render base "chat" name buffer-file-name "Reload caption")
               "#+begin_src svg\n" ende-artifact-test-svg "\n#+end_src\n")
       (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
         (ende-mode 1)

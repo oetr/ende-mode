@@ -3292,8 +3292,7 @@ Keep it while another queued compaction still refers to its durable identity."
            (pcase-let* ((`(,base ,id) (storage))
                         (name (ende-artifact-store base id (plist-get part :bytes)
                                                    (plist-get part :media-type))))
-             (push (concat "\n#+ENDE_ARTIFACT: " name "\n"
-                           (ende-artifact-link base id name org-file) "\n") chunks))
+             (push (concat "\n" (ende-artifact-render base id name org-file)) chunks))
            (setq last-blocks nil))
           (_ (error "Unsupported generated response part"))))
       (flush)
@@ -3317,8 +3316,7 @@ Keep it while another queued compaction still refers to its durable identity."
             (unless (cl-find (plist-get part :path) references
                              :key (lambda (ref) (plist-get (plist-get ref :part) :path)) :test #'equal)
               (setq persisted
-                    (concat persisted "\n#+ENDE_ARTIFACT: " name "\n"
-                            (ende-artifact-link base id name org-file) "\n")
+                    (concat persisted "\n" (ende-artifact-render base id name org-file))
                     parts (ende-content-concat (list parts (list part)))))))
         (setq normalized (plist-put normalized :content persisted))
         (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))

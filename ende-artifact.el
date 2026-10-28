@@ -410,26 +410,54 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
         (when (and written (file-exists-p path) (not (file-symlink-p path)))
           (delete-file path))))))
 
-(defun ende-artifact-link (base chat-id name org-file)
-  "Construct the ordinary Org link for NAME relative to ORG-FILE."
+(defun ende-artifact--caption (caption)
+  "Return a nonempty single-line CAPTION, or nil."
+  (unless (or (null caption) (stringp caption))
+    (error "Artifact caption must be a string"))
+  (let ((text
+         (string-trim
+          (replace-regexp-in-string "[\r\n]+" " " (or caption "")))))
+    (unless (string-empty-p text)
+      text)))
+
+(defun ende-artifact-render (base chat-id name org-file &optional caption)
+  "Render NAME as a complete exportable Org reference with optional CAPTION.
+Use a plain file link relative to ORG-FILE, or absolute without ORG-FILE."
+  (unless (ende-artifact--valid-name-p name)
+    (error "Invalid artifact filename: %s" name))
   (let* ((path (expand-file-name name (ende-artifact-directory base chat-id)))
          (target (if org-file
                      (file-relative-name path (file-name-directory org-file))
-                   path)))
-    (org-link-make-string (concat "file:" (org-link-escape target)) name)))
+                   path))
+         (caption (ende-artifact--caption caption)))
+    (unless (or (file-name-absolute-p target)
+                (string-prefix-p "../" target) (string-prefix-p "./" target))
+      (setq target (concat "./" target)))
+    ;; Escaping for bracket links does not protect whitespace in plain links.
+    (unless (with-temp-buffer
+              (org-mode)
+              (insert "file:" target "\n")
+              (goto-char (point-min))
+              (let ((link (ende-artifact--plain-file-link)))
+                (and link (not (org-element-property :search-option link))
+                     (equal target (org-link-unescape (org-element-property :path link))))))
+      (error "Artifact path cannot be represented losslessly as a plain Org file link: %s" target))
+    (concat "#+ENDE_ARTIFACT: " name "\n"
+            (when caption (concat "#+CAPTION: " caption "\n"))
+            "file:" target "\n\n")))
 
-(defun ende-artifact--following-link (position)
-  "Return the sole file link on the line after marker POSITION, or nil."
+(defun ende-artifact--plain-file-link ()
+  "Return the sole plain file link on the current line, or nil."
   (save-excursion
-    (goto-char position)
-    (forward-line 1)
+    (beginning-of-line)
     (skip-chars-forward " \t")
     (let* ((begin (point))
            (link (org-element-context))
            (end (and (eq (org-element-type link) 'link)
                      (- (org-element-property :end link)
                         (org-element-property :post-blank link)))))
-      (when (and end (equal (org-element-property :type link) "file")
+      (when (and end (eq (org-element-property :format link) 'plain)
+                 (equal (org-element-property :type link) "file")
                  (= begin (org-element-property :begin link))
                  (<= end (line-end-position))
                  (string-blank-p (buffer-substring-no-properties end (line-end-position))))
@@ -447,15 +475,30 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
       (org-element-map tree 'keyword
         (lambda (element)
           (when (equal (upcase (org-element-property :key element)) "ENDE_ARTIFACT")
-            (let* ((begin (org-element-property :begin element))
-                   (name (string-trim (org-element-property :value element)))
-                   (link (ende-artifact--following-link begin))
-                   (end (save-excursion
-                          (goto-char begin) (forward-line (if link 2 1)) (point))))
-              (when link (puthash (org-element-property :begin link) t consumed))
-              (push (list :part nil :begin begin :end end :name name
-                          :path (and link (org-link-unescape (org-element-property :path link))))
-                    references)))))
+            (save-excursion
+              (let* ((begin (org-element-property :begin element))
+                     (name (string-trim (org-element-property :value element)))
+                     (reference (list :part nil :begin begin :name name)))
+                (goto-char begin)
+                (forward-line 1)
+                ;; CAPTION is affiliated metadata, not an ordinary keyword node.
+                (let ((case-fold-search t))
+                  (when (looking-at "[ \t]*#\\+CAPTION:[ \t]*\\(.*\\)$")
+                    (setq reference (plist-put reference :caption (match-string-no-properties 1)))
+                    (forward-line 1)))
+                (let ((link (ende-artifact--plain-file-link)))
+                  (when link
+                    (puthash (org-element-property :begin link) t consumed)
+                    (setq reference
+                          (append reference
+                                  (list :path (org-link-unescape (org-element-property :path link))
+                                        :link-begin (org-element-property :begin link)
+                                        :link-end (- (org-element-property :end link)
+                                                     (org-element-property :post-blank link)))))
+                    (forward-line 1)))
+                (while (and (< (point) (point-max)) (looking-at "[ \t]*$"))
+                  (forward-line 1))
+                (push (plist-put reference :end (point)) references))))))
       (when attachments
         (org-element-map tree 'link
           (lambda (link)
@@ -504,6 +547,8 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
       (let ((begin (plist-get reference :begin)))
         (when (< position begin)
           (push (list :type :text :text (substring text (1- position) (1- begin))) parts))
+        (when-let* ((caption (ende-artifact--caption (plist-get reference :caption))))
+          (push (list :type :text :text (concat caption "\n")) parts))
         (push (plist-get reference :part) parts)
         (setq position (plist-get reference :end))))
     (when (<= position (length text))
@@ -542,20 +587,24 @@ Explicit references use their file link; RESOLVE-FILE enables user attachments."
 STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
   (let ((references (ende-artifact--references text t)) edits)
     (dolist (reference references)
-      (let ((path (plist-get reference :path)))
-        (if path
-            (setf (plist-get reference :part) (ende-artifact--load-image path))
-          (pcase-let* ((`(,base ,id) (funcall storage))
-                       (name (if (plist-get reference :svg)
-                                 (ende-artifact-store
-                                  base id (encode-coding-string (plist-get reference :svg) 'utf-8)
-                                  "image/svg+xml")
-                               (plist-get reference :name)))
-                       (part (ende-artifact-resolve base id name)))
-            (setf (plist-get reference :part) part)
-            (push (list (plist-get reference :begin) (plist-get reference :end)
-                        (concat "#+ENDE_ARTIFACT: " name "\n"
-                                (ende-artifact-link base id name org-file) "\n")) edits)))))
+      (let* ((path (plist-get reference :path))
+             (part
+              (if path (ende-artifact--load-image path)
+                (pcase-let* ((`(,base ,id) (funcall storage))
+                             (name (if (plist-get reference :svg)
+                                       (ende-artifact-store
+                                        base id (encode-coding-string (plist-get reference :svg) 'utf-8)
+                                        "image/svg+xml")
+                                     (plist-get reference :name))))
+                  (ende-artifact-resolve base id name))))
+             (directory (directory-file-name (file-name-directory (plist-get part :path)))))
+        (setf (plist-get reference :part) part)
+        ;; Complete references retain their resolved location, even across questions.
+        (push (list (plist-get reference :begin) (plist-get reference :end)
+                    (ende-artifact-render
+                     (file-name-directory directory) (file-name-nondirectory directory)
+                     (file-name-nondirectory (plist-get part :path)) org-file
+                     (plist-get reference :caption))) edits)))
     (list :content (ende-org--apply-edits text edits)
           :parts (ende-artifact--parts text references)
           :references references)))
@@ -634,8 +683,8 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                (begin (min (or begin (point-min)) (or (car changed) (point-max))))
                (end (max (or end (point-max)) (or (cdr changed) (point-min))))
                (bounds (ende-artifact--clear
-                        (progn (goto-char begin) (line-beginning-position 0))
-                        (progn (goto-char end) (min (point-max) (1+ (line-end-position)))) t))
+                        (progn (goto-char begin) (line-beginning-position -1))
+                        (progn (goto-char end) (line-beginning-position 4)) t))
                (begin (car bounds)) (end (cdr bounds))
                (existing (make-hash-table :test #'eql))
                (kept (make-hash-table :test #'eq)))
@@ -658,8 +707,7 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                          (signature (list path (plist-get entry :signature) pixels-x pixels-y))
                          (start (+ begin (1- (plist-get reference :begin))))
                          (finish (save-excursion
-                                   (goto-char start)
-                                   (forward-line 1)
+                                   (goto-char (+ begin (1- (plist-get reference :link-end))))
                                    (line-end-position)))
                          (overlay (or (gethash start existing)
                                       (cl-find-if
@@ -725,8 +773,8 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
   (setq ende-artifact--structural-change nil)
   (save-excursion
     (goto-char begin)
-    (let ((start (line-beginning-position 0))
-          (finish (progn (goto-char end) (line-beginning-position 3))))
+    (let ((start (line-beginning-position -1))
+          (finish (progn (goto-char end) (line-beginning-position 4))))
       (if ende-artifact--dirty
           (progn
             (set-marker (car ende-artifact--dirty) (min start (car ende-artifact--dirty)))
