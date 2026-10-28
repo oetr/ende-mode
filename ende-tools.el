@@ -103,8 +103,9 @@ Return non-nil if the originating agent job still accepts reports.")
     (name description parameters handler &optional read-only resource-policy options)
   "Register tool NAME with DESCRIPTION, PARAMETERS, and HANDLER.
 
-HANDLER receives an arguments object and a canonical project root.  NAME is a
-symbol internally and is exposed to model transports as a string.  Pass
+PARAMETERS is a JSON schema or a function receiving the resolved access config
+and returning a schema.  HANDLER receives arguments and a canonical project
+root.  NAME is exposed to model transports as a string.  Pass
 `:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
 the historic `:no-resource' registration form; OPTIONS may specify
 `:resource-kind' (`file', `url', or `none'), `:requires-resources',
@@ -166,8 +167,7 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
                     when (ende-tool-always-available tool) collect name))))
 
 (defun ende-tool-definitions (&optional access-config)
-  "Return registered tools in OpenAI-compatible function-tool shape.
-Use ACCESS-CONFIG to generate its effective host-command schema."
+  "Return registered tool definitions, resolving schemas with ACCESS-CONFIG."
   (mapcar
    (lambda (tool)
      (list (cons :type "function")
@@ -175,9 +175,10 @@ Use ACCESS-CONFIG to generate its effective host-command schema."
                  (list (cons :name (symbol-name (ende-tool-name tool)))
                        (cons :description (ende-tool-description tool))
                        (cons :parameters
-                             (if (eq (ende-tool-name tool) 'run_host_command)
-                                 (ende-tools--host-command-schema access-config)
-                               (ende-tool-parameters tool)))))))
+                             (let ((parameters (ende-tool-parameters tool)))
+                               (if (functionp parameters)
+                                   (funcall parameters access-config)
+                                 parameters)))))))
    (mapcar #'cdr ende-tools--registry)))
 
 (defun ende-tool--call-root (tool root access-config)
@@ -2796,7 +2797,7 @@ process-group cancellation function with the active Ende job."
          "private development workspace. Use only when host execution is "
          "specifically required; do not use instead of edit_file, create_file, "
          "delete_file, or apply_patch when modifying project source, unless the user specifically asks you to.")
- ende-tools--run-host-command-schema
+ #'ende-tools--host-command-schema
  #'ende-tools--run-host-command nil :no-resource '(:async t))
 
 (ende-tool-register
