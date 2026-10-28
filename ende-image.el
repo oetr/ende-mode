@@ -273,14 +273,21 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                      (setf (ende-job-instruction job)
                            (plist-put (ende-job-instruction job) :generated-artifacts
                                       (append (plist-get (ende-job-instruction job) :generated-artifacts) artifacts)))
-                     (funcall callback (list :ok t :artifact (plist-get (car artifacts) :name)
-                                             :status "created") nil))
+                     (funcall
+                      callback
+                      (list :ok t
+                            :artifacts
+                            (vconcat
+                             (mapcar (lambda (artifact)
+                                       (plist-get artifact :name))
+                                     artifacts)))
+                      nil))
                  (error (funcall callback nil "Generated image could not be validated or stored"))))))
          ende-tools--register-cancellation-function)))))
 
 (ende-tool-register
  'generate_image
- "Generate an image from a prompt using the user-configured image model. Caption is optional; an omitted or empty caption means no displayed caption. Return an artifact filename; emit #+ENDE_ARTIFACT: FILENAME to attach it."
+ "Generate one or more images from a prompt using the user-configured image backend. Sampling options depend on that backend; omitted generation options use server defaults. Caption is optional local presentation metadata, never sent to the backend; an omitted or empty caption means no displayed caption. The result contains artifact filenames in the artifacts array. Emit one #+ENDE_ARTIFACT: FILENAME marker for each image being attached."
  `((:type . "object")
    (:description . "Optional generation fields are backend-dependent; omitted fields use server defaults.")
    (:properties . ,(append ende-image--request-properties
