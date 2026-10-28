@@ -19,6 +19,7 @@
 (require 'ende-core)
 (require 'ende-edit)
 (require 'ende-project)
+(require 'ende-worker)
 (require 'ende-url)
 (require 'ende-patch)
 (require 'ende-web-fetch)
