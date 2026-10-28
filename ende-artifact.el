@@ -657,9 +657,9 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                          (pixels-y (max 1 (round (* height scale))))
                          (signature (list path (plist-get entry :signature) pixels-x pixels-y))
                          (start (+ begin (1- (plist-get reference :begin))))
-                         ;; Keep the anchor outside link syntax and inside the fold.
                          (finish (save-excursion
                                    (goto-char start)
+                                   (forward-line 1)
                                    (line-end-position)))
                          (overlay (or (gethash start existing)
                                       (cl-find-if
@@ -673,10 +673,15 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
                       (overlay-put overlay 'evaporate t)
                       (push overlay ende-artifact--overlays))
                     (unless (equal signature (overlay-get overlay 'ende-artifact-signature))
-                      (let ((image (create-image path nil nil :width pixels-x :height pixels-y)))
+                      (let ((image (create-image path nil nil :width pixels-x :height pixels-y))
+                            ;; The link's end can remain visible outside a fold.
+                            (collapse `(when (invisible-p (overlay-start ,overlay)) . "")))
                         (when (display-graphic-p) (image-flush image t))
                         (overlay-put overlay 'after-string
-                                     (concat "\n" (propertize " " 'display image) "\n"))
+                                     (propertize
+                                      (concat (propertize "\n" 'display collapse)
+                                              (propertize " " 'display (list collapse image)))
+                                      'face 'default))
                         (overlay-put overlay 'ende-artifact-signature signature)))
                     (move-overlay overlay start finish)
                     (puthash overlay t kept))
@@ -745,6 +750,8 @@ STORAGE lazily returns (BASE CHAT-ID) for creation-time references only."
   (ende-artifact--release-analysis)
   (unless enabled (ende-artifact--clear))
   (when (and enabled (derived-mode-p 'org-mode))
+    (dolist (overlay ende-artifact--overlays)
+      (overlay-put overlay 'ende-artifact-signature nil))
     (add-hook 'before-change-functions #'ende-artifact--before-change nil t)
     (add-hook 'after-change-functions #'ende-artifact--after-change nil t)
     (add-hook 'kill-buffer-hook #'ende-artifact--disable nil t)

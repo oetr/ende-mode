@@ -425,7 +425,7 @@
             (check-refresh 2))
           (ende-mode -1))))))
 
-(ert-deftest ende-artifact-preview-follows-folding ()
+(ert-deftest ende-artifact-preview-layout-and-folding ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "chat" ende-artifact-test-svg "image/svg+xml"))
@@ -436,12 +436,27 @@
       (cl-letf (((symbol-function 'create-image) (lambda (&rest _) '(image :type svg))))
         (ende-artifact-refresh)
         (should (= 2 (length ende-artifact--overlays)))
-        (goto-char (point-min))
-        (dotimes (_ 3)
-          (org-cycle)
-          (dolist (overlay ende-artifact--overlays)
-            (should (eq (not (invisible-p (overlay-start overlay)))
-                        (not (invisible-p (overlay-end overlay)))))))))))
+        (dolist (overlay ende-artifact--overlays)
+          (goto-char (overlay-end overlay))
+          (should (eolp))
+          (beginning-of-line)
+          (should (looking-at-p "\\[\\[file:")))
+        (save-window-excursion
+          (set-window-buffer (selected-window) (current-buffer))
+          (dolist (action '(org-fold-hide-subtree org-fold-show-children org-fold-show-subtree))
+            (goto-char (point-min))
+            (funcall action)
+            (let ((height (cdr (window-text-pixel-size nil (point-min) (point-max) t)))
+                  (strings (mapcar (lambda (overlay) (overlay-get overlay 'after-string))
+                                   ende-artifact--overlays)))
+              (unwind-protect
+                  (progn
+                    (dolist (overlay ende-artifact--overlays)
+                      (overlay-put overlay 'after-string nil))
+                    (should (= (- height (cdr (window-text-pixel-size nil (point-min) (point-max) t)))
+                               (if (eq action 'org-fold-show-subtree) 2 0))))
+                (cl-mapc (lambda (overlay string) (overlay-put overlay 'after-string string))
+                         ende-artifact--overlays strings)))))))))
 
 (ert-deftest ende-artifact-preview-lifecycle ()
   (ende-artifact-test-with-files
