@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'org)
 (require 'ende-core)
 (require 'ende-operation)
 (require 'ende-provider)
@@ -29,7 +30,8 @@
 (cl-defstruct (ende-job-family (:constructor ende--make-job-family))
   "A top-level job and its contiguous scheduler region."
   root parallel max-concurrency policy-frozen-p inference-template registry origin
-  queue-marker queue-tail)
+  queue-marker queue-tail members archived-p origin-name source-marker source-file
+  source-line question-id request-id)
 
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
@@ -55,6 +57,119 @@
 
 (defvar ende--next-job-id 0
   "Next numeric identifier assigned to a job.")
+
+(defcustom ende-queue-finished-limit 30
+  "Maximum completed top-level job trees retained in this Emacs session."
+  :type 'natnum :group 'ende)
+
+(defvar ende--finished-families nil
+  "Retained terminal families, newest completion first.")
+
+(defvar ende--retained-jobs (make-hash-table :test #'eql)
+  "Published retained jobs indexed by stable ID.")
+
+(defvar ende--settlement-depth 0
+  "Nesting depth of atomic settlement batches.")
+
+(defvar ende--settled-families nil
+  "Families awaiting final retention after the outer settlement batch.")
+
+(defun ende-queue-retained-job-by-id (id)
+  "Return the published retained job with ID."
+  (gethash id ende--retained-jobs))
+
+(defun ende--retain-published-job (job)
+  "Register successfully published JOB in its family's display history."
+  (let ((family (ende-job-family job)))
+    (setf (ende-job-family-members family)
+          (nconc (ende-job-family-members family) (list job)))
+    (puthash (ende-job-id job) job ende--retained-jobs)))
+
+(defun ende-queue--source-killed ()
+  "Save navigation and display metadata before the current source dies."
+  (maphash
+   (lambda (_id job)
+     (let ((family (ende-job-family job)))
+       (when (and (eq job (ende-job-family-root family))
+                  (eq (current-buffer) (ende-job-family-origin family)))
+         (setf (ende-job-family-origin-name family) (buffer-name)
+               (ende-job-family-source-file family) buffer-file-name
+               (ende-job-family-source-line family)
+               (line-number-at-pos (ende-job-family-source-marker family) t)))))
+   ende--retained-jobs))
+
+(put 'ende-queue--source-killed 'permanent-local-hook t)
+
+(defun ende-queue--track-source (family)
+  "Capture FAMILY's root navigation metadata."
+  (let* ((root (ende-job-family-root family))
+         (target (ende-job-target root))
+         (buffer (ende-job-family-origin family))
+         (instruction (ende-job-instruction root)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (save-restriction
+          (widen)
+          (let ((position (or (ende-target-cursor target) (point-min))))
+            (setf (ende-job-family-origin-name family) (buffer-name)
+                  (ende-job-family-source-marker family) (copy-marker position t)
+                  (ende-job-family-source-file family) buffer-file-name
+                  (ende-job-family-source-line family) (line-number-at-pos position t)
+                  (ende-job-family-question-id family) (plist-get instruction :question-id)
+                  (ende-job-family-request-id family) (plist-get instruction :request-id))))
+        (add-hook 'kill-buffer-hook #'ende-queue--source-killed -60 t)))))
+
+(defun ende-queue-evict-family (family)
+  "Release the complete terminal FAMILY, without touching user-owned sources."
+  (unless (ende-job-terminal-p (ende-job-family-root family))
+    (error "Cannot evict an active family"))
+  (let ((buffer (ende-job-family-origin family))
+        (ids (mapcar #'ende-job-id (ende-job-family-members family))))
+    (setq ende--finished-families (delq family ende--finished-families))
+    (dolist (job (ende-job-family-members family))
+      (remhash (ende-job-id job) ende--retained-jobs)
+      (ende--job-release-owned-buffer job)
+      (when (buffer-live-p (ende-job-work-buffer job))
+        (kill-buffer (ende-job-work-buffer job)))
+      (setf (ende-job-work-buffer job) nil
+            (ende-job-target job) nil (ende-job-overlay job) nil
+            (ende-job-family job) nil (ende-job-parent job) nil
+            (ende-job-children job) nil (ende-job-profile job) nil
+            (ende-job-inference-template job) nil (ende-job-access-policy job) nil
+            (ende-job-instruction job) nil (ende-job-result job) nil
+            (ende-job-error job) nil (ende-job-structured-state job) nil
+            (ende-job-cancel-function job) nil (ende-job-resume-function job) nil
+            (ende-job-delegated-settlement job) nil (ende-job-active-spawn-batch job) nil
+            (ende-job-pending-guidance job) nil (ende-job-latest-user job) nil
+            (ende-job-last-usage job) nil (ende-job-metadata job) nil
+            (ende-job-reasoning-summary-text job) nil
+            (ende-job-reasoning-summary-item job) nil
+            (ende-job-activity-title job) nil (ende-job-activity-status job) nil))
+    (when (markerp (ende-job-family-source-marker family))
+      (set-marker (ende-job-family-source-marker family) nil))
+    (setf (ende-job-family-members family) nil (ende-job-family-root family) nil
+          (ende-job-family-origin family) nil (ende-job-family-source-marker family) nil
+          (ende-job-family-inference-template family) nil
+          (ende-job-family-registry family) nil
+          (ende-job-family-queue-marker family) nil (ende-job-family-queue-tail family) nil)
+    (when (buffer-live-p buffer)
+      (unless (cl-some (lambda (job) (eq (ende-job-origin-buffer job) buffer))
+                       (hash-table-values ende--retained-jobs))
+        (with-current-buffer buffer
+          (remove-hook 'kill-buffer-hook #'ende-queue--source-killed t))))
+    (ende-queue-emit-event (list :type :evicted :ids ids))))
+
+(defun ende-queue--finalize-retention ()
+  "Archive terminal families once, then trim whole oldest trees."
+  (let ((families (prog1 ende--settled-families
+                    (setq ende--settled-families nil))))
+    (dolist (family families)
+      (when (and family (ende-job-terminal-p (ende-job-family-root family))
+                 (not (ende-job-family-archived-p family)))
+        (setf (ende-job-family-archived-p family) t)
+        (push family ende--finished-families))))
+  (while (> (length ende--finished-families) (max 0 ende-queue-finished-limit))
+    (ende-queue-evict-family (car (last ende--finished-families)))))
 
 (defvar ende--next-dispatch-order 0
   "Next scheduler dispatch sequence assigned to a running job.")
@@ -754,10 +869,11 @@ bypassed by a later same-provider job."
         (save-excursion
           (goto-char (or (ende-target-cursor target) (point-min)))
           (let ((heading (and (derived-mode-p 'org-mode)
+                              (not (org-before-first-heading-p))
                               (org-get-heading t t t t))))
             (if (and heading (not (string-blank-p heading)))
                 (setq text heading)
-              (forward-line 1)
+              (when heading (org-end-of-meta-data t))
               (setq text (buffer-substring-no-properties
                           (point) (min (point-max) (+ (point) 240)))))))))
     (truncate-string-to-width
@@ -800,6 +916,8 @@ Return the newly created `ende-job'."
     (ende--job-register-origin job)
     (ende--queue-push family)
     (ende--queue-insert-family-member job)
+    (ende--retain-published-job job)
+    (ende-queue--track-source family)
     (ende-job-emit-event
      job
      (list :type :queued
@@ -854,6 +972,7 @@ scheduler callbacks are permitted to observe the child."
                 (ende-job-children parent)
                 (append (ende-job-children parent) (list job)))
           (ende--queue-insert-family-member job)
+          (ende--retain-published-job job)
           (ende-job-emit-event
            job (list :type :queued
                      :client (ende-provider-client-name (ende-job-profile job))
@@ -861,6 +980,9 @@ scheduler callbacks are permitted to observe the child."
           (setq published t)
           job)
       (unless published
+        (remhash (ende-job-id job) ende--retained-jobs)
+        (setf (ende-job-family-members family)
+              (delq job (ende-job-family-members family)))
         (setq ende-queue (delq job ende-queue))
         (ende--queue-sync-tail)
         (setf (ende-job-children parent)
@@ -905,6 +1027,7 @@ scheduler callbacks are permitted to observe the child."
   (unless (memq state '(completed failed cancelled skipped))
     (error "invalid terminal job state: %s" state))
   (let* ((was-suspended ende--queue-suspended)
+         (ende--settlement-depth (1+ ende--settlement-depth))
          (selected (cl-delete-duplicates (copy-sequence roots) :test #'eq))
          (jobs (ende--job-live-subtree selected))
          (now (float-time))
@@ -968,10 +1091,13 @@ scheduler callbacks are permitted to observe the child."
         (dolist (job jobs)
           (ende--job-terminal-event
            job (ende-job-state job) (ende-job-result job) (ende-job-error job))
-          (ende-work-buffer-retire (ende--job-release-owned-buffer job)))
+          (ende--job-release-owned-buffer job)
+          (cl-pushnew (ende-job-family job) ende--settled-families :test #'eq))
         (ende-queue-emit-event (list :type state))
         (dolist (entry cancellations)
           (ende--invoke-cancellation (cdr entry))))
+      (when (= ende--settlement-depth 1)
+        (ende-queue--finalize-retention))
       (unless (or ende--aborting was-suspended)
         (ende-process-next)))
     jobs))

@@ -210,7 +210,8 @@ include any explicit user overrides relevant to the assigned task.")
   "Create JOB's private execution buffer and target."
   (let ((buffer (generate-new-buffer
                  (format " *ende-agent-%d*" (ende-job-id job)))))
-    (setf (ende-job-owned-buffer job) buffer)
+    (setf (ende-job-owned-buffer job) buffer
+          (ende-job-work-buffer job) buffer)
     (let* ((owned-buffer buffer)
            (hook (lambda ()
                    (ende-agent--owned-buffer-killed job owned-buffer))))

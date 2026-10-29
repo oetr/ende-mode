@@ -331,6 +331,8 @@ non-nil, is signalled from the event callback."
       (delete-file file)))
   (setq ende-tool-store-file ende-test--tool-store-file)
   (ende-abort-queue)
+  (dolist (family (copy-sequence ende--finished-families))
+    (ende-queue-evict-family family))
   (when (fboundp #'ende-openrouter-batch-abort)
     (ende-openrouter-batch-abort))
   (when (buffer-live-p ende-rubber-duck--buffer)

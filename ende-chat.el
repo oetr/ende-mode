@@ -2018,6 +2018,7 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
       (with-current-buffer buffer
         (org-mode)
         (ende-work-buffer-mode 1))
+      (setf (ende-job-work-buffer job) buffer)
       (setf (ende-job-instruction job)
             (plist-put instruction :staging-buffer buffer)))
     (and (buffer-live-p buffer) buffer)))
@@ -2299,20 +2300,13 @@ When CHECKPOINT is non-nil, persist the completed boundary."
       (buffer-substring-no-properties (point-min) (point-max)))))
 
 (defun ende-chat--dispose-staging-buffer (job event)
-  "Retire JOB's staging buffer after safely preserving its transcript."
+  "Release recovery files only after JOB's transcript is safely materialized."
   (when (eq (plist-get event :type) :settled)
     (let* ((instruction (ende-job-instruction job))
-           (buffer (plist-get instruction :staging-buffer))
            (file (plist-get instruction :recovery-file))
-           (materialized (plist-get instruction :staging-materialized))
-           (snapshot-current (plist-get instruction :recovery-current)))
+           (materialized (plist-get instruction :staging-materialized)))
       (when (and materialized file (file-exists-p file))
         (ignore-errors (delete-file file)))
-      (when (and (buffer-live-p buffer)
-                 (or materialized
-                     (and snapshot-current file (file-exists-p file))))
-        (ende-work-buffer-retire buffer)
-        (setq instruction (plist-put instruction :staging-buffer nil)))
       (when materialized
         (setq instruction
               (plist-put

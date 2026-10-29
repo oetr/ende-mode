@@ -204,7 +204,7 @@
 
 (ert-deftest ende-test/history-is-bounded-and-body-cannot-create-headings ()
   (ende-test--reset)
-  (let ((ende-history-max-entries 2)
+  (let ((ende-queue-finished-limit 2)
         (ende-llm-function
          (ende-test--fake-llm '(" one" " two" "\n* fake heading"))))
     (ende-test--with-buffer "base"
@@ -221,7 +221,7 @@
 
 (ert-deftest ende-test/history-replaces-oldest-entries-at-default-limit ()
   (ende-test--reset)
-  (let ((ende-history-max-entries 100)
+  (let ((ende-queue-finished-limit 100)
         (ende-llm-function
          (ende-test--fake-llm
           (cl-loop for index from 0 to 102

@@ -672,8 +672,7 @@
      (should-not (ende-active-jobs))
      (should-not (ende-pending-jobs))
      (should-not (ende-queue-family-markers))
-     (should (cl-every (lambda (buffer) (not (buffer-live-p buffer)))
-                       child-buffers))
+     (should (cl-every #'buffer-live-p child-buffers))
      (dolist (call (cdr ende-test--calls))
        (ende-test--callback call :on-done '(:content "late child answer"))
        (cl-incf late-count))
@@ -1100,7 +1099,7 @@
        (should (string-match-p "Agent: Work" (buffer-string)))
        (should (string-match-p "Agent: Reply" (buffer-string)))
        (should (string-match-p "mock failure" (buffer-string)))
-       (should (null (ende-chat--staging-buffer job)))
+       (should (buffer-live-p (ende-job-work-buffer job)))
        (let* ((document (ende-chat--build-document))
               (reply (ende-chat--request-state-headline
                       document request-id "failed")))
@@ -1156,7 +1155,7 @@
                             (concat request-id ".org")
                             (expand-file-name "ende/chat-recovery/"
                                               user-emacs-directory))))
-              (should (null (ende-chat--staging-buffer job))))))
+              (should (buffer-live-p (ende-job-work-buffer job))))))
       (delete-directory directory t))))
 
 (ert-deftest ende-test/chat-unsafe-recovery-only-opens-inspection-buffer ()

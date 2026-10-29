@@ -449,7 +449,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
         (ende-work-buffer--collect)
         (delete-directory directory t)))))
 
-(ert-deftest ende-test/work-buffers-outlive-jobs-only-while-displayed ()
+(ert-deftest ende-test/work-buffers-remain-retained-after-display-closes ()
   (save-window-excursion
     (delete-other-windows)
     (ende-test--dashboard-reset)
@@ -507,7 +507,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                  (should-not (ende-job-cancel-function job))
                  (should-not (memq job (ende-all-live-jobs)))
                  (should-not (ende-job-owned-buffer job))
-                 (should-not (ende-chat--staging-buffer job))
+                 (should (eq (ende-job-work-buffer job) buffer))
                  (when hook
                    (should-not (memq hook (buffer-local-value 'kill-buffer-hook buffer))))
                  (set-window-buffer first source)
@@ -517,7 +517,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                  (delete-window second)
                  (run-hook-with-args 'window-buffer-change-functions (selected-frame))
                  (ende-work-buffer--collect)
-                 (should-not (buffer-live-p buffer))
+                 (should (buffer-live-p buffer))
                  (should (buffer-live-p source))
                  (should-not (buffer-local-value 'buffer-read-only source))
                  (setq second (split-window-right))))))
@@ -527,7 +527,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
         (ende-work-buffer--collect)
         (delete-directory directory t)))))
 
-(ert-deftest ende-test/work-buffer-retirement-survives-repeated-reload ()
+(ert-deftest ende-test/work-buffer-retention-survives-repeated-reload ()
   (save-window-excursion
     (delete-other-windows)
     (ende-test--dashboard-reset)
@@ -565,7 +565,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
              (should (eq (ende-job-state child) 'cancelled))
              (should (eq (ende-job-state root) 'cancelled))
              (should-not (ende-job-owned-buffer child))
-             (should-not (ende-chat--staging-buffer root))
+             (should (eq (ende-job-work-buffer root) staging))
              (should-not (ende-all-live-jobs))
              (with-current-buffer owned
                (should (string-match-p
@@ -579,7 +579,7 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
                           1)))
              (should (= (cl-count #'ende-work-buffer--collect timer-list
                                  :key #'timer--function)
-                        1))
+                        0))
              (dolist (buffer (list owned staging))
                (with-current-buffer buffer
                  (should (eq (key-binding (kbd "q")) #'ende-work-buffer-quit))))
@@ -589,8 +589,8 @@ When FACE is non-nil, it must also end precisely at TEXT's boundaries."
              (set-window-buffer second ende-queue-ui--buffer)
              (run-hook-with-args 'delete-frame-functions (selected-frame))
              (ende-work-buffer--collect)
-             (should-not (buffer-live-p owned))
-             (should-not (buffer-live-p staging))
+             (should (buffer-live-p owned))
+             (should (buffer-live-p staging))
              (should-not (cl-find #'ende-work-buffer--collect timer-list
                                   :key #'timer--function))))
         (ende-test--dashboard-reset)

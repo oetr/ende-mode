@@ -34,11 +34,6 @@
   :type 'boolean
   :group 'ende)
 
-(defcustom ende-history-max-entries 100
-  "Maximum number of completed jobs retained in the history buffer."
-  :type 'integer
-  :group 'ende)
-
 (defcustom ende-history-buffer-name "*ende-history*"
   "Name of the buffer used for retained LLM job history."
   :type 'string
@@ -227,21 +222,31 @@
     (dolist (line (split-string text "\n" nil))
       (insert "  " line "\n"))))
 
-(defun ende-history--trim-buffer ()
-  "Remove oldest complete entries until the entry limit is met."
-  (let ((limit (max 1 ende-history-max-entries)))
-    (while (> ende-history--entry-count limit)
-      (goto-char (point-min))
-      (if (re-search-forward "^\\* Job " nil t)
-          (let ((start (line-beginning-position))
-                (end (save-excursion
-                       (forward-line 1)
-                       (if (re-search-forward "^\\* Job " nil t)
-                           (line-beginning-position)
-                         (point-max)))))
-            (delete-region start end)
-            (cl-decf ende-history--entry-count))
-        (setq ende-history--entry-count 0)))))
+(defun ende-history--queue-event (event)
+  "Remove diagnostics for family IDs evicted by EVENT."
+  (when (eq (plist-get event :type) :evicted)
+    (let ((ids (plist-get event :ids)))
+      (maphash (lambda (job _entry)
+                 (when (memq (ende-job-id job) ids)
+                   (remhash job ende-history--entries)))
+               ende-history--entries)
+      (when (buffer-live-p ende-history--buffer-object)
+        (with-current-buffer ende-history--buffer-object
+          (let ((inhibit-read-only t) (ende-history--internal-write t))
+            (save-excursion
+              (goto-char (point-min))
+              (while (re-search-forward "^\\* Job \\([0-9]+\\):" nil t)
+                (let ((id (string-to-number (match-string 1)))
+                      (start (line-beginning-position))
+                      (end (save-excursion
+                             (forward-line 1)
+                             (if (re-search-forward "^\\* Job " nil t)
+                                 (line-beginning-position) (point-max)))))
+                  (when (memq id ids)
+                    (delete-region start end)
+                    (cl-decf ende-history--entry-count)))))))))))
+
+(add-hook 'ende-queue-event-functions #'ende-history--queue-event)
 
 (defun ende-history--format-token-count (count)
   "Return integer COUNT with thousands separators."
@@ -451,8 +456,7 @@
               (when error
                 (ende-history--insert-section
                  "Error" (ende-error-display-message error)))
-              (cl-incf ende-history--entry-count)
-              (ende-history--trim-buffer))))))))
+              (cl-incf ende-history--entry-count))))))))
 
 (defun ende-history ()
   "Display the retained ende job history buffer."
