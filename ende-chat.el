@@ -740,9 +740,11 @@ around rendered chat sections, not arbitrary text slices."
              (with-current-buffer source-buffer
                (ende-artifact--local-path target)))))))))
 
-(defun ende-chat--section-messages (document root start end &optional include-p)
+(defun ende-chat--section-messages
+    (document root start end &optional include-p selected-headlines)
   "Read ROOT's sections within START..END, preserving roles and visibility.
-INCLUDE-P selects sections instead of the normal eligibility policy."
+INCLUDE-P selects sections instead of the normal eligibility policy.
+SELECTED-HEADLINES supplies an already selected current section."
   (let ((messages nil)
         (parts nil)
         (message-owner nil)
@@ -817,9 +819,11 @@ INCLUDE-P selects sections instead of the normal eligibility policy."
                              "")))
                    (push text parts))
                  (setq fragment-end (ende-chat--headline-end document headline)))
-               (dolist (child (ende-chat--fenced-siblings
-                               document (ende-chat--children document headline)
-                               end))
+               (dolist (child (if selected-headlines
+                                 (ende-chat--children document headline)
+                               (ende-chat--fenced-siblings
+                                document (ende-chat--children document headline)
+                                end)))
                  (walk child next-owner next-role next-presentation)))))))
       (catch 'ende-chat--sections-read
         (walk root nil (ende-chat--effective-role document root) nil))
@@ -1381,29 +1385,31 @@ COMPLETE means TEXT reaches the generated wrapper's end."
         (push result messages))
       (nreverse messages))))
 
+(defun ende-chat--context-prefix (document section &optional root)
+  "Read SECTION's preceding context according to the configured policy.
+ROOT overrides the section's enclosing root."
+  (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
+    (error "Invalid ende-chat-context-policy: %s" ende-chat-context-policy))
+  (when (or (eq ende-chat-context-policy 'root-prefix)
+            (ende-chat--reasoning-ancestors document section))
+    (ende-chat--prefix-messages
+     document (or root (ende-chat--root document section)) section
+     (eq ende-chat-context-policy 'current-section-only))))
+
 (defun ende-chat--serialize (document question &optional current-text root)
   "Serialize QUESTION's active root into ordered role-tagged messages.
 CURRENT-TEXT, when supplied, replaces the final user message.
 ROOT supplies the source scope when the destination is a new root sibling."
   (let ((ende-chat--expired-history-in-request nil))
-    (let* ((root (or root (ende-chat--root document question)))
-           (reasoning-ancestors
+    (let* ((reasoning-ancestors
             (ende-chat--reasoning-ancestors document question))
-           (prefix (and (eq ende-chat-context-policy 'root-prefix)
-                        (ende-chat--prefix-messages document root question)))
-           (reasoning-prefix
-            (and (eq ende-chat-context-policy 'current-section-only)
-                 reasoning-ancestors
-                 (ende-chat--prefix-messages document root question t))))
-      (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
-        (error "Invalid ende-chat-context-policy: %s"
-               ende-chat-context-policy))
+           (prefix (ende-chat--context-prefix document question root)))
       (let* ((current-text (or current-text
                                (ende-chat--current-text
                                 document question nil reasoning-ancestors)))
              (content (ende-chat--content document question current-text))
              (messages
-              (append (or prefix reasoning-prefix)
+              (append prefix
                       (unless (ende-content-empty-p content)
                         (list (ende-chat--message 'user content)))))
              (expired ende-chat--expired-history-in-request))
@@ -1411,14 +1417,41 @@ ROOT supplies the source scope when the destination is a new root sibling."
           (message "Some tool payloads are unavailable; omitting affected tool history"))
         messages))))
 
-(defun ende-chat-context-at-point ()
-  "Return the serialized chat context for the Org headline at point.
+(defun ende-chat--context-messages (document headline)
+  "Read context through HEADLINE's selected section in its stored roles."
+  (let* ((ende-chat--expired-history-in-request nil)
+         (owner (ende-chat--generated-section-owner document headline))
+         (section (or owner headline))
+         (ancestors (ende-chat--reasoning-ancestors document headline))
+         (current (unless owner
+                    (ende-chat--current-headlines
+                     document section nil ancestors)))
+         (messages
+          (append
+           (ende-chat--context-prefix document section)
+           (ende-chat--section-messages
+            document section (org-element-property :begin section)
+            (org-element-property :end section)
+            (if owner
+                (lambda (node)
+                  (or (ende-chat--eligible-p document node)
+                      (memq node ancestors)))
+              (lambda (node) (memq node current)))
+            current))))
+    (when ende-chat--expired-history-in-request
+      (message "Some tool payloads are unavailable; omitting affected tool history"))
+    messages))
 
-The result excludes the system prompt and is useful to preview callers and
-tests."
-  (let* ((document (ende-chat--build-document))
-         (question (ende-chat--headline-at-point document)))
-    (ende-chat--serialize document question)))
+(defun ende-chat-context-at-point (&optional document)
+  "Return stored-role chat context at point, excluding the system prompt.
+DOCUMENT reuses an already parsed document.  Before its first headline, return
+an empty conversation."
+  (save-excursion
+    (let* ((document (or document (ende-chat--build-document)))
+           (first (car (ende-chat--document-headlines document))))
+      (when (and first (>= (point) (org-element-property :begin first)))
+        (ende-chat--context-messages
+         document (ende-chat--headline-at-point document))))))
 
 (defun ende-chat--pretty-json-or-raw (text)
   "Pretty-print JSON TEXT when valid, otherwise return it unchanged."
@@ -1463,14 +1496,9 @@ tests."
   "Show the system prompt and serialized chat context at point."
   (interactive)
   (let* ((document (ende-chat--build-document))
-         (question (ende-chat--headline-at-point document))
          (messages
-          (progn
-            (unless (and (eq (ende-chat--effective-role document question) 'user)
-                         (ende-chat--askable-p document question))
-              (user-error "Point is not on an askable chat section"))
-            (cons (cons "system" (ende-chat--system-prompt document))
-                  (ende-chat--serialize document question))))
+          (cons (cons "system" (ende-chat--system-prompt document))
+                (ende-chat-context-at-point document)))
          (buffer (get-buffer-create "*ende context*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))

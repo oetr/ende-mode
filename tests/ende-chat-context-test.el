@@ -330,6 +330,10 @@
            ":ENDE_VISIBILITY: hidden\n"
            ":END:\n"
            "Do not include this private note\n"
+           "*** Independent fence\n"
+           ":PROPERTIES:\n:ENDE_ROLE: assistant\n"
+           ":ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+           "Do not include this independent summary\n"
            "*** Later unmarked reference\n"
            "Include this later reference\n"
            "** Later sibling\n"
@@ -344,6 +348,7 @@
      (should-not (string-match-p "Do not include this turn" text))
      (should-not (string-match-p "Do not include this answer" text))
      (should-not (string-match-p "Do not include this private note" text))
+     (should-not (string-match-p "Do not include this independent summary" text))
      (should-not (string-match-p "Must not enter this request" text)))))
 
 

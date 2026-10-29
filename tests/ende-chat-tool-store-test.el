@@ -195,6 +195,86 @@
           (should-error (ende-tool-store--initialize-buffer) :type 'user-error))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/chat-inspection-observes-sections-without-submitting ()
+  (ende-test--reset)
+  (let ((ende-llm-function (ende-test--fake-llm '("Should not be called"))))
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-buffer
+            (org-mode)
+            (insert "Document preamble.\n* Topic\n** Question\nOriginal question.\n")
+            (ende-test--stored-tool-history
+             (list (cons '(:id "inspect-call" :name "read_file" :arguments "{}")
+                         "INSPECT_RESULT"))
+             '(:content "Checking.\n**** Work detail\nWork reference."))
+            (goto-char (point-max))
+            (insert "*** Reply reference\nAssistant reference.\n"
+                    "*** User correction\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                    "Independent correction.\n"
+                    "*** Private\n:PROPERTIES:\n:ENDE_VISIBILITY: hidden\n:END:\n"
+                    "INSPECT_PRIVATE\n"
+                    "** Follow-up\nSelected user body.\n"
+                    "*** Reference\nSelected user reference.\n"
+                    "*** Independent turn\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                    "INSPECT_LATER_CHILD\n"
+                    "** Later question\nINSPECT_LATER_SIBLING\n"
+                    (ende-chat--assistant-text
+                     2 "later-question" "later-request" ""
+                     '(:content "INSPECT_LATER_REPLY")))
+            (dolist (heading '(nil "** Agent: Work" "**** Work detail"
+                               "** Agent: Reply" "*** User correction"
+                               "** Follow-up"))
+              (if heading (ende-test--chat-goto heading)
+                (goto-char (point-min)))
+              (set-buffer-modified-p (equal heading "** Agent: Work"))
+              (let* ((source (current-buffer))
+                     (before (buffer-string))
+                     (modified (buffer-modified-p))
+                     (cursor (point))
+                     (queue (copy-sequence ende-queue))
+                     (next-id ende-chat--next-id)
+                     (messages (ende-chat-context-at-point))
+                     (text (ende-chat--render-context messages))
+                     (system (ende-chat--system-prompt (ende-chat--build-document)))
+                     (work (member heading '("** Agent: Work" "**** Work detail"))))
+                (if (null heading)
+                    (should-not messages)
+                  (should (string-match-p "INSPECT_RESULT" text))
+                  (should (equal (mapcar #'ende-content-role messages)
+                                 (append '("user" "assistant" "tool")
+                                         (unless work '("assistant" "user"))
+                                         (when (equal heading "** Follow-up")
+                                           '("user")))))
+                  (if work
+                      (should-not (string-match-p "Final stored answer" text))
+                    (should (string-match-p "Final stored answer" text)))
+                  (if (equal heading "** Follow-up")
+                      (progn
+                        (should (string-match-p "Selected user body" text))
+                        (should (string-match-p "Selected user reference" text)))
+                    (should-not (string-match-p "Selected user body" text))
+                    (should-error (ende-ask) :type 'user-error)))
+                (should-not (string-match-p "INSPECT_PRIVATE\\|INSPECT_LATER" text))
+                (save-current-buffer
+                  (ende-inspect-context-at-point))
+                (with-current-buffer "*ende context*"
+                  (should buffer-read-only)
+                  (should (derived-mode-p 'special-mode))
+                  (should (equal (buffer-string)
+                                 (ende-chat--render-context
+                                  (cons (cons "system" system) messages)))))
+                (with-current-buffer source
+                  (should (equal before (buffer-string)))
+                  (should (eq modified (buffer-modified-p)))
+                  (should (= cursor (point))))
+                (should (= next-id ende-chat--next-id))
+                (should (equal queue ende-queue))
+                (should-not (ende-active-jobs))
+                (should-not ende-test--calls)))))
+      (when (get-buffer "*ende context*")
+        (kill-buffer "*ende context*"))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/chat-inspect-context-renders-persisted-tool-history ()
   (ende-test--reset)
   (unwind-protect
