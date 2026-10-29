@@ -138,7 +138,7 @@
            (or (plist-get (ende--usage-token-counts (ende-job-last-usage job)) :input) 0))
           (ende-queue-ui--duration
            (- (or (ende-job-finished-at job) now)
-              (or (ende-job-enqueued-at job) now))))))
+              (or (ende-job-started-at job) (ende-job-enqueued-at job) now))))))
 
 (defun ende-queue-ui--fit (text width &optional right)
   "Fit TEXT in display WIDTH, padding on the left when RIGHT is non-nil."

@@ -39,7 +39,10 @@
                 (ende-job-title finished) "Finished root"
                 (ende-job-last-usage grandchild) '(:input_tokens 100200 :output_tokens 9000)
                 (ende-job-enqueued-at root) 10
-                (ende-job-enqueued-at finished) 10 (ende-job-finished-at finished) 68)
+                (ende-job-started-at root) 20
+                (ende-job-enqueued-at finished) 10
+                (ende-job-started-at finished) 20
+                (ende-job-finished-at finished) 68)
           (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 256)))
             (setq dashboard (ende-queue-open))
             (with-current-buffer dashboard
@@ -47,8 +50,8 @@
                 (should (string-match-p "Active (1)" text))
                 (should (string-match-p "Finished (1)" text))
                 (should (string-match-p "100,200" text))
-                (should (string-match-p "4m06s" text))
-                (should (string-match-p "58s" text))
+                (should (string-match-p "3m56s" text))
+                (should (string-match-p "48s" text))
                 (should (string-match-p "└─ ▼ Child task" text))
                 (should (string-match-p "   └─ Grandchild task" text))
                 (should-not (string-match-p "Provider:\\|Activity:\\|Model:" text)))
@@ -69,6 +72,46 @@
                 (should-error (funcall command) :type 'user-error))
               (should truncate-lines)
               (should-not (get-text-property (point) 'ende-queue-ui-owner)))))
+      (ende-test--dashboard-reset))))
+
+(ert-deftest ende-test/dashboard-elapsed-resets-only-on-first-start ()
+  (ende-test--dashboard-reset)
+  (let ((ende--queue-suspended t)
+        (ende--job-handlers '((insert . ignore)))
+        (clock 10))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "Elapsed time source")
+          (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+            (let ((job (ende-enqueue
+                        (ende-test--dashboard-request ende-test--dashboard-profile))))
+              (cl-labels ((elapsed () (nth 4 (ende-queue-ui--cells job clock))))
+                (setq clock 50)
+                (should (eq (ende-job-state job) 'queued))
+                (should (equal (elapsed) "40s"))
+                (setq clock 70)
+                (let ((ende--queue-suspended nil)) (ende-process-next))
+                (should (eq (ende-job-state job) 'running))
+                (should (equal (elapsed) "0s"))
+                (setq clock 90)
+                (should (equal (elapsed) "20s"))
+                (setq clock 100)
+                (ende-job-suspend job #'ignore)
+                (should (eq (ende-job-state job) 'suspended))
+                (should (equal (elapsed) "30s"))
+                (setq clock 110)
+                (ende-job-resume-queued job)
+                (should (eq (ende-job-state job) 'queued))
+                (should (equal (elapsed) "40s"))
+                (setq clock 130)
+                (let ((ende--queue-suspended nil)) (ende-process-next))
+                (should (eq (ende-job-state job) 'running))
+                (should (equal (elapsed) "1m00s"))
+                (setq clock 150)
+                (ende-job-finish job "done")
+                (should (eq (ende-job-state job) 'completed))
+                (setq clock 200)
+                (should (equal (elapsed) "1m20s"))))))
       (ende-test--dashboard-reset))))
 
 (ert-deftest ende-test/dashboard-untitled-jobs-never-preview-prompts ()
