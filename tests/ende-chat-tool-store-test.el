@@ -7,8 +7,8 @@
 (require 'ende-test-helpers)
 (require 'ende-chat-test-helpers)
 
-(defun ende-test--stored-tool-history (entries)
-  "Insert a completed work section for tool CALL/RESULT ENTRIES."
+(defun ende-test--stored-tool-history (entries &optional normalized)
+  "Insert completed tool ENTRIES with optional NORMALIZED assistant content."
   (let* ((question-id "question-tool-store")
          (request-id "request-tool-store")
          (calls (mapcar (lambda (entry)
@@ -16,7 +16,8 @@
                         entries)))
     (insert (ende-chat--work-text 2 question-id request-id)
             (ende-chat--assistant-protocol-text
-             3 question-id request-id "" '(:content "Checking both sources.")
+             3 question-id request-id ""
+             (or normalized '(:content "Checking both sources."))
              calls))
     (cl-mapc (lambda (call entry)
                (insert (ende-chat--tool-result-text
@@ -46,6 +47,89 @@
      (and (equal (plist-get message :role) "assistant")
           (plist-member message :tool-calls)))
    messages))
+
+(ert-deftest ende-test/chat-editable-history-preserves-roles-and-tool-turns ()
+  (dolist (final-role '(nil "user"))
+    (ende-test--reset)
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert "* Topic\n** Question\nLook up a source.\n")
+          (ende-test--stored-tool-history
+           (list (cons '(:id "history-call" :name "read_file"
+                         :arguments "{\"path\":\"source.el\"}")
+                       "HISTORY_RESULT"))
+           (ende-chat--normalize-response
+            (concat "Checking the source.\n"
+                    "* User note\nUser-owned reference.\n"
+                    "* Private note\nHidden generated detail.\n"
+                    "* Resumed assistant\nAssistant continuation.\n"
+                    "#+begin_src org\n* Literal heading\n"
+                    "#+ENDE_ARTIFACT: literal-not-an-artifact\n")
+            3 t))
+          (ende-test--chat-goto "**** User note")
+          (org-entry-put nil ende-chat-role-property "user")
+          (goto-char (point-min))
+          (search-forward "User-owned reference.")
+          (end-of-line)
+          (insert "\n#+begin_example\n,* User-authored escape\n#+end_example")
+          (ende-test--chat-goto "**** Private note")
+          (org-entry-put nil ende-chat-visibility-property "hidden")
+          (ende-test--chat-goto "** Agent: Reply")
+          (if final-role
+              (progn
+                (org-entry-put nil ende-chat-role-property final-role)
+                (forward-line 1)
+                (search-forward "Final stored answer.")
+                (replace-match "User correction retaining request metadata."))
+            (org-cut-subtree))
+          (goto-char (point-max))
+          (insert "** User follow-up\n:PROPERTIES:\n:ENDE_ROLE: user\n:END:\n"
+                  "User follow-up text.\n"
+                  "** Later question\nWhat next?\n")
+          (ende-test--chat-goto "** Later question")
+          (set-buffer-modified-p nil)
+          (let* ((before (buffer-string))
+                 (messages (ende-chat-context-at-point))
+                 (roles (mapcar #'ende-content-role messages))
+                 (text (ende-chat--render-context messages))
+                 (turn (car (ende-test--stored-tool-messages messages)))
+                 (user (cl-find-if
+                        (lambda (message)
+                          (string-match-p "User-owned reference"
+                                          (ende-content-readable
+                                           (ende-content-body message))))
+                        messages)))
+            (should (equal roles
+                           (append '("user" "assistant" "user" "assistant" "tool")
+                                   (if final-role '("user" "user" "user")
+                                     '("user" "user")))))
+            (should (equal (ende-content-role user) "user"))
+            (should (string-match-p "\\*\\*\\*\\* User note"
+                                    (ende-content-body user)))
+            (should (string-match-p ",\\* User-authored escape"
+                                    (ende-content-body user)))
+            (should (string-match-p "\\* Resumed assistant"
+                                    (plist-get turn :content)))
+            (should (string-match-p "\n\\* Literal heading"
+                                    (plist-get turn :content)))
+            (should (string-match-p "literal-not-an-artifact"
+                                    (plist-get turn :content)))
+            (should-not (string-match-p "end_src" (plist-get turn :content)))
+            (should (equal (plist-get (car (plist-get turn :tool-calls)) :id)
+                           "history-call"))
+            (should (equal (plist-get (nth 4 messages) :tool-call-id)
+                           "history-call"))
+            (should (equal (plist-get (nth 4 messages) :content)
+                           "HISTORY_RESULT"))
+            (should-not (string-match-p "Hidden generated detail" text))
+            (when final-role
+              (should (equal (ende-content-role (nth 5 messages)) "user"))
+              (should (string-match-p "User correction"
+                                      (ende-content-body (nth 5 messages)))))
+            (should (equal before (buffer-string)))
+            (should-not (buffer-modified-p))))
+      (ende-test--reset))))
 
 (ert-deftest ende-test/tool-store-org-setting-initializes-and-refreshes ()
   (let* ((directory (make-temp-file "ende-tool-store-org-" t))

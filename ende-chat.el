@@ -740,41 +740,36 @@ around rendered chat sections, not arbitrary text slices."
              (with-current-buffer source-buffer
                (ende-artifact--local-path target)))))))))
 
-(defun ende-chat--prefix-messages
-    (document root question &optional reasoning-ancestors-only)
-  "Serialize eligible history before QUESTION within ROOT.
-
-Complete historical tool turns are reconstructed from their Org references and
-stored payloads.  The active tool loop keeps its native messages in memory.
-
-An explicit role property starts a message.  Unmarked descendants inherit
-their nearest role-marked ancestor and contribute to its message until another
-explicit role property starts a nested message.  When traversal returns to an
-enclosing role, its content starts a new message so source order is preserved.
-Context fences replace earlier sibling subtrees; the nearest fence on
-QUESTION's ancestor path bounds the whole prefix.  REASONING-ANCESTORS-ONLY
-limits the result to reasoning sections on QUESTION's ancestor path.  Those
-ancestors are included even when ordinary reasoning context is disabled."
-  (let ((question-begin (org-element-property :begin question))
-        (start (ende-chat--context-start document root question))
-        (reasoning-ancestors
-         (ende-chat--reasoning-ancestors document question))
-        (messages nil)
+(defun ende-chat--section-messages (document root start end &optional include-p)
+  "Read ROOT's sections within START..END, preserving roles and visibility.
+INCLUDE-P selects sections instead of the normal eligibility policy."
+  (let ((messages nil)
         (parts nil)
         (message-owner nil)
-        (message-role nil))
+        (message-role nil)
+        (presentation-owner nil)
+        (fragment-end nil))
     (cl-labels
         ((flush ()
            (when parts
-             (push (ende-chat--message
-                    message-role
-                    (ende-chat--content document message-owner
-                                        (apply #'concat (nreverse parts)) message-role))
-                   messages)
+             (let* ((text (apply #'concat (nreverse parts)))
+                    (message
+                     (if presentation-owner
+                         (ende-chat--protocol-assistant-message
+                          document presentation-owner text
+                          (= fragment-end
+                             (org-element-property :end presentation-owner)))
+                       (ende-chat--message
+                        message-role
+                        (ende-chat--content document message-owner text
+                                            message-role)))))
+               (unless (ende-content-empty-p (ende-content-body message))
+                 (push message messages)))
              (setq parts nil
                    message-owner nil
-                   message-role nil)))
-         (walk (headline owner role)
+                   message-role nil
+                   presentation-owner nil)))
+         (walk (headline owner role presentation)
            (let* ((properties (gethash
                                headline
                                (ende-chat--document-properties document)))
@@ -782,14 +777,16 @@ ancestors are included even when ordinary reasoning context is disabled."
                   (local-role (and role-marked (plist-get properties :role)))
                   (next-owner (if role-marked headline owner))
                   (next-role (if role-marked (intern local-role) role))
+                  (assistant (ende-chat--assistant-protocol-p document headline))
+                  (next-presentation
+                   (and (eq next-role 'assistant)
+                        (if assistant headline presentation)))
                   (selected
                    (and (>= (org-element-property :begin headline) start)
-                        (if reasoning-ancestors-only
-                            (memq headline reasoning-ancestors)
-                          (or (ende-chat--eligible-p document headline)
-                              (memq headline reasoning-ancestors))))))
-             (when (>= (org-element-property :begin headline) question-begin)
-               (throw 'ende-chat--question-reached nil))
+                        (if include-p (funcall include-p headline)
+                          (ende-chat--eligible-p document headline)))))
+             (when (>= (org-element-property :begin headline) end)
+               (throw 'ende-chat--sections-read nil))
              (when (and selected role-marked)
                (flush))
              (cond
@@ -800,34 +797,48 @@ ancestors are included even when ordinary reasoning context is disabled."
                  (flush)
                  (setq messages
                        (append (reverse tool-messages) messages))))
-              ((and selected
-                    (ende-chat--assistant-protocol-p document headline))
-               (flush)
-               (push (ende-chat--protocol-assistant-message document headline)
-                     messages))
-              ((and selected
-                    (ende-chat--tool-result-protocol-p document headline))
-               (error "Malformed tool result outside Agent: Work: %s"
-                      (org-element-property :raw-value headline)))
-              ((and selected
-                    (ende-chat--tool-call-protocol-p document headline))
-               (error "Malformed tool call outside Agent: Work: %s"
+              ((and selected (ende-chat--tool-reference-p document headline))
+               (error "Malformed tool reference outside Agent: Work: %s"
                       (org-element-property :raw-value headline)))
               (t
                (when selected
-                 (unless (and parts (eq next-owner message-owner))
+                 (unless (and parts (eq next-owner message-owner)
+                              (eq next-presentation presentation-owner))
                    (flush)
                    (setq message-owner next-owner
-                         message-role next-role))
-                 (push (ende-chat--section-text document headline) parts))
+                         message-role next-role
+                         presentation-owner next-presentation))
+                 (let ((text (ende-chat--section-text document headline)))
+                   (when assistant
+                     (setq text
+                           (if-let* ((newline (string-match "\n" text)))
+                               (string-remove-prefix
+                                "\n" (substring text (1+ newline)))
+                             "")))
+                   (push text parts))
+                 (setq fragment-end (ende-chat--headline-end document headline)))
                (dolist (child (ende-chat--fenced-siblings
                                document (ende-chat--children document headline)
-                               question-begin))
-                 (walk child next-owner next-role)))))))
-      (catch 'ende-chat--question-reached
-        (walk root nil 'user))
+                               end))
+                 (walk child next-owner next-role next-presentation)))))))
+      (catch 'ende-chat--sections-read
+        (walk root nil (ende-chat--effective-role document root) nil))
       (flush)
       (nreverse messages))))
+
+(defun ende-chat--prefix-messages
+    (document root question &optional reasoning-ancestors-only)
+  "Read history before QUESTION within ROOT, bounded by context fences.
+Reasoning ancestors are included even when ordinary reasoning is disabled.
+REASONING-ANCESTORS-ONLY limits selection to those ancestors."
+  (let ((ancestors (ende-chat--reasoning-ancestors document question)))
+    (ende-chat--section-messages
+     document root (ende-chat--context-start document root question)
+     (org-element-property :begin question)
+     (lambda (headline)
+       (or (memq headline ancestors)
+           (and (not reasoning-ancestors-only)
+                (ende-chat--eligible-p document headline)))))))
 
 (defun ende-chat--current-headlines
     (document question &optional instructions include-reasoning)
@@ -877,23 +888,19 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
   (if (stringp text) (cons (symbol-name role) text)
     (list :role (symbol-name role) :content text)))
 
-(defun ende-chat--protocol-title-p (headline prefix)
-  "Return non-nil when HEADLINE's title begins with PREFIX."
-  (string-prefix-p prefix (org-element-property :raw-value headline)))
-
-(defun ende-chat--protocol-metadata-p (document headline)
-  "Return non-nil when HEADLINE has any host-owned protocol metadata."
-  (cl-some (lambda (property)
-             (ende-chat--property document headline property))
-           '(:request-id :reply-to :tool-execution-id :tool-name)))
-
 (defun ende-chat--assistant-protocol-p (document headline)
-  "Return non-nil when HEADLINE is a generated assistant protocol section."
-  (and (not (ende-chat--property document headline :context-fence))
-       (or (and (equal (org-element-property :raw-value headline) "Agent: Reply")
-                (ende-chat--protocol-metadata-p document headline))
-           (and (equal (ende-chat--property document headline :role) "assistant")
-                (ende-chat--property document headline :request-id)))))
+  "Return non-nil for a generated assistant message."
+  (let ((request-id (ende-chat--property document headline :request-id)))
+    (and (equal (ende-chat--property document headline :role) "assistant")
+         (not (ende-chat--property document headline :context-fence))
+         (stringp request-id)
+         (not (string-empty-p request-id)))))
+
+(defun ende-chat--tool-reference-p (document headline)
+  "Return non-nil when HEADLINE carries tool-reference metadata."
+  (or (ende-chat--property document headline :tool-kind)
+      (ende-chat--property document headline :tool-execution-id)
+      (ende-chat--property document headline :tool-name)))
 
 (defun ende-chat--tool-call-protocol-p (document headline)
   "Return non-nil when HEADLINE carries generated tool-call metadata."
@@ -905,7 +912,9 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
 
 (defun ende-chat--validate-tool-reference (document work headline)
   "Validate generated tool reference HEADLINE under WORK."
-  (unless (and (equal (ende-chat--property document headline :request-id)
+  (unless (and (member (ende-chat--property document headline :tool-kind)
+                       '("call" "result"))
+               (equal (ende-chat--property document headline :request-id)
                       (ende-chat--property document work :request-id))
                (cl-every
                 (lambda (property)
@@ -986,8 +995,23 @@ reflects Org history rather than the existence of a stored result payload."
       (setq parent (ende-chat--parent document parent)))
     parent))
 
-(defun ende-chat--validate-work-section (document work)
-  "Validate generated protocol layout and request identity for WORK."
+(defun ende-chat--validate-work-contents (document work)
+  "Validate the identities needed to read WORK's protocol contents."
+  (let ((request-id (ende-chat--property document work :request-id)))
+    (unless (and (stringp request-id) (not (string-empty-p request-id)))
+      (error "Malformed generated Agent: Work: missing request ID"))
+    (dolist (child (ende-chat--children document work))
+      (cond
+       ((ende-chat--tool-reference-p document child)
+        (ende-chat--validate-tool-reference document work child))
+       ((ende-chat--assistant-protocol-p document child)
+        (unless (equal (ende-chat--property document child :request-id) request-id)
+          (error "Malformed generated Agent: Work: child request ID mismatch"))))))
+  work)
+
+(defun ende-chat--validate-generated-work-section (document work)
+  "Validate WORK's complete generated request structure."
+  (ende-chat--validate-work-contents document work)
   (let* ((request-id (ende-chat--property document work :request-id))
          (state (ende-chat--property document work :state))
          (children (ende-chat--children document work))
@@ -998,8 +1022,6 @@ reflects Org history rather than the existence of a stored result payload."
                     request-id))
            (ende-chat--document-headlines document)))
          (replies nil))
-    (unless (and (stringp request-id) (not (string-empty-p request-id)))
-      (error "Malformed generated Agent: Work: missing request ID"))
     (unless (eq work (ende-chat--request-work-section document request-id))
       (error "Malformed generated Agent: Work for request %s is not unique"
              request-id))
@@ -1035,10 +1057,8 @@ reflects Org history rather than the existence of a stored result payload."
           (error "Malformed generated assistant protocol role"))
         (ende-chat--protocol-body-string child)
         (push child replies))
-       ((ende-chat--tool-call-protocol-p document child)
-        (ende-chat--validate-tool-reference document work child))
-       ((ende-chat--tool-result-protocol-p document child)
-        (ende-chat--validate-tool-reference document work child))
+       ((or (ende-chat--tool-call-protocol-p document child)
+            (ende-chat--tool-result-protocol-p document child)))
        (t
         (error "Malformed generated Agent: Work: unexpected child %s"
                (org-element-property :raw-value child)))))
@@ -1225,8 +1245,10 @@ Decoded text is never sent back to artifact discovery."
           :synthetic-newline (equal "t" (ende-chat--local-property
                                          headline ende-chat-content-synthetic-newline-property)))))
 
-(defun ende-chat--protocol-assistant-message (document headline)
-  "Reconstruct the assistant message represented by HEADLINE."
+(defun ende-chat--protocol-assistant-message
+    (document headline &optional text complete)
+  "Restore HEADLINE's assistant TEXT, or its body when TEXT is nil.
+COMPLETE means TEXT reaches the generated wrapper's end."
   (let ((request-id (ende-chat--property document headline :request-id))
         (role (ende-chat--property document headline :role)))
     (unless (and (equal role "assistant")
@@ -1234,10 +1256,17 @@ Decoded text is never sent back to artifact discovery."
       (error "Malformed generated assistant protocol section: %s needs %s and %s"
              (org-element-property :raw-value headline)
              ende-chat-role-property ende-chat-request-id-property))
-    (ende-chat--message
-     'assistant (ende-chat--restore-response-parts
-                 (ende-chat--content document headline (ende-chat--protocol-safe-body headline))
-                 (ende-chat--protocol-transform headline)))))
+    (let ((transform (ende-chat--protocol-transform headline)))
+      (if (null text)
+          (setq text (ende-chat--protocol-safe-body headline))
+        (when (and complete (string-suffix-p "\n\n" text))
+          (setq text (substring text 0 -2)))
+        (unless complete
+          (setq transform (plist-put transform :synthetic-end nil))))
+      (ende-chat--message
+       'assistant
+       (ende-chat--restore-response-parts
+        (ende-chat--content document headline text 'assistant) transform)))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1254,7 +1283,7 @@ Decoded text is never sent back to artifact discovery."
 
 (defun ende-chat--protocol-work-messages (document work)
   "Reconstruct complete tool turns in WORK from its direct child order."
-  (ende-chat--validate-work-section document work)
+  (ende-chat--validate-work-contents document work)
   (let ((children (ende-chat--children document work))
         (messages nil))
     (cl-labels
@@ -1269,6 +1298,10 @@ Decoded text is never sent back to artifact discovery."
          (take-results ()
            (take-while (lambda (headline)
                          (ende-chat--tool-result-protocol-p document headline))))
+         (read-section (headline)
+           (ende-chat--section-messages
+            document headline (org-element-property :begin headline)
+            (org-element-property :end headline)))
          (add-turn (prose calls results)
            (if calls
                (setq messages
@@ -1285,21 +1318,25 @@ Decoded text is never sent back to artifact discovery."
            ((equal (ende-chat--property document child :visibility)
                    "reasoning_summary")
             (pop children))
-           ((and (ende-chat--assistant-protocol-p document child)
-                 (equal (org-element-property :raw-value child) "Agent: Reply"))
+           ((ende-chat--assistant-protocol-p document child)
             (pop children)
-            (let* ((prose
-                    (and (ende-chat--eligible-p document child)
-                         (ende-content-body (ende-chat--protocol-assistant-message
-                                             document child))))
+            (let* ((section-messages (read-section child))
+                   (last (car (last section-messages)))
+                   (prose (and (equal (ende-content-role last) "assistant")
+                               (ende-content-body last)))
                    (calls (take-calls)))
-              (if calls
-                  (add-turn prose calls (take-results))
-                (add-turn prose nil nil))))
+              (setq messages
+                    (nconc messages
+                           (if prose (butlast section-messages)
+                             section-messages)))
+              (add-turn prose calls (take-results))))
            ((ende-chat--tool-call-protocol-p document child)
             (add-turn nil (take-calls) (take-results)))
            ((ende-chat--tool-result-protocol-p document child)
-            (take-results)))))
+            (take-results))
+           (t
+            (pop children)
+            (setq messages (nconc messages (read-section child)))))))
       messages)))
 
 (defun ende-chat--protocol-tool-turn-messages
@@ -2846,7 +2883,8 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
                                              request-id)))
                                      updated-headlines))
 				   (reply (car replies)))
-                              (ende-chat--validate-work-section updated updated-work)
+                              (ende-chat--validate-generated-work-section
+                               updated updated-work)
                               (unless (and (= (length replies) 1)
 					   (equal (ende-chat--property
 						   updated reply :role)
