@@ -437,6 +437,8 @@ scheduler when asynchronous children have settled."
 (defun ende-agent--handle-result
     (job result messages configuration callbacks rounds)
   "Handle model RESULT for JOB under CONFIGURATION using CALLBACKS."
+  (if (eq (ende-job-request-phase job) 'title)
+      (ende-agent--handle-title job result messages configuration callbacks rounds)
   (let ((calls (ende-agent--invoke callbacks :tool-calls result)))
     (if (null calls)
         (let ((next (if (plist-member callbacks :before-final)
@@ -476,7 +478,59 @@ scheduler when asynchronous children have settled."
                            next-messages)))
                  (ende--validate-messages next-messages)
                  (ende-agent--send job next-messages configuration callbacks
-                                  (1+ rounds)))))))))))
+                                  (1+ rounds))))))))))))
+
+(defconst ende-agent--title-control
+  (concat "Ende temporary title phase. Call generate_title exactly once for the "
+          "original task. Do not perform the task yet. Only generate_title may "
+          "execute, including instead of about_thinking.\n\n"
+          "#+begin_ende\n"
+          "(clear-tools)\n"
+          "(tools generate_title)\n"
+          "#+end_ende\n")
+  "Append-only host instruction for the first request.")
+
+(defun ende-agent--accept-title (job title generation)
+  "Accept TITLE for JOB in GENERATION at most once."
+  (when (and (ende-job-execution-current-p job generation)
+             (eq (ende-job-request-phase job) 'title)
+             (not (ende-job-title-generated-p job)))
+    (setf (ende-job-title job) title
+          (ende-job-title-generated-p job) t)
+    (ende-agent--invoke (list :title (plist-get (ende-job-instruction job)
+                                               :generated-title-function))
+                        :title title)
+    (ende-job-emit-event job (list :type :title :title title))
+    t))
+
+(defun ende-agent--handle-title (job result messages configuration callbacks rounds)
+  "Keep title RESULT out of final-answer handling and continue the shared loop."
+  (cl-incf (ende-job-title-attempts job))
+  (let* ((calls (ende-agent--invoke callbacks :tool-calls result))
+         (assistant-data (ende-agent--invoke callbacks :assistant-message
+                                              job result calls))
+         (assistant (if (plist-member assistant-data :message)
+                        (plist-get assistant-data :message) assistant-data))
+         (execution-calls (or (plist-get assistant-data :calls) calls))
+         (prefix (append messages (list assistant))))
+    (cl-labels
+        ((continue (tool-messages)
+           (when (ende-job-current-p job)
+             (let* ((finished (or (ende-job-title-generated-p job)
+                                  (>= (ende-job-title-attempts job) 2)))
+                    (instruction
+                     (if finished
+                         "The temporary title override has ended. Proceed with the original task using its original capabilities. Do not call generate_title again."
+                       "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title-only override is still in force."))
+                    (next (append prefix tool-messages
+                                  (list (cons "user" instruction)))))
+               (when finished (setf (ende-job-request-phase job) 'work))
+               (ende--validate-messages next)
+               (ende-agent--send job next configuration callbacks rounds)))))
+      (if calls
+          (ende-agent--run-tools job execution-calls configuration callbacks
+                                 #'continue)
+        (continue nil)))))
 
 (defun ende-agent--call-name (call callbacks)
   "Return CALL's name using CALLBACKS."
@@ -495,13 +549,15 @@ scheduler when asynchronous children have settled."
 (defun ende-agent--run-tools (job calls configuration callbacks done)
   "Run CALLS sequentially for JOB and return ordered results through DONE."
   (let ((remaining (copy-sequence calls))
+        (phase (or (ende-job-request-phase job) 'work))
         (messages nil))
     (cl-labels
         ((next ()
            (if (or (null remaining) (not (ende-job-current-p job)))
                (when (and (null remaining) (ende-job-current-p job))
                  (funcall done (nreverse messages)))
-             (if (and (plist-get callbacks :execute-spawn-batch)
+             (if (and (ende-tools-phase-allows-p "spawn_agent" phase)
+                      (plist-get callbacks :execute-spawn-batch)
                       (equal (ende-agent--call-name (car remaining) callbacks)
                              "spawn_agent"))
                  (let* ((split (ende-agent--spawn-prefix remaining callbacks))
@@ -535,7 +591,11 @@ scheduler when asynchronous children have settled."
                     (generation (or (ende-job-execution-generation job) 0))
                     (synchronous t)
                     (completed nil)
+                    (ende-tools--request-phase phase)
                     (ende-tools--execution-owner (ende-job-id job))
+                    (ende-tools--generate-title-function
+                     (lambda (title)
+                       (ende-agent--accept-title job title generation)))
                     (ende-tools--report-activity-function
                      (lambda (title status)
                        (ende-job-report-activity job title status generation)))
@@ -550,9 +610,8 @@ scheduler when asynchronous children have settled."
                                      (ende-job-cancel-function job))
                              (ende-job-cancellation-set
                               job prior-cancel generation installed-cancel)))))))
-               (funcall (plist-get callbacks :execute-tool)
-                call configuration
-                (lambda (content)
+               (let ((complete
+                      (lambda (content)
                   (when (and (not completed)
                              (ende-job-execution-current-p job generation))
                     (setq completed t)
@@ -562,7 +621,15 @@ scheduler when asynchronous children have settled."
                        (push (ende-agent--invoke
                               callbacks :tool-result-message job call content)
                              messages)
-                       (unless synchronous (next)))))))
+                       (unless synchronous (next))))))))
+                 (if (ende-tools-phase-allows-p
+                      (ende-agent--call-name call callbacks) phase)
+                     (funcall (plist-get callbacks :execute-tool)
+                              call configuration complete)
+                   (funcall complete
+                            (ende-tools--json-encode-tool-result
+                             (list :ok nil :tool (ende-agent--call-name call callbacks)
+                                   :error (format "Tool disabled during %s phase" phase))))))
                (setq synchronous nil)
                (when completed
                  (next)))))))
@@ -590,11 +657,16 @@ Chat persistence and guidance stay in those callbacks."
     (setf (ende-job-profile job) profile
           (ende-job-agent-tool-rounds job) 0)
     (ende-job-emit-event job '(:type :tool-call-count :count 0))
-    (ende-agent--send
-     job (if (plist-get callbacks :omit-source-metadata)
-             messages
-           (ende-operations--add-source-metadata job messages))
-     configuration callbacks 0)))
+    (let ((messages (if (plist-get callbacks :omit-source-metadata)
+                        messages
+                      (ende-operations--add-source-metadata job messages))))
+      (when (and (memq (ende-job-type job) '(chat agent))
+                 (null (ende-job-request-phase job)))
+        (setf (ende-job-request-phase job) 'title
+              (ende-job-title-attempts job) 0)
+        (setq messages (append messages
+                               (list (cons "user" ende-agent--title-control)))))
+      (ende-agent--send job messages configuration callbacks 0))))
 
 (provide 'ende-agent)
 

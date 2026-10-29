@@ -298,7 +298,7 @@
           (ende-test--fake-llm
            (list (list :tool-calls (list first))
                  (list :tool-calls (list second))
-                 "#+ENDE_CHAT_TITLE: Reviewed\nReview complete.") t)))
+                 "Review complete.") t)))
     (unwind-protect
         (with-temp-buffer
           (org-mode)
@@ -336,7 +336,7 @@
                     (children (ende-chat--children document work)))
                (should work)
                (should reply)
-               (should (string-match-p "^\\*\\* Reviewed$" (buffer-string)))
+               (should (string-match-p "^\\*\\* $" (buffer-string)))
                (should-not
                 (ende-chat--request-state-headline document request-id "pending"))
                ;; The folded work hides its tool children while its sibling reply

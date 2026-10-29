@@ -30,87 +30,30 @@
     (forward-line -1)
     (looking-at-p "^[[:space:]]*$")))
 
-(ert-deftest ende-test/chat-missing-title-uses-standalone-fallback ()
+(ert-deftest ende-test/chat-title-tool-preserves-user-title-edited-in-flight ()
   (ende-test--reset)
-  (let ((ende-llm-function
-         (ende-test--fake-llm '("Answer without title" "Parser overview"))))
-    (ende-test--with-buffer
-     "* Chat\n** \nExplain how this parser works.\n** Next\nFollow up.\n"
-     (org-mode)
-     (ende-test--chat-goto "** ")
-     (let ((job (ende-ask)))
-       (should (eq (ende-job-state job) 'completed))
-       (should (= (length ende-test--calls) 2))
-       (should (= (length (plist-get (cadr ende-test--calls) :messages)) 2))
-       (should (null (plist-get (plist-get (cadr ende-test--calls) :options)
-                                :tool-definitions)))
-       (should (equal
-                (string-trim
-                 (cdr (cadr (plist-get (cadr ende-test--calls) :messages))))
-                "Explain how this parser works."))
-       (should (string-match-p "Answer without title" (buffer-string)))
-       (should (string-match-p "^\\*\\* Parser overview$" (buffer-string)))
-       (should (string-match-p "ENDE_CHAT_GENERATED_TITLE: t" (buffer-string)))
-       (let* ((document (ende-chat--build-document))
-              (next (cl-find-if
-                     (lambda (headline)
-                       (equal (org-element-property :raw-value headline) "Next"))
-                     (ende-chat--document-headlines document)))
-              (text (ende-test--chat-context-text
-                     (ende-chat--serialize document next))))
-         (should-not (string-match-p "Parser overview" text))
-         (should-not (string-match-p "Generate a concise" text))
-         (should (string-match-p "Explain how this parser works" text))
-         (should (string-match-p "Answer without title" text)))))))
-
-(ert-deftest ende-test/chat-inline-title-skips-fallback ()
-  (ende-test--reset)
-  (let ((ende-llm-function
+  (let ((ende-test--title-prelude t)
+        (ende-llm-function
          (ende-test--fake-llm
-          '("#+ENDE_CHAT_TITLE: Inline title\nAnswer"))))
+          '((:tool-calls ((:id "title" :name "generate_title"
+                          :arguments "{\"title\":\"Generated title\"}"))) "Answer") t)))
     (ende-test--with-buffer
      "* Chat\n** \nRequest body.\n"
      (org-mode)
      (ende-test--chat-goto "** ")
      (let ((job (ende-ask)))
-       (should (eq (ende-job-state job) 'completed))
-       (should (= (length ende-test--calls) 1))
-       (should (string-match-p "^\\*\\* Inline title$" (buffer-string)))))))
-
-(ert-deftest ende-test/chat-fallback-preserves-user-title-edited-in-flight ()
-  (ende-test--reset)
-  (let ((ende-llm-function
-         (ende-test--fake-llm '("Answer" "Generated title") t)))
-    (ende-test--with-buffer
-     "* Chat\n** \nRequest body.\n"
-     (org-mode)
-     (ende-test--chat-goto "** ")
-     (let ((job (ende-ask)))
-       (ende-test--complete-call (car ende-test--calls))
        (ende-test--chat-goto "** ")
        (ende-chat--set-headline-title
         (ende-chat--headline-at-point (ende-chat--build-document))
         "My own title")
+       (ende-test--complete-call (car ende-test--calls))
        (ende-test--complete-call (cadr ende-test--calls))
        (should (eq (ende-job-state job) 'completed))
        (should (string-match-p "^\\*\\* My own title$" (buffer-string)))
        (should-not
         (string-match-p "ENDE_CHAT_GENERATED_TITLE" (buffer-string)))))))
 
-(ert-deftest ende-test/chat-title-fallback-failure-keeps-answer-successful ()
-  (ende-test--reset)
-  (let ((ende-llm-function
-         (ende-test--fake-llm '("Successful answer" :error))))
-    (ende-test--with-buffer
-     "* Chat\n** \nRequest body.\n"
-     (org-mode)
-     (ende-test--chat-goto "** ")
-     (let ((job (ende-ask)))
-       (should (eq (ende-job-state job) 'completed))
-       (should (= (length ende-test--calls) 2))
-       (should (string-match-p "Successful answer" (buffer-string)))
-       (should-not (string-match-p "ENDE_CHAT_GENERATED_TITLE" (buffer-string)))
-       (should (string-match-p "^\\*\\* $" (buffer-string)))))))
+
 
 (ert-deftest ende-test/direct-chat-request-uses-buffer-selection ()
   (ende-test--reset)
@@ -1107,7 +1050,7 @@
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call))
-                 "#+ENDE_CHAT_TITLE: Renamed question\nFinal answer") t)))
+                 "Final answer") t)))
     (unwind-protect
         (ende-test--with-buffer
          "* Root\n** \nAsk\n"
@@ -1422,7 +1365,7 @@
              (ende-chat-compact-instruction "Keep the essentials.")
              (ende-llm-function
               (ende-test--fake-llm
-               '((:content "#+ENDE_CHAT_TITLE: Ignore this title\n* Facts\nSummary"
+               '((:content "* Facts\nSummary"
 			   :thinking "Plan")) t)))
         (ende-test--with-buffer "* Topic\nEarlier conversation\n"
 				(org-mode)
@@ -1607,7 +1550,7 @@
             (list (pcase outcome
                     (:error :error)
                     (:empty "")
-                    (:title-only "#+ENDE_CHAT_TITLE: Not a summary\n")
+                    (:title-only "")
                     (_ "Summary"))) t)))
       (ende-test--with-buffer
        "* Topic\nOriginal history\n** Instructions\nKeep decisions\n** Next\nAsk\n"
@@ -1882,7 +1825,7 @@
 (ert-deftest ende-test/chat-generated-ownership-protects-submission ()
   (ende-test--reset)
   (let ((ende-llm-function
-         (ende-test--fake-llm '("#+ENDE_CHAT_TITLE: Follow-up\nAnswer"))))
+         (ende-test--fake-llm '("Answer"))))
     (with-temp-buffer
       (org-mode)
       (insert "* Root\n** Original question\nAsk.\n"

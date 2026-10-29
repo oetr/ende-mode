@@ -34,4 +34,52 @@
   (should-not (plist-get (ende-tool-call 'generate_title
                                         '(:title "Forbidden in work")) :ok)))
 
+(ert-deftest ende-test/title-phase-isolates-a-whole-batch-and-continues ()
+  (ende-test--reset)
+  (let* ((ende-test--title-prelude t)
+         (requests nil) (effects 0)
+         (ende-tools--registry (copy-sequence ende-tools--registry))
+         (ende-llm-function
+          (lambda (messages callbacks &optional profile)
+            (push (cons messages profile) requests)
+            (funcall
+             (plist-get callbacks :on-done)
+             (if (= (length requests) 1)
+                 '(:content "Title-only prose" :tool-calls
+                   ((:id "title" :name "generate_title"
+                     :arguments "{\"title\":\"Inspect queue lifecycle\"}")
+                    (:id "spawn" :name "spawn_agent" :arguments "{\"task\":\"Forbidden\"}")
+                    (:id "effect" :name "title_test_effect" :arguments "{}")))
+               (if (= (length requests) 2)
+                   '(:content "" :tool-calls
+                     ((:id "effect-work" :name "title_test_effect" :arguments "{}")))
+                 '(:content "Actual answer")))))))
+    (ende-tool-register 'title_test_effect "Test effect" '((:type . "object"))
+                        (lambda (&rest _) (cl-incf effects)) nil :no-resource
+                        '(:requires-root nil))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert (ende-test--chat-config-block '((tools title_test_effect)))
+                  "* Root\n** \nInspect the queue.\n** Next\nContinue.\n")
+          (ende-test--chat-goto "** ")
+          (let ((job (ende-ask)))
+            (should (eq (ende-job-state job) 'completed))
+            (should (equal (ende-job-title job) "Inspect queue lifecycle"))
+            (should (= effects 1))
+            (should-not (ende-job-children job))
+            (should (= (length requests) 3))
+            (let* ((ordered (reverse requests))
+                   (first (car ordered)) (second (cadr ordered)))
+              (should (equal (car (car first)) (car (car second))))
+              (should (equal (cdr first) (cdr second)))
+              (should (equal (car first) (seq-take (car second) (length (car first))))))
+            (should (string-match-p "Actual answer" (buffer-string)))
+            (should (string-match-p "ENDE_CHAT_GENERATED_TITLE: t" (buffer-string)))
+            (ende-test--chat-goto "** Next")
+            (should-not (string-match-p "\\*\\* Inspect queue lifecycle"
+                                        (ende-test--chat-context-text
+                                         (ende-chat-context-at-point))))))
+      (ende-test--reset))))
+
 (provide 'ende-title-test)

@@ -211,9 +211,6 @@ discarding superseded details. Be concise but self-contained."
                 ende-chat-thinking-property))
   "Control properties that model output may not author.")
 
-(defconst ende-chat--title-key "ENDE_CHAT_TITLE"
-  "Keyword used by the model to propose an empty question's title.")
-
 (defvar ende-chat--buffer-object nil
   "Chat buffer owned by `ende-chat', when one exists.")
 
@@ -1637,9 +1634,6 @@ after an artifact marker overrides the tool caption; an empty one clears it.
 generate_image is optional and uses the user's configured image backend.
 Never invent filenames or paths, construct storage links, or configure artifact
 storage. Ende owns artifact paths."
-   "\n\nIf the final user headline is untitled and has a request body, begin with
-exactly one line: #+ENDE_CHAT_TITLE: Short title
-Choose a concise title for the request. Otherwise omit this keyword.\n\n"
    ende-agent--implementation-guidance
    "\n\nAsk the user about unresolved conflicts and wait before editing. When delegating,
 include relevant explicit user overrides and bring unresolved choices back to
@@ -1690,22 +1684,15 @@ title.\n\n"
    ende-chat--org-format)
   "System prompt for context compaction.")
 
-(defun ende-chat--title-keyword-p (element)
-  "Return non-nil when ELEMENT is the private chat title keyword."
-  (and (eq (org-element-type element) 'keyword)
-       (string= (upcase (or (org-element-property :key element) ""))
-                ende-chat--title-key)))
-
 (defun ende-chat--response-control-ranges (tree)
   "Return response ranges for private title and control properties."
   (let (ranges)
     (org-element-map tree '(keyword node-property)
 		     (lambda (element)
 		       (cond
-			((or (ende-chat--title-keyword-p element)
-                             (and (eq (org-element-type element) 'keyword)
-                                  (equal (upcase (org-element-property :key element))
-                                         "ENDE_ARTIFACTS_BASE_PATH")))
+			((and (eq (org-element-type element) 'keyword)
+                              (equal (upcase (org-element-property :key element))
+                                     "ENDE_ARTIFACTS_BASE_PATH"))
 			 (let ((begin (org-element-property :begin element)))
 			   (save-excursion
 			     (goto-char begin)
@@ -1720,21 +1707,10 @@ title.\n\n"
 		     nil nil nil)
     ranges))
 
-(defun ende-chat--response-title (tree)
-  "Return the first private title value in response TREE."
-  (let (title)
-    (org-element-map tree 'keyword
-		     (lambda (element)
-		       (when (and (null title) (ende-chat--title-keyword-p element))
-			 (setq title (string-trim
-				      (or (org-element-property :value element) "")))))
-		     nil nil nil)
-    (and (not (string-empty-p title)) title)))
-
 (defun ende-chat--normalize-response (content wrapper-level &optional preserve-trailing blocks)
   "Return normalized CONTENT for a wrapper at WRAPPER-LEVEL.
 
-The returned plist includes `:content', an optional `:title', and the reversible
+The returned plist includes `:content' and the reversible
 metadata required for protocol serialization.  Actual Org headlines are shifted
 uniformly beneath the host-created section wrapper;
 stars in any `#+begin_...` block are left untouched.  Unterminated blocks
@@ -1746,7 +1722,6 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
       (org-mode)
       (insert (plist-get blocks :parse-content))
       (let* ((tree (org-element-parse-buffer))
-             (title (ende-chat--response-title tree))
              (ranges (ende-chat--response-control-ranges tree))
              (headlines (org-element-map tree 'headline #'identity))
              (minimum (and headlines
@@ -1765,8 +1740,7 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
               (push (list begin (+ begin level)
                           (make-string new-level ?*))
                     edits))))
-        (list :title title
-              :headline-shift (and minimum (- target minimum))
+        (list :headline-shift (and minimum (- target minimum))
               :synthetic-end (plist-get blocks :synthetic-end)
               :synthetic-newline (plist-get blocks :synthetic-newline)
               :content
@@ -1781,12 +1755,7 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
 
 (defun ende-chat--valid-title-text-p (title)
   "Return non-nil when TITLE is plain, nonempty, and on one line."
-  (and (stringp title)
-       (not (string-blank-p title))
-       (not (string-match-p "[\r\n]" title))
-       (not (string-match-p "\\`\\(?:#\\+\\|\\*+[ \t]\\)" title))
-       (not (string-match-p
-             "\\`:[[:alnum:]_@#%]+:[ \t]*$" title))))
+  (ende-title-valid-p title))
 
 (defun ende-chat--set-generated-title (question title)
   "Set untitled QUESTION's generated TITLE and mark it as presentation metadata."
@@ -1826,58 +1795,6 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
                        (equal (ende-chat--property document question :id)
                               question-id))
               (ende-chat--set-generated-title question title))))))))
-
-(defun ende-chat--finish-title-generation (job result)
-  "Finish JOB with RESULT if it remains current."
-  (when (ende-job-current-p job)
-    (ende-job-finish job result)))
-
-(defun ende-chat--valid-generated-title (result)
-  "Return RESULT's content if it is one plain-text headline title."
-  (let* ((content (ignore-errors (ende--result-content result)))
-         (calls (and (listp result) (plist-get result :tool-calls)))
-         (title (and (stringp content) (string-trim content))))
-    (when (and (ende-chat--valid-title-text-p title) (null calls))
-      title)))
-
-(defun ende-chat--dispatch-title-fallback (job result)
-  "Request a title for JOB after its main result has been persisted."
-  (let* ((instruction (ende-job-instruction job))
-         (question-id (plist-get instruction :question-id))
-         (source (plist-get instruction :title-source))
-         (buffer (ende-target-buffer (ende-job-target job)))
-         (profile (copy-tree (ende-job-profile job)))
-         (messages
-          (list (cons "system"
-                      (concat "Generate a concise, descriptive title for the "
-                              "supplied user request. Return exactly one line "
-                              "containing only the title. No explanation, "
-                              "markup, or surrounding quotes."))
-                (cons "user" source))))
-    (setq profile (plist-put profile :tool-definitions nil))
-    (if (not (and (stringp source) (not (string-blank-p source))))
-        (ende-job-finish job result)
-      (condition-case nil
-          (progn
-            (ende--validate-messages messages)
-            (funcall
-             ende-llm-function messages
-             (let ((callbacks
-                    (ende--llm-callbacks
-                     job
-                     (lambda (title-result)
-                       (condition-case nil
-                           (ende-chat--set-question-generated-title
-                            buffer question-id
-                            (ende-chat--valid-generated-title title-result))
-                         (error nil))
-                       (ende-chat--finish-title-generation job result))
-                     (lambda (_failure)
-                       (ende-chat--finish-title-generation job result)))))
-               (plist-put callbacks :on-event (lambda (_event) nil)))
-             profile))
-        ((error quit)
-         (ende-chat--finish-title-generation job result))))))
 
 ;;;; Placeholder and response placement
 
@@ -3608,12 +3525,7 @@ FINAL includes retained tool images and trims compaction output."
                       (when insertion-info
                         (ende-artifact-refresh (plist-get insertion-info :section-start)
                                                (plist-get insertion-info :section-end)))))
-                  (if (and (not compact)
-                           (plist-get instruction :title-source)
-                           (not (ende-chat--valid-title-text-p
-                                 (plist-get normalized :title))))
-                      (ende-chat--dispatch-title-fallback job result)
-                    (ende-job-finish job result)))
+                  (ende-job-finish job result))
               (ende-chat--release-insertion-info insertion-info))))
       ((error quit)
        (ende-job-fail job (ende--application-error failure))))))
@@ -3721,6 +3633,7 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
     (ende-agent--run-tools
      job calls configuration
      (list
+      :tool-name (lambda (call) (ende-chat--tool-value call :name))
       :execute-tool #'ende-chat--tool-response-async
       :tool-result-message
       (lambda (job call content)
@@ -3933,27 +3846,13 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                          (concat (ende-chat--system-prompt document)
                                  "\n\nConfigured capabilities:\n"
                                  (ende-chat-config-capabilities environment))))
-                      (request (cons (cons "system" system-prompt) messages))
-                      (title-source
-                       (and (not compact)
-                            (not (ende-chat--property
-                                  document question :generated-title))
-                            (eq (ende-chat--effective-role document question)
-                                'user)
-                            (string-blank-p
-                             (org-element-property :raw-value question))
-                            (not (string-blank-p
-                                  (ende-chat--instruction-body document question)))
-                            (ende-chat--serialized-request-text messages)))
-                      (instruction
-                       (if title-source
-                           (plist-put instruction :title-source title-source)
-                         instruction)))
-                 (setf (ende-job-instruction job) instruction)
-                 (unless (or compact title-source)
+                      (request (cons (cons "system" system-prompt) messages)))
+                 (unless compact
                    (setf (ende-job-instruction job)
-                         (plist-put (ende-job-instruction job)
-                                    :title-source nil)))
+                         (plist-put instruction :generated-title-function
+                                    (lambda (title)
+                                      (ende-chat--set-question-generated-title
+                                       buffer question-id title)))))
                  (unless messages
                    (error "Chat question has no eligible content"))
                  (unless compact

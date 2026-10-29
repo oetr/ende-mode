@@ -40,7 +40,8 @@
   tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
-  scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement)
+  scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement
+  title work-buffer request-phase title-attempts title-generated-p)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
@@ -717,6 +718,8 @@ bypassed by a later same-provider job."
                  :access-policy (copy-tree (plist-get data :access-policy))
                  :instruction (plist-get data :instruction)
                  :enqueued-at now)))
+      (setf (ende-job-title job)
+            (ende-queue--fallback-title type target (ende-job-instruction job)))
       (unless profile
         (error "ende request is missing a provider profile"))
       (condition-case caught
@@ -741,6 +744,25 @@ bypassed by a later same-provider job."
         ((error quit)
          (ende--job-cleanup-unpublished job)
          (signal (car caught) (cdr caught)))))))
+
+(defun ende-queue--fallback-title (type target instruction)
+  "Return a short local label for TYPE, TARGET, and INSTRUCTION."
+  (let ((text (or (plist-get instruction :task) (symbol-name type))))
+    (when (and (eq type 'chat) (ende-target-p target)
+               (buffer-live-p (ende-target-buffer target)))
+      (with-current-buffer (ende-target-buffer target)
+        (save-excursion
+          (goto-char (or (ende-target-cursor target) (point-min)))
+          (let ((heading (and (derived-mode-p 'org-mode)
+                              (org-get-heading t t t t))))
+            (if (and heading (not (string-blank-p heading)))
+                (setq text heading)
+              (forward-line 1)
+              (setq text (buffer-substring-no-properties
+                          (point) (min (point-max) (+ (point) 240)))))))))
+    (truncate-string-to-width
+     (string-trim (replace-regexp-in-string "[[:space:]]+" " " text))
+     60 nil nil "…")))
 
 (defun ende--job-cleanup-unpublished (job)
   "Release target and private buffer resources for unpublished JOB."

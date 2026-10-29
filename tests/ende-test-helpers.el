@@ -18,6 +18,16 @@
 
 (setq ende-tool-store-file ende-test--tool-store-file)
 
+(defvar ende-test--title-prelude nil
+  "Non-nil for fixtures exercising the title protocol rather than work only.")
+
+(defun ende-test--work-only (job &rest _)
+  "Start JOB at work for fixtures focused on work-phase behavior."
+  (unless ende-test--title-prelude
+    (setf (ende-job-request-phase job) 'work)))
+
+(advice-add 'ende-agent-run :before #'ende-test--work-only)
+
 (defvar ende-test--prompts nil)
 
 (defvar ende-test--calls nil)

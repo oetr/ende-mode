@@ -85,11 +85,14 @@
 
 
 
-(ert-deftest ende-test/chat-title-directive-is-applied-and-removed ()
+(ert-deftest ende-test/chat-title-tool-preserves-response-layout ()
   (ende-test--reset)
-  (let ((ende-llm-function
+  (let ((ende-test--title-prelude t)
+        (ende-llm-function
          (ende-test--fake-llm
-          (list (concat "#+ENDE_CHAT_TITLE: Explain the request\n\n"
+          (list '(:tool-calls ((:id "title" :name "generate_title"
+                               :arguments "{\"title\":\"Explain the request\"}")))
+                (concat ""
                         "#+begin_example\n"
                         "Instructions → User question — café\n"
                         "#+end_example\n\n"
