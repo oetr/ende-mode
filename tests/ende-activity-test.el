@@ -228,11 +228,7 @@
               (should (equal contents (buffer-string)))
               (should (= tick (buffer-chars-modified-tick)))
               (should (= position (point)))
-              (with-temp-buffer
-                (ende-queue-ui--job-details job 'running)
-                (should (string-match-p "Checking access" (buffer-string)))
-                (should (string-match-p "Agent: forged" (buffer-string)))
-                (should (string-match-p "Execution: Thinking" (buffer-string)))))
+              (should (equal (ende-queue-ui--job-status job) "Thinking")))
             ;; Continue from another buffer: job ownership must remain explicit.
             (with-temp-buffer (funcall complete-work '(:finished t) nil))
             (should (equal (ende-job-activity-title job) "Reviewing"))

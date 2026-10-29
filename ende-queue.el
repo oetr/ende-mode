@@ -1302,9 +1302,9 @@ When called interactively, prompt for one of the configured providers."
 (defun ende-queue-change-policy (ids policy)
   "Set queued jobs named by IDS to POLICY, then dispatch once if allowed.
 
-POLICY is `parallel' or `wait-idle'.  All IDs are validated before any profile
+POLICY is `parallel' or `sequential'.  All IDs are validated before any profile
 is changed, making a batch update atomic with respect to scheduler dispatch."
-  (unless (memq policy '(parallel wait-idle))
+  (unless (memq policy '(parallel sequential))
     (user-error "Unsupported concurrency policy: %s" policy))
   (let ((jobs (mapcar #'ende-queue-live-job-by-id ids)))
     (unless (and jobs

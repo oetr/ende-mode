@@ -20,7 +20,6 @@
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-queue-ui)
-(require 'ende-finished)
 
 (defcustom ende-selector-buffer-name "*ende-selector*"
   "Buffer used by the provider and model selector."
@@ -451,7 +450,6 @@ the discovered pricing metadata for those model IDs."
       (insert (format "Quota: %s\n\n" (ende-selector--quota-display)))
       (insert "a  - ask\n"
               "d  - queue dashboard\n"
-              "f  - finished jobs\n"
               "R  - reset controls to profile settings\n"
               "i  - insert\n"
               "I  - insert anywhere\n"
@@ -1101,12 +1099,6 @@ performed locally so typing a search term never starts another network request."
   (ende-selector-close)
   (ende-queue-open))
 
-(defun ende-selector-finished-jobs ()
-  "Close the selector and open the finished-jobs list."
-  (interactive)
-  (ende-selector-close)
-  (ende-finished-open))
-
 (defun ende-selector-compact ()
   "Compact the current chat context using the selector choice."
   (interactive)
@@ -1160,7 +1152,6 @@ performed locally so typing a search term never starts another network request."
   (define-key ende-selector-mode-map (kbd "i") #'ende-selector-insert)
   (define-key ende-selector-mode-map (kbd "a") #'ende-selector-ask)
   (define-key ende-selector-mode-map (kbd "d") #'ende-selector-dashboard)
-  (define-key ende-selector-mode-map (kbd "f") #'ende-selector-finished-jobs)
   (define-key ende-selector-mode-map (kbd "k") #'ende-selector-compact)
   (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
   (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)

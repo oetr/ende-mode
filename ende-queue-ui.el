@@ -1,150 +1,65 @@
-;;; ende-queue-ui.el --- Live scheduler dashboard for ende -*- lexical-binding: t; -*-
-
-;; Copyright (C) 2026 Peter
-;; Author: Peter
-;; Keywords: convenience, tools
-
-;;; Commentary:
-
-;; Read-only Jobs and Buffers views over the scheduler's authoritative queue.
+;;; ende-queue-ui.el --- Global task tree dashboard -*- lexical-binding: t; -*-
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'seq)
 (require 'subr-x)
 (require 'ende-queue)
-(require 'ende-chat)
+(require 'ende-queue-source)
+(require 'ende-history)
 
 (defface ende-queue-ui-heading-face
   '((t :inherit font-lock-keyword-face))
-  "Face for dashboard headings."
-  :group 'ende)
-
-(defface ende-queue-ui-fence-face
-  '((t :inherit font-lock-constant-face))
-  "Face for compact fence entries."
-  :group 'ende)
+  "Face for dashboard headings." :group 'ende)
 
 (defface ende-queue-ui-mark-face
   '((t :inherit font-lock-warning-face))
-  "Face for marked jobs."
-  :group 'ende)
+  "Face for marked live jobs." :group 'ende)
 
-(defconst ende-queue-ui-buffer-name "*ende-queue*"
-  "Name of the live scheduler dashboard buffer.")
-
-(defvar ende-queue-ui--buffer nil
-  "The current dashboard buffer, if it exists.")
-
-(defvar ende-queue-ui--marked-ids (make-hash-table :test #'eql)
-  "Job IDs marked for batch dashboard operations.")
-
-(defvar ende-queue-ui--expanded-jobs (make-hash-table :test #'eql)
-  "Job IDs whose additional details are expanded.")
-
-(defvar ende-queue-ui--expanded-fences (make-hash-table :test #'eql)
-  "Fence IDs whose predecessor lists are expanded.")
-
-(defvar ende-queue-ui--folded-buffers (make-hash-table :test #'eq)
-  "Source buffers whose groups are folded.")
-
-(defvar ende-queue-ui--buffer-order nil
-  "Stable order in which source buffers first appeared in the dashboard.")
-
-(defvar-local ende-queue-ui-view 'jobs
-  "Current view in the dashboard buffer: `jobs' or `buffers'.")
-
-(defvar-local ende-queue-ui--refresh-timer nil
-  "Coalesced dashboard refresh timer.")
-
-(defvar-local ende-queue-ui--clock-timer nil
-  "Periodic elapsed-time refresh timer.")
-
-(defvar-local ende-queue-ui--rendering nil
-  "Non-nil while the dashboard buffer is being rebuilt.")
-
-
-
-
-
-
-
+(defconst ende-queue-ui-buffer-name "*ende-queue*")
+(defvar ende-queue-ui--buffer nil)
+(defvar ende-queue-ui--marked-ids (make-hash-table :test #'eql))
+(defvar ende-queue-ui--folds (make-hash-table :test #'eql)
+  "Explicit folding choices keyed by stable job ID: expanded or collapsed.")
+(defvar-local ende-queue-ui--refresh-timer nil)
+(defvar-local ende-queue-ui--clock-timer nil)
+(defvar-local ende-queue-ui--rendering nil)
 
 (defun ende-queue-ui--live-jobs ()
-  "Return all current jobs in stable active and actual pending order."
-  (append
-   (sort (ende-active-jobs)
-         (lambda (left right)
-           (< (or (ende-job-dispatch-order left) (ende-job-id left))
-              (or (ende-job-dispatch-order right) (ende-job-id right)))))
-   (ende-physical-waiting-jobs)))
+  "Return live scheduler jobs for actionable commands."
+  (ende-all-live-jobs))
 
-(defun ende-queue-ui--prune-ui-state ()
-  "Drop marks and expansions for jobs that left the live scheduler."
-  (let ((live (mapcar #'ende-job-id (ende-queue-ui--live-jobs)))
-        (live-fences (mapcar #'ende-queue-fence-id (ende-queue-fences)))
-        stale)
-    (maphash (lambda (id _value)
-               (unless (memq id live)
-                 (push id stale)))
-             ende-queue-ui--marked-ids)
-    (dolist (id stale)
+(defun ende-queue-ui--queue-event (event)
+  "Forget evicted IDs and coalesce a refresh for EVENT."
+  (when (eq (plist-get event :type) :evicted)
+    (dolist (id (plist-get event :ids))
       (remhash id ende-queue-ui--marked-ids)
-      (remhash id ende-queue-ui--expanded-jobs))
-    (setq stale nil)
-    (maphash (lambda (id _value)
-               (unless (memq id live)
-                 (push id stale)))
-             ende-queue-ui--expanded-jobs)
-    (dolist (id stale)
-      (remhash id ende-queue-ui--expanded-jobs))
-    (setq stale nil)
-    (maphash (lambda (id _value)
-               (unless (memq id live-fences)
-                 (push id stale)))
-             ende-queue-ui--expanded-fences)
-    (dolist (id stale)
-      (remhash id ende-queue-ui--expanded-fences))))
-
-(defun ende-queue-ui--marked-count ()
-  "Return the number of currently live marked jobs."
-  (hash-table-count ende-queue-ui--marked-ids))
-
-(defun ende-queue-ui--queue-event (_event)
-  "Schedule a coalesced refresh after a queue-wide scheduler change."
+      (remhash id ende-queue-ui--folds)))
   (ende-queue-ui--schedule-refresh))
 
 (defun ende-queue-ui--job-event (_job event)
-  "Schedule a dashboard refresh for relevant lifecycle EVENT on JOB."
-  (unless (or (eq (plist-get event :type) :delta)
-              (and (eq (plist-get event :type) :usage)
-                   (null (plist-get event :usage))))
+  "Coalesce a refresh for a relevant lifecycle EVENT."
+  (unless (eq (plist-get event :type) :delta)
     (ende-queue-ui--schedule-refresh)))
 
 (defun ende-queue-ui--schedule-refresh ()
-  "Schedule one refresh for the live dashboard, coalescing event bursts."
-  (let ((buffer (and (buffer-live-p ende-queue-ui--buffer)
-                     ende-queue-ui--buffer)))
-    (when (and buffer
-               (not (buffer-local-value 'ende-queue-ui--rendering buffer))
-               (not (timerp
-                     (buffer-local-value 'ende-queue-ui--refresh-timer buffer))))
-      (with-current-buffer buffer
+  "Schedule one refresh without retaining any job objects."
+  (when (buffer-live-p ende-queue-ui--buffer)
+    (with-current-buffer ende-queue-ui--buffer
+      (unless (or ende-queue-ui--rendering (timerp ende-queue-ui--refresh-timer))
         (setq ende-queue-ui--refresh-timer
-              (run-at-time 0.08 nil #'ende-queue-ui--refresh-callback buffer))))))
+              (run-at-time 0.08 nil #'ende-queue-ui--refresh-callback
+                           (current-buffer)))))))
 
 (defun ende-queue-ui--refresh-callback (buffer)
-  "Refresh BUFFER when the dashboard is displayed."
+  "Refresh visible dashboard BUFFER."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq ende-queue-ui--refresh-timer nil)
-      (when (derived-mode-p 'ende-queue-ui-mode)
-        (when (get-buffer-window buffer t)
-          (ende-queue-ui--render))))))
+      (when (get-buffer-window buffer t) (ende-queue-ui--render)))))
 
 (defun ende-queue-ui--clock (buffer)
-  "Refresh elapsed times in visible dashboard BUFFER."
+  "Refresh visible BUFFER's elapsed times once per second."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (if (get-buffer-window buffer t)
@@ -153,836 +68,359 @@
           (cancel-timer ende-queue-ui--clock-timer)
           (setq ende-queue-ui--clock-timer nil))))))
 
-(defun ende-queue-ui--window-buffer-changed (frame)
-  "Refresh the dashboard when a window on FRAME starts displaying it."
-  (let ((buffer ende-queue-ui--buffer))
-    (when (and (buffer-live-p buffer)
-               (get-buffer-window buffer frame))
-      (with-current-buffer buffer
-        (ende-queue-ui--start-clock)
-        (ende-queue-ui--schedule-refresh)))))
-
-(defun ende-queue-ui--attach-observers ()
-  "Subscribe this dashboard to scheduler and lifecycle notifications."
-  (add-hook 'ende-job-event-functions #'ende-queue-ui--job-event)
-  (add-hook 'ende-queue-event-functions #'ende-queue-ui--queue-event))
-
-(defun ende-queue-ui--detach-observers ()
-  "Unsubscribe this dashboard from scheduler notifications."
-  (remove-hook 'ende-job-event-functions #'ende-queue-ui--job-event)
-  (remove-hook 'ende-queue-event-functions #'ende-queue-ui--queue-event))
-
 (defun ende-queue-ui--start-clock ()
-  "Start a modest periodic refresh while the dashboard is visible."
+  "Start the visible-dashboard clock once."
   (unless (timerp ende-queue-ui--clock-timer)
     (setq ende-queue-ui--clock-timer
-          (run-with-timer 5 5 #'ende-queue-ui--clock (current-buffer)))))
+          (run-with-timer 1 1 #'ende-queue-ui--clock (current-buffer)))))
+
+(defun ende-queue-ui--window-buffer-changed (frame)
+  "Restart refreshes when the dashboard becomes visible on FRAME."
+  (when (and (buffer-live-p ende-queue-ui--buffer)
+             (get-buffer-window ende-queue-ui--buffer frame))
+    (with-current-buffer ende-queue-ui--buffer
+      (ende-queue-ui--start-clock)
+      (ende-queue-ui--schedule-refresh))))
+
+(add-hook 'ende-job-event-functions #'ende-queue-ui--job-event)
+(add-hook 'ende-queue-event-functions #'ende-queue-ui--queue-event)
+(add-hook 'window-buffer-change-functions #'ende-queue-ui--window-buffer-changed)
 
 (defun ende-queue-ui--cleanup ()
-  "Cancel timers and unregister lifecycle observers when the buffer dies."
+  "Cancel dashboard timers, leaving family retention untouched."
   (dolist (timer (list ende-queue-ui--refresh-timer ende-queue-ui--clock-timer))
     (when (timerp timer) (cancel-timer timer)))
-  (setq ende-queue-ui--refresh-timer nil
-        ende-queue-ui--clock-timer nil)
-  (ende-queue-ui--detach-observers)
-  (remove-hook 'window-buffer-change-functions
-               #'ende-queue-ui--window-buffer-changed)
+  (setq ende-queue-ui--refresh-timer nil ende-queue-ui--clock-timer nil)
   (when (eq ende-queue-ui--buffer (current-buffer))
     (setq ende-queue-ui--buffer nil)))
 
-(defun ende-queue-ui--line (text &optional properties face)
-  "Insert single-line TEXT, attach PROPERTIES, and optionally FACE."
+(defun ende-queue-ui--line (text &optional id face)
+  "Insert TEXT on one line with optional stable job ID and FACE."
   (let ((start (point)))
-    (insert (string-remove-suffix "\n" text))
-    (when face
-      (add-face-text-property start (point) face t))
-    (when properties
-      (add-text-properties start (point) properties))
+    (insert text)
+    (when id (put-text-property start (point) 'ende-queue-ui-job-id id))
+    (when face (add-face-text-property start (point) face t))
     (insert "\n")))
 
-(defun ende-queue-ui--safe-name (buffer)
-  "Return a source BUFFER name suitable for a one-line summary."
-  (if (buffer-live-p buffer) (buffer-name buffer) "*killed*"))
-
-(defun ende-queue-ui--provider-name (job)
-  "Return JOB's concise provider display name."
-  (ende-provider-client-name (ende-job-profile job) (ende-job-metadata job)))
+(defun ende-queue-ui--duration (seconds)
+  "Format nonnegative elapsed SECONDS compactly, including seconds."
+  (let* ((seconds (max 0 (floor seconds)))
+         (minutes (/ seconds 60)) (hours (/ minutes 60)))
+    (cond ((> hours 0) (format "%dh%02dm%02ds" hours (% minutes 60) (% seconds 60)))
+          ((> minutes 0) (format "%dm%02ds" minutes (% seconds 60)))
+          (t (format "%ds" seconds)))))
 
 (defun ende-queue-ui--policy (job)
-  "Return JOB's editable queue concurrency policy label."
-  (if (eq (plist-get (ende-job-profile job) :parallel) t)
-      "parallel"
-    "wait-idle"))
+  "Return JOB's effective family policy label."
+  (if (plist-get (ende--family-scheduling-policy
+                 (ende-job-family-root (ende-job-family job))) :parallel)
+      "parallel" "sequential"))
 
-(defun ende-queue-ui--operation (job)
-  "Return JOB's concise operation label."
-  (pcase (ende-job-type job)
-    ('chat "chat")
-    ('chat-compact "compact")
-    (type (symbol-name type))))
+(defun ende-queue-ui--job-status (job)
+  "Return scheduler or execution status, never an activity title."
+  (pcase (ende-job-state job)
+    ('queued "Queued") ('suspended "Waiting")
+    ('completed "Done (ok)") ('failed "Done (error)")
+    ('cancelled "Cancelled") ('skipped "Skipped")
+    (_ (or (ende-job-status job) "Thinking"))))
 
-(defun ende-queue-ui--duration (seconds)
-  "Format elapsed SECONDS as a compact duration."
-  (let ((seconds (max 0 (floor (or seconds 0)))))
-    (cond
-     ((< seconds 60) (format "%ds" seconds))
-     ((< seconds 3600) (format "%dm" (/ seconds 60)))
-     ((< seconds 86400) (format "%dh" (/ seconds 3600)))
-     (t (format "%dd" (/ seconds 86400))))))
+(defun ende-queue-ui--cells (job now)
+  "Return JOB's first five cells using a common render time NOW."
+  (let* ((family (ende-job-family job))
+         (buffer (ende-job-family-origin family)))
+    (when (buffer-live-p buffer)
+      (setf (ende-job-family-origin-name family) (buffer-name buffer)))
+    (list (if (ende-job-parent job) "" (or (ende-job-family-origin-name family) ""))
+          (ende-queue-ui--policy job) (ende-queue-ui--job-status job)
+          (ende-history--format-token-count
+           (or (plist-get (ende--usage-token-counts (ende-job-last-usage job)) :input) 0))
+          (ende-queue-ui--duration
+           (- (or (ende-job-finished-at job) now)
+              (or (ende-job-enqueued-at job) now))))))
 
-(defun ende-queue-ui--elapsed (job state)
-  "Return JOB's run or wait duration label for STATE."
-  (let* ((start (if (eq state 'running)
-                    (ende-job-started-at job)
-                  (ende-job-enqueued-at job)))
-         (duration (ende-queue-ui--duration (- (float-time) (or start (float-time)))))
-         (label (if (eq state 'running) "run" "wait")))
-    (format "%s %s" duration label)))
+(defun ende-queue-ui--fit (text width &optional right)
+  "Fit TEXT in display WIDTH, padding on the left when RIGHT is non-nil."
+  (let* ((text (truncate-string-to-width text width nil nil "…"))
+         (padding (make-string (max 0 (- width (string-width text))) ?\s)))
+    (if right (concat padding text) (concat text padding))))
 
-(defun ende-queue-ui--blocker-label (blocker)
-  "Return concise text for readiness BLOCKER."
-  (pcase (plist-get blocker :kind)
-    ('fence (format "Fence F%d"
-                    (ende-queue-fence-id (plist-get blocker :fence))))
-    ('behind (format "Behind #%d"
-                     (ende-job-id (plist-get blocker :job))))
-    ('buffer "Buffer busy")
-    ('provider "Provider busy")
-    (_ "Blocked")))
+(defun ende-queue-ui--columns-text (cells widths)
+  "Align CELLS with display WIDTHS, right-aligning the numeric columns."
+  (let ((index -1))
+    (mapconcat (lambda (cell)
+                 (cl-incf index)
+                 (ende-queue-ui--fit cell (nth index widths) (>= index 3)))
+               cells "  ")))
 
-(defun ende-queue-ui--job-status (job state)
-  "Return JOB's concise state/status label for STATE."
-  (pcase state
-    ('running (or (ende-job-activity-title job)
-                  (ende-job-status job) "Running"))
-    ('suspended "Suspended")
-    (_ (let* ((explanation (ende-job-explanation job))
-              (blockers (plist-get explanation :blockers)))
-         (if blockers
-             (ende-queue-ui--blocker-label (car blockers))
-           "Ready")))))
-
-(defun ende-queue-ui--tokens (job)
-  "Return JOB's latest provider-reported total token count, or a dash."
-  (let ((total (plist-get
-                (ende--usage-token-counts (ende-job-last-usage job))
-                :total)))
-    (if (numberp total) (number-to-string (truncate total)) "-")))
-
-(defun ende-queue-ui--window-width ()
-  "Return available dashboard width in display columns."
-  (max 48
-       (condition-case nil
-           (window-body-width (get-buffer-window (current-buffer) t))
-         (error (frame-width)))))
-
-(defun ende-queue-ui--columns (view)
-  "Return the adaptive column layout for VIEW."
-  (let ((width (ende-queue-ui--window-width)))
-    (if (>= width 105)
-        (if (eq view 'jobs)
-            '((id 4 "ID") (buffer 18 "Buffer") (operation 12 "Operation")
-              (policy 9 "Policy") (provider 11 "Provider")
-              (tokens 8 "Tokens") (status 18 "Status") (time 9 "Time"))
-          '((state 9 "State") (id 4 "ID") (operation 12 "Operation")
-            (policy 9 "Policy") (provider 11 "Provider")
-            (tokens 8 "Tokens") (status 18 "Status") (time 9 "Time")))
-      (if (eq view 'jobs)
-          (list (list 'id 4 "ID")
-                (list 'buffer (max 8 (min 22 (- width 68))) "Buffer")
-                (list 'operation 12 "Operation")
-                (list 'tokens 8 "Tokens")
-                (list 'status (max 13 (min 24 (- width 56))) "Status")
-                (list 'time 9 "Time"))
-        (list (list 'state 9 "State") (list 'id 4 "ID")
-              (list 'operation 12 "Operation")
-              (list 'tokens 8 "Tokens")
-              (list 'status (max 13 (min 24 (- width 56))) "Status")
-              (list 'time 9 "Time"))))))
-
-(defun ende-queue-ui--fit (text width)
-  "Truncate TEXT to display WIDTH and pad it to that width."
-  (let* ((plain (replace-regexp-in-string "[\n\r\t]+" " " (or text "")))
-         (fitted (truncate-string-to-width plain width 0 nil "…")))
-    (concat fitted (make-string (max 0 (- width (string-width fitted))) ?\s))))
-
-(defun ende-queue-ui--column-header (view)
-  "Return the fixed-width column header for VIEW."
-  (let ((columns (ende-queue-ui--columns view)))
-    (concat "   "
-            (mapconcat (lambda (column)
-                         (ende-queue-ui--fit (nth 2 column) (nth 1 column)))
-                       columns " "))))
-
-(defun ende-queue-ui--job-row (job state view)
-  "Render JOB in STATE for VIEW and return its one-line summary."
-  (let* ((marked (gethash (ende-job-id job) ende-queue-ui--marked-ids))
-         (expanded (gethash (ende-job-id job) ende-queue-ui--expanded-jobs))
-         (buffer (ende-job-origin-buffer job))
-         (values (list (cons 'id (number-to-string (ende-job-id job)))
-                       (cons 'buffer (ende-queue-ui--safe-name buffer))
-                       (cons 'operation (ende-queue-ui--operation job))
-                       (cons 'policy (ende-queue-ui--policy job))
-                       (cons 'provider (ende-queue-ui--provider-name job))
-                       (cons 'state
-                             (pcase state
-                               ('running "Running")
-                               ('suspended "Suspended")
-                               (_ "Queued")))
-                       (cons 'tokens (ende-queue-ui--tokens job))
-                       (cons 'status (ende-queue-ui--job-status job state))
-                       (cons 'time (ende-queue-ui--elapsed job state))))
-         (prefix (concat (if marked
-                             (propertize "*" 'face 'ende-queue-ui-mark-face)
-                           " ")
-                         (if expanded "▾ " "▸ ")))
-         (summary
-          (concat prefix
-                  (mapconcat
-                   (lambda (column)
-                     (ende-queue-ui--fit
-                      (alist-get (car column) values) (nth 1 column)))
-                   (ende-queue-ui--columns view) " "))))
-    (ende-queue-ui--line
-     summary
-     (list 'ende-queue-ui-kind 'job
-           'ende-queue-ui-owner job
-           'ende-queue-ui-job-id (ende-job-id job)
-           'ende-queue-ui-state state))
-    (when expanded
-      (ende-queue-ui--job-details job state))))
-
-(defun ende-queue-ui--display-blockers (job)
-  "Render useful readiness blockers for queued JOB."
-  (let ((blockers (cdr (plist-get
-                        (ende-job-explanation job) :blockers))))
-    (when blockers
-      (ende-queue-ui--detail-field
-       "Also blocked by"
-       (mapconcat #'ende-queue-ui--blocker-label blockers ", ")
-       job))))
-
-(defun ende-queue-ui--detail-label (label)
-  "Return LABEL and its colon styled as a detail label."
-  (propertize (concat label ":") 'face 'font-lock-type-face))
-
-(defun ende-queue-ui--detail-line (text owner &optional indent)
-  "Insert TEXT as a detail line owned by OWNER with optional INDENT spaces."
-  (ende-queue-ui--line
-   (concat (make-string (or indent 4) ?\s) text)
-   (list 'ende-queue-ui-kind 'detail 'ende-queue-ui-owner owner
-         'ende-queue-ui-job-id (and (ende-job-p owner) (ende-job-id owner)))))
-
-(defun ende-queue-ui--detail-field (label value owner &optional indent)
-  "Render LABEL and VALUE as a detail field owned by OWNER at INDENT."
-  (ende-queue-ui--detail-line
-   (concat (ende-queue-ui--detail-label label) " "
-           (substring-no-properties (format "%s" value)))
-   owner indent))
-
-(defun ende-queue-ui--detail-paragraph (text owner &optional indent)
-  "Render inert, unwrapped TEXT as an activity detail for OWNER at INDENT."
-  (let ((message
-         (replace-regexp-in-string
-          "[[:cntrl:]]+" " " (substring-no-properties (or text "")))))
-    (ende-queue-ui--detail-line
-     (propertize message 'face 'font-lock-doc-face) owner indent)))
-
-(defun ende-queue-ui--job-details (job state)
-  "Render non-redundant inert details for JOB in STATE."
-  (let* ((profile (ende-job-profile job))
-         (columns (mapcar #'car (ende-queue-ui--columns ende-queue-ui-view)))
-         (model (plist-get profile :model))
-         (effort (plist-get profile :reasoning-effort))
-         (latest (ende-job-latest-user job)))
-    (unless (memq 'policy columns)
-      (ende-queue-ui--detail-field
-       "Policy" (ende-queue-ui--policy job) job))
-    (unless (memq 'provider columns)
-      (ende-queue-ui--detail-field
-       "Provider" (ende-queue-ui--provider-name job) job))
-    (when (and (stringp model) (not (string-empty-p model)))
-      (ende-queue-ui--detail-field
-       "Model" (format "%s%s" model (if effort (format " %s" effort) ""))
-       job))
-    (when (and (eq state 'running) (ende-job-activity-title job))
-      (ende-queue-ui--detail-line
-       (concat
-        (ende-queue-ui--detail-label "Activity") " "
-        (propertize
-         (substring-no-properties (ende-job-activity-title job))
-         'face 'font-lock-function-name-face)
-        " "
-        (propertize
-         (format "(updated %s)"
-                 (format-time-string "%H:%M:%S"
-                                     (ende-job-activity-updated-at job)))
-         'face 'ende-queue-ui-heading-face))
-       job)
-      (ende-queue-ui--detail-paragraph
-       (ende-job-activity-status job) job 8)
-      (ende-queue-ui--detail-field
-       "Execution" (or (ende-job-status job) "Running") job))
-    (when (and (eq state 'running)
-               (eq (ende-job-type job) 'chat)
-               (plist-member profile :tool-definitions))
-      (ende-queue-ui--detail-field
-       "Tool calls"
-       (if (plist-get profile :tool-definitions)
-           (number-to-string (or (ende-job-tool-call-count job) 0))
-         "<disabled>")
-       job))
-    (when latest
-      (let* ((lines (mapcar #'string-trim (split-string latest "\n" t)))
-             (lines (seq-take (cl-remove-if #'string-empty-p lines) 5)))
-        (when lines
-          (ende-queue-ui--detail-line
-           (concat (ende-queue-ui--detail-label "Latest user message")
-                   " " (car lines))
-           job)
-          (dolist (line (cdr lines))
-            (ende-queue-ui--detail-line line job 8)))))
-    (when (and (eq state 'queued) (null latest))
-      (ende-queue-ui--detail-field
-       "Request preview" "live source, captured when started" job))
-    (when (eq state 'queued)
-      (ende-queue-ui--display-blockers job))))
-
-(defun ende-queue-ui--fence-row (fence)
-  "Render FENCE at its actual scheduler position."
-  (let* ((jobs (ende-queue-fence-unfinished-predecessors fence))
-         (ids (mapcar (lambda (job) (format "#%d" (ende-job-id job))) jobs))
-         (waiting (if (> (length ids) 3)
-                      (format "%d unfinished jobs" (length ids))
-                    (if ids (mapconcat #'identity ids ", ") "none")))
-         (scope (or (ende-queue-fence-provider fence) "all"))
-         (expanded (gethash (ende-queue-fence-id fence)
-                            ende-queue-ui--expanded-fences)))
-    (ende-queue-ui--line
-     (format "#  F%d  %s · waiting for %s"
-             (ende-queue-fence-id fence) scope waiting)
-     (list 'ende-queue-ui-kind 'fence 'ende-queue-ui-owner fence
-           'ende-queue-ui-fence-id (ende-queue-fence-id fence))
-     'ende-queue-ui-fence-face)
-    (when expanded
-      (ende-queue-ui--detail-field
-       "All unfinished predecessors"
-       (if ids (mapconcat #'identity ids ", ") "none")
-       fence))))
-
-(defun ende-queue-ui--section (title entries renderer)
-  "Render one section with TITLE, ENTRIES, and entry RENDERER."
-  (ende-queue-ui--line title nil 'ende-queue-ui-heading-face)
-  (ende-queue-ui--line (ende-queue-ui--column-header ende-queue-ui-view))
-  (dolist (entry entries)
-    (funcall renderer entry)))
-
-(defun ende-queue-ui--render-jobs ()
-  "Render the Jobs view using scheduler order and stable running order."
-  (let ((running (cl-remove-if-not
-                  (lambda (job) (eq (ende-job-state job) 'running))
-                  (ende-queue-ui--live-jobs)))
-        (suspended (ende-queue-suspended-jobs))
-        (entries (cl-remove-if-not
-                  (lambda (entry)
-                    (or (ende-queue-fence-p entry)
-                        (eq (ende-job-state entry) 'queued)))
-                  (ende-queue-entries))))
-    (ende-queue-ui--section
-     (format "Running · %d" (length running)) running
-     (lambda (job) (ende-queue-ui--job-row job 'running 'jobs)))
-    (ende-queue-ui--section
-     (format "Queued · %d" (length (ende-queued-jobs))) entries
-     (lambda (entry)
-       (if (ende-queue-fence-p entry)
-           (ende-queue-ui--fence-row entry)
-         (ende-queue-ui--job-row entry 'queued 'jobs))))
-    (ende-queue-ui--section
-     (format "Suspended · %d" (length suspended)) suspended
-     (lambda (job) (ende-queue-ui--job-row job 'suspended 'jobs)))))
-
-(defun ende-queue-ui--buffer-key (job)
-  "Return JOB's source buffer key, including a shared dead-buffer sentinel."
-  (or (ende-job-origin-buffer job) 'ende-queue-ui--killed-buffer))
-
-(defun ende-queue-ui--buffer-jobs ()
-  "Return current job groups in a persistent source-buffer order."
-  (let ((groups nil))
-    (dolist (job (ende-queue-ui--live-jobs))
-      (let* ((buffer (ende-queue-ui--buffer-key job))
-             (group (assq buffer groups)))
-        (unless group
-          (push (cons buffer nil) groups)
-          (unless (memq buffer ende-queue-ui--buffer-order)
-            (setq ende-queue-ui--buffer-order
-                  (append ende-queue-ui--buffer-order (list buffer))))
-          (setq group (assq buffer groups)))
-        (setcdr group (cons job (cdr group)))))
-    (dolist (group groups)
-      (setcdr group (nreverse (cdr group))))
-    (setq ende-queue-ui--buffer-order
-          (cl-remove-if
-           (lambda (buffer)
-             (and (bufferp buffer)
-                  (not (buffer-live-p buffer))
-                  (not (assq buffer groups))))
-           ende-queue-ui--buffer-order))
-    (let (stale)
-      (maphash (lambda (buffer _value)
-                 (unless (assq buffer groups)
-                   (push buffer stale)))
-               ende-queue-ui--folded-buffers)
-      (dolist (buffer stale)
-        (remhash buffer ende-queue-ui--folded-buffers)))
-    (mapcar (lambda (buffer) (assq buffer groups))
-            (cl-remove-if-not (lambda (buffer) (assq buffer groups))
-                              ende-queue-ui--buffer-order))))
-
-(defun ende-queue-ui--buffer-group (group)
-  "Render one source-buffer GROUP in the Buffers view."
-  (let* ((buffer (car group))
-         (jobs (cdr group))
-         (running (cl-remove-if-not
-                   (lambda (job) (eq (ende-job-state job) 'running)) jobs))
-         (queued (cl-remove-if-not
-                  (lambda (job) (eq (ende-job-state job) 'queued)) jobs))
-         (suspended (cl-remove-if-not
-                     (lambda (job) (eq (ende-job-state job) 'suspended)) jobs))
-         (folded (gethash buffer ende-queue-ui--folded-buffers)))
-    (ende-queue-ui--line
-     (format "Buffer %s · %d running · %d queued · %d suspended"
-             (ende-queue-ui--safe-name
-              (unless (eq buffer 'ende-queue-ui--killed-buffer) buffer))
-             (length running) (length queued) (length suspended))
-     (list 'ende-queue-ui-kind 'buffer 'ende-queue-ui-buffer buffer
-           'ende-queue-ui-owner buffer)
-     'ende-queue-ui-heading-face)
-    (ende-queue-ui--line (ende-queue-ui--column-header 'buffers))
-    (unless folded
-      (dolist (job running)
-        (ende-queue-ui--job-row job 'running 'buffers))
-      (dolist (job queued)
-        (ende-queue-ui--job-row job 'queued 'buffers))
-      (dolist (job suspended)
-        (ende-queue-ui--job-row job 'suspended 'buffers)))))
-
-(defun ende-queue-ui--render-buffers ()
-  "Render jobs grouped by source buffer and a shared fence section."
-  (dolist (group (ende-queue-ui--buffer-jobs))
-    (ende-queue-ui--buffer-group group))
-  (ende-queue-ui--line
-   (format "Fences · %d" (length (ende-queue-fences)))
-   (list 'ende-queue-ui-kind 'fences)
-   'ende-queue-ui-heading-face)
-  (dolist (fence (ende-queue-fences))
-    (ende-queue-ui--fence-row fence)))
+(defun ende-queue-ui--expanded-p (job)
+  "Return JOB's explicit folding choice or its section default."
+  (eq (gethash (ende-job-id job) ende-queue-ui--folds
+               (if (ende-job-family-archived-p (ende-job-family job))
+                   'collapsed 'expanded))
+      'expanded))
 
 (defun ende-queue-ui--entry-key-at (position)
-  "Return the stable entry key at POSITION, or nil for section text."
-  (let ((kind (get-text-property position 'ende-queue-ui-kind))
-        (owner (get-text-property position 'ende-queue-ui-owner)))
-    (pcase kind
-      ('job (cons 'job (ende-job-id owner)))
-      ('detail (and (ende-job-p owner)
-                    (cons 'job (ende-job-id owner))))
-      ('fence (cons 'fence (ende-queue-fence-id owner)))
-      ('buffer (cons 'buffer (get-text-property position 'ende-queue-ui-buffer)))
-      (_ nil))))
-
-(defun ende-queue-ui--position-for-key (key)
-  "Return the rendered position for stable entry KEY, or nil."
-  (let ((position (point-min)) found)
-    (while (and (< position (point-max)) (not found))
-      (when (equal key (ende-queue-ui--entry-key-at position))
-        (setq found position))
-      (setq position (or (next-single-property-change
-                          position 'ende-queue-ui-kind nil (point-max))
-                         (point-max))))
-    found))
+  "Return the stable job key at POSITION."
+  (when-let* ((id (get-text-property position 'ende-queue-ui-job-id)))
+    (cons 'job id)))
 
 (defun ende-queue-ui--entry-positions ()
-  "Return positions of rendered job and fence entries."
-  (let ((position (point-min)) positions)
-    (while (< position (point-max))
-      (when (memq (get-text-property position 'ende-queue-ui-kind)
-                  '(job fence))
-        (push position positions))
-      (setq position (or (next-single-property-change
-                          position 'ende-queue-ui-kind nil (point-max))
-                         (point-max))))
-    (nreverse positions)))
+  "Return visible job row positions."
+  (save-excursion
+    (goto-char (point-min))
+    (let (positions)
+      (while (< (point) (point-max))
+        (when (get-text-property (point) 'ende-queue-ui-job-id) (push (point) positions))
+        (forward-line 1))
+      (nreverse positions))))
 
-(defun ende-queue-ui--entry-index (key position)
-  "Return KEY's old entry index, or the number of entries before POSITION."
-  (let* ((positions (ende-queue-ui--entry-positions))
-         (matching (and key
-                        (cl-position-if
-                         (lambda (entry-position)
-                           (equal key (ende-queue-ui--entry-key-at entry-position)))
-                         positions))))
-    (or matching
-        (cl-count-if (lambda (entry-position) (< entry-position position))
-                     positions))))
-
-(defun ende-queue-ui--restore-point (key old-index)
-  "Restore point to KEY, or a nearby surviving entry around OLD-INDEX."
-  (let ((position (and key (ende-queue-ui--position-for-key key))))
-    (unless position
-      (let* ((positions (ende-queue-ui--entry-positions))
-             (target (max 0 old-index)))
-        (setq position
-              (or (nth (min target (max 0 (1- (length positions)))) positions)
-                  (point-min)))))
-    (goto-char position)))
+(defun ende-queue-ui--position-for-key (key)
+  "Resolve stable KEY to its visible row."
+  (cl-find-if (lambda (position) (equal key (ende-queue-ui--entry-key-at position)))
+              (ende-queue-ui--entry-positions)))
 
 (defun ende-queue-ui--render ()
-  "Rebuild the live view while preserving stable selection and window starts."
+  "Render one global tree, retaining identity and sensible window positions."
   (interactive)
   (unless ende-queue-ui--rendering
     (let* ((ende-queue-ui--rendering t)
-           (selected-key (ende-queue-ui--entry-key-at (point)))
-           (old-index (ende-queue-ui--entry-index selected-key (point)))
-           (windows (get-buffer-window-list (current-buffer) nil t))
-           (starts (mapcar (lambda (window)
-                             (cons window
-                                   (with-current-buffer (window-buffer window)
-                                     (line-number-at-pos (window-start window)))))
-                           windows)))
-      (ende-queue-ui--prune-ui-state)
+           (key (ende-queue-ui--entry-key-at (line-beginning-position)))
+           (old-positions (ende-queue-ui--entry-positions))
+           (old-index (or (cl-position (line-beginning-position) old-positions) 0))
+           (starts (mapcar (lambda (window) (cons window (window-start window)))
+                           (get-buffer-window-list (current-buffer) nil t)))
+           (active (mapcar #'ende-job-family-root (ende-queue-family-markers)))
+           (finished (mapcar #'ende-job-family-root ende--finished-families))
+           (roots (append active finished))
+           (children (make-hash-table :test #'eql))
+           (cells (make-hash-table :test #'eql))
+           (headers '("Origin" "Policy" "Status" "Context" "Elapsed"))
+           (widths (mapcar #'string-width headers))
+           (now (float-time)))
+      (maphash (lambda (id _value)
+                 (unless (ende-queue-live-job-by-id id)
+                   (remhash id ende-queue-ui--marked-ids))) ende-queue-ui--marked-ids)
+      (dolist (root roots)
+        (dolist (job (ende-job-family-members (ende-job-family root)))
+          (let ((values (ende-queue-ui--cells job now)))
+            (puthash (ende-job-id job) values cells)
+            (setq widths (cl-mapcar #'max widths (mapcar #'string-width values))))
+          (when-let* ((parent (ende-job-parent job)))
+            (push job (gethash (ende-job-id parent) children)))))
+      (maphash (lambda (id jobs)
+                 (puthash id (sort jobs (lambda (a b)
+                                         (ende--schedule-path-before-p
+                                          (ende-job-schedule-path a)
+                                          (ende-job-schedule-path b)))) children)) children)
       (let ((inhibit-read-only t))
         (erase-buffer)
         (ende-queue-ui--line
-         (format "Queue [%s]  %s  %s%s  v buffers  ? help"
-                 (if (eq ende-queue-ui-view 'jobs) "Jobs" "Buffers")
-                 (if ende-queue-paused "PAUSED (no new starts)" "ACTIVE")
-                 (if ende-queue-paused "R resume" "P pause")
-                 (if (> (ende-queue-ui--marked-count) 0)
-                     (format "  · %d marked" (ende-queue-ui--marked-count))
-                   ""))
-         (list 'ende-queue-ui-kind 'header)
-         'ende-queue-ui-heading-face)
-        (if (eq ende-queue-ui-view 'jobs)
-            (ende-queue-ui--render-jobs)
-          (ende-queue-ui--render-buffers)))
-      (ende-queue-ui--restore-point selected-key old-index)
+         (format "Queue [Jobs]  %s  %s  c: change  w: see agent's work  k: kill agent  q: quit"
+                 (if ende-queue-paused "PAUSED" "ACTIVE")
+                 (if ende-queue-paused "R: resume" "P: pause")) nil 'ende-queue-ui-heading-face)
+        (insert "\n")
+        (ende-queue-ui--line (concat (ende-queue-ui--columns-text headers widths) "  Task"))
+        (cl-labels
+            ((tree (job prefix branch)
+               (let* ((id (ende-job-id job)) (descendants (gethash id children))
+                      (expanded (ende-queue-ui--expanded-p job))
+                      (triangle (if descendants (if expanded "▼ " "▶ ") "  ")))
+                 (ende-queue-ui--line
+                  (concat (ende-queue-ui--columns-text (gethash id cells) widths)
+                          "  " prefix branch triangle
+                          (replace-regexp-in-string "[[:cntrl:]]" " " (or (ende-job-title job) "")))
+                  id (and (gethash id ende-queue-ui--marked-ids) 'ende-queue-ui-mark-face))
+                 (when expanded
+                   (let ((remaining descendants))
+                     (dolist (child descendants)
+                       (setq remaining (cdr remaining))
+                       (tree child (concat prefix (pcase branch ("├─ " "│  ") ("└─ " "   ") (_ "")))
+                             (if remaining "├─ " "└─ "))))))))
+          (dolist (section (list (cons "Active" active) (cons "Finished" finished)))
+            (ende-queue-ui--line (format "%s (%d)" (car section) (length (cdr section)))
+                                 nil 'ende-queue-ui-heading-face)
+            (dolist (root (cdr section)) (tree root "" "")))))
+      (let ((position (and key (ende-queue-ui--position-for-key key)))
+            (job (and key (ende-queue-retained-job-by-id (cdr key)))))
+        (while (and (not position) job (ende-job-parent job))
+          (setq job (ende-job-parent job)
+                position (ende-queue-ui--position-for-key (cons 'job (ende-job-id job)))))
+        (goto-char (or position (nth (min old-index (max 0 (1- (length (ende-queue-ui--entry-positions)))))
+                                    (ende-queue-ui--entry-positions)) (point-min))))
       (dolist (entry starts)
         (when (window-live-p (car entry))
-          (set-window-start
-           (car entry)
-           (save-excursion
-             (goto-char (point-min))
-             (forward-line (max 0 (1- (cdr entry))))
-             (point))
-           t))))))
+          (set-window-start (car entry) (min (cdr entry) (point-max)) t))))))
 
-(defun ende-queue-ui--entry-at-point ()
-  "Return (KIND . OWNER) for the current entry, or nil."
-  (let* ((position (line-beginning-position))
-         (kind (get-text-property position 'ende-queue-ui-kind))
-         (owner (get-text-property position 'ende-queue-ui-owner)))
-    (when (eq kind 'detail)
-      (setq kind (if (ende-job-p owner) 'job 'fence)))
-    (and (memq kind '(job fence buffer)) (cons kind owner))))
-
-(defun ende-queue-ui--current-job ()
-  "Return the current job owner or signal a user-facing error."
-  (let ((entry (ende-queue-ui--entry-at-point)))
-    (unless (and entry (eq (car entry) 'job)
-                 (ende-job-p (cdr entry)))
-      (user-error "Point is not on a job"))
-    (cdr entry)))
+(defun ende-queue-ui--current-job (&optional live)
+  "Resolve the current row through the retained index, or scheduler if LIVE."
+  (let* ((id (get-text-property (line-beginning-position) 'ende-queue-ui-job-id))
+         (job (and id (if live (ende-queue-live-job-by-id id)
+                        (ende-queue-retained-job-by-id id)))))
+    (or job (user-error (if live "Select an eligible live job" "No retained job at point")))))
 
 (defun ende-queue-ui--selected-jobs ()
-  "Return marked jobs, or the current job when there are no marks."
-  (let ((marked (cl-remove-if-not
-                 (lambda (job) (gethash (ende-job-id job)
-                                        ende-queue-ui--marked-ids))
-                 (ende-queue-ui--live-jobs))))
-    (if marked marked (list (ende-queue-ui--current-job)))))
-
-(defun ende-queue-ui--job-counts (jobs)
-  "Return RUNNING, QUEUED, and SUSPENDED counts for JOBS."
-  (list (cl-count-if (lambda (job) (eq (ende-job-state job) 'running)) jobs)
-        (cl-count-if (lambda (job) (eq (ende-job-state job) 'queued)) jobs)
-        (cl-count-if (lambda (job) (eq (ende-job-state job) 'suspended)) jobs)))
+  "Resolve marked IDs through the live scheduler, or select the current live job."
+  (if (= (hash-table-count ende-queue-ui--marked-ids) 0)
+      (list (ende-queue-ui--current-job t))
+    (mapcar (lambda (id) (or (ende-queue-live-job-by-id id)
+                             (user-error "Marked jobs changed; refresh first")))
+            (hash-table-keys ende-queue-ui--marked-ids))))
 
 (defun ende-queue-ui--state-snapshot (jobs)
   "Return stable ID/state pairs for JOBS."
   (mapcar (lambda (job) (cons (ende-job-id job) (ende-job-state job))) jobs))
 
 (defun ende-queue-ui--assert-states-current (snapshot)
-  "Reject SNAPSHOT if any selected ID disappeared or changed state."
-  (let ((current
-         (mapcar (lambda (entry)
-                   (let ((job (ende-queue-live-job-by-id (car entry))))
-                     (and job (cons (car entry) (ende-job-state job)))))
-                 snapshot)))
-    (unless (equal snapshot current)
-      (user-error "Queue changed; review the selected jobs and try again"))))
+  "Reject SNAPSHOT if a selected live ID disappeared or changed state."
+  (unless (equal snapshot
+                 (mapcar (lambda (entry)
+                           (when-let* ((job (ende-queue-live-job-by-id (car entry))))
+                             (cons (car entry) (ende-job-state job)))) snapshot))
+    (user-error "Queue changed; review the selection and try again")))
 
 (defun ende-queue-ui--confirm-cancel (jobs &optional all)
-  "Confirm cancelling JOBS when required, labeling broad cancellation ALL."
-  (let* ((counts (ende-queue-ui--job-counts jobs))
-         (running (car counts))
-         (queued (nth 1 counts))
-         (suspended (nth 2 counts))
-         (waiting (+ queued suspended))
-         (total (+ running waiting)))
-    (or (= total 0)
-        (and (not all) (= running 0) (= waiting 1)
-             (= suspended 0))
-        (yes-or-no-p
-         (if (= suspended 0)
-             (format "Cancel%s %d running and %d queued job%s? "
-                     (if all " all" "") running queued
-                     (if (> total 1) "s" ""))
-           (format "Cancel%s %d running, %d queued, and %d suspended job%s? "
-                   (if all " all" "") running queued suspended
-                   (if (> total 1) "s" "")))))))
+  "Confirm broad or started JOBS cancellation, labeling ALL explicitly."
+  (let ((running (cl-count 'running jobs :key #'ende-job-state))
+        (queued (cl-count 'queued jobs :key #'ende-job-state))
+        (waiting (cl-count 'suspended jobs :key #'ende-job-state)))
+    (or (null jobs)
+        (and (not all) (= queued 1) (= running 0) (= waiting 0))
+        (yes-or-no-p (format "Cancel%s %d running, %d queued, and %d waiting jobs? "
+                             (if all " all" "") running queued waiting)))))
 
 (defun ende-queue-ui-cancel ()
-  "Cancel marked jobs, or the job at point, after any required confirmation."
+  "Cancel selected live subtrees with the existing confirmation safeguards."
   (interactive)
   (let* ((jobs (ende-queue-ui--selected-jobs))
-         (snapshot (ende-queue-ui--state-snapshot jobs))
-         (ids (mapcar #'car snapshot)))
+         (snapshot (ende-queue-ui--state-snapshot jobs)))
     (when (ende-queue-ui--confirm-cancel jobs)
       (ende-queue-ui--assert-states-current snapshot)
-      (ende-queue-cancel-ids ids))))
-
-(defun ende-queue-ui-inject-guidance ()
-  "Queue user guidance for the running chat job at point."
-  (interactive)
-  (let ((job (ende-queue-ui--current-job)))
-    (unless (ende-job-can-accept-guidance-p job)
-      (user-error "Selected job cannot accept guidance"))
-    (ende-queue-add-guidance job (read-string "Inject prompt: "))
-    (message "ende: guidance queued for job %d" (ende-job-id job))))
+      (ende-queue-cancel-ids (mapcar #'car snapshot)))))
 
 (defun ende-queue-ui-cancel-all ()
-  "Cancel every job through the existing broad abort behavior."
+  "Cancel all live work without clearing retained history."
   (interactive)
   (let* ((jobs (ende-queue-ui--live-jobs))
          (snapshot (ende-queue-ui--state-snapshot jobs)))
     (when (ende-queue-ui--confirm-cancel jobs t)
-      (let* ((current (ende-queue-ui--state-snapshot
-                       (ende-queue-ui--live-jobs)))
-             (expected (sort snapshot (lambda (left right)
-                                        (< (car left) (car right))))))
-        (setq current (sort current (lambda (left right)
-                                      (< (car left) (car right)))))
-        (unless (equal expected current)
-          (user-error "Queue changed; review it and try again")))
+      (unless (equal snapshot (ende-queue-ui--state-snapshot (ende-queue-ui--live-jobs)))
+        (user-error "Queue changed; review it and try again"))
       (ende-abort-queue))))
 
 (defun ende-queue-ui-change-policy ()
-  "Change concurrency policy for marked jobs or the queued job at point."
+  "Change only queued, never-started, unfrozen top-level family policies."
   (interactive)
-  (let* ((jobs (ende-queue-ui--selected-jobs))
-         (ids (mapcar #'ende-job-id jobs)))
-    (unless (cl-every (lambda (job) (eq (ende-job-state job) 'queued)) jobs)
-      (user-error "Concurrency policy can only change for queued jobs"))
-    (let* ((choice (completing-read "Policy: " '("parallel" "wait-idle")
-                                    nil t))
-           (policy (intern choice)))
-      (ende-queue-change-policy ids policy))))
+  (let ((ids (mapcar #'ende-job-id (ende-queue-ui--selected-jobs))))
+    (ende-queue-change-policy ids (intern (completing-read "Policy: "
+                                                         '("parallel" "sequential") nil t)))))
+
+(defun ende-queue-ui-inject-guidance ()
+  "Inject guidance into an eligible live chat."
+  (interactive)
+  (let ((job (ende-queue-ui--current-job t)))
+    (unless (ende-job-can-accept-guidance-p job) (user-error "Selected job cannot accept guidance"))
+    (ende-queue-add-guidance job (read-string "Inject prompt: "))))
 
 (defun ende-queue-ui-move-up ()
-  "Move the queued job at point one scheduler entry earlier."
-  (interactive)
-  (unless (eq ende-queue-ui-view 'jobs)
-    (user-error "Reordering is available only in Jobs view"))
-  (ende-queue-move (ende-job-id (ende-queue-ui--current-job)) -1))
-
+  "Move an eligible queued root earlier under existing scheduler semantics."
+  (interactive) (ende-queue-move (ende-job-id (ende-queue-ui--current-job t)) -1))
 (defun ende-queue-ui-move-down ()
-  "Move the queued job at point one scheduler entry later."
-  (interactive)
-  (unless (eq ende-queue-ui-view 'jobs)
-    (user-error "Reordering is available only in Jobs view"))
-  (ende-queue-move (ende-job-id (ende-queue-ui--current-job)) 1))
+  "Move an eligible queued root later under existing scheduler semantics."
+  (interactive) (ende-queue-move (ende-job-id (ende-queue-ui--current-job t)) 1))
 
 (defun ende-queue-ui-mark ()
-  "Mark the job at point for batch operations."
+  "Mark an eligible live job by ID."
   (interactive)
-  (let ((job (ende-queue-ui--current-job)))
-    (puthash (ende-job-id job) t ende-queue-ui--marked-ids)
-    (ende-queue-ui--render)))
-
+  (puthash (ende-job-id (ende-queue-ui--current-job t)) t ende-queue-ui--marked-ids)
+  (ende-queue-ui--render))
 (defun ende-queue-ui-unmark ()
-  "Unmark the job at point for batch operations."
+  "Unmark the selected job ID."
   (interactive)
-  (let ((job (ende-queue-ui--current-job)))
-    (remhash (ende-job-id job) ende-queue-ui--marked-ids)
-    (ende-queue-ui--render)))
+  (remhash (ende-job-id (ende-queue-ui--current-job)) ende-queue-ui--marked-ids)
+  (ende-queue-ui--render))
 
 (defun ende-queue-ui-toggle-entry ()
-  "Expand or fold the job, fence, or buffer group at point."
+  "Toggle descendants only; leaves do not expand details."
   (interactive)
-  (let ((entry (ende-queue-ui--entry-at-point)))
-    (unless entry (user-error "Point is not on a job, fence, or buffer heading"))
-    (pcase (car entry)
-      ('job
-       (let ((id (ende-job-id (cdr entry))))
-         (if (gethash id ende-queue-ui--expanded-jobs)
-             (remhash id ende-queue-ui--expanded-jobs)
-           (puthash id t ende-queue-ui--expanded-jobs))))
-      ('fence
-       (let ((id (ende-queue-fence-id (cdr entry))))
-         (if (gethash id ende-queue-ui--expanded-fences)
-             (remhash id ende-queue-ui--expanded-fences)
-           (puthash id t ende-queue-ui--expanded-fences))))
-      ('buffer
-       (let ((buffer (cdr entry)))
-         (if (gethash buffer ende-queue-ui--folded-buffers)
-             (remhash buffer ende-queue-ui--folded-buffers)
-           (puthash buffer t ende-queue-ui--folded-buffers)))))
+  (let ((job (ende-queue-ui--current-job)))
+    (puthash (ende-job-id job) (if (ende-queue-ui--expanded-p job) 'collapsed 'expanded)
+             ende-queue-ui--folds)
     (ende-queue-ui--render)))
 
 (defun ende-queue-ui-visit-source ()
-  "Visit the source location of the job at point."
-  (interactive)
-  (let* ((job (ende-queue-ui--current-job))
-         (target (ende-job-target job))
-         (buffer (ende-target-buffer target))
-         (position (or (ende-target-cursor target)
-                       (ende-target-start target))))
-    (unless (buffer-live-p buffer)
-      (user-error "The source buffer no longer exists"))
-    (pop-to-buffer buffer)
-    (when position
-      (goto-char (min (point-max) (max (point-min) position))))))
-
+  "Visit the originating source of the selected retained job."
+  (interactive) (ende-queue-visit-source (ende-queue-ui--current-job)))
 (defun ende-queue-ui-visit-agent-work ()
-  "Visit the work buffer belonging to the job at point."
+  "Inspect retained private work without creating a replacement."
   (interactive)
-  (let* ((job (ende-queue-ui--current-job))
-         (buffer (pcase (ende-job-type job)
-                   ('agent (ende-job-owned-buffer job))
-                   ('chat (ende-chat--staging-buffer job)))))
-    (unless (buffer-live-p buffer)
-      (user-error "No work buffer available"))
-    (pop-to-buffer buffer)
-    (goto-char (point-max))))
+  (let ((buffer (ende-job-work-buffer (ende-queue-ui--current-job))))
+    (unless (buffer-live-p buffer) (user-error "Work buffer is unavailable"))
+    (pop-to-buffer buffer) (goto-char (point-max))))
 
 (defun ende-queue-ui-next-entry (&optional direction)
-  "Move to the next or previous job/fence entry by DIRECTION."
-  (interactive)
-  (let* ((direction (or direction 1))
-         (positions (ende-queue-ui--entry-positions))
-         (current (point))
-         (candidate
-          (if (> direction 0)
-              (cl-find-if (lambda (position) (> position current)) positions)
-            (car (last (cl-remove-if-not
-                        (lambda (position) (< position current)) positions))))))
-    (if candidate
-        (goto-char candidate)
-      (user-error "No more job or fence entries"))))
-
+  "Move DIRECTION through visible job rows."
+  (let* ((positions (ende-queue-ui--entry-positions))
+         (current (line-beginning-position))
+         (position (if (> (or direction 1) 0)
+                       (cl-find-if (lambda (p) (> p current)) positions)
+                     (car (last (cl-remove-if-not (lambda (p) (< p current)) positions))))))
+    (if position (goto-char position) (user-error "No more visible jobs"))))
 (defun ende-queue-ui-next-job ()
-  "Move to the next job or fence entry."
-  (interactive)
-  (ende-queue-ui-next-entry 1))
-
+  "Select the next visible job." (interactive) (ende-queue-ui-next-entry 1))
 (defun ende-queue-ui-previous-job ()
-  "Move to the previous job or fence entry."
-  (interactive)
-  (ende-queue-ui-next-entry -1))
-
-(defun ende-queue-ui-switch-view ()
-  "Switch between Jobs and Buffers without changing scheduler state."
-  (interactive)
-  (setq ende-queue-ui-view (if (eq ende-queue-ui-view 'jobs) 'buffers 'jobs))
-  (ende-queue-ui--render))
+  "Select the previous visible job." (interactive) (ende-queue-ui-next-entry -1))
 
 (defun ende-queue-ui-help ()
-  "Display concise dashboard key help."
+  "Show available dashboard commands."
   (interactive)
   (with-help-window "*ende-queue help*"
-    (princ "Ende queue dashboard\n\n")
-    (princ "C-n/C-p, arrows  Move by line    n/p  Next/previous job or fence\n")
-    (princ "TAB             Expand/fold     v    Switch Jobs/Buffers\n")
-    (princ "j/RET           Visit source    w    Visit agent work\n")
-    (princ "q               Quit window\n")
-    (princ "P/R             Pause/resume    k/K  Cancel selected/all\n")
-    (princ "c               Change queued policy\n")
-    (princ "i               Inject guidance\n")
-    (princ "M-<up/down>     Reorder queued job (Jobs view only)\n")
-    (princ "m/u             Mark/unmark     g    Refresh\n")))
-
+    (princ "TAB Fold descendants   n/p Next/previous job   j/RET Visit source\nw Inspect work   P/R Pause/resume   c Change eligible queued policy\nk/K Cancel selected/all live work   m/u Mark/unmark live jobs\ni Inject guidance   M-<up/down> Reorder queued roots   g Refresh   q Quit\n")))
 (defun ende-queue-ui-quit ()
-  "Quit the dashboard window without changing scheduling."
-  (interactive)
-  (let ((buffer (current-buffer)))
-    (quit-window)
-    (when (and (buffer-live-p buffer) (not (get-buffer-window buffer t)))
-      (with-current-buffer buffer
-        (when (timerp ende-queue-ui--clock-timer)
-          (cancel-timer ende-queue-ui--clock-timer)
-          (setq ende-queue-ui--clock-timer nil))
-        (when (timerp ende-queue-ui--refresh-timer)
-          (cancel-timer ende-queue-ui--refresh-timer)
-          (setq ende-queue-ui--refresh-timer nil))))))
+  "Quit without cancelling jobs or clearing retained history."
+  (interactive) (quit-window))
 
-(defvar ende-queue-ui-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "C-n") #'next-line)
-    (define-key map (kbd "C-p") #'previous-line)
-    (define-key map (kbd "<down>") #'next-line)
-    (define-key map (kbd "<up>") #'previous-line)
-    (define-key map (kbd "n") #'ende-queue-ui-next-job)
-    (define-key map (kbd "p") #'ende-queue-ui-previous-job)
-    (define-key map (kbd "TAB") #'ende-queue-ui-toggle-entry)
-    (define-key map (kbd "v") #'ende-queue-ui-switch-view)
-    (define-key map (kbd "q") #'ende-queue-ui-quit)
-    (define-key map (kbd "j") #'ende-queue-ui-visit-source)
-    (define-key map (kbd "RET") #'ende-queue-ui-visit-source)
-    (define-key map (kbd "w") #'ende-queue-ui-visit-agent-work)
-    (define-key map (kbd "i") #'ende-queue-ui-inject-guidance)
-    (define-key map (kbd "P") #'ende-queue-pause)
-    (define-key map (kbd "R") #'ende-queue-resume)
-    (define-key map (kbd "k") #'ende-queue-ui-cancel)
-    (define-key map (kbd "K") #'ende-queue-ui-cancel-all)
-    (define-key map (kbd "c") #'ende-queue-ui-change-policy)
-    (define-key map (kbd "M-<up>") #'ende-queue-ui-move-up)
-    (define-key map (kbd "M-<down>") #'ende-queue-ui-move-down)
-    (define-key map (kbd "m") #'ende-queue-ui-mark)
-    (define-key map (kbd "u") #'ende-queue-ui-unmark)
-    (define-key map (kbd "g") #'ende-queue-ui--render)
-    (define-key map (kbd "?") #'ende-queue-ui-help)
-    map)
-  "Keymap for the Ende scheduler dashboard.")
-
-;; `defvar' keeps a previously loaded dashboard map when this file is reloaded.
-(define-key ende-queue-ui-mode-map (kbd "i") #'ende-queue-ui-inject-guidance)
+(defvar ende-queue-ui-mode-map)
+(setq ende-queue-ui-mode-map
+      (let ((map (make-sparse-keymap)))
+        (set-keymap-parent map special-mode-map)
+        (dolist (entry '(("n" . ende-queue-ui-next-job) ("p" . ende-queue-ui-previous-job)
+                         ("TAB" . ende-queue-ui-toggle-entry) ("q" . ende-queue-ui-quit)
+                         ("j" . ende-queue-ui-visit-source) ("RET" . ende-queue-ui-visit-source)
+                         ("w" . ende-queue-ui-visit-agent-work) ("i" . ende-queue-ui-inject-guidance)
+                         ("P" . ende-queue-pause) ("R" . ende-queue-resume)
+                         ("k" . ende-queue-ui-cancel) ("K" . ende-queue-ui-cancel-all)
+                         ("c" . ende-queue-ui-change-policy) ("m" . ende-queue-ui-mark)
+                         ("u" . ende-queue-ui-unmark) ("g" . ende-queue-ui--render)
+                         ("?" . ende-queue-ui-help) ("M-<up>" . ende-queue-ui-move-up)
+                         ("M-<down>" . ende-queue-ui-move-down)))
+          (define-key map (kbd (car entry)) (cdr entry)))
+        map))
 
 (define-derived-mode ende-queue-ui-mode special-mode "ende-queue"
-  "Read-only live views of Ende's scheduler queue."
+  "Inspect active and retained task families in one global tree."
   (setq-local truncate-lines t)
-  (setq-local ende-queue-ui-view 'jobs)
+  (setq-local buffer-face-mode-face 'fixed-pitch)
+  (buffer-face-mode 1)
+  (buffer-disable-undo)
   (setq ende-queue-ui--buffer (current-buffer))
-  (add-hook 'kill-buffer-hook #'ende-queue-ui--cleanup nil t)
-  (ende-queue-ui--attach-observers)
-  (add-hook 'window-buffer-change-functions
-            #'ende-queue-ui--window-buffer-changed)
-  (ende-queue-ui--start-clock))
+  (add-hook 'kill-buffer-hook #'ende-queue-ui--cleanup nil t))
+
+(when (buffer-live-p ende-queue-ui--buffer)
+  (with-current-buffer ende-queue-ui--buffer
+    (use-local-map ende-queue-ui-mode-map)
+    (ende-queue-ui--schedule-refresh)))
 
 ;;;###autoload
 (defun ende-queue-open ()
-  "Open the live Ende scheduler dashboard."
+  "Open the global task dashboard."
   (interactive)
   (let ((buffer (get-buffer-create ende-queue-ui-buffer-name)))
     (with-current-buffer buffer
-      (unless (derived-mode-p 'ende-queue-ui-mode)
-        (ende-queue-ui-mode))
-      (setq ende-queue-ui--buffer buffer)
-      (ende-queue-ui--attach-observers)
-      (ende-queue-ui--start-clock)
-      (ende-queue-ui--render))
+      (unless (derived-mode-p 'ende-queue-ui-mode) (ende-queue-ui-mode))
+      (ende-queue-ui--render)
+      (ende-queue-ui--start-clock))
     (pop-to-buffer buffer)
     buffer))
 
 (provide 'ende-queue-ui)
-
 ;;; ende-queue-ui.el ends here

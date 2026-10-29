@@ -217,7 +217,7 @@
 			      (ende-queue-resume)
 			      (should (eq (ende-job-state first) 'running))
 			      (should-error (ende-queue-change-policy
-					     (list (ende-job-id first)) 'wait-idle)
+					     (list (ende-job-id first)) 'sequential)
 					    :type 'user-error)
 			      (should-error (ende-queue-change-policy
 					     (list (ende-job-id first) (ende-job-id second)) 'parallel)

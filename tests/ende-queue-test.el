@@ -275,10 +275,7 @@
                         children))
       (setq dashboard (ende-queue-open))
       (with-current-buffer dashboard
-        (setq ende-queue-ui-view 'buffers)
-        (ende-queue-ui--render)
-        (should (equal (mapcar #'car (ende-queue-ui--buffer-jobs))
-                       (list origin))))
+        (should (= (length (ende-queue-ui--entry-positions)) 5)))
       (ende--cancel-live-jobs (list root)))))
 
 (ert-deftest ende-test/root-source-death-cancels-suspended-descendants ()
@@ -286,8 +283,6 @@
   (let* ((source (generate-new-buffer " *ende-agent-origin*"))
          (ende--queue-suspended t)
          (ende-llm-function (ende-test--fake-llm nil t))
-         (ende-finished-jobs nil)
-         (ende-finished--live-jobs (make-hash-table :test #'eql))
          (event-hook-count (length ende-job-event-functions))
          root children dashboard)
     (unwind-protect
@@ -315,17 +310,11 @@
           (should (= (length ende-job-event-functions) event-hook-count))
           (should (cl-every
                    (lambda (child)
-                     (eq (ende-finished--live-buffer
-                          (gethash (ende-job-id child)
-                                   ende-finished--live-jobs))
-                         source))
+                     (eq (ende-job-origin-buffer child) source))
                    children))
           (setq dashboard (ende-queue-open))
           (with-current-buffer dashboard
-            (setq ende-queue-ui-view 'buffers)
-            (ende-queue-ui--render)
-            (should (equal (mapcar #'car (ende-queue-ui--buffer-jobs))
-                           (list source))))
+            (should (= (length (ende-queue-ui--entry-positions)) 5)))
           (kill-buffer source)
           (setq source nil)
           (should (eq (ende-job-state root) 'cancelled))
