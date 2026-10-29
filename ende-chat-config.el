@@ -110,6 +110,8 @@
   (let ((name (ende-chat-config--name value "tool")))
     (unless (ende-tool--find name)
       (ende-chat-config--error "unknown tool: %s" name))
+    (when (ende-tool-internal-only (ende-tool--find name))
+      (ende-chat-config--error "internal tool cannot be configured: %s" name))
     name))
 
 (defun ende-chat-config--file-pattern (value resource)

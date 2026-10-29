@@ -76,7 +76,7 @@
 (cl-defstruct (ende-tool (:constructor ende-tool--create))
   "One model-callable ende tool."
   name description parameters handler resource-kind requires-resources requires-root
-  mutates-local async always-available)
+  mutates-local async always-available internal-only)
 
 (defvar ende-tools--registry nil
   "Registered model tools, keyed by their symbolic names.")
@@ -89,6 +89,33 @@
 
 (defvar ende-tools--execution-owner nil
   "Ende job ID currently dispatching a tool call.")
+
+(defvar ende-tools--request-phase 'work
+  "Host-owned phase of the tool batch currently being executed.")
+
+(defvar ende-tools--generate-title-function nil
+  "Job-scoped callback accepting a validated generated title.")
+
+(defconst ende-title-max-length 60
+  "Maximum number of characters in a generated task title.")
+
+(defun ende-title-valid-p (title)
+  "Return non-nil for a concise, plain, single-line TITLE."
+  (and (stringp title)
+       (not (string-blank-p title))
+       (<= (length title) ende-title-max-length)
+       (equal title (string-trim title))
+       (not (string-match-p "[[:cntrl:]]" title))
+       (not (cl-some (lambda (char) (memq char '(?\" ?` ?* ?~ ?= ?< ?> ?\[ ?\])))
+                     (string-to-list title)))
+       (not (string-prefix-p "#+" title))
+       (not (string-match-p "\\`:[[:alnum:]_@#%]+:\\'" title))))
+
+(defun ende-tools-phase-allows-p (name phase)
+  "Return whether tool NAME may execute during host PHASE."
+  (if (eq phase 'title)
+      (equal (format "%s" name) "generate_title")
+    (not (equal (format "%s" name) "generate_title"))))
 
 (defvar ende-tools--register-cancellation-function nil
   "Optional function used to attach and detach an active tool cancellation.")
@@ -131,6 +158,7 @@ them."
                 :requires-root requires-root
                 :async (eq (plist-get options :async) t)
                 :always-available (eq (plist-get options :always-available) t)
+                :internal-only (eq (plist-get options :internal-only) t)
                 :mutates-local (eq read-only :write))))
     (unless (memq kind '(file url none))
       (error "invalid ende tool resource kind: %s" kind))
@@ -186,7 +214,13 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
          (root-required (ende-tool-requires-root tool))
          (assigned (cdr (assq tool-name
                               (plist-get access-config :tool-resources)))))
-    (when access-config
+    (unless (ende-tools-phase-allows-p tool-name ende-tools--request-phase)
+      (error "tool is disabled during the %s phase: %s"
+             ende-tools--request-phase tool-name))
+    (when (and (ende-tool-internal-only tool)
+               (not (functionp ende-tools--generate-title-function)))
+      (error "internal tool requires a host-created title phase"))
+    (when (and access-config (not (ende-tool-internal-only tool)))
       (unless (memq tool-name (ende-tool-active-names
                                (plist-get access-config :active-tools)))
         (error "tool is not active in this chat: %s" tool-name))
@@ -2193,6 +2227,19 @@ Return trimmed plain text without text properties."
       (error "%s must be a single line without control characters" name))
     (string-trim (substring-no-properties text))))
 
+(defun ende-tools--generate-title (arguments _root)
+  "Validate ARGUMENTS and report a title to the originating job."
+  (ende-tools--assert-properties arguments '("title") "generate_title")
+  (let ((title (ende-tools--argument arguments "title")))
+    (unless (ende-title-valid-p title)
+      (error "title must be plain, nonblank, single-line text of at most %d characters"
+             ende-title-max-length))
+    (unless (and (eq ende-tools--request-phase 'title)
+                 (functionp ende-tools--generate-title-function)
+                 (funcall ende-tools--generate-title-function title))
+      (error "generate_title requires a current title phase"))
+    (list :accepted t)))
+
 (defun ende-tools--about-thinking (arguments _root)
   "Report ARGUMENTS as the originating agent job's current activity."
   (ende-tools--assert-properties arguments '("title" "status") "about_thinking")
@@ -2631,6 +2678,16 @@ process-group cancellation function with the active Ende job."
    (cons :additionalProperties :json-false)))
 
 (setq ende-tools--registry nil)
+
+(ende-tool-register
+ 'generate_title "Set a concise task title before starting the actual work."
+ `((:type . "object")
+   (:properties . ((:title . ((:type . "string") (:minLength . 1)
+                             (:maxLength . ,ende-title-max-length)
+                             (:description . "A concise, descriptive task title. Aim for 30–50 characters. Use plain text on one line, without markup or surrounding quotes.")))))
+   (:required . ["title"]) (:additionalProperties . :json-false))
+ #'ende-tools--generate-title nil :no-resource
+ '(:requires-root nil :internal-only t))
 
 (ende-tool-register
  'about_thinking
