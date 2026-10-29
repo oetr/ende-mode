@@ -1685,7 +1685,7 @@ title.\n\n"
   "System prompt for context compaction.")
 
 (defun ende-chat--response-control-ranges (tree)
-  "Return response ranges for private title and control properties."
+  "Return response ranges for host-owned control properties."
   (let (ranges)
     (org-element-map tree '(keyword node-property)
 		     (lambda (element)
@@ -1767,17 +1767,6 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
       (org-entry-put nil ende-chat-generated-title-property "t")
       (ende-chat--hide-control-drawers-at-heading
        (org-element-property :begin question)))))
-
-(defun ende-chat--serialized-request-text (messages)
-  "Return the body of the last serialized user message in MESSAGES."
-  (let (request)
-    (dolist (message messages)
-      (when (equal (ende-content-role message) "user")
-        (setq request (ende-content-readable (ende-content-body message)))))
-    (when request
-      (let* ((newline (string-match "\n" request))
-             (body (if newline (substring request (1+ newline)) request)))
-        (unless (string-blank-p body) body)))))
 
 (defun ende-chat--set-question-generated-title (buffer question-id title)
   "Set TITLE on the still-untitled question identified by QUESTION-ID in BUFFER."
@@ -2004,6 +1993,7 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
       (when-let* ((marker (ende-chat--summary-marker summary)))
         (set-marker marker nil)
         (setf (ende-chat--summary-marker summary) nil)))
+    (setq instruction (plist-put instruction :generated-title-function nil))
     (setf (ende-job-instruction job) instruction)))
 
 (defun ende-chat--staging-buffer (job &optional create)
@@ -2109,8 +2099,6 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
              (metadata
               (list :request-id (plist-get instruction :request-id)
                     :question-id (plist-get instruction :question-id)
-                    :question-title
-                    (plist-get instruction :staged-question-title)
                     :source-file
                     (and (buffer-live-p buffer)
                          (buffer-local-value 'buffer-file-name buffer))
@@ -2137,9 +2125,7 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
   (let ((transcript (ende-chat--staged-text job)))
     (when (and transcript (eq (ende-job-type job) 'chat))
       (if (ende-chat--staged-final-reply-p job transcript)
-          (ende-chat--commit-staged-transcript
-           job transcript 'staged
-           (plist-get (ende-job-instruction job) :staged-question-title))
+          (ende-chat--commit-staged-transcript job transcript 'staged)
         (let* ((instruction (ende-job-instruction job))
                (level (plist-get instruction :response-level))
                (request-id (plist-get instruction :request-id))
@@ -2223,8 +2209,6 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                        :instruction (list :request-id request-id
                                           :question-id question-id
                                           :response-level level
-                                          :staged-question-title
-                                          (plist-get metadata :question-title)
                                           :question-marker question-marker)))
                  (recovered nil))
             (unwind-protect
@@ -2234,9 +2218,7 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                   (ende-chat--staging-append job transcript)
                   (setq recovered
                         (if (ende-chat--staged-final-reply-p job transcript)
-                            (ende-chat--commit-staged-transcript
-                             job transcript 'staged
-                             (plist-get metadata :question-title))
+                            (ende-chat--commit-staged-transcript job transcript 'staged)
                           (ende-chat--materialize-staged-failure job nil)))
                   recovered)
               (when-let* ((staging (ende-chat--staging-buffer job)))
@@ -2710,23 +2692,10 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
               (null (ende-chat--work-ancestor document headline))))
        (ende-chat--document-headlines document)))))
 
-(defun ende-chat--apply-staged-question-title (job title)
-  "Apply TITLE to JOB's blank question inside the staged commit transaction."
-  (when (and (stringp title) (not (string-empty-p title)))
-    (let* ((instruction (ende-job-instruction job))
-           (question-id (plist-get instruction :question-id))
-           (document (ende-chat--build-document))
-           (question (ende-chat--find-by-property
-                      document ende-chat-id-property question-id)))
-      (unless question
-        (error "Chat question no longer exists"))
-      (ende-chat--set-generated-title question title))))
-
 (defun ende-chat--commit-staged-transcript
-    (job transcript &optional allow-edited question-title)
+    (job transcript &optional allow-edited)
   "Replace JOB's pending request with complete staged TRANSCRIPT atomically.
-When ALLOW-EDITED is `staged', resolve and validate the durable pending ID.
-QUESTION-TITLE is applied atomically if JOB's question is still blank."
+When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
   (let* ((buffer (ende-target-buffer (ende-job-target job)))
          (instruction (ende-job-instruction job))
          (request-id (plist-get instruction :request-id))
@@ -2762,8 +2731,6 @@ QUESTION-TITLE is applied atomically if JOB's question is still blank."
 			  (insert transcript)
 			  (setq inserted-end (copy-marker (point) t))
 			  (delete-region old-start old-end)
-			  (ende-chat--apply-staged-question-title
-			   job question-title)
 			  (let* ((document
 				  (ende-chat--build-document-in-region
 				   inserted-start inserted-end))
@@ -3362,8 +3329,7 @@ FINAL includes retained tool images and trims compaction output."
                              (concat reasoning answer)))
                  (buffer (ende-target-buffer (ende-job-target job)))
                  (question-pair
-                  (when (or compact (plist-get normalized :title))
-                    (ende-chat--marked-question-document job)))
+                  (when compact (ende-chat--marked-question-document job)))
                  (question-document (car question-pair))
                  (question (cadr question-pair))
                  (insertion-info nil))
@@ -3373,13 +3339,6 @@ FINAL includes retained tool images and trims compaction output."
                        (not (plist-get instruction :source-fence))
                        (null question))
               (error "Chat question no longer exists"))
-            (when (and question (not compact) (not staged))
-              (with-current-buffer buffer
-                (save-excursion
-                  (goto-char (org-element-property :begin question))
-                  (when (plist-get normalized :title)
-                    (ende-chat--set-generated-title
-                     question (plist-get normalized :title))))))
             (unwind-protect
                 (progn
                   (if compact
@@ -3496,15 +3455,9 @@ FINAL includes retained tool images and trims compaction output."
                         (progn
                           (unless (ende-chat--staging-buffer job)
                             (ende-chat--stage-agent-section job ""))
-                          (setf (ende-job-instruction job)
-                                (plist-put
-                                 (ende-job-instruction job)
-                                 :staged-question-title
-                                 (plist-get normalized :title)))
                           (ende-chat--staging-append job response t)
                           (ende-chat--commit-staged-transcript
-                           job (ende-chat--staged-text job) nil
-                           (plist-get normalized :title)))
+                           job (ende-chat--staged-text job)))
                       (setq insertion-info
                             (ende-chat--persist-ordinary-reply
                              job response))

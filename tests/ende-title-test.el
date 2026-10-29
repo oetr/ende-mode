@@ -29,7 +29,8 @@
                                               (list :title value)) :ok)))
       (should (plist-get (ende-tool-call 'generate_title
                                         '(:title "Inspect queue lifecycle")
-                                        nil '(:active-tools nil)) :ok))
+                                        "/not/a/required/project"
+                                        '(:active-tools nil :root "/missing")) :ok))
       (should (equal title "Inspect queue lifecycle"))))
   (should-not (plist-get (ende-tool-call 'generate_title
                                         '(:title "Forbidden in work")) :ok)))
@@ -80,6 +81,30 @@
             (should-not (string-match-p "\\*\\* Inspect queue lifecycle"
                                         (ende-test--chat-context-text
                                          (ende-chat-context-at-point))))))
+      (ende-test--reset))))
+
+(ert-deftest ende-test/title-correction-is-bounded-and-keeps-the-local-fallback ()
+  (ende-test--reset)
+  (let* ((ende-test--title-prelude t)
+         (phases nil)
+         (ende-llm-function
+          (lambda (_messages callbacks &optional profile)
+            (let ((job (ende-queue-live-job-by-id (plist-get profile :job-id))))
+              (push (ende-job-request-phase job) phases))
+            (funcall (plist-get callbacks :on-done)
+                     (if (< (length phases) 3)
+                         '(:content "Do not use this as the answer")
+                       '(:content "Actual final answer"))))))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert "* User heading\nDo the real task.\n")
+          (goto-char (point-min))
+          (let ((job (ende-ask)))
+            (should (equal (nreverse phases) '(title title work)))
+            (should (equal (ende-job-title job) "User heading"))
+            (should (eq (ende-job-state job) 'completed))
+            (should (string-match-p "Actual final answer" (buffer-string)))))
       (ende-test--reset))))
 
 (provide 'ende-title-test)

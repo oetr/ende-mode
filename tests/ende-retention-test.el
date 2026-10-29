@@ -52,4 +52,25 @@
             (should-not ende--finished-families)))
       (ende-test--reset))))
 
+(ert-deftest ende-test/failed-publication-leaves-no-retained-work ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t) job work)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "source")
+          (let* ((prepare (lambda (prepared)
+                            (setq job prepared
+                                  work (generate-new-buffer " *failed-publication*"))
+                            (setf (ende-job-work-buffer prepared) work)))
+                 (request (append (ende-test--dashboard-request ende-test--dashboard-profile)
+                                  (list :prepare prepare))))
+            (cl-letf (((symbol-function 'ende--queue-insert-family-member)
+                       (lambda (_) (error "publication failed"))))
+              (should-error (ende-enqueue request)))
+            (should-not (gethash (ende-job-id job) ende--retained-jobs))
+            (should-not (buffer-live-p work))
+            (should-not ende-queue)
+            (should-not ende--source-buffer-jobs)))
+      (ende-test--reset))))
+
 (provide 'ende-retention-test)

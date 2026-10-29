@@ -136,10 +136,10 @@ root.  NAME is exposed to model transports as a string.  Pass
 `:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
 the historic `:no-resource' registration form; OPTIONS may specify
 `:resource-kind' (`file', `url', or `none'), `:requires-resources',
-`:requires-root', `:async', and `:always-available'.  File and URL tools require
-resources by default; resource-free tools do not.  Always-available tools must
-be resource-free, rootless, and non-mutating; chat configuration cannot disable
-them."
+`:requires-root', `:async', `:internal-only', and `:always-available'.
+File and URL tools require resources by default; resource-free tools do not.
+Always-available tools must be resource-free, rootless, and non-mutating;
+chat configuration cannot disable them."
   (unless (and (symbolp name) (functionp handler))
     (error "invalid ende tool registration: %s" name))
   (let* ((kind (or (plist-get options :resource-kind)
@@ -231,7 +231,8 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
       (error "chat tool configuration has no explicit root"))
     (let ((root-value
            ;; Mandatory activity tools must not depend on a configured project.
-           (unless (ende-tool-always-available tool)
+           (unless (or (ende-tool-always-available tool)
+                       (ende-tool-internal-only tool))
              (or root
                  (and access-config root-required
                       (plist-get access-config :root))))))

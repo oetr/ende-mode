@@ -397,6 +397,8 @@ DONE receives ordered tool messages after JOB is admitted again by the
 scheduler when asynchronous children have settled."
   (unless (functionp ende-agent--spawn-execute-tool)
     (error "spawn batches require an asynchronous tool dispatcher"))
+  (unless (ende-tools-phase-allows-p "spawn_agent" (ende-job-request-phase job))
+    (error "spawn_agent is disabled during the title phase"))
   (let ((generation (or (ende-job-execution-generation job) 0)))
     (ende-agent--launch-batch
    job calls
@@ -405,6 +407,7 @@ scheduler when asynchronous children have settled."
       job (list :type :tool-call-count
                 :count (1+ (or (ende-job-tool-call-count job) 0))))
      (let ((ende-tools--execution-owner (ende-job-id job))
+           (ende-tools--request-phase 'work)
            (ende-tools--report-activity-function
             (lambda (title status)
               (ende-job-report-activity job title status generation))))
@@ -498,9 +501,9 @@ scheduler when asynchronous children have settled."
              (not (ende-job-title-generated-p job)))
     (setf (ende-job-title job) title
           (ende-job-title-generated-p job) t)
-    (ende-agent--invoke (list :title (plist-get (ende-job-instruction job)
-                                               :generated-title-function))
-                        :title title)
+    (when-let* ((setter (plist-get (ende-job-instruction job)
+                                   :generated-title-function)))
+      (ende-ignore-errors setter title))
     (ende-job-emit-event job (list :type :title :title title))
     t))
 

@@ -110,7 +110,8 @@
       (with-current-buffer buffer
         (save-restriction
           (widen)
-          (let ((position (or (ende-target-cursor target) (point-min))))
+          (let ((position (or (plist-get instruction :question-marker)
+                              (ende-target-cursor target) (point-min))))
             (setf (ende-job-family-origin-name family) (buffer-name)
                   (ende-job-family-source-marker family) (copy-marker position t)
                   (ende-job-family-source-file family) buffer-file-name
@@ -867,7 +868,8 @@ bypassed by a later same-provider job."
                (buffer-live-p (ende-target-buffer target)))
       (with-current-buffer (ende-target-buffer target)
         (save-excursion
-          (goto-char (or (ende-target-cursor target) (point-min)))
+          (goto-char (or (plist-get instruction :question-marker)
+                         (ende-target-cursor target) (point-min)))
           (let ((heading (and (derived-mode-p 'org-mode)
                               (not (org-before-first-heading-p))
                               (org-get-heading t t t t))))
@@ -886,6 +888,9 @@ bypassed by a later same-provider job."
     (ende-ignore-errors #'ende-target-release (ende-job-target job)))
   (when-let* ((buffer (ende--job-release-owned-buffer job)))
     (kill-buffer buffer))
+  (when (buffer-live-p (ende-job-work-buffer job))
+    (kill-buffer (ende-job-work-buffer job)))
+  (setf (ende-job-work-buffer job) nil)
   job)
 
 (defun ende--job-release-owned-buffer (job)
@@ -907,7 +912,10 @@ Return the newly created `ende-job'."
                   :root job
                   :inference-template (ende-job-inference-template job)
                   :origin (ende-target-buffer (ende-job-target job))
-                  :queue-marker nil :queue-tail nil)))
+                  :queue-marker nil :queue-tail nil))
+         (published nil))
+    (unwind-protect
+        (progn
     (setf (ende-job-family job) family
           (ende-job-family-queue-marker family) nil
           (ende-job-family-queue-tail family) nil
@@ -918,13 +926,24 @@ Return the newly created `ende-job'."
     (ende--queue-insert-family-member job)
     (ende--retain-published-job job)
     (ende-queue--track-source family)
+    (setq published t)
     (ende-job-emit-event
      job
      (list :type :queued
            :client (ende-provider-client-name (ende-job-profile job))
            :model (plist-get (ende-job-profile job) :model)))
     (ende-process-next)
-    job))
+    job)
+      (unless published
+        (ende--unregister-source-job job)
+        (setq ende-queue (delq family (delq job ende-queue)))
+        (ende--queue-refresh-family-hints)
+        (ende--queue-sync-tail)
+        (remhash (ende-job-id job) ende--retained-jobs)
+        (when (markerp (ende-job-family-source-marker family))
+          (set-marker (ende-job-family-source-marker family) nil))
+        (setf (ende-job-family-members family) nil)
+        (ende--job-cleanup-unpublished job)))))
 
 (defun ende-job-next-child-path (parent)
   "Reserve and return the next never-reused numeric child path for PARENT."
