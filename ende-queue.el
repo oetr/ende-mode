@@ -866,8 +866,8 @@ bypassed by a later same-provider job."
          (signal (car caught) (cdr caught)))))))
 
 (defun ende-queue--fallback-title (type target instruction)
-  "Return a short local label for TYPE, TARGET, and INSTRUCTION."
-  (let ((text (or (plist-get instruction :task) (symbol-name type))))
+  "Return a question heading or a placeholder for an untitled job."
+  (let ((text "tbd."))
     (when (and (eq type 'chat) (ende-target-p target)
                (buffer-live-p (ende-target-buffer target)))
       (with-current-buffer (ende-target-buffer target)
@@ -877,11 +877,8 @@ bypassed by a later same-provider job."
           (let ((heading (and (derived-mode-p 'org-mode)
                               (not (org-before-first-heading-p))
                               (org-get-heading t t t t))))
-            (if (and heading (not (string-blank-p heading)))
-                (setq text heading)
-              (when heading (org-end-of-meta-data t))
-              (setq text (buffer-substring-no-properties
-                          (point) (min (point-max) (+ (point) 240)))))))))
+            (when (and heading (not (string-blank-p heading)))
+              (setq text heading))))))
     (truncate-string-to-width
      (string-trim (replace-regexp-in-string "[[:space:]]+" " " text))
      60 nil nil "…")))

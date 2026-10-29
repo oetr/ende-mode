@@ -227,11 +227,16 @@
             ((tree (job prefix branch)
                (let* ((id (ende-job-id job)) (descendants (gethash id children))
                       (expanded (ende-queue-ui--expanded-p job))
-                      (triangle (if descendants (if expanded "▼ " "▶ ") "  ")))
+                      (triangle (cond (descendants (if expanded "▼ " "▶ "))
+                                      ((string-empty-p branch) "  ")
+                                      (t ""))))
                  (ende-queue-ui--line
                   (concat (ende-queue-ui--columns-text (gethash id cells) widths)
                           "  " prefix branch triangle
-                          (replace-regexp-in-string "[[:cntrl:]]" " " (or (ende-job-title job) "")))
+                          (replace-regexp-in-string
+                           "[[:cntrl:]]" " "
+                           (if (string-blank-p (or (ende-job-title job) ""))
+                               "tbd." (ende-job-title job))))
                   id (and (gethash id ende-queue-ui--marked-ids) 'ende-queue-ui-mark-face))
                  (when expanded
                    (let ((remaining descendants))

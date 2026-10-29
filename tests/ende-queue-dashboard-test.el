@@ -34,6 +34,8 @@
                 finished (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
           (ende--job-settle finished 'completed "done")
           (setf (ende-job-title root) "Active root"
+                (ende-job-title child) "Child task"
+                (ende-job-title grandchild) "Grandchild task"
                 (ende-job-title finished) "Finished root"
                 (ende-job-last-usage grandchild) '(:input_tokens 100200 :output_tokens 9000)
                 (ende-job-enqueued-at root) 10
@@ -48,7 +50,7 @@
                 (should (string-match-p "4m06s" text))
                 (should (string-match-p "58s" text))
                 (should (string-match-p "└─ ▼ Child task" text))
-                (should (string-match-p "   └─   Grandchild task" text))
+                (should (string-match-p "   └─ Grandchild task" text))
                 (should-not (string-match-p "Provider:\\|Activity:\\|Model:" text)))
               (let ((positions (ende-queue-ui--entry-positions)) widths)
                 (dolist (position positions)
@@ -67,6 +69,46 @@
                 (should-error (funcall command) :type 'user-error))
               (should truncate-lines)
               (should-not (get-text-property (point) 'ende-queue-ui-owner)))))
+      (ende-test--dashboard-reset))))
+
+(ert-deftest ende-test/dashboard-untitled-jobs-never-preview-prompts ()
+  (ende-test--dashboard-reset)
+  (let ((ende--queue-suspended t) root child dashboard)
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert "* \n#+begin_ende\n(clear-tools)\n#+end_ende\nPRIVATE_USER_INPUT\n"
+                  "* Named question\nPRIVATE_NAMED_INPUT\n")
+          (ende-test--chat-goto "* ")
+          (setq root (ende-ask ende-test--dashboard-profile))
+          (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+          (setq child
+                (ende-job-publish-child
+                 root (list 'agent :profile ende-test--dashboard-profile
+                            :instruction '(:task "PRIVATE_CHILD_INPUT")
+                            :prepare #'ende-agent-private-target)
+                 (ende-job-next-child-path root)))
+          (ende-test--chat-goto "* Named question")
+          (should (equal (ende-job-title (ende-ask ende-test--dashboard-profile))
+                         "Named question"))
+          (should (equal (ende-job-title root) "tbd."))
+          (should (equal (ende-job-title child) "tbd."))
+          (puthash (ende-job-id root) 'expanded ende-queue-ui--folds)
+          (setq dashboard (ende-queue-open))
+          (dotimes (pass 2)
+            (when (= pass 1)
+              (ende--job-settle child 'completed "done")
+              (ende--job-settle root 'completed "done"))
+            (with-current-buffer dashboard
+              (ende-queue-ui--render)
+              (let ((text (buffer-string)))
+                (should (string-match-p "└─ tbd\\." text))
+                (should (string-match-p "Named question" text))
+                (should-not (string-match-p "PRIVATE_\\|begin_ende" text)))))
+          (setf (ende-job-title child) "Generated child title")
+          (with-current-buffer dashboard
+            (ende-queue-ui--render)
+            (should (string-match-p "└─ Generated child title" (buffer-string)))))
       (ende-test--dashboard-reset))))
 
 (ert-deftest ende-test/dashboard-retained-work-and-hooks-survive-two-reloads ()
