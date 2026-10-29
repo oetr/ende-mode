@@ -24,7 +24,8 @@
            (lambda (value) (setq title value))))
       (should-not (plist-get (ende-tool-call 'about_thinking
                                             '(:title "Work" :status "Work.")) :ok))
-      (dolist (value '("" "  " "two\nlines" "* Heading" "\"Quoted\""))
+      (dolist (value '("" "  " "two\nlines" "* Heading" "\"Quoted\""
+                       "'Quoted'" "/Italic/" "_Underlined_" "+Struck+"))
         (should-not (plist-get (ende-tool-call 'generate_title
                                               (list :title value)) :ok)))
       (should (plist-get (ende-tool-call 'generate_title
@@ -105,6 +106,44 @@
             (should (equal (ende-job-title job) "User heading"))
             (should (eq (ende-job-state job) 'completed))
             (should (string-match-p "Actual final answer" (buffer-string)))))
+      (ende-test--reset))))
+
+(ert-deftest ende-test/delegated-title-prelude-does-not-restart-on-parent-resumption ()
+  (ende-test--reset)
+  (let* ((ende-test--title-prelude t)
+         (requests nil)
+         (ende-llm-function
+          (lambda (messages callbacks &optional profile)
+            (setq requests (append requests (list (list messages callbacks profile))))))
+         (title '(:content "" :tool-calls
+                  ((:id "title" :name "generate_title"
+                    :arguments "{\"title\":\"Stable generated title\"}")))))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert (ende-test--chat-config-block
+                   '((tools spawn_agent) (agent-config worker) (spawn-agent-config worker)))
+                  "* Root\nDelegate the task.\n")
+          (ende-test--chat-goto "* Root")
+          (let ((root (ende-ask '(:name remote :model "fixture" :parallel t :max-concurrency 2))))
+            (funcall (plist-get (nth 1 (nth 0 requests)) :on-done) title)
+            (funcall (plist-get (nth 1 (nth 1 requests)) :on-done)
+                     '(:content "" :tool-calls
+                       ((:id "spawn" :name "spawn_agent" :arguments "{\"task\":\"Child task\"}"))))
+            (should (eq (ende-job-state root) 'suspended))
+            (let ((child (car (ende-job-children root))))
+              (should (eq (ende-job-request-phase child) 'title))
+              (funcall (plist-get (nth 1 (nth 2 requests)) :on-done) title)
+              (should (eq (ende-job-request-phase child) 'work))
+              (funcall (plist-get (nth 1 (nth 3 requests)) :on-done) '(:content "Child answer"))
+              (should (eq (ende-job-state child) 'completed))
+              (should (eq (ende-job-state root) 'running))
+              (should (= (ende-job-title-attempts root) 1))
+              (should (eq (ende-job-request-phase root) 'work))
+              (funcall (plist-get (nth 1 (nth 4 requests)) :on-done) '(:content "Parent answer"))
+              (should (eq (ende-job-state root) 'completed))
+              (should (equal (ende-job-title child) "Stable generated title"))
+              (should (= (length requests) 5)))))
       (ende-test--reset))))
 
 (provide 'ende-title-test)

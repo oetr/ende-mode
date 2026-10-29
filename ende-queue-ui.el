@@ -37,8 +37,10 @@
       (remhash id ende-queue-ui--folds)))
   (ende-queue-ui--schedule-refresh))
 
-(defun ende-queue-ui--job-event (_job event)
+(defun ende-queue-ui--job-event (job event)
   "Coalesce a refresh for a relevant lifecycle EVENT."
+  (when (eq (plist-get event :type) :settled)
+    (remhash (ende-job-id job) ende-queue-ui--marked-ids))
   (unless (eq (plist-get event :type) :delta)
     (ende-queue-ui--schedule-refresh)))
 
@@ -187,7 +189,8 @@
            (key (ende-queue-ui--entry-key-at (line-beginning-position)))
            (old-positions (ende-queue-ui--entry-positions))
            (old-index (or (cl-position (line-beginning-position) old-positions) 0))
-           (starts (mapcar (lambda (window) (cons window (window-start window)))
+           (starts (mapcar (lambda (window)
+                             (cons window (line-number-at-pos (window-start window))))
                            (get-buffer-window-list (current-buffer) nil t)))
            (active (mapcar #'ende-job-family-root (ende-queue-family-markers)))
            (finished (mapcar #'ende-job-family-root ende--finished-families))
@@ -249,7 +252,10 @@
                                     (ende-queue-ui--entry-positions)) (point-min))))
       (dolist (entry starts)
         (when (window-live-p (car entry))
-          (set-window-start (car entry) (min (cdr entry) (point-max)) t))))))
+          (set-window-start
+           (car entry)
+           (save-excursion
+             (goto-char (point-min)) (forward-line (1- (cdr entry))) (point)) t))))))
 
 (defun ende-queue-ui--current-job (&optional live)
   "Resolve the current row through the retained index, or scheduler if LIVE."
@@ -282,9 +288,10 @@
   "Confirm broad or started JOBS cancellation, labeling ALL explicitly."
   (let ((running (cl-count 'running jobs :key #'ende-job-state))
         (queued (cl-count 'queued jobs :key #'ende-job-state))
-        (waiting (cl-count 'suspended jobs :key #'ende-job-state)))
+        (waiting (cl-count 'suspended jobs :key #'ende-job-state))
+        (owns-children (cl-some #'ende-job-children jobs)))
     (or (null jobs)
-        (and (not all) (= queued 1) (= running 0) (= waiting 0))
+        (and (not all) (not owns-children) (= queued 1) (= running 0) (= waiting 0))
         (yes-or-no-p (format "Cancel%s %d running, %d queued, and %d waiting jobs? "
                              (if all " all" "") running queued waiting)))))
 
@@ -343,9 +350,11 @@
   "Toggle descendants only; leaves do not expand details."
   (interactive)
   (let ((job (ende-queue-ui--current-job)))
-    (puthash (ende-job-id job) (if (ende-queue-ui--expanded-p job) 'collapsed 'expanded)
-             ende-queue-ui--folds)
-    (ende-queue-ui--render)))
+    (when (cl-some (lambda (member) (eq (ende-job-parent member) job))
+                    (ende-job-family-members (ende-job-family job)))
+      (puthash (ende-job-id job) (if (ende-queue-ui--expanded-p job) 'collapsed 'expanded)
+               ende-queue-ui--folds)
+      (ende-queue-ui--render))))
 
 (defun ende-queue-ui-visit-source ()
   "Visit the originating source of the selected retained job."

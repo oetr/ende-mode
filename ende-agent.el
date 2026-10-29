@@ -443,46 +443,46 @@ scheduler when asynchronous children have settled."
   "Handle model RESULT for JOB under CONFIGURATION using CALLBACKS."
   (if (eq (ende-job-request-phase job) 'title)
       (ende-agent--handle-title job result messages configuration callbacks rounds)
-  (let ((calls (ende-agent--invoke callbacks :tool-calls result)))
-    (if (null calls)
-        (let ((next (if (plist-member callbacks :before-final)
-                        (ende-agent--invoke callbacks :before-final
-                                            job result messages)
-                      :finish)))
-          (if (and (listp next) (not (eq next :finish)))
-              (progn
-                (ende--validate-messages next)
-                (ende-agent--send job next configuration callbacks rounds))
-            (ende-agent--invoke callbacks :on-final job result messages)))
-      (let ((definitions (plist-get (ende-job-profile job) :tool-definitions))
-            (maximum ende-agent-max-tool-rounds))
-        (unless definitions
-          (error "The provider returned an unrequested tool call"))
-        (unless (and (integerp maximum) (> maximum 0))
-          (error "ende-agent-max-tool-rounds must be a positive integer"))
-        (when (>= rounds maximum)
-          (error "Agent exceeded %d tool-call rounds" maximum))
-        (let* ((assistant-data
-                (ende-agent--invoke callbacks :assistant-message
-                                    job result calls))
-               (assistant (if (plist-member assistant-data :message)
-                             (plist-get assistant-data :message)
-                           assistant-data))
-               (execution-calls (or (plist-get assistant-data :calls) calls))
-               (next-messages (append messages (when assistant (list assistant)))))
-          (ende-agent--invoke callbacks :on-tool-request job result calls)
-          (ende-agent--run-tools
-           job execution-calls configuration callbacks
-           (lambda (tool-messages)
-             (when (and tool-messages (ende-job-current-p job))
-               (let* ((next-messages (append next-messages tool-messages))
-                      (next-messages
-                       (or (ende-agent--invoke callbacks :after-tool-round
-                                               job next-messages)
-                           next-messages)))
-                 (ende--validate-messages next-messages)
-                 (ende-agent--send job next-messages configuration callbacks
-                                  (1+ rounds))))))))))))
+    (let ((calls (ende-agent--invoke callbacks :tool-calls result)))
+      (if (null calls)
+          (let ((next (if (plist-member callbacks :before-final)
+                          (ende-agent--invoke callbacks :before-final
+                                              job result messages)
+                        :finish)))
+            (if (and (listp next) (not (eq next :finish)))
+                (progn
+                  (ende--validate-messages next)
+                  (ende-agent--send job next configuration callbacks rounds))
+              (ende-agent--invoke callbacks :on-final job result messages)))
+        (let ((definitions (plist-get (ende-job-profile job) :tool-definitions))
+              (maximum ende-agent-max-tool-rounds))
+          (unless definitions
+            (error "The provider returned an unrequested tool call"))
+          (unless (and (integerp maximum) (> maximum 0))
+            (error "ende-agent-max-tool-rounds must be a positive integer"))
+          (when (>= rounds maximum)
+            (error "Agent exceeded %d tool-call rounds" maximum))
+          (let* ((assistant-data
+                  (ende-agent--invoke callbacks :assistant-message
+                                      job result calls))
+                 (assistant (if (plist-member assistant-data :message)
+                               (plist-get assistant-data :message)
+                             assistant-data))
+                 (execution-calls (or (plist-get assistant-data :calls) calls))
+                 (next-messages (append messages (when assistant (list assistant)))))
+            (ende-agent--invoke callbacks :on-tool-request job result calls)
+            (ende-agent--run-tools
+             job execution-calls configuration callbacks
+             (lambda (tool-messages)
+               (when (and tool-messages (ende-job-current-p job))
+                 (let* ((next-messages (append next-messages tool-messages))
+                        (next-messages
+                         (or (ende-agent--invoke callbacks :after-tool-round
+                                                 job next-messages)
+                             next-messages)))
+                   (ende--validate-messages next-messages)
+                   (ende-agent--send job next-messages configuration callbacks
+                                    (1+ rounds))))))))))))
 
 (defconst ende-agent--title-control
   (concat "Ende temporary title phase. Call generate_title exactly once for the "

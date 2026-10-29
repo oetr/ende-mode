@@ -233,6 +233,8 @@
       (when (buffer-live-p ende-history--buffer-object)
         (with-current-buffer ende-history--buffer-object
           (let ((inhibit-read-only t) (ende-history--internal-write t))
+            (save-restriction
+              (widen)
             (save-excursion
               (goto-char (point-min))
               (while (re-search-forward "^\\* Job \\([0-9]+\\):" nil t)
@@ -244,7 +246,7 @@
                                  (line-beginning-position) (point-max)))))
                   (when (memq id ids)
                     (delete-region start end)
-                    (cl-decf ende-history--entry-count)))))))))))
+                    (cl-decf ende-history--entry-count))))))))))))
 
 (add-hook 'ende-queue-event-functions #'ende-history--queue-event)
 

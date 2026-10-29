@@ -110,4 +110,36 @@
                             (ende-reload--files default-directory))))
         (ende-test--dashboard-reset)))))
 
+(ert-deftest ende-test/dashboard-forgets-evicted-ids-even-while-hidden ()
+  (ende-test--dashboard-reset)
+  (let ((ende--queue-suspended t) (ende-queue-finished-limit 0)
+        root child work dashboard terminal-events)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "source stays alive")
+          (setq root (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
+          (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+          (setq child (ende-test--dashboard-child root "Child")
+                work (ende-job-work-buffer child)
+                dashboard (ende-queue-open))
+          (puthash (ende-job-id root) 'expanded ende-queue-ui--folds)
+          (puthash (ende-job-id child) t ende-queue-ui--marked-ids)
+          (with-current-buffer dashboard
+            (ende-queue-ui--render)
+            (set-window-buffer (selected-window) (get-buffer-create " *hidden-dashboard*")))
+          (let ((ende-job-event-functions
+                 (cons (lambda (_job event)
+                         (when (eq (plist-get event :type) :settled)
+                           (should (buffer-live-p work))
+                           (push t terminal-events))) ende-job-event-functions)))
+            (ende--job-settle root 'cancelled))
+          (should (= (length terminal-events) 2))
+          (should-not (buffer-live-p work))
+          (should-not (gethash (ende-job-id root) ende-queue-ui--folds))
+          (should-not (gethash (ende-job-id child) ende-queue-ui--marked-ids))
+          (with-current-buffer dashboard
+            (should-error (ende-queue-ui--current-job) :type 'user-error)))
+      (ende-test--dashboard-reset)
+      (when-let* ((hidden (get-buffer " *hidden-dashboard*"))) (kill-buffer hidden)))))
+
 (provide 'ende-queue-dashboard-test)

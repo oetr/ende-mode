@@ -100,6 +100,14 @@
 
 (put 'ende-queue--source-killed 'permanent-local-hook t)
 
+(defun ende-queue--update-source-hook (buffer)
+  "Remove BUFFER's navigation hook once no retained family uses it."
+  (when (and (buffer-live-p buffer)
+             (not (cl-some (lambda (job) (eq (ende-job-origin-buffer job) buffer))
+                            (hash-table-values ende--retained-jobs))))
+    (with-current-buffer buffer
+      (remove-hook 'kill-buffer-hook #'ende-queue--source-killed t))))
+
 (defun ende-queue--track-source (family)
   "Capture FAMILY's root navigation metadata."
   (let* ((root (ende-job-family-root family))
@@ -153,11 +161,7 @@
           (ende-job-family-inference-template family) nil
           (ende-job-family-registry family) nil
           (ende-job-family-queue-marker family) nil (ende-job-family-queue-tail family) nil)
-    (when (buffer-live-p buffer)
-      (unless (cl-some (lambda (job) (eq (ende-job-origin-buffer job) buffer))
-                       (hash-table-values ende--retained-jobs))
-        (with-current-buffer buffer
-          (remove-hook 'kill-buffer-hook #'ende-queue--source-killed t))))
+    (ende-queue--update-source-hook buffer)
     (ende-queue-emit-event (list :type :evicted :ids ids))))
 
 (defun ende-queue--finalize-retention ()
@@ -916,24 +920,24 @@ Return the newly created `ende-job'."
          (published nil))
     (unwind-protect
         (progn
-    (setf (ende-job-family job) family
-          (ende-job-family-queue-marker family) nil
-          (ende-job-family-queue-tail family) nil
-          (ende-job-schedule-path job) nil
-          (ende-job-next-child-index job) 0)
-    (ende--job-register-origin job)
-    (ende--queue-push family)
-    (ende--queue-insert-family-member job)
-    (ende--retain-published-job job)
-    (ende-queue--track-source family)
-    (setq published t)
-    (ende-job-emit-event
-     job
-     (list :type :queued
-           :client (ende-provider-client-name (ende-job-profile job))
-           :model (plist-get (ende-job-profile job) :model)))
-    (ende-process-next)
-    job)
+          (setf (ende-job-family job) family
+                (ende-job-family-queue-marker family) nil
+                (ende-job-family-queue-tail family) nil
+                (ende-job-schedule-path job) nil
+                (ende-job-next-child-index job) 0)
+          (ende--job-register-origin job)
+          (ende--queue-push family)
+          (ende--queue-insert-family-member job)
+          (ende--retain-published-job job)
+          (ende-queue--track-source family)
+          (setq published t)
+          (ende-job-emit-event
+           job
+           (list :type :queued
+                 :client (ende-provider-client-name (ende-job-profile job))
+                 :model (plist-get (ende-job-profile job) :model)))
+          (ende-process-next)
+          job)
       (unless published
         (ende--unregister-source-job job)
         (setq ende-queue (delq family (delq job ende-queue)))
@@ -943,6 +947,7 @@ Return the newly created `ende-job'."
         (when (markerp (ende-job-family-source-marker family))
           (set-marker (ende-job-family-source-marker family) nil))
         (setf (ende-job-family-members family) nil)
+        (ende-queue--update-source-hook (ende-job-family-origin family))
         (ende--job-cleanup-unpublished job)))))
 
 (defun ende-job-next-child-path (parent)

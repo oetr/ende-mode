@@ -105,10 +105,14 @@
        (not (string-blank-p title))
        (<= (length title) ende-title-max-length)
        (equal title (string-trim title))
-       (not (string-match-p "[[:cntrl:]]" title))
+       (not (string-match-p "[[:cntrl:]  ]" title))
        (not (cl-some (lambda (char) (memq char '(?\" ?` ?* ?~ ?= ?< ?> ?\[ ?\])))
                      (string-to-list title)))
        (not (string-prefix-p "#+" title))
+       (not (string-match-p "\\`['‘“].*['’”]\\'" title))
+       (not (string-match-p
+             "\\(?:\\`\\|[[:space:]]\\)\\([/_+]\\)[^[:space:]].*\\1\\(?:\\'\\|[[:space:][:punct:]]\\)"
+             title))
        (not (string-match-p "\\`:[[:alnum:]_@#%]+:\\'" title))))
 
 (defun ende-tools-phase-allows-p (name phase)
