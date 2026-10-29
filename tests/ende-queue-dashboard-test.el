@@ -114,6 +114,44 @@
                 (should (equal (elapsed) "1m20s"))))))
       (ende-test--dashboard-reset))))
 
+(ert-deftest ende-test/dashboard-tool-status-keeps-following-columns-fixed ()
+  (ende-test--dashboard-reset)
+  (let ((ende--job-handlers '((insert . ignore))) dashboard)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "Status alignment source")
+          (let ((job (ende-enqueue
+                      (ende-test--dashboard-request ende-test--dashboard-profile)))
+                positions)
+            (setf (ende-job-title job) "Stable task")
+            (setq dashboard (ende-queue-open))
+            (dolist (status '("Thinking" "read_file" "list_project_buffers"
+                              "a_tool_name_longer_than_twenty_columns" "Done (ok)"))
+              (ende--handle-llm-event job (list :type :status :status status))
+              (with-current-buffer dashboard
+                (ende-queue-ui--render)
+                (goto-char (point-min))
+                (search-forward "Status")
+                (let* ((start (- (current-column) (length "Status")))
+                       (expected (if (> (string-width status) 20)
+                                     "a_tool_name_longer_…" status)))
+                  (search-forward "Context")
+                  (push (current-column) positions)
+                  (goto-char (ende-queue-ui--position-for-key
+                              (cons 'job (ende-job-id job))))
+                  (move-to-column start)
+                  (should (looking-at (regexp-quote expected)))
+                  (forward-char (length expected))
+                  (should (looking-at " +0"))
+                  (search-forward "Stable task")
+                  (push (current-column) positions))))
+            (let ((task-column (pop positions))
+                  (context-column (pop positions)))
+              (while positions
+                (should (= task-column (pop positions)))
+                (should (= context-column (pop positions)))))))
+      (ende-test--dashboard-reset))))
+
 (ert-deftest ende-test/dashboard-untitled-jobs-never-preview-prompts ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t) root child dashboard)

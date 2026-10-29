@@ -17,6 +17,8 @@
   "Face for marked live jobs." :group 'ende)
 
 (defconst ende-queue-ui-buffer-name "*ende-queue*")
+(defconst ende-queue-ui--status-width 20
+  "Fixed display width for scheduler statuses and tool names.")
 (defvar ende-queue-ui--buffer nil)
 (defvar ende-queue-ui--marked-ids (make-hash-table :test #'eql))
 (defvar ende-queue-ui--folds (make-hash-table :test #'eql)
@@ -210,6 +212,7 @@
             (setq widths (cl-mapcar #'max widths (mapcar #'string-width values))))
           (when-let* ((parent (ende-job-parent job)))
             (push job (gethash (ende-job-id parent) children)))))
+      (setf (nth 2 widths) ende-queue-ui--status-width)
       (maphash (lambda (id jobs)
                  (puthash id (sort jobs (lambda (a b)
                                          (ende--schedule-path-before-p
