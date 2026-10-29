@@ -348,6 +348,29 @@ discarding superseded details. Be concise but self-contained."
   "Return HEADLINE's enclosing headline, or nil."
   (gethash headline (ende-chat--document-parent document)))
 
+(defun ende-chat--generated-section-owner (document headline)
+  "Return HEADLINE's outermost generated container, including itself."
+  (let ((node headline)
+        owner)
+    (while node
+      (when (or (ende-chat--property document node :request-id)
+                (ende-chat--property document node :work)
+                (ende-chat--property document node :reasoning-for)
+                (ende-chat--property document node :tool-execution-id)
+                (ende-chat--property document node :tool-kind))
+        (setq owner node))
+      (setq node (ende-chat--parent document node)))
+    owner))
+
+(defun ende-chat--check-question-section (document question)
+  "Reject questions inside generated agent sections."
+  (when-let* ((owner (ende-chat--generated-section-owner document question)))
+    (user-error
+     (concat "Cannot ask from agent output. "
+             "Create a follow-up section at the same heading level (%d), "
+             "after this agent section.")
+     (org-element-property :level owner))))
+
 (defun ende-chat--children (document headline)
   "Return HEADLINE's direct children in document order."
   (gethash headline (ende-chat--document-children document)))
@@ -3815,6 +3838,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                                document ende-chat-id-property question-id)))
                (unless question
                  (error "Chat question no longer exists"))
+               (unless compact
+                 (ende-chat--check-question-section document question))
                (unless (or compact
                            (and (eq (ende-chat--effective-role document question)
                                     'user)
@@ -3900,6 +3925,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 
 (defun ende-chat--ask-data (document question)
   "Return validated and durable metadata for QUESTION."
+  (ende-chat--check-question-section document question)
   (let ((question-id (or (ende-chat--property document question :id)
                          (ende-chat--new-id "question"))))
     (when (eq (ende-chat--effective-visibility document question) 'hidden)

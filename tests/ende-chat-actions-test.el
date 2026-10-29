@@ -1879,6 +1879,62 @@
 
 
 
+(ert-deftest ende-test/chat-generated-ownership-protects-submission ()
+  (ende-test--reset)
+  (let ((ende-llm-function
+         (ende-test--fake-llm '("#+ENDE_CHAT_TITLE: Follow-up\nAnswer"))))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Root\n** Original question\nAsk.\n"
+              (ende-chat--work-text 2 "original-question" "original-request")
+              (ende-chat--assistant-protocol-text
+               3 "original-question" "original-request" ""
+               '(:content "Working.\n**** Work detail\nGenerated detail.") nil)
+              (ende-chat--assistant-text
+               2 "original-question" "original-request" ""
+               '(:content "Answer.\n*** Reply detail\nGenerated detail."))
+              "** \nA new question.\n")
+      (ende-test--chat-goto "** Agent: Work")
+      (org-entry-delete nil ende-chat-state-property)
+      (ende-test--chat-goto "*** Reply detail")
+      (org-entry-put nil ende-chat-role-property "user")
+      (dolist (heading '("** Agent: Work" "*** Agent: Reply"
+                         "**** Work detail" "** Agent: Reply"
+                         "*** Reply detail"))
+        (ende-test--chat-goto heading)
+        (set-buffer-modified-p nil)
+        (let ((before (buffer-string))
+              (next-id ende-chat--next-id))
+          (let ((failure (should-error (ende-ask) :type 'user-error)))
+            (should (string-match-p "same heading level (2)"
+                                    (error-message-string failure))))
+          (should (equal before (buffer-string)))
+          (should-not (buffer-modified-p))
+          (should (= next-id ende-chat--next-id))
+          (should-not ende-queue)
+          (should-not (ende-active-jobs))
+          (should-not ende-test--calls)))
+      (ende-test--chat-goto "** Agent: Reply")
+      (org-edit-headline "Renamed output")
+      (let ((before (buffer-string)))
+        (should-error (ende-ask) :type 'user-error)
+        (should (equal before (buffer-string))))
+      (org-edit-headline "Agent: Reply")
+      (ende-test--chat-goto "** ")
+      (let ((job (ende-ask)))
+        (should (eq (ende-job-state job) 'completed))
+        (should (= (length ende-test--calls) 1)))
+      (goto-char (point-max))
+      (insert "** Queued question\nMoved before dispatch.\n")
+      (ende-test--chat-goto "** Queued question")
+      (let* ((ende--queue-suspended t)
+             (job (ende-ask)))
+        (org-demote-subtree)
+        (let ((ende--queue-suspended nil))
+          (ende-process-next))
+        (should (eq (ende-job-state job) 'failed))
+        (should (= (length ende-test--calls) 1))))))
+
 (ert-deftest ende-test/chat-ask-rejects-hidden-nodes-and-reasoning-roots ()
   (dolist (property
            '(":ENDE_VISIBILITY: hidden"
