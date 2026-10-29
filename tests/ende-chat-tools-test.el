@@ -304,6 +304,44 @@
                      (ende-test--chat-context-text history)))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/tool-status-follows-each-call-without-arguments ()
+  (ende-test--reset)
+  (let ((ende--job-handlers '((insert . ignore)))
+        (ende-llm-function (ende-test--fake-llm nil t)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "Tool status source")
+          (let* ((job (ende-enqueue
+                       (ende-test--dashboard-request ende-test--dashboard-profile)))
+                 (calls '((:id "one" :name "read_file" :arguments "PRIVATE_ARGUMENTS")
+                          (:id "two" :name "web_fetch" :arguments "PRIVATE_URL")))
+                 pending executed results)
+            (ende-agent--run-tools
+             job calls nil
+             (list :tool-name (lambda (call) (plist-get call :name))
+                   :execute-tool
+                   (lambda (call _configuration callback)
+                     (push (ende-job-status job) executed)
+                     (should (equal (ende-job-status job) (plist-get call :name)))
+                     (setq pending callback))
+                   :tool-result-message
+                   (lambda (_job call content)
+                     (list :role "tool" :tool-call-id (plist-get call :id)
+                           :content content)))
+             (lambda (messages)
+               (setq results messages)
+               (ende-agent--send job '(("user" . "Continue")) nil nil 1)))
+            (should (equal (ende-job-status job) "read_file"))
+            (with-temp-buffer (funcall pending "first"))
+            (should (equal (ende-job-status job) "web_fetch"))
+            (with-temp-buffer (funcall pending "second"))
+            (should (equal (nreverse executed) '("read_file" "web_fetch")))
+            (should (equal (mapcar (lambda (message) (plist-get message :tool-call-id))
+                                   results)
+                           '("one" "two")))
+            (should (equal (ende-job-status job) "Thinking"))))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/chat-guidance-follows-all-results-in-an-async-tool-round ()
   (ende-test--reset)
   (let* ((ende-tools--registry (copy-sequence ende-tools--registry))

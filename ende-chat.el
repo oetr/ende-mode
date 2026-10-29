@@ -3694,8 +3694,6 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
               (ende-chat--result-properties job result)
               (plist-get prepared :normalized) stored-calls)
              t)
-            (ende--handle-llm-event
-             job '(:type :status :status "Running tools"))
             (list :message assistant :calls stored-calls)))
         :tool-result-message
         (lambda (job call content)

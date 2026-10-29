@@ -557,6 +557,10 @@ scheduler when asynchronous children have settled."
         (messages nil))
     (cl-labels
         ((next ()
+           (when (and remaining (ende-job-current-p job))
+             (ende--handle-llm-event
+              job (list :type :status
+                        :status (ende-agent--call-name (car remaining) callbacks))))
            (if (or (null remaining) (not (ende-job-current-p job)))
                (when (and (null remaining) (ende-job-current-p job))
                  (funcall done (nreverse messages)))

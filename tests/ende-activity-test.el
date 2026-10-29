@@ -206,6 +206,7 @@
             (should (string-match-p "Reading the request" (ende-test--overlay-label overlay)))
             (ende-test--complete-call (cadr ende-test--calls))
             (should (equal observed-title "Checking access"))
+            (should (equal (ende-job-status job) "ende_test_activity_work"))
             (should (functionp complete-work))
             (should (= (length ende-test--calls) 2))
             (let* ((staged (ende-chat--staged-text job))
