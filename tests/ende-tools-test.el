@@ -13,6 +13,11 @@
 (require 'json)
 (require 'ende-chat-test-helpers)
 
+(defun ende-test--disk-text (path)
+  (with-temp-buffer
+    (insert-file-contents path)
+    (buffer-string)))
+
 (defun ende-test--tool-result (name arguments root)
   "Invoke tool NAME and return its successful result in ROOT."
   (let ((call (ende-test--tool-call name arguments root)))
@@ -1567,9 +1572,7 @@
               (should (equal (plist-get result :source_kind) "file"))
               (should (equal (plist-get result :write_target) "disk_file"))
               (should (= (plist-get result :edit_count) 1))
-              (should (equal (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
+              (should (equal (ende-test--disk-text path)
                              "hello Emacs\nkeep\n"))
               (if buffer
                   (with-current-buffer buffer
@@ -1641,9 +1644,7 @@
               (should (ende-review-overlay-p review))
               (should (string= (buffer-string)
                                "unsaved buffer contents\n")))
-            (should (string= (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
+            (should (string= (ende-test--disk-text path)
                              "hello Emacs\n"))))
       (when (buffer-live-p buffer)
         (set-buffer-modified-p nil)
@@ -1703,9 +1704,7 @@
               (should-not (plist-get failure :ok))
               (should (string-match-p "source changed"
                                       (plist-get failure :error))))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            "changed elsewhere\n"))))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -1750,9 +1749,7 @@
                                        '(("reason" . "unknown"))))))))
             (should-not (plist-get (ende-tool-call "edit_file" request root)
                                    :ok))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            "one one")))
           (with-temp-file path (insert "abcdef"))
           (let ((overlap
@@ -1764,9 +1761,7 @@
                          "bcd" "replace" "B"))
                   root)))
             (should-not (plist-get overlap :ok))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            "abcdef"))))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -1785,9 +1780,7 @@
                           (ende-test--anchor-edit "world" "after" "]"))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "hello [world]\n"))
           (with-temp-file path (insert "ab"))
           (should (plist-get
@@ -1797,9 +1790,7 @@
                           (ende-test--anchor-edit "b" "replace" "B"))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "a!B"))
           (with-temp-file path (insert "one one"))
           (should (plist-get
@@ -1809,9 +1800,7 @@
                            "one" "replace" "two" '("occurrence" . 2)))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "one two"))
           (with-temp-file path (insert "one one"))
           (should (plist-get
@@ -1821,9 +1810,7 @@
                            "one" "replace" "ONE" '("all" . t)))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "ONE ONE"))
           (with-temp-file path (insert "one one"))
           (should-not (plist-get
@@ -1841,9 +1828,7 @@
                                '("occurrence" . 1) '("all" . t)))
                         root)
                        :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "one one"))
           (with-temp-file path (insert "remove this keep"))
           (should (plist-get
@@ -1853,9 +1838,7 @@
                            "remove this " "replace" ""))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "keep"))
           (with-temp-file path (insert "first middle last"))
           (should (plist-get
@@ -1867,9 +1850,7 @@
                            "last" "replace" "end"))
                     root)
                    :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "a much longer first middle end"))
           (with-temp-file path (insert "Hello"))
           (should-not (plist-get
@@ -1879,9 +1860,7 @@
                                "hello" "replace" "bye"))
                         root)
                        :ok))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "Hello")))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -1901,9 +1880,7 @@
                          (ende-test--anchor-edit "b" "replace" "B"))
                    root)))
             (should-not (plist-get too-many :ok))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            "a b")))
           (with-temp-file path (insert "x x"))
           (let* ((ende-max-normalized-edits 1)
@@ -1914,9 +1891,7 @@
                           "x" "replace" "X" '("all" . t)))
                    root)))
             (should-not (plist-get expansion :ok))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            "x x"))))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -1940,9 +1915,7 @@
             (should (equal (plist-get result :path) "src/new.el"))
             (should-not (plist-member result :change_set_id))
             (should-not (plist-member result :content))
-            (should (equal (with-temp-buffer
-                             (insert-file-contents path)
-                             (buffer-string))
+            (should (equal (ende-test--disk-text path)
                            ";;; new.el --- sample\n(provide 'new)\n")))
           (let* ((result
                   (ende-test--tool-result
@@ -2055,12 +2028,8 @@
              root)
             :ok))
           (should (null (ende-tools--elisp-syntax-error
-                         (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string)))))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+                         (ende-test--disk-text path))))
+          (should (equal (ende-test--disk-text path)
                          "(setq value 2)\n")))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -2166,9 +2135,7 @@
           (let ((failure
                  (ende-test--create-file-call "race.el" "proposal" root)))
             (should-not (plist-get failure :ok)))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents path)
-                           (buffer-string))
+          (should (equal (ende-test--disk-text path)
                          "won the race")))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -2472,9 +2439,7 @@
               (should (string-match-p "unsaved visiting buffer"
                                       (plist-get failure :error)))
               (should-not (file-exists-p (expand-file-name "new.txt" root)))
-              (should (equal (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
+              (should (equal (ende-test--disk-text path)
                              "first\nsecond\n"))
               (with-current-buffer buffer
                 (should (string-suffix-p "unsaved\n" (buffer-string)))
@@ -2485,14 +2450,10 @@
                    (list
                     "*** Begin Patch\n*** Update File: main.txt\n@@\n -absent\n+bad\n*** End Patch"
                     "*** Begin Patch\n*** Add File: main.txt\n+overwrite\n*** End Patch"))
-            (let ((before (with-temp-buffer
-                            (insert-file-contents path)
-                            (buffer-string))))
+            (let ((before (ende-test--disk-text path)))
               (should-not (plist-get (ende-test--apply-patch-call patch root)
                                      :ok))
-              (should (equal (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
+              (should (equal (ende-test--disk-text path)
                              before)))))
       (with-temp-file path (insert "first\nfirst\n"))
       (let ((ambiguous
@@ -2598,9 +2559,7 @@
                 (should (equal (plist-get second-report :status)
                                "not_applied")))
               (dolist (path (list first second))
-                (should (equal (with-temp-buffer
-                                 (insert-file-contents path)
-                                 (buffer-string))
+                (should (equal (ende-test--disk-text path)
                                "before\nold\n"))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
@@ -2634,9 +2593,7 @@
                                (insert-file-contents recovery)
                                (buffer-string))
                              "before\nold\n"))
-              (should (equal (with-temp-buffer
-                               (insert-file-contents path)
-                               (buffer-string))
+              (should (equal (ende-test--disk-text path)
                              "concurrent edit\n")))))
       (when (and recovery (file-exists-p recovery))
         (delete-file recovery))
