@@ -558,6 +558,17 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
   "Start SANDBOX's private container and execute COMMAND."
   (let ((name (ende-sandbox--new-container-name sandbox)))
     (setf (ende-sandbox-container sandbox) name)
+    (cl-labels
+        ((fail-start (message)
+           (ende-sandbox--remove-container
+            sandbox
+            (lambda (removed)
+              (when (and removed (not (ende-sandbox-started sandbox)))
+                (ende-sandbox--dispose sandbox))
+              (unless removed
+                (setf (ende-sandbox-restart-required sandbox) t))
+              (unless (ende-sandbox-closing sandbox)
+                (funcall callback nil message))))))
     (condition-case caught
         (ende-sandbox--spawn
          sandbox (ende-sandbox--run-container-argv sandbox name)
@@ -572,32 +583,12 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                (error
 		(funcall callback nil (error-message-string caught)))))
             (t
-             (ende-sandbox--remove-container
-              sandbox
-              (lambda (removed)
-                (unless (ende-sandbox-started sandbox)
-                  (when removed
-                    (ende-sandbox--dispose sandbox)))
-                (unless removed
-                  (setf (ende-sandbox-restart-required sandbox) t))
-                (unless (ende-sandbox-closing sandbox)
-                  (funcall callback nil
-                           (ende-sandbox--startup-error
-                            code stdout stderr stdout-truncated stderr-truncated
-                            timed-out)))))))))
+             (fail-start
+              (ende-sandbox--startup-error
+               code stdout stderr stdout-truncated stderr-truncated timed-out))))))
       (error
-       (ende-sandbox--remove-container
-        sandbox
-        (lambda (removed)
-          (unless (ende-sandbox-started sandbox)
-            (when removed
-              (ende-sandbox--dispose sandbox)))
-          (unless removed
-            (setf (ende-sandbox-restart-required sandbox) t))
-          (unless (ende-sandbox-closing sandbox)
-            (funcall callback nil
-                     (format "sandbox could not be started: %s"
-                             (error-message-string caught))))))))))
+       (fail-start (format "sandbox could not be started: %s"
+                           (error-message-string caught))))))))
 
 (defun ende-sandbox--ensure-container (sandbox command cwd timeout callback)
   "Start a replacement container when needed, then run COMMAND."
