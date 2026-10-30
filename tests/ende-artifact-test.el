@@ -34,6 +34,8 @@
   (ende-artifact-test-with-files
     (let ((base (ende-artifact-base))
           (exec-path nil))
+      (should-error (ende-artifact-store base "unsupported" "GIF89a" "image/gif"))
+      (should-not (file-exists-p (ende-artifact-directory base "unsupported")))
       (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
         (dolist (fixture `(("image/png" . ,ende-artifact-test-png)
                            ("image/jpeg" . ,ende-artifact-test-jpeg)))

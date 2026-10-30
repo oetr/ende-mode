@@ -180,7 +180,7 @@
       (regexp-quote
        "[[file:/tmp/ende source.org::2][important claim]]")
       (buffer-string)))
-    (should-not (string-match-p "lop-source:3" (buffer-string)))))
+    (should-not (string-match-p "ende-source:3" (buffer-string)))))
 
 (ert-deftest ende-test/summarize-preserves-tramp-paths-in-local-links ()
   (ende-test--reset)

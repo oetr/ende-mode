@@ -113,12 +113,9 @@
                             :url "https://example.test/chat/completions"
                             :model "snapshot-model" :temperature nil)))
          (unnamed (ende-provider-profile 'generic))
-         (named (ende-provider-profile 'generic))
          (overrides (ende-provider-profile 'overrides))
          (snapshot
           (ende-provider-profile-snapshot 'generic-openai)))
-    (dolist (key '(:type :max-concurrency :parallel :stream-usage :require-sse))
-      (should (equal (plist-get unnamed key) (plist-get named key))))
     (should (eq (plist-get unnamed :type) 'openai))
     (should (= (plist-get unnamed :max-concurrency) 1))
     (should-not (plist-get unnamed :parallel))

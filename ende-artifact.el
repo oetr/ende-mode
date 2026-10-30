@@ -424,9 +424,11 @@ BYTES, when supplied, seed the bounded source cache."
   (let* ((extension (cdr (assoc media '(("image/png" . "png")
                                        ("image/jpeg" . "jpg")
                                        ("image/svg+xml" . "svg")))))
-         (directory (ende-artifact-directory base chat-id t))
+         (directory (progn
+                      (unless extension
+                        (error "Unsupported generated image media type"))
+                      (ende-artifact-directory base chat-id t)))
          (index 1) name path written complete)
-    (unless extension (error "Unsupported generated image media type"))
     (while (progn
              (setq name (format "image-%03d.%s" index extension)
                    path (expand-file-name name directory))

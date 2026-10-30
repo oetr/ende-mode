@@ -234,6 +234,7 @@
         (ende-test--dashboard-reset)))))
 
 (ert-deftest ende-test/dashboard-forgets-evicted-ids-even-while-hidden ()
+  (save-window-excursion
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t) (ende-queue-finished-limit 0)
         root child work dashboard terminal-events)
@@ -263,6 +264,6 @@
           (with-current-buffer dashboard
             (should-error (ende-queue-ui--current-job) :type 'user-error)))
       (ende-test--dashboard-reset)
-      (when-let* ((hidden (get-buffer " *hidden-dashboard*"))) (kill-buffer hidden)))))
+      (when-let* ((hidden (get-buffer " *hidden-dashboard*"))) (kill-buffer hidden))))))
 
 (provide 'ende-queue-dashboard-test)

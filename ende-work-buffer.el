@@ -14,7 +14,7 @@
             (define-key map (kbd "q") #'ende-work-buffer-quit)
             map)
   (when ende-work-buffer-mode
-    (setq-local font-lock-mode t)
+    (font-lock-mode 1)
     (font-lock-ensure))
   (read-only-mode (if ende-work-buffer-mode 1 -1)))
 

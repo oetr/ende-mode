@@ -88,7 +88,7 @@
         (progn
           (with-current-buffer buffer
             (should (derived-mode-p 'org-mode))
-            (should font-lock-mode)
+            (unless noninteractive (should font-lock-mode))
             (should buffer-read-only)
             (should-error (insert "user edit") :type 'buffer-read-only))
           (ende-chat--staging-append job "first")

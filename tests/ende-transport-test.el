@@ -12,6 +12,12 @@
 (require 'cl-lib)
 (require 'json)
 
+(ert-deftest ende-test/curl-recognizes-explicit-loopback-hosts ()
+  (dolist (host '("localhost" "LOCALHOST" "::1" "127.0.0.1" "127.42.255.254"))
+    (should (ende-curl--loopback-host-p host)))
+  (dolist (host '("128.0.0.1" "192.168.1.1" "127.0.0.256" "127.0.0" "127x0x0x1"))
+    (should-not (ende-curl--loopback-host-p host))))
+
 
 
 (defun ende-test--run-default-transport (header response)

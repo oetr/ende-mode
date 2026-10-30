@@ -65,7 +65,7 @@
             (ende-selector--set-provider 1)
             (should quota-callback)
             (should (eq ende-selector--quota-state :loading))
-            (should (string-match-p "Quota: loading\.\.\."
+            (should (string-match-p "Quota: loading\\.\\.\\."
                                     (buffer-string)))
             (let ((now (floor (float-time))))
               (funcall

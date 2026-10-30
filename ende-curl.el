@@ -36,7 +36,7 @@ from remote buffers are supported, but their processes always run locally."
        (let ((name (downcase host)))
          (or (string= name "localhost")
              (string= name "::1")
-             (let ((parts (split-string name "\." nil)))
+             (let ((parts (split-string name "\\." nil)))
                (and (= (length parts) 4)
                     (cl-every
                      (lambda (part)

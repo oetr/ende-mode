@@ -132,7 +132,7 @@
         (let ((fill-column 72))
           (fill-region (point-min) (point-max)))
         (let ((paragraph (propertize (buffer-string) 'face 'shadow)))
-          (add-face-text-property 0 (length paragraph) 'bold t paragraph)
+          (add-face-text-property 0 (length label) 'bold t paragraph)
           (concat paragraph "\n"))))))
 
 (defun ende-ui--format-badge (ov)

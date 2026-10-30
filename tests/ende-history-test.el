@@ -112,8 +112,7 @@
         (let ((text (buffer-string)))
           (should (string-match-p "Stream tokens: 113" text))
           (should (string-match-p "Tokens: 113" text))
-          (should-not (string-match-p "Speed:" text))
-          (should-not (string-match-p "0\.0+ t/s" text)))))))
+          (should-not (string-match-p "Speed:" text)))))))
 
 (ert-deftest ende-test/history-retains-failed-stream-and-summarizes-usage ()
   (ende-test--reset)

@@ -225,11 +225,13 @@
 (defun ende-history--queue-event (event)
   "Remove diagnostics for family IDs evicted by EVENT."
   (when (eq (plist-get event :type) :evicted)
-    (let ((ids (plist-get event :ids)))
+    (let ((ids (plist-get event :ids)) removed)
       (maphash (lambda (job _entry)
                  (when (memq (ende-job-id job) ids)
-                   (remhash job ende-history--entries)))
+                   (push job removed)))
                ende-history--entries)
+      (dolist (job removed)
+        (remhash job ende-history--entries))
       (when (buffer-live-p ende-history--buffer-object)
         (with-current-buffer ende-history--buffer-object
           (let ((inhibit-read-only t) (ende-history--internal-write t))
