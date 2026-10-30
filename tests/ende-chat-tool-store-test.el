@@ -684,7 +684,7 @@
                          (cons '(:id "provider-B" :name "read_file"
                                  :arguments "{\"path\":\"b.el\"}")
                                "RESULT_B"))))
-                 (database (sqlite-open ende-tool-store-file nil))
+                 (database (sqlite-open ende-tool-store-file))
                  (missing-id (ende-chat--tool-value (car calls) :execution-id)))
             (unwind-protect
                 (sqlite-execute

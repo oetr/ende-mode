@@ -82,7 +82,7 @@
   (let* ((directory (make-temp-file "ende-tool-store-version-" t))
          (file (expand-file-name "store.sqlite3" directory))
          (ende-tool-store-file file)
-         (database (sqlite-open file nil)))
+         (database (sqlite-open file)))
     (unwind-protect
         (progn
           (sqlite-execute database "PRAGMA user_version = 42")

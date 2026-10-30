@@ -137,7 +137,7 @@ Ende directory has its existing permissions changed."
     (when (or exists create)
       (let ((database
              (condition-case error-data
-               (sqlite-open filename nil)
+               (sqlite-open filename)
                (error
                 (error "Cannot open tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                        filename (error-message-string error-data))))))
