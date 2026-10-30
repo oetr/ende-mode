@@ -59,19 +59,21 @@
         (setq clean (plist-put clean :codex-session-id nil)))
       clean)))
 
-(defun ende-agent--decode-task (arguments)
-  "Decode tool ARGUMENTS and require exactly one non-empty task string."
+(defun ende-agent--decode-spawn (arguments)
+  "Decode tool ARGUMENTS as exactly two nonblank strings: title and task."
   (let ((object (if (hash-table-p arguments)
                     arguments
                   (and (stringp arguments)
                        (json-parse-string arguments :object-type 'hash-table))))
-        task)
+        title task)
     (unless (and (hash-table-p object)
-                 (= (hash-table-count object) 1)
+                 (= (hash-table-count object) 2)
+                 (stringp (setq title (gethash "title" object)))
+                 (not (string-blank-p title))
                  (stringp (setq task (gethash "task" object)))
                  (not (string-blank-p task)))
-      (error "spawn_agent accepts exactly one non-empty task string"))
-    task))
+      (error "spawn_agent requires exactly two nonblank strings: title and task"))
+    (list title task)))
 
 (defun ende-agent--spawn-tool (arguments _root callback)
   "Publish the delegated child specified by ARGUMENTS.
@@ -80,13 +82,13 @@ CALLBACK receives the child's final answer and no transcript."
     (error "spawn_agent requires an active Ende tool execution"))
   (let* ((owner ende-tools--execution-owner)
          (parent (ende-queue-live-job-by-id owner))
-         (task (ende-agent--decode-task arguments))
+         (handoff (ende-agent--decode-spawn arguments))
          (generation (and parent (ende-job-execution-generation parent))))
     (unless (and parent (= owner (ende-job-id parent))
                  (ende-job-execution-current-p parent generation))
       (error "spawn_agent requires a current live chat or agent"))
     (ende-agent--make-child
-     parent task
+     parent (car handoff) (cadr handoff)
      (lambda (child)
        (when (ende-job-live-p parent)
          (funcall callback (ende-agent--terminal-answer
@@ -95,22 +97,26 @@ CALLBACK receives the child's final answer and no transcript."
 
 (ende-tool-register
  'spawn_agent
- "Delegate a non-empty task to a child using the configured named access policy."
+ "Spawn an independent agent with fresh conversation context using the configured access policy. The child receives its own instructions, configured capabilities, and the supplied task, but not your conversation history, previous tool results, observations, decisions, or findings. Provide a self-contained task containing the objective, relevant background, findings, concrete starting points and file paths, constraints, user decisions, and expected output. Include only task-relevant information; do not copy entire conversations. The child can independently inspect resources permitted by its configuration."
  '((:type . "object")
-   (:properties . ((:task . ((:type . "string")
-                            (:description . "Task for the child agent to complete.")
-                            (:minLength . 1)))))
-   (:required . ["task"])
+   (:properties . ((:title . ((:type . "string")
+                             (:description . "Concise, human-readable title for the delegated task.")
+                             (:minLength . 1)))
+                   (:task . ((:type . "string")
+                             (:description . "Self-contained work description: objective, relevant background and findings, file paths or symbols, constraints, user decisions, and expected output. The child has no parent conversation history; include only task-relevant information.")
+                             (:minLength . 1)))))
+   (:required . ["title" "task"])
    (:additionalProperties . :json-false))
  #'ende-agent--spawn-tool nil :no-resource
  '(:requires-root nil :requires-resources nil :async t))
 
-(defun ende-agent--make-child (parent task &optional settlement)
-  "Create and publish a private child for TASK owned by PARENT."
+(defun ende-agent--make-child (parent title task &optional settlement)
+  "Create and publish a private child with TITLE for TASK owned by PARENT."
   (unless (and (ende-job-current-p parent)
                (memq (ende-job-type parent) '(chat agent))
+               (stringp title) (not (string-blank-p title))
                (stringp task) (not (string-blank-p task)))
-    (error "spawn_agent requires a live chat or agent and non-empty task"))
+    (error "spawn_agent requires a live chat or agent and nonblank title and task"))
   (let* ((family (ende-job-family parent))
          (policy (ende-agent--selected-policy parent))
          (profile (ende-agent-profile-for-policy family policy))
@@ -121,6 +127,7 @@ CALLBACK receives the child's final answer and no transcript."
            parent
            (cons 'agent
                  (list :profile profile
+                       :title (substring-no-properties title)
                        :access-policy (copy-tree policy)
                        :instruction (list :task (substring-no-properties task))
                        :delegated-settlement settlement
@@ -680,12 +687,14 @@ Chat persistence and guidance stay in those callbacks."
     (let ((messages (if (plist-get callbacks :omit-source-metadata)
                         messages
                       (ende-operations--add-source-metadata job messages))))
-      (when (and (memq (ende-job-type job) '(chat agent))
-                 (null (ende-job-request-phase job)))
-        (setf (ende-job-request-phase job) 'title
-              (ende-job-title-attempts job) 0)
-        (setq messages (append messages
-                               (list (cons "user" ende-agent--title-control)))))
+      (when (null (ende-job-request-phase job))
+        (pcase (ende-job-type job)
+          ('agent (setf (ende-job-request-phase job) 'work))
+          ('chat
+           (setf (ende-job-request-phase job) 'title
+                 (ende-job-title-attempts job) 0)
+           (setq messages (append messages
+                                  (list (cons "user" ende-agent--title-control)))))))
       (ende-agent--send job messages configuration callbacks 0))))
 
 (provide 'ende-agent)

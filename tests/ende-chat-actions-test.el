@@ -523,7 +523,7 @@
   (ende-test--reset)
   (let* ((spawn-call (lambda (id task)
                        (list :id id :name "spawn_agent"
-                             :arguments (json-encode `((task . ,task))))))
+                             :arguments (json-encode `((title . ,id) (task . ,task))))))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls
@@ -583,7 +583,7 @@
   (ende-test--reset)
   (let* ((spawn-call (lambda (id task)
                        (list :id id :name "spawn_agent"
-                             :arguments (json-encode `((task . ,task))))))
+                             :arguments (json-encode `((title . ,id) (task . ,task))))))
          (first-call (funcall spawn-call "sibling-a" "task A"))
          (second-call (funcall spawn-call "sibling-b" "task B"))
          (ende-llm-function
@@ -639,7 +639,7 @@
   (ende-test--reset)
   (let* ((spawn-call (lambda (id task)
                        (list :id id :name "spawn_agent"
-                             :arguments (json-encode `((task . ,task))))))
+                             :arguments (json-encode `((title . ,id) (task . ,task))))))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls

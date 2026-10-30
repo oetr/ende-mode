@@ -477,13 +477,22 @@
             (ende-job-execution-generation root) 1)
       (setf (ende-job-type root) 'chat)
       (let ((ende-tools--execution-owner (ende-job-id root)))
+        (dolist (key '("title" "task"))
+          (dolist (value '(nil "" " \t\n" 42))
+            (let ((object (json-parse-string
+                           "{\"title\":\"Inspect\",\"task\":\"Inspect resources\"}")))
+              (if value (puthash key value object) (remhash key object))
+              (should-error
+               (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
+                        object nil (lambda (&rest _) nil))))))
         (should-error
          (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
-                  (let ((object (make-hash-table :test #'equal)))
-                    (puthash "task" "" object) object)
+                  "{\"title\":\"Inspect\",\"task\":\"Inspect resources\",\"extra\":true}"
                   nil (lambda (&rest _) nil)))
+        (should-not (ende-job-children root))
         (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
                  (let ((object (make-hash-table :test #'equal)))
+                   (puthash "title" "Inspect resources" object)
                    (puthash "task" "do inspection" object) object)
                  nil
                  (lambda (result error)
@@ -493,6 +502,7 @@
         (should (ende-job-p child))
         (should (eq (ende-job-state child) 'queued))
         (should (eq (ende-job-parent child) root))
+        (should (equal (ende-job-title child) "Inspect resources"))
         (should (equal (plist-get (ende-job-instruction child) :task)
                        "do inspection"))
         (should (buffer-live-p (ende-job-owned-buffer child)))
@@ -539,6 +549,7 @@
       (let ((ende-tools--execution-owner (ende-job-id root)))
         (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
                  (let ((object (make-hash-table :test #'equal)))
+                   (puthash "title" "Cancel inspection" object)
                    (puthash "task" "cancel now" object) object)
                  nil
                  (lambda (result error)
@@ -584,7 +595,7 @@
                        (setq child-buffer (ende-job-owned-buffer job)))))
                   ((symbol-function 'ende--queue-insert-family-member)
                    (lambda (_job) (error "injected publication failure"))))
-          (should-error (ende-agent--make-child parent "inspect")
+          (should-error (ende-agent--make-child parent "Inspect" "inspect")
                         :type 'error))
         (should (= (or (ende-job-next-child-index parent) 0) 1))
         (should-not (ende-job-children parent))
@@ -688,9 +699,10 @@
 
 (ert-deftest ende-test/recursive-agents-settle-through-the-family-scheduler ()
   (ende-test--reset)
-  (let* ((tool-call (lambda (id task)
+  (let* ((ende-test--title-prelude t)
+         (tool-call (lambda (id task)
                       (list :id id :name "spawn_agent"
-                            :arguments (json-encode `((task . ,task))))))
+                            :arguments (json-encode `((title . ,id) (task . ,task))))))
          (policy '(:root nil :active-tools (about_thinking spawn_agent)
                    :tool-resources nil :spawn-agent-config worker))
          (profile '(:name remote :model "fixture" :parallel t
@@ -730,11 +742,15 @@
         (setq child (car (ende-job-children root)))
         (should (eq (ende-job-state root) 'suspended))
         (should (equal (ende-job-schedule-path child) '(1)))
+        (should (equal (ende-job-title child) "root-call"))
+        (should (eq (ende-job-request-phase child) 'work))
         (should (= (length ende-test--calls) 2))
         (ende-test--complete-call (nth 1 ende-test--calls))
         (setq grandchild (car (ende-job-children child)))
         (should (eq (ende-job-state child) 'suspended))
         (should (equal (ende-job-schedule-path grandchild) '(1 1)))
+        (should (equal (ende-job-title grandchild) "child-call"))
+        (should (eq (ende-job-request-phase grandchild) 'work))
         (should (= (length ende-test--calls) 3))
         (ende-test--complete-call (nth 2 ende-test--calls))
         (should (equal (ende-job-result grandchild) "grandchild answer"))

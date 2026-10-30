@@ -812,7 +812,8 @@ bypassed by a later same-provider job."
                  :instruction (plist-get data :instruction)
                  :enqueued-at now)))
       (setf (ende-job-title job)
-            (ende-queue--fallback-title type target (ende-job-instruction job)))
+            (or (plist-get data :title)
+                (ende-queue--fallback-title type target (ende-job-instruction job))))
       (unless profile
         (error "ende request is missing a provider profile"))
       (condition-case caught

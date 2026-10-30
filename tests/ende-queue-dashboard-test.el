@@ -182,7 +182,7 @@
                 (should (= context-column (pop positions)))))))
       (ende-test--dashboard-reset))))
 
-(ert-deftest ende-test/dashboard-untitled-jobs-never-preview-prompts ()
+(ert-deftest ende-test/dashboard-job-titles-never-preview-prompts ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t) root child dashboard)
     (unwind-protect
@@ -196,6 +196,7 @@
           (setq child
                 (ende-job-publish-child
                  root (list 'agent :profile ende-test--dashboard-profile
+                            :title "Inspect child"
                             :instruction '(:task "PRIVATE_CHILD_INPUT")
                             :prepare #'ende-agent-private-target)
                  (ende-job-next-child-path root)))
@@ -203,7 +204,7 @@
           (should (equal (ende-job-title (ende-ask ende-test--dashboard-profile))
                          "Named question"))
           (should (equal (ende-job-title root) "tbd."))
-          (should (equal (ende-job-title child) "tbd."))
+          (should (equal (ende-job-title child) "Inspect child"))
           (puthash (ende-job-id root) 'expanded ende-queue-ui--folds)
           (setq dashboard (ende-queue-open))
           (dotimes (pass 2)
@@ -213,13 +214,9 @@
             (with-current-buffer dashboard
               (ende-queue-ui--render)
               (let ((text (buffer-string)))
-                (should (string-match-p "└─ tbd\\." text))
+                (should (string-match-p "└─ Inspect child" text))
                 (should (string-match-p "Named question" text))
-                (should-not (string-match-p "PRIVATE_\\|begin_ende" text)))))
-          (setf (ende-job-title child) "Generated child title")
-          (with-current-buffer dashboard
-            (ende-queue-ui--render)
-            (should (string-match-p "└─ Generated child title" (buffer-string)))))
+                (should-not (string-match-p "PRIVATE_\\|begin_ende" text))))))
       (ende-test--dashboard-reset))))
 
 (ert-deftest ende-test/dashboard-retained-work-and-hooks-survive-two-reloads ()
