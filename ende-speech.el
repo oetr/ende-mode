@@ -525,7 +525,7 @@ Try JSON first, then older pactl's normal text listing."
          (source (and (markerp marker) (marker-buffer marker)))
          (source-window (ende-speech--session-source-window session))
          (transcript-window (ende-speech--session-transcript-window session)))
-    (when (and (window-live-p transcript-window)
+    (when (and kill-buffer (window-live-p transcript-window)
                (not (eq transcript-window source-window))
                (eq (window-buffer transcript-window) buffer)
                (not (window-dedicated-p transcript-window)))
@@ -561,19 +561,23 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
     ;; Terminal state comes first so process and WebSocket callbacks are inert.
     (setf (ende-speech--session-state session) 'terminal)
     (let ((text (and accept (ende-speech--transcript-text session)))
-          insertion-error)
+          inserted insertion-error)
       (unwind-protect
           (progn
             (ende-speech--stop-recorder session)
             (ende-speech--close-websocket session)
             (when accept
               (condition-case err
-                  (ende-speech--insert-at-marker session text)
-                (error (setq insertion-error err)))))
-        (ende-speech--clear-session session kill-buffer))
+                  (progn
+                    (ende-speech--insert-at-marker session text)
+                    (setq inserted t))
+                ((error quit) (setq insertion-error err)))))
+        (ende-speech--clear-session
+         session (and kill-buffer (or (not accept) inserted))))
       (cond
        (insertion-error
-        (user-error "Speech stopped, but transcript insertion failed: %s"
+        (user-error "Insertion failed; transcript preserved in %s: %s"
+                    (buffer-name (ende-speech--session-buffer session))
                     (error-message-string insertion-error)))
        (report (message "ende speech: %s" report))))))
 
@@ -686,15 +690,14 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
   (let* ((source-window (selected-window))
          (source-buffer (current-buffer))
          (marker (copy-marker (point) t))
-         (buffer (get-buffer-create "*ende-speech*"))
+         (buffer (generate-new-buffer "*ende-speech*"))
          (session (ende-speech--make-session
                    :state 'connecting :marker marker :buffer buffer
                    :source-window source-window :status "Connecting...")))
     (setq ende-speech--active-session session)
     (with-current-buffer buffer
       (ende-speech-transcript-mode)
-      (add-hook 'kill-buffer-hook #'ende-speech--transcript-buffer-killed nil t)
-      (let ((inhibit-read-only t)) (erase-buffer)))
+      (add-hook 'kill-buffer-hook #'ende-speech--transcript-buffer-killed nil t))
     (condition-case err
         (setf (ende-speech--session-websocket session)
               ;; Async TLS captures this setting in its GnuTLS boot parameters.

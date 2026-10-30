@@ -91,7 +91,7 @@
                        websocket)))
                 (cl-letf (((symbol-function 'websocket-open) websocket-stub))
                   (ende-speech-start-talking)))))
-          (setq speech-buffer (get-buffer "*ende-speech*")
+          (setq speech-buffer (ende-speech--session-buffer ende-speech--active-session)
                 ende-speech-test--transcript-buffer speech-buffer)
           (let ((session ende-speech--active-session))
             (cl-letf (((symbol-function 'websocket-openp)
@@ -800,7 +800,7 @@
      (should ende-speech-test--closed)
      (should-not ende-speech--active-session))))
 
-(ert-deftest ende-speech/accept-cleans-after-insertion-fails ()
+(ert-deftest ende-speech/accept-preserves-transcript-after-insertion-fails ()
   (ende-speech-test--with-session
    (lambda (session source buffer)
      (ende-speech-test--event session "session.created")
@@ -811,9 +811,22 @@
      (with-current-buffer source (setq buffer-read-only t))
      (should-error (with-current-buffer buffer (ende-speech--accept))
                    :type 'user-error)
+     (should (buffer-live-p buffer))
+     (should (equal "text" (with-current-buffer buffer (buffer-string))))
      (should ende-speech-test--killed-recorder)
      (should ende-speech-test--closed)
      (should-not ende-speech--active-session))))
+
+(ert-deftest ende-speech/sessions-do-not-reuse-unrelated-buffers ()
+  (let ((unrelated (get-buffer-create "*ende-speech*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer unrelated (insert "User text"))
+          (ende-speech-test--with-session
+           (lambda (_session _source transcript)
+             (should-not (eq unrelated transcript))
+             (should (equal "User text" (with-current-buffer unrelated (buffer-string)))))))
+      (kill-buffer unrelated))))
 
 (provide 'ende-speech-test)
 
