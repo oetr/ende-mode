@@ -96,7 +96,7 @@
                   (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
                     (ende-queue-ui-cancel))
                   (should (eq (ende-job-state first) 'cancelled))
-                  (should-not (memq first (ende-active-jobs)))
+                  (should-not (memq first (ende-running-jobs)))
                   (should (ende-job-live-p second))
                   (ende-queue-ui--render)
                   (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id first))))

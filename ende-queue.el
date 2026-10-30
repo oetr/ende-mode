@@ -306,10 +306,6 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
   "Return a snapshot of jobs currently consuming workers."
   (copy-sequence ende--active-jobs))
 
-(defun ende-active-jobs ()
-  "Return a snapshot of currently active jobs."
-  (ende-running-jobs))
-
 (defun ende-queued-jobs ()
   "Return a snapshot of queued jobs awaiting scheduler dispatch."
   (cl-loop for job in ende-queue
@@ -321,14 +317,6 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
   (cl-loop for job in ende-queue
            when (and (ende-job-p job) (memq (ende-job-state job) '(queued suspended)))
            collect job))
-
-(defun ende-pending-jobs ()
-  "Return a snapshot of queued jobs, excluding structural entries."
-  (ende-queued-jobs))
-
-(defun ende-queue-awaiting-dispatch ()
-  "Return queued jobs currently eligible for scheduler consideration."
-  (ende-queued-jobs))
 
 (defun ende-queue-suspended-jobs ()
   "Return suspended jobs in physical scheduler order."
@@ -375,7 +363,7 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
     (append
      (cl-remove-if-not
       (lambda (job) (memq job members))
-      (sort (ende-active-jobs)
+      (sort (ende-running-jobs)
             (lambda (left right)
               (< (or (ende-job-dispatch-order left) (ende-job-id left))
                  (or (ende-job-dispatch-order right) (ende-job-id right))))))

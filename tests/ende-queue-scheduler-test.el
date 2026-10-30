@@ -49,7 +49,7 @@
 			      (ende-queue-cancel-ids (list (ende-job-id cancelled)))
 			      (should (eq (ende-job-state cancelled) 'cancelled))
 			      (should (eq (ende-job-state remaining) 'queued))
-			      (should (equal (ende-pending-jobs) (list remaining)))
+			      (should (equal (ende-queued-jobs) (list remaining)))
 			      (should (= (length ende-test--calls) 0))))))
 
 (ert-deftest ende-test/targeted-batch-cancel-invalidates-before-callbacks ()

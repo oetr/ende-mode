@@ -3135,7 +3135,7 @@ OPTIONS are passed to `json-serialize'."
           (not (ende-job-terminal-p other))
           (equal (plist-get (ende-job-instruction other) :question-id)
                  question-id)))
-   (append (ende-active-jobs) (ende-physical-waiting-jobs))))
+   (append (ende-running-jobs) (ende-physical-waiting-jobs))))
 
 (defun ende-chat--marked-question-document (job)
   "Parse JOB's marked question subtree, without scanning the transcript."

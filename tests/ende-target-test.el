@@ -166,7 +166,7 @@
 			    (should-error (ende-improve-at-cursor "rewrite") :type 'user-error)
 			    (should-error (ende-summarize) :type 'user-error)
 			    (should-not ende-queue)
-			    (should-not (ende-active-jobs))
+			    (should-not (ende-running-jobs))
 			    (should-not ende-ui--managed-overlays))))
 
 (ert-deftest ende-test/changed-selection-is-skipped ()
@@ -182,7 +182,7 @@
 			      (insert "X")
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not (ende-active-jobs))))))
+			      (should-not (ende-running-jobs))))))
 
 (ert-deftest ende-test/permitted-source-edits-do-not-invalidate-targets ()
   (ende-test--reset)

@@ -73,7 +73,7 @@
   "Return the number of active or queued jobs targeting BUFFER."
   (cl-count-if
    (lambda (job) (ende--job-targets-buffer-p job buffer))
-   (append (ende-active-jobs) (ende-physical-waiting-jobs))))
+   (append (ende-running-jobs) (ende-physical-waiting-jobs))))
 
 (defun ende--buffer-review-count (buffer)
   "Return the number of pending reviews in BUFFER."

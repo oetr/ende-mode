@@ -269,7 +269,7 @@
                   (should (= cursor (point))))
                 (should (= next-id ende-chat--next-id))
                 (should (equal queue ende-queue))
-                (should-not (ende-active-jobs))
+                (should-not (ende-running-jobs))
                 (should-not ende-test--calls)))))
       (when (get-buffer "*ende context*")
         (kill-buffer "*ende context*"))

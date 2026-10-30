@@ -152,14 +152,14 @@
          (pending-job (ende--make-job :id 2 :state 'queued))
          (ende--active-jobs (list active-job))
          (ende-queue (list pending-job)))
-    (let ((active (ende-active-jobs))
-          (pending (ende-pending-jobs)))
+    (let ((active (ende-running-jobs))
+          (pending (ende-queued-jobs)))
       (setcar active :changed)
       (setcar pending :changed)
       (should (eq (car ende--active-jobs) active-job))
       (should (eq (car ende-queue) pending-job))
-      (should (cl-every #'ende-job-p (ende-active-jobs)))
-      (should (cl-every #'ende-job-p (ende-pending-jobs))))))
+      (should (cl-every #'ende-job-p (ende-running-jobs)))
+      (should (cl-every #'ende-job-p (ende-queued-jobs))))))
 
 (ert-deftest ende-test/family-queue-keeps-markers-and-sorts-numeric-paths ()
   (let* ((root (ende--make-job :id 1 :state 'queued :schedule-path nil))
@@ -978,7 +978,7 @@
 			    (ende-test--complete-call (nth 2 ende-test--calls))
 			    (should (string= (buffer-string) "base 1 2 3"))
 			    (should (null ende-queue))
-			    (should-not (ende-active-jobs)))))
+			    (should-not (ende-running-jobs)))))
 
 
 
@@ -991,10 +991,10 @@
 			    (let ((job (ende-insert-at-cursor)))
 			      (ende-insert-at-cursor)
 			      (let ((call (car ende-test--calls)))
-				(should (ende-active-jobs))
+				(should (ende-running-jobs))
 				(ende-abort-queue)
 				(should (eq (ende-job-state job) 'cancelled))
-				(should-not (ende-active-jobs))
+				(should-not (ende-running-jobs))
 				(should (null ende-queue))
 				(should-not (process-live-p (plist-get call :process)))
 				;; A late transport callback must be inert.
@@ -1018,10 +1018,10 @@
 			      (ende-test--complete-call first)
 			      (let ((second (nth 1 ende-test--calls)))
 				(should second)
-				(should (eq (ende-job-state (car (ende-active-jobs))) 'running))
+				(should (eq (ende-job-state (car (ende-running-jobs))) 'running))
 				(ende-test--callback first :on-done '(:content " stale"))
 				(ende-test--callback first :on-error "stale error")
-				(should (eq (ende-job-state (car (ende-active-jobs))) 'running))
+				(should (eq (ende-job-state (car (ende-running-jobs))) 'running))
 				(ende-test--complete-call second)))
 			    (should (string= (buffer-string) "base A B")))))
 
@@ -1039,7 +1039,7 @@
 			      (ende-test--callback call :on-done '(:content " X"))
 			      (should (eq (ende-job-state job) 'completed))
 			      (should (string= (buffer-string) "base X"))
-			      (should-not (ende-active-jobs))))))
+			      (should-not (ende-running-jobs))))))
 
 
 
@@ -1052,7 +1052,7 @@
     (ende-test--with-buffer "base"
 			    (let ((job (ende-insert-at-cursor)))
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not (ende-active-jobs))))))
+			      (should-not (ende-running-jobs))))))
 
 
 
@@ -1069,7 +1069,7 @@
 			    (setq ende--queue-suspended nil)
 			    (cl-letf (((symbol-function 'message) #'ignore))
 			      (ende-process-next))
-			    (should-not (ende-active-jobs))
+			    (should-not (ende-running-jobs))
 			    (should-not ende-queue))))
 
 
@@ -1086,7 +1086,7 @@
 						       :buffer (current-buffer)
 						       :start 1 :end 1 :cursor 1)))))
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not (ende-active-jobs)))))
+			      (should-not (ende-running-jobs)))))
   (ende-test--reset)
   (let ((ende--job-handlers (copy-tree ende--job-handlers)))
     (ende-register-job-handler
@@ -1105,7 +1105,7 @@
 						      :start 1 :end 1 :cursor 1)
 					     :overlay overlay))))
 			      (should (eq (ende-job-state job) 'completed))
-			      (should-not (ende-active-jobs))
+			      (should-not (ende-running-jobs))
 			      (delete-overlay overlay)))))
 
 ;;;; Target failure paths
@@ -1153,7 +1153,7 @@
           (should (eq (ende-job-state active) 'cancelled))
           (should (eq (ende-job-state pending) 'cancelled))
           (should (eq (ende-job-state other-active) 'running))
-          (should (equal (ende-active-jobs) (list other-active)))
+          (should (equal (ende-running-jobs) (list other-active)))
           (should-not (memq pending ende-queue))
           (should (= cancel-count 1))
           (should (= settle-count 1))
@@ -1228,7 +1228,7 @@
 			      (setq buffer-read-only t)
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not (ende-active-jobs))
+			      (should-not (ende-running-jobs))
 			      (should (string= (buffer-string) "base"))))))
 
 
@@ -1244,7 +1244,7 @@
 			      (narrow-to-region (point-min) (1- (point-max)))
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
-			      (should-not (ende-active-jobs))))))
+			      (should-not (ende-running-jobs))))))
 
 
 
@@ -1279,7 +1279,7 @@
 			      (ende-test--complete-call call)
 			      (should (eq (ende-job-state job) 'failed))
 			      (should (string= (buffer-string) "base"))
-			      (should-not (ende-active-jobs))))))
+			      (should-not (ende-running-jobs))))))
 
 (ert-deftest ende-test/same-endpoint-preserves-fifo ()
   (ende-test--reset)

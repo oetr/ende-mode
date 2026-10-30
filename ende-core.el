@@ -18,7 +18,6 @@
   :prefix "ende-"
   :group 'convenience)
 
-(defvaralias 'ende-codex-log-tool-diagnostics 'ende-tool-diagnostics)
 
 (defcustom ende-tool-diagnostics t
   "Non-nil to retain tool diagnostics in job history for every provider.
