@@ -1166,9 +1166,7 @@ The returned plist contains `:models', `:details', `:error', and
         ((finish (catalog error)
            (unless cancelled
              (setq completed t)
-             (ende-provider--finish-catalog-flight key flight catalog error)))
-         (finish-error (error)
-           (finish nil error)))
+             (ende-provider--finish-catalog-flight key flight catalog error))))
       (condition-case startup-error
           (setq underlying-cancel
                 (cond
@@ -1177,39 +1175,27 @@ The returned plist contains `:models', `:details', `:error', and
                    probe
                    (lambda (models error)
                      (unless cancelled
-                       (if error
-                           (finish-error error)
-                         (let ((catalog
-                                (ende-provider--catalog-from-models models)))
-                           (if catalog
-                               (finish catalog nil)
-                             (finish-error
-                              (ende-error-create
-                               :kind 'discovery
-                               :message "Provider returned no models")))))))))
+                       (finish (unless error
+                                 (ende-provider--catalog-from-models models))
+                               error)))))
                  (url
                   (ende-provider--start-live-model-request
                    profile url
                    (lambda (payload error)
                      (unless cancelled
-                       (if error
-                           (finish-error error)
-                         (let ((catalog
-                                (ende-provider--catalog-from-payload payload)))
-                           (if catalog
-                               (finish catalog nil)
-                             (finish-error
-                              (ende-error-create
-                               :kind 'discovery
-                               :message "Provider returned no models")))))))))
+                       (finish (unless error
+                                 (ende-provider--catalog-from-payload payload))
+                               error)))))
                  (t
-                  (finish-error
+                  (finish
+                   nil
                    (ende-error-create
                     :kind 'discovery
                     :message
                     "Provider has no compatible model-list endpoint")))))
         ((error quit)
-         (finish-error
+         (finish
+          nil
           (ende-error-create :kind 'startup
                              :message (error-message-string startup-error)))))
       (unless completed

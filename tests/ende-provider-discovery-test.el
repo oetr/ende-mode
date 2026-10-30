@@ -443,6 +443,40 @@
       (should-not retry-error)
       (should (equal retry-models '("remote/first"))))))
 
+(ert-deftest ende-test/model-discovery-rejects-empty-and-failed-catalogs ()
+  (dolist (custom '(nil t))
+    (dolist (failed '(nil t))
+      (let* ((ende-provider--catalog-cache (make-hash-table :test #'equal))
+             (ende-provider--catalog-inflight (make-hash-table :test #'equal))
+             (failure (and failed (ende-error-create :kind 'transport
+                                                     :message "unavailable")))
+             (notifications nil)
+             (complete (lambda (callback)
+                         (funcall callback
+                                  (if custom '("partial")
+                                    (ende-protocol-json-read-string
+                                     "{\"data\":[{\"id\":\"partial\"}]}"))
+                                  failure)
+                         (funcall callback nil nil)))
+             (profile (list :name 'remote
+                            :url "http://remote.example/v1/chat/completions"
+                            :model-discovery-function
+                            (and custom (lambda (callback)
+                                          (if failed (funcall complete callback)
+                                            (funcall callback nil nil)))))))
+        (cl-letf (((symbol-function 'ende-provider--start-live-model-request)
+                   (lambda (_profile _url callback)
+                     (if failed (funcall complete callback)
+                       (funcall callback nil nil)))))
+          (ende-provider-probe-models
+           profile (lambda (models error) (push (list models error) notifications))))
+        (should (= (length notifications) 1))
+        (should-not (caar notifications))
+        (let ((error (cadar notifications)))
+          (should (if failed (eq error failure)
+                    (equal (ende-error-message error) "Provider returned no models"))))
+        (should-not (ende-provider-cached-models profile))))))
+
 (ert-deftest ende-test/runtime-and-model-consumers-share-one-catalog-flight ()
   (let* ((profile '(:name remote
                     :url "http://remote.example/v1/chat/completions"
