@@ -784,6 +784,99 @@
         (ende-sandbox--dispose sandbox))
       (delete-directory root t))))
 
+(ert-deftest ende-test/sandbox-startup-error-describes-status-and-output ()
+  (dolist (entry
+           '(((125 "" "Error: image not known\n" nil nil nil)
+              "sandbox could not be started: Podman exited with status 125\nPodman stderr:\nError: image not known\n")
+             ((125 "runtime diagnostic\n" "" nil nil nil)
+              "sandbox could not be started: Podman exited with status 125\nPodman stdout:\nruntime diagnostic\n")
+             ((125 "partial out" "partial err" t t nil)
+              "sandbox could not be started: Podman exited with status 125\nPodman stderr (truncated):\npartial err\nPodman stdout (truncated):\npartial out")
+             ((125 "" "" nil nil nil)
+              "sandbox could not be started: Podman exited with status 125")))
+    (should (equal (apply #'ende-sandbox--startup-error (car entry))
+                   (cadr entry))))
+  (let ((ende-sandbox--startup-timeout 7))
+    (should
+     (equal (ende-sandbox--startup-error
+             124 "" "Error: still starting\n" nil nil t)
+            (concat "sandbox could not be started: "
+                    "Podman startup timed out after 7 seconds (exit status 124)\n"
+                    "Podman stderr:\nError: still starting\n")))))
+
+(ert-deftest ende-test/sandbox-startup-failure-preserves-diagnostics-in-json ()
+  (dolist (removed '(t nil))
+    (let* ((root (make-temp-file "ende-sandbox-startup-json-" t))
+           (owner (cl-incf ende-test--sandbox-owner))
+           (sandbox (ende-test--sandbox-fixture owner root nil))
+           (configuration (ende-test--sandbox-config root ende-test--sandbox-pin))
+           (startup-callback nil)
+           (cleanup-callback nil)
+           (response nil)
+           (ende-tools--execution-owner owner))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ende-sandbox--run-container-argv)
+                     (lambda (_sandbox _name) '("podman" "run")))
+                    ((symbol-function 'ende-sandbox--spawn)
+                     (lambda (_sandbox _argv _timeout callback)
+                       (setq startup-callback callback)))
+                    ((symbol-function 'ende-sandbox--remove-container)
+                     (lambda (_sandbox callback)
+                       (setq cleanup-callback callback)))
+                    ((symbol-function 'ende-sandbox--exec)
+                     (lambda (&rest _args)
+                       (ert-fail "command must not run after startup failure"))))
+            (ende-chat--tool-response-async
+             (list :id "startup-failure" :name "run_sandbox_command"
+                   :arguments "{\"command\":\"pwd\"}")
+             configuration
+             (lambda (value) (setq response value)))
+            (should (functionp startup-callback))
+            (funcall startup-callback
+                     125 "" "Error: original Podman failure\n" nil nil nil)
+            (should (functionp cleanup-callback))
+            (should-not response)
+            (funcall cleanup-callback removed)
+            (let ((decoded (ende-protocol-json-read-string response)))
+              (should (eq (ende-protocol-json-get "ok" decoded) :false))
+              (should
+               (equal (ende-protocol-json-get "error" decoded)
+                      (concat "sandbox could not be started: "
+                              "Podman exited with status 125\nPodman stderr:\n"
+                              "Error: original Podman failure\n"))))
+            (if removed
+                (progn
+                  (should-not (ende-sandbox-for-owner owner))
+                  (should-not (file-exists-p (ende-sandbox-base sandbox))))
+              (should (eq sandbox (ende-sandbox-for-owner owner)))
+              (should (ende-sandbox-restart-required sandbox))))
+        (setf (ende-sandbox-container sandbox) nil)
+        (ende-sandbox--dispose sandbox)
+        (delete-directory root t)))))
+
+(ert-deftest ende-test/sandbox-startup-preserves-immediate-launch-error ()
+  (let ((sandbox (ende-sandbox--create :owner 1))
+        (cleanup-callback nil)
+        (failure nil))
+    (cl-letf (((symbol-function 'ende-sandbox--run-container-argv)
+               (lambda (_sandbox _name) '("podman" "run")))
+              ((symbol-function 'ende-sandbox--spawn)
+               (lambda (&rest _args) (error "Podman executable: permission denied")))
+              ((symbol-function 'ende-sandbox--remove-container)
+               (lambda (_sandbox callback) (setq cleanup-callback callback))))
+      (ende-sandbox--start-container
+       sandbox "pwd" "." 30
+       (lambda (result error)
+         (should-not result)
+         (setq failure error)))
+      (should (functionp cleanup-callback))
+      (should-not failure)
+      (funcall cleanup-callback nil)
+      (should (equal failure
+                     (concat "sandbox could not be started: "
+                             "Podman executable: permission denied")))
+      (should (ende-sandbox-restart-required sandbox)))))
+
 (ert-deftest ende-test/run-sandbox-command-json-keeps-outer-success-for-failing-process ()
   (let* ((root (make-temp-file "ende-run-sandbox-command-json-" t))
          (owner (cl-incf ende-test--sandbox-owner))

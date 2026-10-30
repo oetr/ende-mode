@@ -538,15 +538,31 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                                         stdout-truncated stderr-truncated)
                   nil))))))
 
+(defun ende-sandbox--startup-error
+    (code stdout stderr stdout-truncated stderr-truncated timed-out)
+  "Describe failed Podman startup with its bounded diagnostic output."
+  (concat
+   "sandbox could not be started: "
+   (if timed-out
+       (format "Podman startup timed out after %d seconds (exit status %d)"
+               ende-sandbox--startup-timeout code)
+     (format "Podman exited with status %d" code))
+   (unless (string-empty-p stderr)
+     (format "\nPodman stderr%s:\n%s"
+             (if stderr-truncated " (truncated)" "") stderr))
+   (unless (string-empty-p stdout)
+     (format "\nPodman stdout%s:\n%s"
+             (if stdout-truncated " (truncated)" "") stdout))))
+
 (defun ende-sandbox--start-container (sandbox command cwd timeout callback)
   "Start SANDBOX's private container and execute COMMAND."
   (let ((name (ende-sandbox--new-container-name sandbox)))
     (setf (ende-sandbox-container sandbox) name)
-    (condition-case nil
+    (condition-case caught
         (ende-sandbox--spawn
          sandbox (ende-sandbox--run-container-argv sandbox name)
          ende-sandbox--startup-timeout
-         (lambda (code _stdout _stderr _out-truncated _err-truncated timed-out)
+         (lambda (code stdout stderr stdout-truncated stderr-truncated timed-out)
            (cond
             ((ende-sandbox-closing sandbox) nil)
             ((and (not timed-out) (= code 0))
@@ -565,7 +581,10 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                 (unless removed
                   (setf (ende-sandbox-restart-required sandbox) t))
                 (unless (ende-sandbox-closing sandbox)
-                  (funcall callback nil "sandbox could not be started"))))))))
+                  (funcall callback nil
+                           (ende-sandbox--startup-error
+                            code stdout stderr stdout-truncated stderr-truncated
+                            timed-out)))))))))
       (error
        (ende-sandbox--remove-container
         sandbox
@@ -576,7 +595,9 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
           (unless removed
             (setf (ende-sandbox-restart-required sandbox) t))
           (unless (ende-sandbox-closing sandbox)
-            (funcall callback nil "sandbox could not be started"))))))))
+            (funcall callback nil
+                     (format "sandbox could not be started: %s"
+                             (error-message-string caught))))))))))
 
 (defun ende-sandbox--ensure-container (sandbox command cwd timeout callback)
   "Start a replacement container when needed, then run COMMAND."
