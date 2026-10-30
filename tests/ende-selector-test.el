@@ -44,7 +44,7 @@
            (openai :model "test-model" :auth-method opencode-oauth
                    :models ("test-model"))))
         (ende-provider--runtime-settings (make-hash-table :test #'equal))
-        (ende-selector--last-selection nil))
+        (ende-model-selection--last-used nil))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -233,7 +233,6 @@
                    :controls ((:reasoning-effort
                                :path ("reasoning" "effort")
                                :choices ("high" "low"))))))
-         (ende-selector--last-selection nil)
          (queued nil)
          (ende-model-selection-scope 'buffer)
          (ende-model-selection--last-used nil)
@@ -265,7 +264,7 @@
           (should (string= (plist-get (nth 2 queued) :model) "two"))
           (should (equal (plist-get (nth 2 queued) :reasoning-effort)
                          "high"))
-          (should (equal ende-selector--last-selection
+          (should (equal ende-model-selection--last-used
                          '(:provider local :model "two")))
           (should (equal (ende-model-selection-for-buffer source)
                          '(:provider local :model "two")))
@@ -279,7 +278,6 @@
 (ert-deftest ende-test/selector-model-completion-updates-choice ()
   (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
         (completion-call nil)
-        (ende-selector--last-selection nil)
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
@@ -376,7 +374,7 @@
 (ert-deftest ende-test/selector-preserves-remembered-model-after-discovery ()
   (let ((buffer (generate-new-buffer " *ende-selector-discovery-test*"))
         (probe-callback nil)
-        (ende-selector--last-selection
+        (ende-model-selection--last-used
          '(:provider remote :model "remote/remembered"))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--buffer-selections
@@ -424,7 +422,7 @@
          (ende-providers '(remote))
          (ende-provider-profiles
           '((remote :url "http://remote.example/v1/chat/completions")))
-         (ende-selector--last-selection
+         (ende-model-selection--last-used
           '(:provider remote :model "remote/saved"))
          (ende-provider--catalog-cache (make-hash-table :test #'equal))
          (ende-provider--catalog-inflight (make-hash-table :test #'equal))
@@ -448,7 +446,7 @@
 	      (should (string= (ende-selector--model-name)
 			       "remote/saved"))
 	      (should (eq ende-selector--model-state :ready))
-	      (setq ende-selector--last-selection nil)
+	      (setq ende-model-selection--last-used nil)
 	      (ende-selector--set-provider 0)
 	      (should (string= (ende-selector--model-name)
 			       "remote/first")))))
@@ -463,7 +461,7 @@
         (ende-providers '(remote))
         (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions")))
-        (ende-selector--last-selection nil))
+        (ende-model-selection--last-used nil))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -491,7 +489,7 @@
         (ende-providers '(remote))
         (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions")))
-        (ende-selector--last-selection
+        (ende-model-selection--last-used
          '(:provider remote :model "remote/missing"))
         (ende-selector--model-validations (make-hash-table :test #'equal))
         (ende-provider--catalog-cache (make-hash-table :test #'equal))
@@ -522,7 +520,7 @@
                           (string-match-p "unavailable" value))
                         messages)
 		       1))
-            (setq ende-selector--last-selection
+            (setq ende-model-selection--last-used
                   '(:provider remote :model "remote/second"))
             (ende-selector--set-provider 0)
             (should (string= (ende-selector--model-name)
@@ -533,7 +531,7 @@
                         messages)
 		       1))
             (ende-provider-clear-discovery-cache)
-            (setq ende-selector--last-selection
+            (setq ende-model-selection--last-used
                   '(:provider remote :model "remote/missing"))
             (ende-selector--set-provider 0)
             (should (= (cl-count-if
@@ -1256,7 +1254,7 @@
           (list (list 'remote
                       :url "http://remote.example/v1/chat/completions"
                       :model-discovery-function probe)))
-         (ende-selector--last-selection nil)
+         (ende-model-selection--last-used nil)
          (ende-selector--model-validations (make-hash-table :test #'equal))
          (ende-provider--catalog-cache (make-hash-table :test #'equal))
          (ende-provider--catalog-inflight (make-hash-table :test #'equal))
@@ -1479,7 +1477,7 @@
 (ert-deftest ende-test/selector-chat-actions-use-selected-profile-in-org-buffer ()
   (dolist (key '("a" "k"))
     (ende-test--reset)
-    (let ((ende-selector--last-selection nil)
+    (let ((ende-model-selection--last-used nil)
           (ende-provider-profiles '((remote :model "configured-model")))
           (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "* Root\nEarlier context\n** Question\nAsk\n"
@@ -1507,7 +1505,7 @@
 (ert-deftest ende-test/selector-ask-prepares-chat-from-non-org-buffer ()
   (dolist (initial '("" "* Existing\nPrevious material\n"))
     (ende-test--reset)
-    (let ((ende-selector--last-selection nil)
+    (let ((ende-model-selection--last-used nil)
           (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "source text"
 			      (let ((source (current-buffer))

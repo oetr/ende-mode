@@ -268,11 +268,6 @@ Errors are signaled so the transport can turn them into protocol failures."
        (let ((missing (make-symbol "missing")))
          (not (eq (gethash key object missing) missing)))))
 
-;; Keep the old names for packages that loaded the previous internal helpers.
-(defalias 'ende-protocol--json-read-string #'ende-protocol-json-read-string)
-(defalias 'ende-protocol--json-get #'ende-protocol-json-get)
-(defalias 'ende-protocol--json-has-key-p #'ende-protocol-json-has-key-p)
-
 (provide 'ende-protocol)
 
 ;;; ende-protocol.el ends here

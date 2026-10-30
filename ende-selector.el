@@ -46,16 +46,6 @@
   "Face used for output prices in the completion picker."
   :group 'ende)
 
-(when (and (boundp 'ende-selector--last-selection)
-           (not (eq (indirect-variable 'ende-selector--last-selection)
-                    'ende-model-selection--last-used))
-           (null ende-model-selection--last-used))
-  (setq ende-model-selection--last-used ende-selector--last-selection))
-
-(defvaralias 'ende-selector--last-selection
-  'ende-model-selection--last-used
-  "Compatibility alias for the most recently used model selection.")
-
 (defvar ende-selector--model-validations (make-hash-table :test #'equal)
   "Cached model preference validation results.")
 
