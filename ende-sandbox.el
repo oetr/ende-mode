@@ -25,6 +25,7 @@
 (defconst ende-sandbox--cleanup-timeout 30)
 
 (defvar ende-sandbox--by-owner (make-hash-table :test #'eql))
+(defvar ende-sandbox--retired nil)
 
 (defun ende-sandbox--join-component (directory component)
   "Append validated literal COMPONENT to DIRECTORY without path expansion."
@@ -63,6 +64,7 @@
   (when (or (file-exists-p path) (file-symlink-p path))
     (if (and (file-directory-p path) (not (file-symlink-p path)))
         (progn
+          (set-file-modes path #o700 'nofollow)
           (dolist (entry
                    (directory-files path t directory-files-no-dot-files-regexp))
             (ende-sandbox--delete-tree entry))
@@ -342,14 +344,16 @@ flags."
 (defun ende-sandbox--dispose (sandbox)
   "Forget SANDBOX and remove its tmpfs files."
   (ende-sandbox--cancel-process sandbox)
+  (ende-sandbox--delete-tree (ende-sandbox-base sandbox))
   (when (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
     (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
-  (ende-sandbox--delete-tree (ende-sandbox-base sandbox)))
+  (setq ende-sandbox--retired (delq sandbox ende-sandbox--retired)))
 
 (defun ende-sandbox--close (sandbox invalidate)
   "Stop SANDBOX before deleting its tmpfs workspace.
 When INVALIDATE is non-nil, make it unavailable to its owner immediately."
   (when (and sandbox (not (ende-sandbox-cleanup-pending sandbox)))
+    (cl-pushnew sandbox ende-sandbox--retired :test #'eq)
     (when (and invalidate
                (eq sandbox (ende-sandbox-for-owner
                             (ende-sandbox-owner sandbox))))
@@ -371,7 +375,12 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
 
 (defun ende-sandbox-cleanup-owner (owner)
   "Stop OWNER's container before deleting its tmpfs workspace."
-  (ende-sandbox--close (ende-sandbox-for-owner owner) nil))
+  (dolist (sandbox (delete-dups
+                    (cons (ende-sandbox-for-owner owner)
+                          (cl-remove-if-not
+                           (lambda (sandbox) (= owner (ende-sandbox-owner sandbox)))
+                           ende-sandbox--retired))))
+    (ende-sandbox--close sandbox nil)))
 
 (defun ende-sandbox-invalidate (sandbox)
   "Retire SANDBOX so its owner cannot reuse a stale workspace."
