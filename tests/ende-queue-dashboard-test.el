@@ -260,7 +260,9 @@
 
 (ert-deftest ende-test/dashboard-job-titles-never-preview-prompts ()
   (ende-test--dashboard-reset)
-  (let ((ende--queue-suspended t) root child dashboard)
+  (let ((ende--queue-suspended t)
+        (title (concat "Inspect child " (make-string 80 ?x)))
+        root child dashboard)
     (unwind-protect
         (with-temp-buffer
           (org-mode)
@@ -272,7 +274,7 @@
           (setq child
                 (ende-job-publish-child
                  root (list 'agent :profile ende-test--dashboard-profile
-                            :title "Inspect child"
+                            :title title
                             :instruction '(:task "PRIVATE_CHILD_INPUT")
                             :prepare #'ende-agent-private-target)
                  (ende-job-next-child-path root)))
@@ -280,7 +282,7 @@
           (should (equal (ende-job-title (ende-ask ende-test--dashboard-profile))
                          "Named question"))
           (should (equal (ende-job-title root) "tbd."))
-          (should (equal (ende-job-title child) "Inspect child"))
+          (should (equal (ende-job-title child) title))
           (puthash (ende-job-id root) 'expanded ende-queue-ui--folds)
           (setq dashboard (ende-queue-open))
           (dotimes (pass 2)
@@ -290,7 +292,7 @@
             (with-current-buffer dashboard
               (ende-queue-ui--render)
               (let ((text (buffer-string)))
-                (should (string-match-p "└─ Inspect child" text))
+                (should (string-match-p (regexp-quote (concat "└─ " title)) text))
                 (should (string-match-p "Named question" text))
                 (should-not (string-match-p "PRIVATE_\\|begin_ende" text))))))
       (ende-test--dashboard-reset))))

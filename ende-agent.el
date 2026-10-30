@@ -59,6 +59,8 @@
         (setq clean (plist-put clean :codex-session-id nil)))
       clean)))
 
+(defconst ende-agent--spawn-title-max-length 40)
+
 (defun ende-agent--decode-spawn (arguments)
   "Decode tool ARGUMENTS as exactly two nonblank strings: title and task."
   (let ((object (if (hash-table-p arguments)
@@ -73,6 +75,8 @@
                  (stringp (setq task (gethash "task" object)))
                  (not (string-blank-p task)))
       (error "spawn_agent requires exactly two nonblank strings: title and task"))
+    (unless (<= (length title) ende-agent--spawn-title-max-length)
+      (error "spawn_agent title must be at most %d characters" ende-agent--spawn-title-max-length))
     (list title task)))
 
 (defun ende-agent--spawn-tool (arguments _root callback)
@@ -98,10 +102,11 @@ CALLBACK receives the child's final answer and no transcript."
 (ende-tool-register
  'spawn_agent
  "Spawn an independent agent with fresh conversation context using the configured access policy. The child receives its own instructions, configured capabilities, and the supplied task, but not your conversation history, previous tool results, observations, decisions, or findings. Provide a self-contained task containing the objective, relevant background, findings, concrete starting points and file paths, constraints, user decisions, and expected output. Include only task-relevant information; do not copy entire conversations. The child can independently inspect resources permitted by its configuration."
- '((:type . "object")
+ `((:type . "object")
    (:properties . ((:title . ((:type . "string")
                              (:description . "Concise, human-readable title for the delegated task.")
-                             (:minLength . 1)))
+                             (:minLength . 1)
+                             (:maxLength . ,ende-agent--spawn-title-max-length)))
                    (:task . ((:type . "string")
                              (:description . "Self-contained work description: objective, relevant background and findings, file paths or symbols, constraints, user decisions, and expected output. The child has no parent conversation history; include only task-relevant information.")
                              (:minLength . 1)))))

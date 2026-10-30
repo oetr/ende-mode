@@ -501,7 +501,12 @@
         (ende-tools--execution-owner nil)
         (ende-tools--register-cancellation-function nil)
         (ende-llm-function (ende-test--fake-llm nil t))
+        (title (make-string 40 ?界))
+        (task (make-string 100 ?x))
         root child answer settle-count)
+    (let ((properties (alist-get :properties (ende-tool-parameters (ende-tool--find 'spawn_agent)))))
+      (should (= (alist-get :maxLength (alist-get :title properties)) 40))
+      (should-not (alist-get :maxLength (alist-get :task properties))))
     (ende-test--with-buffer "agent origin"
       (setq root
             (ende-enqueue
@@ -530,11 +535,15 @@
          (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
                   "{\"title\":\"Inspect\",\"task\":\"Inspect resources\",\"extra\":true}"
                   nil (lambda (&rest _) nil)))
+        (should-error
+         (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
+                  (json-encode `(("title" . ,(concat title "x")) ("task" . ,task)))
+                  nil (lambda (&rest _) nil)))
         (should-not (ende-job-children root))
         (funcall (ende-tool-handler (ende-tool--find 'spawn_agent))
                  (let ((object (make-hash-table :test #'equal)))
-                   (puthash "title" "Inspect resources" object)
-                   (puthash "task" "do inspection" object) object)
+                   (puthash "title" title object)
+                   (puthash "task" task object) object)
                  nil
                  (lambda (result error)
                    (setq settle-count (1+ (or settle-count 0))
@@ -543,9 +552,8 @@
         (should (ende-job-p child))
         (should (eq (ende-job-state child) 'queued))
         (should (eq (ende-job-parent child) root))
-        (should (equal (ende-job-title child) "Inspect resources"))
-        (should (equal (plist-get (ende-job-instruction child) :task)
-                       "do inspection"))
+        (should (equal (ende-job-title child) title))
+        (should (equal (plist-get (ende-job-instruction child) :task) task))
         (should (buffer-live-p (ende-job-owned-buffer child)))
         (should-not answer)
         (ende-job-skip child "test terminalization")
