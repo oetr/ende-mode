@@ -88,7 +88,8 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array.  MAXIMUM overrides
 (defun ende-edit--anchor-offsets (source anchor &optional limit)
   "Return zero-based SOURCE offsets at which ANCHOR occurs.
 When LIMIT is non-nil, signal as soon as more than LIMIT offsets are found."
-  (let ((start 0)
+  (let ((case-fold-search nil)
+        (start 0)
         (offsets nil))
     (while (and (< start (length source))
                 (string-match (regexp-quote anchor) source start))

@@ -613,6 +613,17 @@
 
 
 
+(ert-deftest ende-test/codex-routing-metadata-falls-back-to-token-claims ()
+  (let* ((claims (json-encode
+                  '(("https://api.openai.com/auth"
+                     . (("chatgpt_account_id" . "account")
+                        ("chatgpt_compute_residency" . "eu"))))))
+         (auth (list :access (concat "e30." (base64url-encode-string claims t) ".signature"))))
+    (should (equal "account" (ende-codex--account-id auth)))
+    (should (equal "eu" (ende-codex--residency auth)))
+    (should (equal "explicit" (ende-codex--account-id (plist-put auth :account-id "explicit"))))
+    (should-not (ende-codex--jwt-claims "invalid"))))
+
 (ert-deftest ende-test/openai-auth-entry-is-read-from-opencode-file ()
   (let* ((file (make-temp-file "ende-openai-auth-test-"))
          (ende-codex-auth-file file))

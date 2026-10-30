@@ -246,7 +246,7 @@ The :callbacks argument initializes the composed transport lifecycle."
   "Decode the unverified claims from TOKEN, or return nil.
 The claims are used only for routing metadata such as account and residency."
   (when (stringp token)
-    (let ((parts (split-string token "\.")))
+    (let ((parts (split-string token "\\.")))
       (when (= (length parts) 3)
         (condition-case nil
             (let* ((encoded (replace-regexp-in-string

@@ -11,6 +11,11 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
+(ert-deftest ende-test/anchors-match-literally-regardless-of-buffer-settings ()
+  (dolist (case-fold-search '(nil t))
+    (should (equal '(4) (ende-edit--anchor-offsets "Foo foo" "foo")))
+    (should (equal '(0) (ende-edit--anchor-offsets "a.b axb" "a.b")))))
+
 (ert-deftest ende-test/write-anywhere-creates-independent-reviews ()
   (ende-test--reset)
   (let* ((response
