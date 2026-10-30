@@ -250,7 +250,7 @@
 
 
 
-(ert-deftest ende-test/openrouter-batches-separate-effective-control-payloads ()
+(ert-deftest ende-test/openrouter-batches-separate-incompatible-profiles ()
   (let* ((base (ende-provider-profile 'openrouter-batch))
          (low (plist-put (copy-tree base) :reasoning-effort "low"))
          (high (plist-put (copy-tree base) :reasoning-effort "high"))
@@ -258,7 +258,44 @@
     (should-not (equal (ende-openrouter-batch--profile-key low)
                        (ende-openrouter-batch--profile-key high)))
     (should-not (equal (ende-openrouter-batch--profile-key base)
-                       (ende-openrouter-batch--profile-key temperature)))))
+                       (ende-openrouter-batch--profile-key temperature)))
+    (dolist (field '(:auth-source-host :auth-source-user :auth-source-port))
+      (should-not
+       (equal (ende-openrouter-batch--profile-key base)
+              (ende-openrouter-batch--profile-key
+               (plist-put (copy-tree base) field "other-account")))))))
+
+(ert-deftest ende-test/openrouter-batch-only-submits-live-requests ()
+  (let* ((profile (ende-provider-profile 'openrouter-batch))
+         (requests (mapcar
+                    (lambda (id)
+                      (ende-openrouter-batch--make-request
+                       :custom-id id :profile profile
+                       :messages (list (cons "user" id))))
+                    '("cancelled" "active")))
+         (group (ende-openrouter-batch--make-group
+                 :profile profile :requests requests)))
+    (ende-openrouter-batch--cancel-request (car requests))
+    (let* ((body (ende-protocol-json-read-string
+                  (ende-openrouter-batch--body group)))
+           (submitted (ende-protocol-json-get "requests" body)))
+      (should (= 1 (length submitted)))
+      (should (equal "active" (ende-protocol-json-get "custom_id" (aref submitted 0)))))))
+
+(ert-deftest ende-test/openrouter-batch-expiry-settles-and-releases-group ()
+  (let* ((failure nil)
+         (request (ende-openrouter-batch--make-request
+                   :callbacks (list :on-error (lambda (error) (setq failure error)))))
+         (group (ende-openrouter-batch--make-group
+                 :profile nil :requests (list request)
+                 :submitted-at 0 :deadline 0))
+         (ende-openrouter-batch--known-groups (list group)))
+    (ende-openrouter-batch--schedule-poll group)
+    (should (eq (ende-error-kind failure) 'timeout))
+    (should (ende-openrouter-batch--request-settled request))
+    (should (ende-openrouter-batch--group-terminal group))
+    (should-not ende-openrouter-batch--known-groups)
+    (should-not (ende-openrouter-batch--group-poll-timer group))))
 
 
 

@@ -172,6 +172,9 @@
     (list (plist-get profile :name)
           (plist-get profile :batch-url)
           (plist-get profile :batch-endpoint)
+          (plist-get profile :auth-source-host)
+          (plist-get profile :auth-source-user)
+          (plist-get profile :auth-source-port)
           (plist-get profile :model)
           (plist-get profile :max-tokens)
           (ende-controls-encode nil (plist-get profile :controls) profile)
@@ -353,7 +356,7 @@
               (ende-openrouter-batch--request-messages request)
               profile
               (ende-openrouter-batch--request-custom-id request)))
-           (ende-openrouter-batch--group-requests group)))
+           (ende-openrouter-batch--active-requests group)))
          (body `((:endpoint . ,(plist-get profile :batch-endpoint))
                  (:model . ,(plist-get profile :model))
                  (:requests . ,requests)))
@@ -548,14 +551,17 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
          (max-age (ende-openrouter-batch--profile-value
                    profile :batch-max-age ende-openrouter-batch-max-age))
          (deadline (ende-openrouter-batch--group-deadline group))
-         (delay (or delay (ende-openrouter-batch--jittered-delay group))))
-    (when (and (not (ende-openrouter-batch--group-terminal group))
-               (< (float-time) deadline)
-               (<= (- (float-time) (ende-openrouter-batch--group-submitted-at group))
-                   max-age))
-      (setf (ende-openrouter-batch--group-poll-timer group)
-            (run-at-time delay nil
-                         #'ende-openrouter-batch--poll group)))))
+         (now (float-time)))
+    (unless (ende-openrouter-batch--group-terminal group)
+      (if (or (>= now deadline)
+              (> (- now (ende-openrouter-batch--group-submitted-at group))
+                 max-age))
+          (ende-openrouter-batch--group-fail
+           group (ende-error-create
+                  :kind 'timeout :message "OpenRouter batch exceeded its deadline"))
+        (setf (ende-openrouter-batch--group-poll-timer group)
+              (run-at-time (or delay (ende-openrouter-batch--jittered-delay group))
+                           nil #'ende-openrouter-batch--poll group))))))
 
 (defun ende-openrouter-batch--terminal-status-p (status)
   "Return non-nil when remote STATUS is terminal."
