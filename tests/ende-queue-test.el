@@ -333,10 +333,22 @@
 
 (ert-deftest ende-test/internal-agent-runs-shared-loop-on-private-target ()
   (ende-test--reset)
-  (let ((ende-llm-function (ende-test--fake-llm '("child answer") t))
-        (ende--queue-suspended t)
-        (root-buffer nil)
-        family child)
+  (let* ((texts '(nil "" " \t\n" "Inspection notes"))
+         (responses
+          (cl-loop for text in texts for index from 0
+                   collect
+                   (list :content text :tool-calls
+                         (list (list :id (format "progress-%d" index)
+                                     :name "about_thinking"
+                                     :arguments
+                                     (json-encode
+                                      `((title . "Inspecting")
+                                        (status . ,(format "Inspecting resource %d." index)))))))))
+         (ende-llm-function
+          (ende-test--fake-llm (append responses '("child answer")) t))
+         (ende--queue-suspended t)
+         (root-buffer nil)
+         family child)
     (ende-test--with-buffer "user source"
       (setq root-buffer (current-buffer)
             family (ende--make-job-family
@@ -364,7 +376,36 @@
         (should-not (string-match-p "user source" (format "%s" sent)))
         (should-not (string-match-p "Name:"
                                     (format "%s" sent))))
-      (ende-test--complete-call (car ende-test--calls))
+      (dotimes (index (length texts))
+        (ende-test--complete-call (nth index ende-test--calls)))
+      (let* ((messages (plist-get (car (last ende-test--calls)) :messages))
+             (protocol (nthcdr 2 messages))
+             (assistants (cl-remove-if-not
+                          (lambda (message)
+                            (equal (plist-get message :role) "assistant"))
+                          protocol)))
+        (should (equal (mapcar (lambda (message) (plist-get message :role)) protocol)
+                       '("assistant" "tool" "assistant" "tool"
+                         "assistant" "tool" "assistant" "tool")))
+        (should (equal (mapcar (lambda (message) (plist-get message :content)) assistants)
+                       '("" "" " \t\n" "Inspection notes")))
+        (should (equal (mapcar (lambda (message) (plist-get message :tool-calls)) assistants)
+                       (mapcar (lambda (response) (plist-get response :tool-calls)) responses))))
+      (let ((work (ende-job-owned-buffer child)))
+        (ende-test--complete-call (car (last ende-test--calls)))
+        (with-current-buffer work
+          (should (= (ende-test--count-matches "^\\* Assistant$" (buffer-string)) 1))
+          (should-not (string-match-p "#\\+begin_example\n[[:space:]]*#\\+end_example"
+                                      (buffer-string)))
+          (goto-char (point-min))
+          (dotimes (index (length texts))
+            (when (= index (1- (length texts)))
+              (should (search-forward "* Assistant\n" nil t))
+              (should (search-forward "Inspection notes" nil t)))
+            (dolist (heading '("* Tool request\n" "* Progress\n" "* Tool result\n"))
+              (should (search-forward heading nil t))))
+          (should (search-forward "* Reply\n" nil t))
+          (should (search-forward "child answer" nil t))))
       (should (eq (ende-job-state child) 'completed))
       (should (equal (ende-job-result child) "child answer"))
       (should-not (buffer-live-p (ende-job-owned-buffer child)))

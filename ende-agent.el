@@ -292,7 +292,9 @@ clarification; do not proceed with the disputed change.\n\n"
            :omit-source-metadata t
            :assistant-message
            (lambda (child result calls)
-             (ende-agent--work-section child "Assistant" (plist-get result :content))
+             (when-let* ((text (plist-get result :content))
+                         ((not (string-blank-p text))))
+               (ende-agent--work-section child "Assistant" text))
              (dolist (call calls)
                (ende-agent--work-section
                 child "Tool request"
