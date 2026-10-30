@@ -258,7 +258,7 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
   "Normalize boolean fields recursively in protocol VALUE only."
   (cond
    ((and (vectorp value) (not (stringp value)))
-    (vconcat (mapcar #'ende-tools--json-normalize-value (append value nil))))
+    (vconcat (mapcar #'ende-tools--json-normalize-value value)))
    ((and (listp value) (keywordp (car-safe value))
          (zerop (% (length value) 2)))
     (let ((copy (copy-sequence value))
@@ -866,6 +866,7 @@ ACCEPT-MATCH is called for each match record and must return non-nil to keep it.
 It is called with nil instead of a record when one source line or context block
 is already too large to consider within the configured output byte limit."
   (let ((matches nil)
+        (match-count 0)
         (finished nil)
         (budget-exhausted nil))
     (ende-tools--with-source
@@ -873,7 +874,7 @@ is already too large to consider within the configured output byte limit."
      (lambda ()
        (goto-char (point-min))
        (while (and (not finished)
-                   (< (length matches) maximum)
+                   (< match-count maximum)
                    (re-search-forward regexp nil t))
          (let* ((match-start (match-beginning 0))
                 (line (line-number-at-pos match-start))
@@ -917,7 +918,9 @@ is already too large to consider within the configured output byte limit."
                                 (buffer-substring-no-properties
                                  context-start context-end))))))
                (if (funcall accept-match record)
-                   (push record matches)
+                   (progn
+                     (push record matches)
+                     (cl-incf match-count))
                  (setq finished t
                        budget-exhausted t))))
            ;; Ensure a zero-width regexp cannot keep the search at one point.

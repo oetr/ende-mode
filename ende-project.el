@@ -157,10 +157,10 @@ existing project directory."
   "Return non-nil when BUFFER visits an allowed file below ROOT."
   (let* ((root (or root (ende-project-root buffer)))
          (path (ende-project-buffer-path buffer)))
-    (and path
-         (file-in-directory-p path (ende-project-normalize-root root))
-         (not (ende-project--excluded-p
-               (file-relative-name path (ende-project-normalize-root root)))))))
+    (when path
+      (let ((root (ende-project-normalize-root root)))
+        (and (file-in-directory-p path root)
+             (not (ende-project--excluded-p (file-relative-name path root))))))))
 
 (defun ende-project-visiting-buffer (path &optional root)
   "Return the live buffer visiting PATH below ROOT, or nil."

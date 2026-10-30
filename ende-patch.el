@@ -208,9 +208,9 @@ context, removal, addition, and End of File.  Unsupported constructs signal."
 (defun ende-patch--line-sequence-at-p (lines expected start)
   "Return non-nil when EXPECTED exactly matches LINES starting at START."
   (and (<= (+ start (length expected)) (length lines))
-       (cl-loop for line in expected
-                for index from start
-                always (string= line (nth index lines)))))
+       (cl-loop for expected-line in expected
+                for actual-line in (nthcdr start lines)
+                always (string= expected-line actual-line))))
 
 (defun ende-patch--hunk-matches (lines old end-of-file)
   "Return all exact positions of OLD in LINES, respecting EOF constraint."
