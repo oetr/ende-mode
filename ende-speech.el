@@ -589,23 +589,22 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
                (eq (ende-speech--session-buffer session) (current-buffer)))
       (ende-speech--terminate session nil nil nil))))
 
-(defun ende-speech--accept ()
-  "Stop recording and insert the currently visible transcript."
-  (interactive)
+(defun ende-speech--current-session ()
   (let ((session ende-speech--active-session))
     (unless (and (ende-speech--session-active-p session)
                  (eq (ende-speech--session-buffer session) (current-buffer)))
       (user-error "No active speech session"))
-    (ende-speech--terminate session t nil t)))
+    session))
+
+(defun ende-speech--accept ()
+  "Stop recording and insert the currently visible transcript."
+  (interactive)
+  (ende-speech--terminate (ende-speech--current-session) t nil t))
 
 (defun ende-speech--reject ()
   "Stop recording and discard the currently visible transcript."
   (interactive)
-  (let ((session ende-speech--active-session))
-    (unless (and (ende-speech--session-active-p session)
-                 (eq (ende-speech--session-buffer session) (current-buffer)))
-      (user-error "No active speech session"))
-    (ende-speech--terminate session nil nil t)))
+  (ende-speech--terminate (ende-speech--current-session) nil nil t))
 
 (defun ende-speech--handle-event (session event)
   "Handle the supported realtime transcription EVENT for SESSION."

@@ -365,21 +365,16 @@ REGISTER attaches cancellation to the existing tool lifecycle."
            (if error (funcall callback nil error)
              (when (ende-job-execution-current-p job generation)
                (condition-case nil
-                   (let (artifacts)
-                     (dolist (name names)
-                       (push (list :name name :caption caption) artifacts))
-                     (setq artifacts (nreverse artifacts))
+                   (let* ((instruction (ende-job-instruction job))
+                          (artifacts (mapcar (lambda (name) (list :name name :caption caption)) names)))
                      (setf (ende-job-instruction job)
-                           (plist-put (ende-job-instruction job) :generated-artifacts
-                                      (append (plist-get (ende-job-instruction job) :generated-artifacts) artifacts)))
+                           (plist-put instruction :generated-artifacts
+                                      (append (plist-get instruction :generated-artifacts) artifacts)))
                      (funcall
                       callback
                       (list :ok t
                             :artifacts
-                            (vconcat
-                             (mapcar (lambda (artifact)
-                                       (plist-get artifact :name))
-                                     artifacts)))
+                            (vconcat names))
                       nil))
                  (error (funcall callback nil "Generated image could not be validated or stored"))))))
          ende-tools--register-cancellation-function)))))

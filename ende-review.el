@@ -72,14 +72,8 @@ Read-only operations such as `summarize' do not use this policy."
   (when (stringp color)
     (cond
      ((string-prefix-p "#" color)
-      (when (string-match
-             "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'"
-             color)
-        (mapcar (lambda (component)
-                  (/ (string-to-number component 16) 255.0))
-                (list (match-string 1 color)
-                      (match-string 2 color)
-                      (match-string 3 color)))))
+      (mapcar (lambda (component) (/ component 255.0))
+              (ende-review--hex-components color)))
      (t
       (condition-case nil
           (color-name-to-rgb color)
