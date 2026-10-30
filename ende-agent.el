@@ -560,89 +560,89 @@ scheduler when asynchronous children have settled."
         ((next ()
            (let ((name (and remaining (ende-job-current-p job)
                             (ende-agent--call-name (car remaining) callbacks))))
-           (when (and remaining (ende-job-current-p job))
-             (ende--handle-llm-event
-              job (list :type :status
-                        :status name)))
-           (if (or (null remaining) (not (ende-job-current-p job)))
-               (when (and (null remaining) (ende-job-current-p job))
-                 (funcall done (nreverse messages)))
-             (if (and (ende-tools-phase-allows-p "spawn_agent" phase)
-                      (plist-get callbacks :execute-spawn-batch)
-                      (equal name "spawn_agent"))
-                 (let* ((split (ende-agent--spawn-prefix remaining callbacks))
-                        (batch (car split)))
-                   (setq remaining (cdr split))
-                   (let ((ende-agent--spawn-execute-tool
-                          (plist-get callbacks :execute-tool)))
-                     (funcall (plist-get callbacks :execute-spawn-batch)
-                              job batch configuration
-                              (lambda (results)
-                                (when (ende-job-execution-current-p
-                                       job (or (ende-job-execution-generation job) 0))
-                                  (setq messages
-                                        (nconc
-                                         (nreverse
-                                          (cl-mapcar
-                                           (lambda (call content)
-                                             (ende-agent--invoke
-                                              callbacks :tool-result-message
-                                              job call content))
-                                           batch results))
-                                         messages))
-                                  (next))))))
-               (let* ((call (pop remaining))
-                    (_count
-                     (ende-job-emit-event
-                      job (list :type :tool-call-count
-                                :count (1+ (or (ende-job-tool-call-count job) 0)))))
-                    (prior-cancel (ende-job-cancel-function job))
-                    (installed-cancel nil)
-                    (generation (or (ende-job-execution-generation job) 0))
-                    (synchronous t)
-                    (completed nil)
-                    (ende-tools--request-phase phase)
-                    (ende-tools--execution-owner (ende-job-id job))
-                    (ende-tools--generate-title-function
-                     (lambda (title)
-                       (ende-agent--accept-title job title generation)))
-                    (ende-tools--report-activity-function
-                     (lambda (title status)
-                       (ende-job-report-activity job title status generation)))
-                    (ende-tools--register-cancellation-function
-                     (lambda (cancel)
-                       (when (ende-job-execution-current-p job generation)
-                         (if cancel
-                             (progn
-                               (setq installed-cancel cancel)
-                               (ende-job-cancellation-set job cancel generation))
-                           (when (eq installed-cancel
-                                     (ende-job-cancel-function job))
-                             (ende-job-cancellation-set
-                              job prior-cancel generation installed-cancel)))))))
-               (let ((complete
-                      (lambda (content)
-                  (when (and (not completed)
-                             (ende-job-execution-current-p job generation))
-                    (setq completed t)
-                    (ende--call-with-job-error
-                     job
-                     (lambda ()
-                       (push (ende-agent--invoke
-                              callbacks :tool-result-message job call content)
-                             messages)
-                       (unless synchronous (next))))))))
-                 (if (ende-tools-phase-allows-p
-                      name phase)
-                     (funcall (plist-get callbacks :execute-tool)
-                              call configuration complete)
-                   (funcall complete
-                            (ende-tools--json-encode-tool-result
-                             (list :ok nil :tool name
-                                   :error (format "Tool disabled during %s phase" phase))))))
-               (setq synchronous nil)
-               (when completed
-                 (next))))))))
+             (when (and remaining (ende-job-current-p job))
+               (ende--handle-llm-event
+                job (list :type :status
+                          :status name)))
+             (if (or (null remaining) (not (ende-job-current-p job)))
+                 (when (and (null remaining) (ende-job-current-p job))
+                   (funcall done (nreverse messages)))
+               (if (and (ende-tools-phase-allows-p "spawn_agent" phase)
+                        (plist-get callbacks :execute-spawn-batch)
+                        (equal name "spawn_agent"))
+                   (let* ((split (ende-agent--spawn-prefix remaining callbacks))
+                          (batch (car split)))
+                     (setq remaining (cdr split))
+                     (let ((ende-agent--spawn-execute-tool
+                            (plist-get callbacks :execute-tool)))
+                       (funcall (plist-get callbacks :execute-spawn-batch)
+                                job batch configuration
+                                (lambda (results)
+                                  (when (ende-job-execution-current-p
+                                         job (or (ende-job-execution-generation job) 0))
+                                    (setq messages
+                                          (nconc
+                                           (nreverse
+                                            (cl-mapcar
+                                             (lambda (call content)
+                                               (ende-agent--invoke
+                                                callbacks :tool-result-message
+                                                job call content))
+                                             batch results))
+                                           messages))
+                                    (next))))))
+                 (let* ((call (pop remaining))
+                        (_count
+                         (ende-job-emit-event
+                          job (list :type :tool-call-count
+                                    :count (1+ (or (ende-job-tool-call-count job) 0)))))
+                        (prior-cancel (ende-job-cancel-function job))
+                        (installed-cancel nil)
+                        (generation (or (ende-job-execution-generation job) 0))
+                        (synchronous t)
+                        (completed nil)
+                        (ende-tools--request-phase phase)
+                        (ende-tools--execution-owner (ende-job-id job))
+                        (ende-tools--generate-title-function
+                         (lambda (title)
+                           (ende-agent--accept-title job title generation)))
+                        (ende-tools--report-activity-function
+                         (lambda (title status)
+                           (ende-job-report-activity job title status generation)))
+                        (ende-tools--register-cancellation-function
+                         (lambda (cancel)
+                           (when (ende-job-execution-current-p job generation)
+                             (if cancel
+                                 (progn
+                                   (setq installed-cancel cancel)
+                                   (ende-job-cancellation-set job cancel generation))
+                               (when (eq installed-cancel
+                                         (ende-job-cancel-function job))
+                                 (ende-job-cancellation-set
+                                  job prior-cancel generation installed-cancel)))))))
+                   (let ((complete
+                          (lambda (content)
+                            (when (and (not completed)
+                                       (ende-job-execution-current-p job generation))
+                              (setq completed t)
+                              (ende--call-with-job-error
+                               job
+                               (lambda ()
+                                 (push (ende-agent--invoke
+                                        callbacks :tool-result-message job call content)
+                                       messages)
+                                 (unless synchronous (next))))))))
+                     (if (ende-tools-phase-allows-p
+                          name phase)
+                         (funcall (plist-get callbacks :execute-tool)
+                                  call configuration complete)
+                       (funcall complete
+                                (ende-tools--json-encode-tool-result
+                                 (list :ok nil :tool name
+                                       :error (format "Tool disabled during %s phase" phase))))))
+                   (setq synchronous nil)
+                   (when completed
+                     (next))))))))
       (next))))
 
 (defun ende-agent-run (job messages configuration callbacks)

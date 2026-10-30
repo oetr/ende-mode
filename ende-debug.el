@@ -550,24 +550,24 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
   "Format a readable report for CAPTURES in DIRECTORY."
   (let ((groups (ende-debug--capture-groups captures)))
     (concat
-   (format "Ende cache report\nSession: %s\n\n"
-           (abbreviate-file-name directory))
-   "Provider-reported usage (missing cached-token data is not zero):\n"
-   (mapconcat #'ende-debug--cache-line captures "\n")
-   "\n\n"
-   (if (cl-some (lambda (group) (> (length (cdr group)) 1))
-                groups)
-       (concat "Consecutive requests within each job:\n\n"
-               (mapconcat
-                (lambda (group)
-                  (let ((requests (cdr group)) reports)
-                    (while (cdr requests)
-                      (push (ende-debug--pair-report
-                             (car requests) (cadr requests)) reports)
-                      (setq requests (cdr requests)))
-                    (mapconcat #'identity (nreverse reports) "")))
-                groups ""))
-     "No consecutive requests in the same job to compare.\n"))))
+     (format "Ende cache report\nSession: %s\n\n"
+             (abbreviate-file-name directory))
+     "Provider-reported usage (missing cached-token data is not zero):\n"
+     (mapconcat #'ende-debug--cache-line captures "\n")
+     "\n\n"
+     (if (cl-some (lambda (group) (> (length (cdr group)) 1))
+                  groups)
+         (concat "Consecutive requests within each job:\n\n"
+                 (mapconcat
+                  (lambda (group)
+                    (let ((requests (cdr group)) reports)
+                      (while (cdr requests)
+                        (push (ende-debug--pair-report
+                               (car requests) (cadr requests)) reports)
+                        (setq requests (cdr requests)))
+                      (mapconcat #'identity (nreverse reports) "")))
+                  groups ""))
+       "No consecutive requests in the same job to compare.\n"))))
 
 ;;;###autoload
 (defun ende-debug-cache-report ()

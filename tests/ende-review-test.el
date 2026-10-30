@@ -280,28 +280,27 @@
 (ert-deftest ende-test/review-badge-toggle-preserves-review-highlight ()
   (ende-test--reset)
   (ende-test--with-face-colors 'font-lock-keyword-face "#0000ff" "#ffffff"
-  (let ((ende-review-highlight t))
-    (ende-test--with-buffer "defunLLM"
-			    (add-text-properties 1 6 '(face font-lock-keyword-face))
-			    (setq-local ende-review-show-badges nil)
-			    (let* ((review (ende-review-create-overlay
-					    (current-buffer) 6 9 "model" "client" ""))
-				   (face (overlay-get review 'face)))
-			      (should (ende-review-overlay-p review))
-			      (should-not (overlay-get review 'before-string))
-			      (should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
-			      (ende-toggle-review-badges)
-			      (should ende-review-show-badges)
-			      (should (string-match-p "client model"
-						      (ende-test--overlay-label review)))
-			      (should (equal (overlay-get review 'face) face))
-			      (ende-toggle-review-badges)
-			      (should-not ende-review-show-badges)
-			      (should-not (overlay-get review 'before-string))
-			      (should (equal (overlay-get review 'face) face))
-			      (goto-char (1+ (overlay-start review)))
-			      (ende-approve-output)
-			      (should-not (ende-review-overlay-p review)))))))
+    (let ((ende-review-highlight t))
+      (ende-test--with-buffer "defunLLM"
+        (add-text-properties 1 6 '(face font-lock-keyword-face))
+        (setq-local ende-review-show-badges nil)
+        (let* ((review (ende-review-create-overlay
+                        (current-buffer) 6 9 "model" "client" ""))
+               (face (overlay-get review 'face)))
+          (should (ende-review-overlay-p review))
+          (should-not (overlay-get review 'before-string))
+          (should (equal face '(:foreground "#0000ff" :background "#d9d9ff")))
+          (ende-toggle-review-badges)
+          (should ende-review-show-badges)
+          (should (string-match-p "client model" (ende-test--overlay-label review)))
+          (should (equal (overlay-get review 'face) face))
+          (ende-toggle-review-badges)
+          (should-not ende-review-show-badges)
+          (should-not (overlay-get review 'before-string))
+          (should (equal (overlay-get review 'face) face))
+          (goto-char (1+ (overlay-start review)))
+          (ende-approve-output)
+          (should-not (ende-review-overlay-p review)))))))
 
 (ert-deftest ende-test/review-badge-global-toggle-respects-local-values ()
   (ende-test--reset)
@@ -374,56 +373,55 @@
 
 (ert-deftest ende-test/review-highlight-face-attr-resolution ()
   (ende-test--with-face-colors 'font-lock-keyword-face "#0000ff" "#ffffff"
-  (should (string= (ende-review--face-attr 'font-lock-keyword-face :foreground)
-                   "#0000ff"))
-  (should (string= (ende-review--face-attr 'font-lock-keyword-face :background)
-                   "#ffffff"))
-  (should (string= (ende-review--face-attr
+    (should (string= (ende-review--face-attr 'font-lock-keyword-face :foreground)
+                     "#0000ff"))
+    (should (string= (ende-review--face-attr 'font-lock-keyword-face :background)
+                     "#ffffff"))
+    (should (string= (ende-review--face-attr
                     '(:foreground "red" :background "blue") :foreground)
-                   "red"))
-  (should (string= (ende-review--face-attr
+                     "red"))
+    (should (string= (ende-review--face-attr
                     '((:foreground "cyan") (:weight bold)) :foreground)
-                   "cyan"))
-  (should (string= (ende-review--face-attr
+                     "cyan"))
+    (should (string= (ende-review--face-attr
                     '((:foreground "cyan") (:background "magenta")) :background)
-                   "magenta"))
-  (should (null (ende-review--face-attr '(:weight bold) :foreground)))))
+                     "magenta"))
+    (should (null (ende-review--face-attr '(:weight bold) :foreground)))))
 
 (ert-deftest ende-test/review-highlight-style-from-adjacent-face ()
   (ende-test--with-face-colors 'font-lock-keyword-face "#0000ff" "#ffffff"
-  (ende-test--with-buffer "defun x"
-			  (add-text-properties 1 6 '(face font-lock-keyword-face))
-			  (should (equal (ende-review--style (current-buffer) 6)
-					 '("#0000ff" . "#d9d9ff"))))))
+    (ende-test--with-buffer "defun x"
+      (add-text-properties 1 6 '(face font-lock-keyword-face))
+      (should (equal (ende-review--style (current-buffer) 6)
+                     '("#0000ff" . "#d9d9ff"))))))
 
 (ert-deftest ende-test/review-highlight-style-default-fallback ()
   (ende-test--with-face-colors 'default "#111111" "#222222"
-  (ende-test--with-buffer "plain x"
-			  (should (equal (ende-review--style (current-buffer) 6)
-					 '("#111111" . "#1f1f1f")))
-			  (should (equal (ende-review--style (current-buffer) 1)
-					 '("#111111" . "#1f1f1f"))))))
+    (ende-test--with-buffer "plain x"
+      (should (equal (ende-review--style (current-buffer) 6)
+                     '("#111111" . "#1f1f1f")))
+      (should (equal (ende-review--style (current-buffer) 1)
+                     '("#111111" . "#1f1f1f"))))))
 
 (ert-deftest ende-test/review-highlight-dark-background-light-foreground ()
   (ende-test--with-face-colors 'default "#e6e6e6" "#1e1e1e"
-  (ende-test--with-buffer "plain text"
-			  (should (equal (ende-review--style (current-buffer) 6)
-					 '("#e6e6e6" . "#3c3c3c"))))))
+    (ende-test--with-buffer "plain text"
+      (should (equal (ende-review--style (current-buffer) 6)
+                     '("#e6e6e6" . "#3c3c3c"))))))
 
 (ert-deftest ende-test/review-highlight-overlay-sets-face ()
   (ende-test--reset)
   (ende-test--with-face-colors 'font-lock-keyword-face "#0000ff" "#ffffff"
-  (ende-test--with-buffer "defunLLM"
-			  (add-text-properties 1 6 '(face font-lock-keyword-face))
-			  (let ((overlay (ende-review-create-overlay
-					  (current-buffer) 6 9 nil nil "")))
-			    (should (overlayp overlay))
-			    (should (equal (overlay-get overlay 'face)
-					   '(:foreground "#0000ff" :background "#d9d9ff")))
-			    (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
-			    (should (null (get-char-property 3 'foreground-color)))
-			    (ende-review-delete-overlay overlay)
-			    (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))))))
+    (ende-test--with-buffer "defunLLM"
+      (add-text-properties 1 6 '(face font-lock-keyword-face))
+      (let ((overlay (ende-review-create-overlay (current-buffer) 6 9 nil nil "")))
+        (should (overlayp overlay))
+        (should (equal (overlay-get overlay 'face)
+                       '(:foreground "#0000ff" :background "#d9d9ff")))
+        (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))
+        (should (null (get-char-property 3 'foreground-color)))
+        (ende-review-delete-overlay overlay)
+        (should (eq (get-char-property 3 'face) 'font-lock-keyword-face))))))
 
 (ert-deftest ende-test/review-highlight-disabled-sets-no-properties ()
   (ende-test--reset)
@@ -437,21 +435,21 @@
 (ert-deftest ende-test/review-highlight-approval-cleans-properties ()
   (ende-test--reset)
   (ende-test--with-face-colors 'font-lock-keyword-face "#0000ff" "#ffffff"
-  (let ((ende-llm-function (ende-test--fake-llm '("LLM"))))
-    (ende-test--with-buffer "kw rest"
-			    (add-text-properties 1 3 '(face font-lock-keyword-face))
-			    (goto-char 3)
-			    (ende-insert-at-cursor)
-			    (should (string= (buffer-string) "kwLLM rest"))
-			    (let ((review (cl-find-if #'ende-review-overlay-p
-						      (overlays-in (point-min) (point-max)))))
-			      (should review)
-			      (should (equal (overlay-get review 'face)
-					     '(:foreground "#0000ff" :background "#d9d9ff")))
-			      (goto-char 4)
-			      (ende-approve-output)
-			      (should (string= (buffer-string) "kwLLM rest"))
-			      (should-not (ende-review-overlay-p review)))))))
+    (let ((ende-llm-function (ende-test--fake-llm '("LLM"))))
+      (ende-test--with-buffer "kw rest"
+        (add-text-properties 1 3 '(face font-lock-keyword-face))
+        (goto-char 3)
+        (ende-insert-at-cursor)
+        (should (string= (buffer-string) "kwLLM rest"))
+        (let ((review (cl-find-if #'ende-review-overlay-p
+                                 (overlays-in (point-min) (point-max)))))
+          (should review)
+          (should (equal (overlay-get review 'face)
+                         '(:foreground "#0000ff" :background "#d9d9ff")))
+          (goto-char 4)
+          (ende-approve-output)
+          (should (string= (buffer-string) "kwLLM rest"))
+          (should-not (ende-review-overlay-p review)))))))
 
 (ert-deftest ende-test/review-highlight-rejection-preserves-original-properties ()
   (ende-test--reset)

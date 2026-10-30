@@ -21,22 +21,22 @@
       (save-excursion
         (goto-char (point-min))
         (let (reply question-position)
-        (while (re-search-forward org-heading-regexp nil t)
-          (let ((position (match-beginning 0)))
-            (goto-char position)
-            (when (and question
-                       (equal (org-entry-get nil "ENDE_CHAT_ID" nil) question)
-                       (equal (org-entry-get nil "ENDE_ROLE" nil) "user"))
-              (setq question-position position))
-            (when (and request
-                       (equal (org-entry-get nil "ENDE_CHAT_REQUEST_ID" nil) request)
-                       (equal (org-entry-get nil "ENDE_ROLE" nil) "assistant")
-                       (not (org-entry-get nil "ENDE_CHAT_REASONING_FOR" nil))
-                       (not (org-entry-get nil "ENDE_CHAT_WORK" nil))
-                       (not (ende-queue-source--inside-work-p)))
-              (setq reply position)))
-          (forward-line 1))
-        (or reply question-position))))))
+          (while (re-search-forward org-heading-regexp nil t)
+            (let ((position (match-beginning 0)))
+              (goto-char position)
+              (when (and question
+                         (equal (org-entry-get nil "ENDE_CHAT_ID" nil) question)
+                         (equal (org-entry-get nil "ENDE_ROLE" nil) "user"))
+                (setq question-position position))
+              (when (and request
+                         (equal (org-entry-get nil "ENDE_CHAT_REQUEST_ID" nil) request)
+                         (equal (org-entry-get nil "ENDE_ROLE" nil) "assistant")
+                         (not (org-entry-get nil "ENDE_CHAT_REASONING_FOR" nil))
+                         (not (org-entry-get nil "ENDE_CHAT_WORK" nil))
+                         (not (ende-queue-source--inside-work-p)))
+                (setq reply position)))
+            (forward-line 1))
+          (or reply question-position))))))
 
 (defun ende-queue-visit-source (job)
   "Visit retained JOB's originating source, reopening its file if necessary."

@@ -226,25 +226,25 @@ Supported settings are `:max-concurrency' and `:parallel'."
     ((or 'openrouter 'openrouter-batch)
      (let ((batch (eq name 'openrouter-batch)))
        (list :url "https://openrouter.ai/api/v1/chat/completions"
-           :batch-url "https://openrouter.ai/api/v1/batches"
-           :batch-endpoint "/v1/chat/completions"
-           :transport (if batch 'openrouter-batch 'auto)
-           :model ende-provider--default-openrouter-model
-           :max-concurrency (if batch 16 4)
-           :parallel batch
-           :temperature 0.2
-           :auth-source-host "openrouter.ai"
-           :auth-source-user "ende"
-           :auth-source-port 443
-           :request-headers
-           (copy-sequence ende-provider--openrouter-request-headers)
-           :reasoning-effort-probe-function
-           #'ende-provider--probe-openrouter-reasoning-efforts
-           :controls '((:temperature :path ("temperature"))
-                       (:reasoning-effort
-                        :path ("reasoning" "effort")))
-           :require-sse (not batch)
-           :builtin-profile name)))
+             :batch-url "https://openrouter.ai/api/v1/batches"
+             :batch-endpoint "/v1/chat/completions"
+             :transport (if batch 'openrouter-batch 'auto)
+             :model ende-provider--default-openrouter-model
+             :max-concurrency (if batch 16 4)
+             :parallel batch
+             :temperature 0.2
+             :auth-source-host "openrouter.ai"
+             :auth-source-user "ende"
+             :auth-source-port 443
+             :request-headers
+             (copy-sequence ende-provider--openrouter-request-headers)
+             :reasoning-effort-probe-function
+             #'ende-provider--probe-openrouter-reasoning-efforts
+             :controls '((:temperature :path ("temperature"))
+                         (:reasoning-effort
+                          :path ("reasoning" "effort")))
+             :require-sse (not batch)
+             :builtin-profile name)))
     ('deepseek
      (list :type 'openai
            :url "https://api.deepseek.com/chat/completions"

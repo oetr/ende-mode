@@ -569,26 +569,26 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                 (setf (ende-sandbox-restart-required sandbox) t))
               (unless (ende-sandbox-closing sandbox)
                 (funcall callback nil message))))))
-    (condition-case caught
-        (ende-sandbox--spawn
-         sandbox (ende-sandbox--run-container-argv sandbox name)
-         ende-sandbox--startup-timeout
-         (lambda (code stdout stderr stdout-truncated stderr-truncated timed-out)
-           (cond
-            ((ende-sandbox-closing sandbox) nil)
-            ((and (not timed-out) (= code 0))
-             (setf (ende-sandbox-started sandbox) t)
-             (condition-case caught
-                 (ende-sandbox--exec sandbox command cwd timeout callback)
-               (error
-		(funcall callback nil (error-message-string caught)))))
-            (t
-             (fail-start
-              (ende-sandbox--startup-error
-               code stdout stderr stdout-truncated stderr-truncated timed-out))))))
-      (error
-       (fail-start (format "sandbox could not be started: %s"
-                           (error-message-string caught))))))))
+      (condition-case caught
+          (ende-sandbox--spawn
+           sandbox (ende-sandbox--run-container-argv sandbox name)
+           ende-sandbox--startup-timeout
+           (lambda (code stdout stderr stdout-truncated stderr-truncated timed-out)
+             (cond
+              ((ende-sandbox-closing sandbox) nil)
+              ((and (not timed-out) (= code 0))
+               (setf (ende-sandbox-started sandbox) t)
+               (condition-case caught
+                   (ende-sandbox--exec sandbox command cwd timeout callback)
+                 (error
+                  (funcall callback nil (error-message-string caught)))))
+              (t
+               (fail-start
+                (ende-sandbox--startup-error
+                 code stdout stderr stdout-truncated stderr-truncated timed-out))))))
+        (error
+         (fail-start (format "sandbox could not be started: %s"
+                             (error-message-string caught))))))))
 
 (defun ende-sandbox--ensure-container (sandbox command cwd timeout callback)
   "Start a replacement container when needed, then run COMMAND."

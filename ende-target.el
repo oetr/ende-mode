@@ -228,24 +228,24 @@ each side is additionally capped by `ende-target-window-chars'."
     `(let ((,object ,target)
            (,current-start (point-min))
            (,current-end (point-max)))
-     (save-restriction
-       (widen)
-       (let* ((original-start
-               (ende-target--anchor-position
-                (ende-target-restriction-beg ,object)))
-              (original-end
-               (ende-target--anchor-position
-                (ende-target-restriction-end ,object)))
-              (restriction-start
-               (and original-start (max original-start ,current-start)))
-              (restriction-end
-               (and original-end (min original-end ,current-end))))
-         (unless (and restriction-start restriction-end
-                      (<= (point-min) restriction-start restriction-end
-                          (point-max)))
-           (error "original buffer restriction no longer exists"))
-         (narrow-to-region restriction-start restriction-end)
-         ,@body)))))
+       (save-restriction
+         (widen)
+         (let* ((original-start
+                 (ende-target--anchor-position
+                  (ende-target-restriction-beg ,object)))
+                (original-end
+                 (ende-target--anchor-position
+                  (ende-target-restriction-end ,object)))
+                (restriction-start
+                 (and original-start (max original-start ,current-start)))
+                (restriction-end
+                 (and original-end (min original-end ,current-end))))
+           (unless (and restriction-start restriction-end
+                        (<= (point-min) restriction-start restriction-end
+                            (point-max)))
+             (error "original buffer restriction no longer exists"))
+           (narrow-to-region restriction-start restriction-end)
+           ,@body)))))
 
 (defun ende-target-validate-source (target start end)
   "Signal when TARGET's selected source at START..END has changed."
