@@ -290,6 +290,39 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
   "Serialize tool RESULT with boolean fields encoded as JSON booleans."
   (json-encode (ende-tools--json-tool-result result)))
 
+(defun ende-tools-call-value (call key)
+  "Return KEY from normalized tool CALL."
+  (if (hash-table-p call)
+      (gethash (substring (symbol-name key) 1) call)
+    (plist-get call key)))
+
+(defun ende-tools-call-async (call configuration callback)
+  "Execute normalized CALL under CONFIGURATION.
+Pass its JSON-encoded result to CALLBACK, synchronously when possible."
+  (let ((id (ende-tools-call-value call :id))
+        (name (ende-tools-call-value call :name))
+        (arguments (ende-tools-call-value call :arguments)))
+    (unless (and (stringp id) (not (string-empty-p id))
+                 (stringp name) (not (string-empty-p name))
+                 (stringp arguments))
+      (error "Malformed provider tool call: %S" call))
+    (let ((parsed
+           (condition-case caught
+               (json-parse-string arguments :object-type 'hash-table)
+             (error
+              (list :invalid-arguments (error-message-string caught))))))
+      (if (hash-table-p parsed)
+          (ende-tool-call-async
+           name parsed (plist-get configuration :root) configuration
+           (lambda (result)
+             (funcall callback (ende-tools--json-encode-tool-result result))))
+        (funcall
+         callback
+         (ende-tools--json-encode-tool-result
+          (list :ok nil :tool name
+                :error (format "tool arguments are not a JSON object: %s"
+                               (plist-get parsed :invalid-arguments)))))))))
+
 (defun ende-tool--failure-result (tool caught)
   (if (eq (car-safe caught) 'ende-tool-mutation-failure)
       (list :ok nil

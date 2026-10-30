@@ -281,7 +281,7 @@
                (lambda (&rest _args) nil))
               ((symbol-function 'ende-chat--tool-result-text)
                (lambda (&rest _args) "ok"))
-              ((symbol-function 'ende-chat--tool-response-async)
+              ((symbol-function 'ende-tools-call-async)
                (lambda (_call _configuration callback)
                  (setq owner-seen ende-tools--execution-owner)
                  (funcall callback "{}")))
@@ -826,7 +826,7 @@
                     ((symbol-function 'ende-sandbox--exec)
                      (lambda (&rest _args)
                        (ert-fail "command must not run after startup failure"))))
-            (ende-chat--tool-response-async
+            (ende-tools-call-async
              (list :id "startup-failure" :name "run_sandbox_command"
                    :arguments "{\"command\":\"pwd\"}")
              configuration
@@ -902,7 +902,7 @@
                                   :stderr "" :stdout_truncated :json-false
                                   :stderr_truncated :json-false)
                                 nil))))
-            (ende-chat--tool-response-async
+            (ende-tools-call-async
              (list :id "run-sandbox-command" :name "run_sandbox_command"
                    :arguments "{\"command\":\"exit 9\"}")
              configuration

@@ -27,7 +27,7 @@
 (defun ende-test--tool-response (call configuration)
   "Wait for the JSON response to CALL under CONFIGURATION."
   (let (response)
-    (ende-chat--tool-response-async
+    (ende-tools-call-async
      call configuration (lambda (value) (setq response value)))
     (ende-test--wait-for (lambda () response))
     response))
@@ -390,7 +390,7 @@
             configuration)))
          (failure
           (ende-protocol-json-read-string
-           (ende-chat--tool-response
+           (ende-test--tool-response
             (list :id "bad" :name "read_file"
                   :arguments "{\"path\":\"missing\"}")
             configuration))))
@@ -398,6 +398,17 @@
         (progn
           (should (eq (ende-protocol-json-get "ok" success) t))
           (should (eq (ende-protocol-json-get "ok" failure) :false))
+          (dolist (name '("project_info" "run_host_command"))
+            (dolist (arguments '("[]" "null" "{invalid"))
+              (let ((result
+                     (ende-protocol-json-read-string
+                      (ende-test--tool-response
+                       (list :id "bad-arguments" :name name :arguments arguments)
+                       configuration))))
+                (should (eq (ende-protocol-json-get "ok" result) :false))
+                (should (string-prefix-p
+                         "tool arguments are not a JSON object: "
+                         (ende-protocol-json-get "error" result))))))
           (should-not (string-match-p "\\\"ok\\\":null"
                                       (json-encode failure)))
           (let* ((done nil)
@@ -412,7 +423,7 @@
                                         :stdout_truncated :json-false
                                         :stderr_truncated :json-false)
                                   nil))))
-              (ende-chat--tool-response-async
+              (ende-tools-call-async
                (list :id "async" :name "run_host_command"
                      :arguments "{\"command\":\"exit 9\"}")
                async-config

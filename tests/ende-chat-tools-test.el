@@ -124,15 +124,15 @@
 (ert-deftest ende-test/chat-tool-call-list-accepts-proper-sequences-only ()
   (let* ((calls '((:id "call-1") (:id "call-2")))
          (result (list :tool-calls calls)))
-    (should (equal (ende-chat--tool-call-list result) calls))
-    (should (equal (ende-chat--tool-call-list
+    (should (equal (ende-agent--tool-call-list result) calls))
+    (should (equal (ende-agent--tool-call-list
                     (list :tool-calls (vconcat calls)))
                    calls))
-    (should-not (ende-chat--tool-call-list '(:tool-calls nil)))
+    (should-not (ende-agent--tool-call-list '(:tool-calls nil)))
     (dolist (invalid '("not a call array" 7))
-      (should-error (ende-chat--tool-call-list (list :tool-calls invalid))))
+      (should-error (ende-agent--tool-call-list (list :tool-calls invalid))))
     (should-error
-     (ende-chat--tool-call-list
+     (ende-agent--tool-call-list
       (list :tool-calls (cons (car calls) 'improper-tail))))))
 
 (ert-deftest ende-test/chat-tool-loop-filters-search-and-authorizes-calls ()
@@ -348,7 +348,7 @@
          (pending nil)
          (executed-tools nil)
          (original-tool-response-async
-          (symbol-function #'ende-chat--tool-response-async))
+          (symbol-function #'ende-tools-call-async))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls
@@ -366,9 +366,9 @@
            ende-tools--empty-object-schema
            (lambda (_arguments _root callback) (push callback pending))
            nil :no-resource '(:requires-root nil :async t))
-          (cl-letf (((symbol-function #'ende-chat--tool-response-async)
+          (cl-letf (((symbol-function #'ende-tools-call-async)
                      (lambda (call configuration callback)
-                       (push (ende-chat--tool-value call :name) executed-tools)
+                       (push (ende-tools-call-value call :name) executed-tools)
                        (funcall original-tool-response-async
                                 call configuration callback))))
             (ende-test--with-buffer

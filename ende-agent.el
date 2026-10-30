@@ -12,10 +12,16 @@
 (require 'ende-provider)
 (require 'subr-x)
 
-(declare-function ende-chat--tool-call-list "ende-chat")
-(declare-function ende-chat--tool-value "ende-chat")
-(declare-function ende-chat--tool-response-async "ende-chat")
 (declare-function ende-chat-config-capabilities "ende-chat-config" (environment))
+
+(defun ende-agent--tool-call-list (result)
+  "Return normalized tool calls from LLM RESULT."
+  (let ((calls (plist-get result :tool-calls)))
+    (cond
+     ((null calls) nil)
+     ((and (vectorp calls) (not (stringp calls))) (append calls nil))
+     ((and (listp calls) (proper-list-p calls)) calls)
+     (t (error "Malformed tool calls returned by the provider")))))
 
 (defun ende-agent--selected-policy (parent)
   "Return PARENT's selected frozen child policy, or signal an error."
@@ -252,12 +258,12 @@ include any explicit user overrides relevant to the assigned task.")
                          (cons "user" task))))
     (ende-agent-run
      job messages configuration
-     (list :tool-calls #'ende-chat--tool-call-list
+     (list :tool-calls #'ende-agent--tool-call-list
            :tool-name (lambda (call)
-                        (ende-chat--tool-value call :name))
+                        (ende-tools-call-value call :name))
            :tool-arguments (lambda (call)
-                             (ende-chat--tool-value call :arguments))
-           :execute-tool #'ende-chat--tool-response-async
+                             (ende-tools-call-value call :arguments))
+           :execute-tool #'ende-tools-call-async
            :execute-spawn-batch #'ende-agent--spawn-batch
            :omit-source-metadata t
            :assistant-message
@@ -266,8 +272,8 @@ include any explicit user overrides relevant to the assigned task.")
              (dolist (call calls)
                (ende-agent--work-section
                 child "Tool request"
-                (format "%s\n\n%s" (ende-chat--tool-value call :name)
-                        (ende-chat--tool-value call :arguments))))
+                (format "%s\n\n%s" (ende-tools-call-value call :name)
+                        (ende-tools-call-value call :arguments))))
              (list :role "assistant" :content (or (plist-get result :content) "")
                    :tool-calls calls
                    :reasoning-content (plist-get result :reasoning-content)))
@@ -275,9 +281,9 @@ include any explicit user overrides relevant to the assigned task.")
            (lambda (child call content)
              (ende-agent--work-section
               child "Tool result"
-              (format "%s\n\n%s" (ende-chat--tool-value call :name) content))
+              (format "%s\n\n%s" (ende-tools-call-value call :name) content))
              (list :role "tool" :tool-call-id
-                   (ende-chat--tool-value call :id) :content content))
+                   (ende-tools-call-value call :id) :content content))
            :on-final
            (lambda (child result _messages)
              (let ((answer (or (plist-get result :content) "")))

@@ -3014,9 +3014,9 @@ OPTIONS are passed to `json-serialize'."
 (defun ende-chat--prepare-tool-call (call &optional store-file)
   "Store CALL in STORE-FILE and return it with a fresh execution identity."
   (let ((store-file (or store-file (ende-tool-store--filename)))
-        (id (ende-chat--tool-value call :id))
-        (name (ende-chat--tool-value call :name))
-        (arguments (ende-chat--tool-value call :arguments)))
+        (id (ende-tools-call-value call :id))
+        (name (ende-tools-call-value call :name))
+        (arguments (ende-tools-call-value call :arguments)))
     (let ((execution
            (ende-tool-store-create-execution id name arguments store-file)))
       (list :id (plist-get execution :provider-call-id)
@@ -3027,10 +3027,10 @@ OPTIONS are passed to `json-serialize'."
 
 (defun ende-chat--store-tool-result (call content)
   "Store CONTENT as CALL's exact result payload."
-  (let ((execution-id (ende-chat--tool-value call :execution-id))
-        (id (ende-chat--tool-value call :id)))
+  (let ((execution-id (ende-tools-call-value call :execution-id))
+        (id (ende-tools-call-value call :id)))
     (ende-tool-store-store-result
-     execution-id id content (ende-chat--tool-value call :store-file))))
+     execution-id id content (ende-tools-call-value call :store-file))))
 
 (defun ende-chat--tool-section-properties
     (request-id execution-id tool-name kind)
@@ -3052,9 +3052,9 @@ OPTIONS are passed to `json-serialize'."
 
 (defun ende-chat--tool-call-text (level request-id call &optional result-properties)
   "Render normalized tool CALL at LEVEL with optional RESULT-PROPERTIES."
-  (let ((execution-id (ende-chat--tool-value call :execution-id))
-        (name (ende-chat--tool-value call :name))
-        (arguments (ende-chat--tool-value call :arguments)))
+  (let ((execution-id (ende-tools-call-value call :execution-id))
+        (name (ende-tools-call-value call :name))
+        (arguments (ende-tools-call-value call :arguments)))
     (unless (and (stringp execution-id) (not (string-empty-p execution-id))
                  (stringp name) (not (string-empty-p name))
                  (stringp arguments))
@@ -3111,9 +3111,9 @@ OPTIONS are passed to `json-serialize'."
 
 (defun ende-chat--tool-result-text (level request-id call result)
   "Store RESULT and render its compact sibling reference."
-  (let ((execution-id (ende-chat--tool-value call :execution-id))
-        (name (ende-chat--tool-value call :name))
-        (arguments (ende-chat--tool-value call :arguments)))
+  (let ((execution-id (ende-tools-call-value call :execution-id))
+        (name (ende-tools-call-value call :name))
+        (arguments (ende-tools-call-value call :arguments)))
     (unless (and (stringp execution-id) (stringp name) (stringp arguments))
       (error "Malformed generated tool result"))
     (ende-chat--store-tool-result call result)
@@ -3500,67 +3500,6 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (error "No chat context to compact"))
     messages))
 
-(defun ende-chat--tool-value (tool-call key)
-  "Return KEY from normalized TOOL-CALL."
-  (if (hash-table-p tool-call)
-      (gethash (substring (symbol-name key) 1) tool-call)
-    (plist-get tool-call key)))
-
-(defun ende-chat--tool-call-list (result)
-  "Return normalized tool calls from LLM RESULT."
-  (let ((calls (plist-get result :tool-calls)))
-    (cond
-     ((null calls) nil)
-     ((and (vectorp calls) (not (stringp calls))) (append calls nil))
-     ((and (listp calls) (proper-list-p calls)) calls)
-     (t (error "Malformed tool calls returned by the provider")))))
-
-(defun ende-chat--tool-response (call configuration)
-  "Run normalized tool CALL under CONFIGURATION and return its JSON result."
-  (let* ((id (ende-chat--tool-value call :id))
-         (name (ende-chat--tool-value call :name))
-         (arguments (ende-chat--tool-value call :arguments)))
-    (unless (and (stringp id) (not (string-empty-p id))
-                 (stringp name) (not (string-empty-p name))
-                 (stringp arguments))
-      (error "Malformed provider tool call: %S" call))
-    (let ((parsed
-           (condition-case caught
-               (json-parse-string arguments :object-type 'hash-table)
-             (error
-              (list :invalid-arguments (error-message-string caught))))))
-      (ende-tools--json-encode-tool-result
-       (if (hash-table-p parsed)
-           (ende-tool-call name parsed (plist-get configuration :root)
-                           configuration)
-         (list :ok nil :tool name
-               :error (format "tool arguments are not a JSON object: %s"
-                              (plist-get parsed :invalid-arguments))))))))
-
-(defun ende-chat--tool-response-async (call configuration callback)
-  (let* ((name (ende-chat--tool-value call :name))
-         (arguments (ende-chat--tool-value call :arguments))
-         (tool (ende-tool--find name)))
-    (if (not (and tool (ende-tool-async tool)))
-        (funcall callback (ende-chat--tool-response call configuration))
-      (let ((parsed
-             (condition-case caught
-                 (json-parse-string arguments :object-type 'hash-table)
-               (error
-                (list :invalid-arguments (error-message-string caught))))))
-        (if (hash-table-p parsed)
-            (ende-tool-call-async
-             name parsed (plist-get configuration :root) configuration
-             (lambda (result)
-               (funcall callback
-                        (ende-tools--json-encode-tool-result result))))
-          (funcall
-           callback
-           (ende-tools--json-encode-tool-result
-            (list :ok nil :tool name
-                  :error (format "tool arguments are not a JSON object: %s"
-                                 (plist-get parsed :invalid-arguments))))))))))
-
 (defun ende-chat--execute-tool-round
     (job calls configuration level request-id assistant callback)
   "Compatibility adapter for JOB's shared sequential tool runner."
@@ -3568,13 +3507,13 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
     (ende-agent--run-tools
      job calls configuration
      (list
-      :tool-name (lambda (call) (ende-chat--tool-value call :name))
-      :execute-tool #'ende-chat--tool-response-async
+      :tool-name (lambda (call) (ende-tools-call-value call :name))
+      :execute-tool #'ende-tools-call-async
       :tool-result-message
       (lambda (job call content)
 	(ende-chat--stage-agent-section
 	 job (ende-chat--tool-result-text level request-id call content) t)
-	(list :role "tool" :tool-call-id (ende-chat--tool-value call :id)
+	(list :role "tool" :tool-call-id (ende-tools-call-value call :id)
               :content content)))
      (lambda (tool-messages)
        (funcall callback (cons assistant tool-messages))))))
@@ -3598,9 +3537,9 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                     guidance))
            (normalized-calls
             (mapcar (lambda (call)
-                      (list :id (ende-chat--tool-value call :id)
-                            :name (ende-chat--tool-value call :name)
-                            :arguments (ende-chat--tool-value call :arguments)))
+                      (list :id (ende-tools-call-value call :id)
+                            :name (ende-tools-call-value call :name)
+                            :arguments (ende-tools-call-value call :arguments)))
                     calls))
            (assistant
             (list :role "assistant" :content (plist-get prepared :parts)
@@ -3618,7 +3557,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
       (dolist (entry (cl-mapcar #'cons calls guidance))
         (let* ((call (car entry))
                (text (cdr entry))
-               (id (ende-chat--tool-value call :id)))
+               (id (ende-tools-call-value call :id)))
           (ende-chat--stage-agent-section
            job (ende-chat--tool-result-text level request-id call text) t)
           (setq messages
@@ -3655,9 +3594,9 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
       (ende-agent-run
        job messages configuration
        (list
-        :tool-calls #'ende-chat--tool-call-list
-        :tool-name (lambda (call) (ende-chat--tool-value call :name))
-        :execute-tool #'ende-chat--tool-response-async
+        :tool-calls #'ende-agent--tool-call-list
+        :tool-name (lambda (call) (ende-tools-call-value call :name))
+        :execute-tool #'ende-tools-call-async
         :execute-spawn-batch #'ende-agent--spawn-batch
         :assistant-message
         (lambda (job result calls)
@@ -3691,7 +3630,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
             (ende-chat--stage-agent-section
              job (ende-chat--tool-result-text level request-id call content) t)
             (list :role "tool"
-                  :tool-call-id (ende-chat--tool-value call :id)
+                  :tool-call-id (ende-tools-call-value call :id)
                   :content content)))
         :after-tool-round
         (lambda (job messages)

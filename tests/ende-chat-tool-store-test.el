@@ -456,7 +456,7 @@
                              "RESULT_B"))))
                (original-records
                 (mapcar (lambda (call)
-                          (let ((id (ende-chat--tool-value call :execution-id)))
+                          (let ((id (ende-tools-call-value call :execution-id)))
                             (cons (ende-tool-store-get id 'request)
                                   (ende-tool-store-get id 'result))))
                         calls)))
@@ -468,7 +468,7 @@
                    (lambda (headline)
                      (equal (ende-chat--property
                              document headline :tool-execution-id)
-                            (ende-chat--tool-value (car calls) :execution-id)))
+                            (ende-tools-call-value (car calls) :execution-id)))
                    (ende-test--tool-headlines document 'call))))
             (goto-char (org-element-property :begin call-a))
             (org-edit-headline "--> read_file: user-edited summary")
@@ -487,7 +487,7 @@
                    (lambda (headline)
                      (equal (ende-chat--property
                              document headline :tool-execution-id)
-                            (ende-chat--tool-value (car calls) :execution-id)))
+                            (ende-tools-call-value (car calls) :execution-id)))
                    (ende-test--tool-headlines document 'result))))
             (undo-boundary)
             (delete-region (org-element-property :begin result-a)
@@ -521,14 +521,14 @@
                      (lambda (headline)
                        (equal (ende-chat--property
                                document headline :tool-execution-id)
-                              (ende-chat--tool-value (cadr calls) :execution-id)))
+                              (ende-tools-call-value (cadr calls) :execution-id)))
                      (ende-test--tool-headlines document 'call)))
                    (result-b
                     (cl-find-if
                      (lambda (headline)
                        (equal (ende-chat--property
                                document headline :tool-execution-id)
-                              (ende-chat--tool-value (cadr calls) :execution-id)))
+                              (ende-tools-call-value (cadr calls) :execution-id)))
                      (ende-test--tool-headlines document 'result)))
                    (call-copy (buffer-substring-no-properties
                                (org-element-property :begin call-b)
@@ -573,7 +573,7 @@
               (should (equal original-records
                              (mapcar
                               (lambda (call)
-                                (let ((id (ende-chat--tool-value
+                                (let ((id (ende-tools-call-value
                                            call :execution-id)))
                                   (cons (ende-tool-store-get id 'request)
                                         (ende-tool-store-get id 'result))))
@@ -622,7 +622,7 @@
                    (lambda (headline)
                      (equal (ende-chat--property
                              document headline :tool-execution-id)
-                            (ende-chat--tool-value call-a :execution-id)))
+                            (ende-tools-call-value call-a :execution-id)))
                    (ende-test--tool-headlines document 'result)))
                  (result-a-copy
                   (buffer-substring-no-properties
@@ -636,7 +636,7 @@
                      (lambda (headline)
                        (equal (ende-chat--property
                                updated headline :tool-execution-id)
-                              (ende-chat--tool-value call-b :execution-id)))
+                              (ende-tools-call-value call-b :execution-id)))
                      (ende-test--tool-headlines updated 'call))))
               (goto-char (org-element-property :end call-b))
               (insert result-a-copy)))
@@ -685,7 +685,7 @@
                                  :arguments "{\"path\":\"b.el\"}")
                                "RESULT_B"))))
                  (database (sqlite-open ende-tool-store-file))
-                 (missing-id (ende-chat--tool-value (car calls) :execution-id)))
+                 (missing-id (ende-tools-call-value (car calls) :execution-id)))
             (unwind-protect
                 (sqlite-execute
                  database
@@ -786,7 +786,7 @@
                            (when (string-match-p "Some tool payloads are unavailable" text)
                              (push text notices))
                             text)))
-                       ((symbol-function 'ende-chat--tool-response-async)
+                       ((symbol-function 'ende-tools-call-async)
                         (lambda (&rest _arguments)
                           (setq replayed t)
                           (error "expired tool replayed"))))
@@ -804,11 +804,11 @@
                       (ende-chat--prepare-tool-call
                        '(:id "provider-A" :name "read_file"
                          :arguments "{\"path\":\"new.el\"}")))
-                     (new-id (ende-chat--tool-value new-call :execution-id)))
+                     (new-id (ende-tools-call-value new-call :execution-id)))
                 (should (file-exists-p file))
                 (should-not (member new-id
                                    (mapcar (lambda (call)
-                                             (ende-chat--tool-value
+                                             (ende-tools-call-value
                                               call :execution-id))
                                            calls-to-tools)))
                 (goto-char (point-max))
