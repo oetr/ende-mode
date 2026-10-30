@@ -205,25 +205,29 @@ context, removal, addition, and End of File.  Unsupported constructs signal."
         ('add (push (cdr line) new))))
     (cons (nreverse old) (nreverse new))))
 
-(defun ende-patch--line-sequence-at-p (lines expected start)
-  "Return non-nil when EXPECTED exactly matches LINES starting at START."
-  (and (<= (+ start (length expected)) (length lines))
-       (cl-loop for expected-line in expected
-                for actual-line in (nthcdr start lines)
-                always (string= expected-line actual-line))))
+(defun ende-patch--line-prefix-p (lines expected)
+  "Return non-nil when LINES begins with all EXPECTED lines."
+  (while (and expected lines (string= (car expected) (car lines)))
+    (setq expected (cdr expected)
+          lines (cdr lines)))
+  (null expected))
 
 (defun ende-patch--hunk-matches (lines old end-of-file)
   "Return all exact positions of OLD in LINES, respecting EOF constraint."
   (let ((count (length old))
+        (last-start (- (length lines) (length old)))
         (matches nil))
     (if (zerop count)
         (when (null lines)
           (setq matches '(0)))
-      (cl-loop for start from 0 to (- (length lines) count)
-               when (and (ende-patch--line-sequence-at-p lines old start)
-                         (or (not end-of-file)
-                             (= (+ start count) (length lines))))
-               do (push start matches)))
+      (if end-of-file
+          (when (and (>= last-start 0)
+                     (ende-patch--line-prefix-p (nthcdr last-start lines) old))
+            (setq matches (list last-start)))
+        (cl-loop for tail on lines
+                 for start from 0 to last-start
+                 when (ende-patch--line-prefix-p tail old)
+                 do (push start matches))))
     (nreverse matches)))
 
 (defun ende-patch-apply-update (source hunks)

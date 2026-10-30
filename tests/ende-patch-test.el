@@ -86,6 +86,16 @@
          (hunks (plist-get (car insertion) :hunks)))
     (should-error (ende-patch-apply-update "nonempty\n" hunks))))
 
+(ert-deftest ende-test/patch-updates-long-sources-with-or-without-eof-constraint ()
+  (let ((prefix (apply #'concat (make-list 20000 "line\n"))))
+    (dolist (eof '(nil t))
+      (let* ((patch (concat "*** Begin Patch\n*** Update File: file\n"
+                            "@@\n-last\n+changed\n"
+                            (when eof "*** End of File\n") "*** End Patch"))
+             (hunks (plist-get (car (ende-patch-parse patch)) :hunks)))
+        (should (equal (ende-patch-apply-update (concat prefix "last\n") hunks)
+                       (concat prefix "changed\n")))))))
+
 (provide 'ende-patch-test)
 
 ;;; ende-patch-test.el ends here
