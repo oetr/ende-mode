@@ -282,46 +282,21 @@
                              (user-error "Marked jobs changed; refresh first")))
             (hash-table-keys ende-queue-ui--marked-ids))))
 
-(defun ende-queue-ui--state-snapshot (jobs)
-  "Return stable ID/state pairs for JOBS."
-  (mapcar (lambda (job) (cons (ende-job-id job) (ende-job-state job))) jobs))
-
-(defun ende-queue-ui--assert-states-current (snapshot)
-  "Reject SNAPSHOT if a selected live ID disappeared or changed state."
-  (unless (equal snapshot
-                 (mapcar (lambda (entry)
-                           (when-let* ((job (ende-queue-live-job-by-id (car entry))))
-                             (cons (car entry) (ende-job-state job)))) snapshot))
-    (user-error "Queue changed; review the selection and try again")))
-
-(defun ende-queue-ui--confirm-cancel (jobs &optional all)
-  "Confirm broad or started JOBS cancellation, labeling ALL explicitly."
-  (let ((running (cl-count 'running jobs :key #'ende-job-state))
-        (queued (cl-count 'queued jobs :key #'ende-job-state))
-        (waiting (cl-count 'suspended jobs :key #'ende-job-state))
-        (owns-children (cl-some #'ende-job-children jobs)))
-    (or (null jobs)
-        (and (not all) (not owns-children) (= queued 1) (= running 0) (= waiting 0))
-        (yes-or-no-p (format "Cancel%s %d running, %d queued, and %d waiting jobs? "
-                             (if all " all" "") running queued waiting)))))
-
 (defun ende-queue-ui-cancel ()
-  "Cancel selected live subtrees with the existing confirmation safeguards."
+  "Confirm the selection, then cancel its remaining live jobs and descendants."
   (interactive)
-  (let* ((jobs (ende-queue-ui--selected-jobs))
-         (snapshot (ende-queue-ui--state-snapshot jobs)))
-    (when (ende-queue-ui--confirm-cancel jobs)
-      (ende-queue-ui--assert-states-current snapshot)
-      (ende-queue-cancel-ids (mapcar #'car snapshot)))))
+  (let* ((ids (mapcar #'ende-job-id (ende-queue-ui--selected-jobs)))
+         (count (length ids)))
+    (when (yes-or-no-p (format "Cancel %d selected job%s? " count (if (= count 1) "" "s")))
+      (when-let* ((live-ids (cl-remove-if-not #'ende-queue-live-job-by-id ids)))
+        (ende-queue-cancel-ids live-ids)))))
 
 (defun ende-queue-ui-cancel-all ()
   "Cancel all live work without clearing retained history."
   (interactive)
-  (let* ((jobs (ende-queue-ui--live-jobs))
-         (snapshot (ende-queue-ui--state-snapshot jobs)))
-    (when (ende-queue-ui--confirm-cancel jobs t)
-      (unless (equal snapshot (ende-queue-ui--state-snapshot (ende-queue-ui--live-jobs)))
-        (user-error "Queue changed; review it and try again"))
+  (let ((count (length (ende-queue-ui--live-jobs))))
+    (when (and (> count 0)
+               (yes-or-no-p (format "Cancel all %d job%s? " count (if (= count 1) "" "s"))))
       (ende-abort-queue))))
 
 (defun ende-queue-ui-change-policy ()

@@ -104,6 +104,78 @@
                   (should (string-match-p "Finished (1)" (buffer-string)))))))
         (ende-test--dashboard-reset)))))
 
+(ert-deftest ende-test/dashboard-cancellation-counts-selection-and-cancels-descendants ()
+  (dolist (multiple '(nil t))
+    (ende-test--dashboard-reset)
+    (let ((ende--queue-suspended t))
+      (unwind-protect
+          (with-temp-buffer
+            (let* ((root (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
+                   (other (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
+                   children)
+              (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
+              (dotimes (_ 5) (push (ende-test--dashboard-child root "Child") children))
+              (with-current-buffer (ende-queue-open)
+                (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id root))))
+                (when multiple
+                  (dolist (job (list root other))
+                    (puthash (ende-job-id job) t ende-queue-ui--marked-ids)))
+                (cl-letf (((symbol-function 'yes-or-no-p)
+                           (lambda (prompt)
+                             (should (equal prompt (if multiple "Cancel 2 selected jobs? "
+                                                     "Cancel 1 selected job? ")))
+                             t)))
+                  (ende-queue-ui-cancel)))
+              (dolist (job (cons root children))
+                (should (eq (ende-job-state job) 'cancelled)))
+              (should (eq (ende-job-state other) (if multiple 'cancelled 'queued)))))
+        (ende-test--dashboard-reset)))))
+
+(ert-deftest ende-test/dashboard-cancellation-rechecks-live-selection ()
+  (dolist (states '((completed) (completed queued) (running) (suspended)))
+    (ende-test--dashboard-reset)
+    (let ((ende--queue-suspended t)
+          (ende--job-handlers '((insert . ignore))))
+      (unwind-protect
+          (with-temp-buffer
+            (let ((jobs (mapcar (lambda (_)
+                                  (ende-enqueue (ende-test--dashboard-request
+                                                 ende-test--dashboard-profile))) states)))
+              (dolist (job jobs) (puthash (ende-job-id job) t ende-queue-ui--marked-ids))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (_prompt)
+                           (cl-mapc (lambda (job state)
+                                      (pcase state
+                                        ('completed (ende--job-settle job 'completed "done"))
+                                        ((or 'running 'suspended)
+                                         (let ((ende--queue-suspended nil)) (ende-process-next))
+                                         (when (eq state 'suspended) (ende-job-suspend job #'ignore)))))
+                                    jobs states)
+                           t)))
+                (ende-queue-ui-cancel))
+              (cl-mapc (lambda (job state)
+                         (should (eq (ende-job-state job)
+                                     (if (eq state 'completed) 'completed 'cancelled))))
+                       jobs states)))
+        (ende-test--dashboard-reset)))))
+
+(ert-deftest ende-test/dashboard-cancel-all-rechecks-live-work ()
+  (ende-test--dashboard-reset)
+  (let ((ende--queue-suspended t))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((first (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
+                (second (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile))))
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt)
+                         (should (equal prompt "Cancel all 2 jobs? "))
+                         (ende--job-settle first 'completed "done")
+                         t)))
+              (ende-queue-ui-cancel-all))
+            (should (eq (ende-job-state first) 'completed))
+            (should (eq (ende-job-state second) 'cancelled))))
+      (ende-test--dashboard-reset))))
+
 (ert-deftest ende-test/dashboard-elapsed-resets-only-on-first-start ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t)
