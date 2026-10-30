@@ -76,9 +76,6 @@
 (defvar-local ende-selector--control-preferences nil
   "Explicit control preferences for the current provider and model.")
 
-(defvar-local ende-selector--control-context nil
-  "Provider/model identity associated with `ende-selector--control-preferences'.")
-
 (defvar-local ende-selector--effort nil
   "Reasoning effort selected for the current provider and model.")
 
@@ -140,12 +137,6 @@
 (defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
   (nth ende-selector--model-index ende-selector--models))
-
-(defun ende-selector--control-context-key ()
-  "Return the selected provider/model identity, or nil while incomplete."
-  (let ((provider (ende-selector--provider-name))
-        (model (ende-selector--model-name)))
-    (and provider model (list provider model))))
 
 (defun ende-selector--resolved-profile ()
   "Return the current provider/model profile with controls applied."
@@ -509,18 +500,16 @@ the discovered pricing metadata for those model IDs."
 
 (defun ende-selector--set-control-context ()
   "Restore explicit control preferences for the selected provider and model."
-  (let* ((context (ende-selector--control-context-key))
-         (provider (ende-selector--provider-name))
+  (let* ((provider (ende-selector--provider-name))
          (model (ende-selector--model-name))
          (preferences
-          (and context
+          (and provider model
                (copy-tree
                 (ende-model-selection-control-preferences
                  provider model
                  (or ende-selector--source-buffer (current-buffer)))))))
     (ende-selector--cancel-effort-probe)
-    (setq ende-selector--control-context context
-          ende-selector--control-preferences preferences
+    (setq ende-selector--control-preferences preferences
           ende-selector--effort
           (plist-get (ende-provider-profile-for-selection
                       provider model preferences)
@@ -647,7 +636,7 @@ PREFERRED is selected only when it is present in MODELS."
         (setq ende-selector--model-state
               (if models :ready :error))))))
 
-(defun ende-selector--probe-current-provider (&optional _preferred)
+(defun ende-selector--probe-current-provider ()
   "Probe the selected provider when it has dynamic model discovery."
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
@@ -717,7 +706,7 @@ PREFERRED is selected only when it is present in MODELS."
      ((ende-provider-model-discovery-available-p profile)
       (ende-selector--set-provisional-models profile preferred)
       (setq ende-selector--model-state :validating)
-      (ende-selector--probe-current-provider preferred))
+      (ende-selector--probe-current-provider))
      (t
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
@@ -1192,7 +1181,6 @@ performed locally so typing a search term never starts another network request."
             ende-selector--model-selection-generation 0
             ende-selector--model-state :ready
             ende-selector--control-preferences nil
-            ende-selector--control-context nil
             ende-selector--effort nil
             ende-selector--effort-state :none
             ende-selector--quota nil

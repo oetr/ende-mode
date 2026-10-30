@@ -385,7 +385,8 @@
          (make-hash-table :test #'equal))
         (ende-provider-profiles
          '((remote :url "http://remote.example/v1/chat/completions"
-                   :model "remote/default"))))
+                   :model "remote/default"
+                   :models ("remote/default" "remote/remembered")))))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -409,7 +410,18 @@
                        0))
             (should (= (hash-table-count
                         ende-model-selection--buffer-control-preferences)
-                       0))))
+                       0))
+            (ende-selector--set-provider 0)
+            (ende-selector--move-model 1)
+            (funcall probe-callback
+                     '("remote/default" "remote/remembered") nil)
+            (should (equal (ende-selector--model-name) "remote/default"))
+            (ende-selector--set-provider 0)
+            (setq ende-model-selection--last-used
+                  '(:provider remote :model "remote/default"))
+            (funcall probe-callback
+                     '("remote/default" "remote/remembered") nil)
+            (should (equal (ende-selector--model-name) "remote/default"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
