@@ -11,6 +11,26 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
+(ert-deftest ende-test/target-scopes-evaluate-once-and-clean-up ()
+  (with-temp-buffer
+    (insert "source")
+    (let ((target (ende-target-create :buffer (current-buffer) :start 2 :end 5 :cursor 2))
+          (calls 0)
+          (current-start 'caller))
+      (unwind-protect
+          (progn
+            (ende-target-with-restriction (progn (cl-incf calls) target)
+              (should (eq current-start 'caller)))
+            (should (= calls 1))
+            (should-error
+             (ende-target-with-application (progn (cl-incf calls) target)
+               (should (ende-target-applying target))
+               (error "stop")))
+            (should (= calls 2))
+            (should-not (ende-target-applying target))
+            (should (= (point-max) 7)))
+        (ende-target-release target)))))
+
 (ert-deftest ende-test/source-metadata-uses-file-basename-and-mode ()
   (ende-test--with-buffer "source"
 			  (setq-local buffer-file-name "/ssh:user@example:/path/to/example.el")

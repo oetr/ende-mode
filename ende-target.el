@@ -222,26 +222,30 @@ each side is additionally capped by `ende-target-window-chars'."
 (defmacro ende-target-with-restriction (target &rest body)
   "Evaluate BODY within TARGET's original and current restrictions."
   (declare (indent 1) (debug t))
-  `(let ((current-start (point-min))
-         (current-end (point-max)))
+  (let ((object (make-symbol "target"))
+        (current-start (make-symbol "current-start"))
+        (current-end (make-symbol "current-end")))
+    `(let ((,object ,target)
+           (,current-start (point-min))
+           (,current-end (point-max)))
      (save-restriction
        (widen)
        (let* ((original-start
                (ende-target--anchor-position
-                (ende-target-restriction-beg ,target)))
+                (ende-target-restriction-beg ,object)))
               (original-end
                (ende-target--anchor-position
-                (ende-target-restriction-end ,target)))
+                (ende-target-restriction-end ,object)))
               (restriction-start
-               (and original-start (max original-start current-start)))
+               (and original-start (max original-start ,current-start)))
               (restriction-end
-               (and original-end (min original-end current-end))))
+               (and original-end (min original-end ,current-end))))
          (unless (and restriction-start restriction-end
                       (<= (point-min) restriction-start restriction-end
                           (point-max)))
            (error "original buffer restriction no longer exists"))
          (narrow-to-region restriction-start restriction-end)
-         ,@body))))
+         ,@body)))))
 
 (defun ende-target-validate-source (target start end)
   "Signal when TARGET's selected source at START..END has changed."
@@ -347,11 +351,12 @@ not invalidate it."
 (defmacro ende-target-with-application (target &rest body)
   "Evaluate BODY while TARGET ignores mutations made by its own result."
   (declare (indent 1) (debug t))
-  `(progn
-     (setf (ende-target-applying ,target) t)
-     (unwind-protect
-         (progn ,@body)
-       (setf (ende-target-applying ,target) nil))))
+  (let ((object (make-symbol "target")))
+    `(let ((,object ,target))
+       (setf (ende-target-applying ,object) t)
+       (unwind-protect
+           (progn ,@body)
+         (setf (ende-target-applying ,object) nil)))))
 
 (defun ende-target--remove-hooks (target)
   "Remove lifecycle hooks installed for TARGET."
