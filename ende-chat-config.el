@@ -107,10 +107,11 @@
 
 (defun ende-chat-config--tool-name (value)
   "Validate and return registered tool VALUE."
-  (let ((name (ende-chat-config--name value "tool")))
-    (unless (ende-tool--find name)
+  (let* ((name (ende-chat-config--name value "tool"))
+         (tool (ende-tool--find name)))
+    (unless tool
       (ende-chat-config--error "unknown tool: %s" name))
-    (when (ende-tool-internal-only (ende-tool--find name))
+    (when (ende-tool-internal-only tool)
       (ende-chat-config--error "internal tool cannot be configured: %s" name))
     name))
 
@@ -484,18 +485,9 @@ Grants are (RESOURCE . TARGET) pairs, keyed by tool."
 
 (defun ende-chat-config--validate-grant-types (configuration)
   "Validate all grants in CONFIGURATION, including inactive tool grants."
-  (let ((resources (plist-get configuration :resources)))
-    (dolist (entry (plist-get configuration :grants))
-      (let* ((tool (ende-tool--find (car entry)))
-             (kind (ende-tool-resource-kind tool)))
-        (unless (eq kind 'none)
-          (dolist (grant (cdr entry))
-            (let* ((resource (ende-chat-config--lookup (car grant) resources))
-                   (type (plist-get resource :type)))
-              (unless (eq kind type)
-                (ende-chat-config--error
-                 "resource %s has type %s and cannot be assigned to %s (%s)"
-                 (car grant) type (car entry) kind))))))))
+  (dolist (entry (plist-get configuration :grants))
+    (ende-chat-config--check-assignment-types
+     (list (car entry)) (mapcar #'car (cdr entry)) configuration))
   configuration)
 
 (defun ende-chat-config--assign-resources (form configuration additive)
@@ -959,17 +951,19 @@ Copy only group and resource definitions from VISIBLE."
     (setq current
           (cons definition (assq-delete-all (car definition) current)))))
 
+(defun ende-chat-config--ancestry (tree parent-table headline)
+  (let (ancestors)
+    (while headline
+      (push headline ancestors)
+      (setq headline (gethash headline parent-table)))
+    (cons tree ancestors)))
+
 (defun ende-chat-config-resolve-environment (tree parent-table headline)
   "Resolve root policy and isolated visible agent registry for HEADLINE."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
-         (ancestry nil)
-         (current headline)
          (configuration (ende-chat-config--empty))
          (definitions nil))
-    (while current
-      (push current ancestry)
-      (setq current (gethash current parent-table)))
-    (dolist (node (cons tree ancestry))
+    (dolist (node (ende-chat-config--ancestry tree parent-table headline))
       (let ((blocks (gethash node blocks-by-node)))
         (when blocks
           (let* ((forms (ende-chat-config--block-forms (car blocks)))
@@ -1027,13 +1021,8 @@ them.  Definitions need not be used.  An explicit root is required only when
 an active tool needs a project.  Invalid forms or
 active tools without required resources or roots signal errors before dispatch."
   (let* ((blocks-by-node (ende-chat-config--local-blocks tree))
-         (ancestry nil)
-         (current headline)
          (configuration (ende-chat-config--empty)))
-    (while current
-      (push current ancestry)
-      (setq current (gethash current parent-table)))
-    (dolist (node (cons tree ancestry))
+    (dolist (node (ende-chat-config--ancestry tree parent-table headline))
       (let ((blocks (gethash node blocks-by-node)))
         (when blocks
           (setq configuration

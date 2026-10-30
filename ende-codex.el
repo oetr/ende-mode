@@ -988,11 +988,12 @@ is queried for every call; it does not share the model catalog cache."
      (ende-codex--session-debug-record session) outcome
      (ende-stream-session-usage (ende-codex--session-stream session))
      (ende-codex--response-status session) value))
-  (ende-stream-settle-generation
-   (ende-codex--session-stream session) outcome value "output_tokens"
-   (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-   (list :tool-calls (ende-codex--tool-call-list session))
-   (ende-codex--tool-call-list session) nil t))
+  (let ((tool-calls (ende-codex--tool-call-list session)))
+    (ende-stream-settle-generation
+     (ende-codex--session-stream session) outcome value "output_tokens"
+     (plist-get (ende-codex--session-profile session) :model) "OpenAI"
+     (list :tool-calls tool-calls)
+     tool-calls nil t)))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -1207,17 +1208,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
        (ende-codex--session-stream session)
        (ende-codex--reasoning-summary-key json)
        (ende-protocol-json-get "text" json)))
-     ((member type '("response.completed" "response.done"))
+     ((member type '("response.completed" "response.done" "response.incomplete"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))
       (setf (ende-stream-session-finish-reason
-             (ende-codex--session-stream session)) "stop")
-      (setf (ende-codex--session-terminal-event session) json))
-     ((string= type "response.incomplete")
-      (ende-codex--handle-usage
-       session (ende-protocol-json-get "usage" response))
-      (setf (ende-stream-session-finish-reason
-             (ende-codex--session-stream session)) "incomplete")
+             (ende-codex--session-stream session))
+            (if (equal type "response.incomplete") "incomplete" "stop"))
       (setf (ende-codex--session-terminal-event session) json))
      ((member type '("response.failed" "error"))
       (let ((error (or (ende-protocol-json-get "error" json) json)))

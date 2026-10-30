@@ -75,7 +75,8 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--settle (session outcome value)
   "Settle SESSION exactly once with OUTCOME and VALUE."
-  (let ((record (ende-llm--session-debug-record session))
+  (let* ((record (ende-llm--session-debug-record session))
+         (tool-calls (ende-llm--tool-call-list session))
         (extra-fields
          (list :reasoning-content
                (and (ende-llm--session-reasoning-content-parts session)
@@ -84,7 +85,7 @@ The :callbacks argument initializes the composed transport lifecycle."
                      (reverse
                       (ende-llm--session-reasoning-content-parts session))
                      ""))
-               :tool-calls (ende-llm--tool-call-list session))))
+               :tool-calls tool-calls)))
     (when record
       (ende-debug-record-completion
        record outcome
@@ -94,7 +95,7 @@ The :callbacks argument initializes the composed transport lifecycle."
      (ende-llm--session-stream session) outcome value "completion_tokens"
      (ende-llm--session-model session) nil extra-fields
      (or (ende-llm--session-reasoning-content-parts session)
-         (ende-llm--tool-call-list session)) nil nil)))
+         tool-calls) nil nil)))
 
 (defun ende-llm--fail (session error)
   "Settle SESSION with structured ERROR."

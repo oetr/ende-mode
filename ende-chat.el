@@ -3302,22 +3302,8 @@ FINAL includes retained tool images and trims compaction output."
                  (protocol-properties
                   (if compact
                       result-properties
-                    (concat
-                     result-properties
-                     (when-let* ((shift
-                                  (plist-get normalized :headline-shift)))
-                       (ende-chat--response-property
-                        ende-chat-content-headline-shift-property
-                        (number-to-string shift)))
-                     (when-let* ((block
-                                     (plist-get normalized :synthetic-end)))
-                       (concat
-                        (ende-chat--response-property
-                         ende-chat-content-synthetic-end-property block)
-                        (when (plist-get normalized :synthetic-newline)
-                          (ende-chat--response-property
-                           ende-chat-content-synthetic-newline-property
-                           "t")))))))
+                    (concat result-properties
+                            (ende-chat--normalized-response-properties normalized))))
                  (answer
                   (if compact
                       (ende-chat--assistant-text
