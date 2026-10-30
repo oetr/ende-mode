@@ -11,6 +11,7 @@
 (require 'nxml-mode)
 (require 'ende-org)
 (require 'ende-css)
+(require 'ende-file)
 
 (defgroup ende-artifact nil "Conversation images." :group 'ende)
 
@@ -463,8 +464,7 @@ BYTES, when supplied, seed the bounded source cache."
                             (list (format "Artifact %s in conversation %s: %s"
                                           (file-name-nondirectory path) chat-id
                                           (error-message-string failure))))))))
-       (let ((coding-system-for-write 'no-conversion))
-         (write-region bytes nil path nil 'silent nil 'excl))
+       (ende-file-write-new path bytes 'no-conversion)
        info))
    bytes))
 

@@ -19,6 +19,7 @@
 (require 'seq)
 (require 'ende-core)
 (require 'ende-edit)
+(require 'ende-file)
 (require 'ende-project)
 (require 'ende-worker)
 (require 'ende-url)
@@ -1442,14 +1443,7 @@ Return canonical target and root-relative/public path details."
 
 (defun ende-tools--write-raw-exclusive (path bytes mode)
   "Exclusively create PATH from uninterpreted BYTES and restore MODE."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (insert bytes)
-    (let ((coding-system-for-write 'no-conversion)
-          (inhibit-message t))
-      (write-region (point-min) (point-max) path nil 'silent nil 'excl)))
-  (when mode (set-file-modes path mode))
-  path)
+  (ende-file-write-new path bytes 'no-conversion mode))
 
 (defun ende-tools--write-change-set-stage (change-set)
   "Create a private, adjacent staged file for existing-file CHANGE-SET."
@@ -1962,13 +1956,7 @@ Return canonical target and root-relative/public path details."
 
 (defun ende-tools--write-new-file (content path &optional coding-system)
   "Write CONTENT to new PATH, failing if the filesystem entry exists."
-  (let ((coding-system (or coding-system coding-system-for-write)))
-    (with-temp-buffer
-      (when (eq coding-system 'no-conversion)
-        (set-buffer-multibyte nil))
-      (insert content)
-      (let ((coding-system-for-write coding-system))
-        (write-region (point-min) (point-max) path nil 'silent nil 'excl)))))
+  (ende-file-write-new path content (or coding-system coding-system-for-write)))
 
 (defun ende-tools--create-file (arguments root)
   "Create a new authorized file immediately when the chat permits it."
