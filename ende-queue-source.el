@@ -15,12 +15,12 @@
 
 (defun ende-queue-source--chat-position (family)
   "Find FAMILY's reply or question by durable identity in the current buffer."
-  (when (derived-mode-p 'org-mode)
-    (save-excursion
-      (goto-char (point-min))
-      (let ((request (ende-job-family-request-id family))
-            (question (ende-job-family-question-id family))
-            reply question-position)
+  (let ((request (ende-job-family-request-id family))
+        (question (ende-job-family-question-id family)))
+    (when (and (derived-mode-p 'org-mode) (or request question))
+      (save-excursion
+        (goto-char (point-min))
+        (let (reply question-position)
         (while (re-search-forward org-heading-regexp nil t)
           (let ((position (match-beginning 0)))
             (goto-char position)
@@ -36,7 +36,7 @@
                        (not (ende-queue-source--inside-work-p)))
               (setq reply position)))
           (forward-line 1))
-        (or reply question-position)))))
+        (or reply question-position))))))
 
 (defun ende-queue-visit-source (job)
   "Visit retained JOB's originating source, reopening its file if necessary."
