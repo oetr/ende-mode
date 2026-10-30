@@ -1635,9 +1635,9 @@ generate_image is optional and uses the user's configured image backend.
 Never invent filenames or paths, construct storage links, or configure artifact
 storage. Ende owns artifact paths."
    ende-agent--implementation-guidance
-   "\n\nAsk the user about unresolved conflicts and wait before editing. When delegating,
-include relevant explicit user overrides and bring unresolved choices back to
-the user.\n\n"
+   "\n\nAsk the user about unresolved conflicts and wait before editing.\n\n"
+   ende-agent--delegation-guidance
+   "\n\n"
    "Work in bounded, incremental steps: make one bounded change, verify it with
 an appropriate available task-dependent check, inspect the result when useful,
 and establish a known-good checkpoint before the next independent step.

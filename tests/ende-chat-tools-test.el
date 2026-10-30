@@ -7,19 +7,22 @@
 (require 'ende-test-helpers)
 (require 'ende-chat-test-helpers)
 
-(ert-deftest ende-test/chat-and-agents-share-implementation-guidance-after-reload ()
+(ert-deftest ende-test/chat-and-agents-share-guidance-after-reload ()
   (let ((ende-agent--implementation-guidance "")
+        (ende-agent--delegation-guidance "")
         (ende-agent--system-prompt "")
         (ende-chat--system ""))
     (ende-reload)
     (should-not (string-empty-p ende-agent--implementation-guidance))
+    (should-not (string-empty-p ende-agent--delegation-guidance))
     (with-temp-buffer
       (org-mode)
       (dolist (prompt (list (ende-chat--system-prompt
                             (ende-chat--build-document))
                            ende-agent--system-prompt))
-        (should (string-match-p
-                 (regexp-quote ende-agent--implementation-guidance) prompt))))))
+        (dolist (guidance (list ende-agent--implementation-guidance
+                               ende-agent--delegation-guidance))
+          (should (string-match-p (regexp-quote guidance) prompt)))))))
 
 (ert-deftest ende-test/chat-completions-tool-diagnostics-cover-local-and-openrouter ()
   (should (eq ende-tool-diagnostics t))
