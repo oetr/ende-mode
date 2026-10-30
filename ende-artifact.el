@@ -292,7 +292,7 @@ Check containment even when intermediate directories are symlinks."
       (remhash oldest ende-artifact--cache))))
 
 (defun ende-artifact--validate-image (path bytes)
-  "Validate image BYTES read from PATH and return path-based metadata."
+  "Validate image BYTES for PATH and return path-based metadata."
   (let* ((extension (downcase (or (file-name-extension path) "")))
          (type (cond ((equal extension "svg") 'svg)
                      ((equal extension "png") 'png)
@@ -432,16 +432,26 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
              (cl-incf index)
              (or (file-exists-p path) (file-symlink-p path))))
     (unwind-protect
-        (progn
+        (let* ((info (condition-case failure (ende-artifact--validate-image path bytes)
+                       (error
+                        (signal 'ende-artifact-validation-error
+                                (list (format "Artifact %s in conversation %s: %s"
+                                              name chat-id (error-message-string failure)))))))
+               (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
           (let ((coding-system-for-write 'no-conversion))
             (write-region bytes nil path nil 'silent nil 'excl))
           (setq written t)
-          (ende-artifact-resolve base chat-id name)
+          (ende-artifact--cache-room (if retain (length bytes) 0))
+          (puthash path (list :signature (ende-artifact--file-signature path)
+                             :info info :used (cl-incf ende-artifact--cache-clock)
+                             :data (and retain bytes) :payloads nil)
+                   ende-artifact--cache)
           (when ende-artifact--record-stored-file
             (funcall ende-artifact--record-stored-file path))
           (setq complete t)
           name)
       (unless complete
+        (remhash path ende-artifact--cache)
         (when (and written (file-exists-p path) (not (file-symlink-p path)))
           (delete-file path))))))
 

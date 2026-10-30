@@ -87,6 +87,27 @@
         (should-not (string-match-p "base64" (ende-transport-safe-error-text url)))
         (should-not (string-match-p "base64" (error-message-string failure)))))))
 
+(ert-deftest ende-artifact-wire-content-is-stable ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (names (cl-letf (((symbol-function 'ende-artifact--read-bytes)
+                            (lambda (_) (ert-fail "New artifacts need no readback"))))
+                    (list (ende-artifact-store base "stable" ende-artifact-test-png "image/png")
+                          (ende-artifact-store base "stable" ende-artifact-test-jpeg "image/jpeg"))))
+           (text (mapconcat (lambda (name)
+                              (ende-artifact-render base "stable" name buffer-file-name)) names ""))
+           (messages (list (list :role "assistant" :content (ende-artifact-content text))))
+           (encode (lambda (history)
+                     (list (json-encode (ende-llm--request-body history '(:model "vision")))
+                           (json-encode (ende-codex--request-messages history)))))
+           (expected (funcall encode messages)))
+      (should (equal expected (funcall encode messages)))
+      (ende-artifact-clear-cache)
+      (should (equal expected (funcall encode messages)))
+      (should (equal expected
+                     (funcall encode (list (list :role "assistant"
+                                                 :content (ende-artifact-content text)))))))))
+
 (ert-deftest ende-artifact-round-trip-and-native-export ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
