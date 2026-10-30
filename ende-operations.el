@@ -503,28 +503,26 @@ SKIP-REVIEW is non-nil, it must return the review overlay it creates."
            (ende--create-review-overlay
             buffer review-start (point) display original)))))))
 
-(defun ende--apply-insertion-edit (target buffer start edit display)
-  "Apply one insertion EDIT to TARGET and return its review overlay."
-  (ende--apply-anchor-edit target buffer start edit display))
+(defun ende--make-structured-state (type instruction)
+  (list :type type
+        :instruction instruction
+        :system-prompt (pcase type
+                         ('write-anywhere ende-write-anywhere-system)
+                         ('insert-anywhere ende-insert-anywhere-system))
+        :pass-count 0
+        :requested nil
+        :first-pass-applied 0
+        :repaired 0
+        :repair-attempts 0
+        :failures nil
+        :last-result nil
+        :source nil))
 
 (defun ende--structured-state (job)
   "Return or initialize the structured-edit state for JOB."
   (or (ende-job-structured-state job)
       (setf (ende-job-structured-state job)
-            (list :type (ende-job-type job)
-                  :instruction nil
-                  :system-prompt
-                  (pcase (ende-job-type job)
-                    ('write-anywhere ende-write-anywhere-system)
-                    ('insert-anywhere ende-insert-anywhere-system))
-                  :pass-count 0
-                  :requested nil
-                  :first-pass-applied 0
-                  :repaired 0
-                  :repair-attempts 0
-                  :failures nil
-                  :last-result nil
-                  :source nil))))
+            (ende--make-structured-state (ende-job-type job) nil))))
 
 (defun ende--structured-edit-descending-p (left right key)
   "Return non-nil when LEFT should be applied after RIGHT using KEY."
@@ -756,14 +754,6 @@ PREVIOUS contains failures from the preceding structured pass."
           (ende--application-error failure)
           (ende--structured-annotate-result result state)))))))
 
-(defun ende--apply-write-anywhere-result (job result)
-  "Apply a WRITE-ANYWHERE RESULT and repair or settle JOB."
-  (ende--handle-structured-result job result))
-
-(defun ende--apply-insert-anywhere-result (job result)
-  "Apply an INSERT-ANYWHERE RESULT and repair or settle JOB."
-  (ende--handle-structured-result job result))
-
 ;;;; Operation handlers
 
 (defun ende--run-insert (job)
@@ -832,17 +822,7 @@ PREVIOUS contains failures from the preceding structured pass."
 					 (ende-target-validate-source target start end)
 					 (setq source (buffer-substring-no-properties start end)))))
        (setf (ende-job-structured-state job)
-             (list :type type
-                   :instruction instruction
-                   :system-prompt system-prompt
-                   :pass-count 0
-                   :requested nil
-                   :first-pass-applied 0
-                   :repaired 0
-                   :repair-attempts 0
-                   :failures nil
-                   :last-result nil
-                   :source nil))
+             (ende--make-structured-state type instruction))
        (ende--dispatch-llm
         job
         (list (cons "system" system-prompt)
@@ -857,9 +837,7 @@ PREVIOUS contains failures from the preceding structured pass."
                               "Make all appropriate insertions and replacements within the provided document.")
                             source)))
         (lambda (result)
-          (if insertion-only
-              (ende--apply-insert-anywhere-result job result)
-            (ende--apply-write-anywhere-result job result))))))))
+          (ende--handle-structured-result job result)))))))
 
 (defun ende--run-improve (job)
   "Execute an improvement JOB that replaces its target atomically."

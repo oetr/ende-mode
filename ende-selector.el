@@ -1047,7 +1047,6 @@ performed locally so typing a search term never starts another network request."
       (user-error "ende source buffer no longer exists"))
     (unless (stringp model)
       (user-error "ende has no selected model"))
-    (ende-selector--save-selection)
     (if (eq type 'chat)
         (if (with-current-buffer source
               (derived-mode-p 'org-mode))

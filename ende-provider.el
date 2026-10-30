@@ -223,14 +223,15 @@ Supported settings are `:max-concurrency' and `:parallel'."
            :require-sse t
            :display-name "OpenAI"
            :builtin-profile 'openai))
-    ('openrouter
-     (list :url "https://openrouter.ai/api/v1/chat/completions"
+    ((or 'openrouter 'openrouter-batch)
+     (let ((batch (eq name 'openrouter-batch)))
+       (list :url "https://openrouter.ai/api/v1/chat/completions"
            :batch-url "https://openrouter.ai/api/v1/batches"
            :batch-endpoint "/v1/chat/completions"
-           :transport 'auto
+           :transport (if batch 'openrouter-batch 'auto)
            :model ende-provider--default-openrouter-model
-           :max-concurrency 4
-           :parallel nil
+           :max-concurrency (if batch 16 4)
+           :parallel batch
            :temperature 0.2
            :auth-source-host "openrouter.ai"
            :auth-source-user "ende"
@@ -242,29 +243,8 @@ Supported settings are `:max-concurrency' and `:parallel'."
            :controls '((:temperature :path ("temperature"))
                        (:reasoning-effort
                         :path ("reasoning" "effort")))
-           :require-sse t
-           :builtin-profile 'openrouter))
-    ('openrouter-batch
-     (list :url "https://openrouter.ai/api/v1/chat/completions"
-           :batch-url "https://openrouter.ai/api/v1/batches"
-           :batch-endpoint "/v1/chat/completions"
-           :transport 'openrouter-batch
-           :model ende-provider--default-openrouter-model
-           :max-concurrency 16
-           :parallel t
-           :temperature 0.2
-           :auth-source-host "openrouter.ai"
-           :auth-source-user "ende"
-           :auth-source-port 443
-           :request-headers
-           (copy-sequence ende-provider--openrouter-request-headers)
-           :reasoning-effort-probe-function
-           #'ende-provider--probe-openrouter-reasoning-efforts
-           :controls '((:temperature :path ("temperature"))
-                       (:reasoning-effort
-                        :path ("reasoning" "effort")))
-           :require-sse nil
-           :builtin-profile 'openrouter-batch))
+           :require-sse (not batch)
+           :builtin-profile name)))
     ('deepseek
      (list :type 'openai
            :url "https://api.deepseek.com/chat/completions"
