@@ -1414,9 +1414,7 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
 
 (defun ende-queue-cancel-ids (ids)
   "Cancel live jobs identified by IDS as one dispatch-atomic mutation."
-  (let ((jobs (mapcar #'ende-queue-live-job-by-id ids)))
-    (unless (and jobs (cl-every #'identity jobs))
-      (user-error "Selected jobs changed; nothing was cancelled"))
+  (when-let* ((jobs (delq nil (mapcar #'ende-queue-live-job-by-id ids))))
     (ende--cancel-live-jobs jobs)))
 
 (defun ende--source-buffer-killed ()

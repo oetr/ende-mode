@@ -71,7 +71,10 @@
               (should-not (ende-queue-ui--position-for-key (cons 'job (ende-job-id grandchild))))
               (should (= (length (ende-queue-ui--entry-positions)) 3))
               (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id finished))))
-              (dolist (command '(ende-queue-ui-cancel ende-queue-ui-mark
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+                (ende-queue-ui-cancel))
+              (should (eq (ende-job-state finished) 'completed))
+              (dolist (command '(ende-queue-ui-mark
                                  ende-queue-ui-inject-guidance ende-queue-ui-move-up))
                 (should-error (funcall command) :type 'user-error))
               (should truncate-lines)
@@ -146,6 +149,7 @@
                                   (ende-enqueue (ende-test--dashboard-request
                                                  ende-test--dashboard-profile))) states)))
               (dolist (job jobs) (puthash (ende-job-id job) t ende-queue-ui--marked-ids))
+              (puthash -1 t ende-queue-ui--marked-ids)
               (cl-letf (((symbol-function 'yes-or-no-p)
                          (lambda (_prompt)
                            (cl-mapc (lambda (job state)
@@ -163,21 +167,25 @@
                        jobs states)))
         (ende-test--dashboard-reset)))))
 
-(ert-deftest ende-test/dashboard-cancel-all-rechecks-live-work ()
+(ert-deftest ende-test/dashboard-cancel-all-keeps-confirmed-scope ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t))
     (unwind-protect
         (with-temp-buffer
           (let ((first (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
-                (second (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile))))
+                (second (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
+                later)
             (cl-letf (((symbol-function 'yes-or-no-p)
                        (lambda (prompt)
-                         (should (equal prompt "Cancel all 2 jobs? "))
+                         (should (equal prompt "Cancel 2 selected jobs? "))
                          (ende--job-settle first 'completed "done")
+                         (setq later (ende-enqueue
+                                      (ende-test--dashboard-request ende-test--dashboard-profile)))
                          t)))
               (ende-queue-ui-cancel-all))
             (should (eq (ende-job-state first) 'completed))
-            (should (eq (ende-job-state second) 'cancelled))))
+            (should (eq (ende-job-state second) 'cancelled))
+            (should (ende-job-live-p later))))
       (ende-test--dashboard-reset))))
 
 (ert-deftest ende-test/dashboard-elapsed-resets-only-on-first-start ()

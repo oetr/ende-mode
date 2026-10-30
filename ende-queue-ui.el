@@ -284,22 +284,25 @@
                              (user-error "Marked jobs changed; refresh first")))
             (hash-table-keys ende-queue-ui--marked-ids))))
 
+(defun ende-queue-ui--confirm-cancellation (ids)
+  "Confirm cancellation of IDS and their live descendants."
+  (let ((count (length ids)))
+    (when (yes-or-no-p (format "Cancel %d selected job%s? " count (if (= count 1) "" "s")))
+      (ende-queue-cancel-ids ids))))
+
 (defun ende-queue-ui-cancel ()
   "Confirm the selection, then cancel its remaining live jobs and descendants."
   (interactive)
-  (let* ((ids (mapcar #'ende-job-id (ende-queue-ui--selected-jobs)))
-         (count (length ids)))
-    (when (yes-or-no-p (format "Cancel %d selected job%s? " count (if (= count 1) "" "s")))
-      (when-let* ((live-ids (cl-remove-if-not #'ende-queue-live-job-by-id ids)))
-        (ende-queue-cancel-ids live-ids)))))
+  (ende-queue-ui--confirm-cancellation
+   (if (> (hash-table-count ende-queue-ui--marked-ids) 0)
+       (hash-table-keys ende-queue-ui--marked-ids)
+     (list (ende-job-id (ende-queue-ui--current-job))))))
 
 (defun ende-queue-ui-cancel-all ()
   "Cancel all live work without clearing retained history."
   (interactive)
-  (let ((count (length (ende-queue-ui--live-jobs))))
-    (when (and (> count 0)
-               (yes-or-no-p (format "Cancel all %d job%s? " count (if (= count 1) "" "s"))))
-      (ende-abort-queue))))
+  (ende-queue-ui--confirm-cancellation
+   (mapcar #'ende-job-id (ende-queue-ui--live-jobs))))
 
 (defun ende-queue-ui-change-policy ()
   "Change only queued, never-started, unfrozen top-level family policies."
