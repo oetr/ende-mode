@@ -1659,7 +1659,9 @@ Prefer provided file-editing tools for source changes over shell/Python/sed.
 Never manually reproduce large encoded strings, minified JavaScript, generated
 code, or other opaque data in edits; use deterministic, source-derived boundaries
 or a programmatic transformation. If an exact-match edit fails, change methods
-immediately instead of retrying larger patches.")
+immediately instead of retrying larger patches.
+
+Ensure that you answer user's questions with Sardaukar-like efficiency, precision, and text scarcity.")
   "System prompt for Org-backed chat requests.")
 
 (defun ende-chat--system-prompt (document)
