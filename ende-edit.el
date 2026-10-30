@@ -207,6 +207,14 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
     (setq errors (nreverse errors))
     (list :edits edits :errors errors)))
 
+(defun ende-edit--record-conflict (conflicts left right)
+  (let ((left-index (plist-get left :index))
+        (right-index (plist-get right :index)))
+    (unless (gethash left-index conflicts)
+      (puthash left-index (format "overlaps edit %d" (1+ right-index)) conflicts))
+    (unless (gethash right-index conflicts)
+      (puthash right-index (format "overlaps edit %d" (1+ left-index)) conflicts))))
+
 (defun ende-edit-parse-replacements
     (content source &optional allow-empty-text maximum operation)
   "Parse anchor-based replacement edits from CONTENT against SOURCE.
@@ -278,58 +286,19 @@ CONTENT may also be a vector of already parsed edit objects."
           (when (and (not replace)
                      last-zero-edit
                      (= start last-zero-start))
-            (unless (gethash (plist-get edit :index) conflict-messages)
-              (puthash (plist-get edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get last-zero-edit :index)))
-                       conflict-messages))
-            (unless (gethash (plist-get last-zero-edit :index)
-                             conflict-messages)
-              (puthash (plist-get last-zero-edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get edit :index)))
-                       conflict-messages)))
+            (ende-edit--record-conflict conflict-messages edit last-zero-edit))
           (when (and replace
                      last-zero-edit
                      (= start last-zero-start)
                      (equal (plist-get last-zero-edit :position) "before"))
-            (unless (gethash (plist-get edit :index) conflict-messages)
-              (puthash (plist-get edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get last-zero-edit :index)))
-                       conflict-messages))
-            (unless (gethash (plist-get last-zero-edit :index)
-                             conflict-messages)
-              (puthash (plist-get last-zero-edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get edit :index)))
-                       conflict-messages)))
+            (ende-edit--record-conflict conflict-messages edit last-zero-edit))
           (when (and (not replace) max-edit
                      (< (plist-get max-edit :start) start)
                      (> max-end start))
-            (unless (gethash (plist-get edit :index) conflict-messages)
-              (puthash (plist-get edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get max-edit :index)))
-                       conflict-messages))
-            (unless (gethash (plist-get max-edit :index) conflict-messages)
-              (puthash (plist-get max-edit :index)
-                       (format "overlaps edit %d"
-                               (1+ (plist-get edit :index)))
-                       conflict-messages)))
+            (ende-edit--record-conflict conflict-messages edit max-edit))
           (when replace
             (when (and max-edit (> max-end start))
-              (unless (gethash (plist-get edit :index) conflict-messages)
-                (puthash (plist-get edit :index)
-                         (format "overlaps edit %d"
-                                 (1+ (plist-get max-edit :index)))
-                         conflict-messages))
-              (unless (gethash (plist-get max-edit :index)
-                               conflict-messages)
-                (puthash (plist-get max-edit :index)
-                         (format "overlaps edit %d"
-                                 (1+ (plist-get edit :index)))
-                         conflict-messages)))
+              (ende-edit--record-conflict conflict-messages edit max-edit))
             (when (or (null max-end) (> end max-end))
               (setq max-end end
                     max-edit edit)))
