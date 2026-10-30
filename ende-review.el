@@ -306,34 +306,21 @@ the inserted characters are tinted using the review overlay's face."
       (delete-overlay overlay)
       (ende-review--notify-change buffer))))
 
-(defun ende-review-resolve-conflicts (buffer start end)
-  "Resolve pending reviews overlapping START..END in BUFFER.
-The behavior is controlled by `ende-review-conflict-policy'.  Return the
-overlays that were resolved, or nil when there was no conflict."
+(defun ende-review-conflicts-to-approve (buffer start end)
+  "Return reviews approved for replacement at START..END in BUFFER.
+Check `ende-review-conflict-policy' without removing any reviews."
   (let ((overlays (ende-review--overlays-overlapping buffer start end)))
     (when overlays
-      (let ((approve
-             (pcase ende-review-conflict-policy
-               ('block
-                (ende-review-assert-available buffer start end))
-               ('approve t)
-               ('confirm
-                (or (yes-or-no-p
-                     (format
-                      "Approve %d overlapping ende review%s and continue? "
-                      (length overlays)
-                      (if (= (length overlays) 1) "" "s")))
-                    (user-error
-                     "ende: job cancelled; pending reviews were not changed")))
-               (_
-                (error "unknown ende review conflict policy: %s"
-                       ende-review-conflict-policy)))))
-        (when approve
-          (dolist (overlay overlays)
-            (ende-review-delete-overlay overlay))
-          (message "ende: approved %d overlapping generated region%s"
-                   (length overlays)
-                   (if (= (length overlays) 1) "" "s")))))
+      (pcase ende-review-conflict-policy
+        ('block (ende-review-assert-available buffer start end))
+        ('approve nil)
+        ('confirm
+         (unless (yes-or-no-p
+                  (format "Approve %d overlapping ende review%s and continue? "
+                          (length overlays) (if (= (length overlays) 1) "" "s")))
+           (user-error "ende: job cancelled; pending reviews were not changed")))
+        (_ (error "unknown ende review conflict policy: %s"
+                  ende-review-conflict-policy))))
     overlays))
 
 ;;;; Interactive Commands

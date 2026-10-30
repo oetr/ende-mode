@@ -64,12 +64,15 @@ INSTRUCTION and PROFILE override the operation defaults."
                       :review-policy
                       (ende-operation-review-policy type)))))
          (overlay nil)
+         (reviews nil)
+         (job nil)
          (committed nil))
     (unwind-protect
         (progn
           (when (eq (ende-target-review-policy target) 'resolve)
-            (ende-review-resolve-conflicts
-             buffer (ende-target-start target) (ende-target-end target)))
+            (setq reviews
+                  (ende-review-conflicts-to-approve
+                   buffer (ende-target-start target) (ende-target-end target))))
           (setq overlay (ende-ui-create-overlay
                          buffer start end "Queued" 'badge-only))
           (let ((data (list :target target :overlay overlay)))
@@ -77,10 +80,13 @@ INSTRUCTION and PROFILE override the operation defaults."
               (setq data (plist-put data :profile profile)))
             (when instruction
               (setq data (plist-put data :instruction instruction)))
-            (let ((job (ende-enqueue (cons type data))))
+            (let ((ende--queue-suspended t))
+              (setq job (ende-enqueue (cons type data)))
               (setq committed t)
-              (message "ende: queued %s job %d" type (ende-job-id job))
-              job)))
+              (mapc #'ende-review-delete-overlay reviews)))
+          (ende-process-next)
+          (message "ende: queued %s job %d" type (ende-job-id job))
+          job)
       (unless committed
         (ende-ignore-errors #'ende-target-release target)
         (when overlay

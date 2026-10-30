@@ -3810,86 +3810,72 @@ COMPACT requests a context fence and archives the instruction section."
          (target nil)
          (overlay nil)
          (job nil)
+         (drawer-markers
+          (org-element-map
+           (ende-chat--document-tree document) 'property-drawer
+           (lambda (drawer)
+             (when (cl-every #'ende-chat--reserved-property-p
+                            (org-element-map drawer 'node-property #'identity))
+               (copy-marker (org-element-property :begin drawer))))))
          (committed nil))
-    (save-excursion
-      (atomic-change-group
-        ;; Other control drawers are still at the positions DOCUMENT parsed.
-        (ende-chat--hide-control-drawers-in-tree
-         (ende-chat--document-tree document))
-        (goto-char (org-element-property :begin question))
-        (let ((before (buffer-size)))
-          (when (and compact (not source-fence))
-            (org-entry-put nil ende-chat-visibility-property "hidden"))
-          (unless (and compact source-fence local-role)
-            (org-entry-put nil ende-chat-role-property "user"))
-          (unless (ende-chat--property document question :id)
-            (org-entry-put nil ende-chat-id-property question-id))
-          (setq question-marker
-                (ende-chat--make-question-marker question))
-          (when (and conversation-id
-                     (null (ende-chat--local-property
-                            root ende-chat-id-property)))
-            ;; Persist the root identity so follow-ups retain affinity after reload.
-            (save-excursion
-              (goto-char (org-element-property :begin root))
-              (org-entry-put nil ende-chat-id-property conversation-id)
-              (ende-chat--hide-control-drawers-at-heading (point))))
-          ;; The property writes shifted positions parsed before them.
-          (setq position
-                (ende-chat--insert-placeholder
-                 (+ (ende-chat--placeholder-position
-                     document question question-id compact)
-                    (- (buffer-size) before))
-                 response-level question-id request-id compact))
+    (unwind-protect
+        (progn
           (save-excursion
+            (atomic-change-group
+              (goto-char (org-element-property :begin question))
+              (let ((before (buffer-size)))
+                (when (and compact (not source-fence))
+                  (org-entry-put nil ende-chat-visibility-property "hidden"))
+                (unless (and compact source-fence local-role)
+                  (org-entry-put nil ende-chat-role-property "user"))
+                (unless (ende-chat--property document question :id)
+                  (org-entry-put nil ende-chat-id-property question-id))
+                (setq question-marker (ende-chat--make-question-marker question))
+                (when (and conversation-id
+                           (null (ende-chat--local-property root ende-chat-id-property)))
+                  (save-excursion
+                    (goto-char (org-element-property :begin root))
+                    (org-entry-put nil ende-chat-id-property conversation-id)))
+                (setq position
+                      (ende-chat--insert-placeholder
+                       (+ (ende-chat--placeholder-position
+                           document question question-id compact)
+                          (- (buffer-size) before))
+                       response-level question-id request-id compact)))
+              (setq target
+                    (ende-target-create
+                     :buffer (current-buffer) :start (point-min) :end (point-max)
+                     :cursor position :review-policy 'ignore))
+              (setq overlay
+                    (ende-ui-create-overlay
+                     (current-buffer) (1- position) (1- position) "Queued" 'badge-only))
+              (let ((ende--queue-suspended t))
+                (setq job
+                      (ende-enqueue
+                       (list type :target target :overlay overlay :profile profile
+                             :instruction
+                             (list :question-id question-id :request-id request-id
+                                   :source-fence source-fence :question-marker question-marker
+                                   :response-level response-level)))))))
+          (setq committed t)
+          (save-excursion
+            (dolist (marker drawer-markers)
+              (goto-char marker)
+              (org-fold-hide-drawer-toggle t t))
+            (ende-chat--hide-control-drawers-at-heading
+             (org-element-property :begin root))
             (goto-char question-marker)
             (org-back-to-heading t)
-            (ende-chat--hide-control-drawers-at-heading (point)))
-          (ende-chat--hide-control-drawers-at-heading position)))
-      (unwind-protect
-          (progn
-            (setq target
-                  (ende-target-create
-                   :buffer (current-buffer)
-                   :start (point-min)
-                   :end (point-max)
-                   :cursor position
-                   :review-policy 'ignore))
-            (setq overlay
-                  (ende-ui-create-overlay
-                   (current-buffer) (1- position) (1- position)
-                   "Queued" 'badge-only))
-            (let ((data
-                   (list :target target :overlay overlay
-                         :instruction (list :question-id question-id
-                                            :request-id request-id
-                                            :source-fence source-fence
-                                            :question-marker question-marker
-                                            :response-level response-level))))
-              (setq data (plist-put data :profile profile))
-              (setq job (ende-enqueue (cons type data))))
-            (setq committed t)
-            (message "ende: queued %s request %d" type (ende-job-id job))
-            job)
-        (unless committed
-          (when overlay
-            (ende-ui-delete-overlay overlay))
-          (when target
-            (ende-target-release target))
-          (when question-marker
-            (set-marker question-marker nil))
-          (when (and (buffer-live-p (current-buffer)) position)
-            (save-excursion
-              (goto-char (1- position))
-              (condition-case nil
-                  (let* ((failed-document (ende-chat--build-document))
-                         (failed (ende-chat--find-by-property
-                                  failed-document
-                                  ende-chat-request-id-property request-id)))
-                    (when failed
-                      (delete-region (1- position)
-                                     (org-element-property :end failed))))
-                ((error quit) nil)))))))))
+            (ende-chat--hide-control-drawers-at-heading (point))
+            (ende-chat--hide-control-drawers-at-heading position))
+          (ende-process-next)
+          (message "ende: queued %s request %d" type (ende-job-id job))
+          job)
+      (mapc (lambda (marker) (set-marker marker nil)) drawer-markers)
+      (unless committed
+        (when overlay (ende-ui-delete-overlay overlay))
+        (when target (ende-target-release target))
+        (when question-marker (set-marker question-marker nil))))))
 
 (defun ende-ask (&optional profile)
   "Ask the Org headline at point using PROFILE.

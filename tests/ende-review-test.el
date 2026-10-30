@@ -121,6 +121,19 @@
 			      (should (= (length (ende-review--overlays-in-buffer)) 2))
 			      (should (string= (buffer-string) "o!ld text"))))))
 
+(ert-deftest ende-test/failed-enqueue-preserves-pending-reviews ()
+  (ende-test--reset)
+  (let ((ende-review-conflict-policy 'approve))
+    (ende-test--with-buffer "generated text"
+      (let ((review (ende-review-create-overlay
+                     (current-buffer) 1 (point-max) nil nil "original")))
+        (goto-char 5)
+        (cl-letf (((symbol-function 'ende-enqueue)
+                   (lambda (&rest _) (error "Enqueue failed"))))
+          (should-error (ende-insert-at-cursor)))
+        (should (ende-review-overlay-p review))
+        (should-not (ende-all-live-jobs))))))
+
 (ert-deftest ende-test/automatic-review-conflict-approval-is-local ()
   (ende-test--reset)
   (let ((ende-review-conflict-policy 'approve)

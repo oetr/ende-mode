@@ -30,6 +30,22 @@
     (forward-line -1)
     (looking-at-p "^[[:space:]]*$")))
 
+(ert-deftest ende-test/chat-failed-enqueue-preserves-source ()
+  (ende-test--reset)
+  (dolist (compact '(nil t))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Root\n** Question\nAsk this.\n")
+      (ende-test--chat-goto "** Question")
+      (let* ((before (buffer-string))
+             (document (ende-chat--build-document))
+             (question (ende-chat--headline-at-point document)))
+        (cl-letf (((symbol-function 'ende-enqueue)
+                   (lambda (&rest _) (error "Enqueue failed"))))
+          (should-error (ende-chat--enqueue document question nil compact)))
+        (should (equal before (buffer-string)))
+        (should-not (ende-all-live-jobs))))))
+
 (ert-deftest ende-test/chat-title-tool-preserves-user-title-edited-in-flight ()
   (ende-test--reset)
   (let ((ende-test--title-prelude t)
