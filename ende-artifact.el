@@ -417,9 +417,10 @@ Keep generated filenames contained in their output directory."
                                  (cadr failure)
                                (error-message-string failure)))))))))
 
-(defun ende-artifact-store (base chat-id bytes media)
-  "Exclusively store validated BYTES of MEDIA under BASE and CHAT-ID.
-Return the chosen filename.  Insert no Org reference until writing succeeds."
+(defun ende-artifact--store (base chat-id media writer &optional bytes)
+  "Store MEDIA under BASE and CHAT-ID using WRITER; return its filename.
+WRITER receives the destination and returns validated metadata.
+BYTES, when supplied, seed the bounded source cache."
   (let* ((extension (cdr (assoc media '(("image/png" . "png")
                                        ("image/jpeg" . "jpg")
                                        ("image/svg+xml" . "svg")))))
@@ -432,14 +433,8 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
              (cl-incf index)
              (or (file-exists-p path) (file-symlink-p path))))
     (unwind-protect
-        (let* ((info (condition-case failure (ende-artifact--validate-image path bytes)
-                       (error
-                        (signal 'ende-artifact-validation-error
-                                (list (format "Artifact %s in conversation %s: %s"
-                                              name chat-id (error-message-string failure)))))))
+        (let* ((info (funcall writer path))
                (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
-          (let ((coding-system-for-write 'no-conversion))
-            (write-region bytes nil path nil 'silent nil 'excl))
           (setq written t)
           (ende-artifact--cache-room (if retain (length bytes) 0))
           (puthash path (list :signature (ende-artifact--file-signature path)
@@ -454,6 +449,30 @@ Return the chosen filename.  Insert no Org reference until writing succeeds."
         (remhash path ende-artifact--cache)
         (when (and written (file-exists-p path) (not (file-symlink-p path)))
           (delete-file path))))))
+
+(defun ende-artifact-store (base chat-id bytes media)
+  "Validate and exclusively store BYTES of MEDIA under BASE and CHAT-ID."
+  (ende-artifact--store
+   base chat-id media
+   (lambda (path)
+     (let ((info (condition-case failure (ende-artifact--validate-image path bytes)
+                   (error
+                    (signal 'ende-artifact-validation-error
+                            (list (format "Artifact %s in conversation %s: %s"
+                                          (file-name-nondirectory path) chat-id
+                                          (error-message-string failure))))))))
+       (let ((coding-system-for-write 'no-conversion))
+         (write-region bytes nil path nil 'silent nil 'excl))
+       info))
+   bytes))
+
+(defun ende-artifact-import (base chat-id source info)
+  "Move validated SOURCE with metadata INFO under BASE and CHAT-ID."
+  (ende-artifact--store
+   base chat-id (plist-get info :media-type)
+   (lambda (path)
+     (rename-file source path nil)
+     (plist-put (copy-sequence info) :path path))))
 
 (defun ende-artifact--caption (caption)
   "Return a nonempty single-line CAPTION, or nil."

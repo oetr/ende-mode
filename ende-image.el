@@ -8,6 +8,7 @@
 (require 'ende-queue)
 (require 'ende-curl)
 (require 'ende-transport)
+(require 'ende-worker)
 
 (declare-function ende-chat--build-document "ende-chat")
 (declare-function ende-chat--find-by-property "ende-chat")
@@ -264,48 +265,77 @@
       (error (error "%s returned unsupported or malformed image data; expected PNG or JPEG"
                     name)))))
 
-(defun ende-image--request (arguments profile callback register)
-  "Generate from ARGUMENTS using PROFILE, calling CALLBACK with parts or an error.
+(defun ende-image--store-response (file api directory)
+  "Decode FILE for API and store validated images in DIRECTORY."
+  (let ((body (with-temp-buffer
+                (insert-file-contents file)
+                (json-parse-buffer :object-type 'hash-table))))
+    (mapcar
+     (lambda (part)
+       (let ((name (ende-artifact-store directory "images" (plist-get part :bytes)
+                                        (plist-get part :media-type))))
+         (ende-artifact-resolve directory "images" name)))
+     (ende-image--response body (list :image-api api)))))
+
+(defun ende-image--request (arguments profile base id callback register)
+  "Generate from ARGUMENTS using PROFILE into BASE and ID.
+Call CALLBACK with artifact names or an error.
 REGISTER attaches cancellation to the existing tool lifecycle."
   (let* ((url (plist-get profile :url))
          (data (json-encode (ende-image--request-body arguments profile)))
          (lifecycle (ende-transport-session-create nil nil))
-         (chunks nil) (size 0) (settled nil))
+         (directory (make-temp-file (expand-file-name ".pending-" (ende-artifact-directory base id t)) t))
+         (file (expand-file-name "response.json" directory))
+         (settled nil) (processing nil))
     (cl-labels
-        ((finish (parts error)
+        ((finish (names error)
            (unless settled
-             (setq settled t chunks nil)
+             (setq settled t)
              (setf (ende-transport-session-terminal lifecycle) t)
              (ende-transport-session-cleanup lifecycle)
+             (ende-ignore-errors #'delete-directory directory t)
              (when register (funcall register nil))
-             (funcall callback parts error))))
+             (funcall callback names error)))
+         (import-images (images error)
+           (unless settled
+             (if error (finish nil error)
+               (condition-case failure
+                   (finish
+                    (ende-artifact--call-with-transaction
+                     (lambda ()
+                       (mapcar (lambda (info)
+                                 (ende-artifact-import base id (plist-get info :path) info))
+                               images))) nil)
+                 (error (finish nil (error-message-string failure)))))))
+         (receive (process _event)
+           (when (and (not settled) (not processing)
+                      (memq (process-status process) '(exit signal)))
+             (setq processing t)
+             (condition-case failure
+                 (let ((status (car (ende-curl-response-headers
+                                     (ende-transport-session-headers-file lifecycle)))))
+                   (unless (and (zerop (process-exit-status process))
+                                status (<= 200 status) (< status 300))
+                     (error "Image request failed"))
+                   (when (and ende-max-response-bytes
+                              (> (file-attribute-size (file-attributes file)) ende-max-response-bytes))
+                     (error "Generated image response exceeds ende-max-response-bytes"))
+                   (ende-transport-session-add-canceller
+                    lifecycle
+                    (ende-worker-run
+                     'ende-image #'ende-image--store-response
+                     (list file (plist-get profile :image-api) directory) nil #'import-images)))
+               (error (finish nil (error-message-string failure)))))))
       (condition-case failure
           (let ((request
                  (ende-curl-start-request
                   :profile profile :url url :name "ende-generate-image"
+                  :output-file file
                   :command (lambda (headers config)
                              (ende-curl-json-command profile headers config "POST"
                                                      "application/json" t url))
-                  :filter (lambda (_process chunk)
-                            (cl-incf size (string-bytes chunk))
-                            (if (and ende-max-response-bytes (> size ende-max-response-bytes))
-                                (finish nil "Generated image response exceeds ende-max-response-bytes")
-                              (push chunk chunks)))
-                  :sentinel
-                  (lambda (process _event)
-                    (when (and (not settled) (memq (process-status process) '(exit signal)))
-                      (condition-case nil
-                          (let* ((status (car (ende-curl-response-headers
-                                               (ende-transport-session-headers-file lifecycle))))
-                                 (body (and (zerop (process-exit-status process))
-                                            status (<= 200 status) (< status 300)
-                                            (json-parse-string (apply #'concat (nreverse chunks))
-                                                               :object-type 'hash-table))))
-                            (unless body (error "Image request failed"))
-                            (condition-case failure
-                                (finish (ende-image--response body profile) nil)
-                              (error (finish nil (error-message-string failure)))))
-                        (error (finish nil "Image generation failed or returned invalid image data"))))))))
+                  :filter #'ignore
+                  :sentinel #'receive)))
             (ende-transport-session-set-resources lifecycle request)
             (when register (funcall register (lambda () (finish nil "Image generation cancelled"))))
             (unless settled
@@ -330,16 +360,14 @@ REGISTER attaches cancellation to the existing tool lifecycle."
              (id (ende-chat--property document (ende-chat--root document question) :id))
              (base (ende-artifact-base)))
         (ende-image--request
-         arguments (plist-get (ende-job-profile job) :image-profile)
-         (lambda (parts error)
+         arguments (plist-get (ende-job-profile job) :image-profile) base id
+         (lambda (names error)
            (if error (funcall callback nil error)
              (when (ende-job-execution-current-p job generation)
                (condition-case nil
                    (let (artifacts)
-                     (dolist (part parts)
-                       (push (list :name (ende-artifact-store base id (plist-get part :bytes)
-                                                             (plist-get part :media-type))
-                                   :caption caption) artifacts))
+                     (dolist (name names)
+                       (push (list :name name :caption caption) artifacts))
                      (setq artifacts (nreverse artifacts))
                      (setf (ende-job-instruction job)
                            (plist-put (ende-job-instruction job) :generated-artifacts

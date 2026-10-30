@@ -264,6 +264,12 @@ secrets are deliberately kept out of the command arguments."
   (ende-curl--cancel-idle-timer process)
   (when (and (process-live-p process)
              (not (process-get process :ende-settled)))
+    (when-let* ((file (process-get process :ende-output-file))
+                (attributes (file-attributes file)))
+      (let ((size (file-attribute-size attributes)))
+        (unless (equal size (process-get process :ende-output-size))
+          (process-put process :ende-output-size size)
+          (process-put process :ende-last-response-time (float-time)))))
     (let* ((limit (process-get process :ende-idle-limit))
            (remaining (- (cdr limit)
                          (- (float-time)
@@ -304,12 +310,14 @@ Wrap its filter and sentinel, preserving their transport-specific behavior."
 
 (cl-defun ende-curl-start-request
     (&key profile url name command filter sentinel
-          internal-headers
+          internal-headers output-file
           (buffer-name " *ende-curl*")
           (stderr-name " *ende-curl-stderr*"))
   "Start a curl request and return its owned process resources.
 COMMAND receives the generated headers and config file paths.  FILTER and
 SENTINEL are wrapped to track response inactivity and release its timer.
+OUTPUT-FILE, when non-nil, receives the response body and remains caller-owned.
+Its growth counts as response activity.
 An idle failure is stored in the process property `:ende-idle-error'
 before SENTINEL runs.  Startup failures clean up all resources before
 being re-signaled to the caller."
@@ -342,9 +350,11 @@ being re-signaled to the caller."
                  :stderr stderr-process
                  :connection-type 'pipe
                  :noquery t
-                 :command (funcall command headers-file config-file)
+                 :command (append (funcall command headers-file config-file)
+                                  (when output-file (list "--output" output-file)))
                  :filter filter
                  :sentinel sentinel))
+          (process-put process :ende-output-file output-file)
           (process-put process :ende-response-buffer response-buffer)
           (process-put process :ende-stderr-buffer stderr-buffer)
           (process-put process :ende-headers-file headers-file)
