@@ -108,6 +108,35 @@
                      (funcall encode (list (list :role "assistant"
                                                  :content (ende-artifact-content text)))))))))
 
+(ert-deftest ende-artifact-worker-requests-preserve-wire-content ()
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "request" ende-artifact-test-png "image/png"))
+           (image (ende-artifact-resolve base "request" name))
+           (messages (list (cons "user" "Draw")
+                           (list :role "assistant" :content (list image))
+                           (cons "user" "Continue")))
+           (profile '(:model "vision"))
+           (ende-max-output-tokens 123))
+      (dolist (builder '(ende-llm--request-body ende-codex--request-body))
+        (let* ((expected (encode-coding-string (json-encode (funcall builder messages profile)) 'utf-8))
+               (lifecycle (ende-transport-session-create nil #'ert-fail))
+               done file actual)
+          (unwind-protect
+              (progn
+                (ende-artifact-clear-cache)
+                (ende-request-prepare
+                 lifecycle (if (eq builder 'ende-llm--request-body) 'ende-llm 'ende-codex)
+                 builder messages profile nil
+                 (lambda (data _body _record)
+                   (setq file (plist-get data :file)
+                         actual (ende-artifact--read-bytes file) done t)))
+                (should-not done)
+                (ende-test--wait-for (lambda () done))
+                (should (equal expected actual)))
+            (ende-transport-session-cleanup lifecycle))
+          (should-not (file-exists-p file)))))))
+
 (ert-deftest ende-artifact-round-trip-and-native-export ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))

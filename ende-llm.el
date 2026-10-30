@@ -22,6 +22,7 @@
 (require 'ende-transport)
 (require 'ende-stream)
 (require 'ende-debug)
+(require 'ende-request)
 (require 'ende-provider)
 (require 'ende-openrouter-batch)
 (require 'ende-codex)
@@ -579,14 +580,10 @@ The :callbacks argument initializes the composed transport lifecycle."
                                             ende-max-output-tokens)))))
     (ende-controls-encode body (plist-get profile :controls) profile)))
 
-(defun ende-llm--start-session (session messages)
-  "Allocate and start SESSION for MESSAGES."
-  (ende-validate-resource-options)
+(defun ende-llm--start-prepared (session messages json-data request-body record)
+  "Start SESSION with prepared JSON-DATA, REQUEST-BODY and debug RECORD."
   (let* ((default-directory (ende-curl-local-directory))
-         (profile (ende-llm--session-profile session))
-         (request-body (ende-llm--request-body messages profile))
-         (json-data (encode-coding-string
-                     (json-encode request-body) 'utf-8)))
+         (profile (ende-llm--session-profile session)))
     (setf (ende-llm--session-messages session) messages)
     (setf (ende-llm--session-json-data session) json-data)
     (let ((request
@@ -597,14 +594,13 @@ The :callbacks argument initializes the composed transport lifecycle."
                           (or (plist-get profile :job-id) "unknown"))
             :command (lambda (headers-file config-file)
                        (ende-curl-command
-                        profile headers-file config-file))
+                        profile headers-file config-file
+                        (and (listp json-data) (plist-get json-data :file))))
             :filter (apply-partially #'ende-llm--process-filter session)
             :sentinel (apply-partially #'ende-llm--process-sentinel session))))
       (ende-transport-session-set-resources
        (ende-llm--lifecycle session) request))
-    (ende-transport-session-invoke
-     (ende-llm--lifecycle session) :on-start
-     (apply-partially #'ende-llm--cancel session))
+    (setf (ende-llm--session-debug-record session) record)
     (ende-llm--diagnose-request session request-body)
     (when (and (not (ende-llm--terminal-p session))
                ende-provider-discovery-enabled)
@@ -613,15 +609,21 @@ The :callbacks argument initializes the composed transport lifecycle."
        (ende-provider-discover
         profile (apply-partially #'ende-llm--discovery-result session))))
     (unless (ende-llm--terminal-p session)
-      (setf (ende-llm--session-debug-record session)
-            (ende-debug-record-request
-             (ende-llm--session-json-data session) request-body messages profile
-             "openai-compatible" (plist-get profile :url)))
-      (process-send-string
-        (ende-transport-session-process (ende-llm--lifecycle session))
-        (ende-llm--session-json-data session))
-      (process-send-eof
-       (ende-transport-session-process (ende-llm--lifecycle session))))))
+      (ende-request-send
+       (ende-transport-session-process (ende-llm--lifecycle session)) json-data))))
+
+(defun ende-llm--start-session (session messages)
+  "Allocate and start SESSION for MESSAGES."
+  (ende-validate-resource-options)
+  (ende-transport-session-invoke
+   (ende-llm--lifecycle session) :on-start
+   (apply-partially #'ende-llm--cancel session))
+  (unless (ende-llm--terminal-p session)
+    (ende-request-prepare
+     (ende-llm--lifecycle session) 'ende-llm #'ende-llm--request-body
+     messages (ende-llm--session-profile session)
+     (list "openai-compatible" (plist-get (ende-llm--session-profile session) :url))
+     (apply-partially #'ende-llm--start-prepared session messages))))
 
 (defun ende-llm--dispatch-error (callbacks caught)
   "Deliver dispatch error CAUGHT through CALLBACKS."

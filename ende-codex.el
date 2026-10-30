@@ -24,6 +24,7 @@
 (require 'ende-transport)
 (require 'ende-stream)
 (require 'ende-debug)
+(require 'ende-request)
 
 (defcustom ende-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -1414,16 +1415,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
              body '("reasoning" "summary") "auto")))
     body))
 
-(defun ende-codex--start-generation (session messages auth)
-  "Start a Codex generation for SESSION using AUTH."
+(defun ende-codex--start-prepared (session auth session-id body request-body record)
+  "Start SESSION using AUTH, SESSION-ID and a prepared BODY."
   (let* ((default-directory (ende-curl-local-directory))
          (profile (ende-codex--session-profile session))
          (url (ende-codex--validated-generation-url
                (or (plist-get profile :url) ende-codex-endpoint)))
          (account-id (ende-codex--account-id auth))
          (residency (ende-codex--residency auth))
-          (session-id (or (plist-get profile :codex-session-id)
-                          (ende-codex--new-session-id)))
           (headers
            (append
             (list (concat "Authorization: Bearer "
@@ -1435,10 +1434,6 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (when residency
              (list (concat "x-openai-internal-codex-residency: "
                            residency)))))
-         (request-body (ende-codex--request-body messages profile))
-         (body (encode-coding-string
-                (json-encode request-body)
-                'utf-8))
          (request
           (ende-curl-start-request
            :profile profile
@@ -1447,20 +1442,27 @@ When APPEND is non-nil, append the argument delta to the stored value."
            :name (format "ende-codex-%s"
                          (or (plist-get profile :job-id) "request"))
            :command (lambda (headers-file config-file)
-                      (ende-curl-command profile headers-file config-file))
+                      (ende-curl-command profile headers-file config-file
+                                         (and (listp body) (plist-get body :file))))
            :filter (apply-partially #'ende-codex--filter session)
            :sentinel (apply-partially #'ende-codex--sentinel session))))
     (ende-transport-session-set-resources
      (ende-codex--lifecycle session) request)
     (ende-codex--diagnose-request session request-body)
     (setf (ende-codex--session-debug-record session)
-          (ende-debug-record-request
-           body request-body messages profile
-           "codex-responses" url session-id))
-    (process-send-string
-     (ende-transport-session-process (ende-codex--lifecycle session)) body)
-    (process-send-eof
-     (ende-transport-session-process (ende-codex--lifecycle session)))))
+          record)
+    (ende-request-send
+     (ende-transport-session-process (ende-codex--lifecycle session)) body)))
+
+(defun ende-codex--start-generation (session messages auth)
+  "Prepare and start a Codex generation for SESSION using AUTH."
+  (let* ((profile (ende-codex--session-profile session))
+         (session-id (or (plist-get profile :codex-session-id)
+                         (ende-codex--new-session-id))))
+    (ende-request-prepare
+     (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
+     messages profile (list "codex-responses" (plist-get profile :url) session-id)
+     (apply-partially #'ende-codex--start-prepared session auth session-id))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."

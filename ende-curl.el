@@ -228,13 +228,13 @@ separate from user-configured profile headers."
    (when max-filesize
      (list "--max-filesize" (number-to-string max-filesize)))))
 
-(defun ende-curl-command (profile headers-file config-file)
+(defun ende-curl-command (profile headers-file config-file &optional input-file)
   "Build curl command for PROFILE without embedding request data or secrets."
   (ende-curl-json-command
-   profile headers-file config-file "POST" "text/event-stream" t))
+   profile headers-file config-file "POST" "text/event-stream" t nil input-file))
 
 (defun ende-curl-json-command
-    (profile headers-file config-file method accept send-body &optional url)
+    (profile headers-file config-file method accept send-body &optional url input-file)
   "Build a JSON curl command for PROFILE.
 METHOD is the HTTP method, ACCEPT is the response media type, and SEND-BODY
 controls whether curl reads a request body from stdin.  Request data and
@@ -246,7 +246,7 @@ secrets are deliberately kept out of the command arguments."
      (list "--request" method
            "--header" "Content-Type: application/json"
            "--header" (concat "Accept: " accept))
-     (when send-body (list "--data-binary" "@-"))
+     (when send-body (list "--data-binary" (if input-file (concat "@" input-file) "@-")))
      (when config-file (list "--config" config-file))
      (ende-curl-timeout-options
       ende-request-timeout ende-max-response-bytes)
