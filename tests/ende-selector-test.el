@@ -483,7 +483,7 @@
 
 
 
-(ert-deftest ende-test/selector-validates-preferences-once-per-catalog ()
+(ert-deftest ende-test/selector-warns-once-per-model-and-catalog ()
   (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
         (messages nil)
         (ende-providers '(remote))
@@ -491,7 +491,7 @@
          '((remote :url "http://remote.example/v1/chat/completions")))
         (ende-model-selection--last-used
          '(:provider remote :model "remote/missing"))
-        (ende-selector--model-validations (make-hash-table :test #'equal))
+        (ende-selector--model-warnings (make-hash-table :test #'eq))
         (ende-provider--catalog-cache (make-hash-table :test #'equal))
         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
@@ -538,7 +538,20 @@
                         (lambda (value)
                           (string-match-p "unavailable" value))
                         messages)
-		       2))))
+		       2))
+            (let ((before (length messages))
+                  (profile (ende-provider-profile 'remote)))
+              (dolist (models '(("a" "b") ("a" "b") ("b" "a")))
+                (ende-selector--apply-model-catalog
+                 profile models nil 0 "missing"))
+              (should (= (length messages) (+ before 2)))
+              (ende-selector--apply-model-catalog
+               profile '("a" "missing") nil 0 "missing")
+              (should (equal (ende-selector--model-name) "missing"))
+              (should (= (length messages) (+ before 2)))
+              (ende-selector--apply-model-catalog
+               profile '("a" "b") nil 0 "missing")
+              (should (= (length messages) (+ before 3))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

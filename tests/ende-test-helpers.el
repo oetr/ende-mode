@@ -365,7 +365,7 @@ non-nil, is signalled from the event callback."
   (clrhash ende-provider--discovery-failures)
   (clrhash ende-provider--catalog-inflight)
   (setq ende-provider--model-generation 0)
-  (clrhash ende-selector--model-validations)
+  (clrhash ende-selector--model-warnings)
   (clrhash ende-model-selection--buffer-selections)
   (clrhash ende-model-selection--shared-control-preferences)
   (clrhash ende-model-selection--buffer-control-preferences)

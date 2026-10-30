@@ -46,8 +46,8 @@
   "Face used for output prices in the completion picker."
   :group 'ende)
 
-(defvar ende-selector--model-validations (make-hash-table :test #'equal)
-  "Cached model preference validation results.")
+(defvar ende-selector--model-warnings (make-hash-table :test #'eq)
+  "Unavailable-model warnings for each provider's current catalog.")
 
 (defvar-local ende-selector--source-buffer nil
   "Source buffer associated with the current selector buffer.")
@@ -190,30 +190,26 @@
   (or (ende-selector--remembered-model provider)
       (ende-provider-configured-model profile)))
 
-(defun ende-selector--model-validation-key (provider models generation model)
-  "Return the validation key for MODEL in PROVIDER's catalog."
-  (list provider generation model
-        (secure-hash 'sha256 (prin1-to-string models))))
-
 (defun ende-selector--valid-model-p (provider profile models generation model)
   "Return non-nil when MODEL is available in the current catalog.
-Report an unavailable model once for each catalog generation."
+Report an unavailable model once for each catalog identity."
   (when (and (stringp model) models)
-    (let* ((key (ende-selector--model-validation-key
-                 provider models generation model))
-           (status (gethash key ende-selector--model-validations)))
-      (if status
-          (plist-get status :valid)
-        (let ((valid (member model models)))
-          (puthash key (list :valid valid)
-                   ende-selector--model-validations)
-          (unless valid
-            (message
-             "ende: model %s is unavailable for %s; using %s"
-             model
-             (ende-provider-client-name profile)
-             (or (car models) "the first available model")))
-          valid)))))
+    (let ((record (gethash provider ende-selector--model-warnings)))
+      (unless (and (equal generation (plist-get record :generation))
+                   (equal models (plist-get record :models)))
+        (setq record (list :generation generation
+                           :models (copy-sequence models) :warned nil))
+        (puthash provider record ende-selector--model-warnings))
+      (or (member model models)
+          (progn
+            (unless (member model (plist-get record :warned))
+              (push model (plist-get record :warned))
+              (message
+               "ende: model %s is unavailable for %s; using %s"
+               model
+               (ende-provider-client-name profile)
+               (or (car models) "the first available model")))
+            nil)))))
 
 (defun ende-selector--model-detail (model)
   "Return cached display metadata for MODEL, or nil."
