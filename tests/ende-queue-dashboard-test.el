@@ -295,6 +295,34 @@
                 (should-not (string-match-p "PRIVATE_\\|begin_ende" text))))))
       (ende-test--dashboard-reset))))
 
+(ert-deftest ende-test/dashboard-owns-its-buffer-without-taking-over-names ()
+  (save-window-excursion
+    (ende-test--dashboard-reset)
+    (let ((unrelated (get-buffer-create ende-queue-ui-buffer-name)) dashboard timers)
+      (unwind-protect
+          (progn
+            (with-current-buffer unrelated
+              (text-mode)
+              (insert "Unrelated contents"))
+            (setq dashboard (ende-queue-open))
+            (should-not (eq dashboard unrelated))
+            (should (eq (ende-queue-open) dashboard))
+            (with-current-buffer unrelated
+              (should (eq major-mode 'text-mode))
+              (should (equal (buffer-string) "Unrelated contents")))
+            (with-current-buffer dashboard
+              (should ende-queue-ui--owned-buffer)
+              (ende-queue-ui--schedule-refresh)
+              (setq timers (list ende-queue-ui--refresh-timer ende-queue-ui--clock-timer))
+              (should (cl-every #'timerp timers)))
+            (kill-buffer dashboard)
+            (should-not ende-queue-ui--buffer)
+            (dolist (timer timers)
+              (should-not (memq timer timer-list)))
+            (should (buffer-live-p unrelated)))
+        (ende-test--dashboard-reset)
+        (kill-buffer unrelated)))))
+
 (ert-deftest ende-test/dashboard-retained-work-and-hooks-survive-two-reloads ()
   (save-window-excursion
     (ende-test--dashboard-reset)
@@ -311,6 +339,7 @@
             (setq dashboard (ende-queue-open))
             (dotimes (_ 2)
               (ende-reload)
+              (should (eq (ende-queue-open) dashboard))
               (with-current-buffer dashboard
                 (ende-queue-ui--render)
                 (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id root))))

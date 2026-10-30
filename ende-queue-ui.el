@@ -20,6 +20,7 @@
 (defconst ende-queue-ui--status-width 20
   "Fixed display width for scheduler statuses and tool names.")
 (defvar ende-queue-ui--buffer nil)
+(defvar-local ende-queue-ui--owned-buffer nil)
 (defvar ende-queue-ui--marked-ids (make-hash-table :test #'eql))
 (defvar ende-queue-ui--folds (make-hash-table :test #'eql)
   "Explicit folding choices keyed by stable job ID: expanded or collapsed.")
@@ -407,7 +408,10 @@
 (defun ende-queue-open ()
   "Open the global task dashboard."
   (interactive)
-  (let ((buffer (get-buffer-create ende-queue-ui-buffer-name)))
+  (let ((buffer (ende-owned-buffer ende-queue-ui--buffer
+                                   ende-queue-ui-buffer-name
+                                   'ende-queue-ui--owned-buffer
+                                   #'ende-queue-ui-mode)))
     (with-current-buffer buffer
       (unless (derived-mode-p 'ende-queue-ui-mode) (ende-queue-ui-mode))
       (ende-queue-ui--render)
