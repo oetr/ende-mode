@@ -411,18 +411,19 @@
           (should (eq (ende-job-state parent) 'queued)))
         (should (= continuation-runs 0))
         (should (functionp (ende-job-resume-function parent)))
-        (should (eq (ende-agent-spawn-batch-completed-p batch) t))
+        (should (= (ende-agent-spawn-batch-outstanding batch) 0))
         (setq ende--queue-suspended nil)
         (ende-process-next)
         (should (= continuation-runs 1))
-        (should (eq (ende-job-state parent) 'completed))))))
+        (should (eq (ende-job-state parent) 'completed))
+        (should (equal (ende-job-result parent) '("first" "second")))))))
 
 (ert-deftest ende-test/spawn-batch-settles-synchronous-results-once ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)
         (settled nil)
         (continued nil)
-        parent batch)
+        parent)
     (ende-test--with-buffer "batch source"
       (let* ((target (ende-target-create
                       :buffer (current-buffer)
@@ -440,20 +441,18 @@
         (setf (ende-job-family-root family) parent)
         (push parent ende--active-jobs)
         (ende--queue-push family)
-        (setq batch
-              (ende-agent--launch-batch
-               parent '("one" "two")
-               (lambda (call position settle)
-                 (push position settled)
-                 (funcall settle call)
-                 (funcall settle "duplicate"))
-               (lambda (results)
-                 (setq continued results)
-                 (ende-job-finish parent results))))
+        (ende-agent--launch-batch
+         parent '("one" "two")
+         (lambda (call position settle)
+           (push position settled)
+           (funcall settle call)
+           (funcall settle "duplicate"))
+         (lambda (results)
+           (setq continued results)
+           (ende-job-finish parent results)))
         (should (eq (ende-job-state parent) 'completed))
         (should (equal (sort settled #'<) '(0 1)))
-        (should (equal continued '("one" "two")))
-        (should (eq (ende-agent-spawn-batch-completed-p batch) t))))))
+        (should (equal continued '("one" "two")))))))
 
 (ert-deftest ende-test/spawn-agent-tool-publishes-child-and-settles-final-answer ()
   (ende-test--reset)
@@ -866,7 +865,7 @@
       (let ((callbacks
              (list :tool-name (lambda (call) (plist-get call :name))
                    :execute-spawn-batch
-                   (lambda (_job calls _configuration settle)
+                   (lambda (_job calls _configuration _execute-tool settle)
                      (push (mapcar (lambda (call) (plist-get call :id)) calls)
                            batches)
                      (funcall settle

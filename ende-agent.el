@@ -294,16 +294,12 @@ include any explicit user overrides relevant to the assigned task.")
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))
-  identity generation calls result-slots settled-slots outstanding launch-open
-  completed-p invalidated-p continuation)
-
-(defvar ende-agent--next-batch-id 0)
+  generation result-slots settled-slots outstanding launch-open)
 
 (defun ende-agent--batch-live-p (parent batch)
   "Return non-nil when BATCH still belongs to live PARENT."
   (and (ende-job-live-p parent)
-       (eq batch (ende-job-active-spawn-batch parent))
-       (not (ende-agent-spawn-batch-invalidated-p batch))))
+       (eq batch (ende-job-active-spawn-batch parent))))
 
 (defun ende-agent--batch-settle (parent batch position result)
   "Settle BATCH result POSITION once, remaining valid while PARENT waits."
@@ -325,7 +321,6 @@ include any explicit user overrides relevant to the assigned task.")
   (when (and (ende-agent--batch-live-p parent batch)
              (= (ende-agent-spawn-batch-outstanding batch) 0)
              (not (ende-agent-spawn-batch-launch-open batch)))
-    (setf (ende-agent-spawn-batch-completed-p batch) t)
     (ende-job-resume-queued parent)))
 
 (defun ende-agent--launch-batch (parent calls launch done)
@@ -336,9 +331,7 @@ ordered result slots only through the parent's saved scheduler continuation."
                (null (ende-job-active-spawn-batch parent)))
     (error "spawn batch requires a running parent with no active batch"))
   (let* ((batch (ende-agent--make-spawn-batch
-                 :identity (cl-incf ende-agent--next-batch-id)
                  :generation (or (ende-job-execution-generation parent) 0)
-                 :calls (copy-sequence calls)
                  :result-slots (make-vector (length calls) nil)
                  :settled-slots (make-vector (length calls) nil)
                  :outstanding 0 :launch-open t))
@@ -383,8 +376,7 @@ ordered result slots only through the parent's saved scheduler continuation."
                        (setf (ende-job-active-spawn-batch parent) nil)
                        (funcall done results))))
                 (progn
-                  (setf (ende-agent-spawn-batch-completed-p batch) t
-                        (ende-job-active-spawn-batch parent) nil)
+                  (setf (ende-job-active-spawn-batch parent) nil)
                   (funcall done
                            (append
                             (ende-agent-spawn-batch-result-slots batch)
@@ -396,31 +388,28 @@ ordered result slots only through the parent's saved scheduler continuation."
       (ende-process-next))
     batch))
 
-(defvar ende-agent--spawn-execute-tool nil)
-
-(defun ende-agent--spawn-batch (job calls configuration done)
-  "Execute adjacent spawn CALLS for JOB through its normal tool dispatcher.
+(defun ende-agent--spawn-batch (job calls configuration execute-tool done)
+  "Execute adjacent spawn CALLS for JOB using EXECUTE-TOOL.
 DONE receives ordered tool messages after JOB is admitted again by the
 scheduler when asynchronous children have settled."
-  (unless (functionp ende-agent--spawn-execute-tool)
+  (unless (functionp execute-tool)
     (error "spawn batches require an asynchronous tool dispatcher"))
   (unless (ende-tools-phase-allows-p "spawn_agent" (ende-job-request-phase job))
     (error "spawn_agent is disabled during the title phase"))
   (let ((generation (or (ende-job-execution-generation job) 0)))
     (ende-agent--launch-batch
-   job calls
-   (lambda (call _position settle)
-     (ende-job-emit-event
-      job (list :type :tool-call-count
-                :count (1+ (or (ende-job-tool-call-count job) 0))))
-     (let ((ende-tools--execution-owner (ende-job-id job))
-           (ende-tools--request-phase 'work)
-           (ende-tools--report-activity-function
-            (lambda (title status)
-              (ende-job-report-activity job title status generation))))
-       (funcall ende-agent--spawn-execute-tool
-                call configuration settle)))
-   done)))
+     job calls
+     (lambda (call _position settle)
+       (ende-job-emit-event
+        job (list :type :tool-call-count
+                  :count (1+ (or (ende-job-tool-call-count job) 0))))
+       (let ((ende-tools--execution-owner (ende-job-id job))
+             (ende-tools--request-phase 'work)
+             (ende-tools--report-activity-function
+              (lambda (title status)
+                (ende-job-report-activity job title status generation))))
+         (funcall execute-tool call configuration settle)))
+     done)))
 
 (defcustom ende-agent-max-tool-rounds 100000
   "Maximum model replies requesting tools for one agent job."
@@ -579,24 +568,23 @@ scheduler when asynchronous children have settled."
                    (let* ((split (ende-agent--spawn-prefix remaining callbacks))
                           (batch (car split)))
                      (setq remaining (cdr split))
-                     (let ((ende-agent--spawn-execute-tool
-                            (plist-get callbacks :execute-tool)))
-                       (funcall (plist-get callbacks :execute-spawn-batch)
-                                job batch configuration
-                                (lambda (results)
-                                  (when (ende-job-execution-current-p
-                                         job (or (ende-job-execution-generation job) 0))
-                                    (setq messages
-                                          (nconc
-                                           (nreverse
-                                            (cl-mapcar
-                                             (lambda (call content)
-                                               (ende-agent--invoke
-                                                callbacks :tool-result-message
-                                                job call content))
-                                             batch results))
-                                           messages))
-                                    (next))))))
+                     (funcall (plist-get callbacks :execute-spawn-batch)
+                              job batch configuration
+                              (plist-get callbacks :execute-tool)
+                              (lambda (results)
+                                (when (ende-job-execution-current-p
+                                       job (or (ende-job-execution-generation job) 0))
+                                  (setq messages
+                                        (nconc
+                                         (nreverse
+                                          (cl-mapcar
+                                           (lambda (call content)
+                                             (ende-agent--invoke
+                                              callbacks :tool-result-message
+                                              job call content))
+                                           batch results))
+                                         messages))
+                                  (next)))))
                  (let* ((call (pop remaining))
                         (_count
                          (ende-job-emit-event
@@ -670,8 +658,7 @@ Chat persistence and guidance stay in those callbacks."
                    (eq (plist-get profile :transport) 'openrouter-batch)))
       (error (concat "Agent chat requires about_thinking and cannot use the "
                      "OpenRouter batch transport; choose an interactive transport")))
-    (setf (ende-job-profile job) profile
-          (ende-job-agent-tool-rounds job) 0)
+    (setf (ende-job-profile job) profile)
     (ende-job-emit-event job '(:type :tool-call-count :count 0))
     (let ((messages (if (plist-get callbacks :omit-source-metadata)
                         messages

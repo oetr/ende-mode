@@ -39,7 +39,7 @@
   metadata metadata-rank result error structured-state
   enqueued-at started-at finished-at dispatch-order status latest-user
   last-usage reasoning-summary-item reasoning-summary-text
-  tool-call-count agent-tool-rounds activity-title activity-status activity-updated-at
+  tool-call-count activity-title activity-status activity-updated-at
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
   scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement
