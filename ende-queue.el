@@ -103,8 +103,8 @@
 (defun ende-queue--update-source-hook (buffer)
   "Remove BUFFER's navigation hook once no retained family uses it."
   (when (and (buffer-live-p buffer)
-             (not (cl-some (lambda (job) (eq (ende-job-origin-buffer job) buffer))
-                            (hash-table-values ende--retained-jobs))))
+             (not (cl-loop for job being the hash-values of ende--retained-jobs
+                           thereis (eq (ende-job-origin-buffer job) buffer))))
     (with-current-buffer buffer
       (remove-hook 'kill-buffer-hook #'ende-queue--source-killed t))))
 
@@ -312,17 +312,15 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
 
 (defun ende-queued-jobs ()
   "Return a snapshot of queued jobs awaiting scheduler dispatch."
-  (copy-sequence
-   (cl-remove-if-not
-    (lambda (job) (eq (ende-job-state job) 'queued))
-    (cl-remove-if-not #'ende-job-p ende-queue))))
+  (cl-loop for job in ende-queue
+           when (and (ende-job-p job) (eq (ende-job-state job) 'queued))
+           collect job))
 
 (defun ende-physical-waiting-jobs ()
   "Return queued and suspended jobs in physical scheduler order."
-  (copy-sequence
-   (cl-remove-if-not
-    (lambda (job) (memq (ende-job-state job) '(queued suspended)))
-    (cl-remove-if-not #'ende-job-p ende-queue))))
+  (cl-loop for job in ende-queue
+           when (and (ende-job-p job) (memq (ende-job-state job) '(queued suspended)))
+           collect job))
 
 (defun ende-pending-jobs ()
   "Return a snapshot of queued jobs, excluding structural entries."
@@ -629,18 +627,6 @@ HANDLER receives one `ende-job' object."
   (eq (ende-target-buffer (ende-job-target left))
       (ende-target-buffer (ende-job-target right))))
 
-(defun ende--buffer-write-locked-p (job)
-  "Return non-nil when JOB conflicts with an active arbitrary write."
-  (and (ende--write-job-p job)
-       (cl-some
-        (lambda (active)
-          (and (ende--write-job-p active)
-               (ende--same-buffer-p job active)
-               (or (ende-operation-whole-buffer-p (ende-job-type job))
-                   (ende-operation-whole-buffer-p
-                    (ende-job-type active)))))
-        ende--active-jobs)))
-
 (defun ende--fence-applies-p (fence job)
   "Return non-nil when FENCE's scope includes JOB's provider."
   (or (null (ende-queue-fence-provider fence))
@@ -746,18 +732,17 @@ if user pause were ignored."
         (push (list :kind 'fence :fence fence) blockers))
       (when earlier-provider
         (push (list :kind 'behind :job earlier-provider) blockers))
-      (when (ende--buffer-write-locked-p job)
-        (push (list :kind 'buffer
-                    :jobs (cl-remove-if-not
-                           (lambda (active)
-                             (and (ende--write-job-p active)
-                                  (ende--same-buffer-p job active)
-                                  (or (ende-operation-whole-buffer-p
-                                       (ende-job-type job))
-                                      (ende-operation-whole-buffer-p
-                                       (ende-job-type active)))))
-                           ende--active-jobs))
-              blockers))
+      (when (ende--write-job-p job)
+        (let ((writers
+               (cl-remove-if-not
+                (lambda (active)
+                  (and (ende--write-job-p active)
+                       (ende--same-buffer-p job active)
+                       (or (ende-operation-whole-buffer-p (ende-job-type job))
+                           (ende-operation-whole-buffer-p (ende-job-type active)))))
+                ende--active-jobs)))
+          (when writers
+            (push (list :kind 'buffer :jobs writers) blockers))))
       (let* ((active (ende--active-provider-jobs job))
              (policy (ende--family-scheduling-policy job))
              (parallel (eq (plist-get policy :parallel) t))

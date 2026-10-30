@@ -325,19 +325,17 @@ PATH is the current JSON path."
         difference))
      ((and (ende-debug--json-array-p left)
            (ende-debug--json-array-p right))
-      (let* ((left-list (ende-debug--json-array-list left))
-             (right-list (ende-debug--json-array-list right))
-             (shared (min (length left-list) (length right-list)))
+      (let* ((shared (min (length left) (length right)))
              (index 0)
              difference)
         (while (and (< index shared) (not difference))
           (setq difference
                 (ende-debug--first-difference
-                 (nth index left-list) (nth index right-list)
+                 (aref left index) (aref right index)
                  (ende-debug--path-index path index)))
           (cl-incf index))
         (or difference
-            (and (/= (length left-list) (length right-list))
+            (and (/= (length left) (length right))
                  (ende-debug--path-index path shared)))))
      (t (if (string-empty-p (or path "")) "$" path)))))
 
@@ -387,9 +385,7 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
          (old-value (and key (ende-protocol-json-get key previous)))
          (new-value (and key (ende-protocol-json-get key current)))
          (old-array (and key (ende-debug--json-array-p old-value)))
-         (new-array (and key (ende-debug--json-array-p new-value)))
-         (old (and old-array (append old-value nil)))
-         (new (and new-array (append new-value nil))))
+         (new-array (and key (ende-debug--json-array-p new-value))))
     (cond
      ((and (null key) (ende-debug--json-equal-p previous current))
       (list t 0))
@@ -397,12 +393,11 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
            (ende-debug--same-json-field-p previous current key))
       (list t 0))
      ((and key old-array new-array
-           (<= (length old) (length new))
-           (cl-loop for message in old
-                    for index from 0
-                    always (ende-debug--json-equal-p
-                            message (nth index new))))
-      (list t (- (length new) (length old))))
+           (<= (length old-value) (length new-value))
+           (cl-loop for old-message across old-value
+                    for new-message across new-value
+                    always (ende-debug--json-equal-p old-message new-message)))
+      (list t (- (length new-value) (length old-value))))
      (t (list nil 0)))))
 
 (defun ende-debug--common-byte-prefix-length (left right)
@@ -553,14 +548,15 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
 
 (defun ende-debug--format-report (directory captures)
   "Format a readable report for CAPTURES in DIRECTORY."
-  (concat
+  (let ((groups (ende-debug--capture-groups captures)))
+    (concat
    (format "Ende cache report\nSession: %s\n\n"
            (abbreviate-file-name directory))
    "Provider-reported usage (missing cached-token data is not zero):\n"
    (mapconcat #'ende-debug--cache-line captures "\n")
    "\n\n"
    (if (cl-some (lambda (group) (> (length (cdr group)) 1))
-                (ende-debug--capture-groups captures))
+                groups)
        (concat "Consecutive requests within each job:\n\n"
                (mapconcat
                 (lambda (group)
@@ -570,8 +566,8 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
                              (car requests) (cadr requests)) reports)
                       (setq requests (cdr requests)))
                     (mapconcat #'identity (nreverse reports) "")))
-                (ende-debug--capture-groups captures) ""))
-     "No consecutive requests in the same job to compare.\n")))
+                groups ""))
+     "No consecutive requests in the same job to compare.\n"))))
 
 ;;;###autoload
 (defun ende-debug-cache-report ()
