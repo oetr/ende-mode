@@ -37,12 +37,16 @@
                 (ende-job-title child) "Child task"
                 (ende-job-title grandchild) "Grandchild task"
                 (ende-job-title finished) "Finished root"
+                (ende-job-last-usage child) '(:input_tokens 0)
                 (ende-job-last-usage grandchild) '(:input_tokens 100200 :output_tokens 9000)
                 (ende-job-enqueued-at root) 10
                 (ende-job-started-at root) 20
                 (ende-job-enqueued-at finished) 10
                 (ende-job-started-at finished) 20
                 (ende-job-finished-at finished) 68)
+          (should (equal (mapcar (lambda (job) (nth 3 (ende-queue-ui--cells job 256)))
+                                (list root child grandchild))
+                         '("–" "0" "100,200")))
           (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 256)))
             (setq dashboard (ende-queue-open))
             (with-current-buffer dashboard
@@ -244,7 +248,7 @@
                   (move-to-column start)
                   (should (looking-at (regexp-quote expected)))
                   (forward-char (length expected))
-                  (should (looking-at " +0"))
+                  (should (looking-at " +–"))
                   (search-forward "Stable task")
                   (push (current-column) positions))))
             (let ((task-column (pop positions))

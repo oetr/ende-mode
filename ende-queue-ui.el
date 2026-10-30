@@ -136,8 +136,9 @@
       (setf (ende-job-family-origin-name family) (buffer-name buffer)))
     (list (if (ende-job-parent job) "" (or (ende-job-family-origin-name family) ""))
           (ende-queue-ui--policy job) (ende-queue-ui--job-status job)
-          (ende-history--format-token-count
-           (or (plist-get (ende--usage-token-counts (ende-job-last-usage job)) :input) 0))
+          (if-let* ((input (plist-get (ende--usage-token-counts (ende-job-last-usage job)) :input)))
+              (ende-history--format-token-count input)
+            "–")
           (ende-queue-ui--duration
            (- (or (ende-job-finished-at job) now)
               (or (ende-job-started-at job) (ende-job-enqueued-at job) now))))))
