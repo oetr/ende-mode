@@ -74,6 +74,36 @@
               (should-not (get-text-property (point) 'ende-queue-ui-owner)))))
       (ende-test--dashboard-reset))))
 
+(ert-deftest ende-test/dashboard-guidance-and-cancellation-follow-selection ()
+  (save-window-excursion
+    (ende-test--dashboard-reset)
+    (let ((ende-llm-function (ende-test--fake-llm '(:stall) t)))
+      (unwind-protect
+          (with-temp-buffer
+            (org-mode)
+            (insert "* First\nQuestion\n* Second\nQuestion\n")
+            (ende-test--chat-goto "* First")
+            (let ((first (ende-ask ende-test--dashboard-profile)))
+              (ende-test--chat-goto "* Second")
+              (let ((second (ende-ask ende-test--dashboard-profile))
+                    (dashboard (ende-queue-open)))
+                (with-current-buffer dashboard
+                  (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id first))))
+                  (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "Check ownership")))
+                    (ende-queue-ui-inject-guidance))
+                  (should (equal (ende-job-pending-guidance first) '("Check ownership")))
+                  (should-not (ende-job-pending-guidance second))
+                  (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                    (ende-queue-ui-cancel))
+                  (should (eq (ende-job-state first) 'cancelled))
+                  (should-not (memq first (ende-active-jobs)))
+                  (should (ende-job-live-p second))
+                  (ende-queue-ui--render)
+                  (goto-char (ende-queue-ui--position-for-key (cons 'job (ende-job-id first))))
+                  (should (eq (ende-queue-ui--current-job) first))
+                  (should (string-match-p "Finished (1)" (buffer-string)))))))
+        (ende-test--dashboard-reset)))))
+
 (ert-deftest ende-test/dashboard-elapsed-resets-only-on-first-start ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t)
