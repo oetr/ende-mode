@@ -267,7 +267,7 @@
       (ende-sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
-(ert-deftest ende-test/chat-tool-round-binds-its-job-id-for-dispatch ()
+(ert-deftest ende-test/tool-runner-binds-its-job-id-for-dispatch ()
   (let* ((job (ende--make-job :id 765432 :state 'running :type 'chat))
          (call '(:id "tool-call" :name "probe" :arguments "{}"))
          (owner-seen nil)
@@ -277,17 +277,16 @@
                (lambda (_job) t))
               ((symbol-function 'ende-job-emit-event)
                (lambda (&rest _args) nil))
-              ((symbol-function 'ende-chat--stage-agent-section)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'ende-chat--tool-result-text)
-               (lambda (&rest _args) "ok"))
               ((symbol-function 'ende-tools-call-async)
                (lambda (_call _configuration callback)
                  (setq owner-seen ende-tools--execution-owner)
                  (funcall callback "{}")))
               (ende-tools--execution-owner 'outer-owner))
-      (ende-chat--execute-tool-round
-       job (list call) nil 1 "request" nil
+      (ende-agent--run-tools
+       job (list call) nil
+       (list :tool-name (lambda (call) (ende-tools-call-value call :name))
+             :execute-tool #'ende-tools-call-async
+             :tool-result-message (lambda (_job _call content) content))
        (lambda (_messages) (setq round-finished t))))
     (should round-finished)
     (should (= owner-seen (ende-job-id job)))

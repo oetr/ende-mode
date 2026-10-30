@@ -3500,24 +3500,6 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
       (error "No chat context to compact"))
     messages))
 
-(defun ende-chat--execute-tool-round
-    (job calls configuration level request-id assistant callback)
-  "Compatibility adapter for JOB's shared sequential tool runner."
-  (let ((ende-tools--execution-owner (ende-job-id job)))
-    (ende-agent--run-tools
-     job calls configuration
-     (list
-      :tool-name (lambda (call) (ende-tools-call-value call :name))
-      :execute-tool #'ende-tools-call-async
-      :tool-result-message
-      (lambda (job call content)
-	(ende-chat--stage-agent-section
-	 job (ende-chat--tool-result-text level request-id call content) t)
-	(list :role "tool" :tool-call-id (ende-tools-call-value call :id)
-              :content content)))
-     (lambda (tool-messages)
-       (funcall callback (cons assistant tool-messages))))))
-
 (defun ende-chat--consume-user-guidance (job &optional assistant-result)
   "Consume JOB's pending guidance as a stored synthetic tool exchange.
 ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
