@@ -67,40 +67,37 @@
     :review-policy 'resolve))
   "Registered operation specifications.")
 
+(defun ende-operation--find (type)
+  (cl-find type ende-operation-specs :key #'ende-operation-spec-type :test #'eq))
+
 (defun ende-operation-for (type)
   "Return the specification for operation TYPE, or signal an error."
-  (or (cl-find type ende-operation-specs
-               :key #'ende-operation-spec-type :test #'eq)
+  (or (ende-operation--find type)
       (error "Unknown ende operation: %s" type)))
 
 (defun ende-operation-writes-buffer-p (type)
   "Return non-nil when TYPE can modify a buffer."
-  (let ((spec (cl-find type ende-operation-specs
-                       :key #'ende-operation-spec-type :test #'eq)))
+  (let ((spec (ende-operation--find type)))
     (and spec (ende-operation-spec-writes-buffer spec))))
 
 (defun ende-operation-whole-buffer-p (type)
   "Return non-nil when TYPE examines the entire accessible document."
-  (let ((spec (cl-find type ende-operation-specs
-                       :key #'ende-operation-spec-type :test #'eq)))
+  (let ((spec (ende-operation--find type)))
     (and spec (ende-operation-spec-whole-buffer spec))))
 
 (defun ende-operation-allows-source-changes-p (type)
   "Return non-nil when TYPE tolerates source changes during generation."
-  (let ((spec (cl-find type ende-operation-specs
-                       :key #'ende-operation-spec-type :test #'eq)))
+  (let ((spec (ende-operation--find type)))
     (and spec (ende-operation-spec-allows-source-changes spec))))
 
 (defun ende-operation-structured-result (type)
   "Return TYPE's structured result kind, or nil for plain text results."
-  (let ((spec (cl-find type ende-operation-specs
-                       :key #'ende-operation-spec-type :test #'eq)))
+  (let ((spec (ende-operation--find type)))
     (and spec (ende-operation-spec-structured-result spec))))
 
 (defun ende-operation-review-policy (type)
   "Return the pending-review policy for operation TYPE."
-  (let ((spec (cl-find type ende-operation-specs
-                       :key #'ende-operation-spec-type :test #'eq)))
+  (let ((spec (ende-operation--find type)))
     (and spec (ende-operation-spec-review-policy spec))))
 
 (provide 'ende-operation)

@@ -32,7 +32,7 @@
 
 (defun ende-agent-profile-for-policy (family policy)
   "Derive a detached inference profile for POLICY in FAMILY."
-  (let* ((template (copy-tree (ende-job-family-inference-template family)))
+  (let* ((template (ende-job-family-inference-template family))
          (configured-provider (plist-get policy :provider))
          (provider (or configured-provider (plist-get template :name)))
          (configured-model (plist-get policy :model))
@@ -58,13 +58,14 @@
   (let ((object (if (hash-table-p arguments)
                     arguments
                   (and (stringp arguments)
-                       (json-parse-string arguments :object-type 'hash-table)))))
+                       (json-parse-string arguments :object-type 'hash-table))))
+        task)
     (unless (and (hash-table-p object)
                  (= (hash-table-count object) 1)
-                 (stringp (gethash "task" object))
-                 (not (string-blank-p (gethash "task" object))))
+                 (stringp (setq task (gethash "task" object)))
+                 (not (string-blank-p task)))
       (error "spawn_agent accepts exactly one non-empty task string"))
-    (gethash "task" object)))
+    task))
 
 (defun ende-agent--spawn-tool (arguments _root callback)
   "Publish the delegated child specified by ARGUMENTS.
@@ -557,17 +558,18 @@ scheduler when asynchronous children have settled."
         (messages nil))
     (cl-labels
         ((next ()
+           (let ((name (and remaining (ende-job-current-p job)
+                            (ende-agent--call-name (car remaining) callbacks))))
            (when (and remaining (ende-job-current-p job))
              (ende--handle-llm-event
               job (list :type :status
-                        :status (ende-agent--call-name (car remaining) callbacks))))
+                        :status name)))
            (if (or (null remaining) (not (ende-job-current-p job)))
                (when (and (null remaining) (ende-job-current-p job))
                  (funcall done (nreverse messages)))
              (if (and (ende-tools-phase-allows-p "spawn_agent" phase)
                       (plist-get callbacks :execute-spawn-batch)
-                      (equal (ende-agent--call-name (car remaining) callbacks)
-                             "spawn_agent"))
+                      (equal name "spawn_agent"))
                  (let* ((split (ende-agent--spawn-prefix remaining callbacks))
                         (batch (car split)))
                    (setq remaining (cdr split))
@@ -631,16 +633,16 @@ scheduler when asynchronous children have settled."
                              messages)
                        (unless synchronous (next))))))))
                  (if (ende-tools-phase-allows-p
-                      (ende-agent--call-name call callbacks) phase)
+                      name phase)
                      (funcall (plist-get callbacks :execute-tool)
                               call configuration complete)
                    (funcall complete
                             (ende-tools--json-encode-tool-result
-                             (list :ok nil :tool (ende-agent--call-name call callbacks)
+                             (list :ok nil :tool name
                                    :error (format "Tool disabled during %s phase" phase))))))
                (setq synchronous nil)
                (when completed
-                 (next)))))))
+                 (next))))))))
       (next))))
 
 (defun ende-agent-run (job messages configuration callbacks)
