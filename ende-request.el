@@ -1,5 +1,9 @@
 ;;; ende-request.el --- Asynchronous multimodal request preparation -*- lexical-binding: t; -*-
 
+(require 'cl-lib)
+(require 'json)
+(require 'ende-core)
+(require 'ende-transport)
 (require 'ende-content)
 (require 'ende-curl)
 (require 'ende-debug)
