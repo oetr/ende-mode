@@ -418,8 +418,6 @@
 (define-derived-mode ende-queue-ui-mode special-mode "ende-queue"
   "Inspect active and retained task families in one global tree."
   (setq-local truncate-lines t)
-  (setq-local buffer-face-mode-face 'fixed-pitch)
-  (buffer-face-mode 1)
   (buffer-disable-undo)
   (setq ende-queue-ui--buffer (current-buffer))
   (add-hook 'kill-buffer-hook #'ende-queue-ui--cleanup nil t))
