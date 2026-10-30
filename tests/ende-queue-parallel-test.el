@@ -11,6 +11,12 @@
 (require 'ende-test-helpers)
 (require 'cl-lib)
 
+(defun ende-test--parallel-insert (profile)
+  (ende-enqueue
+   (list 'insert
+         :target (ende-target-create :buffer (current-buffer) :start 5 :end 5 :cursor 5)
+         :profile profile)))
+
 (ert-deftest ende-test/family-policy-freezes-only-on-first-dispatch ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm '("done") t))
@@ -45,15 +51,9 @@
 			 :max-concurrency 2 :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((ende--queue-suspended t)
-				  (target (ende-target-create
-					   :buffer (current-buffer) :start 5 :end 5 :cursor 5)))
-			      (ende-enqueue (list 'insert :target target :profile profile))
-			      (ende-enqueue
-			       (list 'insert
-				     :target (ende-target-create
-					      :buffer (current-buffer) :start 5 :end 5 :cursor 5)
-				     :profile profile))
+			    (let ((ende--queue-suspended t))
+			      (ende-test--parallel-insert profile)
+			      (ende-test--parallel-insert profile)
 			      (setq ende--queue-suspended nil)
 			      (ende-process-next))
 			    (should (= (length ende--active-jobs) 2))
@@ -71,20 +71,10 @@
 			 :max-concurrency 1 :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((first (ende-enqueue
-					  (list 'insert
-						:target (ende-target-create
-							 :buffer (current-buffer)
-							 :start 5 :end 5 :cursor 5)
-						:profile profile)))
+			    (let ((first (ende-test--parallel-insert profile))
 				  (second nil))
 			      (setq second
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile profile)))
+				    (ende-test--parallel-insert profile))
 			      (should (eq (ende-job-state first) 'running))
 			      (should (eq (ende-job-state second) 'queued))
 			      (should (plist-get (ende-job-profile second) :parallel))
@@ -106,21 +96,11 @@
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
 			    (let ((first
-				   (ende-enqueue
-				    (list 'insert
-					  :target (ende-target-create
-						   :buffer (current-buffer)
-						   :start 5 :end 5 :cursor 5)
-					  :profile serial-profile)))
+				   (ende-test--parallel-insert serial-profile))
 				  (second nil))
 			      (let ((ende--queue-suspended t))
 				(setq second
-				      (ende-enqueue
-				       (list 'insert
-					     :target (ende-target-create
-						      :buffer (current-buffer)
-						      :start 5 :end 5 :cursor 5)
-					     :profile parallel-profile))))
+				      (ende-test--parallel-insert parallel-profile)))
 			      (should (eq (ende-job-state first) 'running))
 			      (should (eq (ende-job-state second) 'queued))
 			      (ende-process-next)
@@ -140,27 +120,12 @@
 			 :max-concurrency 4 :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((first (ende-enqueue
-					  (list 'insert
-						:target (ende-target-create
-							 :buffer (current-buffer)
-							 :start 5 :end 5 :cursor 5)
-						:profile profile)))
-				  (second (ende-enqueue
-					   (list 'insert
-						 :target (ende-target-create
-							  :buffer (current-buffer)
-							  :start 5 :end 5 :cursor 5)
-						 :profile profile)))
+			    (let ((first (ende-test--parallel-insert profile))
+				  (second (ende-test--parallel-insert profile))
 				  (third nil))
 			      (ende-fence-all)
 			      (setq third
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile profile)))
+				    (ende-test--parallel-insert profile))
 			      (should (eq (ende-job-state first) 'running))
 			      (should (eq (ende-job-state second) 'running))
 			      (should (eq (ende-job-state third) 'queued))
@@ -185,35 +150,15 @@
 				:max-concurrency 4 :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((first (ende-enqueue
-					  (list 'insert
-						:target (ende-target-create
-							 :buffer (current-buffer)
-							 :start 5 :end 5 :cursor 5)
-						:profile first-profile)))
-				  (second (ende-enqueue
-					   (list 'insert
-						 :target (ende-target-create
-							  :buffer (current-buffer)
-							  :start 5 :end 5 :cursor 5)
-						 :profile second-profile)))
+			    (let ((first (ende-test--parallel-insert first-profile))
+				  (second (ende-test--parallel-insert second-profile))
 				  (third nil)
 				  (fourth nil))
 			      (ende-fence-provider 'first)
 			      (setq third
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile first-profile)))
+				    (ende-test--parallel-insert first-profile))
 			      (setq fourth
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile second-profile)))
+				    (ende-test--parallel-insert second-profile))
 			      (should (eq (ende-job-state first) 'running))
 			      (should (eq (ende-job-state second) 'running))
 			      (should (eq (ende-job-state third) 'queued))
@@ -243,29 +188,14 @@
                                  :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((active (ende-enqueue
-					   (list 'insert
-						 :target (ende-target-create
-							  :buffer (current-buffer)
-							  :start 5 :end 5 :cursor 5)
-						 :profile active-profile)))
+			    (let ((active (ende-test--parallel-insert active-profile))
 				  (serial nil)
 				  (parallel nil))
 			      (let ((ende--queue-suspended t))
 				(setq serial
-				      (ende-enqueue
-				       (list 'insert
-					     :target (ende-target-create
-						      :buffer (current-buffer)
-						      :start 5 :end 5 :cursor 5)
-					     :profile serial-profile))
+				      (ende-test--parallel-insert serial-profile)
 				      parallel
-				      (ende-enqueue
-				       (list 'insert
-					     :target (ende-target-create
-						      :buffer (current-buffer)
-						      :start 5 :end 5 :cursor 5)
-					     :profile parallel-profile))))
+				      (ende-test--parallel-insert parallel-profile)))
 			      (should (eq (ende-job-state active) 'running))
 			      (should (eq (ende-job-state serial) 'queued))
 			      (should (eq (ende-job-state parallel) 'queued))
@@ -289,28 +219,13 @@
 				:max-concurrency 1 :parallel t)))
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
-			    (let ((first (ende-enqueue
-					  (list 'insert
-						:target (ende-target-create
-							 :buffer (current-buffer)
-							 :start 5 :end 5 :cursor 5)
-						:profile first-profile)))
+			    (let ((first (ende-test--parallel-insert first-profile))
 				  (second nil)
 				  (third nil))
 			      (setq second
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile first-profile)))
+				    (ende-test--parallel-insert first-profile))
 			      (setq third
-				    (ende-enqueue
-				     (list 'insert
-					   :target (ende-target-create
-						    :buffer (current-buffer)
-						    :start 5 :end 5 :cursor 5)
-					   :profile second-profile)))
+				    (ende-test--parallel-insert second-profile))
 			      (should (eq (ende-job-state first) 'running))
 			      (should (eq (ende-job-state second) 'queued))
 			      (should (eq (ende-job-state third) 'running))
