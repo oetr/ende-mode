@@ -13,7 +13,7 @@
           (set-file-modes stage (or mode (logand #o666 (default-file-modes))))
           (add-name-to-file stage path)
           path)
-      (delete-file stage))))
+      (ignore-errors (delete-file stage)))))
 
 (provide 'ende-file)
 
