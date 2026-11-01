@@ -67,6 +67,9 @@
 (defvar-local ende-selector--model-index 0
   "Index of the selected model in the current selector.")
 
+(defvar-local ende-selector--selection-required nil
+  "Non-nil when a catalog needs an explicit model choice.")
+
 (defvar-local ende-selector--model-state nil
   "State of model discovery for the selected provider.")
 
@@ -409,6 +412,8 @@ the discovered pricing metadata for those model IDs."
       (insert (format "%-8s - %-18s %s\n" "n/p" "Provider:" provider))
       (insert (format "%-8s - %-18s %s%s\n" "C-n/C-p" "Model:"
                       model-status model))
+      (when ende-selector--selection-required
+        (insert "Select a model explicitly before starting a request.\n"))
       (insert (format "%-8s - %-18s %d\n" "c/C" "Concurrency:"
                       (ende-selector--provider-concurrency)))
       (insert (format "%-8s - %-18s %s\n" "P" "Parallel:"
@@ -628,6 +633,11 @@ PREFERRED is selected only when it is present in MODELS."
                    profile models generation preferred)
                   preferred)))
         (ende-selector--set-models models selected)
+        (setq ende-selector--selection-required
+              (and models (not selected)
+                   (or preferred
+                       (and (not (ende-provider-configured-models-explicit-p profile))
+                            (> (length models) 1)))))
         (setq ende-selector--model-state
               (if models :ready :error))))))
 
@@ -650,7 +660,7 @@ PREFERRED is selected only when it is present in MODELS."
                (with-current-buffer selector-buffer
                  (when (eq (ende-selector--provider-name) provider)
                    (setq ende-selector--probe-cancel nil)
-                   (let* ((live-profile (ende-provider-profile provider))
+                   (let* ((live-profile profile)
                           (live-preferred
                            (if (= selection-generation
                                   ende-selector--model-selection-generation)
@@ -732,6 +742,7 @@ PREFERRED is selected only when it is present in MODELS."
     (setq ende-selector--model-index
           (mod (+ ende-selector--model-index delta)
                (length ende-selector--models)))
+    (setq ende-selector--selection-required nil)
     (cl-incf ende-selector--model-selection-generation)
     (ende-selector--set-control-context)
     (ende-selector--remember-selected-pair)
@@ -757,10 +768,17 @@ performed locally so typing a search term never starts another network request."
     ((or :loading :validating)
      (user-error "ende model discovery is still loading"))
     (:error
-     (user-error "ende model discovery failed; change provider or retry"))
+     (if (plist-get (ende-selector--provider-profile) :service)
+         (user-error "ende model discovery failed; change provider or retry")
+       (let ((model (read-string "Manual model ID: ")))
+         (when (string-blank-p model) (user-error "Supply a nonempty model ID"))
+         (ende-selector--set-models (list model) model)
+         (setq ende-selector--model-state :ready ende-selector--selection-required nil)
+         (ende-selector--remember-selected-pair)
+         (ende-selector--render))))
     (_
      (let ((models (cl-remove-if-not #'stringp ende-selector--models)))
-       (unless models
+       (unless (or models (not (plist-get (ende-selector--provider-profile) :service)))
          (user-error "ende has no models available for this provider"))
        (let* ((candidates (ende-selector--model-candidates))
               (candidate-names (mapcar #'car candidates))
@@ -775,15 +793,20 @@ performed locally so typing a search term never starts another network request."
                    completions candidates details))))
               (completion-ignore-case t)
               (completion-styles '(substring))
+              (manual (and (not (plist-get (ende-selector--provider-profile) :service))
+                           (not (ende-provider-configured-models-explicit-p
+                                 (ende-selector--provider-profile)))))
               (choice (completing-read "Model: " candidate-names
-                                       nil t nil nil current))
+                                       nil (not manual) nil nil current))
               (selected-model
-               (cdr (cl-find choice candidates
-                             :key #'car :test #'string=)))
+               (or (cdr (cl-find choice candidates :key #'car :test #'string=))
+                   (and manual (not (string-blank-p choice)) choice)))
               (index (cl-position selected-model models :test #'equal)))
-         (when (and selected-model index)
-           (setq ende-selector--models models
-                 ende-selector--model-index index)
+         (when selected-model
+           (unless index
+             (setq models (append models (list selected-model)) index (1- (length models))))
+           (setq ende-selector--models models ende-selector--model-index index
+                 ende-selector--model-state :ready ende-selector--selection-required nil)
            (cl-incf ende-selector--model-selection-generation)
            (ende-selector--set-control-context)
            (ende-selector--remember-selected-pair)
@@ -1044,6 +1067,8 @@ performed locally so typing a search term never starts another network request."
 
 (defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model."
+  (when ende-selector--selection-required
+    (user-error "Select a model explicitly with the model picker"))
   (ende-selector--save-selection)
   (let* ((profile (ende-selector--resolved-profile))
          (effort (ende-provider-active-reasoning-effort profile)))

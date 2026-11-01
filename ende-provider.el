@@ -545,6 +545,13 @@ An unset buffer follows the current configured provider defaults."
           (ende-model-selection-control-preferences provider model buffer))
          (profile (ende-provider-profile-for-selection
                    provider model preferences)))
+    (unless model
+      (let* ((catalog (ende-provider-cached-models configured-profile))
+             (models (plist-get catalog :models)))
+        (if (= (length models) 1)
+            (setq model (car models)
+                  profile (ende-provider-profile-for-selection provider model preferences))
+          (user-error "Model selection required for %s; open ende-selector-open" provider))))
     (when (and remember (stringp model))
       (ende-model-selection-save
        (append (list :provider provider :model model)
@@ -1184,7 +1191,8 @@ Successful endpoint catalogs are cached; runtime failures are throttled for
     (ende-validate-resource-options)
     (ende-provider--validate-discovery-options)
     (cond
-     ((not ende-provider-discovery-enabled)
+     ((or (ende-provider-configured-models-explicit-p profile)
+          (not ende-provider-discovery-enabled))
       (ende-provider--invoke-discovery-callback callback nil)
       nil)
      ((not key)
@@ -1207,6 +1215,9 @@ this consumer; an unused shared request is cancelled.  Failures are retried."
   (let ((key (ende-provider--catalog-key profile))
         (probe (plist-get profile :model-discovery-function)))
     (cond
+     ((ende-provider-configured-models-explicit-p profile)
+      (funcall callback (ende-provider-config-copy (plist-get profile :models)) nil)
+      #'ignore)
      ((or (not key)
           (and (null probe) (not ende-provider-discovery-enabled)))
       (condition-case nil
