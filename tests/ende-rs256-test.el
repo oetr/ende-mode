@@ -14,6 +14,16 @@
   (json-parse-string
    (json-encode `(("keys" . [,(alist-get 'jwk ende-rs256-test--fixtures)])))))
 
+(defun ende-rs256-test--refresh-claims (record token jwks)
+  "Return the claims that verify TOKEN against JWKS for RECORD, or nil."
+  (let (claims)
+    (cl-letf (((symbol-function 'ende-codex-auth--jwks-async)
+               (lambda (callback) (funcall callback jwks nil) #'ignore)))
+      (ende-codex-auth--verify-refresh
+       token record
+       (lambda (value failure) (setq claims (and value (not failure) value)))))
+    claims))
+
 (ert-deftest ende-rs256-signature-and-key-boundary ()
   (let* ((jwks (ende-rs256-test--jwks))
          (key (aref (gethash "keys" jwks) 0))
@@ -69,22 +79,30 @@
              (claims (ende-codex--verify-id-token valid "test-client" "test-nonce")))
         (should (equal (gethash "sub" claims) "test-subject"))
         (let* ((directory (make-temp-file "ende-verified-refresh-" t))
-               (ende-codex-auth--directory (expand-file-name "private" directory)))
+               (ende-codex-auth--directory (expand-file-name "private" directory))
+               (parts (split-string valid "\\."))
+               (retired (concat (base64url-encode-string
+                                 "{\"alg\":\"RS256\",\"kid\":\"retired-key\"}" t)
+                                "." (cadr parts) "." (nth 2 parts))))
           (unwind-protect
-              (let* ((record (ende-codex-auth--register
-                              'verified (list :client-id "test-client" :subject "test-subject"
-                                              :id-token valid :access-token "access"
-                                              :refresh-token "refresh" :expires-at 1800000000)))
-                     (next (ende-codex--store-refresh record "next-access" "next-refresh"
-                                                      3600 valid)))
-                (should (ende-codex-auth--same-registration-p record next))
-                (should (equal (plist-get next :subject) "test-subject"))
-                (should-error (ende-codex--store-refresh
-                               next "bad-access" "bad-refresh" 3600
-                               (alist-get 'nonce ende-rs256-test--fixtures)))
-                (should (equal next (ende-codex-auth-read 'verified)))
-                (let ((other (plist-put (copy-sequence next) :subject "other-subject")))
-                  (should-error (ende-codex--store-refresh other "access" "refresh" 3600 valid))))
+              (let ((record (ende-codex-auth--register
+                             'verified (list :client-id "test-client" :subject "test-subject"
+                                             :id-token retired :access-token "access"
+                                             :refresh-token "refresh" :expires-at 1800000000))))
+                ;; Signing-key rotation must not invalidate the stored identity:
+                ;; only the replacement token is verified, against current keys.
+                (should-error (ende-codex-auth--signed-claims retired (lambda () jwks)))
+                (should (ende-rs256-test--refresh-claims record valid jwks))
+                (should-not (ende-rs256-test--refresh-claims
+                             (plist-put (copy-sequence record) :subject "other-subject")
+                             valid jwks))
+                (should-not (ende-rs256-test--refresh-claims
+                             record (alist-get 'nonce ende-rs256-test--fixtures) jwks))
+                (let ((next (ende-codex--store-refresh
+                             record "next-access" "next-refresh" 3600 valid)))
+                  (should (ende-codex-auth--same-registration-p record next))
+                  (should (equal (plist-get next :subject) "test-subject"))
+                  (should (equal next (ende-codex-auth-read 'verified)))))
             (delete-directory directory t)))
         (dolist (scope '("openid offline_access" "offline_access openid profile"))
           (should (equal (ende-codex-auth--scopes scope)
@@ -118,41 +136,6 @@
                    (lambda () (error "Unavailable"))))
           (should-error (ende-codex--verify-id-token valid "test-client" "test-nonce")
                         :type 'ende-codex-identity-error))))))
-
-(ert-deftest ende-rs256-trusted-key-retrieval ()
-  (let ((start (symbol-function 'ende-curl-start-request))
-        (jwks (ende-rs256-test--jwks)))
-    (dolist (response (list (list 200 (json-encode jwks) t)
-                            '(302 "{}" nil) '(200 "{malformed" nil)
-                            '(200 "{\"keys\":[]}" nil)
-                            (list 200 (make-string 65537 ?x) nil)))
-      (let (resources command)
-        (cl-letf (((symbol-function 'ende-curl-start-request)
-                   (lambda (&rest arguments)
-                     (let* ((builder (plist-get arguments :command))
-                            (headers (make-temp-file "ende-jwks-test-")))
-                       (unwind-protect (setq command (funcall builder headers nil))
-                         (delete-file headers)))
-                     (setq arguments (plist-put arguments :command
-                                                (lambda (&rest _) '("cat"))))
-                     (setq resources (apply start arguments))
-                     (with-temp-file (plist-get resources :headers-file)
-                       (insert (format "HTTP/1.1 %d Test\r\n\r\n" (car response))))
-                     (process-send-string (plist-get resources :process) (cadr response))
-                     (process-send-eof (plist-get resources :process))
-                     resources)))
-          (if (nth 2 response)
-              (should (= (length (gethash "keys" (ende-codex-auth--jwks))) 1))
-            (should-error (ende-codex-auth--jwks)))
-          (should (equal (cadr (member "--url" command)) ende-codex-auth--jwks-uri))
-          (should (equal (cadr (member "--max-redirs" command)) "0"))
-          (should (member "--disable" command))
-          (should (member "--max-time" command))
-          (should-not (member "--insecure" command))
-          (should-not (member "--location" command))
-          (should-not (process-live-p (plist-get resources :process)))
-          (should-not (buffer-live-p (plist-get resources :response-buffer)))
-          (should-not (file-exists-p (plist-get resources :headers-file))))))))
 
 (provide 'ende-rs256-test)
 ;;; ende-rs256-test.el ends here

@@ -312,11 +312,41 @@
          (funcall callback new)
          (should (ende-error-p result)))))))
 
-(ert-deftest ende-codex-auth-refresh-unverified-id-token-cannot-change-continuity ()
+(ert-deftest ende-codex-auth-refresh-defers-rotation-until-verification ()
   (ende-codex-auth-test--with-store
-   (let ((old (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))))
-     (should-error (ende-codex--store-refresh old "new-access" "new-refresh" 3600 "unverified-id"))
-     (should (equal old (ende-codex-auth-read 'personal))))))
+   (let* ((result nil)
+          (verify nil)
+          (old (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
+          (payload (ende-codex-auth--json
+                    "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"id_token\":\"replacement\",\"token_type\":\"Bearer\",\"expires_in\":3600}"))
+          (waiter (ende-codex--make-refresh-waiter
+                   :callback (lambda (value) (setq result value))))
+          (flight (ende-codex--make-refresh-flight
+                   :key 'refresh :auth old :waiters (list waiter))))
+     (puthash 'refresh flight ende-codex--refresh-flights)
+     (cl-letf (((symbol-function 'ende-codex-auth--verify-refresh)
+                (lambda (_id-token _record callback) (setq verify callback) #'ignore)))
+       (ende-codex--refresh-response flight 200 payload)
+       (should verify)
+       (should-not result)
+       (should (equal old (ende-codex-auth-read 'personal)))
+       (funcall verify 'claims nil)
+       (should (equal (plist-get result :refresh-token) "new-refresh"))
+       (should (equal (plist-get (ende-codex-auth-read 'personal) :refresh-token)
+                      "new-refresh")))
+     (let* ((verify nil)
+            (old (ende-codex-auth--register 'work (ende-codex-auth-test--credentials "two")))
+            (waiter (ende-codex--make-refresh-waiter :callback #'ignore))
+            (flight (ende-codex--make-refresh-flight
+                     :key 'cancelled :auth old :waiters (list waiter))))
+       (puthash 'cancelled flight ende-codex--refresh-flights)
+       (cl-letf (((symbol-function 'ende-codex-auth--verify-refresh)
+                  (lambda (_id-token _record callback) (setq verify callback) #'ignore)))
+         (ende-codex--refresh-response flight 200 payload)
+         (ende-codex--refresh-cancel-waiter flight waiter)
+         (funcall verify 'claims nil)
+         (should (equal old (ende-codex-auth-read 'work))))))))
 
 (ert-deftest ende-codex-auth-resolve-never-falls-back-or-sends-replaced-account ()
   (ende-codex-auth-test--with-store

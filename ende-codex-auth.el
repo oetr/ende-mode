@@ -14,7 +14,6 @@
 (require 'ende-provider-config)
 (require 'ende-curl)
 
-(defconst ende-codex--issuer "https://auth.openai.com")
 (defconst ende-codex--authorize-url "https://auth.openai.com/api/accounts/authorize")
 (defconst ende-codex--token-url "https://auth.openai.com/api/accounts/oauth/token")
 (defconst ende-codex--jwks-url "https://auth.openai.com/.well-known/jwks.json")
@@ -86,8 +85,6 @@
   payload)
 
 (defconst ende-codex-auth--issuer "https://auth.openai.com")
-(defconst ende-codex-auth--jwks-uri
-  "https://auth.openai.com/.well-known/jwks.json")
 
 (define-error 'ende-codex-identity-error "OpenAI identity could not be verified")
 
@@ -223,66 +220,9 @@ CALLBACK receives (PAYLOAD ERROR).  Return a cancellation function."
     value))
 
 (defun ende-codex-auth--jwks ()
-  ;; Login supplies asynchronously retrieved trusted keys to this verifier.
-  "Fetch a bounded key set from the pinned OpenAI HTTPS endpoint."
+  "Return the keys trusted for the current verification."
   (or ende-codex-auth--trusted-jwks
-      (let* ((url (ende-curl--validated-url (list :url ende-codex-auth--jwks-uri)))
-             (origin (ende-url-normalize ende-codex-auth--issuer))
-             (destination (ende-url-normalize url))
-             (ende-connect-timeout 10)
-             (ende-max-response-header-bytes 16384)
-             (ende-max-stderr-bytes 4096)
-             (received 0) resources process overflow)
-	(unless (and (equal (plist-get origin :scheme) "https")
-                     (equal url (concat ende-codex-auth--issuer "/.well-known/jwks.json"))
-                     (equal (plist-get destination :host) "auth.openai.com")
-                     (= (plist-get destination :port) 443))
-	  (signal 'ende-codex-identity-error nil))
-	(unwind-protect
-            (progn
-              (setq resources
-                    (ende-curl-start-request
-                     :profile (list :url url) :name "ende-openai-jwks"
-                     :command (lambda (headers _config)
-				(append (ende-curl-base-command url)
-					(ende-curl-response-options headers)
-					(ende-curl-timeout-options 15 65536)
-					(list "--header" "Accept: application/json" "--url" url)))
-                     :filter (lambda (proc chunk)
-                               (cl-incf received (string-bytes chunk))
-                               (if (> received 65536)
-				   (progn (setq overflow t) (delete-process proc))
-				 (with-current-buffer (process-buffer proc)
-				   (goto-char (point-max)) (insert chunk))))
-                     :sentinel #'ignore)
-                    process (plist-get resources :process))
-              (set-process-coding-system process 'binary 'binary)
-              (with-current-buffer (plist-get resources :response-buffer)
-		(set-buffer-multibyte nil))
-              (let ((deadline (+ (float-time) 16)))
-		(while (and (process-live-p process) (< (float-time) deadline))
-		  (accept-process-output process 0.05)
-		  (when (> (file-attribute-size
-                            (file-attributes (plist-get resources :headers-file))) 16384)
-                    (setq overflow t)
-                    (delete-process process))))
-              (unless (and (not overflow) (eq (process-status process) 'exit)
-			   (= (process-exit-status process) 0)
-			   (= (or (car (ende-curl-response-headers
-					(plist-get resources :headers-file))) 0) 200))
-		(signal 'ende-codex-identity-error nil))
-              (let* ((jwks (with-current-buffer (plist-get resources :response-buffer)
-                             (ende-codex-auth--json (buffer-string))))
-                     (keys (gethash "keys" jwks)))
-		(unless (and (vectorp keys) (<= 1 (length keys) 16))
-		  (signal 'ende-codex-identity-error nil))
-		jwks))
-	  (when (processp process)
-            (ende-curl--cancel-idle-timer process))
-	  (ende-curl-cleanup-resources
-	   (list (plist-get resources :response-buffer) (plist-get resources :stderr-buffer))
-	   (list (plist-get resources :headers-file) (plist-get resources :config-file))
-	   (list process (plist-get resources :stderr-process)))))))
+      (signal 'ende-codex-identity-error nil)))
 
 (defun ende-codex-auth--claims (claims client-id nonce)
   "Validate authenticated CLAIMS against CLIENT-ID and login NONCE."
@@ -348,29 +288,46 @@ Return claims only after signature and OpenID validation."
       (ende-codex-auth--signed-claims id-token #'ende-codex-auth--jwks)
       expected-client-id expected-nonce))))
 
-(defun ende-codex-auth--verify-refresh (id-token record)
-  "Authenticate refreshed ID-TOKEN without changing RECORD's identity."
-  (ende-codex-auth--identity-guard
-   (lambda ()
-     (let* ((keys nil)
-            (source (lambda () (or keys (setq keys (ende-codex-auth--jwks)))))
-            (old (ende-codex-auth--signed-claims (plist-get record :id-token) source))
-            (new (ende-codex-auth--signed-claims id-token source))
-            (client (plist-get record :client-id))
-            (nonce (when (ende-protocol-json-has-key-p "nonce" new)
-                     (let ((original (gethash "nonce" old)))
-                       (unless (ende-codex-auth--text-p original)
-                         (signal 'ende-codex-identity-error nil))
-                       original))))
-       (ende-codex-auth--claims new client nonce)
-       (unless (and (equal (gethash "iss" old) ende-codex-auth--issuer)
-                    (equal (gethash "sub" old) (plist-get record :subject))
-                    (equal (gethash "sub" new) (plist-get record :subject))
-                    (equal (gethash "aud" new) (gethash "aud" old))
-                    (integerp (gethash "iat" old))
-                    (>= (gethash "iat" new) (gethash "iat" old)))
-         (signal 'ende-codex-identity-error nil))
-       new))))
+(defun ende-codex-auth--refresh-nonce (claims record)
+  "Return the nonce that refreshed CLAIMS must repeat from RECORD.
+RECORD's token was verified before storage, so only its payload is decoded."
+  (when (ende-protocol-json-has-key-p "nonce" claims)
+    (let* ((token (plist-get record :id-token))
+           (parts (and (stringp token) (split-string token "\\." nil)))
+           (nonce (and (= (length parts) 3)
+                       (gethash "nonce" (ende-codex-auth--json
+                                         (ende-rs256--decode (nth 1 parts)))))))
+      (unless (ende-codex-auth--text-p nonce)
+        (signal 'ende-codex-identity-error nil))
+      nonce)))
+
+(defun ende-codex-auth--refresh-claims (id-token record jwks)
+  "Verify replacement ID-TOKEN for RECORD against trusted JWKS.
+The replacement must continue RECORD's subject, issued client, and nonce."
+  (let ((claims (ende-codex-auth--signed-claims id-token (lambda () jwks))))
+    (ende-codex-auth--claims claims (plist-get record :client-id)
+                             (ende-codex-auth--refresh-nonce claims record))
+    (unless (equal (gethash "sub" claims) (plist-get record :subject))
+      (signal 'ende-codex-identity-error nil))
+    claims))
+
+(defun ende-codex-auth--verify-refresh (id-token record callback)
+  "Verify refreshed ID-TOKEN for RECORD asynchronously.
+CALLBACK receives (CLAIMS FAILURE); CLAIMS is non-nil only when the
+replacement token was verified against the pinned JWKS endpoint."
+  (ende-codex-auth--jwks-async
+   (lambda (jwks failure)
+     (if failure
+         (funcall callback nil failure)
+       (condition-case nil
+           (funcall callback
+                    (ende-codex-auth--identity-guard
+                     (lambda () (ende-codex-auth--refresh-claims id-token record jwks)))
+                    nil)
+         ((error quit)
+          (funcall callback nil (ende-error-create
+                                 :kind 'auth
+                                 :message "OpenAI identity could not be verified"))))))))
 
 (defvar ende-codex-auth--directory
   (expand-file-name "ende-codex/" user-emacs-directory)
@@ -389,11 +346,11 @@ Return claims only after signature and OpenID validation."
     (:registration-id . "registration_id") (:revision . "revision")
     (:access-token . "access_token") (:refresh-token . "refresh_token")
     (:id-token . "id_token") (:expires-at . "expires_at")
-    (:account-id . "account_id") (:scope . "scope") (:email . "email")
+    (:scope . "scope") (:email . "email")
     (:earliest-refresh-at . "earliest_refresh_at") (:needs-login . "needs_login")))
 
 (defconst ende-codex-auth--credential-fields
-  '(:client-id :subject :access-token :refresh-token :id-token :expires-at :account-id
+  '(:client-id :subject :access-token :refresh-token :id-token :expires-at
 	       :scope :email :earliest-refresh-at :needs-login))
 
 (defun ende-codex-auth--fail ()
@@ -462,11 +419,10 @@ Return claims only after signature and OpenID validation."
   (unless (and (integerp (plist-get credentials :expires-at))
                (>= (plist-get credentials :expires-at) 0))
     (ende-codex-auth--fail))
-  (dolist (key '(:account-id :email))
-    (when (plist-member credentials key)
-      (unless (and (ende-codex-auth--text-p (plist-get credentials key))
-                   (<= (length (plist-get credentials key)) 320))
-        (ende-codex-auth--fail))))
+  (when (plist-member credentials :email)
+    (unless (and (ende-codex-auth--text-p (plist-get credentials :email))
+                 (<= (length (plist-get credentials :email)) 320))
+      (ende-codex-auth--fail)))
   (when (plist-member credentials :scope)
     (ende-codex-auth--scopes (plist-get credentials :scope)))
   (when (plist-member credentials :earliest-refresh-at)

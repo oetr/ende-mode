@@ -42,7 +42,7 @@
   "One coalesced OAuth refresh and its waiting callbacks."
   key auth waiters process response-buffer stderr-buffer stderr-process
   headers-file
-  received-bytes finished lock timer (attempts 0))
+  received-bytes finished lock timer verification (attempts 0))
 
 (defvar ende-codex--refresh-flights (make-hash-table :test #'equal)
   "In-flight OAuth refreshes keyed by credential source and client identity.")
@@ -189,6 +189,9 @@ An inherited binding, including an unusable one, survives delegation."
             ende-codex--refresh-processes
             (delq process ende-codex--refresh-processes))
       (when-let* ((timer (ende-codex--refresh-flight-timer flight))) (cancel-timer timer))
+      (when-let* ((verification (ende-codex--refresh-flight-verification flight)))
+        (setf (ende-codex--refresh-flight-verification flight) nil)
+        (funcall verification))
       (when-let* ((lock (ende-codex--refresh-flight-lock flight)))
         (ende-ignore-errors #'delete-directory lock))
       (when (and (processp process) (process-live-p process))
@@ -240,9 +243,8 @@ An inherited binding, including an unusable one, survives delegation."
               (insert chunk))))))))
 
 (defun ende-codex--store-refresh (auth access refresh expires-in id-token &optional payload)
-  "Rotate AUTH atomically, verifying ID-TOKEN and preserving registration identity.
+  "Rotate AUTH atomically using verified ID-TOKEN and its registration identity.
 PAYLOAD supplies optional updated scopes and earliest refresh time."
-  (when id-token (ende-codex-auth--verify-refresh id-token auth))
   (let ((credentials (ende-codex-auth--credentials auth)))
     (dolist (key '(:needs-login :earliest-refresh-at)) (cl-remf credentials key))
     (setq credentials (ende-plist-merge
@@ -254,6 +256,33 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
     (when (and payload (gethash "earliest_refresh_at" payload))
       (setq credentials (plist-put credentials :earliest-refresh-at (gethash "earliest_refresh_at" payload))))
     (ende-codex-auth--rotate auth credentials)))
+
+(defun ende-codex--refresh-refusal ()
+  "Return the error for refreshed credentials that could not be verified."
+  (ende-error-create
+   :kind 'auth
+   :message "Codex refresh could not be verified; run M-x ende-codex-login"))
+
+(defun ende-codex--refresh-rotate (flight payload id-token)
+  "Rotate FLIGHT's credentials from PAYLOAD carrying verified ID-TOKEN."
+  (let ((auth (ende-codex--refresh-flight-auth flight)))
+    (condition-case nil
+        (ende-codex--refresh-finish
+         flight
+         (ende-codex--store-refresh
+          auth (gethash "access_token" payload) (gethash "refresh_token" payload)
+          (gethash "expires_in" payload) id-token payload))
+      (ende-codex-auth-conflict
+       (ende-codex--refresh-finish flight (ende-codex--refresh-current auth)))
+      ((error quit)
+       (ende-codex--refresh-finish flight (ende-codex--refresh-refusal))))))
+
+(defun ende-codex--refresh-verified (flight payload id-token _claims failure)
+  "Finish FLIGHT after verifying ID-TOKEN from PAYLOAD, or refuse FAILURE."
+  (unless (ende-codex--refresh-flight-finished flight)
+    (if failure
+        (ende-codex--refresh-finish flight (ende-codex--refresh-refusal))
+      (ende-codex--refresh-rotate flight payload id-token))))
 
 (defun ende-codex--refresh-current (auth)
   "Return a fresh concurrent winner only for AUTH's retained registration."
@@ -272,10 +301,14 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
     (if (equal status 200)
         (progn
           (ende-codex-auth--token-payload payload t)
-          (ende-codex--refresh-finish
-           flight (ende-codex--store-refresh
-                   auth (gethash "access_token" payload) (gethash "refresh_token" payload)
-                   (gethash "expires_in" payload) (gethash "id_token" payload) payload)))
+          (let ((id-token (gethash "id_token" payload)))
+            (if id-token
+                (setf (ende-codex--refresh-flight-verification flight)
+                      (ende-codex-auth--verify-refresh
+                       id-token auth
+                       (apply-partially #'ende-codex--refresh-verified
+                                        flight payload id-token)))
+              (ende-codex--refresh-rotate flight payload nil))))
       (let ((winner (ende-codex--refresh-current auth)))
         (if winner (ende-codex--refresh-finish flight winner)
           (when terminal (ende-codex-auth--require-login auth))
@@ -306,7 +339,7 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
         ((error quit)
          (ende-codex--refresh-finish
           flight (or (and (eq (car failure) 'ende-codex-auth-conflict) (ende-codex--refresh-current auth))
-                     (ende-error-create :kind 'auth :message "Codex refresh could not be verified; run M-x ende-codex-login"))))))))
+                     (ende-codex--refresh-refusal))))))))
 
 (defun ende-codex--start-refresh-flight (flight)
   "Start the process belonging to refresh FLIGHT."
