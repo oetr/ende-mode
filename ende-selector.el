@@ -67,6 +67,9 @@
 (defvar-local ende-selector--model-index 0
   "Index of the selected model in the current selector.")
 
+(defvar-local ende-selector--api nil
+  "Explicit wire API selection in this selector.")
+
 (defvar-local ende-selector--selection-required nil
   "Non-nil when a catalog needs an explicit model choice.")
 
@@ -134,8 +137,8 @@
   (let ((model (ende-selector--model-name))
         (provider (ende-selector--provider-name)))
     (if model
-        (ende-provider-profile-for-model provider model)
-      (ende-provider-profile provider))))
+        (ende-provider-profile-for-model provider model ende-selector--api)
+      (ende-provider--compose-profile provider nil ende-selector--api))))
 
 (defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
@@ -145,7 +148,7 @@
   "Return the current provider/model profile with controls applied."
   (ende-provider-profile-for-selection
    (ende-selector--provider-name) (ende-selector--model-name)
-   ende-selector--control-preferences))
+   ende-selector--control-preferences ende-selector--api))
 
 (defun ende-selector--control-setting (control)
   "Return CONTROL's resolved selector setting details."
@@ -410,6 +413,13 @@ the discovered pricing metadata for those model IDs."
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert (format "%-8s - %-18s %s\n" "n/p" "Provider:" provider))
+      (insert (format "%-8s - %-18s %s / %s / %s\n" "A" "Service/API/auth:"
+                      (or (plist-get profile :service) 'custom)
+                      (plist-get profile :api) (plist-get profile :auth-method)))
+      (insert (format "Account: %s   Endpoint: %s   Catalog: %s\n"
+                      (or (plist-get profile :account) (plist-get profile :auth-source-user) "none")
+                      (plist-get profile :url)
+                      (if (plist-get profile :models-explicit-p) "static" "discovered/manual")))
       (insert (format "%-8s - %-18s %s%s\n" "C-n/C-p" "Model:"
                       model-status model))
       (when ende-selector--selection-required
@@ -686,6 +696,7 @@ PREFERRED is selected only when it is present in MODELS."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (ende-selector--cancel-quota-probe)
+  (unless (= index ende-selector--provider-index) (setq ende-selector--api nil))
   (setq ende-selector--provider-index
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
@@ -724,6 +735,17 @@ PREFERRED is selected only when it is present in MODELS."
     (when (ende-selector--quota-supported-p)
       (ende-selector--probe-quota))
     (ende-selector--render)))
+
+(defun ende-selector-select-api ()
+  "Select an explicitly supported wire API, then revalidate model selection."
+  (interactive)
+  (let* ((profile (ende-selector--provider-profile))
+         (endpoints (plist-get profile :endpoints))
+         (apis (if (plist-get profile :base-url) (list (plist-get profile :api))
+                 (mapcar #'car endpoints)))
+         (choice (completing-read "Wire API: " (mapcar #'symbol-name apis) nil t)))
+    (setq ende-selector--api (intern choice))
+    (ende-selector--set-provider ende-selector--provider-index)))
 
 (defun ende-selector-next-provider ()
   "Select the next configured provider."
@@ -992,6 +1014,7 @@ performed locally so typing a search term never starts another network request."
     (when (and provider (stringp model))
       (ende-model-selection-save
        (append (list :provider provider :model model)
+               (when ende-selector--api (list :api ende-selector--api))
                (when ende-selector--control-preferences
                  (list :control-preferences
                        (copy-tree ende-selector--control-preferences))))
@@ -1153,6 +1176,7 @@ performed locally so typing a search term never starts another network request."
   (define-key ende-selector-mode-map (kbd "w") #'ende-selector-write-anywhere)
   (define-key ende-selector-mode-map (kbd "I") #'ende-selector-insert-anywhere)
   (define-key ende-selector-mode-map (kbd "m") #'ende-selector-select-model)
+  (define-key ende-selector-mode-map (kbd "A") #'ende-selector-select-api)
   (define-key ende-selector-mode-map (kbd "T") #'ende-selector-select-temperature)
   (define-key ende-selector-mode-map (kbd "t") #'ende-selector-select-thinking)
   (define-key ende-selector-mode-map (kbd "e") #'ende-selector-select-effort)

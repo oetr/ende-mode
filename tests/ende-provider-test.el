@@ -92,5 +92,23 @@
                            '(:temperature 0.4)))))
       (kill-buffer first) (kill-buffer second))))
 
+(ert-deftest ende-test/provider-api-selection-and-local-check ()
+  (let ((ende-providers '(openai))
+        (ende-builtin-provider-settings '((openai :models ("public-model")))))
+    (cl-letf (((symbol-function 'ende-credentials-secret)
+               (lambda (&rest _) (ert-fail "Local checker requested credentials")))
+              ((symbol-function 'make-process)
+               (lambda (&rest _) (ert-fail "Local checker started a network request"))))
+      (should (eq (plist-get (car (ende-provider-check)) :credentials) 'unchecked)))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--providers '(openai))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "openai-chat-completions")))
+        (ende-selector-select-api))
+      (should (eq (plist-get (ende-selector--resolved-profile) :api) 'openai-chat-completions))
+      (should (equal (plist-get (ende-selector--resolved-profile) :url)
+                     "https://api.openai.com/v1/chat/completions")))))
+
 (provide 'ende-provider-test)
 ;;; ende-provider-test.el ends here

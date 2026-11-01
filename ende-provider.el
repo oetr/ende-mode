@@ -134,10 +134,10 @@ Supported settings are `:max-concurrency' and `:parallel'."
   "Clear all session-level provider settings."
   (clrhash ende-provider--runtime-settings))
 
-(defun ende-provider--compose-profile (name model-override _model-override-p)
+(defun ende-provider--compose-profile (name model-override &optional api)
   "Resolve NAME and MODEL-OVERRIDE before capturing a request snapshot."
   (let* ((name (or name (car ende-providers)))
-         (profile (ende-provider-config-resolve name model-override)))
+         (profile (ende-provider-config-resolve name model-override api)))
     (pcase (plist-get profile :service)
       ('openai-codex
        (unless (eq (plist-get profile :account) 'default)
@@ -165,11 +165,11 @@ Supported settings are `:max-concurrency' and `:parallel'."
 
 (defun ende-provider-profile (&optional name)
   "Return a non-secret, composed provider profile for NAME."
-  (ende-provider--compose-profile name nil nil))
+  (ende-provider--compose-profile name nil))
 
-(defun ende-provider-profile-for-model (name model)
+(defun ende-provider-profile-for-model (name model &optional api)
   "Return composed provider NAME specialized for selected MODEL."
-  (ende-provider--compose-profile name model t))
+  (ende-provider--compose-profile name model api))
 
 (defun ende-provider-control-descriptor (profile control)
   "Return PROFILE's descriptor for CONTROL, or nil."
@@ -197,10 +197,10 @@ Present preference keys override PROFILE even when their value is nil."
               (plist-put resolved control (plist-get preferences control)))))
     resolved))
 
-(defun ende-provider-profile-for-selection (name model preferences)
+(defun ende-provider-profile-for-selection (name model preferences &optional api)
   "Resolve provider NAME and MODEL with explicit control PREFERENCES last."
   (ende-provider-profile-with-control-preferences
-   (ende-provider-profile-for-model name model) preferences))
+   (ende-provider-profile-for-model name model api) preferences))
 
 (defun ende-provider-control-setting (profile preferences control)
   "Return effective CONTROL value, source, and documented provider default."
@@ -346,6 +346,7 @@ SELECTION must contain a provider symbol and a nonempty model string."
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
         (append (list :provider provider :model model)
+                (when (plist-get selection :api) (list :api (plist-get selection :api)))
                 (when preferences-present
                   (list :control-preferences preferences)))))))
 
@@ -532,7 +533,8 @@ An unset buffer follows the current configured provider defaults."
          (selection (ende-model-selection-for-buffer buffer))
          (provider (or (plist-get selection :provider)
                        (car ende-providers)))
-         (configured-profile (ende-provider-profile provider))
+         (api (plist-get selection :api))
+         (configured-profile (ende-provider--compose-profile provider nil api))
          (model (or (plist-get selection :model)
                     (plist-get configured-profile :model)))
          (matching-selection-p
@@ -544,17 +546,18 @@ An unset buffer follows the current configured provider defaults."
          (preferences
           (ende-model-selection-control-preferences provider model buffer))
          (profile (ende-provider-profile-for-selection
-                   provider model preferences)))
+                   provider model preferences api)))
     (unless model
       (let* ((catalog (ende-provider-cached-models configured-profile))
              (models (plist-get catalog :models)))
         (if (= (length models) 1)
             (setq model (car models)
-                  profile (ende-provider-profile-for-selection provider model preferences))
+                  profile (ende-provider-profile-for-selection provider model preferences api))
           (user-error "Model selection required for %s; open ende-selector-open" provider))))
     (when (and remember (stringp model))
       (ende-model-selection-save
        (append (list :provider provider :model model)
+               (when api (list :api api))
                (when selection-preferences-p
                  (list :control-preferences
                        (copy-tree preferences))))
@@ -1385,6 +1388,39 @@ over PROFILE's live probe function.  Live probes bypass model metadata caches."
         (when (and (processp process) (process-live-p process))
           (ende-ignore-errors #'delete-process process)))))
   (setq ende-provider--discovery-processes nil)))
+
+;;;###autoload
+(defun ende-provider-check (&optional probe)
+  "Check configured providers locally without resolving credentials.
+With explicit prefix PROBE, discover only an unauthenticated provider catalog.
+Never issue generation requests or prompt for credentials."
+  (interactive "P")
+  (ende-provider-config-validate)
+  (let ((names (ende-provider-names)) reports)
+    (dolist (name names)
+      (let ((profile (ende-provider-profile name)))
+        (ende-provider-validate-controls profile)
+        (push (list :profile name :service (or (plist-get profile :service) 'custom)
+                    :api (plist-get profile :api) :account (plist-get profile :account)
+                    :endpoint (plist-get profile :url)
+                    :model (or (plist-get profile :model) 'selection-required)
+                    :credentials (if (eq (plist-get profile :auth-method) 'none) 'none 'unchecked))
+              reports)))
+    (when probe
+      (let* ((name (intern (completing-read "Probe unauthenticated provider: " names nil t)))
+             (profile (ende-provider-profile name)))
+        (unless (eq (plist-get profile :auth-method) 'none)
+          (user-error "Authenticated probes are not part of the local configuration check"))
+        (ende-provider-probe-models
+         profile (lambda (models error)
+                   (message "Ende discovery: %s" (if error "unavailable" (format "%d models" (length models))))))))
+    (when (called-interactively-p 'interactive)
+      (with-help-window "*Ende Provider Check*"
+        (if reports
+            (dolist (report (nreverse reports))
+              (princ (format "%S\n" report)))
+          (princ "No selectable providers. Configure ende-providers and a provider definition.\n"))))
+    reports))
 
 (provide 'ende-provider)
 

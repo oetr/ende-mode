@@ -500,6 +500,7 @@ selects another explicitly available wire endpoint.  No network is started."
          (profile
           (list :name name :service service :api api :url url :model model
                 :account (unless custom account) :auth-method auth
+                :endpoints (ende-provider-config-copy endpoints)
                 :max-concurrency (or (plist-get integration :max-concurrency) 1)
                 :parallel nil :require-sse t :stream-usage t
                 :request-timeout ende-request-timeout
