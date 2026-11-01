@@ -16,8 +16,8 @@
   "Return an explicit custom provider table for NAME with SETTINGS."
   (list (cons name (ende-plist-merge
                     '(:api openai-chat-completions :auth-method none
-                      :base-url "http://localhost:8080/v1" :models ("test-model")
-                      :temperature 0.8)
+			   :base-url "http://localhost:8080/v1" :models ("test-model")
+			   :temperature 0.8)
                     settings))))
 
 (defconst ende-test--custom-providers
@@ -58,14 +58,14 @@
 
 (defconst ende-test--dashboard-profile
   '(:name remote :api openai-chat-completions :auth-method none
-    :url "https://remote.test/v1/chat/completions"
-    :model "dashboard-test" :max-concurrency 2 :parallel nil))
+	  :url "https://remote.test/v1/chat/completions"
+	  :model "dashboard-test" :max-concurrency 2 :parallel nil))
 
 (defun ende-test--request-profile (settings)
   "Complete synthetic request SETTINGS with explicit transport configuration."
   (ende-plist-merge
    '(:api openai-chat-completions :auth-method none
-     :url "https://remote.test/v1/chat/completions")
+	  :url "https://remote.test/v1/chat/completions")
    settings))
 
 (defun ende-test--dashboard-request (profile)
@@ -265,19 +265,19 @@ non-nil, is signalled from the event callback."
               (list :name 'transport-test
                     :service (when (eq transport 'codex) 'openai-codex)
                     :account (when (eq transport 'codex) 'default)
+                    :codex-auth-source (when (eq transport 'codex) 'ende)
                     :api (if (eq transport 'codex) 'openai-responses 'openai-chat-completions)
                     :auth-method (if (eq transport 'codex) 'codex-oauth 'none)
                     :url (if (eq transport 'codex)
-                             "https://chatgpt.com/backend-api/codex/responses"
+                             "https://api.openai.com/v1/responses"
                            "https://example.test/v1/chat/completions")
                     :model "test-model"
                     :temperature (unless (eq transport 'codex) 0.2)
                     :controls (unless (eq transport 'codex)
                                 '((:temperature :path ("temperature"))))
                     :require-sse t)))
-         (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
-         (auth '(:access "transport-test-token"
-			 :expires 9999999999999)))
+         (auth '(:access-token "transport-test-token" :scope "offline_access chatgpt.tokens.use.direct"
+			       :expires-at 9999999999)))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
                  (setq request-args args)
@@ -291,9 +291,8 @@ non-nil, is signalled from the event callback."
                (lambda (target body)
                  (setq request-body (concat (or request-body "") body))
                  (funcall real-process-send-string target body)))
-              ((symbol-function 'ende-codex--auth-entry) (lambda () auth))
               ((symbol-function 'ende-codex--resolve-auth)
-               (lambda (callback)
+               (lambda (callback &optional _profile)
                  (funcall callback auth)
                  nil)))
       (unwind-protect

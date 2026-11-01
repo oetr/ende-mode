@@ -77,13 +77,17 @@
                   ;; Both wire APIs must advertise the same mandatory tool once.
                   (dolist (builder '(ende-llm--request-body ende-codex--request-body))
                     (let* ((body (funcall builder '(("user" . "Progress?")) profile))
-                           (tools (alist-get :tools body))
                            (wire-names
-                            (mapcar (lambda (tool)
-                                      (or (alist-get :name (alist-get :function tool))
-                                          (alist-get :name tool)))
-                                    tools)))
+                            (cl-mapcan
+                             (lambda (tool)
+                               (if (alist-get :tools tool)
+                                   (mapcar (lambda (member) (alist-get :name member))
+                                           (alist-get :tools tool))
+                                 (list (or (alist-get :name (alist-get :function tool))
+                                           (alist-get :name tool)))))
+                             (alist-get :tools body))))
                       (should (= (cl-count "about_thinking" wire-names :test #'equal) 1))
+                      (should-not (cl-some #'null wire-names))
                       (should (equal (sort wire-names #'string<)
                                      (sort (copy-sequence catalog-names)
                                            #'string<))))))))))))
@@ -254,9 +258,9 @@
                                    (ende-chat--protocol-tool-call
                                     document (ende-chat--parent document node) node))
                                  calls)))
-                 (let ((sent-calls
-                        (cl-loop for message in sent
-                                 append (plist-get message :tool-calls)))
+                (let ((sent-calls
+                       (cl-loop for message in sent
+                                append (plist-get message :tool-calls)))
                       (sent-results
                        (cl-remove-if-not
                         (lambda (message)
@@ -271,17 +275,17 @@
                                            :test #'equal))
                             (stored (ende-chat--protocol-tool-result-message
                                      document node)))
-                        (should call)
-                        (should (equal (plist-get stored :tool-call-id) id))
-                        (should (equal (plist-get stored :content)
-                                       (plist-get message :content)))))
-                    results sent-results)))
-               (ende-test--chat-goto "** Follow-up")
-               (let* ((history (ende-chat-context-at-point))
-                      (history-text (prin1-to-string history)))
-                 (should (ende-test--chat-protocol-messages history))
-                 (dolist (text '("about_thinking" "Checking access" "Reviewing"))
-                   (should (string-match-p text history-text))))
+                       (should call)
+                       (should (equal (plist-get stored :tool-call-id) id))
+                       (should (equal (plist-get stored :content)
+                                      (plist-get message :content)))))
+                   results sent-results)))
+              (ende-test--chat-goto "** Follow-up")
+              (let* ((history (ende-chat-context-at-point))
+                     (history-text (prin1-to-string history)))
+                (should (ende-test--chat-protocol-messages history))
+                (dolist (text '("about_thinking" "Checking access" "Reviewing"))
+                  (should (string-match-p text history-text))))
               (with-current-buffer (ende-history--buffer)
                 (should (string-match-p "Last reported activity" (buffer-string)))
                 (should (string-match-p "Reviewing" (buffer-string))))))))
@@ -301,10 +305,10 @@
           (org-mode)
           (insert "* Conversation\n** \nInvestigate.\n")
           (ende-test--chat-goto "** ")
-           (let* ((job (ende-ask))
-                  (request-id
-                   (plist-get (ende-job-instruction job) :request-id))
-                  (before (buffer-string)))
+          (let* ((job (ende-ask))
+                 (request-id
+                  (plist-get (ende-job-instruction job) :request-id))
+                 (before (buffer-string)))
             (ende-test--complete-call (car ende-test--calls))
             (should (eq (ende-job-state job) 'running))
             (should (equal (buffer-string) before))
@@ -316,37 +320,37 @@
             (should (= (length (split-string
                                 (ende-chat--staged-text job)
                                 "--> about_thinking" t)) 3))
-             (ende-test--complete-call (nth 2 ende-test--calls))
-             (should (eq (ende-job-state job) 'completed))
-             (let* ((document (ende-chat--build-document))
-                    (work (ende-chat--request-work-section document request-id))
-                    (reply
-                     (cl-find-if
-                      (lambda (headline)
-                        (and (equal (org-element-property :raw-value headline)
-                                    "Agent: Reply")
-                             (equal (ende-chat--property
-                                     document headline :request-id)
-                                    request-id)
-                             (null (ende-chat--work-ancestor document headline))))
-                      (ende-chat--document-headlines document)))
-                    (children (ende-chat--children document work)))
-               (should work)
-               (should reply)
-               (should (string-match-p "^\\*\\* $" (buffer-string)))
-               (should-not
-                (ende-chat--request-state-headline document request-id "pending"))
-               ;; The folded work hides its tool children while its sibling reply
-               ;; remains visible to the user.
-               (should (ende-test--chat-headline-text-hidden-p
-                        work "--> about_thinking"))
-               (should-not (ende-test--chat-headline-text-hidden-p
-                            reply "Review complete."))
-               (should (= (length (cl-remove-if-not
-                                   (lambda (node)
-                                     (ende-chat--tool-call-protocol-p document node))
-                                   children))
-                          2)))))
+            (ende-test--complete-call (nth 2 ende-test--calls))
+            (should (eq (ende-job-state job) 'completed))
+            (let* ((document (ende-chat--build-document))
+                   (work (ende-chat--request-work-section document request-id))
+                   (reply
+                    (cl-find-if
+                     (lambda (headline)
+                       (and (equal (org-element-property :raw-value headline)
+                                   "Agent: Reply")
+                            (equal (ende-chat--property
+                                    document headline :request-id)
+                                   request-id)
+                            (null (ende-chat--work-ancestor document headline))))
+                     (ende-chat--document-headlines document)))
+                   (children (ende-chat--children document work)))
+              (should work)
+              (should reply)
+              (should (string-match-p "^\\*\\* $" (buffer-string)))
+              (should-not
+               (ende-chat--request-state-headline document request-id "pending"))
+              ;; The folded work hides its tool children while its sibling reply
+              ;; remains visible to the user.
+              (should (ende-test--chat-headline-text-hidden-p
+                       work "--> about_thinking"))
+              (should-not (ende-test--chat-headline-text-hidden-p
+                           reply "Review complete."))
+              (should (= (length (cl-remove-if-not
+                                  (lambda (node)
+                                    (ende-chat--tool-call-protocol-p document node))
+                                  children))
+                         2)))))
       (ende-test--reset))))
 (ert-deftest ende-test/activity-is-job-scoped-through-cancellation-failure-and-late-callbacks ()
   (ende-test--reset)

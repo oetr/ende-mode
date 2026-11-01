@@ -33,13 +33,6 @@
   "Return the S256 challenge for VERIFIER."
   (ende-codex--base64url (secure-hash 'sha256 verifier nil nil t)))
 
-(defun ende-codex--form (parameters)
-  "Encode PARAMETERS for an OAuth query or form."
-  (mapconcat (lambda (pair)
-               (concat (url-hexify-string (car pair)) "="
-                       (url-hexify-string (cdr pair))))
-             parameters "&"))
-
 (defun ende-codex--login-live-p (attempt)
   "Return non-nil if ATTEMPT can still change credentials."
   (and (eq attempt ende-codex--pending-login)
@@ -48,7 +41,7 @@
 (defun ende-codex--login-close-listener (attempt)
   "Close ATTEMPT's listener and all accepted connections."
   (dolist (process (cons (ende-codex--login-listener attempt)
-                        (ende-codex--login-clients attempt)))
+                         (ende-codex--login-clients attempt)))
     (when (processp process)
       (set-process-filter process #'ignore)
       (set-process-sentinel process #'ignore)
@@ -105,7 +98,7 @@
     (when (plist-get existing :email)
       (push (cons "login_hint" (plist-get existing :email)) parameters))
     (concat (ende-codex-auth--endpoint ende-codex--authorize-url ende-codex--authorize-url)
-            "?" (ende-codex--form parameters))))
+            "?" (ende-codex-auth--form parameters))))
 
 (defun ende-codex--login-save (attempt payload jwks failure)
   "Verify PAYLOAD with trusted JWKS and save ATTEMPT unless FAILURE occurred."
@@ -204,7 +197,7 @@
       (setf (ende-codex--login-cancel attempt)
             (ende-codex-auth--request
              ende-codex--token-url
-             (ende-codex--form
+             (ende-codex-auth--form
               `(("grant_type" . "authorization_code")
                 ("client_id" . ,(ende-codex--login-client-id attempt)) ("code" . ,code)
                 ("code_verifier" . ,(ende-codex--login-verifier attempt))

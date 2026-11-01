@@ -26,32 +26,39 @@
       (expand-file-name (format "%04d-meta.json" sequence) directory))
      (buffer-string))))
 
-(defun ende-debug-test--record-synthetic (request job usage &optional session-id)
-  "Record synthetic REQUEST for JOB with provider USAGE and SESSION-ID."
+(defun ende-debug-test--record-synthetic (request job usage)
+  "Record synthetic REQUEST for JOB with provider USAGE."
   (let* ((model (alist-get :model request))
          (profile (list :name 'debug-test :job-id job :model model
-                       :reasoning-effort (or (alist-get :reasoning_effort
-                                                        request)
-                                             "high")))
+			:reasoning-effort (or (alist-get :reasoning_effort
+                                                         request)
+                                              "high")))
          (body (encode-coding-string (json-encode request) 'utf-8))
          (record (ende-debug-record-request
                   body request '(("user" . "synthetic")) profile
-                  "synthetic" "https://example.test/v1" session-id)))
+                  "synthetic" "https://example.test/v1")))
     (ende-debug-record-completion record 'success usage 200 nil)))
 
 (ert-deftest ende-test/debug-captures-exact-transport-body-without-altering-it ()
   (let ((directory (make-temp-file "ende-debug-fidelity-" t)))
     (unwind-protect
         (dolist (transport '(chat codex))
-          (let* ((profile
-                  (list :name 'debug-test :api 'openai-chat-completions :auth-method 'none
-                        :job-id 17 :model "test-model"
-                        :url (if (eq transport 'codex)
-                                 "https://chatgpt.com/backend-api/codex/responses"
-                               "https://example.test/v1/chat/completions")
-                        :temperature 0.2
-                        :controls '((:temperature :path ("temperature")))
-                        :require-sse t))
+          (let* ((codex (eq transport 'codex))
+                 (profile
+                  (append
+                   (list :name 'debug-test
+                         :api (if codex 'openai-responses 'openai-chat-completions)
+                         :auth-method (if codex 'codex-oauth 'none)
+                         :job-id 17 :model "test-model"
+                         :url (if codex
+                                  "https://api.openai.com/v1/responses"
+                                "https://example.test/v1/chat/completions")
+                         :require-sse t)
+                   (unless codex
+                     (list :temperature 0.2
+                           :controls '((:temperature :path ("temperature")))))
+                   (when codex
+                     (list :codex-auth-source 'ende :account 'default))))
                  (chunks (if (eq transport 'codex)
                              (list (concat "data: {\"type\":\"response.completed\","
                                            "\"response\":{\"usage\":{"
@@ -97,8 +104,8 @@
             (let ((metadata (ende-debug-test--read-meta directory 1)))
               (should (= (ende-protocol-json-get "job_id" metadata) 17))
               (should (equal (ende-protocol-json-get "transport" metadata)
-                             (if (eq transport 'codex)
-                                 "codex-responses"
+                             (if codex
+                                 "openai-responses"
                                "openai-compatible")))
               (should-not
                (string-match-p "transport-test-token"
@@ -107,13 +114,10 @@
                                   (expand-file-name "0001-meta.json"
                                                     directory))
                                  (buffer-string))))
-              (when (eq transport 'codex)
-                (let ((session-id
-                       (ende-protocol-json-get "codex_session_id" metadata)))
-                  (should (stringp session-id))
-                  (should (string-match-p
-                           (regexp-quote session-id)
-                           (plist-get recorded :config-text))))))
+              (when codex
+                (should (string-match-p
+                         "Authorization: Bearer transport-test-token"
+                         (plist-get recorded :config-text)))))
             (should (file-exists-p
                      (expand-file-name "0001-messages.el" directory)))))
       (delete-directory directory t))))
@@ -210,11 +214,11 @@
             (should (= (ende-protocol-json-get
                         "cached_input_tokens" completion-a) 0))
             (should (eq (ende-protocol-json-get
-                        "cached_tokens_reported" completion-a) t))
+                         "cached_tokens_reported" completion-a) t))
             (should (equal (ende-protocol-json-get "outcome" completion-b)
                            "failure"))
             (should (eq (ende-protocol-json-get
-                        "cached_tokens_reported" completion-b) :false))
+                         "cached_tokens_reported" completion-b) :false))
             (should-not (ende-protocol-json-get
                          "cached_input_tokens" completion-b))))
       (delete-directory directory t))))
@@ -243,19 +247,19 @@
          (modified `((:model . "chat-model")
                      (:messages . [,system-changed ((:role . "user")
                                                     (:content . "edited question"))
-                                  ,assistant])
+						   ,assistant])
                      (:reasoning . ((:effort . "high")))
                      (:tools . ,tools-a)))
          (tool-changed `((:model . "chat-model")
                          (:messages . [,system-changed ((:role . "user")
                                                         (:content . "edited question"))
-                                      ,assistant])
+						       ,assistant])
                          (:reasoning . ((:effort . "high")))
                          (:tools . ,tools-b)))
          (settings-changed `((:model . "chat-model-v2")
                              (:messages . [,system-changed ((:role . "user")
                                                             (:content . "edited question"))
-                                          ,assistant])
+							   ,assistant])
                              (:reasoning . ((:effort . "low")))
                              (:reasoning_effort . "low")
                              (:tools . ,tools-b)))
@@ -280,12 +284,12 @@
           (ende-debug-test--record-synthetic
            '((:model . "responses-model")
              (:input . [((:role . "user") (:content . "question"))]))
-           32 cache-a "session-one")
+           32 cache-a)
           (ende-debug-test--record-synthetic
            '((:model . "responses-model")
              (:input . [((:role . "user") (:content . "question"))
                         ((:role . "assistant") (:content . "answer"))]))
-           32 cache-zero "session-two")
+           32 cache-zero)
           (setq report
                 (ende-debug--format-report
                  directory (ende-debug--read-captures directory)))
@@ -298,7 +302,6 @@
           (should (string-match-p "Reasoning:       changed" report))
           (should (string-match-p "Instructions:    changed" report))
           (should (string-match-p "input\\[1\\]" report))
-          (should (string-match-p "Session ID:      changed" report))
           (should (string-match-p "Cached: 0 (0.0%)" report))
           (should (string-match-p "Cached: not reported" report))
           (should (string-match-p "First changed path:" report))

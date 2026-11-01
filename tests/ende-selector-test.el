@@ -34,69 +34,6 @@
         (call-interactively
          (lookup-key ende-selector-mode-map (kbd "a")))))))
 
-(ert-deftest ende-test/selector-quota-is-scoped-and-ignores-stale-results ()
-  (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
-        (quota-callback nil)
-        (cancel-count 0)
-        (ende-providers '(local openai-codex))
-        (ende-builtin-provider-settings '((openai-codex :models ("test-model"))))
-        (ende-provider--runtime-settings (make-hash-table :test #'equal))
-        (ende-model-selection--last-used nil))
-    (unwind-protect
-        (with-current-buffer buffer
-          (ende-selector-mode)
-          (setq ende-selector--providers '(local openai-codex)
-                ende-selector--provider-index 0)
-          (cl-letf (((symbol-function 'ende-provider-probe-models)
-                     (lambda (_profile callback)
-                       (funcall callback '("test-model") nil)
-                       (lambda () nil)))
-                    ((symbol-function 'ende-codex-probe-quota)
-                     (lambda (callback)
-                       (setq quota-callback callback)
-                       (lambda () (cl-incf cancel-count)))))
-            (ende-selector--set-provider 0)
-            (should-not quota-callback)
-            (should (string-match-p "Quota: unavailable"
-                                    (buffer-string)))
-            (ende-selector--set-provider 1)
-            (should quota-callback)
-            (should (eq ende-selector--quota-state :loading))
-            (should (string-match-p "Quota: loading\\.\\.\\."
-                                    (buffer-string)))
-            (let ((now (floor (float-time))))
-              (funcall
-               quota-callback
-               (list :primary
-                     (list :used-percent 28
-                           :reset-at (+ now 18660)
-                           :window-seconds 18000)
-                     :secondary
-                     (list :used-percent 59
-                           :reset-at (+ now 7980)
-                           :window-seconds 604800))
-               nil)
-              (should (eq ende-selector--quota-state :ready))
-              (should (string-match-p
-                       "Quota: 5h 1[01]m: 72% left"
-                       (buffer-string)))
-              (ende-selector--set-provider 1)
-              (let ((stale-callback quota-callback))
-                (ende-selector--set-provider 0)
-                (should (= cancel-count 1))
-                (should (eq ende-selector--quota-state :unavailable))
-                (funcall stale-callback
-                         (list :primary
-                               (list :used-percent 1
-                                     :reset-at (+ now 18660)
-                                     :window-seconds 18000))
-                         nil)
-                (should (eq ende-selector--quota-state :unavailable))))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-
-
 (ert-deftest ende-test/model-selection-restores-by-buffer-identity ()
   (let* ((name " *ende-model-selection-identity*")
          (file "/tmp/ende-model-selection-identity.el")
@@ -1226,7 +1163,6 @@
 (ert-deftest ende-test/selector-changes-provider-runtime-settings ()
   (ende-provider-clear-runtime-settings)
   (let ((ende-providers '(remote))
-        (ende-providers '(remote))
         (ende-custom-providers
          '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model") :temperature 0.8 :max-concurrency 2
                    :parallel nil))))
@@ -1248,7 +1184,6 @@
       (ende-selector--render)
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
                      "Temperature:" "Thinking:" "Reasoning effort:"
-                     "Quota: unavailable"
                      "i  - insert" "a  - ask" "d  - queue dashboard"
                      "I  - insert anywhere"
                      "k  - compact chat context"
@@ -1478,18 +1413,18 @@
           (setq ende-selector--providers '(remote)
                 ende-selector--provider-index 0)
           (cl-letf (((symbol-function 'ende-provider--start-live-model-request) probe))
-          (ende-selector--set-provider 0)
-          (should (= attempts 1))
-          (should (eq ende-selector--model-state :error))
-          (should (string-match-p "probe failed" (buffer-string)))
+            (ende-selector--set-provider 0)
+            (should (= attempts 1))
+            (should (eq ende-selector--model-state :error))
+            (should (string-match-p "probe failed" (buffer-string)))
 
-          (ende-selector--set-provider 0)
-          (should (= attempts 2))
-          (should (eq ende-selector--model-state :ready))
-          (should (string= (ende-selector--model-name) "remote/first"))
+            (ende-selector--set-provider 0)
+            (should (= attempts 2))
+            (should (eq ende-selector--model-state :ready))
+            (should (string= (ende-selector--model-name) "remote/first"))
 
-          (ende-selector--set-provider 0)
-          (should (= attempts 2))))
+            (ende-selector--set-provider 0)
+            (should (= attempts 2))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 

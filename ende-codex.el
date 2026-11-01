@@ -6,9 +6,7 @@
 
 ;;; Commentary:
 
-;; Reuse the OAuth credentials maintained by OpenCode for ChatGPT Plus/Pro.
-;; This deliberately does not implement a second login flow: users authenticate
-;; OpenCode once, then ende reads and refreshes its openai OAuth record.
+;; Native ChatGPT-plan authorization and the official Responses transport.
 
 ;;; Code:
 
@@ -31,71 +29,6 @@
 
 (declare-function ende-provider-validate-profile "ende-provider" (profile))
 
-(defcustom ende-codex-auth-file
-  (expand-file-name "~/.local/share/opencode/auth.json")
-  "OpenCode credential file containing the `openai' OAuth record."
-  :type 'file
-  :group 'ende)
-
-(defcustom ende-codex-issuer "https://auth.openai.com"
-  "OAuth issuer used to refresh OpenCode's ChatGPT credentials."
-  :type 'string
-  :group 'ende)
-
-(defcustom ende-codex-client-id "app_EMoamEEZ73f0CkXaXp7hrann"
-  "OpenAI OAuth client id used by OpenCode's ChatGPT integration."
-  :type 'string
-  :group 'ende)
-
-(defcustom ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses"
-  "ChatGPT/Codex Responses endpoint."
-  :type 'string
-  :group 'ende)
-
-(defcustom ende-codex-models-endpoint "https://chatgpt.com/backend-api/codex/models"
-  "Account-scoped ChatGPT/Codex model discovery endpoint."
-  :type 'string
-  :group 'ende)
-
-(defcustom ende-codex-usage-endpoint
-  "https://chatgpt.com/backend-api/wham/usage"
-  "Account-scoped ChatGPT/Codex quota endpoint."
-  :type 'string
-  :group 'ende)
-
-(defcustom ende-codex-client-version "1.0.0"
-  "Client version sent to the ChatGPT/Codex model discovery endpoint."
-  :type 'string
-  :group 'ende)
-
-(defconst ende-codex--generation-host "chatgpt.com"
-  "Official host allowed for Codex generation and model discovery.")
-
-(defconst ende-codex--issuer-host "auth.openai.com"
-  "Official host allowed for Codex OAuth refreshes.")
-
-(defconst ende-codex--generation-path "/backend-api/codex/responses"
-  "Official Codex generation path.")
-
-(defconst ende-codex--models-path "/backend-api/codex/models"
-  "Official Codex model discovery path.")
-
-(defun ende-codex--session-id-for-identity (identity)
-  "Return an opaque Codex session ID derived from stable IDENTITY."
-  (secure-hash 'sha256 (format "ende-codex:%s" identity)))
-
-(defun ende-codex--new-session-id ()
-  "Return a fresh Codex session ID for a job without a stable identity."
-  (ende-codex--session-id-for-identity
-   (format "job:%s:%s:%s" (emacs-pid) (float-time)
-           (random most-positive-fixnum))))
-
-(defconst ende-codex--usage-path "/backend-api/wham/usage"
-  "Official ChatGPT/Codex quota path.")
-
-(defconst ende-codex--refresh-path "/oauth/token"
-  "Official Codex OAuth refresh path.")
-
 (defvar ende-codex--refresh-processes nil
   "In-flight OpenAI OAuth refresh processes.")
 
@@ -109,16 +42,13 @@
   "One coalesced OAuth refresh and its waiting callbacks."
   key auth waiters process response-buffer stderr-buffer stderr-process
   headers-file
-  received-bytes finished)
+  received-bytes finished lock timer (attempts 0))
 
 (defvar ende-codex--refresh-flights (make-hash-table :test #'equal)
   "In-flight OAuth refreshes keyed by credential source and client identity.")
 
 (defvar ende-codex--model-probe-processes nil
   "In-flight ChatGPT/Codex model discovery processes.")
-
-(defvar ende-codex--quota-probe-processes nil
-  "In-flight ChatGPT/Codex quota discovery processes.")
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
@@ -150,274 +80,86 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 ;;;; Credential handling
 
-(defun ende-codex--auth-version (auth)
-  "Return the credential version represented by AUTH."
-  (list (plist-get auth :access)
-        (plist-get auth :refresh)
-        (plist-get auth :expires)
-        (plist-get auth :account-id)))
-
-(defun ende-codex--entry-version (entry)
-  "Return the credential version represented by JSON ENTRY."
-  (list (ende-protocol-json-get "access" entry)
-        (ende-protocol-json-get "refresh" entry)
-        (ende-protocol-json-get "expires" entry)
-        (ende-protocol-json-get "accountId" entry)))
-
-(defun ende-codex--validated-official-url (url host path)
-  "Return URL when it has the exact official HTTPS origin and PATH."
-  (let* ((parsed (and (stringp url) (url-generic-parse-url url)))
-         (scheme (and parsed (url-type parsed)))
-         (actual-host (and parsed (url-host parsed)))
-         (port (and parsed (url-port parsed)))
-         (actual-path (and parsed (url-filename parsed))))
-    (unless (and (stringp url)
-                 (string= (downcase (or scheme "")) "https")
-                 (string= (downcase (or actual-host "")) host)
-                 (= (or port 443) 443)
-                 (null (and parsed (url-user parsed)))
-                 (null (and parsed (url-password parsed)))
-                 (not (string-match-p "[?#]" url))
-                 (string= (or actual-path "/") path))
-      (error "Codex credentials may only be sent to the official %s endpoint"
-             host))
-    url))
-
 (defun ende-codex--validated-generation-url (url)
-  "Validate the credential-bearing Codex generation URL URL."
-  (ende-codex--validated-official-url
-   url ende-codex--generation-host ende-codex--generation-path))
+  "Require URL to be the fixed official Responses endpoint."
+  (unless (equal url ende-codex--responses-url)
+    (error "Codex credentials may only be sent to the official Responses endpoint"))
+  (ende-codex-auth--endpoint url ende-codex--responses-url))
 
-(defun ende-codex--validated-models-url ()
-  "Validate and return the credential-bearing Codex models URL."
-  (ende-codex--validated-official-url
-   ende-codex-models-endpoint
-   ende-codex--generation-host
-   ende-codex--models-path))
-
-(defun ende-codex--validated-usage-url ()
-  "Validate and return the credential-bearing Codex quota URL."
-  (ende-codex--validated-official-url
-   ende-codex-usage-endpoint
-   ende-codex--generation-host
-   ende-codex--usage-path))
+(defun ende-codex--catalog-url ()
+  "Return the fixed official ChatGPT-plan model catalog endpoint."
+  (ende-codex-auth--endpoint ende-codex--models-url ende-codex--models-url))
 
 (defun ende-codex--validated-refresh-url ()
-  "Validate and return the official Codex OAuth refresh URL."
-  (ende-codex--validated-official-url
-   (concat (string-remove-suffix "/" ende-codex-issuer)
-           ende-codex--refresh-path)
-   ende-codex--issuer-host
-   ende-codex--refresh-path))
+  "Return the fixed official OAuth token endpoint."
+  (ende-codex-auth--endpoint ende-codex--token-url ende-codex--token-url))
+
+(defun ende-codex--access-token (auth)
+  "Return the access token from private AUTH, never from a request profile."
+  (plist-get auth :access-token))
 
 (defun ende-codex--auth-fresh-p (auth)
-  "Return non-nil when AUTH has enough lifetime for a new request."
-  (let* ((owned (ende-codex--account-auth-p auth))
-         (expires (plist-get auth (if owned :expires-at :expires))))
-    (and (stringp (ende-codex--access-token auth)) (numberp expires)
-         (> expires (* (if owned 1 1000) (+ (floor (float-time)) 30))))))
-
-(defun ende-codex--read-json-file (file)
-  "Read FILE as a JSON hash table without interning its keys."
-  (with-temp-buffer
-    (insert-file-contents-literally file)
-    (ende-protocol-json-read-string (buffer-string))))
-
-(defun ende-codex--auth-entry ()
-  "Return OpenCode's OAuth entry for the `openai' provider."
-  (let* ((default-directory (ende-curl-local-directory))
-         (data (ende-codex--read-json-file ende-codex-auth-file))
-         (entry (ende-protocol-json-get "openai" data)))
-    (unless (and (hash-table-p entry)
-                 (string= (format "%s"
-                                  (ende-protocol-json-get "type" entry))
-                          "oauth"))
-      (error "OpenCode has no ChatGPT OAuth credentials for openai"))
-    (let ((access (ende-protocol-json-get "access" entry))
-          (refresh (ende-protocol-json-get "refresh" entry))
-          (expires (ende-protocol-json-get "expires" entry))
-          (account-id (ende-protocol-json-get "accountId" entry)))
-      (unless (and (stringp access) (stringp refresh) (numberp expires))
-        (error "OpenCode's openai OAuth credentials are incomplete"))
-      (list :access access :refresh refresh :expires expires
-            :account-id account-id))))
-
-(defun ende-codex--jwt-claims (token)
-  "Decode the unverified claims from TOKEN, or return nil.
-The claims are used only for routing metadata such as account and residency."
-  (when (stringp token)
-    (let ((parts (split-string token "\\.")))
-      (when (= (length parts) 3)
-        (condition-case nil
-            (let* ((encoded (replace-regexp-in-string
-                             "-" "+"
-                             (replace-regexp-in-string "_" "/"
-                                                       (nth 1 parts))))
-                   (padding (mod (- 4 (mod (length encoded) 4)) 4))
-                   (decoded (base64-decode-string
-                             (concat encoded (make-string padding ?=)))))
-              (ende-protocol-json-read-string
-               (decode-coding-string decoded 'utf-8)))
-          ((error quit) nil))))))
-
-(defun ende-codex--claim (claims key)
-  "Return claim KEY from CLAIMS, including namespaced auth claims."
-  (or (ende-protocol-json-get key claims)
-      (ende-protocol-json-get key
-                              (ende-protocol-json-get
-                               "https://api.openai.com/auth" claims))))
-
-(defun ende-codex--binding-state (auth)
-  "Return private continuity state for retained AUTH, never verified identity."
-  (list (expand-file-name ende-codex-auth-file) ende-codex-issuer ende-codex-client-id
-        (plist-get auth :account-id)
-        (ende-credentials--signature (concat (plist-get auth :access) "\0" (plist-get auth :refresh)))))
+  "Return non-nil when AUTH can authenticate a request without refresh."
+  (let ((expires (plist-get auth :expires-at))
+        (earliest (plist-get auth :earliest-refresh-at))
+        (now (floor (float-time))))
+    (and (not (plist-get auth :needs-login))
+         (ende-codex-auth--text-p (ende-codex--access-token auth))
+         (integerp expires)
+         (> expires now)
+         (or (> expires (+ now 30))
+             (and earliest (> earliest now))))))
 
 (defun ende-codex--account-profile (profile)
-  "Stage a detached Ende-owned account PROFILE for internal callers only.
-No public profile uses this source until the atomic login/transport cutover.
-This is not a user setting, an availability test, or a legacy fallback."
+  "Return a detached PROFILE bound exclusively to Ende-owned account storage."
   (ende-codex-auth--alias (plist-get profile :account))
   (plist-put (ende-provider-config-copy profile) :codex-auth-source 'ende))
 
-(defun ende-codex--account-auth-p (auth)
-  "Return non-nil for a private Ende-owned AUTH record."
-  (plist-member auth :registration-id))
-
 (defun ende-codex--account-binding-state (auth)
-  "Return private registration continuity for Ende-owned AUTH, without tokens."
+  "Return private registration continuity for AUTH, without tokens."
   (list 'ende (expand-file-name ende-codex-auth--directory)
         (plist-get auth :account) (plist-get auth :host-id)
         (plist-get auth :registration-id) (plist-get auth :client-id)
         (plist-get auth :subject)))
 
 (defun ende-codex--profile-auth (profile)
-  "Read only the credential source explicitly retained by PROFILE."
-  (if (eq (plist-get profile :codex-auth-source) 'ende)
-      (ende-codex-auth-read (plist-get profile :account))
-    (unless (and (not (plist-member profile :codex-auth-source))
-                 (memq (plist-get profile :account) '(nil default)))
-      (error "Independent Codex accounts require an authorized Ende registration"))
-    (ende-codex--auth-entry)))
+  "Read the Ende-owned registration selected by PROFILE."
+  (unless (eq (plist-get profile :codex-auth-source) 'ende)
+    (error "Codex requires Ende-owned account storage"))
+  (or (ende-codex-auth-lookup (plist-get profile :account))
+      (user-error "Codex account is not connected; run M-x ende-codex-login")))
 
 (defun ende-codex-capture-binding (profile)
-  "Bind queued PROFILE to its explicit credential source without copying tokens.
-Preserve an inherited binding, including an unusable one, through delegation."
+  "Bind queued PROFILE to its account registration without copying tokens.
+An inherited binding, including an unusable one, survives delegation."
   (if (plist-member profile :codex-binding) profile
-    (let* ((id (make-symbol "ende-codex-binding"))
-           (state (condition-case nil
-                      (let ((auth (ende-codex--profile-auth profile)))
-                        (if (eq (plist-get profile :codex-auth-source) 'ende)
-                            (ende-codex--account-binding-state auth)
-                          (ende-codex--binding-state auth)))
-                    (error nil))))
+    (let ((id (make-symbol "ende-codex-binding"))
+          state)
+      (condition-case nil
+          (setq state (ende-codex--account-binding-state
+                       (ende-codex--profile-auth profile)))
+        (error nil))
       (puthash id state ende-credentials--bindings)
       (plist-put profile :codex-binding id))))
 
 (defun ende-codex--check-binding (profile auth)
   "Require captured PROFILE continuity before using AUTH."
   (when (plist-member profile :codex-binding)
-    (let* ((owned (eq (plist-get profile :codex-auth-source) 'ende))
-           (captured (gethash (plist-get profile :codex-binding) ende-credentials--bindings))
-           (current (if owned
-                        (and (ende-codex--account-auth-p auth)
-                             (eq (plist-get profile :account) (plist-get auth :account))
-                             (ende-codex--account-binding-state auth))
-                      (and (not (ende-codex--account-auth-p auth))
-                           (memq (plist-get profile :account) '(nil default))
-                           (ende-codex--binding-state auth)))))
+    (let ((captured (gethash (plist-get profile :codex-binding)
+                             ende-credentials--bindings))
+          (current (and (eq (plist-get profile :codex-auth-source) 'ende)
+                        (eq (plist-get profile :account) (plist-get auth :account))
+                        (ende-codex--account-binding-state auth))))
       (unless (and captured current (equal captured current))
         (error "Queued Codex credentials changed or cannot be verified; submit a new request")))))
 
-(defun ende-codex--access-token (auth)
-  "Return the access token from private AUTH, never from a request profile."
-  (plist-get auth (if (ende-codex--account-auth-p auth) :access-token :access)))
-
-(defun ende-codex--account-id (auth)
-  "Return the ChatGPT account id in AUTH or its access token."
-  (or (plist-get auth :account-id)
-      (let ((claims (ende-codex--jwt-claims (ende-codex--access-token auth))))
-        (or (ende-codex--claim claims "chatgpt_account_id")
-            (let ((organizations
-                   (ende-protocol-json-get "organizations" claims)))
-              (and (vectorp organizations)
-                   (> (length organizations) 0)
-                   (ende-protocol-json-get
-                    "id" (aref organizations 0))))))))
-
-(defun ende-codex--residency (auth)
-  "Return the compute residency claim in AUTH, if constrained."
-  (let ((residency
-         (ende-codex--claim
-          (ende-codex--jwt-claims (ende-codex--access-token auth))
-          "chatgpt_compute_residency")))
-    (and (stringp residency)
-         (not (string-empty-p residency))
-         (not (string= residency "no_constraint"))
-         residency)))
-
-(defun ende-codex--form-field (value)
-  "Encode VALUE for an OAuth form body."
-  (url-hexify-string (format "%s" value)))
-
-(defun ende-codex--refresh-body (refresh-token &optional client-id)
+(defun ende-codex--refresh-body (refresh-token client-id)
   "Return an OAuth refresh body for REFRESH-TOKEN and issued CLIENT-ID."
-  (format "grant_type=refresh_token&refresh_token=%s&client_id=%s"
-          (ende-codex--form-field refresh-token)
-          (ende-codex--form-field (or client-id ende-codex-client-id))))
-
-(defun ende-codex--store-auth (auth &optional expected-version)
-  "Write refreshed AUTH back to OpenCode's credential file atomically.
-When EXPECTED-VERSION is non-nil, refuse to replace credentials that changed
-since the refresh began."
-  (let* ((default-directory (ende-curl-local-directory))
-         (file (expand-file-name ende-codex-auth-file))
-         (data (progn
-                 (when (file-remote-p file)
-                   (user-error "Ende requires a local Codex credential file"))
-                 (ende-codex--read-json-file file)))
-         (old (ende-protocol-json-get "openai" data))
-         (entry (if (hash-table-p old)
-                    (copy-hash-table old)
-		  (make-hash-table :test #'equal)))
-         (temporary nil)
-         (complete nil))
-    (when (and expected-version
-               (not (equal expected-version
-                           (ende-codex--entry-version old))))
-      (error "OpenCode credentials changed during refresh"))
-    (puthash "type" "oauth" entry)
-    (puthash "access" (plist-get auth :access) entry)
-    (puthash "refresh" (plist-get auth :refresh) entry)
-    (puthash "expires" (plist-get auth :expires) entry)
-    (when (plist-get auth :account-id)
-      (puthash "accountId" (plist-get auth :account-id) entry))
-    (puthash "openai" entry data)
-    (unwind-protect
-        (progn
-          (setq temporary
-                (make-temp-file
-                 (expand-file-name ".ende-openai-auth-"
-                                   (or (file-name-directory file)
-                                       default-directory))))
-          (set-file-modes temporary #o600)
-          (with-temp-file temporary
-            (insert (json-encode data) "\n"))
-          (set-file-modes temporary #o600)
-          (rename-file temporary file t)
-          (let ((old-state (and expected-version (hash-table-p old)
-                                (ende-codex--binding-state
-                                 (list :access (gethash "access" old) :refresh (gethash "refresh" old)
-                                       :account-id (gethash "accountId" old)))))
-                (new-state (ende-codex--binding-state auth)))
-            (when (and old-state (equal (nth 3 old-state) (nth 3 new-state)))
-              (maphash (lambda (id state)
-                         (when (equal state old-state) (puthash id new-state ende-credentials--bindings)))
-                       ende-credentials--bindings)))
-          (setq complete t))
-      (unless complete
-        (when (and temporary (file-exists-p temporary))
-          (ende-ignore-errors #'delete-file temporary))))))
+  (when (equal client-id "dynamic_agent_client")
+    (error "An issued Codex client ID is required"))
+  (ende-codex-auth--form
+   `(("grant_type" . "refresh_token") ("client_id" . ,client-id)
+     ("refresh_token" . ,refresh-token) ("resource" . ,ende-codex--resource))))
 
 (defun ende-codex--refresh-command (url headers-file)
   "Build the curl command for an OAuth refresh request to URL."
@@ -426,6 +168,7 @@ since the refresh began."
    (ende-curl-response-options headers-file)
    (list "--request" "POST"
          "--header" "Content-Type: application/x-www-form-urlencoded"
+         "--header" "Accept: application/json"
          "--data-binary" "@-")
    (ende-curl-timeout-options ende-request-timeout
                               ende-max-oauth-refresh-bytes)
@@ -445,6 +188,9 @@ since the refresh began."
       (setf (ende-codex--refresh-flight-waiters flight) nil
             ende-codex--refresh-processes
             (delq process ende-codex--refresh-processes))
+      (when-let* ((timer (ende-codex--refresh-flight-timer flight))) (cancel-timer timer))
+      (when-let* ((lock (ende-codex--refresh-flight-lock flight)))
+        (ende-ignore-errors #'delete-directory lock))
       (when (and (processp process) (process-live-p process))
         (ende-ignore-errors #'delete-process process))
       (ende-curl-cleanup-resources
@@ -493,86 +239,74 @@ since the refresh began."
               (goto-char (point-max))
               (insert chunk))))))))
 
-(defun ende-codex--store-refresh (auth access refresh expires-in id-token)
-  "Store refreshed tokens for private AUTH and return its new snapshot.
-Only the retained registration supplies the issued client ID and subject;
-unverified JWT payloads can never authorize an identity change."
-  (if (ende-codex--account-auth-p auth)
-      (let* ((claims (when id-token (ende-codex-auth--verify-refresh id-token auth)))
-             (credentials
-             (list :client-id (plist-get auth :client-id)
-                   :subject (if claims (gethash "sub" claims) (plist-get auth :subject))
-                   :access-token access :refresh-token refresh
-                   :id-token (or id-token (plist-get auth :id-token))
-                   :expires-at (+ (floor (float-time)) expires-in))))
-        (when (plist-get auth :account-id)
-          (setq credentials (plist-put credentials :account-id (plist-get auth :account-id))))
-        (ende-codex-auth--rotate auth credentials))
-    (let ((refreshed
-           (list :access access :refresh refresh
-                 :expires (* 1000 (+ (floor (float-time)) expires-in))
-                 :account-id
-                 (or (plist-get auth :account-id)
-                     (ende-codex--claim (ende-codex--jwt-claims access) "chatgpt_account_id")))))
-      (ende-codex--store-auth refreshed (ende-codex--auth-version auth))
-      refreshed)))
+(defun ende-codex--store-refresh (auth access refresh expires-in id-token &optional payload)
+  "Rotate AUTH atomically, verifying ID-TOKEN and preserving registration identity.
+PAYLOAD supplies optional updated scopes and earliest refresh time."
+  (when id-token (ende-codex-auth--verify-refresh id-token auth))
+  (let ((credentials (ende-codex-auth--credentials auth)))
+    (dolist (key '(:needs-login :earliest-refresh-at)) (cl-remf credentials key))
+    (setq credentials (ende-plist-merge
+                       credentials (list :access-token access :refresh-token refresh
+                                         :expires-at (+ (floor (float-time)) expires-in)
+                                         :id-token (or id-token (plist-get auth :id-token)))))
+    (when (ende-protocol-json-has-key-p "scope" payload)
+      (setq credentials (plist-put credentials :scope (gethash "scope" payload))))
+    (when (and payload (gethash "earliest_refresh_at" payload))
+      (setq credentials (plist-put credentials :earliest-refresh-at (gethash "earliest_refresh_at" payload))))
+    (ende-codex-auth--rotate auth credentials)))
 
 (defun ende-codex--refresh-current (auth)
   "Return a fresh concurrent winner only for AUTH's retained registration."
   (condition-case nil
-      (let ((current (if (ende-codex--account-auth-p auth)
-                         (ende-codex-auth-read (plist-get auth :account))
-                       (ende-codex--auth-entry))))
+      (let ((current (ende-codex-auth-read (plist-get auth :account))))
         (and (ende-codex--auth-fresh-p current)
-             (if (ende-codex--account-auth-p auth)
-                 (ende-codex-auth--same-registration-p auth current)
-               (equal (plist-get auth :account-id) (plist-get current :account-id)))
-             current))
+             (ende-codex-auth--same-registration-p auth current) current))
     ((error quit) nil)))
 
-(defun ende-codex--refresh-sentinel (flight process event)
-  "Handle terminal PROCESS EVENT for refresh FLIGHT."
+(defun ende-codex--refresh-response (flight status payload)
+  "Apply token PAYLOAD with HTTP STATUS to FLIGHT."
+  (let* ((auth (ende-codex--refresh-flight-auth flight))
+         (code (gethash "error" payload))
+         (terminal (member code '("invalid_grant" "invalid_refresh_token" "token_expired"
+                                  "refresh_token_expired" "refresh_token_invalidated" "refresh_token_reused"))))
+    (if (equal status 200)
+        (progn
+          (ende-codex-auth--token-payload payload t)
+          (ende-codex--refresh-finish
+           flight (ende-codex--store-refresh
+                   auth (gethash "access_token" payload) (gethash "refresh_token" payload)
+                   (gethash "expires_in" payload) (gethash "id_token" payload) payload)))
+      (let ((winner (ende-codex--refresh-current auth)))
+        (if winner (ende-codex--refresh-finish flight winner)
+          (when terminal (ende-codex-auth--require-login auth))
+          (ende-codex--refresh-finish
+           flight (ende-error-create
+                   :kind (if terminal 'auth 'transport)
+                   :message (if terminal "Codex requires sign-in; run M-x ende-codex-login"
+                              "OpenAI refresh was rejected; credentials retained")
+                   :details (list :status status
+                                  :code (and (stringp code) (<= (length code) 100)
+                                             (string-match-p "\\`[a-z_]+\\'" code) code)))))))))
+
+(defun ende-codex--refresh-sentinel (flight process _event)
+  "Handle terminal PROCESS for refresh FLIGHT without leaking token responses."
   (when (and (not (ende-codex--refresh-flight-finished flight))
              (memq (process-status process) '(exit signal closed)))
-    (if (/= (process-exit-status process) 0)
-        (ende-codex--refresh-finish
-         flight (or (process-get process :ende-idle-error)
-                    (ende-error-create
-                     :kind 'auth
-                     :message (format "OpenAI token refresh failed: %s" (string-trim event)))))
-      (let* ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil)
-             (auth (ende-codex--refresh-flight-auth flight))
-             (owned (ende-codex--account-auth-p auth)))
-        (condition-case failure
-            (let* ((status (car (ende-curl-response-headers
-                                 (ende-codex--refresh-flight-headers-file flight))))
-                   (payload (with-current-buffer (ende-codex--refresh-flight-response-buffer flight)
-                              (ende-protocol-json-read-string (buffer-string))))
-                   (access (ende-protocol-json-get "access_token" payload))
-                   (refresh (ende-protocol-json-get "refresh_token" payload))
-                   (expires-in (ende-protocol-json-get "expires_in" payload)))
-              (unless (and status (<= 200 status) (< status 300))
-                (error "OpenAI token refresh returned HTTP %s" (or status "unknown")))
-              (unless (and (stringp access) (stringp refresh)
-                           (integerp expires-in) (> expires-in 0))
-                (error "Token refresh response is incomplete"))
-              (when owned
-                (ende-codex-auth--refresh-scope payload))
+    (let ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil)
+          (auth (ende-codex--refresh-flight-auth flight)))
+      (condition-case failure
+          (if (/= (process-exit-status process) 0)
               (ende-codex--refresh-finish
-               flight (ende-codex--store-refresh
-                       auth access refresh expires-in
-                       (ende-protocol-json-get "id_token" payload))))
-          ((error quit)
-           (let* ((conflict (if owned (eq (car failure) 'ende-codex-auth-conflict)
-                              (string-match-p "credentials changed during refresh"
-                                              (error-message-string failure))))
-                  (current (and conflict (ende-codex--refresh-current auth))))
-             (ende-codex--refresh-finish
-              flight (or current
-                         (ende-error-create
-                          :kind 'auth
-                          :message (if owned "Codex registration changed or refresh could not be verified"
-                                     (error-message-string failure))))))))))))
+               flight (or (process-get process :ende-idle-error)
+                          (ende-error-create :kind 'transport :message "OpenAI token refresh failed; credentials retained")))
+            (ende-codex--refresh-response
+             flight (car (ende-curl-response-headers (ende-codex--refresh-flight-headers-file flight)))
+             (with-current-buffer (ende-codex--refresh-flight-response-buffer flight)
+               (ende-codex-auth--json (buffer-string)))))
+        ((error quit)
+         (ende-codex--refresh-finish
+          flight (or (and (eq (car failure) 'ende-codex-auth-conflict) (ende-codex--refresh-current auth))
+                     (ende-error-create :kind 'auth :message "Codex refresh could not be verified; run M-x ende-codex-login"))))))))
 
 (defun ende-codex--start-refresh-flight (flight)
   "Start the process belonging to refresh FLIGHT."
@@ -582,7 +316,7 @@ unverified JWT payloads can never authorize an identity change."
         (stderr-process nil)
         (headers-file nil)
         (process nil))
-    (condition-case startup-error
+    (condition-case nil
         (let ((default-directory (ende-curl-local-directory)))
           (ende-validate-resource-options)
           (setq response-buffer (generate-new-buffer " *ende-openai-refresh*"))
@@ -621,27 +355,51 @@ unverified JWT payloads can never authorize an identity change."
             (push process ende-codex--refresh-processes)
             (process-send-string
              process
-             (let* ((auth (ende-codex--refresh-flight-auth flight))
-                    (owned (ende-codex--account-auth-p auth)))
-               (ende-codex--refresh-body
-                (plist-get auth (if owned :refresh-token :refresh))
-                (and owned (plist-get auth :client-id)))))
+             (let ((auth (ende-codex--refresh-flight-auth flight)))
+               (ende-codex--refresh-body (plist-get auth :refresh-token) (plist-get auth :client-id))))
             (process-send-eof process)))
       ((error quit)
        (ende-codex--refresh-finish
         flight
         (ende-error-create
          :kind 'auth
-         :message (if (ende-codex--account-auth-p (ende-codex--refresh-flight-auth flight))
-                      "Codex credential refresh could not be started"
-                    (error-message-string startup-error))))))))
+         :message "Codex credential refresh could not be started"))))))
 
 (defun ende-codex--refresh-key (auth)
   "Return the private coalescing key for AUTH's exact account/registration."
-  (if (ende-codex--account-auth-p auth)
-      (append (ende-codex--account-binding-state auth)
-              (list ende-codex-issuer (plist-get auth :revision)))
-    (list (expand-file-name ende-codex-auth-file) ende-codex-issuer ende-codex-client-id)))
+  (append (ende-codex--account-binding-state auth) (list (plist-get auth :revision))))
+
+(defun ende-codex--lock-refresh (flight)
+  "Serialize rotating token use across Emacs instances before starting FLIGHT."
+  (unless (ende-codex--refresh-flight-finished flight)
+    (condition-case nil
+        (let* ((auth (ende-codex--refresh-flight-auth flight))
+               (directory (ende-codex-auth--path nil))
+               (lock (expand-file-name
+                      (concat ".refresh-" (symbol-name (plist-get auth :account))) directory)))
+          (condition-case nil
+              (let ((original (default-file-modes)))
+                (unwind-protect
+                    (progn (set-default-file-modes #o700) (make-directory lock)
+                           (setf (ende-codex--refresh-flight-lock flight) lock))
+                  (set-default-file-modes original)))
+            (file-already-exists (ende-codex-auth--attributes lock t t)))
+          (let ((current (ende-codex-auth-read (plist-get auth :account))))
+            (unless (ende-codex-auth--same-registration-p auth current)
+              (signal 'ende-codex-auth-conflict nil))
+            (cond
+             ((ende-codex--auth-fresh-p current) (ende-codex--refresh-finish flight current))
+             ((not (equal (plist-get auth :revision) (plist-get current :revision)))
+              (error "Refusing to reuse changed refresh credentials"))
+             ((ende-codex--refresh-flight-lock flight) (ende-codex--start-refresh-flight flight))
+             ((< (cl-incf (ende-codex--refresh-flight-attempts flight)) 40)
+              (setf (ende-codex--refresh-flight-timer flight)
+                    (run-at-time 0.5 nil #'ende-codex--lock-refresh flight)))
+             (t (error "Another instance is refreshing this account")))))
+      ((error quit)
+       (ende-codex--refresh-finish
+        flight (ende-error-create :kind 'auth
+                                  :message "Codex refresh is locked or credentials changed; retry or run M-x ende-codex-login"))))))
 
 (defun ende-codex--refresh-auth (auth callback)
   "Coalesce a refresh for AUTH and register CALLBACK as a waiter.
@@ -659,169 +417,112 @@ Return a cancellation function that only removes this callback."
     (setf (ende-codex--refresh-flight-waiters flight)
           (cons waiter (ende-codex--refresh-flight-waiters flight)))
     (when new-flight
-      (ende-codex--start-refresh-flight flight))
+      (ende-codex--lock-refresh flight))
     (apply-partially #'ende-codex--refresh-cancel-waiter flight waiter)))
+
+(defun ende-codex--scopes (auth)
+  "Return AUTH's granted scope tokens."
+  (let ((scope (plist-get auth :scope)))
+    (and scope (ende-codex-auth--scopes scope))))
+
+(defun ende-codex--require-permission (auth)
+  "Require a renewable, inference-authorized account registration AUTH."
+  (when (plist-get auth :needs-login)
+    (user-error "Codex account requires sign-in; run M-x ende-codex-login"))
+  (let ((scopes (ende-codex--scopes auth)))
+    (unless (member "chatgpt.tokens.use.direct" scopes)
+      (user-error "Account connected but ChatGPT-plan usage was not authorized; run M-x ende-codex-login"))
+    (unless (member "offline_access" scopes)
+      (user-error "Renewable ChatGPT access was not authorized; run M-x ende-codex-login"))))
 
 (defun ende-codex--resolved-account (profile callback auth)
   "Check retained PROFILE again before delivering private AUTH to CALLBACK."
   (unless (ende-error-p auth)
     (setq auth (condition-case nil
                    (let ((current (ende-codex--profile-auth profile)))
+                     (unless (ende-codex-auth--same-registration-p auth current)
+                       (error "Codex registration changed"))
                      (ende-codex--check-binding profile current)
+                     (ende-codex--require-permission current)
                      current)
                  ((error quit)
                   (ende-error-create :kind 'auth :message "Queued Codex registration changed or cannot be verified")))))
   (funcall callback auth))
 
-(defun ende-codex--resolve-auth (callback &optional profile)
-  "Resolve PROFILE's explicit credential source and deliver AUTH to CALLBACK.
-Omitting PROFILE retains the existing public transport until Task 4."
+(defun ende-codex--resolve-auth (callback profile)
+  "Resolve PROFILE's exact Ende account and deliver private AUTH to CALLBACK."
   (let ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil))
-    (condition-case load-error
-      (let* ((profile (if (eq (plist-get profile :codex-auth-source) 'ende)
-                          (ende-codex-capture-binding profile) profile))
-             (auth (ende-codex--profile-auth profile))
-             (callback (if (eq (plist-get profile :codex-auth-source) 'ende)
-                           (apply-partially #'ende-codex--resolved-account profile callback)
-                         callback)))
-        (ende-codex--check-binding profile auth)
-        (if (ende-codex--auth-fresh-p auth)
-            (progn (funcall callback auth) nil)
-          (ende-codex--refresh-auth auth callback)))
-    ((error quit)
-     (funcall callback
-              (ende-error-create
-               :kind 'auth
-               :message (if (eq (plist-get profile :codex-auth-source) 'ende)
-                            "Codex account credentials are unavailable or changed"
-                          (error-message-string load-error))))
-     nil))))
+    (condition-case failure
+        (let* ((profile (ende-codex-capture-binding profile))
+               (auth (ende-codex--profile-auth profile))
+               (deliver (apply-partially #'ende-codex--resolved-account profile callback)))
+          (ende-codex--check-binding profile auth)
+          (ende-codex--require-permission auth)
+          (if (ende-codex--auth-fresh-p auth)
+              (progn (funcall deliver auth) nil)
+            (ende-codex--refresh-auth auth deliver)))
+      ((error quit)
+       (funcall callback
+                (ende-error-create
+                 :kind 'auth
+                 :message (if (eq (car failure) 'user-error)
+                              (error-message-string failure)
+                            "Codex account is unavailable or changed; run M-x ende-codex-login")))
+       nil))))
 
 ;;;; Model discovery
 
-(defun ende-codex--models-command (url headers-file config-file)
-  "Build a curl GET command for the account-scoped model list at URL."
+(defun ende-codex--catalog-command (url headers-file config-file)
+  "Build the curl GET command for the account model catalog at URL."
   (append
    (ende-curl-base-command url)
    (ende-curl-response-options headers-file)
-   (list "--get"
-         "--data-urlencode"
-         (concat "client_version=" ende-codex-client-version))
+   (list "--request" "GET" "--header" "Accept: application/json")
    (when config-file (list "--config" config-file))
    (ende-curl-timeout-options ende-request-timeout
                               ende-provider-max-discovery-bytes)
    (list "--url" url)))
 
-(defun ende-codex--parse-model-entries (text)
-  "Return model objects parsed from a Codex model-list response TEXT."
+(defun ende-codex--catalog-efforts (entry)
+  "Return advertised reasoning EFFORTS and DEFAULT from catalog ENTRY."
+  (let ((levels (ende-protocol-json-get "supported_reasoning_levels" entry))
+        (seen nil) (efforts nil))
+    (dolist (level (cond ((vectorp levels) (append levels nil))
+                         ((listp levels) levels)))
+      (let ((effort (ende-protocol-json-get "effort" level)))
+        (when (and (stringp effort) (not (string-empty-p effort))
+                   (not (member effort seen)))
+          (push effort seen)
+          (push effort efforts))))
+    (setq efforts (nreverse efforts))
+    (let ((default (ende-protocol-json-get "default_reasoning_level" entry)))
+      (list :efforts efforts
+            :default (and (stringp default) (member default efforts) default)))))
+
+(defun ende-codex--catalog-entry (entry)
+  "Return normalized listed model metadata from catalog ENTRY, or nil."
+  (when (and (hash-table-p entry)
+             (equal (ende-protocol-json-get "visibility" entry) "list"))
+    (let ((slug (ende-protocol-json-get "slug" entry))
+          (name (ende-protocol-json-get "display_name" entry)))
+      (when (and (stringp slug) (not (string-empty-p slug)))
+        (let ((options (ende-codex--catalog-efforts entry)))
+          (list :id slug
+                :name (and (stringp name) (not (string-empty-p name)) name)
+                :efforts (plist-get options :efforts)
+                :default (plist-get options :default)))))))
+
+(defun ende-codex--parse-catalog (text)
+  "Return ordered listed models from a ChatGPT-plan catalog response TEXT."
   (let* ((payload (ende-protocol-json-read-string text))
          (models (ende-protocol-json-get "models" payload)))
     (unless (vectorp models)
-      (error "Codex model response has no models array"))
-    (append models nil)))
+      (error "ChatGPT model response has no models array"))
+    (delq nil (mapcar #'ende-codex--catalog-entry (append models nil)))))
 
-(defun ende-codex--parse-models (text)
-  "Return model slugs parsed from a Codex model-list response TEXT."
-  (cl-loop for model in (ende-codex--parse-model-entries text)
-           for slug = (ende-protocol-json-get "slug" model)
-           when (and (stringp slug) (not (string-empty-p slug)))
-           collect slug))
-
-(defun ende-codex--usage-command (url headers-file config-file)
-  "Build a curl GET command for the account-scoped quota URL URL."
-  (append
-   (ende-curl-base-command url)
-   (ende-curl-response-options headers-file)
-   (list "--request" "GET"
-         "--header" "Accept: application/json")
-   (when config-file (list "--config" config-file))
-   (ende-curl-timeout-options ende-request-timeout
-                              ende-provider-max-discovery-bytes)
-   (list "--url" url)))
-
-(defun ende-codex--quota-window (entry)
-  "Return a normalized quota window from JSON object ENTRY, or nil."
-  (when (hash-table-p entry)
-    (let ((used (ende-protocol-json-get "used_percent" entry))
-          (reset (ende-protocol-json-get "reset_at" entry))
-          (window (ende-protocol-json-get "limit_window_seconds" entry)))
-      (when (numberp used)
-        (list :used-percent (max 0 (min 100 used))
-              :reset-at (and (numberp reset) reset)
-              :window-seconds
-              (and (numberp window) (> window 0) window))))))
-
-(defun ende-codex--parse-quota (text)
-  "Return normalized quota windows parsed from usage response TEXT."
-  (let* ((payload (ende-protocol-json-read-string text))
-         (rate-limit (ende-protocol-json-get "rate_limit" payload))
-         (primary (and (hash-table-p rate-limit)
-                       (ende-codex--quota-window
-                        (ende-protocol-json-get "primary_window" rate-limit))))
-         (secondary (and (hash-table-p rate-limit)
-                         (ende-codex--quota-window
-                          (ende-protocol-json-get
-                           "secondary_window" rate-limit)))))
-    (unless (or primary secondary)
-      (error "Codex usage response has no quota windows"))
-    (list :primary primary :secondary secondary)))
-
-(defun ende-codex--duration-string (seconds)
-  "Return a compact human-readable duration for SECONDS."
-  (let* ((seconds (max 0 (floor seconds)))
-         (days (/ seconds 86400))
-         (hours (/ (% seconds 86400) 3600))
-         (minutes (/ (% seconds 3600) 60)))
-    (cond
-     ((> days 0) (format "%dd %dh" days hours))
-     ((> hours 0) (format "%dh%s" hours
-                          (if (> minutes 0) (format " %dm" minutes) "")))
-     ((> minutes 0) (format "%dm" minutes))
-     (t "now"))))
-
-(defun ende-codex--quota-window-label (window now &optional until-reset)
-  "Return a display label for quota WINDOW at NOW.
-When UNTIL-RESET is non-nil, prefer the window's reset countdown."
-  (let ((seconds (if (and until-reset
-                          (numberp (plist-get window :reset-at)))
-                     (- (plist-get window :reset-at) now)
-                   (plist-get window :window-seconds))))
-    (cond
-     ((and (numberp seconds) (>= seconds (* 7 86400))) "weekly")
-     ((numberp seconds) (ende-codex--duration-string seconds))
-     (t "quota"))))
-
-(defun ende-codex-quota-string (quota &optional now)
-  "Return a compact display string for normalized QUOTA.
-NOW is the current time as a Unix timestamp and is injectable for tests."
-  (let* ((now (or now (float-time)))
-         (segments nil)
-         (secondary-reset-at
-          (plist-get (plist-get quota :secondary) :reset-at)))
-    (dolist (key '(:primary :secondary))
-      (let ((window (plist-get quota key)))
-        (when window
-          (push (format "%s: %d%% left"
-                        (ende-codex--quota-window-label
-                         window now (eq key :primary))
-                        (round (- 100 (plist-get window :used-percent))))
-                segments))))
-    (setq segments (nreverse segments))
-    (when (numberp secondary-reset-at)
-      (setq segments
-            (append segments
-                    (list (format "reset in %s"
-                                  (ende-codex--duration-string
-                                   (- secondary-reset-at now)))))))
-    (mapconcat #'identity segments " · ")))
-
-(defun ende-codex--probe-json
-    (url request-name command parser callback &optional process-slot)
-  "Probe authenticated JSON URL and call CALLBACK with parsed data.
-COMMAND receives URL, headers-file, and config-file.  PARSER receives the
-complete response body.  CALLBACK receives (VALUE ERROR).  When PROCESS-SLOT
-is non-nil, it names a variable tracking the live request process.  Return a
-cancellation function."
+(defun ende-codex--probe-catalog (profile callback)
+  "Probe PROFILE's account model catalog and call CALLBACK.
+CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
   (let ((response-buffer nil)
         (stderr-buffer nil)
         (stderr-process nil)
@@ -832,15 +533,12 @@ cancellation function."
         (received-bytes 0)
         (finished nil))
     (cl-labels
-        ((remove-process ()
-           (when (and process process-slot)
-             (set process-slot
-                  (delq process (symbol-value process-slot)))))
-         (finish (value &optional error cancelled)
+        ((finish (value &optional error cancelled)
            (unless finished
              (setq finished t)
-             (remove-process)
-             (when (and (processp process) (process-live-p process))
+             (setq ende-codex--model-probe-processes
+                   (delq process ende-codex--model-probe-processes))
+             (when (and process (process-live-p process))
                (delete-process process))
              (ende-curl-cleanup-resources
               (list response-buffer stderr-buffer)
@@ -849,27 +547,21 @@ cancellation function."
              (unless cancelled
                (funcall callback value error))))
          (start (auth)
-           (let* ((account-id (ende-codex--account-id auth))
-                  (headers
-                   (append
-                    (list (concat "Authorization: Bearer "
-                                  (plist-get auth :access))
-                          "originator: opencode")
-                    (when account-id
-                      (list (concat "ChatGPT-Account-Id: " account-id)))))
+           (let* ((default-directory (ende-curl-local-directory))
+                  (url (ende-codex--catalog-url))
                   (request
                    (ende-curl-start-request
                     :profile (list :url url)
-                    :name request-name
-                    :internal-headers headers
-                    :command
-                    (lambda (url-headers url-config)
-                      (funcall command url url-headers url-config))
+                    :name "ende-codex-model-probe"
+                    :internal-headers
+                    (list (concat "Authorization: Bearer "
+                                  (ende-codex--access-token auth)))
+                    :command (lambda (headers config)
+                               (ende-codex--catalog-command url headers config))
                     :filter
                     (lambda (_probe-process chunk)
                       (unless finished
-                        (setq received-bytes
-                              (+ received-bytes (string-bytes chunk)))
+                        (cl-incf received-bytes (string-bytes chunk))
                         (if (and ende-provider-max-discovery-bytes
                                  (> received-bytes
                                     ende-provider-max-discovery-bytes))
@@ -878,13 +570,10 @@ cancellation function."
                              (ende-error-create
                               :kind 'resource
                               :message
-                              (format
-                               "%s response exceeds ende-provider-max-discovery-bytes"
-                               request-name)))
-                          (when (buffer-live-p response-buffer)
-                            (with-current-buffer response-buffer
-                              (goto-char (point-max))
-                              (insert chunk))))))
+                              "Codex model response exceeds ende-provider-max-discovery-bytes"))
+                          (with-current-buffer response-buffer
+                            (goto-char (point-max))
+                            (insert chunk)))))
                     :sentinel
                     (lambda (probe-process event)
                       (when (memq (process-status probe-process)
@@ -896,8 +585,7 @@ cancellation function."
                                  (ende-error-create
                                   :kind 'transport
                                   :message
-                                  (format "%s failed: %s"
-                                          request-name
+                                  (format "Codex model discovery failed: %s"
                                           (string-trim event)))))
                           (condition-case parse-error
                               (let* ((status
@@ -905,22 +593,18 @@ cancellation function."
                                             headers-file)))
                                      (text
                                       (with-current-buffer response-buffer
-                                        (buffer-string)))
-                                     (detail
-                                      (ende-transport-error-detail text)))
-                                (if (or (null status) (< status 200)
-                                        (>= status 300))
-                                    (finish
-                                     nil
-                                     (ende-error-create
-                                      :kind 'http
-                                      :message
-                                      (format "HTTP status %s: %s"
-                                              (or status "unknown")
-                                              (or detail
-                                                  (format "%s failed"
-                                                          request-name)))))
-                                  (finish (funcall parser text))))
+                                        (buffer-string))))
+                                (if (equal status 200)
+                                    (finish (ende-codex--parse-catalog text))
+                                  (finish
+                                   nil
+                                   (ende-error-create
+                                    :kind 'http
+                                    :message
+                                    (format "HTTP status %s: %s"
+                                            (or status "unknown")
+                                            (or (ende-transport-error-detail text)
+                                                "Codex model discovery failed"))))))
                             ((error quit)
                              (finish
                               nil
@@ -934,9 +618,7 @@ cancellation function."
                    stderr-process (plist-get request :stderr-process)
                    headers-file (plist-get request :headers-file)
                    config-file (plist-get request :config-file))
-             (when process-slot
-               (set process-slot
-                    (cons process (symbol-value process-slot)))))))
+             (push process ende-codex--model-probe-processes))))
       (condition-case startup-error
           (progn
             (ende-validate-resource-options)
@@ -954,7 +636,8 @@ cancellation function."
                              (ende-error-create
                               :kind 'startup
                               :message
-                              (error-message-string request-error)))))))))))
+                              (error-message-string request-error))))))))
+                   profile)))
         ((error quit)
          (finish
           nil
@@ -966,156 +649,37 @@ cancellation function."
           (funcall auth-cancel))
         (finish nil nil t)))))
 
-(defun ende-codex--probe-model-entries (callback)
-  "Probe the authenticated Codex endpoint and call CALLBACK with model objects.
-CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
-  (condition-case validation-error
-      (ende-codex--probe-json
-       (ende-codex--validated-models-url)
-       "ende-codex-model-probe"
-       #'ende-codex--models-command
-       #'ende-codex--parse-model-entries
-       callback
-       'ende-codex--model-probe-processes)
-    ((error quit)
-     (funcall callback
-              nil
-              (ende-error-create
-               :kind 'startup
-               :message (error-message-string validation-error)))
-     nil)))
-
-(defun ende-codex--probe-quota (callback)
-  "Probe OpenAI's authenticated quota endpoint and call CALLBACK.
-CALLBACK receives (QUOTA ERROR).  Return a cancellation function."
-  (condition-case validation-error
-      (ende-codex--probe-json
-       (ende-codex--validated-usage-url)
-       "ende-codex-quota-probe"
-       #'ende-codex--usage-command
-       #'ende-codex--parse-quota
-       callback
-       'ende-codex--quota-probe-processes)
-    ((error quit)
-     (funcall callback
-              nil
-              (ende-error-create
-               :kind 'startup
-               :message (error-message-string validation-error)))
-     nil)))
-
-(defvar ende-codex--quota-cache (make-hash-table :test #'equal))
-(defvar ende-codex--quota-flights (make-hash-table :test #'equal))
-
-(defun ende-codex-probe-quota (callback)
-  "Return fresh or stale quota for the current retained credential binding.
-Coalesce concurrent probes and back off after failures.  CALLBACK receives
-QUOTA and ERROR; quota :state is fresh, stale, auth, transient or unavailable."
-  (let* ((key (condition-case nil (ende-codex--binding-state (ende-codex--auth-entry))
-                (error nil)))
-         (cached (and key (gethash key ende-codex--quota-cache)))
-         (now (float-time))
-         (flight (and key (gethash key ende-codex--quota-flights)))
-         (waiter (list callback))
-         (cancelled nil))
-    (cond
-     ((null key)
-      (funcall callback '(:state auth)
-               (ende-error-create :kind 'auth :message "Codex quota requires the retained credential binding")))
-     ((and cached (< now (plist-get cached :retry-at)))
-      (funcall callback (ende-provider-config-copy (plist-get cached :quota)) (plist-get cached :error)))
-     (flight (setcdr flight (cons waiter (cdr flight))))
-     (t
-      (setq flight (list nil waiter))
-      (puthash key flight ende-codex--quota-flights)
-      (setcar flight
-              (ende-codex--probe-quota
-               (lambda (quota error)
-                 (let* ((old (plist-get cached :quota))
-                        (value (if error
-                                   (plist-put (ende-provider-config-copy old) :state
-                                              (cond
-                                               ((eq (ende-error-kind error) 'auth) 'auth)
-                                               (old 'stale)
-                                               (t 'transient)))
-                                 (plist-put quota :state 'fresh))))
-                   (puthash key (list :quota value :error error :retry-at (+ (float-time) (if error 30 15)))
-                            ende-codex--quota-cache)
-                   (remhash key ende-codex--quota-flights)
-                   (dolist (entry (cdr flight))
-                     (when (car entry)
-                       (condition-case nil (funcall (car entry) (ende-provider-config-copy value) error)
-                         ((error quit) nil))))))))))
-    (lambda ()
-      (unless cancelled
-        (setq cancelled t)
-        (setcar waiter nil)
-        (when (and flight (gethash key ende-codex--quota-flights)
-                   (not (cl-some #'car (cdr flight))))
-          (when (functionp (car flight)) (funcall (car flight)))
-          (remhash key ende-codex--quota-flights))))))
-
-(defun ende-codex-probe-models (callback)
-  "Probe the authenticated Codex endpoint and call CALLBACK with model slugs.
+(defun ende-codex-probe-models (profile callback)
+  "Probe PROFILE's ChatGPT account catalog and call CALLBACK with model slugs.
 CALLBACK receives (MODELS ERROR).  Return a cancellation function."
-  (ende-codex--probe-model-entries
+  (ende-codex--probe-catalog
+   profile
    (lambda (entries error)
      (funcall callback
               (and entries
-                   (cl-loop for entry in entries
-                            for slug = (ende-protocol-json-get "slug" entry)
-                            when (and (stringp slug) (not (string-empty-p slug)))
-                            collect slug))
+                   (mapcar (lambda (entry) (plist-get entry :id)) entries))
               error))))
 
-(defun ende-codex--reasoning-effort-options (entry)
-  "Return explicit reasoning effort metadata from Codex model ENTRY."
-  (let ((levels (ende-protocol-json-get "supported_reasoning_levels" entry))
-        (seen nil)
-        (efforts nil))
-    (dolist (level (cond ((vectorp levels) (append levels nil))
-                         ((listp levels) levels)))
-      (let ((effort (ende-protocol-json-get "effort" level)))
-        (when (and (stringp effort) (not (string-empty-p effort))
-                   (not (member effort seen)))
-          (push effort seen)
-          (push effort efforts))))
-    (setq efforts (nreverse efforts))
-    (list :efforts efforts
-          :default
-          (let ((default (ende-protocol-json-get
-                          "default_reasoning_level" entry)))
-            (and (stringp default) (member default efforts) default)))))
-
-(defun ende-codex-probe-reasoning-efforts (_profile model callback)
-  "Query the current Codex account for MODEL's reasoning efforts.
-CALLBACK receives (EFFORTS DEFAULT ERROR).  The account-scoped model endpoint
-is queried for every call; it does not share the model catalog cache."
-  (ende-codex--probe-model-entries
+(defun ende-codex-probe-reasoning-efforts (profile model callback)
+  "Query PROFILE's account for MODEL's advertised reasoning efforts.
+CALLBACK receives (EFFORTS DEFAULT ERROR).  A model that advertises no
+explicit efforts yields no choices instead of an error."
+  (ende-codex--probe-catalog
+   profile
    (lambda (entries error)
      (if error
          (funcall callback nil nil error)
        (let ((entry (cl-find model entries
-                             :key (lambda (value)
-                                    (ende-protocol-json-get "slug" value))
+                             :key (lambda (value) (plist-get value :id))
                              :test #'equal)))
-         (if (not entry)
-             (funcall
-              callback nil nil
-              (ende-error-create
-               :kind 'capability
-               :message (format "Codex does not advertise model %s" model)))
-           (let* ((options (ende-codex--reasoning-effort-options entry))
-                  (efforts (plist-get options :efforts)))
-             (if efforts
-                 (funcall callback efforts (plist-get options :default) nil)
-               (funcall
-                callback nil nil
-                (ende-error-create
-                 :kind 'capability
-                 :message
-                 (format "Codex does not advertise explicit reasoning efforts for %s"
-                         model)))))))))))
+         (if entry
+             (funcall callback (plist-get entry :efforts)
+                      (plist-get entry :default) nil)
+           (funcall callback nil nil
+                    (ende-error-create
+                     :kind 'capability
+                     :message
+                     (format "ChatGPT does not advertise model %s" model)))))))))
 
 ;;;; Responses transport
 
@@ -1138,7 +702,7 @@ is queried for every call; it does not share the model catalog cache."
 (defun ende-codex--remember-output (session item index)
   "Capture completed replay ITEM at output INDEX for SESSION."
   (when (and (integerp index) (>= index 0)
-             (member (ende-protocol-json-get "type" item) '("message" "reasoning" "function_call")))
+             (member (ende-protocol-json-get "type" item) '("message" "function_call")))
     (setf (alist-get index (ende-codex--session-replay-items session))
           (ende-provider-config-copy item))))
 
@@ -1220,6 +784,8 @@ is queried for every call; it does not share the model catalog cache."
                      (plist-get old :id))
              :name (or (ende-protocol-json-get "name" item)
                        (plist-get old :name))
+             :namespace (or (ende-protocol-json-get "namespace" item)
+                            (plist-get old :namespace))
              :arguments (if (and (stringp arguments)
                                  (not (string-empty-p arguments)))
                             arguments
@@ -1316,8 +882,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (cl-loop for entry in (ende-codex--output-items output) for index from 0
                do (ende-codex--remember-output session entry index))
       (when (cl-some (lambda (entry)
-                      (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
-                    (ende-codex--output-items output))
+                       (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
+                     (ende-codex--output-items output))
         (setf (ende-stream-session-output-parts (ende-codex--session-stream session))
               (reverse
                (cl-mapcan
@@ -1402,30 +968,77 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (ende-error-create
           :kind 'provider
           :message (ende-transport-safe-error-text
-                    (format "%s"
-                            (or (ende-protocol-json-get "message" error)
-                                (ende-protocol-json-get "code" error)
-                                "ChatGPT request failed")))
+                    (format "%s" (ende-codex--error-message error)))
           :details (ende-content-redact error))))))))
 
+(defconst ende-codex--error-hints
+  '(("subscription_sharing_user_not_eligible" .
+     "ChatGPT-plan use is unavailable for this account")
+    ("subscription_sharing_usage_limit_exceeded" .
+     "ChatGPT-plan usage limit reached")
+    ("subscription_sharing_usage_unavailable" .
+     "ChatGPT-plan usage is temporarily unavailable; retry later")
+    ("subscription_sharing_unsupported_capability" .
+     "ChatGPT-plan does not support this request")
+    ("subscription_sharing_invalid_user" .
+     "ChatGPT authorization is no longer valid; run M-x ende-codex-login")
+    ("chatpass_v2_scope_not_authorized" .
+     "ChatGPT-plan permission is insufficient; run M-x ende-codex-login")
+    ("chatpass_v2_invalid_authorization_context" .
+     "ChatGPT authorization context is invalid; run M-x ende-codex-login"))
+  "Known ChatGPT-plan error codes and their safe descriptions.")
+
+(defun ende-codex--error-message (error)
+  "Return a safe human-readable message for provider ERROR metadata."
+  (let ((code (ende-protocol-json-get "code" error)))
+    (or (cdr (assoc code ende-codex--error-hints))
+        (ende-protocol-json-get "message" error)
+        code
+        "ChatGPT request failed")))
+
+(defun ende-codex--error-payload (session)
+  "Return safe provider error metadata parsed from SESSION's response."
+  (condition-case nil
+      (let* ((preview (ende-stream-preview-text
+                       (ende-codex--session-stream session)))
+             (payload (ende-protocol-json-read-string
+                       (ende-transport-safe-error-text preview)))
+             (error (or (ende-protocol-json-get "error" payload) payload)))
+        (when (hash-table-p error)
+          (list :code (ende-protocol-json-get "code" error)
+                :param (ende-protocol-json-get "param" error)
+                :request-id (ende-protocol-json-get "request_id" payload))))
+    (error nil)))
+
 (defun ende-codex--http-error (session &optional response-status)
-  "Return a structured HTTP error for SESSION."
+  "Return a structured, token-free HTTP error for SESSION."
   (let* ((status (or response-status
                      (condition-case nil
                          (car (ende-stream-response-headers
                                (ende-codex--session-stream session)))
                        (error nil))))
+         (payload (ende-codex--error-payload session))
+         (code (plist-get payload :code))
          (preview (ende-stream-preview-text
                    (ende-codex--session-stream session)))
          (detail (ende-transport-error-detail preview)))
     (ende-error-create
      :kind 'http
-     :message (format "HTTP status %s: %s"
-                      (or status "unknown")
-                      (or detail
-                          (and (not (string-empty-p (string-trim preview)))
-                               (string-trim preview))
-                          "ChatGPT request failed")))))
+     :message
+     (ende-transport-safe-error-text
+      (format "HTTP status %s%s: %s"
+              (or status "unknown")
+              (if (and (stringp code) (not (string-empty-p code)))
+                  (format " %s" code) "")
+              (or (and (stringp code)
+                       (cdr (assoc code ende-codex--error-hints)))
+                  detail
+                  (and (not (string-empty-p (string-trim preview)))
+                       (string-trim preview))
+                  "ChatGPT request failed")))
+     :details (list :status status :code code
+                    :param (plist-get payload :param)
+                    :request-id (plist-get payload :request-id)))))
 
 (defun ende-codex--handle-sse-events (session events)
   "Decode Codex JSON EVENTS for SESSION, ignoring Chat Completions markers."
@@ -1517,15 +1130,30 @@ When APPEND is non-nil, append the argument delta to the stored value."
   "Return CONTENT in the Responses shape required for ROLE."
   (ende-content-provider-content role content 'responses profile))
 
+(defun ende-codex--message-role (role)
+  "Return the Responses role for internal ROLE."
+  (if (equal role "system") "developer" role))
+
+(defun ende-codex--function-call-item (call)
+  "Return a replayed Responses function_call item for CALL."
+  (append
+   (list (cons :type "function_call")
+         (cons :call_id (plist-get call :id)))
+   (when (plist-get call :namespace)
+     (list (cons :namespace (plist-get call :namespace))))
+   (list (cons :name (plist-get call :name))
+         (cons :arguments (plist-get call :arguments)))))
+
 (defun ende-codex--request-messages (messages &optional profile)
   "Convert internal MESSAGES to Responses API input objects."
   (cl-mapcan
    (lambda (message)
      (if (and (consp message) (stringp (car message)))
-         (list (list (cons :role (car message))
-                     (cons :content
-                           (ende-codex--message-content
-                            (car message) (cdr message) profile))))
+         (let ((role (ende-codex--message-role (car message))))
+           (list (list (cons :role role)
+                       (cons :content
+                             (ende-codex--message-content
+                              role (cdr message) profile)))))
        (let ((history (plist-get message :protocol-history))
              (calls (plist-get message :tool-calls))
              (content (plist-get message :content))
@@ -1533,10 +1161,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (cond
           ((eq (car-safe history) 'openai-responses)
            (append (ende-provider-config-copy (cdr history))
-                   (mapcar (lambda (call)
-                             (list (cons :type "function_call") (cons :call_id (plist-get call :id))
-                                   (cons :name (plist-get call :name))
-                                   (cons :arguments (plist-get call :arguments))))
+                   (mapcar #'ende-codex--function-call-item
                            (cl-remove-if
                             (lambda (call)
                               (cl-some (lambda (item)
@@ -1549,26 +1174,27 @@ When APPEND is non-nil, append the argument delta to the stored value."
                           (cons :content
                                 (ende-codex--message-content
                                  "assistant" content profile)))))
-            (mapcar (lambda (call)
-                      (list (cons :type "function_call")
-                            (cons :call_id (plist-get call :id))
-                            (cons :name (plist-get call :name))
-                            (cons :arguments (plist-get call :arguments))))
-                    calls)))
+            (mapcar #'ende-codex--function-call-item calls)))
           (call-id
            (list (list (cons :type "function_call_output")
                        (cons :call_id call-id)
                        (cons :output (plist-get message :content)))))
           (t
-           (let ((role (plist-get message :role)))
+           (let ((role (ende-codex--message-role (plist-get message :role))))
              (list (list (cons :role role)
                          (cons :content
                                (ende-codex--message-content
                                 role (plist-get message :content) profile))))))))))
    (ende-content-provider-messages messages)))
 
-(defun ende-codex--tool-definitions (definitions)
-  "Convert Chat Completions DEFINITIONS to Responses API tool definitions."
+(defun ende-codex--reasoning-summary-key (json)
+  "Return the identity of a reasoning-summary part in JSON."
+  (cons (or (ende-protocol-json-get "item_id" json)
+            (ende-protocol-json-get "output_index" json))
+        (or (ende-protocol-json-get "summary_index" json) 0)))
+
+(defun ende-responses--tool-definitions (definitions)
+  "Convert Chat Completions DEFINITIONS to flat Responses API tools."
   (mapcar
    (lambda (definition)
      (let ((function (alist-get :function definition)))
@@ -1577,12 +1203,6 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (cons :description (alist-get :description function))
              (cons :parameters (alist-get :parameters function)))))
    definitions))
-
-(defun ende-codex--reasoning-summary-key (json)
-  "Return the identity of a reasoning-summary part in JSON."
-  (cons (or (ende-protocol-json-get "item_id" json)
-            (ende-protocol-json-get "output_index" json))
-        (or (ende-protocol-json-get "summary_index" json) 0)))
 
 (defun ende-responses--request-body (messages profile)
   "Build a Responses API request body for MESSAGES and PROFILE."
@@ -1595,7 +1215,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (setq body
             (append body
                     (list (cons :tools
-                                (ende-codex--tool-definitions
+                                (ende-responses--tool-definitions
                                  (plist-get profile :tool-definitions)))
                           (cons :tool_choice "auto")))))
     (let ((budget (plist-get profile :output-tokens)))
@@ -1604,15 +1224,62 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (ende-provider-config-encode-parameters
      (ende-controls-encode body (plist-get profile :controls) profile) profile)))
 
+(defconst ende-codex--forbidden-body-fields
+  '("background" "conversation" "max_output_tokens" "max_tool_calls" "metadata"
+    "moderation" "multi_agent" "prompt" "prompt_cache_retention"
+    "safety_identifier" "temperature" "top_logprobs" "top_p" "truncation"
+    "user")
+  "Request fields the ChatGPT-plan Responses API does not accept.")
+
+(defun ende-codex--json-name (key)
+  "Return the JSON member name for plist or alist KEY."
+  (if (symbolp key) (substring (symbol-name key) 1) (format "%s" key)))
+
+(defun ende-codex--validate-body (body)
+  "Reject unsupported ChatGPT-plan request fields in BODY."
+  (dolist (entry body)
+    (when (member (ende-codex--json-name (car entry))
+                  ende-codex--forbidden-body-fields)
+      (error "ChatGPT-plan requests do not support %s; remove it from the profile"
+             (ende-codex--json-name (car entry)))))
+  body)
+
+(defun ende-codex--tool-definitions (definitions)
+  "Wrap Chat Completions DEFINITIONS in Ende's local tool namespace."
+  (when definitions
+    (list (list (cons :type "namespace")
+                (cons :name "ende")
+                (cons :description "Local coding and agent tools")
+                (cons :tools
+                      (ende-responses--tool-definitions definitions))))))
+
 (defun ende-codex--request-body (messages profile)
-  "Build the retained Codex request for MESSAGES and PROFILE."
-  (let ((body (ende-responses--request-body messages profile)))
+  "Build the ChatGPT-plan Responses request for MESSAGES and PROFILE."
+  (let ((provenance (plist-get profile :provenance)))
+    (dolist (key '(:temperature :output-tokens))
+      (when (plist-get provenance key)
+        (error "ChatGPT-plan requests do not support %s; remove it from this profile"
+               (ende-codex--json-name key)))))
+  (let* ((body (list (cons :model (plist-get profile :model))
+                     (cons :input
+                           (ende-codex--request-messages messages profile))
+                     (cons :store json-false)
+                     (cons :stream t)))
+         (tools (ende-codex--tool-definitions
+                 (plist-get profile :tool-definitions))))
+    (when tools
+      (setq body
+            (append body
+                    (list (cons :tools tools)
+                          (cons :tool_choice "auto")))))
     (unless (or (eq (plist-get profile :thinking) 'off)
                 (equal (plist-get profile :reasoning-effort) "none"))
       (setq body
-            (ende-controls--set-path
-             body '("reasoning" "summary") "auto")))
-    body))
+            (ende-controls--set-path body '("reasoning" "summary") "auto")))
+    (ende-codex--validate-body
+     (ende-provider-config-encode-parameters
+      (ende-controls-encode body (plist-get profile :controls) profile)
+      profile))))
 
 (defun ende-responses--start-prepared (session body _request-body record)
   "Start a public Responses SESSION with prepared BODY and debug RECORD."
@@ -1646,57 +1313,44 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (apply-partially #'ende-responses--start-prepared session))))
       ((error quit)
        (ende-codex--fail session (ende-error-create
-                                 :kind 'startup :message (error-message-string failure)))))
+                                  :kind 'startup :message (error-message-string failure)))))
     (ende-transport-session-process (ende-codex--lifecycle session))))
 
-(defun ende-codex--start-prepared (session auth session-id body request-body record)
-  "Start SESSION using AUTH, SESSION-ID and a prepared BODY."
+(defun ende-codex--start-prepared (session auth data body record)
+  "Start SESSION with AUTH, prepared DATA, BODY and debug RECORD."
   (let* ((default-directory (ende-curl-local-directory))
          (profile (ende-codex--session-profile session))
          (url (ende-codex--validated-generation-url
-               (or (plist-get profile :url) ende-codex-endpoint)))
-         (account-id (ende-codex--account-id auth))
-         (residency (ende-codex--residency auth))
-          (headers
-           (append
-            (list (concat "Authorization: Bearer "
-                          (ende-codex--access-token auth))
-                  "originator: opencode"
-                  (concat "session-id: " session-id))
-            (when account-id
-              (list (concat "ChatGPT-Account-Id: " account-id)))
-           (when residency
-             (list (concat "x-openai-internal-codex-residency: "
-                           residency)))))
+               (or (plist-get profile :url) ende-codex--responses-url)))
          (request
           (ende-curl-start-request
            :profile profile
            :url url
-           :internal-headers headers
+           :internal-headers
+           (list (concat "Authorization: Bearer "
+                         (ende-codex--access-token auth)))
            :name (format "ende-codex-%s"
                          (or (plist-get profile :job-id) "request"))
-           :command (lambda (headers-file config-file)
-                      (ende-curl-command profile headers-file config-file
-                                         (and (listp body) (plist-get body :file))))
+           :command (lambda (headers config)
+                      (ende-curl-command profile headers config
+                                         (and (listp data)
+                                              (plist-get data :file))))
            :filter (apply-partially #'ende-codex--filter session)
            :sentinel (apply-partially #'ende-codex--sentinel session))))
     (ende-transport-session-set-resources
      (ende-codex--lifecycle session) request)
-    (ende-codex--diagnose-request session request-body)
-    (setf (ende-codex--session-debug-record session)
-          record)
+    (ende-codex--diagnose-request session body)
+    (setf (ende-codex--session-debug-record session) record)
     (ende-request-send
-     (ende-transport-session-process (ende-codex--lifecycle session)) body)))
+     (ende-transport-session-process (ende-codex--lifecycle session)) data)))
 
 (defun ende-codex--start-generation (session messages auth)
-  "Prepare and start a Codex generation for SESSION using AUTH."
-  (let* ((profile (ende-codex--session-profile session))
-         (session-id (or (plist-get profile :codex-session-id)
-                         (ende-codex--new-session-id))))
-    (ende-request-prepare
-     (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
-     messages profile (list "codex-responses" (plist-get profile :url) session-id)
-     (apply-partially #'ende-codex--start-prepared session auth session-id))))
+  "Prepare and start a ChatGPT-plan generation for SESSION using AUTH."
+  (ende-request-prepare
+   (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
+   messages (ende-codex--session-profile session)
+   (list "openai-responses" ende-codex--responses-url)
+   (apply-partially #'ende-codex--start-prepared session auth)))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
@@ -1705,7 +1359,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-codex--fail session auth)
       (condition-case startup-error
           (progn
-            (ende-codex--check-binding (ende-codex--session-profile session) auth)
+            (ende-codex--check-binding
+             (ende-codex--session-profile session) auth)
+            (ende-codex--require-permission auth)
             (ende-codex--start-generation session messages auth))
         ((error quit)
          (ende-codex--fail
@@ -1715,7 +1371,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
            :message (error-message-string startup-error))))))))
 
 (defun ende-codex-default (messages callbacks &optional options)
-  "Send MESSAGES through the ChatGPT/Codex endpoint using OpenCode auth."
+  "Send MESSAGES through the official Responses API for an Ende account."
   (let* ((profile (ende-provider-config-copy options))
          (session
           (ende-codex--make-session
@@ -1730,36 +1386,31 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--terminal-p session)
             (when (plist-member profile :codex-binding)
-              (ende-codex--check-binding profile (ende-codex--profile-auth profile)))
-            (let ((cancel
-                   (if (eq (plist-get profile :codex-auth-source) 'ende)
-                       (ende-codex--resolve-auth
-                        (apply-partially #'ende-codex--auth-ready session messages) profile)
-                     (ende-codex--resolve-auth
-                      (apply-partially #'ende-codex--auth-ready session messages)))))
-              (ende-transport-session-add-canceller
-               (ende-codex--lifecycle session) cancel))))
+              (ende-codex--check-binding
+               profile (ende-codex--profile-auth profile)))
+            (ende-transport-session-add-canceller
+             (ende-codex--lifecycle session)
+             (ende-codex--resolve-auth
+              (apply-partially #'ende-codex--auth-ready session messages)
+              profile))))
       ((error quit)
        (ende-codex--fail
         session
         (ende-error-create
          :kind 'startup
          :message (error-message-string startup-error)))))
-    (ende-transport-session-process
-     (ende-codex--lifecycle session))))
+    (ende-transport-session-process (ende-codex--lifecycle session))))
 
 (defun ende-codex-abort-background ()
-  "Cancel retained credential refresh and metadata work before reload."
-  (maphash (lambda (_key flight)
-             (dolist (waiter (cdr flight)) (setcar waiter nil))
-             (when (functionp (car flight)) (funcall (car flight))))
-           ende-codex--quota-flights)
-  (clrhash ende-codex--quota-flights)
+  "Cancel login, token refresh, and model discovery before reload."
+  (ende-codex-cancel-login)
   (let (flights)
-    (maphash (lambda (_key flight) (push flight flights)) ende-codex--refresh-flights)
+    (maphash (lambda (_key flight) (push flight flights))
+             ende-codex--refresh-flights)
     (dolist (flight flights) (ende-codex--refresh-finish flight nil t)))
-  (dolist (process (append ende-codex--model-probe-processes ende-codex--quota-probe-processes))
-    (when (and (processp process) (process-live-p process)) (delete-process process))))
+  (dolist (process ende-codex--model-probe-processes)
+    (when (and (processp process) (process-live-p process))
+      (delete-process process))))
 
 (add-hook 'ende-queue-abort-functions #'ende-codex-abort-background)
 

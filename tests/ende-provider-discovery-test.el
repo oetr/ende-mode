@@ -48,15 +48,15 @@
            (ende-provider--catalog-from-payload
             (ende-protocol-json-read-string
              (concat
-             "{\"object\":\"list\",\"data\":["
-             "{\"id\":\"llama3\",\"name\":\"Llama 3\","
-             "\"owned_by\":\"llama.cpp\",\"pricing\":{"
-             "\"prompt\":\"0.000003\",\"completion\":\"0.000015\","
-             "\"input_cache_read\":\"0.000001\","
-             "\"input_cache_write\":\"0.000004\","
-             "\"input_cache_write_1h\":\"0.000005\","
-             "\"internal_reasoning\":\"0\"}},"
-             "{\"id\":\"llama4\"}]}"))))))
+              "{\"object\":\"list\",\"data\":["
+              "{\"id\":\"llama3\",\"name\":\"Llama 3\","
+              "\"owned_by\":\"llama.cpp\",\"pricing\":{"
+              "\"prompt\":\"0.000003\",\"completion\":\"0.000015\","
+              "\"input_cache_read\":\"0.000001\","
+              "\"input_cache_write\":\"0.000004\","
+              "\"input_cache_write_1h\":\"0.000005\","
+              "\"internal_reasoning\":\"0\"}},"
+              "{\"id\":\"llama4\"}]}"))))))
     (should (string= (ende-provider-models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
@@ -307,7 +307,7 @@
         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
     (let* ((probe
-            (lambda (callback)
+            (lambda (_profile callback)
               (setq probe-callback callback)
               (cl-incf probe-count)
               (lambda () (cl-incf cancel-count))))
@@ -366,7 +366,7 @@
         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
         (ende-provider--model-generation 0))
     (let* ((probe
-            (lambda (callback)
+            (lambda (_profile callback)
               (cl-incf attempts)
               (if (= attempts 1)
                   (funcall
@@ -409,7 +409,7 @@
 
 (ert-deftest ende-test/generic-model-probe-retries-after-failure ()
   (let* ((profile '(:name remote
-                    :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"))
+			  :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"))
          (requests 0)
          (first-error nil)
          (retry-models nil)
@@ -461,7 +461,7 @@
              (profile (list :name 'remote
                             :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
                             :model-discovery-function
-                            (and custom (lambda (callback)
+                            (and custom (lambda (_profile callback)
                                           (if failed (funcall complete callback)
                                             (funcall callback nil nil)))))))
         (cl-letf (((symbol-function 'ende-provider--start-live-model-request)
@@ -479,8 +479,8 @@
 
 (ert-deftest ende-test/runtime-and-model-consumers-share-one-catalog-flight ()
   (let* ((profile '(:name remote
-                    :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
-                    :model "remote/selected"))
+			  :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
+			  :model "remote/selected"))
          (key (ende-provider--catalog-key profile))
          (requests 0)
          (live-callback nil)

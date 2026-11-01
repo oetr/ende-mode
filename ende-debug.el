@@ -161,13 +161,12 @@ errors are reported but never propagated into transport completion."
                 (error-message-string failure))))))
 
 (defun ende-debug-record-request
-    (serialized-body request-body messages profile transport endpoint
-     &optional session-id)
+    (serialized-body request-body messages profile transport endpoint)
   "Record exact SERIALIZED-BODY and internal MESSAGES for a request.
 REQUEST-BODY is the encoded request object used to describe its settings.
-PROFILE, TRANSPORT, and ENDPOINT describe the transport.  SESSION-ID is the
-Codex session-id header value when applicable.  Return an opaque record used
-to associate later completion metadata, or nil when debugging is disabled."
+PROFILE, TRANSPORT, and ENDPOINT describe the transport.  Return an opaque
+record used to associate later completion metadata, or nil when debugging is
+disabled."
   (when (and ende-debugging-enabled ende-debug--session-directory)
     (condition-case failure
         (let* ((sequence (cl-incf ende-debug--sequence))
@@ -199,8 +198,7 @@ to associate later completion metadata, or nil when debugging is disabled."
                   ("reasoning_settings" . ,reasoning)
                   ("request_settings" . ,(ende-debug--request-settings
                                             request-body))
-                  ("endpoint" . ,(ende-debug--safe-endpoint endpoint))
-                  ("codex_session_id" . ,session-id)))
+                  ("endpoint" . ,(ende-debug--safe-endpoint endpoint))))
                (record (list :directory directory :stem stem
                              :started started :metadata metadata)))
           (ende-debug--write-file
@@ -464,15 +462,6 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
   (if (ende-debug--same-json-field-p left right key)
       "unchanged" "changed"))
 
-(defun ende-debug--session-label (left right)
-  "Compare Codex session IDs in metadata objects LEFT and RIGHT."
-  (let ((old (ende-protocol-json-get "codex_session_id" left))
-        (new (ende-protocol-json-get "codex_session_id" right)))
-    (cond
-     ((and old new) (if (equal old new) "unchanged" "changed"))
-     ((or old new) "not comparable")
-     (t "not present"))))
-
 (defun ende-debug--pair-report (previous current)
   "Return a concise structural comparison of PREVIOUS and CURRENT captures."
   (let* ((old-request (plist-get previous :request))
@@ -518,8 +507,6 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
          (format "Messages:        %d appended, previous prefix identical\n"
                  appended)
        "Messages:        previous prefix modified, removed, or reordered\n")
-     (format "Session ID:      %s\n"
-             (ende-debug--session-label old-meta new-meta))
      (if difference
          (format "\nFirst changed path:\n  %s\n" difference)
        "\nFirst changed path: none (JSON bodies structurally identical)\n")

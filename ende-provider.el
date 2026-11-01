@@ -97,15 +97,15 @@ When nil, use only the response inactivity timeout."
   "Nonsecret bindings captured when explicit selections are saved.")
 
 (dolist (variable '(ende-model-selection--last-used ende-model-selection--buffer-selections
-                    ende-model-selection--shared-control-preferences
-                    ende-model-selection--buffer-control-preferences ende-model-selection--provenance))
+						    ende-model-selection--shared-control-preferences
+						    ende-model-selection--buffer-control-preferences ende-model-selection--provenance))
   (add-to-list 'savehist-additional-variables variable))
 
 (defun ende-provider-selection-provenance (profile)
   "Return PROFILE's nonsecret credential, endpoint, API and catalog identity."
   (mapcar (lambda (key) (cons key (ende-provider-config-copy (plist-get profile key))))
           '(:service :api :url :auth-method :account :auth-source-host
-            :auth-source-port :auth-source-user :models)))
+		     :auth-source-port :auth-source-user :models)))
 
 (defun ende-model-selection--provenance-key (selection)
   "Return the stable lookup identity of SELECTION."
@@ -149,14 +149,19 @@ Supported settings are `:max-concurrency' and `:parallel'."
          (profile (ende-provider-config-resolve name model-override api)))
     (pcase (plist-get profile :service)
       ('openai-codex
-       (unless (eq (plist-get profile :account) 'default)
-         (user-error "Independent Codex accounts require an authorized login registration"))
+       (setq profile (ende-codex--account-profile profile))
        (setq profile (ende-plist-merge
                       profile
                       (list :model-discovery-function #'ende-codex-probe-models
                             :model-discovery-key
-                            (list ende-codex-models-endpoint ende-codex-client-version
-                                  (expand-file-name ende-codex-auth-file))
+                            (list ende-codex--models-url
+                                  (plist-get profile :account)
+                                  (condition-case nil
+                                      (plist-get
+                                       (ende-codex-auth-lookup
+                                        (plist-get profile :account))
+                                       :registration-id)
+                                    (error nil)))
                             :reasoning-effort-probe-function #'ende-codex-probe-reasoning-efforts))))
       ('openrouter
        (setq profile (ende-plist-merge
@@ -265,10 +270,8 @@ Present preference keys override PROFILE even when their value is nil."
     (unless (and (eq (plist-get profile :api) 'openai-responses)
                  (eq (plist-get profile :auth-method) 'codex-oauth))
       (error "Codex requires the Responses API and OAuth authentication"))
-    (unless (or (eq (plist-get profile :codex-auth-source) 'ende)
-                (and (not (plist-member profile :codex-auth-source))
-                     (eq (plist-get profile :account) 'default)))
-      (error "Independent Codex accounts require an authorized Ende registration")))
+    (unless (eq (plist-get profile :codex-auth-source) 'ende)
+      (error "Codex requires Ende-owned account storage")))
   (unless (assq (plist-get profile :api) ende-provider-config--apis)
     (error "Select a supported provider :api"))
   (let ((model (plist-get profile :model)))
@@ -281,7 +284,7 @@ Present preference keys override PROFILE even when their value is nil."
              (not (memq (plist-get profile :image-input) '(nil t))))
     (error ":image-input must be boolean"))
   (ende-provider-config-parameters (plist-get profile :parameters)
-                                    ende-provider-config--protected-paths)
+                                   ende-provider-config--protected-paths)
   (ende-provider-validate-controls profile)
   (let ((url (plist-get profile :url)))
     (unless (and (stringp url) (not (string-empty-p url)))
@@ -1041,7 +1044,7 @@ The returned plist contains `:models', `:details', `:error', and
                 (cond
                  ((functionp probe)
                   (funcall
-                   probe
+                   probe profile
                    (lambda (models error)
                      (unless cancelled
                        (finish (unless error
@@ -1445,14 +1448,14 @@ over PROFILE's live probe function.  Live probes bypass model metadata caches."
         (remhash key ende-provider--catalog-inflight)
         (when cancel
           (ende-ignore-errors cancel))))
-  (dolist (process (copy-sequence ende-provider--discovery-processes))
-    (let ((finish (and (processp process)
-                       (process-get process :ende-discovery-finish))))
-      (if finish
-          (funcall finish nil nil t)
-        (when (and (processp process) (process-live-p process))
-          (ende-ignore-errors #'delete-process process)))))
-  (setq ende-provider--discovery-processes nil)))
+    (dolist (process (copy-sequence ende-provider--discovery-processes))
+      (let ((finish (and (processp process)
+			 (process-get process :ende-discovery-finish))))
+	(if finish
+            (funcall finish nil nil t)
+          (when (and (processp process) (process-live-p process))
+            (ende-ignore-errors #'delete-process process)))))
+    (setq ende-provider--discovery-processes nil)))
 
 ;;;###autoload
 (defun ende-provider-check (&optional probe)

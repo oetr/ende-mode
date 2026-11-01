@@ -26,27 +26,27 @@
         (aset tampered position (logxor 1 (aref tampered position)))
         (should-error (ende-rs256-verify tampered signature jwks "test-key"))))
     (dolist (bad (list (concat "!" signature) (concat signature "=")
-                      (substring signature 1) (gethash "n" key)
-                      (concat (if (= (aref signature 0) ?A) "B" "A")
-                              (substring signature 1))
-                      (alist-get 'bad-padding ende-rs256-test--fixtures)
-                      (alist-get 'bad-digest-info ende-rs256-test--fixtures)))
+                       (substring signature 1) (gethash "n" key)
+                       (concat (if (= (aref signature 0) ?A) "B" "A")
+                               (substring signature 1))
+                       (alist-get 'bad-padding ende-rs256-test--fixtures)
+                       (alist-get 'bad-digest-info ende-rs256-test--fixtures)))
       (should-error (ende-rs256-verify input bad jwks "test-key")))
     (dolist (change
              `(("kty" . "EC") ("use" . "enc") ("alg" . "RS512")
                ("e" . "Aw") ("e" . "AA") ("e" . "Ag") ("e" . "AAEAAQ")
                ("n" . "!") ("n" . "AA") ("n" . ,(concat (gethash "n" key) "="))
                ("n" . ,(base64url-encode-string
-                         (concat (unibyte-string 0)
-                                 (base64-decode-string (gethash "n" key) t)) t))
+                        (concat (unibyte-string 0)
+                                (base64-decode-string (gethash "n" key) t)) t))
                ("n" . ,(base64url-encode-string (fillarray (make-string 128 0) 255) t))
                ("n" . ,(base64url-encode-string (fillarray (make-string 1025 0) 255) t))
                ("n" . ,(base64url-encode-string
-                         (concat (unibyte-string 127)
-                                 (fillarray (make-string 255 0) 255)) t))
+                        (concat (unibyte-string 127)
+                                (fillarray (make-string 255 0) 255)) t))
                ("n" . ,(base64url-encode-string
-                         (concat (fillarray (make-string 255 0) 255)
-                                 (unibyte-string 254)) t))))
+                        (concat (fillarray (make-string 255 0) 255)
+                                (unibyte-string 254)) t))))
       (let ((changed (copy-hash-table key)))
         (puthash (car change) (cdr change) changed)
         (puthash "keys" (vector changed) jwks)
@@ -76,7 +76,7 @@
                                               :id-token valid :access-token "access"
                                               :refresh-token "refresh" :expires-at 1800000000)))
                      (next (ende-codex--store-refresh record "next-access" "next-refresh"
-                                                       3600 valid)))
+                                                      3600 valid)))
                 (should (ende-codex-auth--same-registration-p record next))
                 (should (equal (plist-get next :subject) "test-subject"))
                 (should-error (ende-codex--store-refresh
@@ -87,11 +87,11 @@
                   (should-error (ende-codex--store-refresh other "access" "refresh" 3600 valid))))
             (delete-directory directory t)))
         (dolist (scope '("openid offline_access" "offline_access openid profile"))
-          (should-not (ende-codex-auth--refresh-scope
-                       (json-parse-string (json-encode `(("scope" . ,scope)))))))
-        (dolist (scope '("profile" "openid" "OPENID offline_access" nil 42 "openid\noffline_access"))
-          (should-error (ende-codex-auth--refresh-scope
-                         (json-parse-string (json-encode `(("scope" . ,scope)))))))
+          (should (equal (ende-codex-auth--scopes scope)
+                         (split-string scope " " nil))))
+        (dolist (scope '("" "openid  offline_access" "openid openid" nil 42
+                         "openid\noffline_access"))
+          (should-error (ende-codex-auth--scopes scope)))
         (dolist (kind '(issuer audience nonce expired future issued subject azp))
           (should-error (ende-codex--verify-id-token
                          (alist-get kind ende-rs256-test--fixtures) "test-client" "test-nonce")
@@ -134,7 +134,7 @@
                        (unwind-protect (setq command (funcall builder headers nil))
                          (delete-file headers)))
                      (setq arguments (plist-put arguments :command
-                                                 (lambda (&rest _) '("cat"))))
+                                                (lambda (&rest _) '("cat"))))
                      (setq resources (apply start arguments))
                      (with-temp-file (plist-get resources :headers-file)
                        (insert (format "HTTP/1.1 %d Test\r\n\r\n" (car response))))

@@ -508,16 +508,16 @@ HANDLER receives one `ende-job' object."
   "Refresh family marker and tail cells after rebuilding queue conses."
   (let ((family nil))
     (cl-loop for cell on ende-queue do
-      (let ((entry (car cell)))
-        (cond
-         ((ende-job-family-p entry)
-          (setq family entry)
-          (setf (ende-job-family-queue-marker family) cell
-                (ende-job-family-queue-tail family) cell))
-         ((and family (ende-job-p entry)
-               (eq (ende-job-family entry) family))
-          (setf (ende-job-family-queue-tail family) cell))
-         (t (setq family nil)))))))
+	     (let ((entry (car cell)))
+               (cond
+		((ende-job-family-p entry)
+		 (setq family entry)
+		 (setf (ende-job-family-queue-marker family) cell
+                       (ende-job-family-queue-tail family) cell))
+		((and family (ende-job-p entry)
+		      (eq (ende-job-family entry) family))
+		 (setf (ende-job-family-queue-tail family) cell))
+		(t (setq family nil)))))))
 
 (defun ende--schedule-path-before-p (left right)
   "Return non-nil when numeric path LEFT precedes RIGHT lexicographically."
@@ -825,16 +825,9 @@ bypassed by a later same-provider job."
             (unless (and (ende-target-p (ende-job-target job))
                          (ende-target-live-p (ende-job-target job)))
               (error "ende request preparation did not create a live target"))
-            (let ((profile
-                   (plist-put (ende-provider-config-copy (ende-job-profile job))
-                              :job-id (ende-job-id job))))
-              (when (eq (plist-get profile :service) 'openai-codex)
-                (setq profile
-                      (plist-put
-                       profile :codex-session-id
-                       (or (plist-get profile :codex-session-id)
-                           (ende-codex--new-session-id)))))
-              (setf (ende-job-profile job) profile))
+            (setf (ende-job-profile job)
+                  (plist-put (ende-provider-config-copy (ende-job-profile job))
+                             :job-id (ende-job-id job)))
             job)
         ((error quit)
          (ende--job-cleanup-unpublished job)
@@ -1445,12 +1438,12 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
   (interactive)
   (let* ((active (car ende--active-jobs))
          (status (list :running (and ende--active-jobs t)
-                      :active (and active (ende-job-id active))
-                      :active-jobs (mapcar #'ende-job-id ende--active-jobs)
-                      :pending (length (ende-queued-jobs))
-                      :suspended (length (ende-queue-suspended-jobs))
-                      :fences (length (ende-queue-fences))
-                      :paused ende-queue-paused)))
+                       :active (and active (ende-job-id active))
+                       :active-jobs (mapcar #'ende-job-id ende--active-jobs)
+                       :pending (length (ende-queued-jobs))
+                       :suspended (length (ende-queue-suspended-jobs))
+                       :fences (length (ende-queue-fences))
+                       :paused ende-queue-paused)))
     (message "ende: active=%s pending=%d fences=%d"
              (or (plist-get status :active) "none")
              (plist-get status :pending)

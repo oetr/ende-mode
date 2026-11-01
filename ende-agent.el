@@ -56,8 +56,6 @@
     (let ((clean (ende-provider-config-copy profile)))
       (setq clean (plist-put clean :job-id nil)
             clean (plist-put clean :tool-definitions nil))
-      (when (plist-member clean :codex-session-id)
-        (setq clean (plist-put clean :codex-session-id nil)))
       clean)))
 
 (defun ende-agent-freeze-registry (family registry)
@@ -114,9 +112,9 @@ CALLBACK receives the child's final answer and no transcript."
  "Spawn an independent agent with fresh conversation context using the configured access policy. The child receives its own instructions, configured capabilities, and the supplied task, but not your conversation history, previous tool results, observations, decisions, or findings. Provide a self-contained task containing the objective, relevant background, findings, concrete starting points and file paths, constraints, user decisions, and expected output. Include only task-relevant information; do not copy entire conversations. The child can independently inspect resources permitted by its configuration."
  `((:type . "object")
    (:properties . ((:title . ((:type . "string")
-                             (:description . "Concise, human-readable title for the delegated task.")
-                             (:minLength . 1)
-                             (:maxLength . ,ende-agent--spawn-title-max-length)))
+                              (:description . "Concise, human-readable title for the delegated task.")
+                              (:minLength . 1)
+                              (:maxLength . ,ende-agent--spawn-title-max-length)))
                    (:task . ((:type . "string")
                              (:description . "Self-contained work description: objective, relevant background and findings, file paths or symbols, constraints, user decisions, and expected output. The child has no parent conversation history; include only task-relevant information.")
                              (:minLength . 1)))))
@@ -504,8 +502,8 @@ scheduler when asynchronous children have settled."
                   (ende-agent--invoke callbacks :assistant-message
                                       job result calls))
                  (assistant (if (plist-member assistant-data :message)
-                               (plist-get assistant-data :message)
-                             assistant-data))
+				(plist-get assistant-data :message)
+                              assistant-data))
                  (execution-calls (or (plist-get assistant-data :calls) calls))
                  (next-messages (append messages (when assistant (list assistant)))))
             (ende-agent--invoke callbacks :on-tool-request job result calls)
@@ -520,7 +518,7 @@ scheduler when asynchronous children have settled."
                              next-messages)))
                    (ende--validate-messages next-messages)
                    (ende-agent--send job next-messages configuration callbacks
-                                    (1+ rounds))))))))))))
+                                     (1+ rounds))))))))))))
 
 (defconst ende-agent--title-control
   (concat "Ende temporary title phase. Call generate_title exactly once for the "
@@ -550,7 +548,7 @@ scheduler when asynchronous children have settled."
   (cl-incf (ende-job-title-attempts job))
   (let* ((calls (ende-agent--invoke callbacks :tool-calls result))
          (assistant-data (ende-agent--invoke callbacks :assistant-message
-                                              job result calls))
+                                             job result calls))
          (assistant (if (plist-member assistant-data :message)
                         (plist-get assistant-data :message) assistant-data))
          (execution-calls (or (plist-get assistant-data :calls) calls))

@@ -38,7 +38,8 @@ manually entered model.  :model-settings refines shared model defaults."
 (defconst ende-provider-config--services
   '((openai-codex
      :api openai-responses :max-concurrency 4
-     :endpoints ((openai-responses . "https://chatgpt.com/backend-api/codex/responses")))
+     :models-url "https://api.openai.com/v1/models"
+     :endpoints ((openai-responses . "https://api.openai.com/v1/responses")))
     (openai
      :api openai-responses :max-concurrency 4
      :models-url "https://api.openai.com/v1/models"
@@ -59,11 +60,11 @@ manually entered model.  :model-settings refines shared model defaults."
 
 (defconst ende-provider-config--model-fields
   '(:context-window :max-output-tokens :output-tokens :temperature
-    :thinking :reasoning-effort :parameters))
+		    :thinking :reasoning-effort :parameters))
 
 (defconst ende-provider-config--common-fields
   (append '(:display-name :api :models :model-settings :request-timeout
-            :max-concurrency :parallel :source-name-disclosure)
+			  :max-concurrency :parallel :source-name-disclosure)
           ende-provider-config--model-fields))
 
 (defconst ende-provider-config--protected-paths
@@ -179,7 +180,7 @@ manually entered model.  :model-settings refines shared model defaults."
       (let* ((fields (append ende-provider-config--common-fields
                              (if custom
                                  '(:base-url :endpoints :models-url :auth-method
-                                   :auth-source-user :auth-scheme :request-headers :controls)
+					     :auth-source-user :auth-scheme :request-headers :controls)
                                '(:provider :account :transport))))
              (service (unless custom (or (plist-get settings :provider) name)))
              (integration (cdr (assq service ende-provider-config--services)))
@@ -242,10 +243,10 @@ manually entered model.  :model-settings refines shared model defaults."
             (error ":transport: only OpenRouter supports transport overrides")))
         (when custom
           (dolist (url (append (when (plist-get settings :base-url)
-                                (list (plist-get settings :base-url)))
-                              (mapcar #'cdr (plist-get settings :endpoints))
-                              (when (plist-get settings :models-url)
-                                (list (plist-get settings :models-url)))))
+                                 (list (plist-get settings :base-url)))
+                               (mapcar #'cdr (plist-get settings :endpoints))
+                               (when (plist-get settings :models-url)
+                                 (list (plist-get settings :models-url)))))
             (ende-curl--validated-url settings url)
             (when (and (eq (plist-get settings :auth-method) 'auth-source)
                        (not (equal (plist-get (ende-url-normalize url) :scheme) "https")))

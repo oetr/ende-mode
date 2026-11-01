@@ -91,26 +91,11 @@
 (defvar-local ende-selector--effort-cancel nil
   "Cancellation function for the current reasoning-effort probe.")
 
-(defvar-local ende-selector--quota nil
-  "Latest quota snapshot for the selected provider, or nil.")
-
-(defvar-local ende-selector--quota-state :unavailable
-  "Display state of the selected provider's quota snapshot.")
-
-(defvar-local ende-selector--quota-cancel nil
-  "Cancellation function for the current quota probe.")
-
 (defvar ende-selector--next-effort-probe-generation 0
   "Next generation identifier assigned to a reasoning-effort probe.")
 
 (defvar-local ende-selector--effort-probe-generation 0
   "Generation identifier for the current reasoning-effort probe.")
-
-(defvar ende-selector--next-quota-probe-generation 0
-  "Next generation identifier assigned to a quota probe.")
-
-(defvar-local ende-selector--quota-probe-generation 0
-  "Generation identifier for the current quota probe.")
 
 (defvar-local ende-selector--probe-cancel nil
   "Cancellation function for the current model probe.")
@@ -281,23 +266,6 @@ the discovered pricing metadata for those model IDs."
   "Return whether the selected provider defaults to parallel jobs."
   (ende-provider-parallel-enabled-p (ende-selector--provider-profile)))
 
-(defun ende-selector--quota-supported-p ()
-  "Return non-nil when the selected provider has an OAuth quota endpoint."
-  (let ((profile (ende-selector--provider-profile)))
-    (eq (plist-get profile :service) 'openai-codex)))
-
-(defun ende-selector--quota-display ()
-  "Return the selected provider's quota display text."
-  (pcase ende-selector--quota-state
-    (:loading "loading...")
-    (:ready (or (and ende-selector--quota
-                     (ende-codex-quota-string ende-selector--quota))
-                "unavailable"))
-    (:stale (concat "stale: " (or (ende-codex-quota-string ende-selector--quota) "unknown")))
-    (:auth "authentication required")
-    (:transient "temporarily unavailable")
-    (_ "unavailable")))
-
 (defun ende-selector--control-value-label (_control setting)
   "Format SETTING with its preference source."
   (let ((value (plist-get setting :value))
@@ -449,7 +417,6 @@ the discovered pricing metadata for those model IDs."
       (when capability-note (insert capability-note))
       (when compatibility-note (insert compatibility-note))
       (insert "\n")
-      (insert (format "Quota: %s\n\n" (ende-selector--quota-display)))
       (insert "a  - ask\n"
               "d  - queue dashboard\n"
               "R  - reset controls to profile settings\n"
@@ -483,47 +450,6 @@ the discovered pricing metadata for those model IDs."
           (cl-incf ende-selector--next-effort-probe-generation))
     (when (functionp cancel)
       (ende-ignore-errors cancel))))
-
-(defun ende-selector--cancel-quota-probe ()
-  "Cancel the current quota probe, if any."
-  (let ((cancel ende-selector--quota-cancel))
-    (setq ende-selector--quota-cancel nil
-          ende-selector--quota-probe-generation
-          (cl-incf ende-selector--next-quota-probe-generation))
-    (when (functionp cancel)
-      (ende-ignore-errors cancel))))
-
-(defun ende-selector--probe-quota ()
-  "Probe the selected provider's quota and update the selector display."
-  (ende-selector--cancel-quota-probe)
-  (let* ((provider (ende-selector--provider-name))
-         (selector-buffer (current-buffer))
-         (generation (cl-incf ende-selector--next-quota-probe-generation))
-         (completed nil))
-    (setq ende-selector--quota-probe-generation generation
-          ende-selector--quota-state :loading
-          ende-selector--quota nil)
-    (ende-selector--render)
-    (let ((cancel
-           (ende-codex-probe-quota
-            (lambda (quota error)
-              (setq completed t)
-              (when (and (buffer-live-p selector-buffer)
-                         (with-current-buffer selector-buffer
-                           (and (= ende-selector--quota-probe-generation
-                                   generation)
-                                (eq (ende-selector--provider-name) provider))))
-                (with-current-buffer selector-buffer
-                  (setq ende-selector--quota-cancel nil
-                        ende-selector--quota quota
-                        ende-selector--quota-state
-                        (pcase (plist-get quota :state)
-                          ('stale :stale) ('auth :auth) ('transient :transient)
-                          (_ (if error :error :ready))))
-                  (ende-selector--render)))))))
-      (when (and (not completed)
-                 (= ende-selector--quota-probe-generation generation))
-        (setq ende-selector--quota-cancel cancel)))))
 
 (defun ende-selector--set-control-context ()
   "Restore explicit controls for the selected provider, model and API."
@@ -711,16 +637,13 @@ PREFERRED is selected only when it is present in MODELS."
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
-  (ende-selector--cancel-quota-probe)
   (unless (= index ende-selector--provider-index) (setq ende-selector--api nil))
   (setq ende-selector--provider-index
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
   (setq ende-selector--models nil
         ende-selector--model-details nil
-        ende-selector--model-index 0
-        ende-selector--quota nil
-        ende-selector--quota-state :unavailable)
+        ende-selector--model-index 0)
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
          (preferred (ende-selector--preferred-model provider profile))
@@ -748,8 +671,6 @@ PREFERRED is selected only when it is present in MODELS."
     (ende-selector--set-control-context)
     (when remember-pair
       (ende-selector--remember-selected-pair))
-    (when (ende-selector--quota-supported-p)
-      (ende-selector--probe-quota))
     (ende-selector--render)))
 
 (defun ende-selector-select-api ()
@@ -1044,7 +965,6 @@ Return the saved selection, or nil when no valid model is selected."
   (interactive)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
-  (ende-selector--cancel-quota-probe)
   (let ((buffer (current-buffer))
         (window (or (and (window-live-p ende-selector--window)
                          ende-selector--window)
@@ -1058,8 +978,7 @@ Return the saved selection, or nil when no valid model is selected."
 (defun ende-selector--buffer-killed ()
   "Cancel a selector probe when its buffer is killed externally."
   (ende-selector--cancel-probe)
-  (ende-selector--cancel-effort-probe)
-  (ende-selector--cancel-quota-probe))
+  (ende-selector--cancel-effort-probe))
 
 (defun ende-selector-confirm ()
   "Confirm the current choice and close the selector."
@@ -1237,12 +1156,11 @@ Return the saved selection, or nil when no valid model is selected."
     (with-current-buffer buffer
       (ende-selector--cancel-probe)
       (ende-selector--cancel-effort-probe)
-      (ende-selector--cancel-quota-probe)
       (ende-selector-mode)
       (setq ende-selector--source-buffer source
             ende-selector--providers providers
             ende-selector--api (and (eq last-provider (nth provider-index providers))
-                                     (plist-get selection :api))
+                                    (plist-get selection :api))
             ende-selector--provider-index provider-index
             ende-selector--models nil
             ende-selector--model-details nil
@@ -1251,9 +1169,7 @@ Return the saved selection, or nil when no valid model is selected."
             ende-selector--model-state :ready
             ende-selector--control-preferences nil
             ende-selector--effort nil
-            ende-selector--effort-state :none
-            ende-selector--quota nil
-            ende-selector--quota-state :unavailable)
+            ende-selector--effort-state :none)
       (ende-selector--set-provider provider-index))
     (with-current-buffer buffer
       (ende-selector--remember-selected-pair))

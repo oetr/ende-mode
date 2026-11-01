@@ -820,10 +820,10 @@ SELECTED-HEADLINES supplies an already selected current section."
                    (push text parts))
                  (setq fragment-end (ende-chat--headline-end document headline)))
                (dolist (child (if selected-headlines
-                                 (ende-chat--children document headline)
-                               (ende-chat--fenced-siblings
-                                document (ende-chat--children document headline)
-                                end)))
+                                  (ende-chat--children document headline)
+				(ende-chat--fenced-siblings
+                                 document (ende-chat--children document headline)
+                                 end)))
                  (walk child next-owner next-role next-presentation)))))))
       (catch 'ende-chat--sections-read
         (walk root nil (ende-chat--effective-role document root) nil))
@@ -1271,8 +1271,8 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                        (ende-chat--content document headline text 'assistant) transform))
              (reference (ende-chat--property document headline :protocol-history)))
         (if (and reference (not (ende-chat--tool-call-protocol-p
-                              document (cadr (memq headline
-                                                   (ende-chat--children document (ende-chat--parent document headline)))))))
+				 document (cadr (memq headline
+                                                      (ende-chat--children document (ende-chat--parent document headline)))))))
             (list :role "assistant" :content content
                   :protocol-history (ende-tool-store-load-protocol reference content nil))
           (ende-chat--message 'assistant content))))))
@@ -2865,8 +2865,8 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
                             (org-fold-hide-subtree)))
                       (when old-start (set-marker old-start nil))
                       (when old-end (set-marker old-end nil))))))
-            (when (bound-and-true-p ende-mode)
-              (ende-artifact-refresh inserted-start inserted-end)))))
+              (when (bound-and-true-p ende-mode)
+		(ende-artifact-refresh inserted-start inserted-end)))))
       (when inserted-start (set-marker inserted-start nil))
       (when inserted-end (set-marker inserted-end nil))
       (when work-marker (set-marker work-marker nil))
@@ -3093,7 +3093,7 @@ OPTIONS are passed to `json-serialize'."
   (concat
    (when-let* ((shift (plist-get normalized :headline-shift)))
      (ende-chat--response-property ende-chat-content-headline-shift-property
-                                  (number-to-string shift)))
+                                   (number-to-string shift)))
    (when-let* ((block (plist-get normalized :synthetic-end)))
      (concat (ende-chat--response-property ende-chat-content-synthetic-end-property block)
              (when (plist-get normalized :synthetic-newline)
@@ -3801,21 +3801,11 @@ COMPACT requests a context fence and archives the instruction section."
                    (ende-chat--compact-data document question)
                  (ende-chat--ask-data document question)))
          (question-id (plist-get data :question-id))
-         (codex-profile-p
-          (eq (plist-get selected-profile :service) 'openai-codex))
          (root (ende-chat--root document question))
          (conversation-id
           (or (ende-chat--property document root :id)
               (and (eq root question) question-id)
               (ende-chat--new-id "question")))
-         (codex-session-id
-          (and codex-profile-p
-               (ende-codex--session-id-for-identity conversation-id)))
-         (profile
-          (if codex-profile-p
-              (plist-put
-               (copy-tree selected-profile) :codex-session-id codex-session-id)
-            profile))
          (source-fence (plist-get data :source-fence))
          (type (if compact 'chat-compact 'chat))
          (request-id (ende-chat--new-id "request"))
@@ -3835,7 +3825,7 @@ COMPACT requests a context fence and archives the instruction section."
            (ende-chat--document-tree document) 'property-drawer
            (lambda (drawer)
              (when (cl-every #'ende-chat--reserved-property-p
-                            (org-element-map drawer 'node-property #'identity))
+                             (org-element-map drawer 'node-property #'identity))
                (copy-marker (org-element-property :begin drawer))))))
          (committed nil))
     (unwind-protect
@@ -3872,7 +3862,8 @@ COMPACT requests a context fence and archives the instruction section."
               (let ((ende--queue-suspended t))
                 (setq job
                       (ende-enqueue
-                       (list type :target target :overlay overlay :profile profile
+                       (list type :target target :overlay overlay
+                             :profile selected-profile
                              :instruction
                              (list :question-id question-id :request-id request-id
                                    :source-fence source-fence :question-marker question-marker

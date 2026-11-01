@@ -175,8 +175,9 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-provider--catalog-cache (make-hash-table :test #'equal))
           (ende-provider--catalog-inflight (make-hash-table :test #'equal))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
-          (auth '(:access "test-access" :refresh "test-refresh"
-			  :expires 9999999999999))
+          (auth '(:account default :client-id "issued" :subject "verified" :registration-id "registration"
+			   :scope "offline_access chatgpt.tokens.use.direct"
+			   :access-token "test-access" :refresh-token "test-refresh" :expires-at 9999999999))
           (profile '(:name test :api openai-chat-completions :auth-method none
                            :url "https://example.test/v1/chat/completions"
                            :models-url "https://example.test/v1/models"
@@ -188,59 +189,61 @@ Use COMMAND for the process, or a silent sleep process by default."
           (real-pipe (symbol-function 'make-pipe-process))
           (real-temp (symbol-function 'make-temp-file)))
       (cl-letf (((symbol-function 'make-process)
-                 (lambda (&rest args)
+		 (lambda (&rest args)
                    (should-not (file-remote-p default-directory))
                    (should (file-directory-p default-directory))
                    (cl-incf process-count)
                    (dolist (option '("--dump-header" "--config"))
                      (let ((path (cadr (member option (plist-get args :command)))))
                        (when path
-                         (should (file-name-absolute-p path))
-                         (should-not (file-remote-p path))
-                         (should (file-exists-p path)))))
+			 (should (file-name-absolute-p path))
+			 (should-not (file-remote-p path))
+			 (should (file-exists-p path)))))
                    (setq process
-                         (funcall real-process :name "ende-test-local"
+			 (funcall real-process :name "ende-test-local"
                                   :command '("cat") :connection-type 'pipe
                                   :noquery t))))
-                ((symbol-function 'make-pipe-process)
-                 (lambda (&rest args)
+		((symbol-function 'make-pipe-process)
+		 (lambda (&rest args)
                    (should-not (file-remote-p default-directory))
                    (cl-incf pipe-count)
                    (apply real-pipe args)))
-                ((symbol-function 'make-temp-file)
-                 (lambda (&rest args)
+		((symbol-function 'make-temp-file)
+		 (lambda (&rest args)
                    (should-not (file-remote-p default-directory))
                    (let ((file (apply real-temp args)))
                      (push file files)
                      file)))
-                ((symbol-function 'process-send-string)
-                 (lambda (target body)
+		((symbol-function 'process-send-string)
+		 (lambda (target body)
                    (should (eq target process))
                    (should-not (file-remote-p default-directory))
                    (should (stringp body))
                    (when (eq operation 'refresh)
                      (should (string-match-p "refresh_token=test-refresh" body)))
                    (cl-incf send-count)))
-                ((symbol-function 'ende-codex--auth-entry) (lambda () auth)))
-        (unwind-protect
+		((symbol-function 'ende-codex--profile-auth) (lambda (_profile) auth))
+		((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight))
+	(unwind-protect
             (let ((callbacks (list :on-start (lambda (value) (setq cancel value))
                                    :on-error (lambda (value) (setq failure value)))))
               (pcase operation
-                ('generation
-                 (ende-llm-default '(("user" . "remote source")) callbacks profile))
-                ('codex-generation
-                 (ende-codex-default '(("user" . "remote source")) callbacks
+		('generation
+		 (ende-llm-default '(("user" . "remote source")) callbacks profile))
+		('codex-generation
+		 (ende-codex-default '(("user" . "remote source")) callbacks
                                      '(:service openai-codex :account default :api openai-responses
-                                       :auth-method codex-oauth
-                                       :url "https://chatgpt.com/backend-api/codex/responses" :model "test-model")))
-                ('discovery
-                 (let ((ende-provider-discovery-enabled t))
+						:auth-method codex-oauth :codex-auth-source ende
+						:url "https://api.openai.com/v1/responses" :model "test-model")))
+		('discovery
+		 (let ((ende-provider-discovery-enabled t))
                    (setq cancel (ende-provider-discover profile #'ignore))))
-                ('models
-                 (setq cancel (ende-codex-probe-models
+		('models
+		 (setq cancel (ende-codex-probe-models
+                               '(:account default :codex-auth-source ende)
                                (lambda (_models error) (setq failure error)))))
-                ('refresh
-                 (setq cancel (ende-codex--refresh-auth
+		('refresh
+		 (setq cancel (ende-codex--refresh-auth
                                auth (lambda (value) (setq failure value))))))
               (should-not failure)
               (should (= process-count 1))
@@ -456,9 +459,9 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal (mapcar (lambda (event) (plist-get event :type)) events)
                      (if (eq transport 'codex)
                          '(:diagnostic :status :delta :status
-                           :partial-result :error)
+				       :partial-result :error)
                        '(:diagnostic :delta :usage :status
-                         :partial-result :error))))
+				     :partial-result :error))))
       (should (equal (plist-get (plist-get partial :result) :content) "ab"))
       (should (plist-get out :cleaned)))))
 
@@ -904,16 +907,16 @@ Use COMMAND for the process, or a silent sleep process by default."
   (let ((ende-response-idle-timeout 180)
         (ende-codex--refresh-flights (make-hash-table :test #'equal))
         (ende-codex--refresh-processes nil)
-        (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
         (cancel nil)
         (failure nil))
     (unwind-protect
         (cl-letf (((symbol-function 'ende-codex--refresh-command)
                    (lambda (&rest _) '("sleep" "30")))
                   ((symbol-function 'process-send-string) #'ignore)
-                  ((symbol-function 'process-send-eof) #'ignore))
+                  ((symbol-function 'process-send-eof) #'ignore)
+                  ((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight))
           (setq cancel (ende-codex--refresh-auth
-                        '(:refresh "test-refresh")
+                        '(:account default :client-id "issued" :refresh-token "test-refresh")
                         (lambda (result) (setq failure result))))
           (let* ((process (car ende-codex--refresh-processes))
                  (buffer (process-buffer process)))
@@ -965,7 +968,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/explicit-apis-share-stream-lifecycle ()
   (dolist (case '((responses openai-responses
-                            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+                             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
                   (messages anthropic-messages
                             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n")))
     (let* ((profile (list :api (nth 1 case) :auth-method 'none :url "https://example.test/api"

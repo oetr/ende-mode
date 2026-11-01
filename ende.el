@@ -17,8 +17,7 @@
 ;; probing, and OAuth refresh always run curl locally, never on the source
 ;; buffer's remote host.  Provider processes and their header/config files use
 ;; `temporary-file-directory', which must be an existing absolute local
-;; directory; remote or relative values are rejected.  Refreshed Codex
-;; credentials must also be stored in a local file.
+;; directory; remote or relative values are rejected.
 
 ;;; Code:
 
