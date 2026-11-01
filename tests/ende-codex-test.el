@@ -64,6 +64,40 @@
     (should (equal (alist-get :name (car (alist-get :tools (car tools)))) "read_file"))
     (should-not (alist-get :max_output_tokens body))))
 
+(ert-deftest ende-codex-endpoints-are-pinned ()
+  (dolist (url (list ende-codex--authorize-url ende-codex--token-url
+                     ende-codex--jwks-url ende-codex--models-url
+                     ende-codex--responses-url))
+    (should (equal (ende-codex-auth--endpoint url url) url)))
+  (should-error (ende-codex-auth--endpoint
+                 "https://auth.openai.com:8443/api/accounts/authorize"
+                 ende-codex--authorize-url))
+  (should-error (ende-codex-auth--endpoint
+                 ende-codex--models-url ende-codex--responses-url))
+  (should-error (ende-codex-auth--endpoint
+                 "https://attacker.test/api/accounts/authorize"
+                 ende-codex--authorize-url))
+  (dolist (url '("http://auth.openai.com/api/accounts/authorize"
+                 "https://auth.openai.com/api/accounts/authorize?x=1"
+                 "https://auth.openai.com/api/accounts/authorize#x"
+                 "https://auth.openai.com/api/accounts/token"))
+    (should-error (ende-codex-auth--endpoint url ende-codex--authorize-url))))
+
+(ert-deftest ende-codex-requires-completion-event ()
+  (let ((completed (ende-test--run-stream-request
+                    'codex
+                    (list "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")))
+        (done (ende-test--run-stream-request
+               'codex
+               (list "data: {\"type\":\"response.done\",\"response\":{\"output\":[]}}\n\n")))
+        (missing (ende-test--run-stream-request
+                  'codex
+                  (list "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))))
+    (should-not (plist-get completed :error))
+    (should (plist-get completed :result))
+    (should (ende-error-p (plist-get done :error)))
+    (should (ende-error-p (plist-get missing :error)))))
+
 (ert-deftest ende-codex-catalog-keeps-listed-metadata ()
   (let* ((models (json-parse-string
                   (json-encode

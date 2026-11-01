@@ -36,7 +36,7 @@
 					ende-codex--responses-url))
                  (equal (url-type actual) "https")
                  (equal (url-host actual) (url-host trusted))
-                 (= (url-port actual) 443)
+                 (= (or (url-port actual) 443) 443)
                  (equal (url-filename actual) (url-filename trusted)))
       (error "Codex requires the fixed official HTTPS endpoint"))
     url))

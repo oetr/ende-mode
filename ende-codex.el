@@ -1378,7 +1378,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
   (let* ((profile (ende-provider-config-copy options))
          (session
           (ende-codex--make-session
-           :profile profile :callbacks callbacks
+           :profile profile :callbacks callbacks :strict-completion t
            :tool-calls (make-hash-table :test #'eql))))
     (condition-case startup-error
         (progn
