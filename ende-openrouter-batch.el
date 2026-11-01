@@ -175,6 +175,7 @@
           (plist-get profile :auth-source-host)
           (plist-get profile :auth-source-user)
           (plist-get profile :auth-source-port)
+          (plist-get profile :credential-binding)
           (plist-get profile :model)
           (plist-get profile :output-tokens)
           (plist-get profile :parameters)

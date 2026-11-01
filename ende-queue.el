@@ -784,13 +784,14 @@ bypassed by a later same-provider job."
     (let* ((buffer (and (ende-target-p target)
                         (ende-target-buffer target)))
            (profile
-            (copy-tree
+            (ende-credentials-capture
+             (ende-provider-config-copy
              (or (plist-get data :profile)
                  (and (plist-member data :provider)
                       (ende-provider-profile-snapshot
                        (plist-get data :provider)))
                  (and (buffer-live-p buffer)
-                      (ende-provider-profile-for-buffer buffer t)))))
+                      (ende-provider-profile-for-buffer buffer t))))))
            (now (float-time))
            (overrides
             (append (when (plist-member data :parallel)
@@ -798,7 +799,7 @@ bypassed by a later same-provider job."
                     (when (plist-member data :max-concurrency)
                       (list :max-concurrency
                             (plist-get data :max-concurrency)))))
-           (template (copy-tree profile))
+           (template (ende-provider-config-copy profile))
            (job (ende--make-job
                  :inference-template template
                  :scheduling-overrides overrides

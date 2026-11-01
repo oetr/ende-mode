@@ -15,6 +15,12 @@
           (set-file-modes file #o600)
           (with-temp-file file (insert "machine example.test port 443 login work password test-key\n"))
           (should (equal (ende-curl--auth-secret profile) "test-key"))
+          (let ((snapshot (ende-credentials-capture profile)))
+            (should-not (string-match-p "test-key" (prin1-to-string snapshot)))
+            (should (equal (ende-curl--auth-secret snapshot) "test-key"))
+            (with-temp-file file (insert "machine example.test port 443 login work password replacement\n"))
+            (should-error (ende-curl--auth-secret snapshot)))
+          (with-temp-file file (insert "machine example.test port 443 login work password test-key\n"))
           (let ((config (ende-curl--config profile)))
             (unwind-protect
                 (with-temp-buffer
