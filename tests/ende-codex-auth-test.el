@@ -4,6 +4,7 @@
 
 (require 'ert)
 (require 'ende-codex-auth)
+(require 'ende-test-helpers)
 
 (defmacro ende-codex-auth-test--with-store (&rest body)
   "Run BODY with an isolated private credential store."
@@ -145,6 +146,153 @@
         (should-not (string-match-p (regexp-quote secret) (prin1-to-string failure))))
       (should-not (custom-variable-p 'ende-codex-auth--directory))
       (should-not (file-exists-p ende-codex-auth--directory)))))
+
+(defun ende-codex-auth-test--profile (account)
+  "Return an internal request profile bound to Ende ACCOUNT."
+  (ende-codex--account-profile
+   (list :name 'codex-test :service 'openai-codex :account account
+         :api 'openai-responses :auth-method 'codex-oauth :model "synthetic-model"
+         :url "https://chatgpt.com/backend-api/codex/responses")))
+
+(ert-deftest ende-codex-auth-binding-two-queued-accounts-reject-replacement ()
+  (ende-codex-auth-test--with-store
+    (let* ((personal (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+           (work (ende-codex-auth--register 'work (ende-codex-auth-test--credentials "two")))
+           (ende-credentials--bindings (make-hash-table :test #'eq)))
+      (with-temp-buffer
+        (let* ((target (ende-target-create :buffer (current-buffer) :start 1 :end 1 :cursor 1))
+               (personal-job (ende--job-from-request
+                              (list 'insert :target target
+                                    :profile (ende-codex-auth-test--profile 'personal))))
+               (work-job (ende--job-from-request
+                          (list 'insert :target target
+                                :profile (ende-codex-auth-test--profile 'work)))))
+          (should-not (ende-codex--check-binding (ende-job-profile personal-job) personal))
+          (should-not (ende-codex--check-binding (ende-job-profile work-job) work))
+          (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials "replacement")
+                                     (plist-get personal :revision) t)
+          (should-error (ende-codex--check-binding
+                         (ende-job-profile personal-job) (ende-codex-auth-read 'personal)))
+          (should-not (ende-codex--check-binding
+                       (ende-job-profile work-job) (ende-codex-auth-read 'work)))
+          (dolist (job (list personal-job work-job))
+            (let ((printed (prin1-to-string (list (ende-job-profile job)
+                                                   (ende-job-inference-template job)))))
+              (dolist (secret '("synthetic-access" "synthetic-refresh" "synthetic-id"))
+                (should-not (string-match-p secret printed)))))
+          (ende-target-release target))))))
+
+(ert-deftest ende-codex-auth-binding-rotation-survives-and-capture-stays-failed-closed ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (ende-codex-auth-test--credentials))
+           (record (ende-codex-auth--register 'personal credentials))
+           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
+           (missing (ende-codex-capture-binding (ende-codex-auth-test--profile 'missing))))
+      (setq credentials (plist-put credentials :refresh-token "synthetic-rotation"))
+      (should-not (ende-codex--check-binding profile (ende-codex-auth--rotate record credentials)))
+      (let ((new (ende-codex-auth--register 'missing (ende-codex-auth-test--credentials))))
+        (should-error (ende-codex--check-binding missing new))
+        (should-error (ende-codex--check-binding (ende-codex-capture-binding missing) new)))
+      ;; Changing an alias, store, or opaque binding cannot rebind an old job.
+      (should-error (ende-codex--check-binding
+                     (plist-put (copy-sequence profile) :account 'work)
+                     (ende-codex-auth-read 'personal)))
+      (should-error (ende-codex--check-binding
+                     (plist-put (copy-sequence profile) :codex-binding (make-symbol "lost"))
+                     (ende-codex-auth-read 'personal)))
+      (let ((ende-codex-auth--directory (expand-file-name "another" root)))
+        (should-error (ende-codex--check-binding profile record))))))
+
+(ert-deftest ende-codex-auth-refresh-is-account-and-registration-scoped ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+           (personal (ende-codex-auth--register 'personal credentials))
+           (work (ende-codex-auth--register 'work credentials))
+           (ende-codex--refresh-flights (make-hash-table :test #'equal))
+           flights cancellations)
+      (cl-letf (((symbol-function 'ende-codex--start-refresh-flight)
+                 (lambda (flight) (push flight flights))))
+        (unwind-protect
+            (progn
+              (push (ende-codex--refresh-auth personal #'ignore) cancellations)
+              (push (ende-codex--refresh-auth personal #'ignore) cancellations)
+              (should (= (length flights) 1))
+              (push (ende-codex--refresh-auth work #'ignore) cancellations)
+              (should (= (length flights) 2))
+              (let ((replacement (ende-codex-auth--register
+                                  'personal credentials (plist-get personal :revision) t)))
+                (push (ende-codex--refresh-auth replacement #'ignore) cancellations)
+                (should (= (length flights) 3))))
+          (mapc #'funcall cancellations))))))
+
+(ert-deftest ende-codex-auth-refresh-uses-issued-client-and-private-stdin ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+           (old (ende-codex-auth--register 'personal credentials))
+           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
+           (ende-codex--refresh-flights (make-hash-table :test #'equal))
+           (ende-codex--refresh-processes nil)
+           (real-make-process (symbol-function 'make-process))
+           process command sent result cancel)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (setq command (plist-get args :command)
+                         process (funcall real-make-process :name "ende-test-refresh"
+                                          :command '("cat") :connection-type 'pipe
+                                          :noquery t :filter #'ignore :sentinel #'ignore))))
+                ((symbol-function 'process-send-string)
+                 (lambda (_process text) (setq sent text)))
+                ((symbol-function 'process-send-eof) #'ignore))
+        (unwind-protect
+            (progn
+              (setq cancel (ende-codex--resolve-auth (lambda (value) (setq result value)) profile))
+              (should (string-match-p "client_id=issued-client-one" sent))
+              (should (string-match-p "refresh_token=synthetic-refresh-one" sent))
+              (should-not (string-match-p "synthetic-" (prin1-to-string command)))
+              (let ((flight (gethash (ende-codex--refresh-key old) ende-codex--refresh-flights)))
+                (with-temp-file (ende-codex--refresh-flight-headers-file flight)
+                  (insert "HTTP/1.1 200 OK\r\n\r\n"))
+                (ende-codex--refresh-filter
+                 flight process
+                 "{\"access_token\":\"synthetic-new-access\",\"refresh_token\":\"synthetic-new-refresh\",\"expires_in\":3600}")
+                (cl-letf (((symbol-function 'process-status) (lambda (_) 'exit))
+                          ((symbol-function 'process-exit-status) (lambda (_) 0)))
+                  (ende-codex--refresh-sentinel flight process "finished\n")))
+              (should-not (ende-error-p result))
+              (should (equal (plist-get result :refresh-token) "synthetic-new-refresh"))
+              (should (ende-codex-auth--same-registration-p old result))
+              (should-not (ende-codex--check-binding profile result)))
+          (when cancel (funcall cancel))
+          (when (and process (process-live-p process)) (delete-process process)))))))
+
+(ert-deftest ende-codex-auth-refresh-stale-winner-must-have-the-same-registration ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (ende-codex-auth-test--credentials))
+           (old (ende-codex-auth--register 'personal credentials))
+           (rotated (ende-codex-auth--rotate old credentials)))
+      (should-error (ende-codex--store-refresh old "stale-access" "stale-refresh" 3600 nil)
+                    :type 'ende-codex-auth-conflict)
+      (should (equal rotated (ende-codex--refresh-current old)))
+      (ende-codex-auth--register 'personal credentials (plist-get rotated :revision) t)
+      (should-not (ende-codex--refresh-current old)))))
+
+(ert-deftest ende-codex-auth-resolve-never-falls-back-or-sends-replaced-account ()
+  (ende-codex-auth-test--with-store
+    (cl-letf (((symbol-function 'ende-codex--auth-entry)
+               (lambda () (ert-fail "Ende account path accessed foreign credentials"))))
+      (let (result)
+        (ende-codex--resolve-auth (lambda (value) (setq result value))
+                                 (ende-codex-auth-test--profile 'missing))
+        (should (ende-error-p result)))
+      (let* ((credentials (ende-codex-auth-test--credentials))
+             (old (ende-codex-auth--register 'personal credentials))
+             (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
+             result)
+        (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
+        (should (equal old result))
+        (ende-codex-auth--register 'personal credentials (plist-get old :revision) t)
+        (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
+        (should (ende-error-p result))))))
 
 (provide 'ende-codex-auth-test)
 ;;; ende-codex-auth-test.el ends here

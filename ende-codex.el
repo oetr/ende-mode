@@ -26,6 +26,9 @@
 (require 'ende-debug)
 (require 'ende-request)
 (require 'ende-provider-config)
+(require 'ende-codex-auth)
+
+(declare-function ende-provider-validate-profile "ende-provider" (profile))
 
 (defcustom ende-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -208,10 +211,10 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-codex--auth-fresh-p (auth)
   "Return non-nil when AUTH has enough lifetime for a new request."
-  (and (stringp (plist-get auth :access))
-       (numberp (plist-get auth :expires))
-       (> (plist-get auth :expires)
-          (+ (* 1000 (floor (float-time))) 30000))))
+  (let* ((owned (ende-codex--account-auth-p auth))
+         (expires (plist-get auth (if owned :expires-at :expires))))
+    (and (stringp (ende-codex--access-token auth)) (numberp expires)
+         (> expires (* (if owned 1 1000) (+ (floor (float-time)) 30))))))
 
 (defun ende-codex--read-json-file (file)
   "Read FILE as a JSON hash table without interning its keys."
@@ -269,25 +272,69 @@ The claims are used only for routing metadata such as account and residency."
         (plist-get auth :account-id)
         (ende-credentials--signature (concat (plist-get auth :access) "\0" (plist-get auth :refresh)))))
 
+(defun ende-codex--account-profile (profile)
+  "Stage a detached Ende-owned account PROFILE for internal callers only.
+No public profile uses this source until the atomic login/transport cutover.
+This is not a user setting, an availability test, or a legacy fallback."
+  (ende-codex-auth--alias (plist-get profile :account))
+  (plist-put (ende-provider-config-copy profile) :codex-auth-source 'ende))
+
+(defun ende-codex--account-auth-p (auth)
+  "Return non-nil for a private Ende-owned AUTH record."
+  (plist-member auth :registration-id))
+
+(defun ende-codex--account-binding-state (auth)
+  "Return private registration continuity for Ende-owned AUTH, without tokens."
+  (list 'ende (expand-file-name ende-codex-auth--directory)
+        (plist-get auth :account) (plist-get auth :host-id)
+        (plist-get auth :registration-id) (plist-get auth :client-id)
+        (plist-get auth :subject)))
+
+(defun ende-codex--profile-auth (profile)
+  "Read only the credential source explicitly retained by PROFILE."
+  (if (eq (plist-get profile :codex-auth-source) 'ende)
+      (ende-codex-auth-read (plist-get profile :account))
+    (unless (memq (plist-get profile :account) '(nil default))
+      (error "Independent Codex accounts require an authorized Ende registration"))
+    (ende-codex--auth-entry)))
+
 (defun ende-codex-capture-binding (profile)
-  "Bind queued PROFILE to the retained credential source without copying tokens."
-  (let* ((id (make-symbol "ende-codex-binding"))
-         (state (condition-case nil (ende-codex--binding-state (ende-codex--auth-entry))
-                  (error nil))))
-    (puthash id state ende-credentials--bindings)
-    (plist-put profile :codex-binding id)))
+  "Bind queued PROFILE to its explicit credential source without copying tokens.
+Preserve an inherited binding, including an unusable one, through delegation."
+  (if (plist-member profile :codex-binding) profile
+    (let* ((id (make-symbol "ende-codex-binding"))
+           (state (condition-case nil
+                      (let ((auth (ende-codex--profile-auth profile)))
+                        (if (eq (plist-get profile :codex-auth-source) 'ende)
+                            (ende-codex--account-binding-state auth)
+                          (ende-codex--binding-state auth)))
+                    (error nil))))
+      (puthash id state ende-credentials--bindings)
+      (plist-put profile :codex-binding id))))
 
 (defun ende-codex--check-binding (profile auth)
   "Require captured PROFILE continuity before using AUTH."
   (when (plist-member profile :codex-binding)
-    (unless (equal (gethash (plist-get profile :codex-binding) ende-credentials--bindings)
-                   (ende-codex--binding-state auth))
-      (error "Queued Codex credentials changed or cannot be verified; submit a new request"))))
+    (let* ((owned (eq (plist-get profile :codex-auth-source) 'ende))
+           (captured (gethash (plist-get profile :codex-binding) ende-credentials--bindings))
+           (current (if owned
+                        (and (ende-codex--account-auth-p auth)
+                             (eq (plist-get profile :account) (plist-get auth :account))
+                             (ende-codex--account-binding-state auth))
+                      (and (not (ende-codex--account-auth-p auth))
+                           (memq (plist-get profile :account) '(nil default))
+                           (ende-codex--binding-state auth)))))
+      (unless (and captured current (equal captured current))
+        (error "Queued Codex credentials changed or cannot be verified; submit a new request")))))
+
+(defun ende-codex--access-token (auth)
+  "Return the access token from private AUTH, never from a request profile."
+  (plist-get auth (if (ende-codex--account-auth-p auth) :access-token :access)))
 
 (defun ende-codex--account-id (auth)
   "Return the ChatGPT account id in AUTH or its access token."
   (or (plist-get auth :account-id)
-      (let ((claims (ende-codex--jwt-claims (plist-get auth :access))))
+      (let ((claims (ende-codex--jwt-claims (ende-codex--access-token auth))))
         (or (ende-codex--claim claims "chatgpt_account_id")
             (let ((organizations
                    (ende-protocol-json-get "organizations" claims)))
@@ -300,7 +347,7 @@ The claims are used only for routing metadata such as account and residency."
   "Return the compute residency claim in AUTH, if constrained."
   (let ((residency
          (ende-codex--claim
-          (ende-codex--jwt-claims (plist-get auth :access))
+          (ende-codex--jwt-claims (ende-codex--access-token auth))
           "chatgpt_compute_residency")))
     (and (stringp residency)
          (not (string-empty-p residency))
@@ -311,11 +358,11 @@ The claims are used only for routing metadata such as account and residency."
   "Encode VALUE for an OAuth form body."
   (url-hexify-string (format "%s" value)))
 
-(defun ende-codex--refresh-body (refresh-token)
-  "Return an OAuth refresh body for REFRESH-TOKEN."
+(defun ende-codex--refresh-body (refresh-token &optional client-id)
+  "Return an OAuth refresh body for REFRESH-TOKEN and issued CLIENT-ID."
   (format "grant_type=refresh_token&refresh_token=%s&client_id=%s"
           (ende-codex--form-field refresh-token)
-          (ende-codex--form-field ende-codex-client-id)))
+          (ende-codex--form-field (or client-id ende-codex-client-id))))
 
 (defun ende-codex--store-auth (auth &optional expected-version)
   "Write refreshed AUTH back to OpenCode's credential file atomically.
@@ -444,81 +491,86 @@ since the refresh began."
               (goto-char (point-max))
               (insert chunk))))))))
 
+(defun ende-codex--store-refresh (auth access refresh expires-in id-token)
+  "Store refreshed tokens for private AUTH and return its new snapshot.
+Only the retained registration supplies the issued client ID and subject;
+unverified JWT payloads can never authorize an identity change."
+  (if (ende-codex--account-auth-p auth)
+      (let ((credentials
+             (list :client-id (plist-get auth :client-id)
+                   :subject (plist-get auth :subject)
+                   :access-token access :refresh-token refresh
+                   :id-token (or id-token (plist-get auth :id-token))
+                   :expires-at (+ (floor (float-time)) expires-in))))
+        ;; New identity-bearing tokens require Task 4's verifier, not the
+        ;; routing-only JWT decoder in this transport.
+        (when (and id-token (not (equal id-token (plist-get auth :id-token))))
+          (error "Codex refresh identity requires verification"))
+        (when (plist-get auth :account-id)
+          (setq credentials (plist-put credentials :account-id (plist-get auth :account-id))))
+        (ende-codex-auth--rotate auth credentials))
+    (let ((refreshed
+           (list :access access :refresh refresh
+                 :expires (* 1000 (+ (floor (float-time)) expires-in))
+                 :account-id
+                 (or (plist-get auth :account-id)
+                     (ende-codex--claim (ende-codex--jwt-claims access) "chatgpt_account_id")))))
+      (ende-codex--store-auth refreshed (ende-codex--auth-version auth))
+      refreshed)))
+
+(defun ende-codex--refresh-current (auth)
+  "Return a fresh concurrent winner only for AUTH's retained registration."
+  (condition-case nil
+      (let ((current (if (ende-codex--account-auth-p auth)
+                         (ende-codex-auth-read (plist-get auth :account))
+                       (ende-codex--auth-entry))))
+        (and (ende-codex--auth-fresh-p current)
+             (if (ende-codex--account-auth-p auth)
+                 (ende-codex-auth--same-registration-p auth current)
+               (equal (plist-get auth :account-id) (plist-get current :account-id)))
+             current))
+    ((error quit) nil)))
+
 (defun ende-codex--refresh-sentinel (flight process event)
   "Handle terminal PROCESS EVENT for refresh FLIGHT."
   (when (and (not (ende-codex--refresh-flight-finished flight))
              (memq (process-status process) '(exit signal closed)))
     (if (/= (process-exit-status process) 0)
         (ende-codex--refresh-finish
-         flight
-         (or (process-get process :ende-idle-error)
-             (ende-error-create
-              :kind 'auth
-              :message
-              (format "OpenAI token refresh failed: %s" (string-trim event)))))
-      (condition-case parse-error
-          (let* ((headers
-                  (ende-curl-response-headers
-                   (ende-codex--refresh-flight-headers-file flight)))
-                 (status (car headers))
-                 (buffer (ende-codex--refresh-flight-response-buffer flight))
-                 (payload
-                  (with-current-buffer buffer
-                    (ende-protocol-json-read-string (buffer-string))))
-                 (access (ende-protocol-json-get "access_token" payload))
-                 (refresh (ende-protocol-json-get "refresh_token" payload))
-                 (expires-in (ende-protocol-json-get "expires_in" payload)))
-            (if (or (null status) (< status 200) (>= status 300))
-                (ende-codex--refresh-finish
-                 flight
-                 (ende-error-create
-                  :kind 'auth
-                  :message
-                  (format "OpenAI token refresh returned HTTP %s"
-                          (or status "unknown"))))
+         flight (or (process-get process :ende-idle-error)
+                    (ende-error-create
+                     :kind 'auth
+                     :message (format "OpenAI token refresh failed: %s" (string-trim event)))))
+      (let* ((auth (ende-codex--refresh-flight-auth flight))
+             (owned (ende-codex--account-auth-p auth)))
+        (condition-case failure
+            (let* ((status (car (ende-curl-response-headers
+                                 (ende-codex--refresh-flight-headers-file flight))))
+                   (payload (with-current-buffer (ende-codex--refresh-flight-response-buffer flight)
+                              (ende-protocol-json-read-string (buffer-string))))
+                   (access (ende-protocol-json-get "access_token" payload))
+                   (refresh (ende-protocol-json-get "refresh_token" payload))
+                   (expires-in (ende-protocol-json-get "expires_in" payload)))
+              (unless (and status (<= 200 status) (< status 300))
+                (error "OpenAI token refresh returned HTTP %s" (or status "unknown")))
               (unless (and (stringp access) (stringp refresh)
-                           (numberp expires-in))
-                (error "token refresh response is incomplete"))
-              (let ((refreshed
-                     (list :access access
-                           :refresh refresh
-                           :expires (+ (* 1000 (floor (float-time)))
-                                       (* 1000 expires-in))
-                           :account-id
-                           (or (plist-get (ende-codex--refresh-flight-auth flight)
-                                          :account-id)
-                               (ende-codex--claim
-                                (ende-codex--jwt-claims access)
-                                "chatgpt_account_id")))))
-                (condition-case store-error
-                    (progn
-                      (ende-codex--store-auth
-                       refreshed
-                       (ende-codex--auth-version
-                        (ende-codex--refresh-flight-auth flight)))
-                      (ende-codex--refresh-finish flight refreshed))
-                  ((error quit)
-                   (let ((current
-                          (condition-case nil
-                              (ende-codex--auth-entry)
-                            ((error quit) nil))))
-                     (if (and (string-match-p
-                               "credentials changed during refresh"
-                               (error-message-string store-error))
-                              (ende-codex--auth-fresh-p current))
-                         (ende-codex--refresh-finish flight current)
-                       (ende-codex--refresh-finish
-                        flight
-                        (ende-error-create
-                         :kind 'auth
-                         :message (error-message-string store-error))))))))))
-        ((error quit)
-         (ende-codex--refresh-finish
-          flight
-          (ende-error-create
-           :kind 'auth
-           :message (error-message-string parse-error)))))))
-  )
+                           (integerp expires-in) (> expires-in 0))
+                (error "Token refresh response is incomplete"))
+              (ende-codex--refresh-finish
+               flight (ende-codex--store-refresh
+                       auth access refresh expires-in
+                       (ende-protocol-json-get "id_token" payload))))
+          ((error quit)
+           (let* ((conflict (if owned (eq (car failure) 'ende-codex-auth-conflict)
+                              (string-match-p "credentials changed during refresh"
+                                              (error-message-string failure))))
+                  (current (and conflict (ende-codex--refresh-current auth))))
+             (ende-codex--refresh-finish
+              flight (or current
+                         (ende-error-create
+                          :kind 'auth
+                          :message (if owned "Codex registration changed or refresh could not be verified"
+                                     (error-message-string failure))))))))))))
 
 (defun ende-codex--start-refresh-flight (flight)
   "Start the process belonging to refresh FLIGHT."
@@ -566,8 +618,11 @@ since the refresh began."
             (push process ende-codex--refresh-processes)
             (process-send-string
              process
-             (ende-codex--refresh-body
-              (plist-get (ende-codex--refresh-flight-auth flight) :refresh)))
+             (let* ((auth (ende-codex--refresh-flight-auth flight))
+                    (owned (ende-codex--account-auth-p auth)))
+               (ende-codex--refresh-body
+                (plist-get auth (if owned :refresh-token :refresh))
+                (and owned (plist-get auth :client-id)))))
             (process-send-eof process)))
       ((error quit)
        (ende-codex--refresh-finish
@@ -576,13 +631,18 @@ since the refresh began."
          :kind 'auth
          :message (error-message-string startup-error)))))))
 
+(defun ende-codex--refresh-key (auth)
+  "Return the private coalescing key for AUTH's exact account/registration."
+  (if (ende-codex--account-auth-p auth)
+      (append (ende-codex--account-binding-state auth)
+              (list ende-codex-issuer (plist-get auth :revision)))
+    (list (expand-file-name ende-codex-auth-file) ende-codex-issuer ende-codex-client-id)))
+
 (defun ende-codex--refresh-auth (auth callback)
   "Coalesce a refresh for AUTH and register CALLBACK as a waiter.
 Return a cancellation function that only removes this callback."
   (let* ((default-directory (ende-curl-local-directory))
-         (key (list (expand-file-name ende-codex-auth-file)
-                    ende-codex-issuer
-                    ende-codex-client-id))
+         (key (ende-codex--refresh-key auth))
          (flight (gethash key ende-codex--refresh-flights))
          (new-flight (null flight))
          (waiter (ende-codex--make-refresh-waiter :callback callback)))
@@ -597,11 +657,28 @@ Return a cancellation function that only removes this callback."
       (ende-codex--start-refresh-flight flight))
     (apply-partially #'ende-codex--refresh-cancel-waiter flight waiter)))
 
-(defun ende-codex--resolve-auth (callback)
-  "Load OpenCode's credentials and call CALLBACK with AUTH or an error.
-Return a cancellation function for an asynchronous refresh, or nil."
+(defun ende-codex--resolved-account (profile callback auth)
+  "Check retained PROFILE again before delivering private AUTH to CALLBACK."
+  (unless (ende-error-p auth)
+    (setq auth (condition-case nil
+                   (let ((current (ende-codex--profile-auth profile)))
+                     (ende-codex--check-binding profile current)
+                     current)
+                 ((error quit)
+                  (ende-error-create :kind 'auth :message "Queued Codex registration changed or cannot be verified")))))
+  (funcall callback auth))
+
+(defun ende-codex--resolve-auth (callback &optional profile)
+  "Resolve PROFILE's explicit credential source and deliver AUTH to CALLBACK.
+Omitting PROFILE retains the existing public transport until Task 4."
   (condition-case load-error
-      (let ((auth (ende-codex--auth-entry)))
+      (let* ((profile (if (eq (plist-get profile :codex-auth-source) 'ende)
+                          (ende-codex-capture-binding profile) profile))
+             (auth (ende-codex--profile-auth profile))
+             (callback (if (eq (plist-get profile :codex-auth-source) 'ende)
+                           (apply-partially #'ende-codex--resolved-account profile callback)
+                         callback)))
+        (ende-codex--check-binding profile auth)
         (if (ende-codex--auth-fresh-p auth)
             (progn (funcall callback auth) nil)
           (ende-codex--refresh-auth auth callback)))
