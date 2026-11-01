@@ -20,6 +20,7 @@
 (require 'ende-codex)
 (require 'ende-controls)
 (require 'ende-provider-config)
+(require 'savehist)
 
 ;;;; User options
 
@@ -102,6 +103,25 @@ When nil, use only the response inactivity timeout."
 (defvar ende-model-selection--buffer-control-preferences
   (make-hash-table :test #'equal)
   "Per-buffer control-preference tables keyed by buffer identity.")
+
+(defvar ende-model-selection--provenance (make-hash-table :test #'equal)
+  "Nonsecret bindings captured when explicit selections are saved.")
+
+(dolist (variable '(ende-model-selection--last-used ende-model-selection--buffer-selections
+                    ende-model-selection--shared-control-preferences
+                    ende-model-selection--buffer-control-preferences ende-model-selection--provenance))
+  (add-to-list 'savehist-additional-variables variable))
+
+(defun ende-provider-selection-provenance (profile)
+  "Return PROFILE's nonsecret credential, endpoint, API and catalog identity."
+  (mapcar (lambda (key) (cons key (ende-provider-config-copy (plist-get profile key))))
+          '(:service :api :url :auth-method :account :auth-source-host
+            :auth-source-port :auth-source-user :models)))
+
+(defun ende-model-selection--provenance-key (selection)
+  "Return the stable lookup identity of SELECTION."
+  (list (plist-get selection :provider) (plist-get selection :api)
+        (plist-get selection :model)))
 
 (defvar-local ende-model-selection--buffer-selection nil
   "Selection currently associated with this live buffer.")
@@ -507,6 +527,14 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
            (plist-get selection :control-preferences) buffer)
         (ende-model-selection-remember-pair
          (plist-get selection :provider) (plist-get selection :model) buffer)))
+    (let ((profile (condition-case nil
+                       (ende-provider--compose-profile
+                        (plist-get selection :provider) (plist-get selection :model)
+                        (plist-get selection :api))
+                     (error nil))))
+      (when profile
+        (puthash (ende-model-selection--provenance-key selection)
+                 (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
     (setq ende-model-selection--last-used (copy-tree selection))
     (pcase ende-model-selection-scope
       ('global nil)
@@ -547,6 +575,10 @@ An unset buffer follows the current configured provider defaults."
           (ende-model-selection-control-preferences provider model buffer))
          (profile (ende-provider-profile-for-selection
                    provider model preferences api)))
+    (let ((provenance (gethash (ende-model-selection--provenance-key selection)
+                               ende-model-selection--provenance)))
+      (when (and provenance (not (equal provenance (ende-provider-selection-provenance profile))))
+        (user-error "Provider binding or catalog changed; select the provider and model again")))
     (unless model
       (let* ((catalog (ende-provider-cached-models configured-profile))
              (models (plist-get catalog :models)))

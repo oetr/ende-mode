@@ -110,5 +110,20 @@
       (should (equal (plist-get (ende-selector--resolved-profile) :url)
                      "https://api.openai.com/v1/chat/completions")))))
 
+(ert-deftest ende-test/provider-remembered-selection-rejects-rebinding ()
+  (let ((ende-providers '(local))
+        (ende-custom-providers (ende-test--custom-profile 'local))
+        (ende-model-selection--provenance (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--last-used nil))
+    (with-temp-buffer
+      (ende-model-selection-save '(:provider local :model "test-model"))
+      (should (ende-provider-profile-for-buffer))
+      (setf (plist-get (cdar ende-custom-providers) :base-url) "https://other.test/v1")
+      (should-error (ende-provider-profile-for-buffer))
+      (ende-model-selection-save '(:provider local :model "test-model"))
+      (should (equal (plist-get (ende-provider-profile-for-buffer) :url)
+                     "https://other.test/v1/chat/completions")))))
+
 (provide 'ende-provider-test)
 ;;; ende-provider-test.el ends here
