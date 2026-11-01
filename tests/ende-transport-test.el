@@ -961,6 +961,19 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should-not (plist-get out :result))
       (should (eq (ende-error-kind (plist-get out :error)) 'incomplete)))))
 
+(ert-deftest ende-test/explicit-apis-share-stream-lifecycle ()
+  (dolist (case '((responses openai-responses
+                            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+                  (messages anthropic-messages
+                            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n")))
+    (let* ((profile (list :api (nth 1 case) :auth-method 'none :url "https://example.test/api"
+                          :model "m" :output-tokens 50 :require-sse t))
+           (out (ende-test--run-stream-request (car case) (list (nth 2 case)) nil nil profile)))
+      (should-not (plist-get out :error))
+      (should (equal (plist-get (plist-get out :result) :content) "answer"))
+      (should (plist-get out :cleaned))
+      (should (eq (car (last (plist-get out :order))) :done)))))
+
 (provide 'ende-transport-test)
 
 ;;; ende-transport-test.el ends here

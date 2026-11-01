@@ -284,9 +284,11 @@ non-nil, is signalled from the event callback."
                  nil)))
       (unwind-protect
           (progn
-            (if (eq transport 'codex)
-                (ende-codex-default messages callbacks profile)
-              (ende-llm-default messages callbacks profile))
+            (pcase transport
+              ('codex (ende-codex-default messages callbacks profile))
+              ('responses (ende-responses-default messages callbacks profile))
+              ('messages (ende-messages-default messages callbacks profile))
+              (_ (ende-llm-default messages callbacks profile)))
             (unless cancel-on-start
               (let* ((command (plist-get request-args :command))
                      (headers-file
