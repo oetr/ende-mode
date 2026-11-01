@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
+(require 'ende-rs256)
 (require 'ende-protocol)
 (require 'ende-provider-config)
 
