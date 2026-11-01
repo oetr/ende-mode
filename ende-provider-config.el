@@ -384,7 +384,7 @@ at every nesting level; arbitrary values are not guaranteed nonsecret."
               (lambda (key child)
                 (let ((path (append prefix (list key))))
                   (when (string-match-p
-                         "\\(?:authorization\\|api[_-]?key\\|\\`\\(?:auth[_-]?token\\|bearer[_-]?token\\|token\\)\\'\\|access[_-]?token\\|refresh[_-]?token\\|password\\|secret\\|cookie\\|credential\\)"
+                         "\\(?:authorization\\|api[_-]?key\\|\\`\\(?:auth[_-]?token\\|bearer[_-]?token\\|token\\)\\'\\|access[_-]?token\\|refresh[_-]?token\\|id[_-]?token\\|password\\|secret\\|cookie\\|credential\\)"
                          (downcase key))
                     (error "Raw parameters: remove credential-bearing field"))
                   (when (cl-some

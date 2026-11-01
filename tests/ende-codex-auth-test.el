@@ -147,6 +147,24 @@
       (should-not (custom-variable-p 'ende-codex-auth--directory))
       (should-not (file-exists-p ende-codex-auth--directory)))))
 
+(ert-deftest ende-codex-auth-storage-malformed-json-and-wrong-owner-fail-closed ()
+  (ende-codex-auth-test--with-store
+    (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
+    (let ((file (expand-file-name "accounts.json" ende-codex-auth--directory))
+          (real-attributes (symbol-function 'file-attributes)))
+      (cl-letf (((symbol-function 'file-attributes)
+                 (lambda (path &optional format)
+                   (let ((attributes (funcall real-attributes path format)))
+                     (when (and attributes (equal path file))
+                       (setq attributes (copy-sequence attributes))
+                       (setf (nth 2 attributes) (1+ (user-uid))))
+                     attributes))))
+        (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error))
+      (with-temp-file file (insert "{synthetic-private-json-secret"))
+      (let ((failure (should-error (ende-codex-auth-read 'personal)
+                                   :type 'ende-codex-auth-error)))
+        (should-not (string-match-p "synthetic-private" (prin1-to-string failure)))))))
+
 (defun ende-codex-auth-test--profile (account)
   "Return an internal request profile bound to Ende ACCOUNT."
   (ende-codex--account-profile
@@ -276,6 +294,27 @@
       (ende-codex-auth--register 'personal credentials (plist-get rotated :revision) t)
       (should-not (ende-codex--refresh-current old)))))
 
+(ert-deftest ende-codex-auth-refresh-replacement-while-waiting-fails-closed ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+           (old (ende-codex-auth--register 'personal credentials))
+           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
+           callback result)
+      (cl-letf (((symbol-function 'ende-codex--refresh-auth)
+                 (lambda (_auth function) (setq callback function) #'ignore)))
+        (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
+        (should-not result)
+        (let ((new (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)
+                                              (plist-get old :revision) t)))
+          (funcall callback new)
+          (should (ende-error-p result)))))))
+
+(ert-deftest ende-codex-auth-refresh-unverified-id-token-cannot-change-continuity ()
+  (ende-codex-auth-test--with-store
+    (let ((old (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))))
+      (should-error (ende-codex--store-refresh old "new-access" "new-refresh" 3600 "unverified-id"))
+      (should (equal old (ende-codex-auth-read 'personal))))))
+
 (ert-deftest ende-codex-auth-resolve-never-falls-back-or-sends-replaced-account ()
   (ende-codex-auth-test--with-store
     (cl-letf (((symbol-function 'ende-codex--auth-entry)
@@ -307,6 +346,7 @@
                               (:auth-method none) (:stream-usage invalid)
                               (:url "https://attacker.test/responses")
                               (:parameters (:access_token "synthetic-secret"))
+                              (:parameters (:nested (:id_token "synthetic-secret")))
                               (:access-token "synthetic-secret")))
             (should-error (ende--job-from-request
                            (list 'insert :target target :profile (ende-plist-merge base overrides)))))
