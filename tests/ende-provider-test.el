@@ -160,5 +160,80 @@
       (should (equal (plist-get (ende-provider-profile-for-buffer) :url)
                      "https://other.test/v1/chat/completions")))))
 
+(ert-deftest ende-test/remembered-discovered-model-revalidated-before-enqueue ()
+  (ende-test--reset)
+  (let* ((ende-providers '(remote))
+         (ende-custom-providers
+          '((remote :api openai-responses :auth-method none
+                    :models-url "https://remote.test/v1/models"
+                    :endpoints ((openai-responses . "https://remote.test/v1/responses")
+                                (openai-chat-completions . "https://remote.test/v1/chat/completions")))))
+         (ende-model-selection-scope 'buffer)
+         (ende-provider-discovery-enabled t)
+         (ende-provider-discovery-ttl 30)
+         (ende-llm-function (ende-test--fake-llm '(:stall) t))
+         (clock 1000.0)
+         (requests 0)
+         (payload "{\"data\":[{\"id\":\"selected\"},{\"id\":\"other\"}]}")
+         (failure nil)
+         (profile (ende-provider-profile-for-model
+                   'remote nil 'openai-chat-completions))
+         (key (ende-provider--catalog-key profile)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "source")
+          (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock))
+                    ((symbol-function 'ende-provider--start-live-model-request)
+                     (lambda (_profile _url callback)
+                       (cl-incf requests)
+                       (funcall callback
+                                (unless failure
+                                  (ende-protocol-json-read-string payload))
+                                failure)
+                       #'ignore)))
+            (cl-labels ((refresh ()
+                          (ende-provider-clear-discovery-cache)
+                          (ende-provider-probe-models profile #'ignore))
+                        (selected-model ()
+                          (plist-get (ende-provider-profile-for-buffer) :model)))
+              (refresh)
+              (ende-model-selection-save
+               '(:provider remote :model "selected" :api openai-chat-completions))
+              (should (equal (selected-model) "selected"))
+              (let ((generation (ende-provider-models-generation profile)))
+                (setq payload "{\"data\":[{\"id\":\"other\"}]}")
+                (refresh)
+                ;; Another API's catalog must not validate this selection.
+                (puthash (ende-provider--catalog-key (ende-provider-profile 'remote))
+                         (list :time clock :models '("selected") :generation 100)
+                         ende-provider--catalog-cache)
+                (should (string-match-p
+                         "Model selected is no longer available; select a model again"
+                         (error-message-string
+                          (should-error (ende-insert-at-cursor) :type 'user-error))))
+                (should-not ende-queue)
+                (should-not ende-test--calls)
+                (should (= ende--next-job-id 0))
+                (should (= requests 2))
+                ;; Expiry and failed discovery are not negative model evidence.
+                (setq clock (+ clock 60))
+                (should-not (ende-provider-cached-models profile))
+                (should (equal (selected-model) "selected"))
+                (setq failure (ende-error-create :kind 'transport :message "offline"))
+                (ende-provider-discover profile)
+                (should (ende-provider--cached-failure-p key))
+                (should-not (ende-provider-cached-models profile))
+                (should (equal (selected-model) "selected"))
+                ;; Membership, not generation equality, permits the request.
+                (setq failure nil
+                      payload "{\"data\":[{\"id\":\"other\"},{\"id\":\"selected\"}]}")
+                (refresh)
+                (should (> (ende-provider-models-generation profile) generation))
+                (should (equal (plist-get (ende-job-profile (ende-insert-at-cursor)) :model)
+                               "selected"))
+                (should (= (length ende-test--calls) 1))
+                (should (= requests 4))))))
+      (ende-test--reset))))
+
 (provide 'ende-provider-test)
 ;;; ende-provider-test.el ends here

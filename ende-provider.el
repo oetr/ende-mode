@@ -583,6 +583,14 @@ An unset buffer follows the current configured provider defaults."
                                ende-model-selection--provenance)))
       (when (and provenance (not (equal provenance (ende-provider-selection-provenance profile))))
         (user-error "Provider binding or catalog changed; select the provider and model again")))
+    (when (and matching-selection-p
+               (not (ende-provider-configured-models-explicit-p
+                     configured-profile)))
+      (when-let* ((catalog (ende-provider-cached-models configured-profile))
+                  (models (plist-get catalog :models)))
+        (unless (member model models)
+          (user-error "Model %s is no longer available; select a model again"
+                      model))))
     (unless model
       (let* ((catalog (ende-provider-cached-models configured-profile))
              (models (plist-get catalog :models)))
