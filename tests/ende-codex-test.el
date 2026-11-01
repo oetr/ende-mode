@@ -997,10 +997,10 @@
 
 
 (ert-deftest ende-test/openai-request-body-applies-output-token-limit ()
-  (let ((ende-default-output-tokens 123))
+  (let ((ende-default-output-tokens 999))
     (let ((body (ende-codex--request-body
                  (list (cons "user" "body"))
-                 '(:model "test-model"))))
+                 '(:model "test-model" :output-tokens 123))))
       (should (= (alist-get :max_output_tokens body) 123)))))
 
 

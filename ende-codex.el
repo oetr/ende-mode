@@ -1405,8 +1405,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                 (ende-codex--tool-definitions
                                  (plist-get profile :tool-definitions)))
                           (cons :tool_choice "auto")))))
-    (let ((budget (if (plist-member profile :output-tokens)
-                      (plist-get profile :output-tokens) ende-default-output-tokens)))
+    (let ((budget (plist-get profile :output-tokens)))
       (when budget
         (setq body (append body (list (cons :max_output_tokens budget))))))
     (ende-provider-config-encode-parameters

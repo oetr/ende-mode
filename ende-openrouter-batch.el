@@ -176,9 +176,10 @@
           (plist-get profile :auth-source-user)
           (plist-get profile :auth-source-port)
           (plist-get profile :model)
-          (plist-get profile :max-tokens)
+          (plist-get profile :output-tokens)
+          (plist-get profile :parameters)
+          (plist-get profile :request-timeout)
           (ende-controls-encode nil (plist-get profile :controls) profile)
-          ende-default-output-tokens
           (plist-get profile :request-headers)))))
 
 (defun ende-openrouter-batch--active-requests (group)
@@ -340,9 +341,9 @@
                                            role (ende-content-body message) 'chat profile)))))
                           (ende-content-provider-messages messages))))))
     (setq body (ende-controls-encode body (plist-get profile :controls) profile))
-    (when (integerp ende-default-output-tokens)
-      (setq body (append body (list (cons :max_tokens
-                                          ende-default-output-tokens)))))
+    (when (plist-get profile :output-tokens)
+      (setq body (append body (list (cons :max_tokens (plist-get profile :output-tokens))))))
+    (setq body (ende-provider-config-encode-parameters body profile))
     (list (cons :custom_id custom-id)
           (cons :body body))))
 
