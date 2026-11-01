@@ -535,7 +535,8 @@ the discovered pricing metadata for those model IDs."
   "Record the current ready provider/model as recently used."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name)))
-    (when (and (eq ende-selector--model-state :ready) provider model)
+    (when (and (eq ende-selector--model-state :ready) provider model
+               (not ende-selector--selection-required))
       (ende-model-selection-remember-pair
        provider model (or ende-selector--source-buffer (current-buffer))))))
 
@@ -598,7 +599,7 @@ ignored.  Return a cancellation function."
   "Show PROFILE's provisional models while discovery validates PREFERRED."
   (let ((configured (ende-provider-models profile)))
     (cond
-     (preferred
+     ((and preferred (not (ende-provider-configured-models-explicit-p profile)))
       (ende-selector--set-models
        (if (member preferred configured)
            configured
@@ -1013,7 +1014,7 @@ performed locally so typing a search term never starts another network request."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
-    (when (and provider (stringp model))
+    (when (and provider (stringp model) (not ende-selector--selection-required))
       (ende-model-selection-save
        (append (list :provider provider :model model)
                (when ende-selector--api (list :api ende-selector--api))

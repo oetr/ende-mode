@@ -265,6 +265,8 @@ Present preference keys override PROFILE even when their value is nil."
   (when (and (plist-member profile :image-input)
              (not (memq (plist-get profile :image-input) '(nil t))))
     (error ":image-input must be boolean"))
+  (ende-provider-config-parameters (plist-get profile :parameters)
+                                    ende-provider-config--protected-paths)
   (ende-provider-validate-controls profile)
   (let ((url (plist-get profile :url)))
     (unless (and (stringp url) (not (string-empty-p url)))
@@ -725,7 +727,8 @@ selection without starting another model-list request."
   (let ((url (ende-provider-models-url profile))
         (probe (plist-get profile :model-discovery-function)))
     (when (or url (functionp probe))
-      (list (plist-get profile :name)
+      (list (plist-get profile :name) (plist-get profile :service)
+            (plist-get profile :api) (plist-get profile :account)
             (or (plist-get profile :model-discovery-key) url)
             probe
             (plist-get profile :auth-source-host)
