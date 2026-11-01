@@ -6,6 +6,267 @@
 (require 'json)
 (require 'ende-core)
 (require 'ende-controls)
+(require 'ende-curl)
+
+(defcustom ende-providers nil
+  "Ordered profile symbols offered by the provider selector.
+An empty list disables provider selection; it does not imply a local server."
+  :type '(repeat symbol)
+  :group 'ende)
+
+(defcustom ende-builtin-provider-settings nil
+  "Settings for built-in services and independently named instances.
+Entries have the form (NAME KEY VALUE ...).  Named instances require
+:provider.  API keys belong in auth-source, never in these settings."
+  :type 'sexp
+  :group 'ende)
+
+(defcustom ende-custom-providers nil
+  "Custom HTTP profiles as (NAME KEY VALUE ...) entries.
+Specify :api, exactly one of :base-url or :endpoints, and an explicit
+:auth-method of none or auth-source.  :models is an ordered static catalog;
+its first entry is the initial model.  Without it, select a discovered or
+manually entered model.  :model-settings refines shared model defaults."
+  :type 'sexp
+  :group 'ende)
+
+(defconst ende-provider-config--apis
+  '((openai-chat-completions . "/chat/completions")
+    (openai-responses . "/responses")
+    (anthropic-messages . "/messages")))
+
+(defconst ende-provider-config--services
+  '((openai-codex
+     :api openai-responses :max-concurrency 4
+     :endpoints ((openai-responses . "https://chatgpt.com/backend-api/codex/responses")))
+    (openai
+     :api openai-responses :max-concurrency 4
+     :models-url "https://api.openai.com/v1/models"
+     :endpoints ((openai-responses . "https://api.openai.com/v1/responses")
+                 (openai-chat-completions . "https://api.openai.com/v1/chat/completions")))
+    (deepseek
+     :api openai-chat-completions :max-concurrency 1
+     :models-url "https://api.deepseek.com/models"
+     :endpoints ((openai-chat-completions . "https://api.deepseek.com/chat/completions")))
+    (openrouter
+     :api openai-chat-completions :max-concurrency 4
+     :models-url "https://openrouter.ai/api/v1/models"
+     :endpoints ((openai-chat-completions . "https://openrouter.ai/api/v1/chat/completions")))
+    (anthropic
+     :api anthropic-messages :max-concurrency 4
+     :models-url "https://api.anthropic.com/v1/models"
+     :endpoints ((anthropic-messages . "https://api.anthropic.com/v1/messages")))))
+
+(defconst ende-provider-config--model-fields
+  '(:context-window :max-output-tokens :output-tokens :temperature
+    :thinking :reasoning-effort :parameters))
+
+(defconst ende-provider-config--common-fields
+  (append '(:display-name :api :models :model-settings :request-timeout
+            :max-concurrency :parallel :source-name-disclosure)
+          ende-provider-config--model-fields))
+
+(defconst ende-provider-config--protected-paths
+  (mapcar #'list
+          '("model" "messages" "input" "stream" "stream_options" "tools"
+            "tool_choice" "instructions" "previous_response_id" "conversation"
+            "max_tokens" "max_completion_tokens" "max_output_tokens" "store"
+            "temperature" "thinking" "reasoning_effort" "reasoning")))
+
+(defun ende-provider-config-name-p (name)
+  "Return non-nil for a valid profile NAME."
+  (and (symbolp name) name (not (eq name t)) (not (keywordp name))))
+
+(defun ende-provider-config--string (value field)
+  "Require a nonempty string VALUE for FIELD."
+  (unless (and (stringp value) (not (string-blank-p value)))
+    (error "%s: supply a nonempty string" field)))
+
+(defun ende-provider-config--positive (value field &optional real)
+  "Validate optional positive VALUE for FIELD; permit finite REAL values."
+  (unless (or (null value)
+              (and (if real (ende-provider-config--finite-p value) (integerp value))
+                   (> value 0)))
+    (error "%s: use nil or a positive %s" field (if real "finite number" "integer"))))
+
+(defun ende-provider-config--models (models)
+  "Validate an explicit ordered catalog MODELS."
+  (unless (and (proper-list-p models) models)
+    (error ":models: supply a nonempty proper list of unique model IDs"))
+  (let (seen)
+    (dolist (model models)
+      (ende-provider-config--string model ":models")
+      (when (member model seen)
+        (error ":models: remove duplicate model ID %s" model))
+      (push model seen))))
+
+(defun ende-provider-config--settings (settings fields context)
+  "Validate SETTINGS against FIELDS in CONTEXT."
+  (ende-provider-config--plist settings context)
+  (cl-loop
+   for (key value) on settings by #'cddr do
+   (unless (memq key fields)
+     (error "%s: remove unsupported field %s" context key))
+   (pcase key
+     ((or :context-window :max-output-tokens :output-tokens)
+      (ende-provider-config--positive value key))
+     (:request-timeout (ende-provider-config--positive value key t))
+     (:max-concurrency
+      (unless (and (integerp value) (> value 0))
+        (error ":max-concurrency: supply a positive integer")))
+     ((or :parallel :source-name-disclosure)
+      (unless (memq value '(nil t)) (error "%s: use t or nil" key)))
+     ((or :display-name :name :base-url :models-url :auth-source-user)
+      (ende-provider-config--string value key))
+     (:api
+      (unless (assq value ende-provider-config--apis)
+        (error ":api: choose openai-chat-completions, openai-responses, or anthropic-messages")))
+     (:models (ende-provider-config--models value))
+     (:parameters (ende-provider-config-parameters value))
+     ((or :temperature :thinking :reasoning-effort)
+      (ende-controls--validate-canonical-value key value context)
+      (when (and (eq key :temperature) value
+                 (not (ende-provider-config--finite-p value)))
+        (error ":temperature: use a finite number or nil")))
+     (:controls (ende-controls--validate-descriptor-list value t))
+     (:auth-method
+      (unless (memq value '(none auth-source))
+        (error ":auth-method: choose none or auth-source")))
+     (:auth-scheme
+      (unless (memq value '(bearer x-api-key))
+        (error ":auth-scheme: choose bearer or x-api-key")))
+     (:account
+      (unless (and (ende-provider-config-name-p value)
+                   (string-match-p "\\`[a-z0-9][a-z0-9_-]*\\'" (symbol-name value)))
+        (error ":account: use a lowercase ASCII symbol with letters, digits, underscores, or hyphens")))
+     (:provider
+      (unless (assq value ende-provider-config--services)
+        (error ":provider: choose a canonical built-in service")))
+     (:transport
+      (unless (memq value '(auto openrouter-batch))
+        (error ":transport: choose auto or openrouter-batch"))))))
+
+(defun ende-provider-config--headers (headers)
+  "Validate nonsecret custom HEADERS."
+  (unless (proper-list-p headers) (error ":request-headers: use a proper list"))
+  (let (seen)
+    (dolist (header headers)
+      (unless (and (ende-curl--valid-header-p header)
+                   (not (ende-curl--unsafe-profile-header-p header)))
+        (error ":request-headers: remove invalid, secret, or transport-owned header"))
+      (let ((name (downcase (car (split-string header ":")))))
+        (when (member name seen)
+          (error ":request-headers: remove duplicate header %s" name))
+        (push name seen)))))
+
+(defun ende-provider-config--endpoints (endpoints)
+  "Validate API endpoint mapping ENDPOINTS."
+  (unless (and (proper-list-p endpoints) endpoints)
+    (error ":endpoints: supply a nonempty API-to-URL alist"))
+  (let (seen)
+    (dolist (entry endpoints)
+      (unless (and (consp entry) (assq (car entry) ende-provider-config--apis)
+                   (stringp (cdr entry)))
+        (error ":endpoints: map implemented API symbols to complete URL strings"))
+      (when (memq (car entry) seen)
+        (error ":endpoints: remove duplicate API %s" (car entry)))
+      (push (car entry) seen))))
+
+(defun ende-provider-config--definition (name settings custom)
+  "Validate profile NAME's SETTINGS; CUSTOM distinguishes endpoint profiles."
+  (condition-case failure
+      (let* ((fields (append ende-provider-config--common-fields
+                             (if custom
+                                 '(:base-url :endpoints :models-url :auth-method
+                                   :auth-source-user :auth-scheme :request-headers :controls)
+                               '(:provider :account :transport))))
+             (service (unless custom (or (plist-get settings :provider) name)))
+             (integration (cdr (assq service ende-provider-config--services)))
+             (api (or (plist-get settings :api) (plist-get integration :api)))
+             (models (plist-get settings :models))
+             (model-settings (plist-get settings :model-settings))
+             seen)
+        (ende-provider-config--settings settings fields "Profile")
+        (unless (proper-list-p model-settings)
+          (error ":model-settings: use a proper list"))
+        (dolist (entry model-settings)
+          (unless (and (consp entry) (proper-list-p entry))
+            (error ":model-settings: use (MODEL KEY VALUE ...) entries"))
+          (ende-provider-config--string (car entry) ":model-settings")
+          (when (member (car entry) seen)
+            (error ":model-settings: remove duplicate model %s" (car entry)))
+          (when (and models (not (member (car entry) models)))
+            (error ":model-settings: model %s is outside :models" (car entry)))
+          (push (car entry) seen)
+          (ende-provider-config--settings
+           (cdr entry) (cons :name ende-provider-config--model-fields)
+           (format "Model %s" (car entry))))
+        (if custom
+            (progn
+              (when (assq name ende-provider-config--services)
+                (error "name is reserved; choose a different custom profile name"))
+              (unless (plist-member settings :api)
+                (error "supply :api"))
+              (unless (plist-member settings :auth-method)
+                (error "supply :auth-method none or auth-source"))
+              (when (eq (not (null (plist-member settings :base-url)))
+                        (not (null (plist-member settings :endpoints))))
+                (error "supply exactly one of :base-url or :endpoints"))
+              (when (plist-member settings :endpoints)
+                (ende-provider-config--endpoints (plist-get settings :endpoints))
+                (unless (assq api (plist-get settings :endpoints))
+                  (error ":endpoints: add an entry for selected :api")))
+              (when (eq (plist-get settings :auth-method) 'none)
+                (when (or (plist-member settings :auth-source-user)
+                          (plist-member settings :auth-scheme))
+                  (error ":auth-method none: remove authentication fields")))
+              (ende-provider-config--headers (plist-get settings :request-headers)))
+          (unless integration
+            (error "named built-in instances require :provider with a canonical service"))
+          (when (and (assq name ende-provider-config--services) (not (eq name service)))
+            (error ":provider: canonical profile must use its own service"))
+          (unless (assq api (plist-get integration :endpoints))
+            (error ":api: choose a verified API for %s" service))
+          (when (and (plist-member settings :transport) (not (eq service 'openrouter)))
+            (error ":transport: only OpenRouter supports transport overrides")))
+        (when custom
+          (dolist (url (append (when (plist-get settings :base-url)
+                                (list (plist-get settings :base-url)))
+                              (mapcar #'cdr (plist-get settings :endpoints))
+                              (when (plist-get settings :models-url)
+                                (list (plist-get settings :models-url)))))
+            (ende-curl--validated-url settings url)
+            (when (and (eq (plist-get settings :auth-method) 'auth-source)
+                       (not (string-prefix-p "https://" url)))
+              (error "authenticated destinations require HTTPS")))))
+    (error (error "Profile %s: %s" name (error-message-string failure)))))
+
+(defun ende-provider-config-validate ()
+  "Validate all provider definitions without resolving credentials or networking."
+  (dolist (table (list ende-builtin-provider-settings ende-custom-providers))
+    (ende-provider-config-copy table)
+    (unless (proper-list-p table) (error "Provider definitions must be proper lists")))
+  (let (names selected)
+    (dolist (table (list ende-builtin-provider-settings ende-custom-providers))
+      (dolist (entry table)
+        (unless (and (consp entry) (ende-provider-config-name-p (car entry)))
+          (error "Provider definitions require non-nil, non-keyword profile symbols other than t"))
+        (when (memq (car entry) names)
+          (error "Profile %s: remove duplicate definition" (car entry)))
+        (push (car entry) names)
+        (ende-provider-config--definition
+         (car entry) (cdr entry) (eq table ende-custom-providers))))
+    (unless (proper-list-p ende-providers)
+      (error "ende-providers: use a proper ordered list"))
+    (dolist (name ende-providers)
+      (unless (ende-provider-config-name-p name)
+        (error "ende-providers: use valid profile symbols"))
+      (when (memq name selected)
+        (error "Profile %s: remove duplicate selector entry" name))
+      (unless (or (memq name names) (assq name ende-provider-config--services))
+        (error "Profile %s: add a built-in or custom definition" name))
+      (push name selected)))
+  t)
 
 (defun ende-provider-config--finite-p (value)
   "Return non-nil when VALUE is a finite real number."
@@ -138,6 +399,138 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
                         (append result (list (ende-provider-config-copy key)
                                              (ende-provider-config-copy value)))))
       result)))
+
+(defun ende-provider-config--controls (service api model)
+  "Return verified control mappings for SERVICE, API and MODEL."
+  (pcase service
+    ('openai-codex '((:reasoning-effort :path ("reasoning" "effort"))))
+    ('deepseek
+     (when (member model '("deepseek-flash" "deepseek-v4-pro"))
+       '((:temperature :path ("temperature"))
+         (:thinking :path ("thinking" "type") :choices (on off)
+                    :values ((on . "enabled") (off . "disabled")))
+         (:reasoning-effort :path ("reasoning_effort")
+                            :choices ("none" "low" "high" "max")))))
+    ('openrouter
+     '((:temperature :path ("temperature"))
+       (:reasoning-effort :path ("reasoning" "effort"))))
+    ('openai
+     (if (and model (string-match-p "\\`\\(?:o[134]\\|gpt-5\\)" model))
+         (list (list :reasoning-effort :path
+                     (if (eq api 'openai-responses)
+                         '("reasoning" "effort") '("reasoning_effort"))))
+       '((:temperature :path ("temperature")))))
+    (_ '((:temperature :path ("temperature"))))))
+
+(defun ende-provider-config--inherit (base settings source)
+  "Return BASE with SETTINGS inherited and provenance marked SOURCE."
+  (let ((result (ende-provider-config-copy base))
+        (provenance (ende-provider-config-copy (plist-get base :provenance))))
+    (cl-loop for (key value) on settings by #'cddr do
+             (setq result
+                   (plist-put result key
+                              (if (eq key :parameters)
+                                  (ende-provider-config-merge-parameters
+                                   (plist-get result key) value)
+                                (ende-provider-config-copy value))))
+             (setq provenance (plist-put provenance key source)))
+    (plist-put result :provenance provenance)))
+
+(defun ende-provider-config--origin (url)
+  "Return URL's normalized scheme, host and effective port."
+  (let ((parsed (url-generic-parse-url url)))
+    (list (downcase (url-type parsed)) (downcase (url-host parsed))
+          (url-port parsed))))
+
+(defun ende-provider-config-resolve (name &optional model api)
+  "Resolve profile NAME into detached nonsecret request settings.
+MODEL is a runtime selection, never a configuration property.  Optional API
+selects another explicitly available wire endpoint.  No network is started."
+  (ende-provider-config-validate)
+  (unless (ende-provider-config-name-p name)
+    (user-error "No provider selected; configure ende-providers and open the selector"))
+  (let* ((custom (assq name ende-custom-providers))
+         (configured (cdr (or custom (assq name ende-builtin-provider-settings))))
+         (service (unless custom (or (plist-get configured :provider) name)))
+         (integration (cdr (assq service ende-provider-config--services)))
+         (api (or api (plist-get configured :api) (plist-get integration :api)))
+         (endpoints (if custom (plist-get configured :endpoints)
+                      (plist-get integration :endpoints)))
+         (base-url (plist-get configured :base-url))
+         (url (if base-url
+                  (and (eq api (plist-get configured :api))
+                       (concat (string-trim-right base-url "/+")
+                               (alist-get api ende-provider-config--apis)))
+                (alist-get api endpoints)))
+         (model (or model (car (plist-get configured :models))))
+         (model-settings (cdr (assoc model (plist-get configured :model-settings))))
+         (account (or (plist-get configured :account) 'default))
+         (auth (if custom (plist-get configured :auth-method)
+                 (if (eq service 'openai-codex) 'codex-oauth 'auth-source)))
+         (controls (ende-provider-config--controls service api model))
+         (profile
+          (list :name name :service service :api api :url url :model model
+                :account (unless custom account) :auth-method auth
+                :max-concurrency (or (plist-get integration :max-concurrency) 1)
+                :parallel nil :require-sse t :stream-usage t
+                :request-timeout ende-request-timeout
+                :source-name-disclosure ende-source-name-disclosure
+                :output-tokens ende-default-output-tokens)))
+    (unless (and (or custom integration) url)
+      (error "Profile %s: define the profile and a supported endpoint for :api %s" name api))
+    (when (and model (plist-member configured :models)
+               (not (member model (plist-get configured :models))))
+      (error "Profile %s: model %s is outside :models; select a configured model" name model))
+    (setq controls (if custom
+                       (ende-controls-merge-descriptors controls (plist-get configured :controls))
+                     controls))
+    (let ((protected (append ende-provider-config--protected-paths
+                             (mapcar (lambda (entry) (plist-get (cdr entry) :path)) controls))))
+      (ende-provider-config-parameters (plist-get configured :parameters) protected)
+      (ende-provider-config-parameters (plist-get model-settings :parameters) protected))
+    (setq profile (ende-provider-config--inherit profile configured 'profile)
+          profile (ende-provider-config--inherit profile model-settings 'model))
+    (setq profile (plist-put profile :name name)
+          profile (plist-put profile :api api)
+          profile (plist-put profile :controls (ende-provider-config-copy controls))
+          profile (plist-put profile :models-explicit-p (and (plist-member configured :models) t))
+          profile (plist-put profile :models-url
+                             (or (plist-get configured :models-url)
+                                 (plist-get integration :models-url)
+                                 (and base-url (not (eq api 'anthropic-messages))
+                                      (concat (string-trim-right base-url "/+") "/models")))))
+    (when (and (eq service 'openrouter) (eq (plist-get profile :transport) 'openrouter-batch))
+      (unless (plist-member configured :max-concurrency)
+        (setq profile (plist-put profile :max-concurrency 16)))
+      (unless (plist-member configured :parallel)
+        (setq profile (plist-put profile :parallel t))))
+    (when (eq auth 'auth-source)
+      (let* ((parsed (url-generic-parse-url url))
+             (user (if custom (or (plist-get configured :auth-source-user) "ende")
+                     (symbol-name account))))
+        (setq profile (plist-put profile :auth-source-host (downcase (url-host parsed)))
+              profile (plist-put profile :auth-source-port (url-port parsed))
+              profile (plist-put profile :auth-source-user user)
+              profile (plist-put profile :auth-scheme
+                                 (or (plist-get configured :auth-scheme)
+                                     (if (eq api 'anthropic-messages) 'x-api-key 'bearer)))))
+      (when-let* ((models-url (plist-get profile :models-url)))
+        (unless (equal (ende-provider-config--origin url)
+                       (ende-provider-config--origin models-url))
+          (error "Profile %s: authenticated discovery must share the generation origin" name))))
+    (when (eq service 'deepseek)
+      (when (member model '("deepseek-flash" "deepseek-v4-pro"))
+        (setq profile (plist-put profile :reasoning-history-field 'reasoning_content)
+              profile (plist-put profile :control-defaults
+                                 '(:temperature 1 :thinking on :reasoning-effort "high")))))
+    (when-let* ((label (plist-get profile :display-name)))
+      (setq profile (plist-put profile :display-name (ende-bounded-single-line label 80 t))))
+    (let ((budget (plist-get profile :output-tokens))
+          (capacity (plist-get profile :max-output-tokens)))
+      (when (and budget capacity (> budget capacity))
+        (error "Profile %s model %s: reduce :output-tokens below :max-output-tokens" name model)))
+    (ende-curl--validated-url profile)
+    (ende-provider-config-copy profile)))
 
 (provide 'ende-provider-config)
 ;;; ende-provider-config.el ends here
