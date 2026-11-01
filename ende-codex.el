@@ -27,6 +27,7 @@
 (require 'ende-request)
 (require 'ende-provider-config)
 (require 'ende-codex-auth)
+(require 'ende-codex-login)
 
 (declare-function ende-provider-validate-profile "ende-provider" (profile))
 

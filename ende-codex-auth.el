@@ -14,11 +14,184 @@
 (require 'ende-provider-config)
 (require 'ende-curl)
 
+(defconst ende-codex--issuer "https://auth.openai.com")
+(defconst ende-codex--authorize-url "https://auth.openai.com/api/accounts/authorize")
+(defconst ende-codex--token-url "https://auth.openai.com/api/accounts/oauth/token")
+(defconst ende-codex--jwks-url "https://auth.openai.com/.well-known/jwks.json")
+(defconst ende-codex--resource "https://api.openai.com/v1")
+(defconst ende-codex--models-url "https://api.openai.com/v1/models")
+(defconst ende-codex--responses-url "https://api.openai.com/v1/responses")
+(defconst ende-codex--scopes
+  "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct")
+
+(defvar ende-codex-auth--trusted-jwks nil
+  "Dynamically bound keys retrieved from the pinned endpoint.")
+
+(defun ende-codex-auth--endpoint (url expected)
+  "Validate URL against a fixed trusted EXPECTED endpoint before HTTPS."
+  (let ((actual (url-generic-parse-url (ende-curl--validated-url (list :url url))))
+        (trusted (url-generic-parse-url expected)))
+    (unless (and (member expected (list ende-codex--authorize-url ende-codex--token-url
+                                       ende-codex--jwks-url ende-codex--models-url
+                                       ende-codex--responses-url))
+                 (equal (url-type actual) "https")
+                 (equal (url-host actual) (url-host trusted))
+                 (= (url-port actual) 443)
+                 (equal (url-filename actual) (url-filename trusted)))
+      (error "Codex requires the fixed official HTTPS endpoint"))
+    url))
+
+(defun ende-codex-auth--scopes (scope)
+  "Return the separate granted tokens in valid OAuth SCOPE."
+  (unless (and (stringp scope) (<= 1 (length scope) 4096)
+               (cl-loop for char across scope
+                        always (or (= char 32) (= char 33)
+                                   (<= 35 char 91) (<= 93 char 126))))
+    (signal 'ende-codex-identity-error nil))
+  (let ((tokens (split-string scope " " nil)))
+    (unless (and (not (member "" tokens))
+                 (= (length tokens) (length (delete-dups (copy-sequence tokens)))))
+      (signal 'ende-codex-identity-error nil))
+    tokens))
+
+(defun ende-codex-auth--token-payload (payload &optional refresh)
+  "Validate a token endpoint PAYLOAD, optionally for REFRESH."
+  (unless (and (hash-table-p payload)
+               (cl-every (lambda (key)
+                           (let ((value (gethash key payload)))
+                             (and (ende-codex-auth--text-p value)
+                                  (<= (length value) 65536))))
+                         (if refresh '("access_token" "refresh_token")
+                           '("access_token" "refresh_token" "id_token")))
+               (stringp (gethash "token_type" payload))
+               (equal (downcase (gethash "token_type" payload)) "bearer")
+               (integerp (gethash "expires_in" payload))
+               (> (gethash "expires_in" payload) 0))
+    (signal 'ende-codex-identity-error nil))
+  (when (or (not refresh) (ende-protocol-json-has-key-p "scope" payload))
+    (ende-codex-auth--scopes (gethash "scope" payload)))
+  (when (ende-protocol-json-has-key-p "earliest_refresh_at" payload)
+    (unless (and (integerp (gethash "earliest_refresh_at" payload))
+                 (>= (gethash "earliest_refresh_at" payload) 0)
+                 (< (gethash "earliest_refresh_at" payload)
+                    (+ (floor (float-time)) (gethash "expires_in" payload))))
+      (signal 'ende-codex-identity-error nil)))
+  payload)
+
 (defconst ende-codex-auth--issuer "https://auth.openai.com")
 (defconst ende-codex-auth--jwks-uri
   "https://auth.openai.com/.well-known/jwks.json")
 
 (define-error 'ende-codex-identity-error "OpenAI identity could not be verified")
+
+(cl-defstruct (ende-codex-auth--request (:constructor ende-codex-auth--make-request))
+  resources callback timer finished (bytes 0))
+
+(defun ende-codex-auth--request-finish (request payload failure &optional cancelled)
+  "Clean up REQUEST and deliver PAYLOAD or FAILURE unless CANCELLED."
+  (unless (ende-codex-auth--request-finished request)
+    (setf (ende-codex-auth--request-finished request) t)
+    (when-let* ((timer (ende-codex-auth--request-timer request))) (cancel-timer timer))
+    (let* ((resources (ende-codex-auth--request-resources request))
+           (process (plist-get resources :process)))
+      (when (processp process) (ende-curl--cancel-idle-timer process))
+      (ende-curl-cleanup-resources
+       (list (plist-get resources :response-buffer) (plist-get resources :stderr-buffer))
+       (list (plist-get resources :headers-file) (plist-get resources :config-file))
+       (list process (plist-get resources :stderr-process))))
+    (let ((callback (ende-codex-auth--request-callback request)))
+      (setf (ende-codex-auth--request-callback request) nil)
+      (unless cancelled (funcall callback payload failure)))))
+
+(defun ende-codex-auth--request-fail (request)
+  "Fail REQUEST without including credentials or untrusted diagnostics."
+  (ende-codex-auth--request-finish
+   request nil (ende-error-create :kind 'auth :message "OpenAI authorization request failed")))
+
+(defun ende-codex-auth--check-headers (request)
+  "Bound REQUEST's header file even while no response body arrives."
+  (unless (ende-codex-auth--request-finished request)
+    (let ((attributes (file-attributes
+                       (plist-get (ende-codex-auth--request-resources request) :headers-file))))
+      (unless (and attributes (<= (file-attribute-size attributes) 16384))
+        (ende-codex-auth--request-fail request)))))
+
+(defun ende-codex-auth--request-sentinel (request process _event)
+  "Validate terminal PROCESS response for authorization REQUEST."
+  (when (and (not (ende-codex-auth--request-finished request))
+             (memq (process-status process) '(exit signal closed failed)))
+    (let ((debug-on-error nil) (debug-on-signal nil) (debug-on-quit nil)
+          (ende-max-response-header-bytes 16384))
+      (condition-case nil
+          (if (/= (process-exit-status process) 0)
+              (ende-codex-auth--request-fail request)
+            (let* ((resources (ende-codex-auth--request-resources request))
+                   (status (car (ende-curl-response-headers (plist-get resources :headers-file))))
+                   (payload (with-current-buffer (plist-get resources :response-buffer)
+                              (ende-codex-auth--json (buffer-string)))))
+              (if (equal status 200)
+                  (ende-codex-auth--request-finish request payload nil)
+                (let ((code (gethash "error" payload)))
+                  (ende-codex-auth--request-finish
+                   request nil
+                   (ende-error-create
+                    :kind 'auth :message "OpenAI authorization request was rejected"
+                    :details (list :status status
+                                   :code (and (stringp code) (<= (length code) 100)
+                                              (string-match-p "\\`[a-z_]+\\'" code) code))))))))
+        ((error quit) (ende-codex-auth--request-fail request))))))
+
+(defun ende-codex-auth--request (url form limit callback)
+  "Request bounded authorization JSON at pinned URL with optional stdin FORM.
+CALLBACK receives (PAYLOAD ERROR).  Return a cancellation function."
+  (ende-codex-auth--endpoint url url)
+  (let ((request (ende-codex-auth--make-request :callback callback))
+        (ende-connect-timeout 10) (ende-max-stderr-bytes 4096))
+    (condition-case nil
+        (let* ((resources
+                (ende-curl-start-request
+                 :profile (list :url url) :name "ende-openai-authorization"
+                 :command
+                 (lambda (headers _config)
+                   (append (ende-curl-base-command url)
+                           (ende-curl-response-options headers)
+                           (ende-curl-timeout-options 15 limit)
+                           '("--header" "Accept: application/json")
+                           (when form
+                             '("--request" "POST" "--header"
+                               "Content-Type: application/x-www-form-urlencoded"
+                               "--data-binary" "@-"))
+                           (list "--url" url)))
+                 :filter
+                 (lambda (process chunk)
+                   (unless (ende-codex-auth--request-finished request)
+                     (cl-incf (ende-codex-auth--request-bytes request) (string-bytes chunk))
+                     (if (> (ende-codex-auth--request-bytes request) limit)
+                         (ende-codex-auth--request-fail request)
+                       (with-current-buffer (process-buffer process)
+                         (goto-char (point-max)) (insert chunk)))))
+                 :sentinel (apply-partially #'ende-codex-auth--request-sentinel request)))
+               (process (plist-get resources :process)))
+          (setf (ende-codex-auth--request-resources request) resources
+                (ende-codex-auth--request-timer request)
+                (run-at-time 0.2 0.2 #'ende-codex-auth--check-headers request))
+          (set-process-coding-system process 'binary 'binary)
+          (with-current-buffer (plist-get resources :response-buffer) (set-buffer-multibyte nil))
+          (when form (process-send-string process form))
+          (process-send-eof process))
+      ((error quit) (ende-codex-auth--request-fail request)))
+    (lambda () (ende-codex-auth--request-finish request nil nil t))))
+
+(defun ende-codex-auth--jwks-async (callback)
+  "Retrieve bounded trusted keys asynchronously for CALLBACK."
+  (ende-codex-auth--request
+   ende-codex--jwks-url nil 65536
+   (lambda (jwks failure)
+     (let ((keys (and jwks (gethash "keys" jwks))))
+       (if (and (not failure) (vectorp keys) (<= 1 (length keys) 16))
+           (funcall callback jwks nil)
+         (funcall callback nil (or failure (ende-error-create
+                                           :kind 'auth :message "OpenAI signing keys are unavailable"))))))))
 
 (defun ende-codex-auth--json (bytes)
   "Parse a UTF-8 JSON object from BYTES, rejecting duplicate members."
@@ -43,8 +216,10 @@
     value))
 
 (defun ende-codex-auth--jwks ()
+  ;; Login supplies asynchronously retrieved trusted keys to this verifier.
   "Fetch a bounded key set from the pinned OpenAI HTTPS endpoint."
-  (let* ((url (ende-curl--validated-url (list :url ende-codex-auth--jwks-uri)))
+  (or ende-codex-auth--trusted-jwks
+      (let* ((url (ende-curl--validated-url (list :url ende-codex-auth--jwks-uri)))
          (origin (ende-url-normalize ende-codex-auth--issuer))
          (destination (ende-url-normalize url))
          (ende-connect-timeout 10)
@@ -94,14 +269,13 @@
                  (keys (gethash "keys" jwks)))
             (unless (and (vectorp keys) (<= 1 (length keys) 16))
               (signal 'ende-codex-identity-error nil))
-            (mapc #'ende-rs256--public-key keys)
             jwks))
       (when (processp process)
         (ende-curl--cancel-idle-timer process))
       (ende-curl-cleanup-resources
        (list (plist-get resources :response-buffer) (plist-get resources :stderr-buffer))
        (list (plist-get resources :headers-file) (plist-get resources :config-file))
-       (list process (plist-get resources :stderr-process))))))
+       (list process (plist-get resources :stderr-process)))))))
 
 (defun ende-codex-auth--claims (claims client-id nonce)
   "Validate authenticated CLAIMS against CLIENT-ID and login NONCE."
@@ -220,10 +394,12 @@ Return claims only after signature and OpenID validation."
     (:registration-id . "registration_id") (:revision . "revision")
     (:access-token . "access_token") (:refresh-token . "refresh_token")
     (:id-token . "id_token") (:expires-at . "expires_at")
-    (:account-id . "account_id")))
+    (:account-id . "account_id") (:scope . "scope") (:email . "email")
+    (:earliest-refresh-at . "earliest_refresh_at")))
 
 (defconst ende-codex-auth--credential-fields
-  '(:client-id :subject :access-token :refresh-token :id-token :expires-at :account-id))
+  '(:client-id :subject :access-token :refresh-token :id-token :expires-at :account-id
+    :scope :email :earliest-refresh-at))
 
 (defun ende-codex-auth--fail ()
   "Signal a value-free storage error, never including file contents."
@@ -285,8 +461,17 @@ Return claims only after signature and OpenID validation."
   (unless (and (integerp (plist-get credentials :expires-at))
                (>= (plist-get credentials :expires-at) 0))
     (ende-codex-auth--fail))
-  (when (plist-member credentials :account-id)
-    (unless (ende-codex-auth--text-p (plist-get credentials :account-id))
+  (dolist (key '(:account-id :email))
+    (when (plist-member credentials key)
+      (unless (and (ende-codex-auth--text-p (plist-get credentials key))
+                   (<= (length (plist-get credentials key)) 320))
+        (ende-codex-auth--fail))))
+  (when (plist-member credentials :scope)
+    (ende-codex-auth--scopes (plist-get credentials :scope)))
+  (when (plist-member credentials :earliest-refresh-at)
+    (unless (and (integerp (plist-get credentials :earliest-refresh-at))
+                 (<= 0 (plist-get credentials :earliest-refresh-at)
+                     (plist-get credentials :expires-at)))
       (ende-codex-auth--fail))))
 
 (defun ende-codex-auth--attributes (path directory private)
@@ -435,15 +620,19 @@ This does not register, select, or authenticate an account."
        (if state (gethash "host_id" state)
          (ende-codex-auth--transaction (lambda (new) (gethash "host_id" new))))))))
 
-(defun ende-codex-auth-read (account)
-  "Return ACCOUNT's detached private record, never importing other credentials."
+(defun ende-codex-auth-lookup (account)
+  "Return ACCOUNT's validated record or nil if absent; unsafe storage errors."
   (ende-codex-auth--guard
    (lambda ()
      (let* ((alias (ende-codex-auth--alias account))
             (state (ende-codex-auth--read-state (ende-codex-auth--path nil)))
             (entry (and state (gethash alias (gethash "accounts" state)))))
-       (unless entry (ende-codex-auth--fail))
-       (ende-codex-auth--decode-record account entry (gethash "host_id" state))))))
+       (when entry
+         (ende-codex-auth--decode-record account entry (gethash "host_id" state)))))))
+
+(defun ende-codex-auth-read (account)
+  "Return ACCOUNT's detached private record, never importing other credentials."
+  (or (ende-codex-auth-lookup account) (ende-codex-auth--fail)))
 
 (defun ende-codex-auth--encode-record (record)
   "Encode private RECORD using only the fixed storage fields."
