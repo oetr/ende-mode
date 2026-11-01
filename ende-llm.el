@@ -580,7 +580,8 @@ The :callbacks argument initializes the composed transport lifecycle."
                     (list (cons :tools (plist-get profile :tool-definitions))
                           (cons :tool_choice "auto")))))
     (when (plist-get profile :output-tokens)
-      (setq body (append body (list (cons :max_tokens (plist-get profile :output-tokens))))))
+      (setq body (append body (list (cons (if (eq (plist-get profile :service) 'openai) :max_completion_tokens :max_tokens)
+                                                           (plist-get profile :output-tokens))))))
     (ende-provider-config-encode-parameters
      (ende-controls-encode body (plist-get profile :controls) profile) profile)))
 

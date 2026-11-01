@@ -1134,6 +1134,8 @@ This is the uncached request primitive used by catalog and capability probes."
                (ende-curl-start-request
                 :profile profile
                 :url url
+                :internal-headers (when (eq (plist-get profile :api) 'anthropic-messages)
+                                    '("anthropic-version: 2023-06-01"))
                 :name (format "ende-provider-discovery-%s"
                               (or (plist-get profile :name) "request"))
                 :command (lambda (request-headers request-config)
