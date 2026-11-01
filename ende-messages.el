@@ -92,9 +92,15 @@
       ("content_block_start"
        (when (or (not (integerp index)) (gethash index blocks))
          (error "Invalid or duplicate Messages content index"))
-       (puthash index (copy-hash-table (gethash "content_block" json)) blocks))
+       (let ((initial (copy-hash-table (gethash "content_block" json))))
+         (puthash index initial blocks)
+         (dolist (field '(("text" . :content) ("thinking" . :thinking)))
+           (when-let* ((text (gethash (car field) initial)))
+             (ende-stream-record-delta stream (cdr field) text
+                                       (apply-partially #'ende-messages--fail session))))))
       ("content_block_delta"
-       (unless block (error "Messages delta has no content block"))
+       (unless (and block (not (gethash "ende_complete" block)))
+         (error "Messages delta has no active content block"))
        (pcase (gethash "type" delta)
          ("text_delta"
           (let ((text (gethash "text" delta)))
@@ -215,7 +221,13 @@
         (if (equal role "system")
             (setq system (append system content))
           (when (and history (eq (car history) 'anthropic-messages))
-            (setq content (cdr history) calls nil))
+            (setq content (cdr history)
+                  calls (cl-remove-if
+                         (lambda (call)
+                           (cl-some (lambda (block)
+                                      (and (equal (gethash "type" block) "tool_use")
+                                           (equal (gethash "id" block) (plist-get call :id))))
+                                    content)) calls)))
           (dolist (call calls)
             (let ((input (ende-protocol-json-read-string (plist-get call :arguments))))
               (unless (hash-table-p input) (error "Messages tool arguments must be an object"))

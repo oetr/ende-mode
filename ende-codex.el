@@ -1365,7 +1365,17 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (content (plist-get message :content))
              (call-id (plist-get message :tool-call-id)))
          (cond
-          ((eq (car-safe history) 'openai-responses) (ende-provider-config-copy (cdr history)))
+          ((eq (car-safe history) 'openai-responses)
+           (append (ende-provider-config-copy (cdr history))
+                   (mapcar (lambda (call)
+                             (list (cons :type "function_call") (cons :call_id (plist-get call :id))
+                                   (cons :name (plist-get call :name))
+                                   (cons :arguments (plist-get call :arguments))))
+                           (cl-remove-if
+                            (lambda (call)
+                              (cl-some (lambda (item)
+                                         (equal (ende-protocol-json-get "call_id" item)
+                                                (plist-get call :id))) (cdr history))) calls))))
           (calls
            (append
             (when (and (stringp content) (not (string-empty-p content)))
