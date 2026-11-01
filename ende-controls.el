@@ -24,7 +24,8 @@
 (defconst ende-controls--reserved-path-keys
   '("model" "messages" "input" "stream" "stream_options" "tools"
     "tool_choice" "max_tokens" "max_output_tokens"
-    "max_completion_tokens" "store")
+    "max_completion_tokens" "store" "system" "instructions"
+    "previous_response_id" "conversation")
   "Request fields owned by protocol builders, not control descriptors.")
 
 (defun ende-controls--proper-plist-p (value)

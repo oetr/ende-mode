@@ -69,7 +69,7 @@ manually entered model.  :model-settings refines shared model defaults."
 (defconst ende-provider-config--protected-paths
   (mapcar #'list
           '("model" "messages" "input" "stream" "stream_options" "tools"
-            "tool_choice" "instructions" "previous_response_id" "conversation"
+            "tool_choice" "system" "instructions" "previous_response_id" "conversation"
             "max_tokens" "max_completion_tokens" "max_output_tokens" "store"
             "temperature" "thinking" "reasoning_effort" "reasoning")))
 
@@ -137,7 +137,8 @@ manually entered model.  :model-settings refines shared model defaults."
         (error ":auth-scheme: choose bearer or x-api-key")))
      (:account
       (unless (and (ende-provider-config-name-p value)
-                   (string-match-p "\\`[a-z0-9][a-z0-9_-]*\\'" (symbol-name value)))
+                   (let ((case-fold-search nil))
+                     (string-match-p "\\`[a-z0-9][a-z0-9_-]*\\'" (symbol-name value))))
         (error ":account: use a lowercase ASCII symbol with letters, digits, underscores, or hyphens")))
      (:provider
       (unless (assq value ende-provider-config--services)
@@ -187,6 +188,8 @@ manually entered model.  :model-settings refines shared model defaults."
              (model-settings (plist-get settings :model-settings))
              seen)
         (ende-provider-config--settings settings fields "Profile")
+        (ende-provider-config-parameters (plist-get settings :parameters)
+                                         ende-provider-config--protected-paths)
         (unless (proper-list-p model-settings)
           (error ":model-settings: use a proper list"))
         (dolist (entry model-settings)
@@ -200,7 +203,9 @@ manually entered model.  :model-settings refines shared model defaults."
           (push (car entry) seen)
           (ende-provider-config--settings
            (cdr entry) (cons :name ende-provider-config--model-fields)
-           (format "Model %s" (car entry))))
+           (format "Model %s" (car entry)))
+          (ende-provider-config-parameters (plist-get (cdr entry) :parameters)
+                                           ende-provider-config--protected-paths))
         (if custom
             (progn
               (when (assq name ende-provider-config--services)
@@ -220,6 +225,12 @@ manually entered model.  :model-settings refines shared model defaults."
                 (when (or (plist-member settings :auth-source-user)
                           (plist-member settings :auth-scheme))
                   (error ":auth-method none: remove authentication fields")))
+              (let ((controls (ende-controls-merge-descriptors
+                               (ende-provider-config--controls nil api nil)
+                               (plist-get settings :controls))))
+                (dolist (entry controls)
+                  (dolist (mapping (plist-get (cdr entry) :values))
+                    (ende-provider-config--json-value (cdr mapping) nil))))
               (ende-provider-config--headers (plist-get settings :request-headers)))
           (unless integration
             (error "named built-in instances require :provider with a canonical service"))
@@ -237,7 +248,7 @@ manually entered model.  :model-settings refines shared model defaults."
                                 (list (plist-get settings :models-url)))))
             (ende-curl--validated-url settings url)
             (when (and (eq (plist-get settings :auth-method) 'auth-source)
-                       (not (string-prefix-p "https://" url)))
+                       (not (equal (plist-get (ende-url-normalize url) :scheme) "https")))
               (error "authenticated destinations require HTTPS")))))
     (error (error "Profile %s: %s" name (error-message-string failure)))))
 
@@ -367,7 +378,7 @@ at every nesting level; arbitrary values are not guaranteed nonsecret."
               (lambda (key child)
                 (let ((path (append prefix (list key))))
                   (when (string-match-p
-                         "\\(?:authorization\\|api[_-]?key\\|access[_-]?token\\|refresh[_-]?token\\|password\\|secret\\|cookie\\|credential\\)"
+                         "\\(?:authorization\\|api[_-]?key\\|\\`\\(?:auth[_-]?token\\|bearer[_-]?token\\|token\\)\\'\\|access[_-]?token\\|refresh[_-]?token\\|password\\|secret\\|cookie\\|credential\\)"
                          (downcase key))
                     (error "Raw parameters: remove credential-bearing field"))
                   (when (cl-some
@@ -438,9 +449,9 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
 
 (defun ende-provider-config--origin (url)
   "Return URL's normalized scheme, host and effective port."
-  (let ((parsed (url-generic-parse-url url)))
-    (list (downcase (url-type parsed)) (downcase (url-host parsed))
-          (url-port parsed))))
+  (let ((parsed (ende-url-normalize url)))
+    (list (plist-get parsed :scheme) (plist-get parsed :host)
+          (plist-get parsed :port))))
 
 (defun ende-provider-config-resolve (name &optional model api)
   "Resolve profile NAME into detached nonsecret request settings.
@@ -476,6 +487,7 @@ selects another explicitly available wire endpoint.  No network is started."
                 :request-timeout ende-request-timeout
                 :source-name-disclosure ende-source-name-disclosure
                 :output-tokens ende-default-output-tokens)))
+    (when model (ende-provider-config--string model ":model selection"))
     (unless (and (or custom integration) url)
       (error "Profile %s: define the profile and a supported endpoint for :api %s" name api))
     (when (and model (plist-member configured :models)
@@ -492,6 +504,9 @@ selects another explicitly available wire endpoint.  No network is started."
           profile (ende-provider-config--inherit profile model-settings 'model))
     (setq profile (plist-put profile :name name)
           profile (plist-put profile :api api)
+          profile (plist-put profile :model-name
+                             (when (plist-get model-settings :name)
+                               (ende-bounded-single-line (plist-get model-settings :name) 80 t)))
           profile (plist-put profile :controls (ende-provider-config-copy controls))
           profile (plist-put profile :models-explicit-p (and (plist-member configured :models) t))
           profile (plist-put profile :models-url
