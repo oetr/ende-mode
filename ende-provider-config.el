@@ -411,6 +411,18 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
                                              (ende-provider-config-copy value)))))
       result)))
 
+(defun ende-provider-config-encode-parameters (body profile)
+  "Return adapter BODY extended with PROFILE's validated raw parameters."
+  (let ((parameters
+         (ende-provider-config-parameters
+          (plist-get profile :parameters)
+          (append ende-provider-config--protected-paths
+                  (mapcar (lambda (entry) (plist-get (cdr entry) :path))
+                          (plist-get profile :controls)))))
+        (result (copy-tree body)))
+    (maphash (lambda (key value) (push (cons key value) result)) parameters)
+    result))
+
 (defun ende-provider-config--controls (service api model)
   "Return verified control mappings for SERVICE, API and MODEL."
   (pcase service

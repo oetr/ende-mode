@@ -25,6 +25,7 @@
 (require 'ende-stream)
 (require 'ende-debug)
 (require 'ende-request)
+(require 'ende-provider-config)
 
 (defcustom ende-codex-auth-file
   (expand-file-name "~/.local/share/opencode/auth.json")
@@ -122,7 +123,7 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile stream tool-calls terminal-event debug-record)
+  profile stream tool-calls terminal-event debug-record strict-completion)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -1216,7 +1217,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
             (if (equal type "response.incomplete") "incomplete" "stop"))
       (setf (ende-codex--session-terminal-event session) json))
      ((member type '("response.failed" "error"))
-      (let ((error (or (ende-protocol-json-get "error" json) json)))
+      (let ((error (or (ende-protocol-json-get "error" response)
+                       (ende-protocol-json-get "error" json) json)))
         (ende-codex--fail
          session
          (ende-error-create
@@ -1304,7 +1306,11 @@ When APPEND is non-nil, append the argument delta to the stored value."
             (ende-stream-session-parser (ende-codex--session-stream session)))
            (apply-partially #'ende-codex--handle-sse-events session))
           (unless (ende-codex--terminal-p session)
-            (if (ende-codex--session-terminal-event session)
+            (if (and (ende-codex--session-terminal-event session)
+                     (or (not (ende-codex--session-strict-completion session))
+                         (equal (ende-protocol-json-get
+                                 "type" (ende-codex--session-terminal-event session))
+                                "response.completed")))
                 (ende-codex--settle
                  session 'success (ende-codex--result session))
               (ende-codex--fail
@@ -1385,7 +1391,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
             (ende-protocol-json-get "output_index" json))
         (or (ende-protocol-json-get "summary_index" json) 0)))
 
-(defun ende-codex--request-body (messages profile)
+(defun ende-responses--request-body (messages profile)
   "Build a Responses API request body for MESSAGES and PROFILE."
   (let ((body
          (list (cons :model (plist-get profile :model))
@@ -1399,17 +1405,57 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                 (ende-codex--tool-definitions
                                  (plist-get profile :tool-definitions)))
                           (cons :tool_choice "auto")))))
-    (if ende-default-output-tokens
-        (setq body (append body (list (cons :max_output_tokens
-                                            ende-default-output-tokens)))))
-    (setq body (ende-controls-encode
-                body (plist-get profile :controls) profile))
+    (let ((budget (if (plist-member profile :output-tokens)
+                      (plist-get profile :output-tokens) ende-default-output-tokens)))
+      (when budget
+        (setq body (append body (list (cons :max_output_tokens budget))))))
+    (ende-provider-config-encode-parameters
+     (ende-controls-encode body (plist-get profile :controls) profile) profile)))
+
+(defun ende-codex--request-body (messages profile)
+  "Build the retained Codex request for MESSAGES and PROFILE."
+  (let ((body (ende-responses--request-body messages profile)))
     (unless (or (eq (plist-get profile :thinking) 'off)
                 (equal (plist-get profile :reasoning-effort) "none"))
       (setq body
             (ende-controls--set-path
              body '("reasoning" "summary") "auto")))
     body))
+
+(defun ende-responses--start-prepared (session body _request-body record)
+  "Start a public Responses SESSION with prepared BODY and debug RECORD."
+  (let* ((profile (ende-codex--session-profile session))
+         (request
+          (ende-curl-start-request
+           :profile profile :name "ende-responses"
+           :command (lambda (headers config)
+                      (ende-curl-command profile headers config
+                                         (and (listp body) (plist-get body :file))))
+           :filter (apply-partially #'ende-codex--filter session)
+           :sentinel (apply-partially #'ende-codex--sentinel session))))
+    (ende-transport-session-set-resources (ende-codex--lifecycle session) request)
+    (setf (ende-codex--session-debug-record session) record)
+    (ende-request-send (plist-get request :process) body)))
+
+(defun ende-responses-default (messages callbacks profile)
+  "Send MESSAGES using public Responses and PROFILE's explicit authentication."
+  (let ((session (ende-codex--make-session
+                  :profile profile :callbacks callbacks :strict-completion t
+                  :tool-calls (make-hash-table :test #'eql))))
+    (condition-case failure
+        (progn
+          (ende-transport-session-invoke
+           (ende-codex--lifecycle session) :on-start
+           (apply-partially #'ende-codex--cancel session))
+          (unless (ende-codex--terminal-p session)
+            (ende-request-prepare
+             (ende-codex--lifecycle session) 'ende-codex #'ende-responses--request-body
+             messages profile (list "openai-responses" (plist-get profile :url))
+             (apply-partially #'ende-responses--start-prepared session))))
+      ((error quit)
+       (ende-codex--fail session (ende-error-create
+                                 :kind 'startup :message (error-message-string failure)))))
+    (ende-transport-session-process (ende-codex--lifecycle session))))
 
 (defun ende-codex--start-prepared (session auth session-id body request-body record)
   "Start SESSION using AUTH, SESSION-ID and a prepared BODY."
