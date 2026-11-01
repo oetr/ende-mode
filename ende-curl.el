@@ -18,6 +18,7 @@
 (require 'ende-core)
 (require 'ende-transport)
 (require 'ende-url)
+(require 'ende-credentials)
 
 (defun ende-curl-local-directory ()
   "Return an existing local directory for provider processes and temp files.
@@ -65,9 +66,11 @@ from remote buffers are supported, but their processes always run locally."
     (when (string-match-p "[?#]" value)
       (error "Provider URL must not contain a query or fragment"))
     (when (and (string= scheme "http")
-               (not (plist-get profile :allow-http))
                (not (ende-curl--loopback-host-p host)))
       (error "Plain HTTP is only allowed for explicit loopback endpoints"))
+    (when (and (not (string= scheme "https"))
+               (or auth-host (memq (plist-get profile :auth-method) '(auth-source codex-oauth))))
+      (error "Authenticated requests require HTTPS"))
     (when (and auth-host
                (not (string= (downcase (format "%s" auth-host))
                              (downcase host))))
@@ -88,22 +91,7 @@ from remote buffers are supported, but their processes always run locally."
   (ende-curl--validated-url profile)
   (let ((host (plist-get profile :auth-source-host)))
     (when host
-      (let* ((user (plist-get profile :auth-source-user))
-             (port (plist-get profile :auth-source-port))
-             (entries (auth-source-search :host host
-                                          :user user
-                                          :port port
-                                          :require '(:secret)
-                                          :max 1))
-             (entry (car entries)))
-        (unless entry
-          (error "No auth-source entry for %s" host))
-        (let ((secret (plist-get entry :secret)))
-          (setq secret (if (functionp secret) (funcall secret) secret))
-          (unless (and (stringp secret)
-                       (not (string-match-p "[[:cntrl:]]" secret)))
-            (error "Invalid auth-source secret"))
-          secret)))))
+      (ende-credentials-secret profile))))
 
 (defun ende-curl--valid-header-p (header)
   "Return non-nil when HEADER is one complete RFC-style header line."

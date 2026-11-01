@@ -706,7 +706,7 @@
           (append ende-test--custom-providers (ende-test--custom-profile 'studio)))
          (initial (mapcar #'default-value ende-image--configuration-variables))
          (draft '(stable-diffusion studio
-                  "http://192.168.1.50:8080/sdapi/v1/txt2img" "image-model"))
+                  "http://127.0.0.1:8080/sdapi/v1/txt2img" "image-model"))
          buffer)
     (save-window-excursion
       (unwind-protect

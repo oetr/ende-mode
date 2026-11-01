@@ -102,7 +102,7 @@
                     (when ende-image-auth-profile
                       (ende-provider-profile-snapshot ende-image-auth-profile))
                     (list :url ende-image-endpoint :model model
-                          :image-api ende-image-api :allow-http t))))
+                          :image-api ende-image-api))))
       (when (eq (plist-get profile :auth-method) 'codex-oauth)
         (user-error "Images API requires an auth-source or unauthenticated profile"))
       (ende-curl--validated-url profile)

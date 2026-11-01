@@ -590,10 +590,12 @@ Use COMMAND for the process, or a silent sleep process by default."
            (concat "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,"
                    "\"completion_tokens\":3,\"total_tokens\":8}}\n\n")
            "data: [DONE]\n\n")))
-    (cl-letf (((symbol-function 'auth-source-search)
-               (lambda (&rest arguments)
-                 (setq auth-query arguments)
-                 (list (list :secret token)))))
+    (cl-letf (((symbol-function 'ende-credentials-secret)
+               (lambda (resolved)
+                 (setq auth-query (list :host (plist-get resolved :auth-source-host)
+                                        :port (plist-get resolved :auth-source-port)
+                                        :user (plist-get resolved :auth-source-user)))
+                 token)))
       (setq out
             (ende-test--run-stream-request
              'openai-compatible chunks nil nil profile)))
@@ -683,8 +685,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                         :auth-source-user "ende"
                         :auth-source-port 443))
          (config nil))
-    (cl-letf (((symbol-function 'auth-source-search)
-               (lambda (&rest _) (list (list :secret token)))))
+    (cl-letf (((symbol-function 'ende-credentials-secret)
+               (lambda (_) token)))
       (setq config (ende-curl--config profile))
       (unwind-protect
           (let ((command (ende-curl-command

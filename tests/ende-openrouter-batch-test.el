@@ -590,9 +590,8 @@
                        process)))
                   ((symbol-function 'process-send-string) #'ignore)
                   ((symbol-function 'process-send-eof) #'ignore)
-                  ((symbol-function 'auth-source-search)
-                   (lambda (&rest _)
-                     (list (list :secret "openrouter-test-token")))))
+                  ((symbol-function 'ende-credentials-secret)
+                   (lambda (_) "openrouter-test-token")))
           (unwind-protect
               (progn
                 (ende-llm-default
