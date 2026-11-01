@@ -49,6 +49,15 @@
   (setf (ende-codex--login-listener attempt) nil
         (ende-codex--login-clients attempt) nil))
 
+(defun ende-codex--login-stop-accepting (attempt)
+  "Stop ATTEMPT's listener while accepted responses can finish."
+  (let ((listener (ende-codex--login-listener attempt)))
+    (when (processp listener)
+      (set-process-filter listener #'ignore)
+      (set-process-sentinel listener #'ignore)
+      (when (process-live-p listener) (delete-process listener)))
+    (setf (ende-codex--login-listener attempt) nil)))
+
 (defun ende-codex--login-finish (attempt record failure)
   "Finish ATTEMPT once, cleaning every resource before reporting RECORD or FAILURE."
   (when (ende-codex--login-live-p attempt)
@@ -178,7 +187,7 @@
                (equal (cdr (assoc "state" parameters)) (ende-codex--login-state attempt)))
     (signal 'ende-codex-identity-error nil))
   (setf (ende-codex--login-consumed attempt) t)
-  (ende-codex--login-close-listener attempt)
+  (ende-codex--login-stop-accepting attempt)
   (if (assoc "error" parameters)
       (ende-codex--login-fail attempt "ChatGPT authorization was declined")
     (let* ((code (cdr (assoc "code" parameters)))
@@ -250,10 +259,11 @@
                 (unless (equal (cdr (assoc "state" parameters)) (ende-codex--login-state attempt))
                   (signal 'ende-codex-identity-error nil))
                 (ende-codex--login-http-response process t)
+                (process-put process :responded t)
                 (process-put process :request nil)
                 (ende-codex--login-receive-callback attempt parameters)))))
       ((error quit)
-       (when (process-live-p process)
+       (when (and (process-live-p process) (not (process-get process :responded)))
          (ignore-errors (ende-codex--login-http-response process nil)))
        (ende-codex--login-fail attempt)))))
 
