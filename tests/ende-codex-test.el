@@ -414,6 +414,7 @@
 
 (ert-deftest ende-test/codex-job-affinity-is-stable-and-transport-only ()
   (let* ((directory (make-temp-file "ende-codex-affinity-debug-" t))
+         (ende-codex-auth-file (expand-file-name "unused-test-auth.json"))
          (ende-debugging-enabled t)
          (ende-debug--session-directory directory)
          (ende-debug--sequence 0)
@@ -447,12 +448,14 @@
          job-a job-b)
     (unwind-protect
         (progn
+          (cl-letf (((symbol-function 'ende-codex--auth-entry)
+                     (lambda () '(:access "transport-test-token" :expires 9999999999999))))
           (setq job-a
                 (ende--job-from-request
                  (cons 'insert (list :target target-a :profile profile)))
                 job-b
                 (ende--job-from-request
-                 (cons 'insert (list :target target-b :profile profile))))
+                 (cons 'insert (list :target target-b :profile profile)))))
           (let* ((session-a (plist-get (ende-job-profile job-a)
                                        :codex-session-id))
                  (session-b (plist-get (ende-job-profile job-b)
@@ -1133,6 +1136,16 @@
       (should (equal results
                      '((("high" "low") "low" nil)
                        (("high" "low") "low" nil)))))))
+
+(ert-deftest ende-test/codex-queued-binding-rejects-substitution ()
+  (let ((auth '(:access "a" :refresh "r" :account-id "workspace"))
+        (ende-credentials--bindings (make-hash-table :test #'eq)))
+    (cl-letf (((symbol-function 'ende-codex--auth-entry) (lambda () auth)))
+      (let ((profile (ende-codex-capture-binding '(:service openai-codex))))
+        (should-not (ende-codex--check-binding profile auth))
+        (should-error (ende-codex--check-binding profile '(:access "b" :refresh "r" :account-id "workspace")))
+        (let ((ende-codex-auth-file "/tmp/other-account.json"))
+          (should-error (ende-codex--check-binding profile auth)))))))
 
 (provide 'ende-codex-test)
 

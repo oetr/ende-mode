@@ -278,6 +278,7 @@ non-nil, is signalled from the event callback."
                (lambda (target body)
                  (setq request-body (concat (or request-body "") body))
                  (funcall real-process-send-string target body)))
+              ((symbol-function 'ende-codex--auth-entry) (lambda () auth))
               ((symbol-function 'ende-codex--resolve-auth)
                (lambda (callback)
                  (funcall callback auth)

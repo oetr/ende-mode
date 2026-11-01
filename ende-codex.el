@@ -263,6 +263,27 @@ The claims are used only for routing metadata such as account and residency."
                               (ende-protocol-json-get
                                "https://api.openai.com/auth" claims))))
 
+(defun ende-codex--binding-state (auth)
+  "Return private continuity state for retained AUTH, never verified identity."
+  (list (expand-file-name ende-codex-auth-file) ende-codex-issuer ende-codex-client-id
+        (plist-get auth :account-id)
+        (ende-credentials--signature (concat (plist-get auth :access) "\0" (plist-get auth :refresh)))))
+
+(defun ende-codex-capture-binding (profile)
+  "Bind queued PROFILE to the retained credential source without copying tokens."
+  (let* ((id (make-symbol "ende-codex-binding"))
+         (state (condition-case nil (ende-codex--binding-state (ende-codex--auth-entry))
+                  (error nil))))
+    (puthash id state ende-credentials--bindings)
+    (plist-put profile :codex-binding id)))
+
+(defun ende-codex--check-binding (profile auth)
+  "Require captured PROFILE continuity before using AUTH."
+  (when (plist-member profile :codex-binding)
+    (unless (equal (gethash (plist-get profile :codex-binding) ende-credentials--bindings)
+                   (ende-codex--binding-state auth))
+      (error "Queued Codex credentials changed or cannot be verified; submit a new request"))))
+
 (defun ende-codex--account-id (auth)
   "Return the ChatGPT account id in AUTH or its access token."
   (or (plist-get auth :account-id)
@@ -335,6 +356,15 @@ since the refresh began."
             (insert (json-encode data) "\n"))
           (set-file-modes temporary #o600)
           (rename-file temporary file t)
+          (let ((old-state (and expected-version (hash-table-p old)
+                                (ende-codex--binding-state
+                                 (list :access (gethash "access" old) :refresh (gethash "refresh" old)
+                                       :account-id (gethash "accountId" old)))))
+                (new-state (ende-codex--binding-state auth)))
+            (when (and old-state (equal (nth 3 old-state) (nth 3 new-state)))
+              (maphash (lambda (id state)
+                         (when (equal state old-state) (puthash id new-state ende-credentials--bindings)))
+                       ende-credentials--bindings)))
           (setq complete t))
       (unless complete
         (when (and temporary (file-exists-p temporary))
@@ -1538,7 +1568,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (if (ende-error-p auth)
         (ende-codex--fail session auth)
       (condition-case startup-error
-          (ende-codex--start-generation session messages auth)
+          (progn
+            (ende-codex--check-binding (ende-codex--session-profile session) auth)
+            (ende-codex--start-generation session messages auth))
         ((error quit)
          (ende-codex--fail
           session
@@ -1565,6 +1597,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (ende-codex--lifecycle session) :on-start
            (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--terminal-p session)
+            (when (plist-member profile :codex-binding)
+              (ende-codex--check-binding profile (ende-codex--auth-entry)))
             (let ((cancel
                    (ende-codex--resolve-auth
                     (apply-partially #'ende-codex--auth-ready

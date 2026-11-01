@@ -799,6 +799,8 @@ bypassed by a later same-provider job."
                     (when (plist-member data :max-concurrency)
                       (list :max-concurrency
                             (plist-get data :max-concurrency)))))
+           (profile (if (eq (plist-get profile :service) 'openai-codex)
+                        (ende-codex-capture-binding profile) profile))
            (template (ende-provider-config-copy profile))
            (job (ende--make-job
                  :inference-template template
