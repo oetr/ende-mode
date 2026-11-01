@@ -294,7 +294,8 @@ This is not a user setting, an availability test, or a legacy fallback."
   "Read only the credential source explicitly retained by PROFILE."
   (if (eq (plist-get profile :codex-auth-source) 'ende)
       (ende-codex-auth-read (plist-get profile :account))
-    (unless (memq (plist-get profile :account) '(nil default))
+    (unless (and (not (plist-member profile :codex-auth-source))
+                 (memq (plist-get profile :account) '(nil default)))
       (error "Independent Codex accounts require an authorized Ende registration"))
     (ende-codex--auth-entry)))
 
@@ -541,7 +542,8 @@ unverified JWT payloads can never authorize an identity change."
                     (ende-error-create
                      :kind 'auth
                      :message (format "OpenAI token refresh failed: %s" (string-trim event)))))
-      (let* ((auth (ende-codex--refresh-flight-auth flight))
+      (let* ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil)
+             (auth (ende-codex--refresh-flight-auth flight))
              (owned (ende-codex--account-auth-p auth)))
         (condition-case failure
             (let* ((status (car (ende-curl-response-headers
@@ -574,7 +576,8 @@ unverified JWT payloads can never authorize an identity change."
 
 (defun ende-codex--start-refresh-flight (flight)
   "Start the process belonging to refresh FLIGHT."
-  (let ((response-buffer nil)
+  (let ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil)
+        (response-buffer nil)
         (stderr-buffer nil)
         (stderr-process nil)
         (headers-file nil)
@@ -629,7 +632,9 @@ unverified JWT payloads can never authorize an identity change."
         flight
         (ende-error-create
          :kind 'auth
-         :message (error-message-string startup-error)))))))
+         :message (if (ende-codex--account-auth-p (ende-codex--refresh-flight-auth flight))
+                      "Codex credential refresh could not be started"
+                    (error-message-string startup-error))))))))
 
 (defun ende-codex--refresh-key (auth)
   "Return the private coalescing key for AUTH's exact account/registration."
@@ -671,7 +676,8 @@ Return a cancellation function that only removes this callback."
 (defun ende-codex--resolve-auth (callback &optional profile)
   "Resolve PROFILE's explicit credential source and deliver AUTH to CALLBACK.
 Omitting PROFILE retains the existing public transport until Task 4."
-  (condition-case load-error
+  (let ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil))
+    (condition-case load-error
       (let* ((profile (if (eq (plist-get profile :codex-auth-source) 'ende)
                           (ende-codex-capture-binding profile) profile))
              (auth (ende-codex--profile-auth profile))
@@ -686,8 +692,10 @@ Omitting PROFILE retains the existing public transport until Task 4."
      (funcall callback
               (ende-error-create
                :kind 'auth
-               :message (error-message-string load-error)))
-     nil)))
+               :message (if (eq (plist-get profile :codex-auth-source) 'ende)
+                            "Codex account credentials are unavailable or changed"
+                          (error-message-string load-error))))
+     nil))))
 
 ;;;; Model discovery
 

@@ -331,5 +331,103 @@
           (should (ende-error-p failure))))
       (should (= accesses 0)))))
 
+(ert-deftest ende-codex-auth-validation-no-unstaged-alias-or-unknown-source ()
+  (let ((base (ende-codex-auth-test--profile 'personal)) accesses)
+    (cl-letf (((symbol-function 'ende-codex--auth-entry)
+               (lambda () (setq accesses t) (error "Foreign credentials"))))
+      (dolist (source '(nil unknown))
+        (let ((profile (plist-put (copy-sequence base) :codex-auth-source source)) failure)
+          (should-error (ende-provider-validate-profile profile))
+          (ende-codex-default '(("user" . "test"))
+                              (list :on-error (lambda (value) (setq failure value))) profile)
+          (should (ende-error-p failure))))
+      (should-not accesses))))
+
+(ert-deftest ende-codex-auth-host-exists-before-registration ()
+  (ende-codex-auth-test--with-store
+    (let ((host (ende-codex-auth-host-id)))
+      (should (ende-codex-auth--id-p host))
+      (should (equal host (ende-codex-auth-host-id)))
+      (should (equal host (plist-get (ende-codex-auth--register
+                                     'personal (ende-codex-auth-test--credentials)) :host-id))))))
+
+(ert-deftest ende-codex-auth-storage-second-emacs-preserves-newer-records ()
+  (ende-codex-auth-test--with-store
+    (let* ((credentials (ende-codex-auth-test--credentials))
+           (old (ende-codex-auth--register 'personal credentials))
+           (host (plist-get old :host-id))
+           (executable (expand-file-name invocation-name invocation-directory))
+           (library-directory (file-name-directory (locate-library "ende-codex-auth"))))
+      ;; Tokens are read and generated inside the child, not passed on argv.
+      (with-temp-buffer
+        (should
+         (= 0 (call-process
+               executable nil t nil "-Q" "--batch" "-L" library-directory
+               "-l" "ende-codex-auth" "--eval"
+               (prin1-to-string
+                `(let* ((ende-codex-auth--directory ,ende-codex-auth--directory)
+                        (record (ende-codex-auth-read 'personal))
+                        (credentials (cl-loop for key in ende-codex-auth--credential-fields
+                                              when (plist-member record key)
+                                              append (list key (plist-get record key)))))
+                   (ende-codex-auth--rotate record credentials)
+                   (ende-codex-auth--register 'work credentials)))))))
+      (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-conflict)
+      (should (equal host (plist-get (ende-codex-auth-read 'work) :host-id)))
+      (should (ende-codex-auth--same-registration-p old (ende-codex-auth-read 'personal))))))
+
+(ert-deftest ende-codex-auth-secrets-absent-from-selections-debug-and-reload ()
+  (ende-codex-auth-test--with-store
+    (let* ((record (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
+           (ende-providers '(codex-personal codex-work))
+           (ende-builtin-provider-settings
+            '((codex-personal :provider openai-codex :account personal :models ("synthetic-model"))
+              (codex-work :provider openai-codex :account work :models ("synthetic-model"))))
+           (ende-model-selection--last-used nil)
+           (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+           (ende-model-selection--provenance (make-hash-table :test #'equal))
+           (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+           (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+           (debug-directory (expand-file-name "debug" root))
+           (ende-debugging-enabled t)
+           (ende-debug--session-directory debug-directory)
+           (ende-debug--sequence 0)
+           (savehist-file (expand-file-name "history.el" root))
+           (savehist-additional-variables
+            '(ende-model-selection--last-used ende-model-selection--buffer-selections
+              ende-model-selection--provenance ende-model-selection--shared-control-preferences
+              ende-model-selection--buffer-control-preferences)))
+      (make-directory debug-directory)
+      ;; Public profile composition remains deliberately gated until Task 4.
+      ;; Configuration resolution and persisted selections still reuse :account.
+      (let ((personal (ende-provider-config-resolve 'codex-personal))
+            (work (ende-provider-config-resolve 'codex-work)))
+        (should (eq (plist-get personal :account) 'personal))
+        (should (eq (plist-get work :account) 'work)))
+      (cl-letf (((symbol-function 'ende-provider-profile-for-model)
+                 (lambda (name model &optional api)
+                   (ende-provider-config-resolve name model api))))
+        (ende-model-selection-save '(:provider codex-personal :model "synthetic-model") nil t))
+      (savehist-save t)
+      (let* ((messages '(("user" . "Synthetic question")))
+             (body (ende-codex--request-body messages profile)))
+        (should (ende-debug-record-request (json-encode body) body messages profile
+                                           "codex-responses" (plist-get profile :url))))
+      (dolist (file (cons savehist-file (directory-files debug-directory t "^[^.].*")))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (dolist (key '(:access-token :refresh-token :id-token))
+            (should-not (string-match-p (regexp-quote (plist-get record key)) (buffer-string))))))
+      (dolist (variable savehist-additional-variables)
+        (should-not (string-match-p "synthetic-access\\|synthetic-refresh\\|synthetic-id"
+                                    (prin1-to-string (symbol-value variable)))))
+      (let* ((files (ende-reload--files (file-name-directory (locate-library "ende.el")))))
+        (should (< (cl-position "ende-codex-auth.el" files :test #'equal)
+                   (cl-position "ende-codex.el" files :test #'equal))))
+      (ende-reload)
+      (should (equal (plist-get record :host-id) (ende-codex-auth-host-id)))
+      (should-not (ende-codex--check-binding profile (ende-codex-auth-read 'personal))))))
+
 (provide 'ende-codex-auth-test)
 ;;; ende-codex-auth-test.el ends here

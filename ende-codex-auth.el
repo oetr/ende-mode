@@ -238,6 +238,15 @@ under the lock and must still compare the individual account revision."
               (ende-codex-auth--write-state directory state))))
       (when acquired (delete-directory lock)))))
 
+(defun ende-codex-auth-host-id ()
+  "Return the installation's persistent opaque ID, creating it if necessary.
+This does not register, select, or authenticate an account."
+  (ende-codex-auth--guard
+   (lambda ()
+     (let ((state (ende-codex-auth--read-state (ende-codex-auth--path nil))))
+       (if state (gethash "host_id" state)
+         (ende-codex-auth--transaction (lambda (new) (gethash "host_id" new))))))))
+
 (defun ende-codex-auth-read (account)
   "Return ACCOUNT's detached private record, never importing other credentials."
   (ende-codex-auth--guard
