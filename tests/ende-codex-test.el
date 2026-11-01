@@ -1164,6 +1164,39 @@
       (should (= starts 1))
       (should (eq (plist-get (car values) :state) 'fresh)))))
 
+(ert-deftest ende-test/codex-quota-auth-failure-overrides-cached-state ()
+  (let ((ende-codex--quota-cache (make-hash-table :test #'equal))
+        (ende-codex--quota-flights (make-hash-table :test #'equal))
+        (clock 1000.0)
+        (starts 0)
+        (auth-error (ende-error-create :kind 'auth :message "Login required"))
+        callback value failure)
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock))
+              ((symbol-function 'ende-codex--auth-entry)
+               (lambda () '(:access "a" :refresh "r")))
+              ((symbol-function 'ende-codex--probe-quota)
+               (lambda (function)
+                 (cl-incf starts)
+                 (setq callback function)
+                 #'ignore)))
+      (ende-codex-probe-quota #'ignore)
+      (funcall callback '(:primary (:used-percent 20)) nil)
+      (setq clock (+ clock 16))
+      (ende-codex-probe-quota
+       (lambda (quota error) (setq value quota failure error)))
+      (funcall callback nil auth-error)
+      (should (eq failure auth-error))
+      (should (eq (plist-get value :state) 'auth))
+      (should (= (plist-get (plist-get value :primary) :used-percent) 20))
+      ;; Backoff retains the auth state, including in the selector display.
+      (with-temp-buffer
+        (ende-selector-mode)
+        (setq ende-selector--providers '(openai-codex))
+        (ende-selector--probe-quota)
+        (should (eq ende-selector--quota-state :auth))
+        (should (string-match-p "Quota: authentication required" (buffer-string))))
+      (should (= starts 2)))))
+
 (provide 'ende-codex-test)
 
 ;;; ende-codex-test.el ends here

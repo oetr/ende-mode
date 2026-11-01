@@ -949,8 +949,10 @@ QUOTA and ERROR; quota :state is fresh, stale, auth, transient or unavailable."
                  (let* ((old (plist-get cached :quota))
                         (value (if error
                                    (plist-put (ende-provider-config-copy old) :state
-                                              (if old 'stale
-                                                (if (eq (ende-error-kind error) 'auth) 'auth 'transient)))
+                                              (cond
+                                               ((eq (ende-error-kind error) 'auth) 'auth)
+                                               (old 'stale)
+                                               (t 'transient)))
                                  (plist-put quota :state 'fresh))))
                    (puthash key (list :quota value :error error :retry-at (+ (float-time) (if error 30 15)))
                             ende-codex--quota-cache)
