@@ -125,7 +125,8 @@
                    '((tools spawn_agent) (agent-config worker) (spawn-agent-config worker)))
                   "* Root\nDelegate the task.\n")
           (ende-test--chat-goto "* Root")
-          (let ((root (ende-ask '(:name remote :model "fixture" :parallel t :max-concurrency 2))))
+          (let ((root (ende-ask (ende-test--request-profile
+                                 '(:name remote :model "fixture" :parallel t :max-concurrency 2)))))
             (funcall (plist-get (nth 1 (nth 0 requests)) :on-done) title)
             (funcall (plist-get (nth 1 (nth 1 requests)) :on-done)
                      '(:content "" :tool-calls

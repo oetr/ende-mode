@@ -225,14 +225,16 @@
     (ende-test--with-buffer "origin"
       (setq root
             (ende-enqueue
-             (ende-test--dashboard-request '(:name remote :model "fixture"))))
+             (ende-test--dashboard-request '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture"))))
       (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
       (setq path (ende-job-next-child-path root)
             child
             (ende-job-publish-child
              root
              (cons 'agent
-                   (list :profile '(:name remote :model "fixture")
+                   (list :profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture")
                          :access-policy '(:active-tools (about_thinking))
                          :instruction '(:task "inspect")
                          :prepare (lambda (job)
@@ -353,7 +355,8 @@
       (setq root-buffer (current-buffer)
             family (ende--make-job-family
                     :registry nil :inference-template
-                    '(:name remote :model "fixture" :parallel t
+                    '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                       :max-concurrency 2)))
       (setq child
             (ende--make-job
@@ -424,7 +427,8 @@
              (family (ende--make-job-family
                       :parallel t :max-concurrency 2 :policy-frozen-p t
                       :origin (current-buffer)))
-             (profile '(:name remote :model "fixture" :parallel t
+             (profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                         :max-concurrency 2)))
         (setq parent
               (ende--make-job :id 910 :type 'agent :state 'running
@@ -472,7 +476,8 @@
              (family (ende--make-job-family
                       :parallel t :max-concurrency 2 :policy-frozen-p t
                       :origin (current-buffer)))
-             (profile '(:name remote :model "fixture" :parallel t
+             (profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                         :max-concurrency 2)))
         (setq parent
               (ende--make-job :id 912 :type 'agent :state 'running
@@ -510,7 +515,8 @@
     (ende-test--with-buffer "agent origin"
       (setq root
             (ende-enqueue
-             (ende-test--dashboard-request '(:name remote :model "fixture"))))
+             (ende-test--dashboard-request '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture"))))
       (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
             (ende-job-access-policy root)
             '(:active-tools (spawn_agent) :spawn-agent-config worker))
@@ -576,7 +582,8 @@
                   (cons 'chat
                         (append
                          (cdr (ende-test--dashboard-request
-                               '(:name remote :model "fixture")))
+                               '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture")))
                          '(:instruction (:request-id "publication"
                                         :question-id "question"))))))
       (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t
@@ -620,7 +627,8 @@
       (setq source (current-buffer))
       (let ((family (ende--make-job-family
                      :policy-frozen-p t
-                     :inference-template '(:name remote :model "fixture"))))
+                     :inference-template '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture"))))
         (setq parent (ende--make-job
                       :id 916 :type 'agent :state 'running
                       :family family :schedule-path nil
@@ -628,7 +636,8 @@
                                :buffer (current-buffer)
                                :start (point-min) :end (point-min)
                                :cursor (point-min))
-                      :profile '(:name remote :model "fixture")
+                      :profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture")
                       :access-policy '(:active-tools (spawn_agent)
                                        :spawn-agent-config worker)
                       :execution-generation 1))
@@ -661,13 +670,15 @@
     (ende-test--with-buffer "policy root"
       (let* ((root (ende-enqueue
                     (ende-test--dashboard-request
-                     '(:name remote :model "fixture"))))
+                     '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture"))))
              (family (ende-job-family root))
              (before (copy-tree (ende-job-profile root)))
              (child (ende--make-job
                      :id 919 :type 'agent :state 'queued :family family
                      :parent root :schedule-path '(1)
-                     :profile '(:name remote :model "fixture")
+                     :profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture")
                      :access-policy '(:active-tools nil))))
         (setf (ende-job-family-root family) root
               (ende-job-children root) (list child))
@@ -698,7 +709,8 @@
                                            :buffer (current-buffer)
                                            :start (point-min) :end (point-max)
                                            :cursor (point-min))
-                                  :profile '(:name remote :model "fixture")))
+                                  :profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture")))
                            child
                            (ende-job-publish-child
                             job
@@ -735,7 +747,8 @@
                               :buffer (current-buffer)
                               :start (point-min) :end (point-max)
                               :cursor (point-min))
-                     :profile '(:name remote :model "fixture"
+                     :profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture"
                                 :parallel t :max-concurrency 2))))
         (setq ende--queue-suspended nil)
         (ende-process-next)
@@ -754,7 +767,8 @@
                             :arguments (json-encode `((title . ,id) (task . ,task))))))
          (policy '(:root nil :active-tools (about_thinking spawn_agent)
                    :tool-resources nil :spawn-agent-config worker))
-         (profile '(:name remote :model "fixture" :parallel t
+         (profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                     :max-concurrency 2))
          (ende-llm-function
           (ende-test--fake-llm
@@ -879,7 +893,8 @@
 (ert-deftest ende-test/family-inference-template-is-clean-and-immutable ()
   (ende-test--reset)
   (let ((ende-llm-function (ende-test--fake-llm nil t))
-        (profile '(:name remote :model "root-model" :temperature 0.4)))
+        (profile '(:name remote :model "root-model" :temperature 0.4
+                   :controls ((:temperature :path ("temperature"))))))
     (ende-test--with-buffer "base"
       (let* ((job (ende-enqueue
                    (ende-test--dashboard-request profile)))
@@ -1013,7 +1028,8 @@
 
 (ert-deftest ende-test/queue-status-uses-active-jobs-as-its-representative ()
   (ende-test--reset)
-  (let ((profile '(:name remote :model "fixture" :parallel t
+  (let ((profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                          :max-concurrency 2))
         (ende-llm-function (ende-test--fake-llm '(" done" :stall) t)))
     (ende-test--with-buffer "base"
@@ -1187,7 +1203,8 @@
 
 (ert-deftest ende-test/killed-source-buffer-cancels-only-its-jobs-once ()
   (ende-test--reset)
-  (let* ((profile '(:name remote :model "fixture" :parallel t
+  (let* ((profile '(:name remote :api openai-chat-completions :auth-method none
+                      :url "https://remote.test/v1/chat/completions" :model "fixture" :parallel t
                            :max-concurrency 2))
          (ende-llm-function (ende-test--fake-llm '(" late" " kept") t))
          (buffer (generate-new-buffer " *ende-killed*"))

@@ -419,7 +419,7 @@
          (ende-debug--session-directory directory)
          (ende-debug--sequence 0)
          (profile
-          '(:name openai-codex :service openai-codex :api openai-responses :auth-method codex-oauth
+          '(:name openai-codex :service openai-codex :account default :api openai-responses :auth-method codex-oauth
             :url "https://chatgpt.com/backend-api/codex/responses"
             :model "gpt-test" :require-sse t
             :tool-definitions
@@ -503,7 +503,7 @@
 (ert-deftest ende-test/codex-chat-affinity-uses-durable-conversation-root ()
   (ende-test--reset)
   (let ((profile
-         '(:name openai-codex :service openai-codex :api openai-responses :auth-method codex-oauth
+         '(:name openai-codex :service openai-codex :account default :api openai-responses :auth-method codex-oauth
            :url "https://chatgpt.com/backend-api/codex/responses"
            :model "gpt-test"))
         root-job follow-up-job independent-job)

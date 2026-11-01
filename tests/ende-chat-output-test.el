@@ -440,7 +440,7 @@
        "* Root\n** Question\nAsk\n** Next\nFollow up\n"
        (org-mode)
        (ende-test--chat-goto "** Question")
-       (let ((job (ende-ask profile)))
+       (let ((job (ende-ask (ende-test--request-profile profile))))
          (should (eq (ende-job-state job) 'completed)))
        (let ((reasoning (car (ende-test--chat-reasoning-headlines)))
              (reply (car (ende-test--chat-response-headlines))))

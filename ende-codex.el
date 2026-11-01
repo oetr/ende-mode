@@ -1652,7 +1652,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
           (headers
            (append
             (list (concat "Authorization: Bearer "
-                          (plist-get auth :access))
+                          (ende-codex--access-token auth))
                   "originator: opencode"
                   (concat "session-id: " session-id))
             (when account-id
@@ -1716,21 +1716,19 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (condition-case startup-error
         (progn
           (ende-validate-resource-options)
-          (unless (and (stringp (plist-get profile :model))
-                       (not (string-blank-p (plist-get profile :model))))
-            (error "Select a Codex model explicitly"))
-          (ende-codex--validated-generation-url
-           (plist-get profile :url))
+          (ende-provider-validate-profile profile)
           (ende-transport-session-invoke
            (ende-codex--lifecycle session) :on-start
            (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--terminal-p session)
             (when (plist-member profile :codex-binding)
-              (ende-codex--check-binding profile (ende-codex--auth-entry)))
+              (ende-codex--check-binding profile (ende-codex--profile-auth profile)))
             (let ((cancel
-                   (ende-codex--resolve-auth
-                    (apply-partially #'ende-codex--auth-ready
-                                     session messages))))
+                   (if (eq (plist-get profile :codex-auth-source) 'ende)
+                       (ende-codex--resolve-auth
+                        (apply-partially #'ende-codex--auth-ready session messages) profile)
+                     (ende-codex--resolve-auth
+                      (apply-partially #'ende-codex--auth-ready session messages)))))
               (ende-transport-session-add-canceller
                (ende-codex--lifecycle session) cancel))))
       ((error quit)

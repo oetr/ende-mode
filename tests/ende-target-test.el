@@ -118,7 +118,9 @@
 			      (should (string-match-p "Type: buffer" without-name))
 			      (should (string-match-p "Major mode: python-mode" without-name)))
 			    (ende-approve-all-output)
-			    (ende-enqueue-operation 'insert nil '(:source-name-disclosure t))
+			    (ende-enqueue-operation
+                             'insert nil (plist-put (ende-provider-profile 'local)
+                                                    :source-name-disclosure t))
 			    (let ((with-name
 				   (ende-test--user-message (car ende-test--prompts))))
 			      (should (string-match-p "Name: private-buffer" with-name))))))

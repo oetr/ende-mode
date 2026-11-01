@@ -57,7 +57,16 @@
 (defvar ende-test--fake-responses nil)
 
 (defconst ende-test--dashboard-profile
-  '(:name remote :model "dashboard-test" :max-concurrency 2 :parallel nil))
+  '(:name remote :api openai-chat-completions :auth-method none
+    :url "https://remote.test/v1/chat/completions"
+    :model "dashboard-test" :max-concurrency 2 :parallel nil))
+
+(defun ende-test--request-profile (settings)
+  "Complete synthetic request SETTINGS with explicit transport configuration."
+  (ende-plist-merge
+   '(:api openai-chat-completions :auth-method none
+     :url "https://remote.test/v1/chat/completions")
+   settings))
 
 (defun ende-test--dashboard-request (profile)
   "Build a deterministic insertion request using PROFILE."
@@ -66,7 +75,7 @@
           :target (ende-target-create
                    :buffer (current-buffer) :start position :end position
                    :cursor position :review-policy 'ignore)
-          :profile profile)))
+          :profile (ende-test--request-profile profile))))
 
 (defun ende-test--callback (call name &rest args)
   "Invoke callback NAME from CALL with ARGS when it exists."
@@ -253,7 +262,11 @@ non-nil, is signalled from the event callback."
                   (push :on-error order))))
          (profile
           (or profile
-              (list :name 'transport-test :api 'openai-chat-completions :auth-method 'none
+              (list :name 'transport-test
+                    :service (when (eq transport 'codex) 'openai-codex)
+                    :account (when (eq transport 'codex) 'default)
+                    :api (if (eq transport 'codex) 'openai-responses 'openai-chat-completions)
+                    :auth-method (if (eq transport 'codex) 'codex-oauth 'none)
                     :url (if (eq transport 'codex)
                              "https://chatgpt.com/backend-api/codex/responses"
                            "https://example.test/v1/chat/completions")

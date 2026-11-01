@@ -355,7 +355,8 @@
         (closing-buffer (generate-new-buffer " *ende-activity-closing*")))
     (unwind-protect
         (let* ((ende-reduced-motion t)
-               (profile '(:name remote :model "fixture" :parallel t :max-concurrency 2))
+               (profile (ende-test--request-profile
+                         '(:name remote :model "fixture" :parallel t :max-concurrency 2)))
                (ende-llm-function
                 (ende-test--fake-llm
                  (list (list :tool-calls
@@ -442,7 +443,8 @@
   (ende-test--reset)
   (unwind-protect
       (let ((ende-reduced-motion t)
-            (profile '(:name remote :model "fixture" :transport openrouter-batch))
+            (profile (ende-test--request-profile
+                      '(:name remote :model "fixture" :transport openrouter-batch)))
             (ende-llm-function (ende-test--fake-llm '("Retained context.") t)))
         (with-temp-buffer
           (org-mode)

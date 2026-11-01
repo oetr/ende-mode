@@ -221,7 +221,7 @@
             "* Conversation\n** Question\nConsider the request.\n"
           (org-mode)
           (ende-test--chat-goto "** Question")
-          (setq job (ende-ask '(:name remote :model "fixture")))
+          (setq job (ende-ask (ende-test--request-profile '(:name remote :model "fixture"))))
           (should (eq (ende-job-state job) 'running))
           (ende-queue-add-guidance job "First exact guidance.\nline two")
           (ende-queue-add-guidance job "Second guidance, unchanged.")
@@ -380,7 +380,7 @@
                       "* Conversation\n** Question\nWork on both items.\n")
             (org-mode)
             (ende-test--chat-goto "** Question")
-            (setq job (ende-ask '(:name remote :model "fixture")))
+            (setq job (ende-ask (ende-test--request-profile '(:name remote :model "fixture"))))
             (ende-test--complete-call (car ende-test--calls))
             (should (= (length pending) 1))
             (ende-queue-add-guidance job "Wait until both tools finish.")

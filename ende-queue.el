@@ -789,8 +789,7 @@ bypassed by a later same-provider job."
                  (and (plist-member data :provider)
                       (ende-provider-profile-snapshot (plist-get data :provider)))
                  (and (buffer-live-p buffer) (ende-provider-profile-for-buffer buffer t)))))
-           (_ (when (eq (plist-get profile :auth-method) 'auth-source)
-                (ende-provider-validate-profile profile)))
+           (_ (ende-provider-validate-profile profile))
            (profile (ende-credentials-capture profile))
            (now (float-time))
            (overrides

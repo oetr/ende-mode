@@ -256,6 +256,15 @@ Present preference keys override PROFILE even when their value is nil."
 
 (defun ende-provider-validate-profile (profile)
   "Validate request configuration in PROFILE before network startup."
+  (dolist (key '(:access :refresh :access-token :refresh-token :id-token))
+    (when (plist-member profile key)
+      (error "Provider profiles must not contain OAuth credentials")))
+  (when (eq (plist-get profile :service) 'openai-codex)
+    (ende-provider-config--settings (list :account (plist-get profile :account))
+                                    '(:account) "Codex profile")
+    (unless (and (eq (plist-get profile :api) 'openai-responses)
+                 (eq (plist-get profile :auth-method) 'codex-oauth))
+      (error "Codex requires the Responses API and OAuth authentication")))
   (unless (assq (plist-get profile :api) ende-provider-config--apis)
     (error "Select a supported provider :api"))
   (let ((model (plist-get profile :model)))

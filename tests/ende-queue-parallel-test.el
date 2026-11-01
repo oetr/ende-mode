@@ -15,7 +15,7 @@
   (ende-enqueue
    (list 'insert
          :target (ende-target-create :buffer (current-buffer) :start 5 :end 5 :cursor 5)
-         :profile profile)))
+         :profile (ende-test--request-profile profile))))
 
 (ert-deftest ende-test/family-policy-freezes-only-on-first-dispatch ()
   (ende-test--reset)
@@ -176,7 +176,7 @@
   (ende-test--reset)
   (let* ((ende-llm-function
           (ende-test--fake-llm '("X" "A" "B") t))
-         (url "http://same.example/v1/chat/completions")
+         (url "https://same.example/v1/chat/completions")
          (active-profile (list :url (copy-sequence url)
                                :model "active" :max-concurrency 2
                                :parallel t))

@@ -620,7 +620,7 @@
              "* Conversation\n** Question\nDelegate both checks.\n")
      (org-mode)
      (ende-test--chat-goto "** Question")
-     (setq root (ende-ask profile))
+     (setq root (ende-ask (ende-test--request-profile profile)))
      (ende-test--complete-call (nth 0 ende-test--calls))
      (setq children (copy-sequence (ende-job-children root)))
      (should (= (length children) 2))
@@ -675,7 +675,7 @@
              "* Conversation\n** Question\nDelegate and await.\n")
      (org-mode)
      (ende-test--chat-goto "** Question")
-     (setq root (ende-ask profile))
+     (setq root (ende-ask (ende-test--request-profile profile)))
      (ende-test--complete-call (nth 0 ende-test--calls))
      (setq children (copy-sequence (ende-job-children root))
            child-buffers (mapcar #'ende-job-owned-buffer children))
@@ -1392,7 +1392,8 @@
 				  (insert (make-string level ?*) " " title "\n" body "\n"
 					  (make-string level ?*) " Next\nContinue\n")
 				  (goto-char start)
-				  (let* ((job (ende-compact '(:name local :model "compact-model")))
+				  (let* ((job (ende-compact (ende-test--request-profile
+                                                          '(:name local :model "compact-model"))))
 					 (question-id (plist-get (ende-job-instruction job) :question-id))
 					 (call (car ende-test--calls))
 					 (messages (plist-get call :messages)))
