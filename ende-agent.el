@@ -47,17 +47,27 @@
                          (plist-get template :model))))
          (profile
           (cond
+           ((plist-get policy :inference-profile) (plist-get policy :inference-profile))
            ((and (null configured-provider) (null configured-model)) template)
            (model (ende-provider-profile-for-model provider model))
            (t (ende-provider-profile-snapshot provider)))))
     (unless profile
       (error "configured child provider is unavailable: %s" provider))
-    (let ((clean (copy-tree profile)))
+    (let ((clean (ende-provider-config-copy profile)))
       (setq clean (plist-put clean :job-id nil)
             clean (plist-put clean :tool-definitions nil))
       (when (plist-member clean :codex-session-id)
         (setq clean (plist-put clean :codex-session-id nil)))
       clean)))
+
+(defun ende-agent-freeze-registry (family registry)
+  "Capture inference profiles for FAMILY's complete delegation REGISTRY."
+  (mapcar (lambda (entry)
+            (cons (car entry)
+                  (plist-put (ende-provider-config-copy (cdr entry)) :inference-profile
+                             (ende-credentials-capture
+                              (ende-agent-profile-for-policy family (cdr entry))))))
+          registry))
 
 (defconst ende-agent--spawn-title-max-length 40)
 

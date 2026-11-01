@@ -910,6 +910,16 @@
     (should (equal (plist-get selected :model) "child-model"))
     (should-not (plist-get selected :tool-definitions))))
 
+(ert-deftest ende-test/delegated-profile-is-frozen-with-family-policy ()
+  (let* ((ende-custom-providers (ende-test--custom-profile 'remote :models '("child-model")))
+         (ende-providers '(remote))
+         (family (ende--make-job-family :inference-template '(:name remote :model "root-model")))
+         (registry (ende-agent-freeze-registry family '((worker :provider remote :model "child-model"))))
+         (profile (plist-get (cdar registry) :inference-profile)))
+    (setf (plist-get (cdar ende-custom-providers) :base-url) "https://changed.test/v1")
+    (should (equal (ende-agent-profile-for-policy family (cdar registry)) profile))
+    (should (equal (plist-get profile :url) "http://localhost:8080/v1/chat/completions"))))
+
 (ert-deftest ende-test/shared-loop-batches-only-adjacent-spawn-calls ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)

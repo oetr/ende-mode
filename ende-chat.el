@@ -3732,7 +3732,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                  (unless compact
                    (setf (ende-job-access-policy job) tool-configuration
                          (ende-job-family-registry (ende-job-family job))
-                         (plist-get environment :registry)))
+                         (ende-agent-freeze-registry
+                          (ende-job-family job) (plist-get environment :registry))))
                  (if compact
                      (ende--dispatch-llm
                       job request
