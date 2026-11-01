@@ -80,10 +80,10 @@
   "Generation incremented when the user changes the current model.")
 
 (defvar-local ende-selector--control-preferences nil
-  "Explicit control preferences for the current provider and model.")
+  "Explicit control preferences for the current provider, model and API.")
 
 (defvar-local ende-selector--effort nil
-  "Reasoning effort selected for the current provider and model.")
+  "Reasoning effort selected for the current provider, model and API.")
 
 (defvar-local ende-selector--effort-state :none
   "Discovery state of reasoning-effort choices for the current model.")
@@ -170,7 +170,7 @@
                (ende-selector--model-name))
       (ende-model-selection-save-control-preferences
        (ende-selector--provider-name) (ende-selector--model-name)
-       ende-selector--control-preferences
+       ende-selector--api ende-selector--control-preferences
        (or ende-selector--source-buffer (current-buffer))))
     (ende-selector--render)))
 
@@ -526,21 +526,19 @@ the discovered pricing metadata for those model IDs."
         (setq ende-selector--quota-cancel cancel)))))
 
 (defun ende-selector--set-control-context ()
-  "Restore explicit control preferences for the selected provider and model."
+  "Restore explicit controls for the selected provider, model and API."
   (let* ((provider (ende-selector--provider-name))
          (model (ende-selector--model-name))
          (preferences
           (and provider model
                (copy-tree
                 (ende-model-selection-control-preferences
-                 provider model
+                 provider model ende-selector--api
                  (or ende-selector--source-buffer (current-buffer)))))))
     (ende-selector--cancel-effort-probe)
     (setq ende-selector--control-preferences preferences
           ende-selector--effort
-          (plist-get (ende-provider-profile-for-selection
-                      provider model preferences)
-                     :reasoning-effort)
+          (plist-get (ende-selector--resolved-profile) :reasoning-effort)
           ende-selector--effort-state
           (if ende-selector--effort :remembered :none))))
 
@@ -551,7 +549,8 @@ the discovered pricing metadata for those model IDs."
     (when (and (eq ende-selector--model-state :ready) provider model
                (not ende-selector--selection-required))
       (ende-model-selection-remember-pair
-       provider model (or ende-selector--source-buffer (current-buffer))))))
+       provider model ende-selector--api
+       (or ende-selector--source-buffer (current-buffer))))))
 
 (defun ende-selector--effort-error-message (error)
   "Return a useful human-readable message for effort probe ERROR."
@@ -936,7 +935,8 @@ performed locally so typing a search term never starts another network request."
              (ende-selector--provider-name)
              (ende-selector--model-name))
     (ende-model-selection-save-control-preferences
-     (ende-selector--provider-name) (ende-selector--model-name) nil
+     (ende-selector--provider-name) (ende-selector--model-name)
+     ende-selector--api nil
      (or ende-selector--source-buffer (current-buffer))))
   (ende-selector--render))
 
@@ -1075,13 +1075,10 @@ performed locally so typing a search term never starts another network request."
 (defun ende-selector--dispatch (type instruction)
   "Dispatch TYPE and INSTRUCTION using the current selection."
   (let* ((source ende-selector--source-buffer)
-         (provider (ende-selector--provider-name))
-         (model (ende-selector--model-name))
-         (profile (ende-provider-profile-for-selection
-                   provider model ende-selector--control-preferences)))
+         (profile (ende-selector--resolved-profile)))
     (unless (buffer-live-p source)
       (user-error "ende source buffer no longer exists"))
-    (unless (stringp model)
+    (unless (stringp (plist-get profile :model))
       (user-error "ende has no selected model"))
     (if (eq type 'chat)
         (if (with-current-buffer source

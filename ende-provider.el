@@ -87,7 +87,7 @@ When nil, use only the response inactivity timeout."
 
 (defvar ende-model-selection--shared-control-preferences
   (make-hash-table :test #'equal)
-  "Control preferences keyed by provider/model for this Emacs session.")
+  "Control preferences keyed by provider/model/binding for this Emacs session.")
 
 (defvar ende-model-selection--buffer-control-preferences
   (make-hash-table :test #'equal)
@@ -363,11 +363,12 @@ SELECTION must contain a provider symbol and a nonempty model string."
                 (when preferences-present
                   (list :control-preferences preferences)))))))
 
-(defun ende-model-selection--pair-key (provider model)
-  "Return the preference-history key for PROVIDER and MODEL, or nil."
+(defun ende-model-selection--pair-key (provider model api)
+  "Return the preference-history key for PROVIDER, MODEL and API, or nil.
+Nil API resolves to PROVIDER's configured default API."
   (and (symbolp provider) provider
        (stringp model) (not (string-empty-p model))
-       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model)
+       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model api)
                          (error nil)))
               (binding (when profile
                          (cl-remove-if (lambda (entry) (eq (car entry) :models))
@@ -386,11 +387,11 @@ SELECTION must contain a provider symbol and a nonempty model string."
               table))))))
 
 (defun ende-model-selection--control-preference-entry
-    (provider model &optional buffer)
-  "Return (FOUND . PREFERENCES) for PROVIDER and MODEL.
-An empty preference plist is a found entry.  BUFFER defaults to the current
-buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model))
+    (provider model api &optional buffer)
+  "Return (FOUND . PREFERENCES) for PROVIDER, MODEL and API.
+Nil API resolves to PROVIDER's configured default API.  An empty preference
+plist is a found entry.  BUFFER defaults to the current buffer."
+  (let* ((pair (ende-model-selection--pair-key provider model api))
          (buffer (or buffer (current-buffer)))
          (missing (make-symbol "missing"))
          entry)
@@ -419,18 +420,20 @@ buffer."
     (when entry
       (cons t (copy-tree (cdr entry))))))
 
-(defun ende-model-selection-control-preferences (provider model &optional buffer)
-  "Return remembered controls for PROVIDER and MODEL, or nil.
+(defun ende-model-selection-control-preferences (provider model api &optional buffer)
+  "Return remembered controls for PROVIDER, MODEL and API, or nil.
+Nil API resolves to PROVIDER's configured default API.
 BUFFER defaults to the current buffer."
   (cdr (ende-model-selection--control-preference-entry
-        provider model buffer)))
+        provider model api buffer)))
 
 (defun ende-model-selection-save-control-preferences
-    (provider model preferences &optional buffer)
-  "Save explicit control PREFERENCES for PROVIDER and MODEL.
+    (provider model api preferences &optional buffer)
+  "Save explicit control PREFERENCES for PROVIDER, MODEL and API.
+Nil API resolves to PROVIDER's configured default API.
 In buffer scope save a detached copy for BUFFER and also update shared history.
 In global scope update only shared history."
-  (let* ((pair (ende-model-selection--pair-key provider model))
+  (let* ((pair (ende-model-selection--pair-key provider model api))
          (buffer (or buffer (current-buffer)))
          (preferences
           (copy-tree (ende-provider--validate-control-preferences preferences))))
@@ -447,21 +450,22 @@ In global scope update only shared history."
                (ende-model-selection--buffer-preference-table buffer t)))
     (copy-tree preferences)))
 
-(defun ende-model-selection-remember-pair (provider model &optional buffer)
-  "Record PROVIDER and MODEL as recently selected and return its preferences.
+(defun ende-model-selection-remember-pair (provider model api &optional buffer)
+  "Record PROVIDER, MODEL and API as selected and return its preferences.
+Nil API resolves to PROVIDER's configured default API.
 On first selection, snapshot the inherited settings into BUFFER's history.
 BUFFER defaults to the current buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model))
+  (let* ((pair (ende-model-selection--pair-key provider model api))
          (buffer (or buffer (current-buffer)))
          (entry (ende-model-selection--control-preference-entry
-                 provider model buffer))
+                 provider model api buffer))
          (preferences (copy-tree (cdr entry))))
     (unless pair
       (error "A model selection requires a provider and model"))
     (unless entry
       (setq preferences nil))
     (ende-model-selection-save-control-preferences
-     provider model preferences buffer)
+     provider model api preferences buffer)
     (copy-tree preferences)))
 
 (defun ende-model-selection-initialize-buffer (&optional buffer)
@@ -522,9 +526,11 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
       (if (plist-member selection :control-preferences)
           (ende-model-selection-save-control-preferences
            (plist-get selection :provider) (plist-get selection :model)
+           (plist-get selection :api)
            (plist-get selection :control-preferences) buffer)
         (ende-model-selection-remember-pair
-         (plist-get selection :provider) (plist-get selection :model) buffer)))
+         (plist-get selection :provider) (plist-get selection :model)
+         (plist-get selection :api) buffer)))
     (let ((profile (condition-case nil
                        (ende-provider--compose-profile
                         (plist-get selection :provider) (plist-get selection :model)
@@ -570,7 +576,7 @@ An unset buffer follows the current configured provider defaults."
           (and matching-selection-p
                (plist-member selection :control-preferences)))
          (preferences
-          (ende-model-selection-control-preferences provider model buffer))
+          (ende-model-selection-control-preferences provider model api buffer))
          (profile (ende-provider-profile-for-selection
                    provider model preferences api)))
     (let ((provenance (gethash (ende-model-selection--provenance-key selection)

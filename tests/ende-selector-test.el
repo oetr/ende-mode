@@ -138,7 +138,7 @@
              source))
           (should (equal
                    (ende-model-selection-control-preferences
-                    'remote "file-model" source)
+                    'remote "file-model" nil source)
                    '(:reasoning-effort "high" :temperature nil)))
           (kill-buffer source)
           (setq source nil
@@ -168,7 +168,7 @@
                      "high"))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'remote "file-model" reopened)
+                      'remote "file-model" nil reopened)
                      '(:reasoning-effort "high" :temperature nil)))
             (should (plist-member
                      (ende-provider-profile-for-buffer reopened)
@@ -213,7 +213,7 @@
                                      (:reasoning-effort "medium"))))
           (should (equal
                    (ende-model-selection-control-preferences
-                    'openai "shared-model" second)
+                    'openai "shared-model" nil second)
                    '(:reasoning-effort "medium")))
           (should (= (hash-table-count
                       ende-model-selection--buffer-selections)
@@ -275,6 +275,153 @@
           (kill-buffer buffer))))))
 
 
+
+(ert-deftest ende-test/selector-api-controls-and-dispatched-profiles-stay-isolated ()
+  (let ((source (generate-new-buffer " *ende-selector-api-source*"))
+        (ende-providers '(openai))
+        (ende-builtin-provider-settings '((openai :models ("gpt-5-test"))))
+        (ende-custom-providers nil)
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--provenance (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+        (dispatched nil))
+    (unwind-protect
+        (cl-labels
+            ((select-api (api)
+               (cl-letf (((symbol-function 'completing-read)
+                          (lambda (&rest _) (symbol-name api))))
+                 (ende-selector-select-api)))
+             (record (type instruction profile)
+               (push (list type instruction (copy-tree profile) (current-buffer))
+                     dispatched))
+             (check-profile (profile api effort)
+               (should (eq (plist-get profile :name) 'openai))
+               (should (equal (plist-get profile :model) "gpt-5-test"))
+               (should (eq (plist-get profile :api) api))
+               (should (equal (plist-get profile :url)
+                              (if (eq api 'openai-responses)
+                                  "https://api.openai.com/v1/responses"
+                                "https://api.openai.com/v1/chat/completions")))
+               (should (equal (plist-get profile :reasoning-effort) effort))
+               (should (equal
+                        (plist-get (ende-provider-control-descriptor
+                                    profile :reasoning-effort) :path)
+                        (if (eq api 'openai-responses)
+                            '("reasoning" "effort") '("reasoning_effort"))))))
+          (with-current-buffer source (org-mode))
+          (with-temp-buffer
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(openai))
+            (cl-letf (((symbol-function 'ende-selector-close) #'ignore)
+                      ((symbol-function 'ende-enqueue-operation) #'record)
+                      ((symbol-function 'ende-ask)
+                       (lambda (profile) (record 'chat nil profile)))
+                      ((symbol-function 'ende-compact)
+                       (lambda (profile) (record 'chat-compact nil profile)))
+                      ((symbol-function 'ende-rubber-duck)
+                       (lambda (instruction profile)
+                         (record 'rubber-duck instruction profile))))
+              ;; An implicit default and an explicit default share one history.
+              (ende-selector--set-provider 0)
+              (ende-selector--set-control-preference :reasoning-effort "high")
+              (should (equal (ende-model-selection--pair-key 'openai "gpt-5-test" nil)
+                             (ende-model-selection--pair-key
+                              'openai "gpt-5-test" 'openai-responses)))
+              ;; The other API must not inherit the first API's explicit effort.
+              (select-api 'openai-chat-completions)
+              (should-not ende-selector--control-preferences)
+              (should-not ende-selector--effort)
+              (should (eq ende-selector--effort-state :none))
+              (ende-selector--set-control-preference :reasoning-effort "low")
+              (ende-selector--remember-selected-pair)
+              (dolist (scope '(buffer global))
+                (let ((ende-model-selection-scope scope))
+                  (should (equal (ende-model-selection-control-preferences
+                                  'openai "gpt-5-test" nil source)
+                                 '(:reasoning-effort "high")))
+                  (should (equal (ende-model-selection-control-preferences
+                                  'openai "gpt-5-test" 'openai-chat-completions source)
+                                 '(:reasoning-effort "low")))))
+              (should (= (hash-table-count ende-model-selection--shared-control-preferences) 2))
+              ;; Switching and confirming restore each API's own controls.
+              (dolist (entry '((openai-responses . "high")
+                               (openai-chat-completions . "low")))
+                (select-api (car entry))
+                (should (equal ende-selector--effort (cdr entry)))
+                (should (eq ende-selector--effort-state :remembered))
+                (ende-selector-confirm)
+                (should (eq (plist-get (ende-model-selection-for-buffer source) :api)
+                            (car entry)))
+                (check-profile (ende-provider-profile-for-buffer source t)
+                               (car entry) (cdr entry))
+                ;; Inspect profiles at operation boundaries, not rendered text.
+                (dolist (operation '((insert) (improve "Improve") (summarize)
+                                     (write-anywhere "Rewrite") (insert-anywhere "Extend")
+                                     (chat) (chat-compact) (rubber-duck "Explain")))
+                  (setq dispatched nil)
+                  (apply #'ende-selector--run operation)
+                  (should (= (length dispatched) 1))
+                  (should (equal (take 2 (car dispatched))
+                                 (list (car operation) (cadr operation))))
+                  (should (eq (nth 3 (car dispatched)) source))
+                  (check-profile (nth 2 (car dispatched)) (car entry) (cdr entry))))
+              ;; Existing validation must reject an unmapped active control.
+              (ende-selector--set-control-preference :thinking 'on)
+              (setq dispatched nil)
+              (should-error (ende-selector-insert) :type 'user-error)
+              (should-error (ende-selector-confirm) :type 'user-error)
+              (should-not dispatched)
+              (ende-selector-reset-controls)
+              (should-not (ende-model-selection-control-preferences
+                           'openai "gpt-5-test" 'openai-chat-completions source))
+              (should (equal (ende-model-selection-control-preferences
+                              'openai "gpt-5-test" nil source)
+                             '(:reasoning-effort "high")))
+              ;; Ordinary implicit-default selections still dispatch correctly.
+              (setq ende-selector--api nil)
+              (ende-selector--set-provider 0)
+              (should (equal ende-selector--effort "high"))
+              (ende-selector-insert)
+              (check-profile (nth 2 (car dispatched)) 'openai-responses "high"))))
+      (kill-buffer source))))
+
+(ert-deftest ende-test/selector-api-switch-recomputes-inherited-effort ()
+  (let ((ende-providers '(openai))
+        (ende-builtin-provider-settings '((openai :models ("gpt-5-test"))))
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+        (resolve (symbol-function 'ende-provider-profile-for-model)))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--providers '(openai))
+      ;; Supply API-specific inherited capabilities at the profile boundary.
+      (cl-letf (((symbol-function 'ende-provider-profile-for-model)
+                 (lambda (provider model &optional api)
+                   (let ((profile (funcall resolve provider model api)))
+                     (if (eq (plist-get profile :api) 'openai-responses)
+                         (plist-put profile :reasoning-effort "high")
+                       (plist-put profile :controls nil))))))
+        (ende-selector--set-provider 0)
+        (should-not ende-selector--control-preferences)
+        (should (equal ende-selector--effort "high"))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "openai-chat-completions")))
+          (ende-selector-select-api))
+        (should-not ende-selector--control-preferences)
+        (should-not ende-selector--effort)
+        (should (eq ende-selector--effort-state :none))
+        (should (ende-provider-validate-controls (ende-selector--resolved-profile)))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) "openai-responses")))
+          (ende-selector-select-api))
+        (should-not ende-selector--control-preferences)
+        (should (equal ende-selector--effort "high"))
+        (should (eq ende-selector--effort-state :remembered))))))
 
 (ert-deftest ende-test/selector-model-completion-updates-choice ()
   (let ((buffer (generate-new-buffer " *ende-selector-model-test*"))
@@ -365,7 +512,7 @@
           (should-not ende-model-selection--last-used)
           (should (equal
                    (ende-model-selection--control-preference-entry
-                    'remote "remote/beta" buffer)
+                    'remote "remote/beta" nil buffer)
                    '(t))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
@@ -636,7 +783,7 @@
                          '(:reasoning-effort "high")))
           (should (equal
                    (ende-model-selection-control-preferences
-                    'remote "remote-model" buffer)
+                    'remote "remote-model" nil buffer)
                    '(:reasoning-effort "high")))
           (should-not ende-model-selection--last-used)
           (should (string-match-p "Effort:.*high (explicit)"
@@ -645,7 +792,7 @@
           (should-not ende-model-selection--last-used)
           (should (equal
                    (ende-model-selection-control-preferences
-                    'remote "remote-model" buffer)
+                    'remote "remote-model" nil buffer)
                    '(:reasoning-effort "high"))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
@@ -719,7 +866,7 @@
               (ende-selector-select-effort))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'alpha "alpha-one" test-buffer)
+                      'alpha "alpha-one" nil test-buffer)
                      '(:temperature 0 :thinking off :reasoning-effort "high")))
             (ende-selector-next-model)
             (should (equal (ende-selector--model-name) "shared-model"))
@@ -746,11 +893,11 @@
                 (ende-selector-select-temperature)))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'alpha "shared-model" test-buffer)
+                      'alpha "shared-model" nil test-buffer)
                      '(:temperature 0.4)))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'beta "shared-model" test-buffer)
+                      'beta "shared-model" nil test-buffer)
                      '(:temperature 0.2)))
             (cl-letf (((symbol-function 'ende-provider-model-discovery-available-p)
                        (lambda (_) nil))
@@ -797,7 +944,7 @@
             (should (equal (ende-selector--model-name) "alpha-one"))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'alpha "alpha-one" dev-buffer)
+                      'alpha "alpha-one" nil dev-buffer)
                      '(:temperature 0 :thinking off :reasoning-effort "high")))
             (let ((value 0.9))
               (cl-letf (((symbol-function 'completing-read)
@@ -808,7 +955,7 @@
             (ende-selector-close))
           (should (equal
                    (ende-model-selection-control-preferences
-                    'alpha "alpha-one" dev-buffer)
+                    'alpha "alpha-one" nil dev-buffer)
                    '(:temperature 0.9 :thinking off :reasoning-effort "high")))
           (cl-letf (((symbol-function 'display-buffer)
                      (lambda (&rest _) nil))
@@ -828,11 +975,11 @@
                                       :temperature)))
             (should (equal
                      (ende-model-selection-control-preferences
-                      'alpha "alpha-one" test-buffer)
+                      'alpha "alpha-one" nil test-buffer)
                      '(:temperature 0 :thinking off :reasoning-effort "high")))
             (ende-selector-close))
           (should (equal
-                   (gethash (ende-model-selection--pair-key 'alpha "alpha-one")
+                   (gethash (ende-model-selection--pair-key 'alpha "alpha-one" nil)
                             ende-model-selection--shared-control-preferences)
                    '(:temperature 0 :thinking off :reasoning-effort "high")))
           (should (equal (plist-get ende-model-selection--last-used :provider)
@@ -884,7 +1031,7 @@
                          "high"))
           (should (equal
                    (ende-model-selection--control-preference-entry
-                    'remote "remote-model" buffer)
+                    'remote "remote-model" nil buffer)
                    '(t))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))

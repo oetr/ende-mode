@@ -69,13 +69,13 @@
     (unwind-protect
         (progn
           (ende-model-selection-save-control-preferences
-           'remote "m" '(:temperature nil :thinking off :reasoning-effort "high") first)
-          (ende-model-selection-remember-pair 'remote "m" second)
-          (ende-model-selection-save-control-preferences 'remote "m" '(:temperature 0.4) first)
-          (should (equal (ende-model-selection-control-preferences 'remote "m" second)
+           'remote "m" nil '(:temperature nil :thinking off :reasoning-effort "high") first)
+          (ende-model-selection-remember-pair 'remote "m" nil second)
+          (ende-model-selection-save-control-preferences 'remote "m" nil '(:temperature 0.4) first)
+          (should (equal (ende-model-selection-control-preferences 'remote "m" nil second)
                          '(:temperature nil :thinking off :reasoning-effort "high")))
-          (should-not (ende-model-selection-control-preferences 'other "m" second))
-          (should-not (ende-model-selection-control-preferences 'remote "other" second))
+          (should-not (ende-model-selection-control-preferences 'other "m" nil second))
+          (should-not (ende-model-selection-control-preferences 'remote "other" nil second))
           (let* ((profile '(:temperature 0.8 :thinking on :reasoning-effort "high"
                            :controls ((:temperature :path ("temperature"))
                                       (:thinking :path ("thinking") :choices (on off))
@@ -88,9 +88,44 @@
             (should-not (assq :temperature body))
             (should-not (assoc "reasoning" body)))
           (let ((ende-model-selection-scope 'global))
-            (should (equal (ende-model-selection-control-preferences 'remote "m" second)
+            (should (equal (ende-model-selection-control-preferences 'remote "m" nil second)
                            '(:temperature 0.4)))))
       (kill-buffer first) (kill-buffer second))))
+
+(ert-deftest ende-test/model-control-history-follows-resolved-binding ()
+  (let ((ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-responses :auth-method auth-source
+                   :auth-source-user "first" :models ("m")
+                   :endpoints ((openai-responses . "https://remote.test/v1/responses")
+                               (openai-chat-completions . "https://remote.test/v1/chat/completions")))))
+        (ende-model-selection-scope 'global)
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal)))
+    (ende-model-selection-save-control-preferences 'remote "m" nil '(:temperature 0.4))
+    (let ((key (ende-model-selection--pair-key 'remote "m" nil)))
+      ;; Catalog growth does not change the resolved request binding.
+      (let ((ende-custom-providers
+             (list (cons 'remote (ende-plist-merge
+                                 (cdar ende-custom-providers) '(:models ("m" "other")))))))
+        (should (equal key (ende-model-selection--pair-key 'remote "m" nil))))
+      (dolist (overrides
+               '((:auth-source-user "second")
+                 (:endpoints ((openai-responses . "https://other.test/v1/responses")
+                              (openai-chat-completions . "https://remote.test/v1/chat/completions")))))
+        (let ((ende-custom-providers
+               (list (cons 'remote (ende-plist-merge (cdar ende-custom-providers) overrides)))))
+          (should-not (equal key (ende-model-selection--pair-key 'remote "m" nil)))
+          (should-not (ende-model-selection-control-preferences 'remote "m" nil))
+          (ende-model-selection-save-control-preferences 'remote "m" nil '(:temperature 0.2))))
+      (should (equal (ende-model-selection-control-preferences 'remote "m" nil)
+                     '(:temperature 0.4))))
+    (let ((ende-custom-providers nil)
+          (ende-builtin-provider-settings '((remote :provider openai :account work :models ("m")))))
+      (ende-model-selection-save-control-preferences 'remote "m" nil '(:temperature 0.6))
+      (let ((ende-builtin-provider-settings '((remote :provider openai :account personal :models ("m")))))
+        (should-not (ende-model-selection-control-preferences 'remote "m" nil)))
+      (should (equal (ende-model-selection-control-preferences 'remote "m" nil)
+                     '(:temperature 0.6))))))
 
 (ert-deftest ende-test/provider-api-selection-and-local-check ()
   (let ((ende-providers '(openai))
