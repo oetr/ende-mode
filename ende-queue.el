@@ -824,10 +824,9 @@ bypassed by a later same-provider job."
                          (ende-target-live-p (ende-job-target job)))
               (error "ende request preparation did not create a live target"))
             (let ((profile
-                   (plist-put (copy-tree (ende-job-profile job))
+                   (plist-put (ende-provider-config-copy (ende-job-profile job))
                               :job-id (ende-job-id job))))
-              (when (and (eq (plist-get profile :wire-api) 'responses)
-                         (not (eq (plist-get profile :type) 'openai)))
+              (when (eq (plist-get profile :service) 'openai-codex)
                 (setq profile
                       (plist-put
                        profile :codex-session-id
@@ -1318,7 +1317,7 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
       (user-error "Selected jobs changed; policy was not updated"))
     (dolist (job jobs)
       (setf (ende-job-profile job)
-            (plist-put (copy-tree (ende-job-profile job))
+            (plist-put (ende-provider-config-copy (ende-job-profile job))
                        :parallel (eq policy 'parallel))
             (ende-job-scheduling-overrides job)
             (plist-put (copy-sequence (ende-job-scheduling-overrides job))

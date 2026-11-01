@@ -40,7 +40,7 @@
 
 
 (ert-deftest ende-test/provider-discovery-parses-model-metadata ()
-  (let* ((profile '(:url "http://localhost:8080/v1/chat/completions"
+  (let* ((profile '(:url "http://localhost:8080/v1/chat/completions" :models-url "http://localhost:8080/v1/models"
 			 :model "llama3"))
          (metadata
           (ende-provider--catalog-metadata
@@ -214,7 +214,7 @@
 
 (ert-deftest ende-test/provider-discovery-is-async-and-cached ()
   (let ((profile '(:name local
-			 :url "http://localhost:8080/v1/chat/completions"
+			 :url "http://localhost:8080/v1/chat/completions" :models-url "http://localhost:8080/v1/models"
 			 :model "llama3"))
         (captured nil)
         (process nil)
@@ -377,7 +377,7 @@
                 (funcall callback '("remote/first" "remote/second") nil))
               (lambda () nil)))
            (profile (list :name 'remote
-                          :url "http://remote.example/v1/chat/completions"
+                          :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
                           :model-discovery-function probe)))
       (ende-provider-probe-models
        profile
@@ -409,7 +409,7 @@
 
 (ert-deftest ende-test/generic-model-probe-retries-after-failure ()
   (let* ((profile '(:name remote
-                    :url "http://remote.example/v1/chat/completions"))
+                    :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"))
          (requests 0)
          (first-error nil)
          (retry-models nil)
@@ -459,7 +459,7 @@
                                   failure)
                          (funcall callback nil nil)))
              (profile (list :name 'remote
-                            :url "http://remote.example/v1/chat/completions"
+                            :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
                             :model-discovery-function
                             (and custom (lambda (callback)
                                           (if failed (funcall complete callback)
@@ -479,7 +479,7 @@
 
 (ert-deftest ende-test/runtime-and-model-consumers-share-one-catalog-flight ()
   (let* ((profile '(:name remote
-                    :url "http://remote.example/v1/chat/completions"
+                    :url "https://remote.example/v1/chat/completions" :models-url "https://remote.example/v1/models"
                     :model "remote/selected"))
          (key (ende-provider--catalog-key profile))
          (requests 0)
@@ -562,7 +562,7 @@
 
 (ert-deftest ende-test/provider-discovery-cancellation-releases-last-waiter ()
   (let ((profile '(:name local
-			 :url "http://localhost:8080/v1/chat/completions"
+			 :url "http://localhost:8080/v1/chat/completions" :models-url "http://localhost:8080/v1/models"
 			 :model "llama3"))
         (process nil)
         (value nil)
@@ -611,7 +611,7 @@
 
 (ert-deftest ende-test/provider-discovery-cancelling-one-waiter-keeps-request ()
   (let ((profile '(:name local
-			 :url "http://localhost:8080/v1/chat/completions"
+			 :url "http://localhost:8080/v1/chat/completions" :models-url "http://localhost:8080/v1/models"
 			 :model "llama3"))
         (process nil)
         (make-process-count 0)
@@ -675,7 +675,7 @@
 
 (ert-deftest ende-test/provider-discovery-response-is-bounded ()
   (let ((profile '(:name local
-			 :url "http://localhost:8080/v1/chat/completions"
+			 :url "http://localhost:8080/v1/chat/completions" :models-url "http://localhost:8080/v1/models"
 			 :model "llama3"))
         (ende-provider-max-discovery-bytes 4)
         (captured nil)

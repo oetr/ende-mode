@@ -198,18 +198,18 @@
 
 
 (ert-deftest ende-test/openai-profile-uses-opencode-oauth ()
-  (let ((profile (ende-provider-profile 'openai)))
-    (should (eq (plist-get profile :wire-api) 'responses))
-    (should (eq (plist-get profile :auth-method) 'opencode-oauth))
+  (let ((profile (ende-provider-profile 'openai-codex)))
+    (should (eq (plist-get profile :api) 'openai-responses))
+    (should (eq (plist-get profile :auth-method) 'codex-oauth))
     (should (string= (plist-get profile :model) "gpt-5.6-luna"))
     (should (string= (plist-get profile :url)
                      "https://chatgpt.com/backend-api/codex/responses"))
-    (should-not (ende-provider-configured-model profile))
-    (should-not (plist-get (ende-provider-profile-snapshot 'openai) :access))
-    (should-not (plist-get (ende-provider-profile-snapshot 'openai) :refresh)))
-  (let ((ende-codex-model "gpt-configured"))
+    (should (equal (ende-provider-configured-model profile) "gpt-5.6-luna"))
+    (should-not (plist-get (ende-provider-profile-snapshot 'openai-codex) :access))
+    (should-not (plist-get (ende-provider-profile-snapshot 'openai-codex) :refresh)))
+  (let ((ende-builtin-provider-settings '((openai-codex :models ("gpt-configured")))))
     (should (string= (ende-provider-configured-model
-                      (ende-provider-profile 'openai))
+                      (ende-provider-profile 'openai-codex))
                      "gpt-configured"))))
 
 
@@ -418,7 +418,7 @@
          (ende-debug--session-directory directory)
          (ende-debug--sequence 0)
          (profile
-          '(:name openai :type codex :wire-api responses
+          '(:name openai-codex :service openai-codex :api openai-responses :auth-method codex-oauth
             :url "https://chatgpt.com/backend-api/codex/responses"
             :model "gpt-test" :require-sse t
             :tool-definitions
@@ -500,7 +500,7 @@
 (ert-deftest ende-test/codex-chat-affinity-uses-durable-conversation-root ()
   (ende-test--reset)
   (let ((profile
-         '(:name openai :type codex :wire-api responses
+         '(:name openai-codex :service openai-codex :api openai-responses :auth-method codex-oauth
            :url "https://chatgpt.com/backend-api/codex/responses"
            :model "gpt-test"))
         root-job follow-up-job independent-job)
@@ -673,7 +673,7 @@
              (list (cons "user" "body"))
              (list :on-done (lambda (value) (setq result value))
                    :on-error (lambda (value) (setq failure value)))
-             (ende-provider-profile 'openai))
+             (ende-provider-profile 'openai-codex))
             (let* ((command (plist-get captured :command))
                    (config (cadr (member "--config" command)))
                    (headers-file (cadr (member "--dump-header" command)))

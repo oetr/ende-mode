@@ -73,7 +73,8 @@
 
 (ert-deftest ende-test/direct-chat-request-uses-buffer-selection ()
   (ende-test--reset)
-  (let ((ende-model-selection-scope 'buffer)
+  (let ((ende-builtin-provider-settings '((openrouter :models ("chat-model"))))
+        (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
@@ -434,7 +435,7 @@
 
 (ert-deftest ende-test/concurrent-chat-and-compaction-stay-in-their-buffers ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :parallel t :max-concurrency 2))
         (ende-llm-function
          (ende-test--fake-llm '("Compaction-only summary" "Chat-only answer") t))
         (chat-buffer (generate-new-buffer " *ende-chat-live-location*"))
@@ -1476,7 +1477,7 @@
 
 (ert-deftest ende-test/chat-compaction-and-asks-share-live-context ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :parallel t :max-concurrency 2))
         (ende-llm-function
          (ende-test--fake-llm
           '("First summary" "New answer" "Second summary" "Final answer"
@@ -1703,7 +1704,7 @@
 
 (ert-deftest ende-test/chat-queued-context-is-built-at-dispatch-and-hides-placeholders ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :parallel t :max-concurrency 2))
         (ende-llm-function (ende-test--fake-llm '("First" "Second") t)))
     (ende-test--with-buffer "* Root\n** Question\nAsk\n"
 			    (org-mode)

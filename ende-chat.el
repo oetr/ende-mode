@@ -3781,8 +3781,7 @@ COMPACT requests a context fence and archives the instruction section."
                  (ende-chat--ask-data document question)))
          (question-id (plist-get data :question-id))
          (codex-profile-p
-          (and (eq (plist-get selected-profile :wire-api) 'responses)
-               (not (eq (plist-get selected-profile :type) 'openai))))
+          (eq (plist-get selected-profile :service) 'openai-codex))
          (root (ende-chat--root document question))
          (conversation-id
           (or (ende-chat--property document root :id)

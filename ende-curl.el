@@ -144,7 +144,8 @@ separate from user-configured profile headers."
          (headers (plist-get profile :request-headers))
          (all-headers (append headers internal-headers
                               (when secret
-                                (list (concat "Authorization: Bearer " secret))))))
+                                (list (concat (if (eq (plist-get profile :auth-scheme) 'x-api-key)
+                                                  "x-api-key: " "Authorization: Bearer ") secret))))))
     (when (or secret headers internal-headers)
       (dolist (header all-headers)
         (unless (ende-curl--valid-header-p header)
@@ -253,7 +254,9 @@ secrets are deliberately kept out of the command arguments."
      (when send-body (list "--data-binary" (if input-file (concat "@" input-file) "@-")))
      (when config-file (list "--config" config-file))
      (ende-curl-timeout-options
-      ende-request-timeout ende-max-response-bytes)
+      (if (plist-member profile :request-timeout)
+          (plist-get profile :request-timeout) ende-request-timeout)
+      ende-max-response-bytes)
      (list "--url" url))))
 
 (defun ende-curl--cancel-idle-timer (process)

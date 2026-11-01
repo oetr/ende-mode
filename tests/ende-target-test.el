@@ -210,7 +210,7 @@
         (ende-model-selection--buffer-control-preferences
          (make-hash-table :test #'equal))
         (ende-providers '(openrouter))
-        (ende-provider-profiles nil)
+        (ende-builtin-provider-settings '((openrouter :models ("source-model"))))
         (ende-llm-function (ende-test--fake-llm '("summary" "summary"))))
     (unwind-protect
         (progn
@@ -239,15 +239,8 @@
               (ende-model-selection-save
                '(:provider openrouter :model "stale-model"
                            :control-preferences (:reasoning-effort "high")))
-              (let* ((job (ende-summarize))
-                     (request-profile
-                      (plist-get (car (last ende-test--calls)) :options)))
-                (should (eq (ende-job-state job) 'completed))
-                (should (= (length ende-test--calls) 2))
-                (should (equal (plist-get request-profile :model)
-                               "stale-model"))
-                (should (equal (plist-get request-profile :reasoning-effort)
-                               "high")))))
+              (should-error (ende-summarize))
+              (should (= (length ende-test--calls) 1))))
       (ende-test--reset))))
 
 (ert-deftest ende-test/insert-anchor-does-not-follow-edits-at-point ()

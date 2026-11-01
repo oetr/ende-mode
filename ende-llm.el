@@ -24,6 +24,7 @@
 (require 'ende-debug)
 (require 'ende-request)
 (require 'ende-provider)
+(require 'ende-messages)
 (require 'ende-openrouter-batch)
 (require 'ende-codex)
 
@@ -559,8 +560,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
-  (let* ((typed-openai (eq (plist-get profile :type) 'openai))
-         (stream-usage (if (plist-member profile :stream-usage)
+  (let* ((stream-usage (if (plist-member profile :stream-usage)
                            (plist-get profile :stream-usage)
                          t))
          (body `((:model . ,(plist-get profile :model))
@@ -569,17 +569,17 @@ The :callbacks argument initializes the composed transport lifecycle."
                                   (ende-llm--message-json message profile))
                                 (ende-content-provider-messages messages)))
                  (:stream . t)
-                 ,@(when (or (not typed-openai) stream-usage)
+                 ,@(when stream-usage
                      '((:stream_options . ((:include_usage . t))))))))
     (when (plist-get profile :tool-definitions)
       (setq body
             (append body
                     (list (cons :tools (plist-get profile :tool-definitions))
                           (cons :tool_choice "auto")))))
-    (if (integerp ende-default-output-tokens)
-        (setq body (append body (list (cons :max_tokens
-                                            ende-default-output-tokens)))))
-    (ende-controls-encode body (plist-get profile :controls) profile)))
+    (when (plist-get profile :output-tokens)
+      (setq body (append body (list (cons :max_tokens (plist-get profile :output-tokens))))))
+    (ende-provider-config-encode-parameters
+     (ende-controls-encode body (plist-get profile :controls) profile) profile)))
 
 (defun ende-llm--start-prepared (session messages json-data request-body record)
   "Start SESSION with prepared JSON-DATA, REQUEST-BODY and debug RECORD."
@@ -636,26 +636,26 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm-default (messages callbacks &optional options)
   "Send MESSAGES asynchronously using a callback-safe curl transport."
-  (let* ((profile (copy-tree options))
+  (let* ((profile (ende-provider-config-copy options))
          (validation-error
           (condition-case caught
               (progn
                 (ende-provider-validate-profile profile)
-                (when (and (eq (plist-get profile :transport)
-                               'openrouter-batch)
-                           (not (eq (plist-get profile :type) 'openai)))
+                (when (eq (plist-get profile :transport) 'openrouter-batch)
                   (ende-openrouter-batch--validate-options profile))
                 nil)
             ((error quit) caught))))
     (if validation-error
         (ende-llm--dispatch-error callbacks validation-error)
       (cond
-       ((and (eq (plist-get profile :transport) 'openrouter-batch)
-             (not (eq (plist-get profile :type) 'openai)))
+       ((eq (plist-get profile :transport) 'openrouter-batch)
         (ende-openrouter-batch-default messages callbacks profile))
-       ((and (eq (plist-get profile :wire-api) 'responses)
-             (not (eq (plist-get profile :type) 'openai)))
+       ((eq (plist-get profile :service) 'openai-codex)
         (ende-codex-default messages callbacks profile))
+       ((eq (plist-get profile :api) 'openai-responses)
+        (ende-responses-default messages callbacks profile))
+       ((eq (plist-get profile :api) 'anthropic-messages)
+        (ende-messages-default messages callbacks profile))
        (t
         (let* ((session
                 (ende-llm--make-session

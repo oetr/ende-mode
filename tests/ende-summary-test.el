@@ -13,7 +13,7 @@
 
 (ert-deftest ende-test/summarize-opens-buffer ()
   (ende-test--reset)
-  (let ((ende-provider-model "gpt-5.6-luna")
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("gpt-5.6-luna")))
         (ende-llm-function
          (ende-test--fake-llm '("** Key point\n- short summary")))
         (displayed nil))
@@ -114,7 +114,7 @@
 
 (ert-deftest ende-test/summarize-captures-source-name-across-async-callback ()
   (ende-test--reset)
-  (let ((ende-provider-model "async-model")
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("async-model")))
         (ende-llm-function (ende-test--fake-llm '("summary") t)))
     (with-temp-buffer
       (rename-buffer "*phrases*" t)
@@ -245,7 +245,7 @@
 
 (ert-deftest ende-test/summary-uses-reported-model ()
   (ende-test--reset)
-  (let ((ende-provider-model "configured-model")
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("configured-model")))
         (ende-llm-function
          (ende-test--fake-llm
           '((:content "summary"

@@ -184,7 +184,7 @@
 
 (ert-deftest ende-test/chat-unclosed-response-block-does-not-swallow-later-replies ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((local :parallel t :max-concurrency 2)))
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :parallel t :max-concurrency 2))
         (ende-llm-function
          (ende-test--fake-llm
           '((:content "First answer\n#+begin_src org\n*** Literal heading"

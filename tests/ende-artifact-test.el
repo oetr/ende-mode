@@ -702,7 +702,8 @@
          (ende-image-auth-profile nil)
          (ende-image-endpoint "https://images.example.test/v1/images")
          (ende-image-model nil)
-         (ende-provider-profiles '((studio :type openai)))
+         (ende-custom-providers
+          (append ende-test--custom-providers (ende-test--custom-profile 'studio)))
          (initial (mapcar #'default-value ende-image--configuration-variables))
          (draft '(stable-diffusion studio
                   "http://192.168.1.50:8080/sdapi/v1/txt2img" "image-model"))
@@ -908,13 +909,13 @@
   (ende-artifact-test-with-files
     (let* ((ende-image-api 'openai)
            (ende-image-auth-profile 'studio)
-           (ende-image-endpoint "http://192.168.1.50:8080/v1/images/generations")
+           (ende-image-endpoint "https://192.168.1.50:8080/v1/images/generations")
            (ende-image-model "fixture-image-model")
-           (ende-provider-profiles '((studio :type openai
-                                            :auth-source-host "192.168.1.50"
-                                            :auth-source-user "ende"
-                                            :auth-source-port 8080
-                                            :request-headers ("X-Studio: image"))))
+           (ende-custom-providers
+            (append ende-test--custom-providers
+                    (ende-test--custom-profile 'studio :base-url "https://192.168.1.50:8080/v1"
+                                               :auth-method 'auth-source
+                                               :request-headers '("X-Studio: image"))))
            (real-start (symbol-function 'ende-curl-start-request))
            (real-send (symbol-function 'process-send-string))
            request sent cancel parts failure (calls 0))

@@ -23,7 +23,7 @@
 
 (ert-deftest ende-test/output-remains-marked-until-approved ()
   (ende-test--reset)
-  (let ((ende-provider-model "test-model")
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("test-model")))
         (ende-review-show-badges t)
         (ende-llm-function (ende-test--fake-llm '(" generated") t)))
     (ende-test--with-buffer "base"
@@ -177,7 +177,7 @@
 
 (ert-deftest ende-test/response-metadata-wins-for-review-label ()
   (ende-test--reset)
-  (let ((ende-provider-model "configured-model")
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("configured-model")))
         (ende-review-show-badges t)
         (ende-llm-function
          (ende-test--fake-llm

@@ -44,7 +44,8 @@
     (unwind-protect
         (dolist (transport '(chat codex))
           (let* ((profile
-                  (list :name 'debug-test :job-id 17 :model "test-model"
+                  (list :name 'debug-test :api 'openai-chat-completions :auth-method 'none
+                        :job-id 17 :model "test-model"
                         :url (if (eq transport 'codex)
                                  "https://chatgpt.com/backend-api/codex/responses"
                                "https://example.test/v1/chat/completions")

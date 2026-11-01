@@ -33,7 +33,7 @@ Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
         (events nil)
         (ende-provider-discovery-enabled nil)
         (real-make-process (symbol-function 'make-process))
-        (profile (list :name 'test
+        (profile (list :name 'test :api 'openai-chat-completions :auth-method 'none
                        :job-id 1
                        :url "https://example.test/v1"
                        :model "test-model"
@@ -177,7 +177,9 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (auth '(:access "test-access" :refresh "test-refresh"
 			  :expires 9999999999999))
-          (profile '(:name test :url "https://example.test/v1/chat/completions"
+          (profile '(:name test :api openai-chat-completions :auth-method none
+                           :url "https://example.test/v1/chat/completions"
+                           :models-url "https://example.test/v1/models"
                            :model "test-model" :temperature 0.2
                            :controls ((:temperature :path ("temperature")))))
           (cancel nil) (process nil) (failure nil)
@@ -568,13 +570,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/deepseek-stream-auth-usage-and-tool-history-round-trip ()
   (let* ((token "deepseek-secret-token")
-         (ende-provider-profiles
-          '((deepseek :type openai
-                      :url "https://api.deepseek.com/chat/completions"
-                      :model "deepseek-flash"
-                      :auth-source-host "api.deepseek.com"
-                      :auth-source-user "ende"
-                      :auth-source-port 443)))
+         (ende-builtin-provider-settings '((deepseek :models ("deepseek-flash"))))
          (profile (ende-provider-profile 'deepseek))
          (auth-query nil)
          (out nil)
@@ -646,7 +642,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (equal (ende-protocol-json-get "tool_call_id" tool-message)
                      "call-1"))
       (should (equal (plist-get auth-query :host) "api.deepseek.com"))
-      (should (equal (plist-get auth-query :user) "ende"))
+      (should (equal (plist-get auth-query :user) "default"))
       (should (= (plist-get auth-query :port) 443))
       (should (string-match-p "Authorization: Bearer deepseek-secret-token"
                               (plist-get out :config-text)))

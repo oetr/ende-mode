@@ -60,6 +60,7 @@
 (ert-deftest ende-test/rubber-duck-keeps-the-capture-time-model ()
   (ende-test--reset)
   (let* ((source (generate-new-buffer " *ende-rubber-duck-model-source*"))
+         (ende-custom-providers (ende-test--custom-profile 'local :models '("capture-model")))
          (ende-model-selection-scope 'buffer)
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections
@@ -253,6 +254,7 @@
 
 (ert-deftest ende-test/rubber-duck-selector-captures-source-and-profile ()
   (ende-test--reset)
+  (let ((ende-custom-providers (ende-test--custom-profile 'local :models '("duck-model"))))
   (unwind-protect
       (save-window-excursion
         (with-temp-buffer
@@ -280,7 +282,7 @@
                          (plist-get (ende-rubber-duck--exercise-profile exercise)
                                     :model)
                          "duck-model")))))))
-    (ende-test--reset)))
+    (ende-test--reset))))
 
 (ert-deftest ende-test/rubber-duck-survives-mode-switches-and-toggles ()
   (ende-test--with-duck (list (ende-test--duck-result))

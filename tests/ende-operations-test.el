@@ -146,12 +146,8 @@
         (ende-model-selection--buffer-control-preferences
          (make-hash-table :test #'equal))
         (ende-providers '(openrouter))
-        (ende-provider-profiles
-         '((openrouter :url "https://openrouter.ai/api/v1/chat/completions"
-                       :model "openai/gpt-4o-mini"
-                       :reasoning-effort "medium"
-                       :controls ((:reasoning-effort
-                                   :path ("reasoning" "effort"))))))
+        (ende-builtin-provider-settings
+         '((openrouter :models ("source-model") :reasoning-effort "medium")))
         (ende-llm-function
          (lambda (messages callbacks profile)
            (setq ende-test--calls

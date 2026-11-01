@@ -270,8 +270,7 @@ the discovered pricing metadata for those model IDs."
 (defun ende-selector--quota-supported-p ()
   "Return non-nil when the selected provider has an OAuth quota endpoint."
   (let ((profile (ende-selector--provider-profile)))
-    (and (eq (ende-selector--provider-name) 'openai)
-         (eq (plist-get profile :auth-method) 'opencode-oauth))))
+    (eq (plist-get profile :service) 'openai-codex)))
 
 (defun ende-selector--quota-display ()
   "Return the selected provider's quota display text."
@@ -305,7 +304,7 @@ the discovered pricing metadata for those model IDs."
   "Return non-nil when PROFILE's DeepSeek temperature has no effect."
   (let ((thinking (plist-get profile :thinking))
         (effort (plist-get profile :reasoning-effort)))
-    (and (eq (plist-get profile :builtin-profile) 'deepseek)
+    (and (eq (plist-get profile :service) 'deepseek)
          (ende-provider-deepseek-model-verified-p profile)
          (not (eq thinking 'off))
          (not (and (null thinking) (equal effort "none"))))))
@@ -395,7 +394,7 @@ the discovered pricing metadata for those model IDs."
                 "capability information unavailable")
             effort-label))
          (capability-note
-          (when (and (eq (plist-get profile :builtin-profile) 'deepseek)
+          (when (and (eq (plist-get profile :service) 'deepseek)
                      model-name
                      (not (ende-provider-deepseek-model-verified-p profile)))
             (format "DeepSeek control support is unverified for %s.\n"
@@ -600,11 +599,7 @@ ignored.  Return a cancellation function."
   (let* ((configured-model (ende-provider-configured-model profile))
          (models (ende-provider-models profile))
          (explicit-p
-          (and (eq (plist-get profile :type) 'openai)
-               (or (and (stringp configured-model)
-                        (not (string-empty-p configured-model)))
-                   (and (ende-provider-configured-models-explicit-p profile)
-                        models)))))
+          (and (ende-provider-configured-models-explicit-p profile) models)))
     (setq ende-selector--model-details nil)
     (if explicit-p
         (progn
@@ -694,6 +689,9 @@ PREFERRED is selected only when it is present in MODELS."
          (preferred (ende-selector--preferred-model provider profile))
          (catalog (ende-provider-cached-models profile)))
     (cond
+     ((ende-provider-configured-models-explicit-p profile)
+      (ende-selector--apply-model-catalog
+       profile (ende-provider-models profile) nil 0 preferred))
      (catalog
       (if (plist-get catalog :error)
           (ende-selector--apply-model-probe-error profile preferred)
@@ -1163,6 +1161,7 @@ performed locally so typing a search term never starts another network request."
   (let* ((source (current-buffer))
          (_ (ende-model-selection-initialize-buffer source))
          (providers (ende-provider-names))
+         (_ (unless providers (user-error "Configure ende-providers before opening the selector")))
          (selection (ende-model-selection-for-buffer source))
          (last-provider (plist-get selection :provider))
          (provider-index (or (cl-position last-provider providers :test #'eq) 0))

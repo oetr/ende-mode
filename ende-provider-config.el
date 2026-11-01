@@ -314,9 +314,15 @@ ANCESTORS contains the objects on the current traversal path."
   (cond
    ((stringp value) (substring-no-properties value))
    ((consp value)
-    (let ((path (cons value ancestors)))
-      (cons (ende-provider-config-copy (car value) path)
-            (ende-provider-config-copy (cdr value) path))))
+    (let (result tail (cursor value) (path ancestors))
+      (while (consp cursor)
+        (when (memq cursor path) (error "Provider configuration must not contain cycles"))
+        (push cursor path)
+        (let ((cell (list (ende-provider-config-copy (car cursor) path))))
+          (if tail (setcdr tail cell) (setq result cell))
+          (setq tail cell cursor (cdr cursor))))
+      (setcdr tail (ende-provider-config-copy cursor path))
+      result))
    ((vectorp value)
     (apply #'vector
            (mapcar (lambda (element)

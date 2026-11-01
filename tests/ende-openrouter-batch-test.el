@@ -49,7 +49,7 @@
       (should-not events))))
 
 (ert-deftest ende-test/openrouter-batch-profile-has-separate-endpoints ()
-  (let ((profile (ende-provider-profile 'openrouter-batch)))
+  (let ((profile (ende-provider-profile 'router-batch)))
     (should (eq (plist-get profile :transport) 'openrouter-batch))
     (should (string= (plist-get profile :url)
                      "https://openrouter.ai/api/v1/chat/completions"))
@@ -71,7 +71,7 @@
   (let* ((profile (plist-put
                    (plist-put
                     (plist-put (copy-sequence
-                                (ende-provider-profile 'openrouter-batch))
+                                (ende-provider-profile 'router-batch))
                                :batch-poll-initial-delay 2)
                     :batch-poll-max-delay 60)
                    :batch-poll-jitter 0))
@@ -133,7 +133,7 @@
   (let* ((profile (plist-put
                    (plist-put
                     (plist-put
-                     (copy-sequence (ende-provider-profile 'openrouter-batch))
+                     (copy-sequence (ende-provider-profile 'router-batch))
                      :batch-poll-initial-delay 1)
                     :batch-poll-max-delay 4)
                    :batch-poll-jitter 0))
@@ -183,7 +183,7 @@
 
 
 (ert-deftest ende-test/openrouter-batch-404-after-visibility-is-terminal ()
-  (let* ((profile (ende-provider-profile 'openrouter-batch))
+  (let* ((profile (ende-provider-profile 'router-batch))
          (failure nil)
          (request
           (ende-openrouter-batch--make-request
@@ -213,7 +213,7 @@
 
 (ert-deftest ende-test/openrouter-batch-body-is-non-streaming-and-ordered ()
   (let* ((ende-default-output-tokens 64)
-         (profile (plist-put (ende-provider-profile 'openrouter-batch)
+         (profile (plist-put (ende-provider-profile 'router-batch)
                              :reasoning-effort "medium"))
          (group (ende-openrouter-batch--make-group :profile profile))
          (request
@@ -241,7 +241,7 @@
                        "ende-job-1"))
       (should-not (ende-protocol-json-has-key-p "stream" request-body))
       (should-not (ende-protocol-json-has-key-p "model" request-body))
-      (should (= (ende-protocol-json-get "temperature" request-body) 0.2))
+      (should-not (ende-protocol-json-get "temperature" request-body))
       (should (= (ende-protocol-json-get "max_tokens" request-body) 64))
       (should (string=
                (ende-protocol-json-get
@@ -251,7 +251,7 @@
 
 
 (ert-deftest ende-test/openrouter-batches-separate-incompatible-profiles ()
-  (let* ((base (ende-provider-profile 'openrouter-batch))
+  (let* ((base (ende-provider-profile 'router-batch))
          (low (plist-put (copy-tree base) :reasoning-effort "low"))
          (high (plist-put (copy-tree base) :reasoning-effort "high"))
          (temperature (plist-put (copy-tree base) :temperature 0.7)))
@@ -266,7 +266,7 @@
                (plist-put (copy-tree base) field "other-account")))))))
 
 (ert-deftest ende-test/openrouter-batch-only-submits-live-requests ()
-  (let* ((profile (ende-provider-profile 'openrouter-batch))
+  (let* ((profile (ende-provider-profile 'router-batch))
          (requests (mapcar
                     (lambda (id)
                       (ende-openrouter-batch--make-request
@@ -300,7 +300,7 @@
 
 
 (ert-deftest ende-test/openrouter-batch-completion-routes-by-custom-id ()
-  (let* ((profile (ende-provider-profile 'openrouter-batch))
+  (let* ((profile (ende-provider-profile 'router-batch))
          (events nil)
          (result nil)
          (failure nil)
@@ -343,7 +343,7 @@
 
 
 (ert-deftest ende-test/openrouter-batch-result-failure-does-not-wedge-group ()
-  (let* ((profile (ende-provider-profile 'openrouter-batch))
+  (let* ((profile (ende-provider-profile 'router-batch))
          (failure nil)
          (request
           (ende-openrouter-batch--make-request
@@ -366,7 +366,7 @@
 
 (ert-deftest ende-test/openrouter-batch-request-cancellation-cleans-pending-group ()
   (ende-test--reset)
-  (let ((profile (plist-put (ende-provider-profile 'openrouter-batch)
+  (let ((profile (plist-put (ende-provider-profile 'router-batch)
                             :batch-window 60))
         (cancel nil)
         (done nil)
@@ -407,7 +407,7 @@
 
 
 (ert-deftest ende-test/openrouter-batch-submits-polls-and-settles ()
-  (let* ((profile (plist-put (ende-provider-profile 'openrouter-batch)
+  (let* ((profile (plist-put (ende-provider-profile 'router-batch)
                              :batch-window 0))
          (stages nil)
          (processes nil)
@@ -534,7 +534,7 @@
   (dolist (action '(cancel complete))
     (ende-test--reset)
     (let* ((ende-provider-discovery-enabled nil)
-           (ende-provider-profiles nil)
+           (ende-builtin-provider-settings '((openrouter :models ("openai/gpt-4o-mini"))))
            (ende-provider--runtime-settings (make-hash-table :test #'eq))
            (profile (plist-put (ende-provider-profile 'openrouter)
                                :batch-window 60))
@@ -689,7 +689,7 @@
                (list (process-get process :ende-stderr-process))))))))))
 
 (ert-deftest ende-test/openrouter-auto-fallback-policy-is-specific ()
-  (let ((profile '(:transport auto)))
+  (let ((profile '(:service openrouter :transport auto)))
     (should (ende-openrouter-batch-auto-fallback-p
              profile 404 "This model is available through the Batch API"))
     (should-not (ende-openrouter-batch-auto-fallback-p
@@ -699,7 +699,7 @@
     (should-not (ende-openrouter-batch-auto-fallback-p
                  '(:transport openrouter-batch) 404 "Batch API"))
     (should-not (ende-openrouter-batch-auto-fallback-p
-                 '(:type openai :transport auto) 404 "Batch API"))))
+                 '(:api openai-chat-completions :transport auto) 404 "Batch API"))))
 
 (provide 'ende-openrouter-batch-test)
 

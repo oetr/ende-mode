@@ -38,17 +38,14 @@
   (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
         (quota-callback nil)
         (cancel-count 0)
-        (ende-providers '(local openai))
-        (ende-provider-profiles
-         '((local :model "test-model" :models ("test-model"))
-           (openai :model "test-model" :auth-method opencode-oauth
-                   :models ("test-model"))))
+        (ende-providers '(local openai-codex))
+        (ende-builtin-provider-settings '((openai-codex :models ("test-model"))))
         (ende-provider--runtime-settings (make-hash-table :test #'equal))
         (ende-model-selection--last-used nil))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
-          (setq ende-selector--providers '(local openai)
+          (setq ende-selector--providers '(local openai-codex)
                 ende-selector--provider-index 0)
           (cl-letf (((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
@@ -116,7 +113,11 @@
           (make-hash-table :test #'equal))
          (ende-model-selection--buffer-control-preferences
           (make-hash-table :test #'equal))
-         (ende-provider-model "default-model"))
+         (ende-custom-providers
+          (append (ende-test--custom-profile 'local :models '("default-model"))
+                  '((remote :api openai-chat-completions :auth-method none
+                            :base-url "https://remote.test/v1"
+                            :controls ((:reasoning-effort :path ("reasoning" "effort"))))))))
     (unwind-protect
         (progn
           (setq source (get-buffer-create name))
@@ -227,8 +228,8 @@
   (let* ((source (generate-new-buffer " *ende-selector-source*"))
          (selector (generate-new-buffer " *ende-selector-test*"))
          (ende-providers '(local))
-         (ende-provider-profiles
-          '((local :models ("one" "two")
+         (ende-custom-providers
+          '((local :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("one" "two")
                    :reasoning-effort "high"
                    :controls ((:reasoning-effort
                                :path ("reasoning" "effort")
@@ -383,10 +384,8 @@
          (make-hash-table :test #'equal))
         (ende-model-selection--buffer-control-preferences
          (make-hash-table :test #'equal))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions"
-                   :model "remote/default"
-                   :models ("remote/default" "remote/remembered")))))
+        (ende-custom-providers
+         ende-test--custom-providers))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -412,6 +411,7 @@
                         ende-model-selection--buffer-control-preferences)
                        0))
             (ende-selector--set-provider 0)
+            (ende-selector--set-models '("remote/default" "remote/remembered") "remote/remembered")
             (ende-selector--move-model 1)
             (funcall probe-callback
                      '("remote/default" "remote/remembered") nil)
@@ -429,11 +429,10 @@
 
 (ert-deftest ende-test/selector-uses-cached-models-before-rendering ()
   (let* ((buffer (generate-new-buffer " *ende-selector-cached-models-test*"))
-         (profile '(:name remote
-			  :url "http://remote.example/v1/chat/completions"))
+         (profile (ende-provider-profile 'remote))
          (ende-providers '(remote))
-         (ende-provider-profiles
-          '((remote :url "http://remote.example/v1/chat/completions")))
+         (ende-custom-providers
+          ende-test--custom-providers)
          (ende-model-selection--last-used
           '(:provider remote :model "remote/saved"))
          (ende-provider--catalog-cache (make-hash-table :test #'equal))
@@ -471,8 +470,8 @@
   (let ((buffer (generate-new-buffer " *ende-selector-first-model-test*"))
         (probe-callback nil)
         (ende-providers '(remote))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions")))
+        (ende-custom-providers
+         ende-test--custom-providers)
         (ende-model-selection--last-used nil))
     (unwind-protect
         (with-current-buffer buffer
@@ -499,8 +498,8 @@
   (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
         (messages nil)
         (ende-providers '(remote))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1/chat/completions")))
+        (ende-custom-providers
+         ende-test--custom-providers)
         (ende-model-selection--last-used
          '(:provider remote :model "remote/missing"))
         (ende-selector--model-warnings (make-hash-table :test #'eq))
@@ -594,8 +593,9 @@
 (ert-deftest ende-test/selector-effort-picker-remembers-setting-immediately ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
         (probed-model nil)
-        (ende-provider-profiles
-         '((remote :model "remote-model"
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model")
                    :controls ((:reasoning-effort :path ("reasoning" "effort")
                                                  :choices ("high" "low"))))))
         (ende-provider-discovery-enabled nil)
@@ -662,15 +662,15 @@
           (make-hash-table :test #'equal))
          (ende-model-selection--buffer-control-preferences
           (make-hash-table :test #'equal))
-         (ende-provider-profiles
-          '((alpha :model "alpha-one" :models ("alpha-one" "shared-model")
+         (ende-custom-providers
+          '((alpha :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("alpha-one" "shared-model")
                    :temperature 0.7 :thinking on :reasoning-effort "low"
                    :controls ((:temperature :path ("temperature"))
                               (:thinking :path ("thinking")
                                          :choices (on off))
                               (:reasoning-effort :path ("reasoning" "effort")
                                                  :choices ("high" "low"))))
-            (beta :model "shared-model" :models ("shared-model" "beta-two")
+            (beta :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("shared-model" "beta-two")
                   :temperature 0.3 :thinking on :reasoning-effort "low"
                   :controls ((:temperature :path ("temperature"))
                              (:thinking :path ("thinking")
@@ -847,8 +847,9 @@
          (make-hash-table :test #'equal))
         (ende-model-selection--buffer-control-preferences
          (make-hash-table :test #'equal))
-        (ende-provider-profiles
-         '((remote :model "remote-model" :temperature 0.2
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model") :temperature 0.2
                    :reasoning-effort "high"
                    :controls ((:temperature :path ("temperature"))
                               (:thinking :path ("thinking")
@@ -891,8 +892,9 @@
         (callback nil)
         (cancelled 0)
         (completed nil)
-        (ende-provider-profiles
-         '((remote :model "first"
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("first" "second")
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
         (ende-model-selection-scope 'global)
         (ende-model-selection--shared-control-preferences
@@ -931,8 +933,9 @@
   (let ((source (generate-new-buffer " *ende-selector-effort-source*"))
         (selector (generate-new-buffer " *ende-selector-effort-dispatch*"))
         (queued nil)
-        (ende-provider-profiles
-         '((remote :model "remote-model"
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model")
                    :controls ((:reasoning-effort :path ("reasoning" "effort"))))))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--last-used nil)
@@ -1007,8 +1010,8 @@
                        (funcall callback '("local-model") nil)
                        (lambda () nil))))
             (let ((ende-providers '(local))
-                  (ende-provider-profiles
-                   '((local :model "local-model"))))
+                  (ende-custom-providers
+                   '((local :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1"))))
               (ende-selector-open)
               (setq selector (get-buffer ende-selector-buffer-name))
               (should (eq (plist-get probe-profile :name) 'local))
@@ -1036,8 +1039,9 @@
 (ert-deftest ende-test/selector-changes-provider-runtime-settings ()
   (ende-provider-clear-runtime-settings)
   (let ((ende-providers '(remote))
-        (ende-provider-profiles
-         '((remote :model "remote-model" :max-concurrency 2
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model") :temperature 0.8 :max-concurrency 2
                    :parallel nil))))
     (with-temp-buffer
       (ende-selector-mode)
@@ -1083,8 +1087,9 @@
 
 (ert-deftest ende-test/selector-effort-picker-selects-provider-default-with-e ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-default-test*"))
-        (ende-provider-profiles
-         '((remote :model "remote-model" :reasoning-effort "high"
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model") :reasoning-effort "high"
                    :controls ((:reasoning-effort :path ("reasoning" "effort")
                                                  :choices ("high" "low"))))))
         (ende-model-selection-scope 'buffer)
@@ -1232,9 +1237,8 @@
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
-        (ende-provider-profiles
-         '((remote :url "http://remote.example/v1"
-                   :model "configured"))))
+        (ende-custom-providers
+         ende-test--custom-providers))
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
@@ -1251,7 +1255,7 @@
               (ende-selector--cancel-probe)
               (ende-selector--set-provider 0)
               (funcall stale '("stale") nil)
-              (should (equal ende-selector--models '("configured")))
+              (should-not ende-selector--models)
               (let ((current (car (last callbacks))))
                 (kill-buffer buffer)
                 (should (= cancelled 2))
@@ -1264,7 +1268,7 @@
   (let* ((buffer (generate-new-buffer " *ende-selector-probe-retry-test*"))
          (attempts 0)
          (probe
-          (lambda (callback)
+          (lambda (_profile _url callback)
             (cl-incf attempts)
             (if (= attempts 1)
                 (funcall
@@ -1272,13 +1276,10 @@
                  (ende-error-create
                   :kind 'discovery
                   :message "temporary probe failure"))
-              (funcall callback '("remote/first") nil))
+              (funcall callback (ende-protocol-json-read-string "{\"data\":[{\"id\":\"remote/first\"}]}") nil))
             (lambda () nil)))
          (ende-providers '(remote))
-         (ende-provider-profiles
-          (list (list 'remote
-                      :url "http://remote.example/v1/chat/completions"
-                      :model-discovery-function probe)))
+         (ende-custom-providers ende-test--custom-providers)
          (ende-model-selection--last-used nil)
          (ende-selector--model-warnings (make-hash-table :test #'eq))
          (ende-provider--catalog-cache (make-hash-table :test #'equal))
@@ -1289,6 +1290,7 @@
           (ende-selector-mode)
           (setq ende-selector--providers '(remote)
                 ende-selector--provider-index 0)
+          (cl-letf (((symbol-function 'ende-provider--start-live-model-request) probe))
           (ende-selector--set-provider 0)
           (should (= attempts 1))
           (should (eq ende-selector--model-state :error))
@@ -1300,30 +1302,18 @@
           (should (string= (ende-selector--model-name) "remote/first"))
 
           (ende-selector--set-provider 0)
-          (should (= attempts 2)))
+          (should (= attempts 2))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
 
 
-(ert-deftest ende-test/selector-runs-configured-model-after-discovery-fails ()
+(ert-deftest ende-test/selector-runs-static-model-without-discovery ()
   (let* ((source (generate-new-buffer " *ende-selector-configured-source*"))
          (selector (generate-new-buffer " *ende-selector-configured-model*"))
-         (probe
-          (lambda (callback)
-            (funcall callback
-                     nil
-                     (ende-error-create :kind 'discovery
-                                        :message "catalog unavailable"))
-            (lambda () nil)))
          (ende-providers '(deepseek))
-         (ende-provider-profiles
-          (list
-           (list 'deepseek :type 'openai
-                 :url "https://api.deepseek.com/chat/completions"
-                 :model "deepseek-chat"
-                 :models '("deepseek-chat" "deepseek-reasoner")
-                 :model-discovery-function probe)))
+         (ende-builtin-provider-settings
+          '((deepseek :models ("deepseek-chat" "deepseek-reasoner"))))
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
          (ende-selector--model-warnings (make-hash-table :test #'eq))
@@ -1342,7 +1332,9 @@
                   ende-selector--provider-index 0)
             (cl-letf (((symbol-function 'ende-enqueue-operation)
                        (lambda (type instruction profile)
-                         (setq queued (list type instruction profile)))))
+                         (setq queued (list type instruction profile))))
+                      ((symbol-function 'ende-provider-probe-models)
+                       (lambda (&rest _) (ert-fail "Static catalog was probed"))))
               (ende-selector--set-provider 0)
               (should (eq ende-selector--model-state :ready))
               (should (equal ende-selector--models
@@ -1350,62 +1342,24 @@
               (should (equal (ende-selector--model-name) "deepseek-chat"))
               (ende-selector-insert)))
           (should (eq (car queued) 'insert))
-          (should (eq (plist-get (nth 2 queued) :type) 'openai))
+          (should (eq (plist-get (nth 2 queued) :api) 'openai-chat-completions))
           (should (equal (plist-get (nth 2 queued) :model) "deepseek-chat")))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
-(ert-deftest ende-test/selector-discovery-fallback-is-limited-to-typed-profiles ()
-  (let* ((probe (lambda (callback)
-                  (funcall callback
-                           nil
-                           (ende-error-create
-                            :kind 'discovery :message "catalog unavailable"))
-                  (lambda () nil)))
-         (ende-provider-discovery-enabled t)
-         (ende-provider--runtime-settings (make-hash-table :test #'eq))
-         (ende-provider-profiles
-          `((local :url "http://localhost:8080/v1/chat/completions"
-                   :model "legacy-local" :models ("legacy-local")
-                   :model-discovery-function ,probe)
-            (openrouter :model "legacy-router" :models ("legacy-router")
-                        :model-discovery-function ,probe)
-            (openai :model "legacy-codex" :models ("legacy-codex")
-                    :model-discovery-function ,probe)
-            (generic-openai :type openai
-                            :url "https://example.test/chat/completions"
-                            :model "generic-chat"
-                            :models ("generic-chat" "generic-reasoner"))))
-         (ende-provider--catalog-cache (make-hash-table :test #'equal))
-         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
-         (ende-selector--model-warnings (make-hash-table :test #'eq)))
-    (dolist (name '(local openrouter openai))
-      (let ((buffer (generate-new-buffer " *ende-selector-legacy-failure*"))
-            (models (plist-get (ende-provider-profile name) :models)))
-        (unwind-protect
-            (with-current-buffer buffer
-              (ende-selector-mode)
-              (setq ende-selector--providers (list name)
-                    ende-selector--provider-index 0)
-              (ende-selector--set-provider 0)
-              (should (eq ende-selector--model-state :error))
-              (should (equal ende-selector--models models))
-              (should-error (ende-selector-select-model) :type 'user-error))
-          (when (buffer-live-p buffer)
-            (kill-buffer buffer)))))
-    (let ((buffer (generate-new-buffer " *ende-selector-typed-static*")))
-      (unwind-protect
-          (with-current-buffer buffer
-            (ende-selector-mode)
-            (setq ende-selector--providers '(generic-openai)
-                  ende-selector--provider-index 0)
-            (ende-selector--set-provider 0)
-            (should (eq ende-selector--model-state :ready))
-            (should (equal ende-selector--models
-                           '("generic-chat" "generic-reasoner"))))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+(ert-deftest ende-test/selector-static-catalogs-bypass-discovery ()
+  (cl-letf (((symbol-function 'ende-provider-probe-models)
+             (lambda (&rest _) (ert-fail "Static catalog was probed")))
+            ((symbol-function 'ende-selector--probe-quota) #'ignore))
+    (dolist (name '(local openrouter openai-codex))
+      (with-temp-buffer
+        (ende-selector-mode)
+        (setq ende-selector--providers (list name))
+        (ende-selector--set-provider 0)
+        (should (eq ende-selector--model-state :ready))
+        (should (equal ende-selector--models
+                       (ende-provider-models (ende-provider-profile name))))))))
 
 
 
@@ -1414,7 +1368,7 @@
     (ende-test--reset)
     (let ((ende-chat-context-policy policy)
           (ende-chat-include-reasoning nil)
-          (ende-provider-profiles '((remote :model "configured-model")))
+          (ende-custom-providers ende-test--custom-providers)
           (ende-llm-function (ende-test--fake-llm '("Answer"))))
       (ende-test--with-buffer
        (concat "* Root\n"
@@ -1477,7 +1431,7 @@
 
 (ert-deftest ende-test/selector-ask-rejects-hidden-ancestors ()
   (ende-test--reset)
-  (let ((ende-provider-profiles '((remote :model "configured-model")))
+  (let ((ende-custom-providers ende-test--custom-providers)
         (ende-llm-function (ende-test--fake-llm '("Must not run"))))
     (ende-test--with-buffer
      (concat "* Root\n"
@@ -1503,7 +1457,7 @@
   (dolist (key '("a" "k"))
     (ende-test--reset)
     (let ((ende-model-selection--last-used nil)
-          (ende-provider-profiles '((remote :model "configured-model")))
+          (ende-custom-providers ende-test--custom-providers)
           (ende-llm-function (ende-test--fake-llm '("Reply"))))
       (ende-test--with-buffer "* Root\nEarlier context\n** Question\nAsk\n"
 			      (org-mode)
@@ -1543,7 +1497,7 @@
 				  (setq ende-selector--source-buffer source
 					ende-selector--providers '(local)
 					ende-selector--provider-index 0
-					ende-selector--models '("local-model")
+					ende-selector--models '("test-model")
 					ende-selector--model-index 0
 					ende-selector--model-state :ready
 					ende-selector--effort nil)

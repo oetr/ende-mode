@@ -86,8 +86,7 @@
 (ert-deftest ende-test/agent-config-shares-definitions-not-authority ()
   (let ((root (make-temp-file "ende-agent-definitions-" t))
         (ende-providers '(local remote))
-        (ende-provider-profiles
-         '((remote :url "http://example.invalid/v1" :model "parent-model"))))
+        (ende-custom-providers ende-test--custom-providers))
     (unwind-protect
         (with-temp-buffer
           (org-mode)
@@ -230,8 +229,7 @@
 
 (ert-deftest ende-test/agent-config-freezes-provider-and-model-selection ()
   (let ((ende-providers '(local remote))
-        (ende-provider-profiles
-         '((remote :url "http://example.invalid/v1" :model "base-model"))))
+        (ende-custom-providers ende-test--custom-providers))
     (with-temp-buffer
       (insert (concat "#+begin_ende\n"
                       "(agent-config worker (provider remote) (model \"child-model\"))\n"

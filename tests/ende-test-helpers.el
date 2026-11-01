@@ -12,6 +12,28 @@
 (require 'ende-provider)
 (require 'ende)
 
+(defun ende-test--custom-profile (name &rest settings)
+  "Return an explicit custom provider table for NAME with SETTINGS."
+  (list (cons name (ende-plist-merge
+                    '(:api openai-chat-completions :auth-method none
+                      :base-url "http://localhost:8080/v1" :models ("test-model")
+                      :temperature 0.8)
+                    settings))))
+
+(defconst ende-test--custom-providers
+  '((local :api openai-chat-completions :auth-method none
+           :base-url "http://localhost:8080/v1" :models ("test-model") :temperature 0.8)
+    (remote :api openai-chat-completions :auth-method none
+            :base-url "https://remote.test/v1")))
+
+(setq ende-providers '(local)
+      ende-custom-providers (copy-tree ende-test--custom-providers)
+      ende-builtin-provider-settings
+      '((router-batch :provider openrouter :transport openrouter-batch
+                      :models ("openai/gpt-4o-mini"))
+        (openrouter :models ("openai/gpt-4o-mini"))
+        (openai-codex :models ("gpt-5.6-luna"))))
+
 (defconst ende-test--tool-store-file
   (expand-file-name (format "ende-tool-store-tests-%s.sqlite3" (emacs-pid))
                     temporary-file-directory))
@@ -231,7 +253,7 @@ non-nil, is signalled from the event callback."
                   (push :on-error order))))
          (profile
           (or profile
-              (list :name 'transport-test
+              (list :name 'transport-test :api 'openai-chat-completions :auth-method 'none
                     :url (if (eq transport 'codex)
                              "https://chatgpt.com/backend-api/codex/responses"
                            "https://example.test/v1/chat/completions")
@@ -342,6 +364,10 @@ non-nil, is signalled from the event callback."
     (let ((process (plist-get call :process)))
       (when (and (processp process) (process-live-p process))
         (delete-process process))))
+  (setq ende-model-selection--last-used nil)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (setq ende-model-selection--buffer-selection nil)))
   (setq ende-test--prompts nil
         ende-test--calls nil
         ende-test--fake-responses nil
@@ -361,6 +387,7 @@ non-nil, is signalled from the event callback."
         ende-summary--next-source-id 0)
   (when (boundp 'ende-openrouter-batch--groups)
     (clrhash ende-openrouter-batch--groups))
+  (ende-provider-abort-discovery)
   (clrhash ende-provider--catalog-cache)
   (clrhash ende-provider--discovery-failures)
   (clrhash ende-provider--catalog-inflight)

@@ -85,7 +85,8 @@
 (defun ende-image--auth-profile-names ()
   "Return profiles available for image authentication and headers."
   (delete-dups (append '(openrouter) (ende-provider-names)
-                       (mapcar #'car ende-provider-profiles))))
+                       (mapcar #'car ende-custom-providers)
+                       (mapcar #'car ende-builtin-provider-settings))))
 
 (defun ende-image--profile ()
   "Return a validated snapshot of the image request settings."
@@ -102,7 +103,7 @@
                       (ende-provider-profile-snapshot ende-image-auth-profile))
                     (list :url ende-image-endpoint :model model
                           :image-api ende-image-api :allow-http t))))
-      (when (plist-get profile :auth-method)
+      (when (eq (plist-get profile :auth-method) 'codex-oauth)
         (user-error "Images API requires an auth-source or unauthenticated profile"))
       (ende-curl--validated-url profile)
       profile)))
