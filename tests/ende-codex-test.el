@@ -1147,6 +1147,23 @@
         (let ((ende-codex-auth-file "/tmp/other-account.json"))
           (should-error (ende-codex--check-binding profile auth)))))))
 
+(ert-deftest ende-test/codex-quota-coalesces-and-caches-per-binding ()
+  (let ((ende-codex--quota-cache (make-hash-table :test #'equal))
+        (ende-codex--quota-flights (make-hash-table :test #'equal))
+        callback values (starts 0))
+    (cl-letf (((symbol-function 'ende-codex--auth-entry)
+               (lambda () '(:access "a" :refresh "r")))
+              ((symbol-function 'ende-codex--probe-quota)
+               (lambda (function) (cl-incf starts) (setq callback function) #'ignore)))
+      (ende-codex-probe-quota (lambda (value _) (push value values)))
+      (ende-codex-probe-quota (lambda (value _) (push value values)))
+      (should (= starts 1))
+      (funcall callback '(:primary (:used-percent 20)) nil)
+      (should (= (length values) 2))
+      (ende-codex-probe-quota (lambda (value _) (push value values)))
+      (should (= starts 1))
+      (should (eq (plist-get (car values) :state) 'fresh)))))
+
 (provide 'ende-codex-test)
 
 ;;; ende-codex-test.el ends here

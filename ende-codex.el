@@ -900,7 +900,7 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                :message (error-message-string validation-error)))
      nil)))
 
-(defun ende-codex-probe-quota (callback)
+(defun ende-codex--probe-quota (callback)
   "Probe OpenAI's authenticated quota endpoint and call CALLBACK.
 CALLBACK receives (QUOTA ERROR).  Return a cancellation function."
   (condition-case validation-error
@@ -918,6 +918,55 @@ CALLBACK receives (QUOTA ERROR).  Return a cancellation function."
                :kind 'startup
                :message (error-message-string validation-error)))
      nil)))
+
+(defvar ende-codex--quota-cache (make-hash-table :test #'equal))
+(defvar ende-codex--quota-flights (make-hash-table :test #'equal))
+
+(defun ende-codex-probe-quota (callback)
+  "Return fresh or stale quota for the current retained credential binding.
+Coalesce concurrent probes and back off after failures.  CALLBACK receives
+QUOTA and ERROR; quota :state is fresh, stale, auth, transient or unavailable."
+  (let* ((key (condition-case nil (ende-codex--binding-state (ende-codex--auth-entry))
+                (error nil)))
+         (cached (and key (gethash key ende-codex--quota-cache)))
+         (now (float-time))
+         (flight (and key (gethash key ende-codex--quota-flights)))
+         (waiter (list callback))
+         (cancelled nil))
+    (cond
+     ((null key)
+      (funcall callback '(:state auth)
+               (ende-error-create :kind 'auth :message "Codex quota requires the retained credential binding")))
+     ((and cached (< now (plist-get cached :retry-at)))
+      (funcall callback (ende-provider-config-copy (plist-get cached :quota)) (plist-get cached :error)))
+     (flight (setcdr flight (cons waiter (cdr flight))))
+     (t
+      (setq flight (list nil waiter))
+      (puthash key flight ende-codex--quota-flights)
+      (setcar flight
+              (ende-codex--probe-quota
+               (lambda (quota error)
+                 (let* ((old (plist-get cached :quota))
+                        (value (if error
+                                   (plist-put (ende-provider-config-copy old) :state
+                                              (if old 'stale
+                                                (if (eq (ende-error-kind error) 'auth) 'auth 'transient)))
+                                 (plist-put quota :state 'fresh))))
+                   (puthash key (list :quota value :error error :retry-at (+ (float-time) (if error 30 15)))
+                            ende-codex--quota-cache)
+                   (remhash key ende-codex--quota-flights)
+                   (dolist (entry (cdr flight))
+                     (when (car entry)
+                       (condition-case nil (funcall (car entry) (ende-provider-config-copy value) error)
+                         ((error quit) nil))))))))))
+    (lambda ()
+      (unless cancelled
+        (setq cancelled t)
+        (setcar waiter nil)
+        (when (and flight (gethash key ende-codex--quota-flights)
+                   (not (cl-some #'car (cdr flight))))
+          (when (functionp (car flight)) (funcall (car flight)))
+          (remhash key ende-codex--quota-flights))))))
 
 (defun ende-codex-probe-models (callback)
   "Probe the authenticated Codex endpoint and call CALLBACK with model slugs.

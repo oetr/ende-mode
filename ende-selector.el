@@ -285,6 +285,9 @@ the discovered pricing metadata for those model IDs."
     (:ready (or (and ende-selector--quota
                      (ende-codex-quota-string ende-selector--quota))
                 "unavailable"))
+    (:stale (concat "stale: " (or (ende-codex-quota-string ende-selector--quota) "unknown")))
+    (:auth "authentication required")
+    (:transient "temporarily unavailable")
     (_ "unavailable")))
 
 (defun ende-selector--control-value-label (_control setting)
@@ -506,7 +509,9 @@ the discovered pricing metadata for those model IDs."
                   (setq ende-selector--quota-cancel nil
                         ende-selector--quota quota
                         ende-selector--quota-state
-                        (if error :error :ready))
+                        (pcase (plist-get quota :state)
+                          ('stale :stale) ('auth :auth) ('transient :transient)
+                          (_ (if error :error :ready))))
                   (ende-selector--render)))))))
       (when (and (not completed)
                  (= ende-selector--quota-probe-generation generation))
