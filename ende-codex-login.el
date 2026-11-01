@@ -17,6 +17,9 @@
 (defvar ende-codex--issued-clients (make-hash-table :test #'equal)
   "Issued IDs awaiting a verified registration after a consumed code failed.")
 
+(defvar ende-codex-login-complete-functions nil
+  "Functions called with (RECORD FAILURE) when an OAuth login completes.")
+
 (defun ende-codex--base64url (bytes)
   "Encode BYTES as unpadded base64url."
   (base64url-encode-string bytes t))
@@ -300,6 +303,7 @@
 
 (defun ende-codex--login-report (record failure)
   "Report completion using only verified RECORD metadata or safe FAILURE."
+  (run-hook-with-args 'ende-codex-login-complete-functions record failure)
   (if failure (message "%s" (ende-error-message failure))
     (let ((scopes (ende-codex-auth--scopes (plist-get record :scope))))
       (message "ChatGPT account %s connected%s%s"
