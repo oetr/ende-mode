@@ -43,7 +43,26 @@
     (should-not (plist-get out :error))
     (should (equal (plist-get (plist-get out :result) :content) "answer"))
     (should-not (string-match-p "transport-test-token" (prin1-to-string (plist-get out :command))))
-    (should (string-match-p "Authorization: Bearer transport-test-token" (plist-get out :config-text)))))
+    (should (string-match-p "Authorization: Bearer transport-test-token" (plist-get out :config-text))))
+  (let* ((definition
+          (list (cons :type "function")
+                (cons :function (list (cons :name "read_file")
+                                      (cons :description "Read a file")
+                                      (cons :parameters '((:type . "object")))))))
+         (body (ende-codex--request-body
+                (list '("system" . "Be brief") '("user" . "Read it")
+                      (list :tool-call-id "call_1" :content "File contents"))
+                (list :model "model-a" :tool-definitions (list definition))))
+         (input (alist-get :input body))
+         (tools (alist-get :tools body)))
+    (should (eq (alist-get :store body) json-false))
+    (should (eq (alist-get :stream body) t))
+    (should (equal (alist-get :model body) "model-a"))
+    (should (equal (alist-get :role (car input)) "developer"))
+    (should (equal (alist-get :call_id (car (last input))) "call_1"))
+    (should (equal (alist-get :type (car tools)) "namespace"))
+    (should (equal (alist-get :name (car (alist-get :tools (car tools)))) "read_file"))
+    (should-not (alist-get :max_output_tokens body))))
 
 (ert-deftest ende-codex-catalog-keeps-listed-metadata ()
   (let* ((models (json-parse-string
@@ -66,6 +85,16 @@
     (should (equal (plist-get (car (plist-get catalog :details)) :name) "Model A"))
     (should (equal (plist-get (car entries) :efforts) (list "low" "high")))
     (should (equal (plist-get (car entries) :default) "high"))))
+
+(ert-deftest ende-codex-cache-key-follows-registration ()
+  (let* ((base (list :name 'codex :service 'openai-codex :api 'openai-responses
+                     :account 'personal :model-discovery-function #'ignore))
+         (first (ende-provider--catalog-key
+                 (plist-put (copy-sequence base) :model-discovery-key '("registration-a"))))
+         (second (ende-provider--catalog-key
+                  (plist-put (copy-sequence base) :model-discovery-key '("registration-b")))))
+    (should first)
+    (should-not (equal first second))))
 
 (provide 'ende-codex-test)
 ;;; ende-codex-test.el ends here
