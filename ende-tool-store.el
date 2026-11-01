@@ -127,7 +127,9 @@ Ende directory has its existing permissions changed."
      ((/= version ende-tool-store--schema-version)
       (error "Unsupported tool payload database schema version %s in %s; use a fresh database by changing `ende-tool-store-file'"
              version filename))
-     (t nil))))
+     (t nil)))
+  (sqlite-execute database
+                  "CREATE TABLE IF NOT EXISTS assistant_protocol (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"))
 
 (defun ende-tool-store--open (filename create)
   "Open and validate FILENAME.  CREATE allows making a missing database."
@@ -386,6 +388,39 @@ Refuse an unknown destination rather than risk purging an active store."
                      filename)
           (message "Tool payload database does not exist: %s%s"
                    filename (if removed "; removed SQLite auxiliary files" "")))))))
+
+(defun ende-tool-store-save-protocol (history content calls &optional filename)
+  "Store exact protocol HISTORY with its visible CONTENT and CALLS in FILENAME."
+  (when (memq (car-safe history) '(openai-responses anthropic-messages))
+    (let ((id (ende-tool-store--new-execution-id))
+          (payload (ende-tool-store--encode-payload
+                    "api" (symbol-name (car history)) "items" (vconcat (cdr history))
+                    "content" content "calls" (vconcat calls))))
+      (ende-tool-store--call-with-database
+       t (lambda (database)
+           (sqlite-execute database "INSERT INTO assistant_protocol (id, payload) VALUES (?, ?)"
+                           (vector id payload))) filename)
+      id)))
+
+(defun ende-tool-store-load-protocol (id content calls &optional filename)
+  "Restore ID only when visible CONTENT and CALLS still match its captured turn."
+  (when id
+    (let* ((payload (ende-tool-store--call-with-database
+                     nil (lambda (database)
+                           (caar (sqlite-select database "SELECT payload FROM assistant_protocol WHERE id = ?"
+                                                (vector id)))) filename))
+           (object (and payload (json-parse-string payload :object-type 'alist :null-object nil :false-object :json-false)))
+           (api (and object (alist-get 'api object))))
+      (unless object (error "Assistant protocol history is unavailable; restore the selected tool store"))
+      (unless (and (equal (alist-get 'content object) content)
+                   (equal (alist-get 'calls object)
+                          (json-parse-string (json-encode (vconcat calls))
+                                             :object-type 'alist :null-object nil :false-object :json-false)))
+        (error "Assistant protocol history changed; start a new conversation or restore the original turn"))
+      (cons (pcase api ("openai-responses" 'openai-responses)
+                         ("anthropic-messages" 'anthropic-messages)
+                         (_ (error "Unsupported stored assistant protocol")))
+            (append (gethash "items" (json-parse-string payload :null-object nil :false-object :json-false)) nil)))))
 
 (defun ende-tool-store--new-execution-id ()
   "Return a fresh Ende-generated ID, unique across local Emacs processes."

@@ -181,8 +181,11 @@ discarding superseded details. Be concise but self-contained."
   "ENDE_CHAT_GENERATED_TITLE"
   "Marks a generated headline title excluded from model context.")
 
+(defconst ende-chat-protocol-history-property "ENDE_PROTOCOL_HISTORY")
+
 (defconst ende-chat--parsed-property-descriptors
-  (list (cons ende-chat-role-property :role)
+  (list (cons ende-chat-protocol-history-property :protocol-history)
+        (cons ende-chat-role-property :role)
         (cons ende-chat-visibility-property :visibility)
         (cons ende-chat-id-property :id)
         (cons ende-chat-generated-title-property :generated-title)
@@ -1264,10 +1267,15 @@ COMPLETE means TEXT reaches the generated wrapper's end."
           (setq text (substring text 0 -2)))
         (unless complete
           (setq transform (plist-put transform :synthetic-end nil))))
-      (ende-chat--message
-       'assistant
-       (ende-chat--restore-response-parts
-        (ende-chat--content document headline text 'assistant) transform)))))
+      (let* ((content (ende-chat--restore-response-parts
+                       (ende-chat--content document headline text 'assistant) transform))
+             (reference (ende-chat--property document headline :protocol-history)))
+        (if (and reference (not (ende-chat--tool-call-protocol-p
+                              document (cadr (memq headline
+                                                   (ende-chat--children document (ende-chat--parent document headline)))))))
+            (list :role "assistant" :content content
+                  :protocol-history (ende-tool-store-load-protocol reference content nil))
+          (ende-chat--message 'assistant content))))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1303,7 +1311,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
            (ende-chat--section-messages
             document headline (org-element-property :begin headline)
             (org-element-property :end headline)))
-         (add-turn (prose calls results)
+         (add-turn (prose calls results &optional assistant)
            (if calls
                (setq messages
                      (nconc messages
@@ -1312,7 +1320,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
              (when (and prose (not (ende-content-empty-p prose)))
                (setq messages
                      (nconc messages
-                            (list (ende-chat--message 'assistant prose))))))))
+                            (list (or assistant (ende-chat--message 'assistant prose)))))))))
       (while children
         (let ((child (car children)))
           (cond
@@ -1330,7 +1338,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                     (nconc messages
                            (if prose (butlast section-messages)
                              section-messages)))
-              (add-turn prose calls (take-results))))
+              (add-turn prose calls (take-results) last)))
            ((ende-chat--tool-call-protocol-p document child)
             (add-turn nil (take-calls) (take-results)))
            ((ende-chat--tool-result-protocol-p document child)
@@ -1375,7 +1383,11 @@ COMPLETE means TEXT reaches the generated wrapper's end."
       (when (or stored-calls (and prose (not (ende-content-empty-p prose))))
         (push (if stored-calls
                   (list :role "assistant" :content (or prose "")
-                        :tool-calls stored-calls)
+                        :tool-calls stored-calls
+                        :protocol-history
+                        (ende-tool-store-load-protocol
+                         (and calls (ende-chat--property document (car calls) :protocol-history))
+                         (or prose "") stored-calls))
                 (ende-chat--message 'assistant prose))
               messages))
       (dolist (result stored-results)
@@ -2904,6 +2916,13 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
          (thinking (plist-get profile :thinking))
          (effort (ende-provider-active-reasoning-effort profile)))
     (concat
+     (when (and (not (eq (ende-job-type job) 'chat-compact))
+                (plist-get result :protocol-history))
+       (ende-chat--metadata-property
+        ende-chat-protocol-history-property
+        (ende-tool-store-save-protocol
+         (plist-get result :protocol-history) (or (plist-get result :content) "")
+         (plist-get result :tool-calls) (plist-get (ende-job-instruction job) :tool-store-file))))
      (ende-chat--metadata-property ende-chat-model-property model)
      (ende-chat--metadata-property
       ende-chat-temperature-property

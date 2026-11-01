@@ -1059,6 +1059,36 @@
                             (plist-get (nth 2 ende-test--calls) :messages)))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/chat-protocol-sidecar-restores-signed-turns ()
+  (ende-test--reset)
+  (unwind-protect
+      (with-temp-buffer
+        (org-mode)
+        (let* ((block (ende-protocol-json-read-string
+                       "{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"signed\"}"))
+               (call '(:id "c" :name "read_file" :arguments "{}"))
+               (history (list 'anthropic-messages block))
+               (id (ende-tool-store-save-protocol history "Checking." (list call)))
+               (stored (ende-chat--prepare-tool-call call)))
+          (insert "* Topic\n** Question\nInspect.\n"
+                  (ende-chat--work-text 2 "q" "r")
+                  (ende-chat--assistant-protocol-text
+                   3 "q" "r" (ende-chat--metadata-property ende-chat-protocol-history-property id)
+                   '(:content "Checking.") (list stored))
+                  (ende-chat--tool-result-text 3 "r" stored "result")
+                  "** Follow-up\nContinue.\n")
+          (goto-char (point-min))
+          (re-search-forward "Agent: Work")
+          (org-entry-delete nil ende-chat-state-property)
+          (let* ((document (ende-chat--build-document))
+                 (work (cl-find-if (lambda (h) (ende-chat--property document h :work))
+                                   (ende-chat--document-headlines document)))
+                 (messages (ende-chat--protocol-work-messages document work)))
+            (should (equal (gethash "signature" (cadr (plist-get (car messages) :protocol-history))) "signed")))
+          (should-error (ende-tool-store-load-protocol id "Edited." (list call)))
+          (should-error (ende-tool-store-load-protocol id "Checking." nil))))
+    (ende-test--reset)))
+
 (provide 'ende-chat-tool-store-test)
 
 ;;; ende-chat-tool-store-test.el ends here
