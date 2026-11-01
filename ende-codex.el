@@ -497,16 +497,13 @@ since the refresh began."
 Only the retained registration supplies the issued client ID and subject;
 unverified JWT payloads can never authorize an identity change."
   (if (ende-codex--account-auth-p auth)
-      (let ((credentials
+      (let* ((claims (when id-token (ende-codex-auth--verify-refresh id-token auth)))
+             (credentials
              (list :client-id (plist-get auth :client-id)
-                   :subject (plist-get auth :subject)
+                   :subject (if claims (gethash "sub" claims) (plist-get auth :subject))
                    :access-token access :refresh-token refresh
                    :id-token (or id-token (plist-get auth :id-token))
                    :expires-at (+ (floor (float-time)) expires-in))))
-        ;; New identity-bearing tokens require Task 4's verifier, not the
-        ;; routing-only JWT decoder in this transport.
-        (when (and id-token (not (equal id-token (plist-get auth :id-token))))
-          (error "Codex refresh identity requires verification"))
         (when (plist-get auth :account-id)
           (setq credentials (plist-put credentials :account-id (plist-get auth :account-id))))
         (ende-codex-auth--rotate auth credentials))
@@ -558,6 +555,8 @@ unverified JWT payloads can never authorize an identity change."
               (unless (and (stringp access) (stringp refresh)
                            (integerp expires-in) (> expires-in 0))
                 (error "Token refresh response is incomplete"))
+              (when owned
+                (ende-codex-auth--refresh-scope payload))
               (ende-codex--refresh-finish
                flight (ende-codex--store-refresh
                        auth access refresh expires-in

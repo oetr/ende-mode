@@ -7,6 +7,7 @@
 (require 'ende-rs256)
 (require 'ende-rs256-fixtures)
 (require 'ende-codex-auth)
+(require 'ende-codex)
 
 (defun ende-rs256-test--jwks ()
   "Return a detached public key set for the OpenSSL fixtures."
@@ -67,6 +68,30 @@
       (let* ((valid (alist-get 'valid ende-rs256-test--fixtures))
              (claims (ende-codex--verify-id-token valid "test-client" "test-nonce")))
         (should (equal (gethash "sub" claims) "test-subject"))
+        (let* ((directory (make-temp-file "ende-verified-refresh-" t))
+               (ende-codex-auth--directory (expand-file-name "private" directory)))
+          (unwind-protect
+              (let* ((record (ende-codex-auth--register
+                              'verified (list :client-id "test-client" :subject "test-subject"
+                                              :id-token valid :access-token "access"
+                                              :refresh-token "refresh" :expires-at 1800000000)))
+                     (next (ende-codex--store-refresh record "next-access" "next-refresh"
+                                                       3600 valid)))
+                (should (ende-codex-auth--same-registration-p record next))
+                (should (equal (plist-get next :subject) "test-subject"))
+                (should-error (ende-codex--store-refresh
+                               next "bad-access" "bad-refresh" 3600
+                               (alist-get 'nonce ende-rs256-test--fixtures)))
+                (should (equal next (ende-codex-auth-read 'verified)))
+                (let ((other (plist-put (copy-sequence next) :subject "other-subject")))
+                  (should-error (ende-codex--store-refresh other "access" "refresh" 3600 valid))))
+            (delete-directory directory t)))
+        (dolist (scope '("openid offline_access" "offline_access openid profile"))
+          (should-not (ende-codex-auth--refresh-scope
+                       (json-parse-string (json-encode `(("scope" . ,scope)))))))
+        (dolist (scope '("profile" "openid" "OPENID offline_access" nil 42 "openid\noffline_access"))
+          (should-error (ende-codex-auth--refresh-scope
+                         (json-parse-string (json-encode `(("scope" . ,scope)))))))
         (dolist (kind '(issuer audience nonce expired future issued subject azp))
           (should-error (ende-codex--verify-id-token
                          (alist-get kind ende-rs256-test--fixtures) "test-client" "test-nonce")

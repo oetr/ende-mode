@@ -171,8 +171,8 @@ Return claims only after signature and OpenID validation."
   "Authenticate refreshed ID-TOKEN without changing RECORD's identity."
   (ende-codex-auth--identity-guard
    (lambda ()
-     (let* ((keys (ende-codex-auth--jwks))
-            (source (lambda () keys))
+     (let* ((keys nil)
+            (source (lambda () (or keys (setq keys (ende-codex-auth--jwks)))))
             (old (ende-codex-auth--signed-claims (plist-get record :id-token) source))
             (new (ende-codex-auth--signed-claims id-token source))
             (client (plist-get record :client-id))
@@ -190,6 +190,18 @@ Return claims only after signature and OpenID validation."
                     (>= (gethash "iat" new) (gethash "iat" old)))
          (signal 'ende-codex-identity-error nil))
        new))))
+
+(defun ende-codex-auth--refresh-scope (payload)
+  "Reject an explicit loss of identity or refresh scope in token PAYLOAD."
+  (when (ende-protocol-json-has-key-p "scope" payload)
+    (let ((scope (gethash "scope" payload)))
+      (unless (and (stringp scope)
+                   (cl-loop for char across scope
+                            always (or (= char 32) (= char 33)
+                                       (<= 35 char 91) (<= 93 char 126)))
+                   (let ((granted (split-string scope " ")))
+                     (and (member "openid" granted) (member "offline_access" granted))))
+        (signal 'ende-codex-identity-error nil)))))
 
 (defvar ende-codex-auth--directory
   (expand-file-name "ende-codex/" user-emacs-directory)
