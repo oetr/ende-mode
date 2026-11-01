@@ -1472,8 +1472,7 @@
 
 (ert-deftest ende-test/selector-static-catalogs-bypass-discovery ()
   (cl-letf (((symbol-function 'ende-provider-probe-models)
-             (lambda (&rest _) (ert-fail "Static catalog was probed")))
-            ((symbol-function 'ende-selector--probe-quota) #'ignore))
+             (lambda (&rest _) (ert-fail "Static catalog was probed"))))
     (dolist (name '(local openrouter openai-codex))
       (with-temp-buffer
         (ende-selector-mode)
