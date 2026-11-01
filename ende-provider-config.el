@@ -563,7 +563,10 @@ selects another explicitly available wire endpoint.  No network is started."
           (capacity (plist-get profile :max-output-tokens)))
       (when (and budget capacity (> budget capacity))
         (error "Profile %s model %s: reduce :output-tokens below :max-output-tokens" name model)))
-    (ende-curl--validated-url profile)
+    (setq profile (plist-put profile :url (ende-curl--validated-url profile)))
+    (when (plist-get profile :models-url)
+      (setq profile (plist-put profile :models-url
+                               (ende-curl--validated-url profile (plist-get profile :models-url)))))
     (ende-provider-config-copy profile)))
 
 (provide 'ende-provider-config)

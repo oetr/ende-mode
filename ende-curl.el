@@ -50,7 +50,7 @@ from remote buffers are supported, but their processes always run locally."
 (defun ende-curl--validated-url (profile &optional url)
   "Return validated URL for PROFILE, optionally checking URL instead."
   (let* ((value (or url (plist-get profile :url)))
-         (_ (ende-url-normalize value))
+         (normalized (ende-url-normalize value))
          (parsed (and (stringp value) (url-generic-parse-url value)))
          (scheme (and parsed (downcase (or (url-type parsed) ""))))
          (host (and parsed (url-host parsed)))
@@ -84,7 +84,7 @@ from remote buffers are supported, but their processes always run locally."
                       (or (url-port parsed)
                           (if (string= scheme "https") 443 80))))
         (error "Authenticated profile port does not match endpoint port")))
-    value))
+    (plist-get normalized :url)))
 
 (defun ende-curl--auth-secret (profile)
   "Resolve PROFILE's auth-source secret, or nil for unauthenticated hosts."
