@@ -1663,6 +1663,21 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (ende-transport-session-process
      (ende-codex--lifecycle session))))
 
+(defun ende-codex-abort-background ()
+  "Cancel retained credential refresh and metadata work before reload."
+  (maphash (lambda (_key flight)
+             (dolist (waiter (cdr flight)) (setcar waiter nil))
+             (when (functionp (car flight)) (funcall (car flight))))
+           ende-codex--quota-flights)
+  (clrhash ende-codex--quota-flights)
+  (let (flights)
+    (maphash (lambda (_key flight) (push flight flights)) ende-codex--refresh-flights)
+    (dolist (flight flights) (ende-codex--refresh-finish flight nil t)))
+  (dolist (process (append ende-codex--model-probe-processes ende-codex--quota-probe-processes))
+    (when (and (processp process) (process-live-p process)) (delete-process process))))
+
+(add-hook 'ende-queue-abort-functions #'ende-codex-abort-background)
+
 (provide 'ende-codex)
 
 ;;; ende-codex.el ends here
