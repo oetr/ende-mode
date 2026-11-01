@@ -576,9 +576,9 @@ The :callbacks argument initializes the composed transport lifecycle."
             (append body
                     (list (cons :tools (plist-get profile :tool-definitions))
                           (cons :tool_choice "auto")))))
-    (if (integerp ende-max-output-tokens)
+    (if (integerp ende-default-output-tokens)
         (setq body (append body (list (cons :max_tokens
-                                            ende-max-output-tokens)))))
+                                            ende-default-output-tokens)))))
     (ende-controls-encode body (plist-get profile :controls) profile)))
 
 (defun ende-llm--start-prepared (session messages json-data request-body record)

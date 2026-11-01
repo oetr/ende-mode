@@ -701,7 +701,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/unbounded-output-omits-provider-token-limit ()
-  (let ((ende-max-output-tokens nil))
+  (let ((ende-default-output-tokens nil))
     (let ((body (ende-llm--request-body
                  (list (cons "user" "body"))
                  '(:model "test-model" :temperature 0.2

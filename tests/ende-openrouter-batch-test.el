@@ -212,7 +212,7 @@
 
 
 (ert-deftest ende-test/openrouter-batch-body-is-non-streaming-and-ordered ()
-  (let* ((ende-max-output-tokens 64)
+  (let* ((ende-default-output-tokens 64)
          (profile (plist-put (ende-provider-profile 'openrouter-batch)
                              :reasoning-effort "medium"))
          (group (ende-openrouter-batch--make-group :profile profile))

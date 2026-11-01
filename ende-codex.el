@@ -1399,9 +1399,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                 (ende-codex--tool-definitions
                                  (plist-get profile :tool-definitions)))
                           (cons :tool_choice "auto")))))
-    (if ende-max-output-tokens
+    (if ende-default-output-tokens
         (setq body (append body (list (cons :max_output_tokens
-                                            ende-max-output-tokens)))))
+                                            ende-default-output-tokens)))))
     (setq body (ende-controls-encode
                 body (plist-get profile :controls) profile))
     (unless (or (eq (plist-get profile :thinking) 'off)

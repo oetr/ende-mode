@@ -75,10 +75,10 @@ regardless of this setting."
   :type 'boolean
   :group 'ende)
 
-(defcustom ende-max-output-tokens nil
-  "Maximum completion tokens requested from an LLM provider.
+(defcustom ende-default-output-tokens nil
+  "Fallback requested output budget for generation requests.
 
-When nil, omit the request limit and let the provider use its own maximum."
+This is not model capacity.  Nil leaves the requested budget unspecified."
   :type '(choice (const :tag "Provider default" nil)
                  (integer :tag "Maximum tokens"))
   :group 'ende)
@@ -216,7 +216,7 @@ Unknown counts are nil.  Total is derived from input and output when absent."
                (> ende-response-idle-timeout 0))
     (error "ende-response-idle-timeout must be a positive number"))
   (dolist (option
-           (list (cons 'ende-max-output-tokens ende-max-output-tokens)
+           (list (cons 'ende-default-output-tokens ende-default-output-tokens)
                  (cons 'ende-max-response-bytes ende-max-response-bytes)
                  (cons 'ende-max-sse-event-bytes ende-max-sse-event-bytes)
                  (cons 'ende-max-output-chars ende-max-output-chars)

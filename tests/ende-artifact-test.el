@@ -119,7 +119,7 @@
                            (list :role "assistant" :content (list image))
                            (cons "user" "Continue")))
            (profile '(:model "vision"))
-           (ende-max-output-tokens 123))
+           (ende-default-output-tokens 123))
       (dolist (builder '(ende-llm--request-body ende-codex--request-body))
         (let* ((expected (encode-coding-string (json-encode (funcall builder messages profile)) 'utf-8))
                (lifecycle (ende-transport-session-create nil #'ert-fail))

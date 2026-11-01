@@ -38,7 +38,7 @@ DEBUG contains transport, endpoint and optional session ID for recording."
           (funcall callback data body record))
       (let* ((file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
              (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-                               '(ende-max-output-tokens ende-debugging-enabled
+                               '(ende-default-output-tokens ende-debugging-enabled
                                  ende-debug--session-directory ende-debug--sequence)))
              (failed (ende-transport-session-callback-error-handler lifecycle)))
         (when debug (cl-incf ende-debug--sequence))
