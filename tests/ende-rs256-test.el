@@ -6,6 +6,7 @@
 (require 'json)
 (require 'ende-rs256)
 (require 'ende-rs256-fixtures)
+(require 'ende-codex-auth)
 
 (defun ende-rs256-test--jwks ()
   "Return a detached public key set for the OpenSSL fixtures."
@@ -53,6 +54,80 @@
     (should-error (ende-rs256-verify input signature jwks "test-key"))
     (puthash "keys" (vector key) jwks)
     (should-error (ende-rs256-verify input signature jwks "missing-key"))))
+
+(ert-deftest ende-rs256-authenticated-identity ()
+  (let ((jwks (ende-rs256-test--jwks)) (parsed-claims 0)
+        (read-json (symbol-function 'ende-codex-auth--json)))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1800000100.0))
+              ((symbol-function 'ende-codex-auth--jwks) (lambda () jwks))
+              ((symbol-function 'ende-codex-auth--json)
+               (lambda (bytes)
+                 (when (string-match-p "test-subject" bytes) (cl-incf parsed-claims))
+                 (funcall read-json bytes))))
+      (let* ((valid (alist-get 'valid ende-rs256-test--fixtures))
+             (claims (ende-codex--verify-id-token valid "test-client" "test-nonce")))
+        (should (equal (gethash "sub" claims) "test-subject"))
+        (dolist (kind '(issuer audience nonce expired future issued subject azp))
+          (should-error (ende-codex--verify-id-token
+                         (alist-get kind ende-rs256-test--fixtures) "test-client" "test-nonce")
+                        :type 'ende-codex-identity-error))
+        (let ((before parsed-claims))
+          (should-error (ende-codex--verify-id-token
+                         (concat (substring valid 0 -2) "AA") "test-client" "test-nonce")
+                        :type 'ende-codex-identity-error)
+          (should (= parsed-claims before)))
+        (dolist (token '("" "e30.e30" "e30..AA" "e30.e30.AA.extra"))
+          (should-error (ende-codex--verify-id-token token "test-client" "test-nonce")))
+        (dolist (header '("{\"alg\":\"none\",\"kid\":\"test-key\"}"
+                          "{\"alg\":\"HS256\",\"kid\":\"test-key\"}"
+                          "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"kid\":\"other\"}"
+                          "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"crit\":[\"extension\"]}"
+                          "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"b64\":false}"
+                          "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"jku\":\"https://attacker.test\"}"))
+          (cl-letf (((symbol-function 'ende-codex-auth--jwks)
+                     (lambda () (ert-fail "Unsupported header reached network"))))
+            (should-error (ende-codex--verify-id-token
+                           (concat (base64url-encode-string header t) ".e30.AA")
+                           "test-client" "test-nonce"))))
+        (cl-letf (((symbol-function 'ende-codex-auth--jwks)
+                   (lambda () (error "Unavailable"))))
+          (should-error (ende-codex--verify-id-token valid "test-client" "test-nonce")
+                        :type 'ende-codex-identity-error))))))
+
+(ert-deftest ende-rs256-trusted-key-retrieval ()
+  (let ((start (symbol-function 'ende-curl-start-request))
+        (jwks (ende-rs256-test--jwks)))
+    (dolist (response (list (list 200 (json-encode jwks) t)
+                            '(302 "{}" nil) '(200 "{malformed" nil)
+                            '(200 "{\"keys\":[]}" nil)
+                            (list 200 (make-string 65537 ?x) nil)))
+      (let (resources command)
+        (cl-letf (((symbol-function 'ende-curl-start-request)
+                   (lambda (&rest arguments)
+                     (let* ((builder (plist-get arguments :command))
+                            (headers (make-temp-file "ende-jwks-test-")))
+                       (unwind-protect (setq command (funcall builder headers nil))
+                         (delete-file headers)))
+                     (setq arguments (plist-put arguments :command
+                                                 (lambda (&rest _) '("cat"))))
+                     (setq resources (apply start arguments))
+                     (with-temp-file (plist-get resources :headers-file)
+                       (insert (format "HTTP/1.1 %d Test\r\n\r\n" (car response))))
+                     (process-send-string (plist-get resources :process) (cadr response))
+                     (process-send-eof (plist-get resources :process))
+                     resources)))
+          (if (nth 2 response)
+              (should (= (length (gethash "keys" (ende-codex-auth--jwks))) 1))
+            (should-error (ende-codex-auth--jwks)))
+          (should (equal (cadr (member "--url" command)) ende-codex-auth--jwks-uri))
+          (should (equal (cadr (member "--max-redirs" command)) "0"))
+          (should (member "--disable" command))
+          (should (member "--max-time" command))
+          (should-not (member "--insecure" command))
+          (should-not (member "--location" command))
+          (should-not (process-live-p (plist-get resources :process)))
+          (should-not (buffer-live-p (plist-get resources :response-buffer)))
+          (should-not (file-exists-p (plist-get resources :headers-file))))))))
 
 (provide 'ende-rs256-test)
 ;;; ende-rs256-test.el ends here

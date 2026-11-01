@@ -2,10 +2,7 @@
 
 ;;; Commentary:
 
-;; Ende-owned storage only.  Callers must validate OAuth identity before passing
-;; credentials to `ende-codex-auth--register'.  This module does not authenticate
-;; users, trust decoded JWT claims, import credentials, or select an account.
-;; The public login and transport cutover are deliberately a separate feature.
+;; Trusted OpenAI identity validation and private account storage.
 
 ;;; Code:
 
@@ -15,6 +12,184 @@
 (require 'ende-rs256)
 (require 'ende-protocol)
 (require 'ende-provider-config)
+(require 'ende-curl)
+
+(defconst ende-codex-auth--issuer "https://auth.openai.com")
+(defconst ende-codex-auth--jwks-uri
+  "https://auth.openai.com/.well-known/jwks.json")
+
+(define-error 'ende-codex-identity-error "OpenAI identity could not be verified")
+
+(defun ende-codex-auth--json (bytes)
+  "Parse a UTF-8 JSON object from BYTES, rejecting duplicate members."
+  (let* ((text (decode-coding-string bytes 'utf-8-unix))
+         (value (ende-protocol-json-read-string text))
+         (json-object-type 'alist) (json-key-type 'string)
+         (json-array-type 'vector) (json-null :null) (json-false :false))
+    (unless (and (hash-table-p value)
+                 (not (cl-loop for char across text thereis (> char #x10ffff))))
+      (signal 'ende-codex-identity-error nil))
+    (cl-labels ((check (object)
+                  (cond
+                   ((vectorp object) (mapc #'check object))
+                   ((consp object)
+                    (let ((seen (make-hash-table :test #'equal)))
+                      (dolist (entry object)
+                        (when (gethash (car entry) seen)
+                          (signal 'ende-codex-identity-error nil))
+                        (puthash (car entry) t seen)
+                        (check (cdr entry))))))))
+      (check (json-read-from-string text)))
+    value))
+
+(defun ende-codex-auth--jwks ()
+  "Fetch a bounded key set from the pinned OpenAI HTTPS endpoint."
+  (let* ((url (ende-curl--validated-url (list :url ende-codex-auth--jwks-uri)))
+         (origin (ende-url-normalize ende-codex-auth--issuer))
+         (destination (ende-url-normalize url))
+         (ende-connect-timeout 10)
+         (ende-max-response-header-bytes 16384)
+         (ende-max-stderr-bytes 4096)
+         (received 0) resources process overflow)
+    (unless (and (equal (plist-get origin :scheme) "https")
+                 (equal url (concat ende-codex-auth--issuer "/.well-known/jwks.json"))
+                 (equal (plist-get destination :host) "auth.openai.com")
+                 (= (plist-get destination :port) 443))
+      (signal 'ende-codex-identity-error nil))
+    (unwind-protect
+        (progn
+          (setq resources
+                (ende-curl-start-request
+                 :profile (list :url url) :name "ende-openai-jwks"
+                 :command (lambda (headers _config)
+                            (append (ende-curl-base-command url)
+                                    (ende-curl-response-options headers)
+                                    (ende-curl-timeout-options 15 65536)
+                                    (list "--header" "Accept: application/json" "--url" url)))
+                 :filter (lambda (proc chunk)
+                           (cl-incf received (string-bytes chunk))
+                           (if (> received 65536)
+                               (progn (setq overflow t) (delete-process proc))
+                             (with-current-buffer (process-buffer proc)
+                               (goto-char (point-max)) (insert chunk))))
+                 :sentinel #'ignore)
+                process (plist-get resources :process))
+          (set-process-coding-system process 'binary 'binary)
+          (with-current-buffer (plist-get resources :response-buffer)
+            (set-buffer-multibyte nil))
+          (let ((deadline (+ (float-time) 16)))
+            (while (and (process-live-p process) (< (float-time) deadline))
+              (accept-process-output process 0.05)
+              (when (> (file-attribute-size
+                        (file-attributes (plist-get resources :headers-file))) 16384)
+                (setq overflow t)
+                (delete-process process))))
+          (unless (and (not overflow) (eq (process-status process) 'exit)
+                       (= (process-exit-status process) 0)
+                       (= (or (car (ende-curl-response-headers
+                                    (plist-get resources :headers-file))) 0) 200))
+            (signal 'ende-codex-identity-error nil))
+          (let* ((jwks (with-current-buffer (plist-get resources :response-buffer)
+                         (ende-codex-auth--json (buffer-string))))
+                 (keys (gethash "keys" jwks)))
+            (unless (and (vectorp keys) (<= 1 (length keys) 16))
+              (signal 'ende-codex-identity-error nil))
+            (mapc #'ende-rs256--public-key keys)
+            jwks))
+      (when (processp process)
+        (ende-curl--cancel-idle-timer process))
+      (ende-curl-cleanup-resources
+       (list (plist-get resources :response-buffer) (plist-get resources :stderr-buffer))
+       (list (plist-get resources :headers-file) (plist-get resources :config-file))
+       (list process (plist-get resources :stderr-process))))))
+
+(defun ende-codex-auth--claims (claims client-id nonce)
+  "Validate authenticated CLAIMS against CLIENT-ID and login NONCE."
+  (let* ((now (floor (float-time)))
+         (skew 60)
+         (audience (gethash "aud" claims))
+         (azp (gethash "azp" claims :absent))
+         (expires (gethash "exp" claims))
+         (issued (gethash "iat" claims))
+         (not-before (gethash "nbf" claims :absent)))
+    (unless (and (equal (gethash "iss" claims) ende-codex-auth--issuer)
+                 (if (stringp audience) (equal audience client-id)
+                   (and (vectorp audience) (> (length audience) 0)
+                        (cl-every #'ende-codex-auth--text-p audience)
+                        (member client-id (append audience nil))
+                        (or (= (length audience) 1) (equal azp client-id))))
+                 (or (eq azp :absent) (equal azp client-id))
+                 (integerp expires) (> expires (- now skew))
+                 (integerp issued) (<= 0 issued (+ now skew)) (< issued expires)
+                 (or (eq not-before :absent)
+                     (and (integerp not-before) (<= 0 not-before (+ now skew))
+                          (< not-before expires)))
+                 (ende-codex-auth--text-p (gethash "sub" claims))
+                 (if nonce (equal (gethash "nonce" claims) nonce)
+                   (eq (gethash "nonce" claims :absent) :absent)))
+      (signal 'ende-codex-identity-error nil))
+    claims))
+
+(defun ende-codex-auth--signed-claims (id-token jwks)
+  "Return claims from ID-TOKEN only after RS256 verification with trusted JWKS."
+  (unless (and (stringp id-token) (<= (length id-token) 65536))
+    (signal 'ende-codex-identity-error nil))
+  (let* ((parts (split-string id-token "\\." nil))
+         (_ (unless (and (= (length parts) 3)
+                         (cl-every (lambda (part) (> (length part) 0)) parts))
+              (signal 'ende-codex-identity-error nil)))
+         (header (ende-codex-auth--json (ende-rs256--decode (car parts)))))
+    (unless (and (equal (gethash "alg" header) "RS256")
+                 (ende-rs256--kid-p (gethash "kid" header))
+                 (cl-every (lambda (key) (eq (gethash key header :absent) :absent))
+                           '("crit" "b64" "jku" "jwk" "x5u")))
+      (signal 'ende-codex-identity-error nil))
+    (ende-rs256-verify (concat (car parts) "." (cadr parts))
+                       (nth 2 parts) (funcall jwks) (gethash "kid" header))
+    (ende-codex-auth--json (ende-rs256--decode (cadr parts)))))
+
+(defun ende-codex-auth--identity-guard (function)
+  "Call FUNCTION without exposing tokens in errors or the debugger."
+  (let ((debug-on-error nil) (debug-on-quit nil) (debug-on-signal nil))
+    (condition-case nil
+        (funcall function)
+      (error (signal 'ende-codex-identity-error nil)))))
+
+(defun ende-codex--verify-id-token (id-token expected-client-id expected-nonce)
+  "Authenticate ID-TOKEN for EXPECTED-CLIENT-ID and EXPECTED-NONCE.
+Return claims only after signature and OpenID validation."
+  (ende-codex-auth--identity-guard
+   (lambda ()
+     (unless (and (ende-codex-auth--text-p expected-client-id)
+                  (ende-codex-auth--text-p expected-nonce))
+       (signal 'ende-codex-identity-error nil))
+     (ende-codex-auth--claims
+      (ende-codex-auth--signed-claims id-token #'ende-codex-auth--jwks)
+      expected-client-id expected-nonce))))
+
+(defun ende-codex-auth--verify-refresh (id-token record)
+  "Authenticate refreshed ID-TOKEN without changing RECORD's identity."
+  (ende-codex-auth--identity-guard
+   (lambda ()
+     (let* ((keys (ende-codex-auth--jwks))
+            (source (lambda () keys))
+            (old (ende-codex-auth--signed-claims (plist-get record :id-token) source))
+            (new (ende-codex-auth--signed-claims id-token source))
+            (client (plist-get record :client-id))
+            (nonce (when (ende-protocol-json-has-key-p "nonce" new)
+                     (let ((original (gethash "nonce" old)))
+                       (unless (ende-codex-auth--text-p original)
+                         (signal 'ende-codex-identity-error nil))
+                       original))))
+       (ende-codex-auth--claims new client nonce)
+       (unless (and (equal (gethash "iss" old) ende-codex-auth--issuer)
+                    (equal (gethash "sub" old) (plist-get record :subject))
+                    (equal (gethash "sub" new) (plist-get record :subject))
+                    (equal (gethash "aud" new) (gethash "aud" old))
+                    (integerp (gethash "iat" old))
+                    (>= (gethash "iat" new) (gethash "iat" old)))
+         (signal 'ende-codex-identity-error nil))
+       new))))
 
 (defvar ende-codex-auth--directory
   (expand-file-name "ende-codex/" user-emacs-directory)
