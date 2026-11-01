@@ -415,6 +415,8 @@
   "Abort active jobs and reload every Ende source file in dependency order."
   (interactive)
   (ende-abort-queue)
+  (when-let* ((selector (get-buffer ende-selector-buffer-name)))
+    (with-current-buffer selector (ende-selector-close)))
   (let ((dir (or (file-name-directory (locate-library "ende.el"))
                  (user-error "ende.el not found on load-path"))))
     (dolist (file (ende-reload--files dir))

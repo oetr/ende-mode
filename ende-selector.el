@@ -202,7 +202,7 @@ Report an unavailable model once for each catalog identity."
             (unless (member model (plist-get record :warned))
               (push model (plist-get record :warned))
               (message
-               "ende: model %s is unavailable for %s; using %s"
+               "ende: model %s is unavailable for %s; select explicitly from %s"
                model
                (ende-provider-client-name profile)
                (or (car models) "the first available model")))
@@ -626,7 +626,9 @@ ignored.  Return a cancellation function."
            (or (and (stringp preferred) (member preferred models) preferred)
                configured-model))
           (setq ende-selector--model-state :ready))
-      (setq ende-selector--model-state :error))))
+      (let ((stale (ende-provider-stale-models profile)))
+        (when stale (ende-selector--set-models (plist-get stale :models) preferred))
+        (setq ende-selector--model-state :error)))))
 
 (defun ende-selector--apply-model-catalog
     (profile models details generation preferred &optional error)
@@ -1162,6 +1164,9 @@ performed locally so typing a search term never starts another network request."
 
 (defun ende-selector--install-keybindings ()
   "Install selector bindings, including when this file is reloaded."
+  (setq ende-selector-mode-map (make-sparse-keymap))
+  (set-keymap-parent ende-selector-mode-map special-mode-map)
+  (when (derived-mode-p 'ende-selector-mode) (use-local-map ende-selector-mode-map))
   (define-key ende-selector-mode-map (kbd "n") #'ende-selector-next-provider)
   (define-key ende-selector-mode-map (kbd "p") #'ende-selector-previous-provider)
   (define-key ende-selector-mode-map (kbd "C-n") #'ende-selector-next-model)
@@ -1222,6 +1227,8 @@ performed locally so typing a search term never starts another network request."
       (ende-selector-mode)
       (setq ende-selector--source-buffer source
             ende-selector--providers providers
+            ende-selector--api (and (eq last-provider (nth provider-index providers))
+                                     (plist-get selection :api))
             ende-selector--provider-index provider-index
             ende-selector--models nil
             ende-selector--model-details nil

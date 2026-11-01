@@ -43,11 +43,6 @@
   :type 'string
   :group 'ende)
 
-(defcustom ende-codex-model "gpt-5.6-luna"
-  "Default model used by the ChatGPT/Codex profile."
-  :type 'string
-  :group 'ende)
-
 (defcustom ende-codex-endpoint "https://chatgpt.com/backend-api/codex/responses"
   "ChatGPT/Codex Responses endpoint."
   :type 'string
@@ -1543,10 +1538,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex-default (messages callbacks &optional options)
   "Send MESSAGES through the ChatGPT/Codex endpoint using OpenCode auth."
-  (let* ((profile
-          (ende-plist-merge
-           (list :url ende-codex-endpoint :model ende-codex-model)
-           options))
+  (let* ((profile (ende-provider-config-copy options))
          (session
           (ende-codex--make-session
            :profile profile :callbacks callbacks
@@ -1554,6 +1546,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (condition-case startup-error
         (progn
           (ende-validate-resource-options)
+          (unless (and (stringp (plist-get profile :model))
+                       (not (string-blank-p (plist-get profile :model))))
+            (error "Select a Codex model explicitly"))
           (ende-codex--validated-generation-url
            (plist-get profile :url))
           (ende-transport-session-invoke

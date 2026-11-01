@@ -229,7 +229,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                 ('generation
                  (ende-llm-default '(("user" . "remote source")) callbacks profile))
                 ('codex-generation
-                 (ende-codex-default '(("user" . "remote source")) callbacks))
+                 (ende-codex-default '(("user" . "remote source")) callbacks
+                                     '(:url "https://chatgpt.com/backend-api/codex/responses" :model "test-model")))
                 ('discovery
                  (let ((ende-provider-discovery-enabled t))
                    (setq cancel (ende-provider-discover profile #'ignore))))

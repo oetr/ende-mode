@@ -74,17 +74,6 @@ When nil, use only the response inactivity timeout."
     "X-OpenRouter-Title: ende-mode")
   "OpenRouter app-attribution headers for the built-in profiles.")
 
-(defconst ende-provider--secret-profile-keys
-  '(:token :api-key :secret :authorization :auth-token :access :refresh
-	   :access-token :refresh-token :bearer-token)
-  "Profile fields reserved for credentials, which remain in auth-source.")
-
-(defun ende-provider--strip-secret-fields (profile)
-  "Return PROFILE without credential fields."
-  (cl-loop for (key value) on profile by #'cddr
-           unless (memq key ende-provider--secret-profile-keys)
-           append (list key value)))
-
 ;;;; Profiles and display policy
 
 (defvar ende-provider--runtime-settings (make-hash-table :test #'eq)
@@ -778,7 +767,7 @@ selection without starting another model-list request."
   "Remove expired and excess entries from CACHE."
   (let ((now (float-time))
         (expired nil))
-    (when ende-provider-discovery-ttl
+    (when (and ende-provider-discovery-ttl (not (eq cache ende-provider--catalog-cache)))
       (maphash
        (lambda (key entry)
          (when (>= (- now (plist-get entry :time))
@@ -811,8 +800,6 @@ selection without starting another model-list request."
              (or (null ende-provider-discovery-ttl)
                  (< age ende-provider-discovery-ttl)))
         entry
-      (when entry
-        (remhash key ende-provider--catalog-cache))
       nil)))
 
 (defun ende-provider--catalog-for-profile (profile)
@@ -857,6 +844,13 @@ The returned plist contains `:models', `:details', `:error', and
       (list :models (copy-sequence (plist-get entry :models))
             :details (copy-tree (plist-get entry :details))
             :error nil
+            :generation (plist-get entry :generation)))))
+
+(defun ende-provider-stale-models (profile)
+  "Return the last successful PROFILE catalog, explicitly marked stale."
+  (let ((entry (gethash (ende-provider--catalog-key profile) ende-provider--catalog-cache)))
+    (when entry
+      (list :models (ende-provider-config-copy (plist-get entry :models)) :stale t
             :generation (plist-get entry :generation)))))
 
 (defun ende-provider-models-generation (profile)
