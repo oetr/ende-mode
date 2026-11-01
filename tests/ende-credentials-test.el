@@ -37,5 +37,18 @@
           (should-error (ende-curl--validated-url (plist-put (copy-sequence profile) :url "http://localhost/v1"))))
       (delete-file file))))
 
+(ert-deftest ende-credentials-skips-ignored-sources ()
+  (let* ((file (make-temp-file "ende-authinfo-"))
+         (auth-sources (list (concat file ".missing") file))
+         (profile '(:auth-method auth-source :auth-source-host "example.test"
+                    :auth-source-port 443 :auth-source-user "work")))
+    (unwind-protect
+        (progn
+          (set-file-modes file #o600)
+          (with-temp-file file
+            (insert "machine example.test port 443 login work password test-key\n"))
+          (should (equal (ende-credentials-secret profile) "test-key")))
+      (delete-file file))))
+
 (provide 'ende-credentials-test)
 ;;; ende-credentials-test.el ends here
