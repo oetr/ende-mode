@@ -224,6 +224,44 @@
 
 
 
+(ert-deftest ende-test/selector-confirm-requires-valid-model ()
+  (ende-test--reset)
+  (let ((source (generate-new-buffer " *ende-selector-confirm-source*"))
+        (selector (generate-new-buffer " *ende-selector-confirm*"))
+        (ende-providers '(remote))
+        (ende-custom-providers ende-test--custom-providers)
+        (ende-model-selection-scope 'buffer))
+    (unwind-protect
+        (progn
+          (ende-model-selection-save '(:provider remote :model "missing") source)
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote))
+            (let ((profile (ende-provider-profile 'remote)))
+              (ende-selector--apply-model-catalog
+               profile '("other") nil 1 "missing")
+              (should ende-selector--selection-required)
+              (should-error (ende-selector-confirm) :type 'user-error)
+              (should (buffer-live-p selector))
+              (should (equal (plist-get (ende-model-selection-for-buffer source) :model)
+                             "missing"))
+              ;; An absent model must also fail visibly without closing.
+              (ende-selector--apply-model-catalog profile nil nil 2 nil)
+              (should-not (ende-selector--model-name))
+              (should-error (ende-selector-confirm) :type 'user-error)
+              (should (buffer-live-p selector))
+              (should (equal (plist-get (ende-model-selection-for-buffer source) :model)
+                             "missing"))
+              (ende-selector--apply-model-catalog profile '("other") nil 3 nil)
+              (ende-selector-confirm)))
+          (should-not (buffer-live-p selector))
+          (should (equal (plist-get (ende-model-selection-for-buffer source) :model)
+                         "other")))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/selector-runs-from-source-with-selected-profile ()
   (let* ((source (generate-new-buffer " *ende-selector-source*"))
          (selector (generate-new-buffer " *ende-selector-test*"))

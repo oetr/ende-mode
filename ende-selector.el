@@ -1024,7 +1024,8 @@ performed locally so typing a search term never starts another network request."
   (ende-selector--review-source #'ende-reject-all-output))
 
 (defun ende-selector--save-selection ()
-  "Save the current provider/model and explicit controls."
+  "Save the current provider/model and explicit controls.
+Return the saved selection, or nil when no valid model is selected."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
@@ -1069,7 +1070,8 @@ performed locally so typing a search term never starts another network request."
       (ende-provider-validate-controls (ende-selector--resolved-profile))
     ((error quit)
      (user-error "%s" (error-message-string validation-error))))
-  (ende-selector--save-selection)
+  (unless (ende-selector--save-selection)
+    (user-error "Select a model explicitly with the model picker"))
   (ende-selector-close))
 
 (defun ende-selector--dispatch (type instruction)
