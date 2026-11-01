@@ -17,6 +17,7 @@
 (require 'url-parse)
 (require 'ende-core)
 (require 'ende-transport)
+(require 'ende-url)
 
 (defun ende-curl-local-directory ()
   "Return an existing local directory for provider processes and temp files.
@@ -48,6 +49,7 @@ from remote buffers are supported, but their processes always run locally."
 (defun ende-curl--validated-url (profile &optional url)
   "Return validated URL for PROFILE, optionally checking URL instead."
   (let* ((value (or url (plist-get profile :url)))
+         (_ (ende-url-normalize value))
          (parsed (and (stringp value) (url-generic-parse-url value)))
          (scheme (and parsed (downcase (or (url-type parsed) ""))))
          (host (and parsed (url-host parsed)))
@@ -179,7 +181,9 @@ separate from user-configured profile headers."
          (host (url-host parsed)))
     (append
      (list "--globoff" "--proto" "=http,https"
-           "--proto-redir" "=http,https")
+           "--proto-redir" "=https" "--max-redirs" "0")
+     (when (equal (downcase host) "localhost")
+       (list "--resolve" (format "localhost:%d:127.0.0.1" (url-port parsed))))
      (when (or (not ende-allow-environment-proxy)
                (ende-curl--loopback-host-p host))
        (list "--noproxy" "*")))))

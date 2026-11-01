@@ -757,6 +757,11 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/provider-url-and-curl-command-are-hardened ()
+  (dolist (url '("http://127.1/v1" "http://0177.0.0.1/v1"
+                 "http://0x7f000001/v1" "https://example.test:65536/v1"
+                 "https://example.test:0/v1" "https://example.test\\@other.test/v1"
+                 "https://%65xample.test/v1" "https://example.test/v1%2fother"))
+    (should-error (ende-curl--validated-url (list :url url))))
   (should-error
    (ende-curl--validated-url '(:url "http://127.attacker.test/v1")))
   (should-error
@@ -776,6 +781,16 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (equal (cadr (member "--user-agent" command))
                    ende-client-name))
     (should (member "--url" command))))
+
+(ert-deftest ende-curl-loopback-target-is-pinned ()
+  (let* ((ende-allow-environment-proxy t)
+         (url "http://localhost:8080/v1/chat/completions")
+         (command (ende-curl-command (list :url url) "/tmp/headers" nil)))
+    (should (equal (cadr (member "--resolve" command)) "localhost:8080:127.0.0.1"))
+    (should (equal (cadr (member "--noproxy" command)) "*"))
+    (should (equal (cadr (member "--max-redirs" command)) "0"))
+    (should (equal (cadr (member "--url" command)) url))
+    (should-not (member "--location" command))))
 
 
 
