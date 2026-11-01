@@ -3595,7 +3595,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                  (assistant
                   (list :role "assistant" :content (plist-get prepared :parts) :tool-calls calls
                         :reasoning-content
-                        (plist-get result :reasoning-content))))
+                        (plist-get result :reasoning-content)
+                        :protocol-history (plist-get result :protocol-history))))
             (ende-chat--stage-agent-section
              job
              (ende-chat--assistant-protocol-text

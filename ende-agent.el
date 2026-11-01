@@ -307,7 +307,8 @@ clarification; do not proceed with the disputed change.\n\n"
                         (ende-tools-call-value call :arguments))))
              (list :role "assistant" :content (or (plist-get result :content) "")
                    :tool-calls calls
-                   :reasoning-content (plist-get result :reasoning-content)))
+                   :reasoning-content (plist-get result :reasoning-content)
+                   :protocol-history (plist-get result :protocol-history)))
            :tool-result-message
            (lambda (child call content)
              (ende-agent--work-section

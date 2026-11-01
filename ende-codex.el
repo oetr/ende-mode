@@ -123,7 +123,7 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile stream tool-calls terminal-event debug-record strict-completion)
+  profile stream tool-calls terminal-event debug-record strict-completion replay-items)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -968,12 +968,26 @@ is queried for every call; it does not share the model catalog cache."
     (mapcar #'cdr
             (sort calls (lambda (left right) (< (car left) (car right)))))))
 
+(defun ende-codex--history (session)
+  "Return completed replayable output in SESSION's wire order."
+  (let ((items (sort (copy-sequence (ende-codex--session-replay-items session))
+                     (lambda (a b) (< (car a) (car b))))))
+    (when items (cons 'openai-responses (mapcar #'cdr items)))))
+
+(defun ende-codex--remember-output (session item index)
+  "Capture completed replay ITEM at output INDEX for SESSION."
+  (when (and (integerp index) (>= index 0)
+             (member (ende-protocol-json-get "type" item) '("message" "reasoning" "function_call")))
+    (setf (alist-get index (ende-codex--session-replay-items session))
+          (ende-provider-config-copy item))))
+
 (defun ende-codex--result (session)
   "Build a normalized result plist for SESSION."
   (ende-stream-result
    (ende-codex--session-stream session) "output_tokens"
    (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-   (list :tool-calls (ende-codex--tool-call-list session))))
+   (list :tool-calls (ende-codex--tool-call-list session)
+         :protocol-history (ende-codex--history session))))
 
 (defun ende-codex--response-status (session)
   "Return SESSION's HTTP response status, or nil."
@@ -993,7 +1007,7 @@ is queried for every call; it does not share the model catalog cache."
     (ende-stream-settle-generation
      (ende-codex--session-stream session) outcome value "output_tokens"
      (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-     (list :tool-calls tool-calls)
+     (list :tool-calls tool-calls :protocol-history (ende-codex--history session))
      tool-calls nil t)))
 
 (defun ende-codex--fail (session error)
@@ -1132,11 +1146,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
     (when (equal type "response.output_item.done")
+      (ende-codex--remember-output session item output-index)
       (when (equal (ende-protocol-json-get "type" item) "image_generation_call")
         (ende-stream-record-image
          (ende-codex--session-stream session)
          (ende-content-generated-image (ende-protocol-json-get "result" item)))))
     (when (member type '("response.completed" "response.done"))
+      (cl-loop for entry in (ende-codex--output-items output) for index from 0
+               do (ende-codex--remember-output session entry index))
       (when (cl-some (lambda (entry)
                       (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
                     (ende-codex--output-items output))
@@ -1345,10 +1362,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
                      (cons :content
                            (ende-codex--message-content
                             (car message) (cdr message) profile))))
-       (let ((calls (plist-get message :tool-calls))
+       (let ((history (plist-get message :protocol-history))
+             (calls (plist-get message :tool-calls))
              (content (plist-get message :content))
              (call-id (plist-get message :tool-call-id)))
          (cond
+          ((eq (car-safe history) 'openai-responses) (ende-provider-config-copy (cdr history)))
           (calls
            (append
             (when (and (stringp content) (not (string-empty-p content)))

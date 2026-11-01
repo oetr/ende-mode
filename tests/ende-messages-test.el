@@ -13,6 +13,9 @@
                     "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":1}\"}}"
                     "{\"type\":\"content_block_stop\",\"index\":0}"
                     "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}"
+                    "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"opaque\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-value\"}}"
+                    "{\"type\":\"content_block_stop\",\"index\":1}"
                     "{\"type\":\"message_stop\"}"))
       (ende-messages--event session (ende-protocol-json-read-string json)))
     (let* ((result (ende-messages--result session))
@@ -29,6 +32,8 @@
       (should (= (length (alist-get :messages body)) 3))
       (should (equal (alist-get :role (car (last (alist-get :messages body)))) "user"))
       (should (alist-get :system body))
+      (should (equal (gethash "signature" (cadr (alist-get :content (nth 1 (alist-get :messages body)))))
+                     "signed-value"))
       (dolist (image (list '((:type . "base64") (:data . "private-image"))
                            (ende-protocol-json-read-string "{\"type\":\"base64\",\"data\":\"private-image\"}")))
         (should-not (string-match-p "private-image" (prin1-to-string (ende-content-redact image)))))
