@@ -908,11 +908,18 @@ The returned plist contains `:models', `:details', `:error', and
   (copy-tree (plist-get (ende-provider--catalog-for-profile profile) :details)))
 
 (defun ende-provider--catalog-from-models (models)
-  "Normalize model IDs MODELS into a catalog without endpoint details."
-  (setq models (cl-remove-if-not #'stringp models))
-  (when models
-    (list :models (copy-sequence models)
-          :details (mapcar (lambda (model) (list :id model)) models))))
+  "Normalize MODEL IDs or `:id'/`:name' details into a catalog."
+  (let ((details
+         (delq nil
+               (mapcar
+                (lambda (model)
+                  (cond
+                   ((stringp model) (list :id model))
+                   ((and (listp model) (stringp (plist-get model :id))) model)))
+                models))))
+    (when details
+      (list :models (mapcar (lambda (detail) (plist-get detail :id)) details)
+            :details details))))
 
 (defun ende-provider--catalog-from-payload (payload)
   "Normalize endpoint model-list PAYLOAD into one catalog."

@@ -240,7 +240,10 @@ the discovered pricing metadata for those model IDs."
                           'ende-selector-price-output-face
                         'ende-selector-price-muted-face)))))))
        (list (propertize candidate 'face 'ende-selector-model-face)
-             ""
+             (or (and (plist-get detail :name)
+                      (propertize (plist-get detail :name)
+                                  'face 'ende-selector-price-muted-face))
+                 "")
              (or prices ""))))
    completions))
 

@@ -45,5 +45,27 @@
     (should-not (string-match-p "transport-test-token" (prin1-to-string (plist-get out :command))))
     (should (string-match-p "Authorization: Bearer transport-test-token" (plist-get out :config-text)))))
 
+(ert-deftest ende-codex-catalog-keeps-listed-metadata ()
+  (let* ((models (json-parse-string
+                  (json-encode
+                   (list (cons 'models
+                               (vector
+                                (list (cons 'slug "model-a")
+                                      (cons 'display_name "Model A")
+                                      (cons 'visibility "list")
+                                      (cons 'default_reasoning_level "high")
+                                      (cons 'supported_reasoning_levels
+                                            (vector (list (cons 'effort "low"))
+                                                    (list (cons 'effort "high")))))
+                                (list (cons 'slug "internal")
+                                      (cons 'visibility "hidden"))))))))
+         (entries (delq nil (mapcar #'ende-codex--catalog-entry
+                                    (append (gethash "models" models) nil))))
+         (catalog (ende-provider--catalog-from-models entries)))
+    (should (equal (plist-get catalog :models) (list "model-a")))
+    (should (equal (plist-get (car (plist-get catalog :details)) :name) "Model A"))
+    (should (equal (plist-get (car entries) :efforts) (list "low" "high")))
+    (should (equal (plist-get (car entries) :default) "high"))))
+
 (provide 'ende-codex-test)
 ;;; ende-codex-test.el ends here

@@ -650,14 +650,17 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
         (finish nil nil t)))))
 
 (defun ende-codex-probe-models (profile callback)
-  "Probe PROFILE's ChatGPT account catalog and call CALLBACK with model slugs.
-CALLBACK receives (MODELS ERROR).  Return a cancellation function."
+  "Probe PROFILE's ChatGPT account catalog and call CALLBACK with model details.
+CALLBACK receives (MODELS ERROR), where each model is an `:id'/`:name' plist."
   (ende-codex--probe-catalog
    profile
    (lambda (entries error)
      (funcall callback
               (and entries
-                   (mapcar (lambda (entry) (plist-get entry :id)) entries))
+                   (mapcar (lambda (entry)
+                             (list :id (plist-get entry :id)
+                                   :name (plist-get entry :name)))
+                           entries))
               error))))
 
 (defun ende-codex-probe-reasoning-efforts (profile model callback)
