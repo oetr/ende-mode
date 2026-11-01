@@ -182,6 +182,14 @@
     (and (eq provider (plist-get selection :provider))
          (plist-get selection :model))))
 
+(defun ende-selector--binding-current-p (profile)
+  "Return non-nil if PROFILE still belongs to the configured selector binding."
+  (condition-case nil
+      (equal (ende-provider-selection-provenance profile)
+             (ende-provider-selection-provenance
+              (ende-provider--compose-profile (plist-get profile :name) nil (plist-get profile :api))))
+    (error nil)))
+
 (defun ende-selector--preferred-model (provider profile)
   "Return the saved or explicitly configured model for PROVIDER PROFILE."
   (or (ende-selector--remembered-model provider)
@@ -676,7 +684,8 @@ PREFERRED is selected only when it is present in MODELS."
                           (= ende-selector--probe-generation generation)))
                (setq completed t)
                (with-current-buffer selector-buffer
-                 (when (eq (ende-selector--provider-name) provider)
+                 (when (and (eq (ende-selector--provider-name) provider)
+                            (ende-selector--binding-current-p profile))
                    (setq ende-selector--probe-cancel nil)
                    (let* ((live-profile profile)
                           (live-preferred

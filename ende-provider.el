@@ -367,7 +367,12 @@ SELECTION must contain a provider symbol and a nonempty model string."
   "Return the preference-history key for PROVIDER and MODEL, or nil."
   (and (symbolp provider) provider
        (stringp model) (not (string-empty-p model))
-       (list provider (copy-sequence model))))
+       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model)
+                         (error nil)))
+              (binding (when profile
+                         (cl-remove-if (lambda (entry) (eq (car entry) :models))
+                                       (ende-provider-selection-provenance profile)))))
+         (list provider (copy-sequence model) binding))))
 
 (defun ende-model-selection--buffer-preference-table (buffer &optional create)
   "Return BUFFER's pair-preference table, creating it when CREATE is non-nil."
@@ -526,12 +531,6 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
                         (plist-get selection :api))
                      (error nil))))
       (when profile
-        (puthash (ende-model-selection--provenance-key selection)
-                 (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
-    (when (plist-member selection :api)
-      (let ((profile (ende-provider--compose-profile
-                      (plist-get selection :provider) (plist-get selection :model)
-                      (plist-get selection :api))))
         (puthash (ende-model-selection--provenance-key selection)
                  (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
     (setq ende-model-selection--last-used (copy-tree selection))

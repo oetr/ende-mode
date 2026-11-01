@@ -832,7 +832,7 @@
                      '(:temperature 0 :thinking off :reasoning-effort "high")))
             (ende-selector-close))
           (should (equal
-                   (gethash '(alpha "alpha-one")
+                   (gethash (ende-model-selection--pair-key 'alpha "alpha-one")
                             ende-model-selection--shared-control-preferences)
                    '(:temperature 0 :thinking off :reasoning-effort "high")))
           (should (equal (plist-get ende-model-selection--last-used :provider)
