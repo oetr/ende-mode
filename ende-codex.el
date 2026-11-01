@@ -1324,6 +1324,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (apply-partially #'ende-codex--handle-sse-events session))
           (unless (ende-codex--terminal-p session)
             (if (and (ende-codex--session-terminal-event session)
+                     (not (equal (ende-stream-session-finish-reason
+                                  (ende-codex--session-stream session)) "incomplete"))
                      (or (not (ende-codex--session-strict-completion session))
                          (equal (ende-protocol-json-get
                                  "type" (ende-codex--session-terminal-event session))
@@ -1333,8 +1335,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
               (ende-codex--fail
                session
                (ende-error-create
-                :kind 'protocol
-                :message "Codex stream ended without a terminal response event")))))))
+                :kind (if (equal (ende-stream-session-finish-reason
+                                  (ende-codex--session-stream session)) "incomplete") 'incomplete 'protocol)
+                :message "Responses generation is incomplete or missing its completion event")))))))
     ((error quit)
      (ende-codex--fail
       session

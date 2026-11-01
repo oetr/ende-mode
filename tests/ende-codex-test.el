@@ -783,7 +783,7 @@
             (accept-process-output process 0.05))
           (ende-codex--sentinel session process "finished\n")
           (should (eq (ende-error-kind failure) 'protocol))
-          (should (string-match-p "without a terminal response event"
+          (should (string-match-p "missing its completion event"
                                   (ende-error-message failure))))
       (when (process-live-p process)
         (delete-process process))

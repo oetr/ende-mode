@@ -953,6 +953,13 @@ Use COMMAND for the process, or a silent sleep process by default."
     (should (string= (plist-get (plist-get partial :result) :content)
                      "kept"))))
 
+(ert-deftest ende-test/incomplete-generation-never-succeeds ()
+  (dolist (case '((chat . "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n")
+                  (codex . "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n")))
+    (let ((out (ende-test--run-stream-request (car case) (list (cdr case)))))
+      (should-not (plist-get out :result))
+      (should (eq (ende-error-kind (plist-get out :error)) 'incomplete)))))
+
 (provide 'ende-transport-test)
 
 ;;; ende-transport-test.el ends here

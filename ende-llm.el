@@ -451,6 +451,9 @@ The :callbacks argument initializes the composed transport lifecycle."
                  ((ende-llm--session-provider-error session)
                   (ende-llm--fail
                    session (ende-llm--session-provider-error session)))
+                 ((member (ende-stream-session-finish-reason (ende-llm--session-stream session))
+                          '("length" "content_filter"))
+                  (ende-llm--fail session (ende-error-create :kind 'incomplete :message "Generation is incomplete")))
                  (t
                   (ende-llm--diagnose-result session)
                   (ende-llm--settle
