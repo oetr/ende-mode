@@ -784,14 +784,14 @@ bypassed by a later same-provider job."
     (let* ((buffer (and (ende-target-p target)
                         (ende-target-buffer target)))
            (profile
-            (ende-credentials-capture
-             (ende-provider-config-copy
+            (ende-provider-config-copy
              (or (plist-get data :profile)
                  (and (plist-member data :provider)
-                      (ende-provider-profile-snapshot
-                       (plist-get data :provider)))
-                 (and (buffer-live-p buffer)
-                      (ende-provider-profile-for-buffer buffer t))))))
+                      (ende-provider-profile-snapshot (plist-get data :provider)))
+                 (and (buffer-live-p buffer) (ende-provider-profile-for-buffer buffer t)))))
+           (_ (when (eq (plist-get profile :auth-method) 'auth-source)
+                (ende-provider-validate-profile profile)))
+           (profile (ende-credentials-capture profile))
            (now (float-time))
            (overrides
             (append (when (plist-member data :parallel)

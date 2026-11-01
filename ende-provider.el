@@ -203,7 +203,9 @@ Present preference keys override PROFILE even when their value is nil."
     (dolist (control ende-controls--names)
       (when (plist-member preferences control)
         (setq resolved
-              (plist-put resolved control (plist-get preferences control)))))
+              (plist-put resolved control (plist-get preferences control))
+              resolved (plist-put resolved :provenance
+                                  (plist-put (plist-get resolved :provenance) control 'selector)))))
     resolved))
 
 (defun ende-provider-profile-for-selection (name model preferences &optional api)
@@ -524,6 +526,12 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
                         (plist-get selection :api))
                      (error nil))))
       (when profile
+        (puthash (ende-model-selection--provenance-key selection)
+                 (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
+    (when (plist-member selection :api)
+      (let ((profile (ende-provider--compose-profile
+                      (plist-get selection :provider) (plist-get selection :model)
+                      (plist-get selection :api))))
         (puthash (ende-model-selection--provenance-key selection)
                  (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
     (setq ende-model-selection--last-used (copy-tree selection))

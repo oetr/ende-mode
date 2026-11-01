@@ -90,6 +90,8 @@ from remote buffers are supported, but their processes always run locally."
   "Resolve PROFILE's auth-source secret, or nil for unauthenticated hosts."
   (ende-curl--validated-url profile)
   (let ((host (plist-get profile :auth-source-host)))
+    (when (and (eq (plist-get profile :auth-method) 'auth-source) (not host))
+      (error "Authenticated profile is missing its exact credential binding"))
     (when host
       (ende-credentials-secret profile))))
 
