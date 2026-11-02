@@ -235,5 +235,35 @@
                 (should (= requests 4))))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/connection-selections-isolate-preferences-and-snapshots ()
+  (let ((ende-providers '(openai))
+        (ende-builtin-provider-settings '((openai :models ("gpt-5-test"))))
+        (ende-custom-providers nil)
+        (ende-model-selection-scope 'global)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--provenance (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+        (personal '(:account "personal" :auth-method auth-source :api openai-responses))
+        (work '(:account "work" :auth-method auth-source :api openai-chat-completions)))
+    (with-temp-buffer
+      (ende-model-selection-save
+       (append '(:provider openai :model "gpt-5-test" :control-preferences (:reasoning-effort "high")) personal))
+      (let ((snapshot (ende-provider-profile-for-buffer)))
+        (ende-model-selection-save
+         (append '(:provider openai :model "gpt-5-test" :control-preferences (:reasoning-effort "low")) work))
+        (let ((current (ende-provider-profile-for-buffer)))
+          (should (equal (plist-get snapshot :account) "personal"))
+          (should (equal (plist-get snapshot :auth-source-user) "personal"))
+          (should (eq (plist-get snapshot :api) 'openai-responses))
+          (should (equal (plist-get snapshot :reasoning-effort) "high"))
+          (should (equal (plist-get current :auth-source-user) "work"))
+          (should (equal (plist-get current :reasoning-effort) "low"))
+          (should-not (equal (ende-provider--catalog-key snapshot)
+                             (ende-provider--catalog-key current))))
+        (should (equal (ende-model-selection-control-preferences
+                        'openai "gpt-5-test" nil (current-buffer) personal)
+                       '(:reasoning-effort "high")))
+        (should (eq (plist-get (ende-provider-profile 'openai) :account) 'default))))))
+
 (provide 'ende-provider-test)
 ;;; ende-provider-test.el ends here
