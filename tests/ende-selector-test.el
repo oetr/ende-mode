@@ -344,12 +344,11 @@
                                  (list (car operation) (cadr operation))))
                   (should (eq (nth 3 (car dispatched)) source))
                   (check-profile (nth 2 (car dispatched)) (car entry) (cdr entry))))
-              ;; Existing validation must reject an unmapped active control.
+              ;; Unmapped preferences cannot affect a request.
               (ende-selector--set-control-preference :thinking 'on)
               (setq dispatched nil)
-              (should-error (ende-selector-insert) :type 'user-error)
-              (should-error (ende-selector-confirm) :type 'user-error)
-              (should-not dispatched)
+              (ende-selector-insert)
+              (should-not (plist-get (nth 2 (car dispatched)) :thinking))
               (ende-selector-reset-controls)
               (should-not (ende-model-selection-control-preferences
                            'openai "gpt-5-test" 'openai-chat-completions source))
@@ -376,8 +375,8 @@
       (setq ende-selector--providers '(openai))
       ;; Supply API-specific inherited capabilities at the profile boundary.
       (cl-letf (((symbol-function 'ende-provider-profile-for-model)
-                 (lambda (provider model &optional api)
-                   (let ((profile (funcall resolve provider model api)))
+                 (lambda (provider model &optional api connection)
+                   (let ((profile (funcall resolve provider model api connection)))
                      (if (eq (plist-get profile :api) 'openai-responses)
                          (plist-put profile :reasoning-effort "high")
                        (plist-put profile :controls nil))))))

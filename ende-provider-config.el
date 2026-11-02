@@ -472,7 +472,17 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
     (list (plist-get parsed :scheme) (plist-get parsed :host)
           (plist-get parsed :port))))
 
-(defun ende-provider-config-resolve (name &optional model api)
+(defun ende-provider-config-supported-apis (profile)
+  "Return APIs with configured generation endpoints for PROFILE."
+  (if (plist-get profile :base-url)
+      (list (plist-get profile :api))
+    (mapcar #'car (plist-get profile :endpoints))))
+
+(defun ende-provider-config-supported-auth (profile)
+  "Return authentication methods implemented for PROFILE's connection."
+  (list (plist-get profile :auth-method)))
+
+(defun ende-provider-config-resolve (name &optional model api connection)
   "Resolve profile NAME into detached nonsecret request settings.
 MODEL is a runtime selection, never a configuration property.  Optional API
 selects another explicitly available wire endpoint.  No network is started."
@@ -483,7 +493,8 @@ selects another explicitly available wire endpoint.  No network is started."
          (configured (cdr (or custom (assq name ende-builtin-provider-settings))))
          (service (unless custom (or (plist-get configured :provider) name)))
          (integration (cdr (assq service ende-provider-config--services)))
-         (api (or api (plist-get configured :api) (plist-get integration :api)))
+         (api (or (plist-get connection :api) api
+                  (plist-get configured :api) (plist-get integration :api)))
          (endpoints (if custom (plist-get configured :endpoints)
                       (plist-get integration :endpoints)))
          (base-url (plist-get configured :base-url))
@@ -494,19 +505,40 @@ selects another explicitly available wire endpoint.  No network is started."
                 (alist-get api endpoints)))
          (model (or model (car (plist-get configured :models))))
          (model-settings (cdr (assoc model (plist-get configured :model-settings))))
-         (account (or (plist-get configured :account) 'default))
+         (account (or (plist-get connection :account)
+                      (if custom
+                          (and (eq (plist-get configured :auth-method) 'auth-source)
+                               (or (plist-get configured :auth-source-user) "ende"))
+                        (or (plist-get configured :account) 'default))))
          (auth (if custom (plist-get configured :auth-method)
                  (if (eq service 'openai-codex) 'codex-oauth 'auth-source)))
          (controls (ende-provider-config--controls service api model))
          (profile
           (list :name name :service service :api api :url url :model model
-                :account (unless custom account) :auth-method auth
+                :account account :auth-method auth
                 :endpoints (ende-provider-config-copy endpoints)
                 :max-concurrency (or (plist-get integration :max-concurrency) 1)
                 :parallel nil :require-sse t :stream-usage t
                 :request-timeout ende-request-timeout
                 :source-name-disclosure ende-source-name-disclosure
                 :output-tokens ende-default-output-tokens)))
+    (when connection
+      (ende-provider-config--plist connection "Connection selection")
+      (cl-loop for (key _value) on connection by #'cddr do
+               (unless (memq key '(:account :auth-method :api))
+                 (error "Unsupported connection field: %s" key)))
+      (when (and (plist-member connection :auth-method)
+                 (not (eq (plist-get connection :auth-method) auth)))
+        (error "Unsupported authentication method for %s" name))
+      (pcase auth
+        ('codex-oauth
+         (ende-provider-config--settings (list :account account) '(:account) "Connection"))
+        ('auth-source
+         (unless (and (or (stringp account) (ende-provider-config-name-p account))
+                      (string-match-p "\\`[[:alnum:]_.@+-]+\\'" (format "%s" account)))
+           (error "Account: supply a nonempty authentication alias")))
+        ('none
+         (when account (error "This provider does not use an account")))))
     (when model (ende-provider-config--string model ":model selection"))
     (unless (and (or custom integration) url)
       (error "Profile %s: define the profile and a supported endpoint for :api %s" name api))
@@ -524,6 +556,7 @@ selects another explicitly available wire endpoint.  No network is started."
           profile (ende-provider-config--inherit profile model-settings 'model))
     (setq profile (plist-put profile :name name)
           profile (plist-put profile :api api)
+          profile (plist-put profile :account account)
           profile (plist-put profile :model-name
                              (when (plist-get model-settings :name)
                                (ende-bounded-single-line (plist-get model-settings :name) 80 t)))
@@ -541,8 +574,7 @@ selects another explicitly available wire endpoint.  No network is started."
         (setq profile (plist-put profile :parallel t))))
     (when (eq auth 'auth-source)
       (let* ((parsed (url-generic-parse-url url))
-             (user (if custom (or (plist-get configured :auth-source-user) "ende")
-                     (symbol-name account))))
+             (user (format "%s" account)))
         (setq profile (plist-put profile :auth-source-host (downcase (url-host parsed)))
               profile (plist-put profile :auth-source-port (url-port parsed))
               profile (plist-put profile :auth-source-user user)

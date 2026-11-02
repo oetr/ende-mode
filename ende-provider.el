@@ -110,6 +110,7 @@ When nil, use only the response inactivity timeout."
 (defun ende-model-selection--provenance-key (selection)
   "Return the stable lookup identity of SELECTION."
   (list (plist-get selection :provider) (plist-get selection :api)
+        (plist-get selection :account) (plist-get selection :auth-method)
         (plist-get selection :model)))
 
 (defvar-local ende-model-selection--buffer-selection nil
@@ -143,10 +144,10 @@ Supported settings are `:max-concurrency' and `:parallel'."
   "Clear all session-level provider settings."
   (clrhash ende-provider--runtime-settings))
 
-(defun ende-provider--compose-profile (name model-override &optional api)
+(defun ende-provider--compose-profile (name model-override &optional api connection)
   "Resolve NAME and MODEL-OVERRIDE before capturing a request snapshot."
   (let* ((name (or name (car ende-providers)))
-         (profile (ende-provider-config-resolve name model-override api)))
+         (profile (ende-provider-config-resolve name model-override api connection)))
     (pcase (plist-get profile :service)
       ('openai-codex
        (setq profile (ende-codex--account-profile profile))
@@ -181,9 +182,9 @@ Supported settings are `:max-concurrency' and `:parallel'."
   "Return a non-secret, composed provider profile for NAME."
   (ende-provider--compose-profile name nil))
 
-(defun ende-provider-profile-for-model (name model &optional api)
+(defun ende-provider-profile-for-model (name model &optional api connection)
   "Return composed provider NAME specialized for selected MODEL."
-  (ende-provider--compose-profile name model api))
+  (ende-provider--compose-profile name model api connection))
 
 (defun ende-provider-control-descriptor (profile control)
   "Return PROFILE's descriptor for CONTROL, or nil."
@@ -206,17 +207,18 @@ Present preference keys override PROFILE even when their value is nil."
   (ende-provider--validate-control-preferences preferences)
   (let ((resolved (copy-tree profile)))
     (dolist (control ende-controls--names)
-      (when (plist-member preferences control)
+      (when (and (ende-provider-control-descriptor profile control)
+                 (plist-member preferences control))
         (setq resolved
               (plist-put resolved control (plist-get preferences control))
               resolved (plist-put resolved :provenance
                                   (plist-put (plist-get resolved :provenance) control 'selector)))))
     resolved))
 
-(defun ende-provider-profile-for-selection (name model preferences &optional api)
+(defun ende-provider-profile-for-selection (name model preferences &optional api connection)
   "Resolve provider NAME and MODEL with explicit control PREFERENCES last."
   (ende-provider-profile-with-control-preferences
-   (ende-provider-profile-for-model name model api) preferences))
+   (ende-provider-profile-for-model name model api connection) preferences))
 
 (defun ende-provider-control-setting (profile preferences control)
   "Return effective CONTROL value, source, and documented provider default."
@@ -375,16 +377,16 @@ SELECTION must contain a provider symbol and a nonempty model string."
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
         (append (list :provider provider :model model)
-                (when (plist-get selection :api) (list :api (plist-get selection :api)))
+                (ende-model-selection-connection selection)
                 (when preferences-present
                   (list :control-preferences preferences)))))))
 
-(defun ende-model-selection--pair-key (provider model api)
+(defun ende-model-selection--pair-key (provider model api &optional connection)
   "Return the preference-history key for PROVIDER, MODEL and API, or nil.
 Nil API resolves to PROVIDER's configured default API."
   (and (symbolp provider) provider
        (stringp model) (not (string-empty-p model))
-       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model api)
+       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model api connection)
                          (error nil)))
               (binding (when profile
                          (cl-remove-if (lambda (entry) (eq (car entry) :models))
@@ -403,11 +405,11 @@ Nil API resolves to PROVIDER's configured default API."
               table))))))
 
 (defun ende-model-selection--control-preference-entry
-    (provider model api &optional buffer)
+    (provider model api &optional buffer connection)
   "Return (FOUND . PREFERENCES) for PROVIDER, MODEL and API.
 Nil API resolves to PROVIDER's configured default API.  An empty preference
 plist is a found entry.  BUFFER defaults to the current buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model api))
+  (let* ((pair (ende-model-selection--pair-key provider model api connection))
          (buffer (or buffer (current-buffer)))
          (missing (make-symbol "missing"))
          entry)
@@ -436,20 +438,20 @@ plist is a found entry.  BUFFER defaults to the current buffer."
     (when entry
       (cons t (copy-tree (cdr entry))))))
 
-(defun ende-model-selection-control-preferences (provider model api &optional buffer)
+(defun ende-model-selection-control-preferences (provider model api &optional buffer connection)
   "Return remembered controls for PROVIDER, MODEL and API, or nil.
 Nil API resolves to PROVIDER's configured default API.
 BUFFER defaults to the current buffer."
   (cdr (ende-model-selection--control-preference-entry
-        provider model api buffer)))
+        provider model api buffer connection)))
 
 (defun ende-model-selection-save-control-preferences
-    (provider model api preferences &optional buffer)
+    (provider model api preferences &optional buffer connection)
   "Save explicit control PREFERENCES for PROVIDER, MODEL and API.
 Nil API resolves to PROVIDER's configured default API.
 In buffer scope save a detached copy for BUFFER and also update shared history.
 In global scope update only shared history."
-  (let* ((pair (ende-model-selection--pair-key provider model api))
+  (let* ((pair (ende-model-selection--pair-key provider model api connection))
          (buffer (or buffer (current-buffer)))
          (preferences
           (copy-tree (ende-provider--validate-control-preferences preferences))))
@@ -466,22 +468,22 @@ In global scope update only shared history."
                (ende-model-selection--buffer-preference-table buffer t)))
     (copy-tree preferences)))
 
-(defun ende-model-selection-remember-pair (provider model api &optional buffer)
+(defun ende-model-selection-remember-pair (provider model api &optional buffer connection)
   "Record PROVIDER, MODEL and API as selected and return its preferences.
 Nil API resolves to PROVIDER's configured default API.
 On first selection, snapshot the inherited settings into BUFFER's history.
 BUFFER defaults to the current buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model api))
+  (let* ((pair (ende-model-selection--pair-key provider model api connection))
          (buffer (or buffer (current-buffer)))
          (entry (ende-model-selection--control-preference-entry
-                 provider model api buffer))
+                 provider model api buffer connection))
          (preferences (copy-tree (cdr entry))))
     (unless pair
       (error "A model selection requires a provider and model"))
     (unless entry
       (setq preferences nil))
     (ende-model-selection-save-control-preferences
-     provider model api preferences buffer)
+     provider model api preferences buffer connection)
     (copy-tree preferences)))
 
 (defun ende-model-selection-initialize-buffer (&optional buffer)
@@ -543,14 +545,17 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
           (ende-model-selection-save-control-preferences
            (plist-get selection :provider) (plist-get selection :model)
            (plist-get selection :api)
-           (plist-get selection :control-preferences) buffer)
+           (plist-get selection :control-preferences) buffer
+           (ende-model-selection-connection selection))
         (ende-model-selection-remember-pair
          (plist-get selection :provider) (plist-get selection :model)
-         (plist-get selection :api) buffer)))
+         (plist-get selection :api) buffer
+         (ende-model-selection-connection selection))))
     (let ((profile (condition-case nil
                        (ende-provider--compose-profile
                         (plist-get selection :provider) (plist-get selection :model)
-                        (plist-get selection :api))
+                        (plist-get selection :api)
+                        (ende-model-selection-connection selection))
                      (error nil))))
       (when profile
         (puthash (ende-model-selection--provenance-key selection)
@@ -570,6 +575,12 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
                 ende-model-selection-scope)))
     (copy-tree selection)))
 
+(defun ende-model-selection-connection (selection)
+  "Return the nonsecret connection fields in SELECTION."
+  (cl-loop for key in '(:account :auth-method :api)
+           when (plist-member selection key)
+           append (list key (plist-get selection key))))
+
 (defun ende-provider-profile-for-buffer (&optional buffer remember)
   "Return BUFFER's selected provider profile snapshot.
 
@@ -582,7 +593,8 @@ An unset buffer follows the current configured provider defaults."
          (provider (or (plist-get selection :provider)
                        (car ende-providers)))
          (api (plist-get selection :api))
-         (configured-profile (ende-provider--compose-profile provider nil api))
+         (connection (ende-model-selection-connection selection))
+         (configured-profile (ende-provider--compose-profile provider nil api connection))
          (model (or (plist-get selection :model)
                     (plist-get configured-profile :model)))
          (matching-selection-p
@@ -592,9 +604,9 @@ An unset buffer follows the current configured provider defaults."
           (and matching-selection-p
                (plist-member selection :control-preferences)))
          (preferences
-          (ende-model-selection-control-preferences provider model api buffer))
+          (ende-model-selection-control-preferences provider model api buffer connection))
          (profile (ende-provider-profile-for-selection
-                   provider model preferences api)))
+                   provider model preferences api connection)))
     (let ((provenance (gethash (ende-model-selection--provenance-key selection)
                                ende-model-selection--provenance)))
       (when (and provenance (not (equal provenance (ende-provider-selection-provenance profile))))
@@ -610,14 +622,14 @@ An unset buffer follows the current configured provider defaults."
     (unless model
       (let* ((catalog (ende-provider-cached-models configured-profile))
              (models (plist-get catalog :models)))
-        (if (= (length models) 1)
+        (if models
             (setq model (car models)
-                  profile (ende-provider-profile-for-selection provider model preferences api))
+                  profile (ende-provider-profile-for-selection provider model preferences api connection))
           (user-error "Model selection required for %s; open ende-selector-open" provider))))
     (when (and remember (stringp model))
       (ende-model-selection-save
        (append (list :provider provider :model model)
-               (when api (list :api api))
+               connection
                (when selection-preferences-p
                  (list :control-preferences
                        (copy-tree preferences))))
@@ -766,6 +778,7 @@ selection without starting another model-list request."
     (when (or url (functionp probe))
       (list (plist-get profile :name) (plist-get profile :service)
             (plist-get profile :api) (plist-get profile :account)
+            (plist-get profile :auth-method) (plist-get profile :url)
             (or (plist-get profile :model-discovery-key) url)
             probe
             (plist-get profile :auth-source-host)
