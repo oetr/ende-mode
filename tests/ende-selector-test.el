@@ -412,13 +412,6 @@
                 ende-selector--provider-index 0
                 ende-selector--models
                 '("remote/alpha" "remote/beta" "other/gamma")
-                ende-selector--model-details
-                '((:id "remote/alpha" :name "Alpha Model"
-		       :pricing (:prompt "0.000003" :completion "0.000009"
-					 :input-cache-read "0.000001"
-					 :input-cache-write "0.000004"))
-                  (:id "remote/beta" :name "Beta Model")
-                  (:id "other/gamma" :name "Gamma Model"))
                 ende-selector--model-index 0
                 ende-selector--model-state :ready)
           (cl-letf (((symbol-function 'completing-read)

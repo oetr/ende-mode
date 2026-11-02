@@ -46,9 +46,6 @@
 (defvar-local ende-selector--models nil
   "Model names available for the selected provider.")
 
-(defvar-local ende-selector--model-details nil
-  "Cached display metadata for models available to the selected provider.")
-
 (defvar-local ende-selector--model-index 0
   "Index of the selected model in the current selector.")
 
@@ -451,7 +448,6 @@ ignored.  Return a cancellation function."
          (models (ende-provider-models profile))
          (explicit-p
           (and (ende-provider-configured-models-explicit-p profile) models)))
-    (setq ende-selector--model-details nil)
     (if explicit-p
         (progn
           (when (and (stringp configured-model)
@@ -467,11 +463,10 @@ ignored.  Return a cancellation function."
         (setq ende-selector--model-state :error)))))
 
 (defun ende-selector--apply-model-catalog
-    (profile models details generation preferred &optional error)
+    (profile models _details generation preferred &optional error)
   "Apply a discovered or configured model CATALOG to PROFILE.
 PREFERRED is selected only when it is present in MODELS."
   (let ((models (cl-remove-if-not #'stringp models)))
-    (setq ende-selector--model-details (copy-tree details))
     (if error
         (ende-selector--apply-model-probe-error profile preferred)
       (let ((selected
@@ -538,7 +533,6 @@ PREFERRED is selected only when it is present in MODELS."
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
   (setq ende-selector--models nil
-        ende-selector--model-details nil
         ende-selector--model-index 0)
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
@@ -1188,8 +1182,7 @@ Return the saved selection, or nil when no valid model is selected."
             ende-selector--source-window (selected-window)
             ende-selector--provider-index provider-index
             ende-selector--models nil
-            ende-selector--model-details nil
-            ende-selector--model-index 0
+                ende-selector--model-index 0
             ende-selector--model-selection-generation 0
             ende-selector--model-state :ready
             ende-selector--control-preferences nil
