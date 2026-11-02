@@ -103,7 +103,7 @@
                       (ende-provider-profile-snapshot ende-image-auth-profile))
                     (list :url ende-image-endpoint :model model
                           :image-api ende-image-api))))
-      (when (eq (plist-get profile :auth-method) 'codex-oauth)
+      (when (memq (plist-get profile :auth-method) '(chatgpt-plan-oauth codex-oauth))
         (user-error "Images API requires an auth-source or unauthenticated profile"))
       (ende-curl--validated-url profile)
       profile)))

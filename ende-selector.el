@@ -61,6 +61,9 @@
 (defvar-local ende-selector--model-state nil
   "State of model discovery for the selected provider.")
 
+(defvar-local ende-selector--model-error nil
+  "Bounded diagnostic for the current model discovery failure.")
+
 (defvar-local ende-selector--model-selection-generation 0
   "Generation incremented when the user changes the current model.")
 
@@ -319,6 +322,9 @@ Report an unavailable model once for each catalog identity."
      (ende-selector--row "P" "Parallel:" (if (ende-selector--provider-parallel-p) "on" "off"))
      "\n"
      (ende-selector--row "C-n/C-p" "Model:" (ende-selector--model-display))
+     (if ende-selector--model-error
+         (ende-selector--row nil "Discovery:" ende-selector--model-error)
+       "")
      (ende-selector--control-rows profile)
      "\n"
      "a  - ask\nd  - queue dashboard\nR  - reset controls to profile settings\n"
@@ -442,8 +448,13 @@ ignored.  Return a cancellation function."
      (t
       (ende-selector--set-models nil)))))
 
-(defun ende-selector--apply-model-probe-error (profile preferred)
-  "Keep explicitly configured PROFILE models usable after discovery fails."
+(defun ende-selector--apply-model-probe-error (profile preferred &optional error)
+  "Keep explicit PROFILE models usable and retain the discovery ERROR."
+  (setq ende-selector--model-error
+        (ende-bounded-single-line
+         (ende-content-redact
+          (if (ende-error-p error) (ende-error-message error)
+            "Model discovery failed; no catalog is available")) 240 t))
   (let* ((configured-model (ende-provider-configured-model profile))
          (models (ende-provider-models profile))
          (explicit-p
@@ -468,7 +479,9 @@ ignored.  Return a cancellation function."
 PREFERRED is selected only when it is present in MODELS."
   (let ((models (cl-remove-if-not #'stringp models)))
     (if error
-        (ende-selector--apply-model-probe-error profile preferred)
+        (ende-selector--apply-model-probe-error profile preferred error)
+      (setq ende-selector--model-error
+            (unless models "Provider returned no models"))
       (let ((selected
              (and preferred
                   (ende-selector--valid-model-p
@@ -491,7 +504,8 @@ PREFERRED is selected only when it is present in MODELS."
          (selection-generation ende-selector--model-selection-generation)
          (completed nil))
     (setq ende-selector--probe-generation generation)
-    (setq ende-selector--model-state :validating)
+    (setq ende-selector--model-state :validating
+          ende-selector--model-error nil)
     (let ((callback
            (lambda (models error)
              (when (and (buffer-live-p selector-buffer)
@@ -511,7 +525,7 @@ PREFERRED is selected only when it is present in MODELS."
                              (ende-selector--model-name))))
                      (if error
                          (ende-selector--apply-model-probe-error
-                          live-profile live-preferred)
+                          live-profile live-preferred error)
                        (ende-selector--apply-model-catalog
                         live-profile models
                         (ende-provider-model-details live-profile)
@@ -533,6 +547,7 @@ PREFERRED is selected only when it is present in MODELS."
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
   (setq ende-selector--models nil
+        ende-selector--model-error nil
         ende-selector--model-index 0)
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
@@ -544,7 +559,7 @@ PREFERRED is selected only when it is present in MODELS."
        profile (ende-provider-models profile) nil 0 preferred))
      (catalog
       (if (plist-get catalog :error)
-          (ende-selector--apply-model-probe-error profile preferred)
+          (ende-selector--apply-model-probe-error profile preferred (plist-get catalog :error))
         (ende-selector--apply-model-catalog
          profile
          (plist-get catalog :models)
@@ -607,7 +622,7 @@ PREFERRED is selected only when it is present in MODELS."
     (when (eq auth 'none) (user-error "This provider does not use an account"))
     (let ((alias (read-string "Account: " (format "%s" (plist-get profile :account)))))
       (ende-selector-connection--set :account
-                                    (if (eq auth 'codex-oauth) (intern alias) alias)))))
+                                    (if (memq auth '(chatgpt-plan-oauth codex-oauth)) (intern alias) alias)))))
 
 (defun ende-selector-connection--choose (key prompt choices)
   "Read a supported value for KEY using PROMPT and CHOICES."
@@ -649,6 +664,19 @@ PREFERRED is selected only when it is present in MODELS."
   (let* ((profile (ende-selector-connection--profile))
          (connection (ende-model-selection-connection profile))
          (parent ende-selector-connection--parent))
+    (when (and (eq (plist-get profile :service) 'openai-codex)
+               (let ((auth (ende-codex-auth-lookup
+                            (plist-get profile :auth-method) (plist-get profile :account))))
+                 (or (null auth) (plist-get auth :needs-login)))
+               (y-or-n-p "Authorize this OAuth connection in your browser? "))
+      (ende-codex--begin-login
+       (plist-get profile :auth-method) (plist-get profile :account)
+       (lambda (record failure)
+         (ende-codex--login-report record failure)
+         (when (and record (buffer-live-p parent))
+           (with-current-buffer parent
+             (when (equal connection ende-selector--connection)
+               (ende-selector--set-provider ende-selector--provider-index)))))))
     (with-current-buffer parent
       (let* ((model (ende-selector--model-name))
              (prepared
@@ -657,6 +685,7 @@ PREFERRED is selected only when it is present in MODELS."
                     (ende-selector--models ende-selector--models)
                     (ende-selector--model-index ende-selector--model-index)
                     (ende-selector--model-state ende-selector--model-state)
+                    (ende-selector--model-error ende-selector--model-error)
                     (ende-selector--model-selection-generation
                      ende-selector--model-selection-generation)
                     (ende-selector--control-preferences nil)
@@ -670,7 +699,7 @@ PREFERRED is selected only when it is present in MODELS."
                     (atomic-change-group
                       (ende-selector--set-provider ende-selector--provider-index nil model)
                       (list ende-selector--models ende-selector--model-index
-                            ende-selector--model-state
+                            ende-selector--model-state ende-selector--model-error
                             ende-selector--model-selection-generation
                             ende-selector--control-preferences
                             ende-selector--effort ende-selector--effort-state
@@ -687,7 +716,8 @@ PREFERRED is selected only when it is present in MODELS."
               ende-selector--api (plist-get connection :api))
         (cl-multiple-value-setq
             (ende-selector--models ende-selector--model-index
-             ende-selector--model-state ende-selector--model-selection-generation
+             ende-selector--model-state ende-selector--model-error
+             ende-selector--model-selection-generation
              ende-selector--control-preferences
              ende-selector--effort ende-selector--effort-state
              ende-selector--probe-cancel ende-selector--probe-generation
@@ -749,7 +779,7 @@ PREFERRED is selected only when it is present in MODELS."
 (defun ende-selector--move-model (delta)
   "Move the selected model by DELTA."
   (if (null ende-selector--models)
-      (message "ende: no models available")
+      (message "ende: %s" (or ende-selector--model-error "no models available"))
     (setq ende-selector--model-index
           (mod (+ ende-selector--model-index delta)
                (length ende-selector--models)))
@@ -779,7 +809,8 @@ performed locally so typing a search term never starts another network request."
      (user-error "ende model discovery is still loading"))
     (:error
      (if (plist-get (ende-selector--provider-profile) :service)
-         (user-error "ende model discovery failed; change provider or retry")
+         (user-error "ende model discovery failed: %s"
+                     (or ende-selector--model-error "change provider or retry"))
        (let ((model (read-string "Manual model ID: ")))
          (when (string-blank-p model) (user-error "Supply a nonempty model ID"))
          (ende-selector--set-models (list model) model)

@@ -69,7 +69,7 @@ from remote buffers are supported, but their processes always run locally."
                (not (ende-curl--loopback-host-p host)))
       (error "Plain HTTP is only allowed for explicit loopback endpoints"))
     (when (and (not (string= scheme "https"))
-               (or auth-host (memq (plist-get profile :auth-method) '(auth-source codex-oauth))))
+               (or auth-host (memq (plist-get profile :auth-method) '(auth-source chatgpt-plan-oauth codex-oauth))))
       (error "Authenticated requests require HTTPS"))
     (when (and auth-host
                (not (string= (downcase (format "%s" auth-host))
@@ -111,7 +111,7 @@ from remote buffers are supported, but their processes always run locally."
          (or (member downcased
                      '("host" "content-length" "transfer-encoding"
                        "content-type" "accept" "connection" "trailer"
-                       "upgrade" "expect" "proxy-connection"))
+                       "upgrade" "expect" "proxy-connection" "chatgpt-account-id" "originator"))
              (string-match-p
               "\\(?:auth\\|token\\|key\\|secret\\|cookie\\|credential\\)"
               downcased)))))

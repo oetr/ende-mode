@@ -30,6 +30,9 @@ arguments and response content."
 (defconst ende-client-name "ende-mode"
   "Client name advertised in outbound HTTP requests.")
 
+(defconst ende-client-version "1.0.0"
+  "Ende version advertised to providers that require a client version.")
+
 ;;;; Transport and request resource options
 
 (defcustom ende-connect-timeout nil

@@ -48,7 +48,7 @@
                   (append
                    (list :name 'debug-test
                          :api (if codex 'openai-responses 'openai-chat-completions)
-                         :auth-method (if codex 'codex-oauth 'none)
+                         :auth-method (if codex 'chatgpt-plan-oauth 'none)
                          :job-id 17 :model "test-model"
                          :url (if codex
                                   "https://api.openai.com/v1/responses"

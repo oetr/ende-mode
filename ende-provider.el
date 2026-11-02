@@ -155,12 +155,13 @@ Supported settings are `:max-concurrency' and `:parallel'."
                       profile
                       (list :model-discovery-function #'ende-codex-probe-models
                             :model-discovery-key
-                            (list ende-codex--models-url
+                            (list (plist-get profile :auth-method)
+                                  (plist-get profile :models-url)
                                   (plist-get profile :account)
                                   (condition-case nil
                                       (plist-get
                                        (ende-codex-auth-lookup
-                                        (plist-get profile :account))
+                                        (plist-get profile :auth-method) (plist-get profile :account))
                                        :registration-id)
                                     (error nil)))
                             :reasoning-effort-probe-function #'ende-codex-probe-reasoning-efforts))))
@@ -270,8 +271,20 @@ Present preference keys override PROFILE even when their value is nil."
     (ende-provider-config--settings (list :account (plist-get profile :account))
                                     '(:account) "Codex profile")
     (unless (and (eq (plist-get profile :api) 'openai-responses)
-                 (eq (plist-get profile :auth-method) 'codex-oauth))
+                 (memq (plist-get profile :auth-method) '(chatgpt-plan-oauth codex-oauth)))
       (error "Codex requires the Responses API and OAuth authentication"))
+    (when (plist-get profile :base-url)
+      (error "Codex OAuth does not support endpoint overrides"))
+    (when (and (plist-member profile :endpoints)
+               (not (equal (plist-get profile :endpoints)
+                           (list (cons 'openai-responses
+                                       (ende-codex--auth-property
+                                        (plist-get profile :auth-method) :responses-url))))))
+      (error "Codex endpoints do not match selected OAuth method"))
+    (dolist (pair '((:url . :responses-url) (:models-url . :models-url)))
+      (unless (equal (plist-get profile (car pair))
+                     (ende-codex--auth-property (plist-get profile :auth-method) (cdr pair)))
+        (error "Codex endpoint does not match selected OAuth method")))
     (unless (eq (plist-get profile :codex-auth-source) 'ende)
       (error "Codex requires Ende-owned account storage")))
   (unless (assq (plist-get profile :api) ende-provider-config--apis)
@@ -292,7 +305,7 @@ Present preference keys override PROFILE even when their value is nil."
     (unless (and (stringp url) (not (string-empty-p url)))
       (error "Provider profile must include a nonempty :url"))
     (if (eq (plist-get profile :service) 'openai-codex)
-        (ende-codex--validated-generation-url url)
+        (ende-codex--validated-generation-url profile)
       (ende-curl--validated-url profile)))
   t)
 

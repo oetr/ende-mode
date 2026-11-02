@@ -8,8 +8,8 @@
 
 (ert-deftest ende-codex-account-isolation-and-refresh ()
   (ende-codex-auth-test--with-store
-   (let* ((personal (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
-          (work (ende-codex-auth--register 'work (ende-codex-auth-test--credentials "work")))
+   (let* ((personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))
+          (work (ende-codex-auth--register 'chatgpt-plan-oauth 'work (ende-codex-auth-test--credentials "work")))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           (payload (ende-codex-auth--json
                     "{\"access_token\":\"rotated-access\",\"refresh_token\":\"rotated-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}"))
@@ -22,7 +22,7 @@
        (should-error (ende-codex--store-refresh personal "stale" "stale" 3600 nil payload)
                      :type 'ende-codex-auth-conflict)
        (should-not (ende-codex--check-binding profile next))
-       (should (equal work (ende-codex-auth-read 'work)))
+       (should (equal work (ende-codex-auth-read 'chatgpt-plan-oauth 'work)))
        (puthash "scope" "openid offline_access" payload)
        (setq next (ende-codex--store-refresh next "limited" "limited-refresh" 3600 nil payload))
        (ende-codex--resolve-auth (lambda (auth) (setq resolved auth)) profile)
@@ -32,9 +32,9 @@
        (should-not (plist-get next :access-token))
        (should-not (plist-get next :refresh-token))
        (should (ende-codex-auth--same-registration-p personal next)))
-     (should-not (string-match-p "scope=" (ende-codex--refresh-body "secret" "issued")))
-     (should (string-match-p "resource=" (ende-codex--refresh-body "secret" "issued")))
-     (should (equal (ende-codex--validated-refresh-url) ende-codex--token-url)))))
+     (should-not (string-match-p "scope=" (ende-codex--refresh-body 'chatgpt-plan-oauth personal)))
+     (should (string-match-p "resource=" (ende-codex--refresh-body 'chatgpt-plan-oauth personal)))
+     (should (equal (ende-codex--validated-refresh-url 'chatgpt-plan-oauth) (ende-codex--auth-property 'chatgpt-plan-oauth :token-url))))))
 
 (ert-deftest ende-codex-stream-contract ()
   (let* ((stream (concat "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n"
@@ -65,23 +65,23 @@
     (should-not (alist-get :max_output_tokens body))))
 
 (ert-deftest ende-codex-endpoints-are-pinned ()
-  (dolist (url (list ende-codex--authorize-url ende-codex--token-url
-                     ende-codex--jwks-url ende-codex--models-url
-                     ende-codex--responses-url))
+  (dolist (url (list (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url) (ende-codex--auth-property 'chatgpt-plan-oauth :token-url)
+                     ende-codex--jwks-url (ende-codex--auth-property 'chatgpt-plan-oauth :models-url)
+                     (ende-codex--auth-property 'chatgpt-plan-oauth :responses-url)))
     (should (equal (ende-codex-auth--endpoint url url) url)))
   (should-error (ende-codex-auth--endpoint
                  "https://auth.openai.com:8443/api/accounts/authorize"
-                 ende-codex--authorize-url))
+                 (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url)))
   (should-error (ende-codex-auth--endpoint
-                 ende-codex--models-url ende-codex--responses-url))
+                 (ende-codex--auth-property 'chatgpt-plan-oauth :models-url) (ende-codex--auth-property 'chatgpt-plan-oauth :responses-url)))
   (should-error (ende-codex-auth--endpoint
                  "https://attacker.test/api/accounts/authorize"
-                 ende-codex--authorize-url))
+                 (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url)))
   (dolist (url '("http://auth.openai.com/api/accounts/authorize"
                  "https://auth.openai.com/api/accounts/authorize?x=1"
                  "https://auth.openai.com/api/accounts/authorize#x"
                  "https://auth.openai.com/api/accounts/token"))
-    (should-error (ende-codex-auth--endpoint url ende-codex--authorize-url))))
+    (should-error (ende-codex-auth--endpoint url (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url)))))
 
 (ert-deftest ende-codex-requires-completion-event ()
   (let ((completed (ende-test--run-stream-request

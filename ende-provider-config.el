@@ -7,6 +7,7 @@
 (require 'ende-core)
 (require 'ende-controls)
 (require 'ende-curl)
+(require 'ende-codex-methods)
 
 (defcustom ende-providers nil
   "Ordered profile symbols offered by the provider selector.
@@ -36,10 +37,10 @@ manually entered model.  :model-settings refines shared model defaults."
     (anthropic-messages . "/messages")))
 
 (defconst ende-provider-config--services
-  '((openai-codex
+  `((openai-codex
      :api openai-responses :max-concurrency 4
-     :models-url "https://api.openai.com/v1/models"
-     :endpoints ((openai-responses . "https://api.openai.com/v1/responses")))
+     :models-url ,(ende-codex--auth-property 'chatgpt-plan-oauth :models-url)
+     :endpoints ((openai-responses . ,(ende-codex--auth-property 'chatgpt-plan-oauth :responses-url))))
     (openai
      :api openai-responses :max-concurrency 4
      :models-url "https://api.openai.com/v1/models"
@@ -131,8 +132,8 @@ manually entered model.  :model-settings refines shared model defaults."
         (error ":temperature: use a finite number or nil")))
      (:controls (ende-controls--validate-descriptor-list value t))
      (:auth-method
-      (unless (memq value '(none auth-source))
-        (error ":auth-method: choose none or auth-source")))
+      (unless (memq value '(none auth-source chatgpt-plan-oauth codex-oauth))
+        (error ":auth-method: unsupported authentication method")))
      (:auth-scheme
       (unless (memq value '(bearer x-api-key))
         (error ":auth-scheme: choose bearer or x-api-key")))
@@ -188,6 +189,8 @@ manually entered model.  :model-settings refines shared model defaults."
              (models (plist-get settings :models))
              (model-settings (plist-get settings :model-settings))
              seen)
+        (when (eq service 'openai-codex)
+          (push :auth-method fields))
         (ende-provider-config--settings settings fields "Profile")
         (ende-provider-config-parameters (plist-get settings :parameters)
                                          ende-provider-config--protected-paths)
@@ -215,6 +218,8 @@ manually entered model.  :model-settings refines shared model defaults."
                 (error "supply :api"))
               (unless (plist-member settings :auth-method)
                 (error "supply :auth-method none or auth-source"))
+              (unless (memq (plist-get settings :auth-method) '(none auth-source))
+                (error "custom profiles require none or auth-source"))
               (when (eq (not (null (plist-member settings :base-url)))
                         (not (null (plist-member settings :endpoints))))
                 (error "supply exactly one of :base-url or :endpoints"))
@@ -239,6 +244,8 @@ manually entered model.  :model-settings refines shared model defaults."
             (error ":provider: canonical profile must use its own service"))
           (unless (assq api (plist-get integration :endpoints))
             (error ":api: choose a verified API for %s" service))
+          (when (eq service 'openai-codex)
+            (ende-codex--auth-spec (or (plist-get settings :auth-method) 'chatgpt-plan-oauth)))
           (when (and (plist-member settings :transport) (not (eq service 'openrouter)))
             (error ":transport: only OpenRouter supports transport overrides")))
         (when custom
@@ -480,7 +487,9 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
 
 (defun ende-provider-config-supported-auth (profile)
   "Return authentication methods implemented for PROFILE's connection."
-  (list (plist-get profile :auth-method)))
+  (if (eq (plist-get profile :service) 'openai-codex)
+      '(chatgpt-plan-oauth codex-oauth)
+    (list (plist-get profile :auth-method))))
 
 (defun ende-provider-config-resolve (name &optional model api connection)
   "Resolve profile NAME into detached nonsecret request settings.
@@ -511,7 +520,10 @@ selects another explicitly available wire endpoint.  No network is started."
                                (or (plist-get configured :auth-source-user) "ende"))
                         (or (plist-get configured :account) 'default))))
          (auth (if custom (plist-get configured :auth-method)
-                 (if (eq service 'openai-codex) 'codex-oauth 'auth-source)))
+                 (if (eq service 'openai-codex)
+                     (or (plist-get connection :auth-method)
+                         (plist-get configured :auth-method) 'chatgpt-plan-oauth)
+                   'auth-source)))
          (controls (ende-provider-config--controls service api model))
          (profile
           (list :name name :service service :api api :url url :model model
@@ -531,7 +543,7 @@ selects another explicitly available wire endpoint.  No network is started."
                  (not (eq (plist-get connection :auth-method) auth)))
         (error "Unsupported authentication method for %s" name))
       (pcase auth
-        ('codex-oauth
+        ((or 'chatgpt-plan-oauth 'codex-oauth)
          (ende-provider-config--settings (list :account account) '(:account) "Connection"))
         ('auth-source
          (unless (and (or (stringp account) (ende-provider-config-name-p account))
@@ -572,6 +584,13 @@ selects another explicitly available wire endpoint.  No network is started."
         (setq profile (plist-put profile :max-concurrency 16)))
       (unless (plist-member configured :parallel)
         (setq profile (plist-put profile :parallel t))))
+    (when (eq service 'openai-codex)
+      (let ((responses (ende-codex--auth-property auth :responses-url)))
+        (setq url responses
+              profile (plist-put profile :auth-method auth)
+              profile (plist-put profile :url responses)
+              profile (plist-put profile :endpoints (list (cons 'openai-responses responses)))
+              profile (plist-put profile :models-url (ende-codex--auth-property auth :models-url)))))
     (when (eq auth 'auth-source)
       (let* ((parsed (url-generic-parse-url url))
              (user (format "%s" account)))
