@@ -410,15 +410,14 @@ Report an unavailable model once for each catalog identity."
      (if (and (eq (plist-get profile :service) 'openai-codex)
               (eq (plist-get profile :auth-method) 'codex-oauth))
          (concat "\n"
-                 (ende-selector--row
-                  nil "Quota:"
-                  (let ((quota (plist-get ende-selector--usage :quota))
-                        (error (plist-get ende-selector--usage :error)))
-                    (cond (quota (concat (ende-codex-usage-string quota)
-                                         (if error (format " (stale; %s)" error) "")))
-                          (error (format "unavailable (%s)" error))
-                          (ende-selector--usage-cancel "loading...")
-                          (t "unavailable"))))
+                 (format "Quota: %s\n"
+                         (let ((quota (plist-get ende-selector--usage :quota))
+                               (error (plist-get ende-selector--usage :error)))
+                           (cond (quota (concat (ende-codex-usage-string quota)
+                                                (if error (format " (stale; %s)" error) "")))
+                                 (error (format "unavailable (%s)" error))
+                                 (ende-selector--usage-cancel "loading...")
+                                 (t "unavailable"))))
                  "\n")
        "\n")
      "a  - ask\nd  - queue dashboard\nR  - reset controls to profile settings\n"

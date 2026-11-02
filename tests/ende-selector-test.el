@@ -1837,14 +1837,11 @@
                 '(:quota (:primary (:used-percent 25 :reset-at 2000003600
                                                 :window-seconds 18000))))
           (ende-selector--render)
-          (should (string-match-p "Quota:.*1h: 75% left" (buffer-string)))
           (should (string-match-p
-                   (regexp-quote
-                    (concat "e        - Reasoning effort:  Provider default (omitted)\n\n"
-                            "           Quota:"))
+                   (regexp-quote "Quota: 1h: 75% left · reset in 1h\n")
                    (buffer-string)))
           (should (string-match-p
-                   (regexp-quote "Quota:             1h: 75% left · reset in 1h\n\na  - ask")
+                   (regexp-quote "Quota: 1h: 75% left · reset in 1h\n\na  - ask")
                    (buffer-string)))
           (ende-selector--set-provider 1)
           (should (= cancel-count 1))
