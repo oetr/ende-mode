@@ -1761,6 +1761,32 @@
               (kill-buffer ende-selector--connection-buffer)))
           (kill-buffer selector))))))
 
+(ert-deftest ende-test/selector-model-discovery-error-is-visible-and-cleared ()
+  (with-temp-buffer
+    (ende-selector-mode)
+    (let ((ende-builtin-provider-settings nil)
+          (ende-provider--catalog-cache (make-hash-table :test #'equal))
+          callbacks)
+      (setq ende-selector--providers '(openai-codex))
+      (cl-letf (((symbol-function 'ende-provider-probe-models)
+                 (lambda (_profile callback) (push callback callbacks) #'ignore)))
+        (ende-selector--set-provider 0)
+        (funcall (car callbacks) nil
+                 (ende-error-create :kind 'http :message "HTTP status 403: catalog access denied"))
+        (should (eq ende-selector--model-state :error))
+        (should (string-match-p "Discovery:.*HTTP status 403" (buffer-string)))
+        (should (string-match-p "403" (error-message-string (should-error (ende-selector-select-model)))))
+        (ende-selector--set-provider 0)
+        (should-not ende-selector--model-error)
+        (should-not (string-match-p "catalog access denied" (buffer-string)))
+        (funcall (car callbacks) '("advertised-model") nil)
+        (should (eq ende-selector--model-state :ready))
+        (should-not ende-selector--model-error))
+      (ende-selector--apply-model-probe-error
+       (ende-selector--provider-profile) nil
+       (ende-error-create :kind 'http :message "Authorization: Bearer private-token"))
+      (should-not (string-match-p "private-token" ende-selector--model-error)))))
+
 (ert-deftest ende-test/selector-renders-codex-and-custom-identity ()
   (let ((ende-providers '(openai-codex))
         (ende-builtin-provider-settings '((openai-codex :models ("gpt-6.1-sol"))))
@@ -1774,7 +1800,7 @@
        (string-prefix-p
         (concat "n/p      - Provider:          OpenAI Codex - https://api.openai.com/v1/responses\n"
                 "A        - Account:           default\n"
-                "           Auth:              codex-oauth\n"
+                "           Auth:              chatgpt-plan-oauth\n"
                 "           API:               openai-responses\n"
                 "c/C      - Concurrency:       4\n"
                 "P        - Parallel:          off\n\n"

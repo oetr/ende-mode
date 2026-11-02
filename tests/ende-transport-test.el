@@ -175,7 +175,7 @@ Use COMMAND for the process, or a silent sleep process by default."
           (ende-provider--catalog-cache (make-hash-table :test #'equal))
           (ende-provider--catalog-inflight (make-hash-table :test #'equal))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
-          (auth '(:account default :client-id "issued" :subject "verified" :registration-id "registration"
+          (auth '(:auth-method chatgpt-plan-oauth :account default :client-id "issued" :subject "verified" :registration-id "registration"
 			   :scope "offline_access chatgpt.tokens.use.direct"
 			   :access-token "test-access" :refresh-token "test-refresh" :expires-at 9999999999))
           (profile '(:name test :api openai-chat-completions :auth-method none
@@ -233,14 +233,16 @@ Use COMMAND for the process, or a silent sleep process by default."
 		('codex-generation
 		 (ende-codex-default '(("user" . "remote source")) callbacks
                                      '(:service openai-codex :account default :api openai-responses
-						:auth-method codex-oauth :codex-auth-source ende
+						:auth-method chatgpt-plan-oauth :codex-auth-source ende
+                                                :models-url "https://api.openai.com/v1/models"
 						:url "https://api.openai.com/v1/responses" :model "test-model")))
 		('discovery
 		 (let ((ende-provider-discovery-enabled t))
                    (setq cancel (ende-provider-discover profile #'ignore))))
 		('models
 		 (setq cancel (ende-codex-probe-models
-                               '(:account default :codex-auth-source ende)
+                               '(:account default :auth-method chatgpt-plan-oauth :codex-auth-source ende
+                                 :models-url "https://api.openai.com/v1/models")
                                (lambda (_models error) (setq failure error)))))
 		('refresh
 		 (setq cancel (ende-codex--refresh-auth
@@ -916,7 +918,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                   ((symbol-function 'process-send-eof) #'ignore)
                   ((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight))
           (setq cancel (ende-codex--refresh-auth
-                        '(:account default :client-id "issued" :refresh-token "test-refresh")
+                        '(:auth-method chatgpt-plan-oauth :account default :client-id "issued" :refresh-token "test-refresh")
                         (lambda (result) (setq failure result))))
           (let* ((process (car ende-codex--refresh-processes))
                  (buffer (process-buffer process)))

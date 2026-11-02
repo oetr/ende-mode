@@ -275,7 +275,8 @@ non-nil, is signalled from the event callback."
                     :account (when (eq transport 'codex) 'default)
                     :codex-auth-source (when (eq transport 'codex) 'ende)
                     :api (if (eq transport 'codex) 'openai-responses 'openai-chat-completions)
-                    :auth-method (if (eq transport 'codex) 'codex-oauth 'none)
+                    :auth-method (if (eq transport 'codex) 'chatgpt-plan-oauth 'none)
+                    :models-url (when (eq transport 'codex) "https://api.openai.com/v1/models")
                     :url (if (eq transport 'codex)
                              "https://api.openai.com/v1/responses"
                            "https://example.test/v1/chat/completions")
@@ -284,8 +285,16 @@ non-nil, is signalled from the event callback."
                     :controls (unless (eq transport 'codex)
                                 '((:temperature :path ("temperature"))))
                     :require-sse t)))
-         (auth '(:access-token "transport-test-token" :scope "offline_access chatgpt.tokens.use.direct"
-			       :expires-at 9999999999)))
+         (auth (list :auth-method (plist-get profile :auth-method)
+                     :account (plist-get profile :account)
+                     :client-id (if (eq (plist-get profile :auth-method) 'codex-oauth)
+                                    ende-codex-native-client-id "issued-test-client")
+                     :chatgpt-account-id (and (eq (plist-get profile :auth-method) 'codex-oauth) "verified-workspace")
+                     :access-token "transport-test-token"
+                     :scope (if (eq transport 'codex)
+                                (ende-codex--auth-property (plist-get profile :auth-method) :scopes)
+                              "offline_access")
+                     :expires-at 9999999999)))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
                  (setq request-args args)
