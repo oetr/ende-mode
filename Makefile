@@ -48,7 +48,7 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check lint syntax compile test format clean
+.PHONY: check lint syntax compile test test-verbose format clean
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
@@ -74,7 +74,21 @@ syntax:
 	$(EMACS_BATCH) --eval '$(strip $(CHECK_SYNTAX))' $(EL_FILES)
 
 test:
-	$(MAKE) clean
+	@$(MAKE) --no-print-directory clean >/dev/null
+	@log=$$(mktemp); \
+	status=0; \
+	ENDE_TEST_LOG="$$log" $(EMACS_BATCH) \
+		--eval '(setq auth-sources nil)' \
+		$(foreach file,$(TEST_FILES),-l $(file)) \
+		-l ./tests/ende-test-runner.el \
+		-f ende-test-runner >"$$log" 2>&1 || status=$$?; \
+	grep -E '^(Running |TEST-FAILED:|TEST-SUMMARY:|TEST-RUNNER-ERROR:)' "$$log" || true; \
+	if [ "$$status" -eq 0 ]; then rm -f "$$log"; \
+	else printf 'Full test output: %s\n' "$$log"; fi; \
+	exit "$$status"
+
+test-verbose:
+	@$(MAKE) --no-print-directory clean >/dev/null
 	$(EMACS_BATCH) \
 		--eval '(setq auth-sources nil)' \
 		$(foreach file,$(TEST_FILES),-l $(file)) \
