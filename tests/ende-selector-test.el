@@ -1811,6 +1811,54 @@
       (setq ende-selector--providers '(my-local-provider))
       (should (equal (ende-selector--display-provider) "my-local-provider")))))
 
+(ert-deftest ende-test/selector-quota-is-visible-only-for-codex-oauth ()
+  (let ((ende-providers '(openai-codex openrouter))
+        (ende-builtin-provider-settings
+         '((openai-codex :models ("model"))
+           (openrouter :models ("vendor/model"))))
+        (ende-custom-providers nil)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--providers '(openai-codex openrouter)
+            ende-selector--connection '(:auth-method codex-oauth :account default))
+      (let ((callback nil)
+            (cancel-count 0))
+        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 2000000000))
+                  ((symbol-function 'ende-codex-probe-usage)
+                   (lambda (_profile completion)
+                     (setq callback completion)
+                     (lambda () (cl-incf cancel-count)))))
+          (ende-selector--set-provider 0)
+          (should callback)
+          (should (string-match-p "Quota:.*loading" (buffer-string)))
+          (setq ende-selector--usage
+                '(:quota (:primary (:used-percent 25 :reset-at 2000003600
+                                                :window-seconds 18000))))
+          (ende-selector--render)
+          (should (string-match-p "Quota:.*1h: 75% left" (buffer-string)))
+          (should (string-match-p
+                   (regexp-quote
+                    (concat "e        - Reasoning effort:  Provider default (omitted)\n\n"
+                            "           Quota:"))
+                   (buffer-string)))
+          (should (string-match-p
+                   (regexp-quote "Quota:             1h: 75% left · reset in 1h\n\na  - ask")
+                   (buffer-string)))
+          (ende-selector--set-provider 1)
+          (should (= cancel-count 1))
+          (should-not (string-match-p "Quota:" (buffer-string)))))
+      (setq ende-selector--provider-index 0
+            ende-selector--connection '(:auth-method chatgpt-plan-oauth :account default))
+      (let ((ende-selector--usage nil)
+            (ende-selector--usage-cancel nil))
+        (cl-letf (((symbol-function 'ende-codex-probe-usage)
+                   (lambda (&rest _)
+                     (ert-fail "Quota probe must not run for chatgpt-plan-oauth"))))
+          (ende-selector--set-provider 0)
+          (should-not (string-match-p "Quota:" (buffer-string))))))))
+
 (provide 'ende-selector-test)
 
 ;;; ende-selector-test.el ends here

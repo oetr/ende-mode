@@ -166,6 +166,46 @@
                            (url-hexify-string ende-client-version))))
     (should (string= ende-client-version "1.0.0"))))
 
+(ert-deftest ende-codex-dual-usage-is-native-only-and-account-bound ()
+  (let* ((ende-builtin-provider-settings nil)
+         (native (ende-provider-config-resolve
+                  'openai-codex "model" nil '(:auth-method codex-oauth :account personal)))
+         (siwc (ende-provider-config-resolve
+                'openai-codex "model" nil '(:auth-method chatgpt-plan-oauth :account personal)))
+         (auth '(:auth-method codex-oauth :account personal
+                 :client-id "app_EMoamEEZ73f0CkXaXp7hrann"
+                 :access-token "native-token" :chatgpt-account-id "workspace"
+                 :scope "openid offline_access"))
+         (headers nil) (request nil))
+    (should (equal (ende-codex--usage-url native)
+                   "https://chatgpt.com/backend-api/wham/usage"))
+    (should-error (ende-codex--usage-url siwc))
+    (should (equal (ende-codex--usage-headers native auth)
+                   '("Authorization: Bearer native-token" "originator: opencode"
+                     "ChatGPT-Account-Id: workspace")))
+    (should-error (ende-codex--usage-headers siwc auth))
+    (cl-letf (((symbol-function 'ende-codex--resolve-auth)
+               (lambda (callback _profile) (funcall callback auth) nil))
+              ((symbol-function 'ende-curl-start-request)
+               (lambda (&rest arguments)
+                 (setq request arguments)
+                 (list :process nil :response-buffer (generate-new-buffer " *usage-probe*")))))
+      (let ((cancel (ende-codex-probe-usage
+                     native (lambda (&rest _) nil))))
+        (setq headers (plist-get request :internal-headers))
+        (should (member "originator: opencode" headers))
+        (should (member "Authorization: Bearer native-token" headers))
+        (should (member "ChatGPT-Account-Id: workspace" headers))
+        (should (member "--request" (funcall (plist-get request :command) "headers" nil)))
+        (funcall cancel)))))
+
+(ert-deftest ende-codex-dual-usage-parser-and-string ()
+  (let ((quota (ende-codex--parse-usage
+                "{\"rate_limit\":{\"primary_window\":{\"used_percent\":25,\"reset_at\":2000003600,\"limit_window_seconds\":18000},\"secondary_window\":{\"used_percent\":50,\"reset_at\":2000010000,\"limit_window_seconds\":604800}}}")))
+    (should (equal (ende-codex-usage-string quota 2000000000)
+                   "1h: 75% left · weekly: 50% left · reset in 1h"))
+    (should-error (ende-codex--parse-usage "{\"rate_limit\":{}}"))))
+
 (ert-deftest ende-codex-dual-selector-method-draft-and-apply ()
   (save-window-excursion
     (let* ((source (generate-new-buffer " *dual-selector-source*"))

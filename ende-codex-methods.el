@@ -18,6 +18,7 @@
      :token-url "https://auth.openai.com/oauth/token"
      :responses-url "https://chatgpt.com/backend-api/codex/responses"
      :models-url "https://chatgpt.com/backend-api/codex/models"
+     :usage-url "https://chatgpt.com/backend-api/wham/usage"
      :scopes "openid profile email offline_access"
      :client-id "app_EMoamEEZ73f0CkXaXp7hrann"
      :redirect-uri "http://localhost:1455/auth/callback"

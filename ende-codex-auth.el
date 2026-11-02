@@ -28,7 +28,7 @@
                                (cl-loop for (_method . spec) in ende-codex--auth-methods
                                         append (append
                                                 (mapcar (lambda (key) (plist-get spec key))
-                                                        '(:authorize-url :token-url :models-url :responses-url))
+                                                        '(:authorize-url :token-url :models-url :responses-url :usage-url))
                                                 (when (plist-get spec :models-query)
                                                   (list (concat
                                                          (plist-get spec :models-url) "?"

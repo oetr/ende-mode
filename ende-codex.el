@@ -50,6 +50,9 @@
 (defvar ende-codex--model-probe-processes nil
   "In-flight ChatGPT/Codex model discovery processes.")
 
+(defvar ende-codex--usage-probe-processes nil
+  "In-flight Codex OAuth quota discovery processes.")
+
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
   profile stream tool-calls terminal-event debug-record strict-completion replay-items)
@@ -132,6 +135,13 @@ Retain an existing ID unless its recorded account has changed."
                                    ende-client-version
                                  (error "Unsupported catalog query parameter"))))
                        parameters))))))
+
+(defun ende-codex--usage-url (profile)
+  "Return PROFILE's fixed OAuth usage endpoint, refusing other auth methods."
+  (unless (eq (plist-get profile :auth-method) 'codex-oauth)
+    (error "Codex quota is available only for codex-oauth"))
+  (let ((url (ende-codex--auth-property 'codex-oauth :usage-url)))
+    (ende-codex-auth--endpoint url url)))
 
 (defun ende-codex--validated-refresh-url (method)
   "Return METHOD's fixed official OAuth token endpoint."
@@ -570,6 +580,17 @@ Return a cancellation function that only removes this callback."
                               ende-provider-max-discovery-bytes)
    (list "--url" url)))
 
+(defun ende-codex--usage-command (url headers-file config-file)
+  "Build the curl GET command for Codex usage URL."
+  (append
+   (ende-curl-base-command url)
+   (ende-curl-response-options headers-file)
+   (list "--request" "GET" "--header" "Accept: application/json")
+   (when config-file (list "--config" config-file))
+   (ende-curl-timeout-options ende-request-timeout
+                              ende-provider-max-discovery-bytes)
+   (list "--url" url)))
+
 (defun ende-codex--catalog-efforts (entry)
   "Return advertised reasoning EFFORTS and DEFAULT from catalog ENTRY."
   (let ((levels (ende-protocol-json-get "supported_reasoning_levels" entry))
@@ -627,9 +648,77 @@ Return a cancellation function that only removes this callback."
                  "Unrecognized public model catalog schema (expected data IDs or models slugs)"
                "Unrecognized native model catalog schema"))))))
 
-(defun ende-codex--probe-catalog (profile callback)
-  "Probe PROFILE's account model catalog and call CALLBACK.
-CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
+(defun ende-codex--usage-window (entry)
+  "Normalize one quota WINDOW JSON object, or return nil."
+  (when (hash-table-p entry)
+    (let ((used (ende-protocol-json-get "used_percent" entry))
+          (reset (ende-protocol-json-get "reset_at" entry))
+          (duration (ende-protocol-json-get "limit_window_seconds" entry)))
+      (when (numberp used)
+        (list :used-percent (max 0 (min 100 used))
+              :reset-at (and (numberp reset) reset)
+              :window-seconds (and (numberp duration) (> duration 0) duration))))))
+
+(defun ende-codex--parse-usage (text)
+  "Parse TEXT into primary and secondary quota windows."
+  (let* ((payload (ende-protocol-json-read-string text))
+         (rate (ende-protocol-json-get "rate_limit" payload))
+         (primary (and (hash-table-p rate)
+                       (ende-codex--usage-window
+                        (ende-protocol-json-get "primary_window" rate))))
+         (secondary (and (hash-table-p rate)
+                         (ende-codex--usage-window
+                          (ende-protocol-json-get "secondary_window" rate)))))
+    (unless (or primary secondary)
+      (error "Usage response has no quota windows"))
+    (list :primary primary :secondary secondary)))
+
+(defun ende-codex--usage-duration (seconds)
+  "Format SECONDS as a compact duration."
+  (let* ((seconds (max 0 (floor seconds)))
+         (days (/ seconds 86400))
+         (hours (/ (% seconds 86400) 3600))
+         (minutes (/ (% seconds 3600) 60)))
+    (cond ((> days 0) (format "%dd %dh" days hours))
+          ((> hours 0) (format "%dh%s" hours
+                              (if (> minutes 0) (format " %dm" minutes) "")))
+          ((> minutes 0) (format "%dm" minutes))
+          (t "now"))))
+
+(defun ende-codex-usage-string (quota &optional now)
+  "Format normalized Codex OAuth QUOTA for the selector."
+  (let ((now (or now (float-time))) segments reset-at)
+    (dolist (key '(:primary :secondary))
+      (let ((window (plist-get quota key)))
+        (when window
+          (let ((seconds (if (and (eq key :primary)
+                                  (numberp (plist-get window :reset-at)))
+                             (- (plist-get window :reset-at) now)
+                           (plist-get window :window-seconds))))
+            (push (format "%s: %d%% left"
+                          (cond ((and (numberp seconds) (>= seconds (* 7 86400))) "weekly")
+                                ((numberp seconds) (ende-codex--usage-duration seconds))
+                                (t "quota"))
+                          (round (- 100 (plist-get window :used-percent))))
+                  segments))
+          (when (numberp (plist-get window :reset-at))
+            (setq reset-at (if reset-at
+                               (min reset-at (plist-get window :reset-at))
+                             (plist-get window :reset-at)))))))
+    (setq segments (nreverse segments))
+    (when reset-at
+      (setq segments
+            (append segments
+                    (list (format "reset in %s"
+                                  (ende-codex--usage-duration (- reset-at now)))))))
+    (mapconcat #'identity segments " · ")))
+
+(defun ende-codex--probe-catalog
+    (profile callback &optional request-url command parser request-name process-slot usage-p)
+  "Probe PROFILE and call CALLBACK with parsed account-bound JSON.
+CALLBACK receives (VALUE ERROR).  Return a cancellation function.  Optional
+REQUEST-URL, COMMAND, PARSER, REQUEST-NAME, PROCESS-SLOT and USAGE-P customize
+the request while preserving the shared Codex OAuth lifecycle."
   (let ((response-buffer nil)
         (stderr-buffer nil)
         (stderr-process nil)
@@ -643,8 +732,10 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
         ((finish (value &optional error cancelled)
            (unless finished
              (setq finished t)
-             (setq ende-codex--model-probe-processes
-                   (delq process ende-codex--model-probe-processes))
+             (if process-slot
+                 (set process-slot (delq process (symbol-value process-slot)))
+               (setq ende-codex--model-probe-processes
+                     (delq process ende-codex--model-probe-processes)))
              (when (and process (process-live-p process))
                (delete-process process))
              (ende-curl-cleanup-resources
@@ -655,15 +746,19 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                (funcall callback value error))))
          (start (auth)
            (let* ((default-directory (ende-curl-local-directory))
-                  (url (ende-codex--catalog-request-url profile))
+                  (url (or request-url (ende-codex--catalog-request-url profile)))
                   (request
                    (ende-curl-start-request
-                    :profile (list :url (ende-codex--catalog-url profile))
-                    :name "ende-codex-model-probe"
+                    :profile (list :url (if usage-p url (ende-codex--catalog-url profile)))
+                    :name (or request-name "ende-codex-model-probe")
                     :internal-headers
-                    (ende-codex--inference-headers (plist-get profile :auth-method) auth profile)
+                    (if usage-p
+                        (ende-codex--usage-headers profile auth)
+                      (ende-codex--inference-headers
+                       (plist-get profile :auth-method) auth profile))
                     :command (lambda (headers config)
-                               (ende-codex--catalog-command url headers config))
+                               (funcall (or command #'ende-codex--catalog-command)
+                                        url headers config))
                     :filter
                     (lambda (_probe-process chunk)
                       (unless finished
@@ -701,7 +796,10 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                                       (with-current-buffer response-buffer
                                         (buffer-string))))
                                 (if (equal status 200)
-                                    (finish (ende-codex--parse-catalog text (plist-get profile :auth-method)))
+                                    (finish (if parser
+                                              (funcall parser text)
+                                            (ende-codex--parse-catalog
+                                             text (plist-get profile :auth-method))))
                                   (finish
                                    nil
                                    (ende-error-create
@@ -709,8 +807,9 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                                     :message
                                     (format "HTTP status %s: %s"
                                             (or status "unknown")
-                                            (or (ende-transport-error-detail text)
-                                                "Codex model discovery failed"))))))
+                                            (if usage-p "Codex usage request failed"
+                                              (or (ende-transport-error-detail text)
+                                                  "Codex model discovery failed")))))))
                             ((error quit)
                              (finish
                               nil
@@ -724,7 +823,9 @@ CALLBACK receives (ENTRIES ERROR).  Return a cancellation function."
                    stderr-process (plist-get request :stderr-process)
                    headers-file (plist-get request :headers-file)
                    config-file (plist-get request :config-file))
-             (push process ende-codex--model-probe-processes))))
+             (if process-slot
+                 (set process-slot (cons process (symbol-value process-slot)))
+               (push process ende-codex--model-probe-processes)))))
       (condition-case startup-error
           (progn
             (ende-validate-resource-options)
@@ -1439,6 +1540,39 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                   :kind 'startup :message (error-message-string failure)))))
     (ende-transport-session-process (ende-codex--lifecycle session))))
 
+(defun ende-codex--usage-headers (profile auth)
+  "Build usage headers only for PROFILE's exact native Codex registration."
+  (unless (and (eq (plist-get profile :service) 'openai-codex)
+               (eq (plist-get profile :auth-method) 'codex-oauth)
+               (eq (plist-get auth :auth-method) 'codex-oauth)
+               (eq (plist-get profile :account) (plist-get auth :account)))
+    (error "Codex quota requires its exact codex-oauth account"))
+  (ende-codex--require-permission 'codex-oauth auth)
+  (list (concat "Authorization: Bearer " (ende-codex--access-token auth))
+        "originator: opencode"
+        (concat "ChatGPT-Account-Id: " (plist-get auth :chatgpt-account-id))))
+
+(defun ende-codex-probe-usage (profile callback)
+  "Probe PROFILE's Codex OAuth quota and call CALLBACK with (QUOTA ERROR).
+Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
+  (condition-case failure
+      (progn
+        (unless (and (eq (plist-get profile :service) 'openai-codex)
+                     (eq (plist-get profile :auth-method) 'codex-oauth))
+          (error "Codex quota is available only for codex-oauth"))
+        (ende-codex--probe-catalog
+         profile callback
+         (ende-codex--usage-url profile)
+         #'ende-codex--usage-command
+         #'ende-codex--parse-usage
+         "ende-codex-usage-probe"
+         'ende-codex--usage-probe-processes t))
+    ((error quit)
+     (funcall callback nil
+              (ende-error-create :kind 'startup
+                                 :message (error-message-string failure)))
+     nil)))
+
 (defun ende-codex--inference-headers (method auth profile)
   "Build headers only for the exact METHOD, AUTH and PROFILE connection."
   (unless (and (eq method (plist-get profile :auth-method))
@@ -1542,13 +1676,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (ende-transport-session-process (ende-codex--lifecycle session))))
 
 (defun ende-codex-abort-background ()
-  "Cancel login, token refresh, and model discovery before reload."
+  "Cancel login, token refresh, model and usage discovery before reload."
   (ende-codex-cancel-login)
   (let (flights)
     (maphash (lambda (_key flight) (push flight flights))
              ende-codex--refresh-flights)
     (dolist (flight flights) (ende-codex--refresh-finish flight nil t)))
-  (dolist (process ende-codex--model-probe-processes)
+  (dolist (process (append ende-codex--model-probe-processes
+                           ende-codex--usage-probe-processes))
     (when (and (processp process) (process-live-p process))
       (delete-process process))))
 

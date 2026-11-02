@@ -17,6 +17,7 @@
 (require 'ende-core)
 (require 'ende-chat)
 (require 'ende-provider)
+(require 'ende-codex)
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-queue-ui)
@@ -97,9 +98,89 @@
 (defvar-local ende-selector--window nil
   "Window displaying the current selector buffer.")
 
+(defvar-local ende-selector--usage nil
+  "OpenAI quota result or display status for the current selector.")
+
+(defvar-local ende-selector--usage-cancel nil
+  "Cancellation function for the current OpenAI quota request.")
+
+(defvar-local ende-selector--usage-timer nil
+  "Periodic quota refresh timer for the current selector.")
+
+(defvar-local ende-selector--usage-generation 0
+  "Generation of the quota refresh for the selected connection.")
+
+(defvar ende-selector--next-usage-generation 0
+  "Next generation identifier assigned to a selector quota probe.")
+
+(defvar-local ende-selector--usage-suspended nil
+  "Non-nil while connection changes are prepared transactionally.")
+
 (defun ende-selector--fit-window (window)
   "Fit WINDOW to the selector contents."
   (fit-window-to-buffer window nil ende-selector-window-min-height))
+
+(defun ende-selector--cancel-usage ()
+  "Cancel quota refresh and timer for the current selector."
+  (when (timerp ende-selector--usage-timer)
+    (cancel-timer ende-selector--usage-timer))
+  (setq ende-selector--usage-timer nil
+        ende-selector--usage-generation
+        (cl-incf ende-selector--next-usage-generation))
+  (when (functionp ende-selector--usage-cancel)
+    (ende-ignore-errors ende-selector--usage-cancel))
+  (setq ende-selector--usage-cancel nil))
+
+(defun ende-selector--usage-result (buffer generation profile quota error)
+  "Apply QUOTA or ERROR to BUFFER if GENERATION and PROFILE still match."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (= ende-selector--usage-generation generation)
+                 (equal (ende-provider-selection-provenance profile)
+                        (ende-provider-selection-provenance
+                         (ende-selector--provider-profile))))
+        (setq ende-selector--usage-cancel nil
+              ende-selector--usage
+              (list :quota quota
+                    :error (and (ende-error-p error)
+                                (ende-error-message error))))
+        (ende-selector--render)))))
+
+(defun ende-selector--usage-refresh (buffer generation)
+  "Refresh the Codex OAuth quota displayed by BUFFER for GENERATION."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (= ende-selector--usage-generation generation)
+                 (eq (plist-get (ende-selector--provider-profile) :service)
+                     'openai-codex)
+                 (eq (plist-get (ende-selector--provider-profile) :auth-method)
+                     'codex-oauth)
+                 (not ende-selector--usage-cancel))
+        (let ((profile (ende-selector--provider-profile))
+              (completed nil))
+          (let ((cancel
+                 (ende-codex-probe-usage
+                  profile
+                  (lambda (quota error)
+                    (setq completed t)
+                    (ende-selector--usage-result
+                     buffer generation profile quota error)))))
+            (unless completed
+              (setq ende-selector--usage-cancel cancel))))))))
+
+(defun ende-selector--start-usage-refresh ()
+  "Start periodic quota refresh only for the Codex OAuth connection."
+  (ende-selector--cancel-usage)
+  (setq ende-selector--usage nil)
+  (when (and (not ende-selector--usage-suspended)
+             (eq (plist-get (ende-selector--provider-profile) :service) 'openai-codex)
+             (eq (plist-get (ende-selector--provider-profile) :auth-method) 'codex-oauth))
+    (let ((generation (cl-incf ende-selector--next-usage-generation))
+          (buffer (current-buffer)))
+      (setq ende-selector--usage-generation generation)
+      (ende-selector--usage-refresh buffer generation)
+      (setq ende-selector--usage-timer
+            (run-at-time 60 60 #'ende-selector--usage-refresh buffer generation)))))
 
 (defun ende-selector--provider-name ()
   "Return the selected provider name."
@@ -326,7 +407,20 @@ Report an unavailable model once for each catalog identity."
          (ende-selector--row nil "Discovery:" ende-selector--model-error)
        "")
      (ende-selector--control-rows profile)
-     "\n"
+     (if (and (eq (plist-get profile :service) 'openai-codex)
+              (eq (plist-get profile :auth-method) 'codex-oauth))
+         (concat "\n"
+                 (ende-selector--row
+                  nil "Quota:"
+                  (let ((quota (plist-get ende-selector--usage :quota))
+                        (error (plist-get ende-selector--usage :error)))
+                    (cond (quota (concat (ende-codex-usage-string quota)
+                                         (if error (format " (stale; %s)" error) "")))
+                          (error (format "unavailable (%s)" error))
+                          (ende-selector--usage-cancel "loading...")
+                          (t "unavailable"))))
+                 "\n")
+       "\n")
      "a  - ask\nd  - queue dashboard\nR  - reset controls to profile settings\n"
      "i  - insert\nI  - insert anywhere\nk  - compact chat context\n"
      "m  - select/search model\nr  - rubber duck\ns  - summarize\nw  - write anywhere\n\n"
@@ -539,6 +633,7 @@ PREFERRED is selected only when it is present in MODELS."
 
 (defun ende-selector--set-provider (index &optional remember-pair preferred-model)
   "Select provider at INDEX and start dynamic model discovery if needed."
+  (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (unless (= index ende-selector--provider-index)
@@ -576,6 +671,7 @@ PREFERRED is selected only when it is present in MODELS."
     (ende-selector--set-control-context)
     (when remember-pair
       (ende-selector--remember-selected-pair))
+    (ende-selector--start-usage-refresh)
     (ende-selector--render)))
 
 (defvar-local ende-selector--connection-buffer nil
@@ -694,7 +790,8 @@ PREFERRED is selected only when it is present in MODELS."
                     (ende-selector--probe-cancel nil)
                     (ende-selector--probe-generation 0)
                     (ende-selector--effort-cancel nil)
-                    (ende-selector--effort-probe-generation 0))
+                    (ende-selector--effort-probe-generation 0)
+                    (ende-selector--usage-suspended t))
                 (condition-case err
                     (atomic-change-group
                       (ende-selector--set-provider ende-selector--provider-index nil model)
@@ -714,6 +811,7 @@ PREFERRED is selected only when it is present in MODELS."
         (ende-selector--cancel-effort-probe)
         (setq ende-selector--connection connection
               ende-selector--api (plist-get connection :api))
+        (ende-selector--start-usage-refresh)
         (cl-multiple-value-setq
             (ende-selector--models ende-selector--model-index
              ende-selector--model-state ende-selector--model-error
@@ -1049,6 +1147,7 @@ Return the saved selection, or nil when no valid model is selected."
 (defun ende-selector-close ()
   "Close the selector without starting a request."
   (interactive)
+  (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (let ((buffer (current-buffer))
@@ -1066,6 +1165,7 @@ Return the saved selection, or nil when no valid model is selected."
 
 (defun ende-selector--buffer-killed ()
   "Release discovery and the connection draft when the selector is killed."
+  (ende-selector--cancel-usage)
   (when (buffer-live-p ende-selector--connection-buffer)
     (let ((buffer ende-selector--connection-buffer))
       (when-let* ((window (get-buffer-window buffer t)))
@@ -1249,6 +1349,7 @@ Return the saved selection, or nil when no valid model is selected."
          (provider-index (or (cl-position last-provider providers :test #'eq) 0))
          (buffer (get-buffer-create ende-selector-buffer-name)))
     (with-current-buffer buffer
+      (ende-selector--cancel-usage)
       (ende-selector--cancel-probe)
       (ende-selector--cancel-effort-probe)
       (ende-selector-mode)
