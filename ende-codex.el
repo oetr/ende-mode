@@ -42,7 +42,7 @@
   "One coalesced OAuth refresh and its waiting callbacks."
   key auth waiters process response-buffer stderr-buffer stderr-process
   headers-file
-  received-bytes finished lock timer verification (attempts 0))
+  received-bytes finished lock lock-id timer verification (attempts 0))
 
 (defvar ende-codex--refresh-flights (make-hash-table :test #'equal)
   "In-flight OAuth refreshes keyed by credential source and client identity.")
@@ -252,7 +252,9 @@ An inherited binding, including an unusable one, survives delegation."
         (setf (ende-codex--refresh-flight-verification flight) nil)
         (funcall verification))
       (when-let* ((lock (ende-codex--refresh-flight-lock flight)))
-        (ende-ignore-errors #'delete-directory lock))
+        (ende-ignore-errors
+         (ende-codex-auth--delete-lock
+          lock (ende-codex--refresh-flight-lock-id flight))))
       (when (and (processp process) (process-live-p process))
         (ende-ignore-errors #'delete-process process))
       (ende-curl-cleanup-resources
@@ -472,11 +474,9 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
                       (concat ".refresh-" (symbol-name (plist-get auth :auth-method))
                               "-" (symbol-name (plist-get auth :account))) directory)))
           (condition-case nil
-              (let ((original (default-file-modes)))
-                (unwind-protect
-                    (progn (set-default-file-modes #o700) (make-directory lock)
-                           (setf (ende-codex--refresh-flight-lock flight) lock))
-                  (set-default-file-modes original)))
+              (setf (ende-codex--refresh-flight-lock-id flight)
+                    (ende-codex-auth--make-lock lock)
+                    (ende-codex--refresh-flight-lock flight) lock)
             (file-already-exists (ende-codex-auth--attributes lock t t)))
           (let ((current (ende-codex-auth-read (plist-get auth :auth-method) (plist-get auth :account))))
             (unless (ende-codex-auth--same-registration-p auth current)
