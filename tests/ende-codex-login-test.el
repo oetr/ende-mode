@@ -20,7 +20,7 @@
                ((symbol-function 'browse-url) (lambda (url &rest _) (setq browser url)))
                ((symbol-function 'ende-codex-auth--jwks-async)
                 (lambda (callback) (funcall callback jwks nil) #'ignore)))
-       (dolist (scenario '(valid state signature nonce identity permission denied))
+       (dolist (scenario '(valid signature nonce identity permission denied))
          (let* ((before (ende-codex-auth-lookup 'chatgpt-plan-oauth 'personal))
                 (token (alist-get (if (eq scenario 'nonce) 'nonce 'valid) ende-rs256-test--fixtures))
                 (scope (if (eq scenario 'permission) "openid offline_access" (ende-codex--auth-property 'chatgpt-plan-oauth :scopes)))
@@ -51,6 +51,21 @@
                (setf (ende-codex--login-callback attempt)
                      (lambda (record error) (setq result record failure error)))
                (should (string-prefix-p (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url) browser))
+               (setq client (make-network-process :name "ende-login-invalid-test" :host "127.0.0.1"
+                                                   :service port :family 'ipv4 :noquery t
+                                                   :filter #'ignore :sentinel #'ignore))
+               (unwind-protect
+                   (progn
+                     (process-send-string
+                      client (format "GET /auth/callback?state=wrong&code=ignored&client_id=test-client HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" port))
+                     (let ((tries 100))
+                       (while (and (process-live-p client) (> tries 0))
+                         (cl-decf tries) (accept-process-output nil 0.01)))
+                     (should-not (ende-codex--login-consumed attempt))
+                     (should (ende-codex--login-live-p attempt))
+                     (should-not (memq client (ende-codex--login-clients attempt))))
+                 (when (process-live-p client) (delete-process client)))
+               (setq client nil)
                (unwind-protect
                    (progn
                      (setq client (make-network-process :name "ende-login-test" :host "127.0.0.1"

@@ -45,18 +45,52 @@
     (when (processp process)
       (set-process-filter process #'ignore)
       (set-process-sentinel process #'ignore)
+      (when-let* ((timer (process-get process :timeout)))
+        (cancel-timer timer)
+        (process-put process :timeout nil))
       (when (process-live-p process) (delete-process process))))
   (setf (ende-codex--login-listener attempt) nil
         (ende-codex--login-clients attempt) nil))
 
-(defun ende-codex--login-stop-accepting (attempt)
-  "Stop ATTEMPT's listener while accepted responses can finish."
+(defun ende-codex--login-discard-timeout (process)
+  "Cancel PROCESS's incomplete-request timeout."
+  (when-let* ((timer (process-get process :timeout)))
+    (cancel-timer timer)
+    (process-put process :timeout nil)))
+
+(defun ende-codex--login-discard-client (attempt process)
+  "Remove PROCESS and its timeout from ATTEMPT."
+  (ende-codex--login-discard-timeout process)
+  (setf (ende-codex--login-clients attempt)
+        (delq process (ende-codex--login-clients attempt))))
+
+(defun ende-codex--login-reject-client (attempt process)
+  "Reject one invalid callback connection without affecting ATTEMPT."
+  (when (process-live-p process)
+    (ignore-errors (ende-codex--login-http-response process nil))
+    (delete-process process))
+  (ende-codex--login-discard-client attempt process))
+
+(defun ende-codex--login-client-sentinel (attempt process _event)
+  "Remove a closed callback PROCESS from ATTEMPT immediately."
+  (unless (process-live-p process)
+    (ende-codex--login-discard-client attempt process)))
+
+(defun ende-codex--login-client-timeout (attempt process)
+  "Reject an incomplete callback PROCESS after its short timeout."
+  (ende-codex--login-reject-client attempt process))
+
+(defun ende-codex--login-stop-accepting (attempt &optional preserve)
+  "Stop ATTEMPT's listener and reject any other pending clients."
   (let ((listener (ende-codex--login-listener attempt)))
     (when (processp listener)
       (set-process-filter listener #'ignore)
       (set-process-sentinel listener #'ignore)
       (when (process-live-p listener) (delete-process listener)))
-    (setf (ende-codex--login-listener attempt) nil)))
+    (setf (ende-codex--login-listener attempt) nil))
+  (dolist (client (copy-sequence (ende-codex--login-clients attempt)))
+    (unless (eq client preserve)
+      (ende-codex--login-reject-client attempt client))))
 
 (defun ende-codex--login-finish (attempt record failure)
   "Finish ATTEMPT once, cleaning every resource before reporting RECORD or FAILURE."
@@ -191,8 +225,8 @@
         (push (cons key value) parameters)))
     parameters))
 
-(defun ende-codex--login-receive-callback (attempt parameters)
-  "Validate callback PARAMETERS for ATTEMPT in protocol order and exchange once."
+(defun ende-codex--login-validate-callback (attempt parameters)
+  "Validate callback PARAMETERS for ATTEMPT without consuming its state."
   (dolist (key '("state" "code" "client_id" "error"))
     (when (> (cl-count key parameters :key #'car :test #'equal) 1)
       (signal 'ende-codex-identity-error nil)))
@@ -200,28 +234,48 @@
                (not (ende-codex--login-consumed attempt))
                (equal (cdr (assoc "state" parameters)) (ende-codex--login-state attempt)))
     (signal 'ende-codex-identity-error nil))
-  (setf (ende-codex--login-consumed attempt) t)
-  (ende-codex--login-stop-accepting attempt)
   (if (assoc "error" parameters)
-      (ende-codex--login-fail attempt "ChatGPT authorization was declined")
-    (let* ((code (cdr (assoc "code" parameters)))
-           (returned (cdr (assoc "client_id" parameters)))
-           (saved (ende-codex--login-client-id attempt)))
+      (progn
+        (when (assoc "code" parameters)
+          (signal 'ende-codex-identity-error nil))
+        (unless (ende-codex--login-identifier-p (cdr (assoc "error" parameters)))
+          (signal 'ende-codex-identity-error nil))
+        'denied)
+    (let ((code (cdr (assoc "code" parameters)))
+          (returned (cdr (assoc "client_id" parameters)))
+          (saved (ende-codex--login-client-id attempt)))
       (unless (ende-codex--login-identifier-p code) (signal 'ende-codex-identity-error nil))
       (if (equal saved "dynamic_agent_client")
           (unless (and (ende-codex--login-identifier-p returned)
                        (not (equal returned "dynamic_agent_client")))
             (signal 'ende-codex-identity-error nil))
         (when (and returned (not (equal returned saved))) (signal 'ende-codex-identity-error nil)))
-      (when (equal saved "dynamic_agent_client")
-        (setf (ende-codex--login-client-id attempt) returned)
-        (puthash (list (ende-codex--login-method attempt) (ende-codex--login-host-id attempt) (ende-codex--login-account attempt))
-                 returned ende-codex--issued-clients))
-      (setf (ende-codex--login-cancel attempt)
-            (ende-codex-auth--request
-             (ende-codex--auth-property (ende-codex--login-method attempt) :token-url)
-             (ende-codex--code-exchange-body (ende-codex--login-method attempt) attempt code)
-             262144 (apply-partially #'ende-codex--login-exchanged attempt))))))
+      (list code returned))))
+
+(defun ende-codex--login-receive-callback (attempt parameters)
+  "Validate and consume callback PARAMETERS for ATTEMPT exactly once."
+  (let ((callback (ende-codex--login-validate-callback attempt parameters)))
+    (setf (ende-codex--login-consumed attempt) t)
+    (ende-codex--login-stop-accepting attempt)
+    (if (eq callback 'denied)
+        (ende-codex--login-fail attempt "ChatGPT authorization was declined")
+      (let ((code (car callback))
+            (returned (cadr callback)))
+        (when (equal (ende-codex--login-client-id attempt) "dynamic_agent_client")
+          (setf (ende-codex--login-client-id attempt) returned)
+          (puthash (list (ende-codex--login-method attempt)
+                         (ende-codex--login-host-id attempt)
+                         (ende-codex--login-account attempt))
+                   returned ende-codex--issued-clients))
+        (condition-case nil
+            (setf (ende-codex--login-cancel attempt)
+                  (ende-codex-auth--request
+                   (ende-codex--auth-property (ende-codex--login-method attempt) :token-url)
+                   (ende-codex--code-exchange-body (ende-codex--login-method attempt) attempt code)
+                   262144
+                   (apply-partially #'ende-codex--login-exchanged attempt)))
+          ((error quit)
+           (ende-codex--login-fail attempt)))))))
 
 (defun ende-codex--code-exchange-body (method attempt code)
   "Encode METHOD's code exchange for ATTEMPT and CODE."
@@ -244,7 +298,8 @@
 
 (defun ende-codex--login-http-filter (attempt process chunk)
   "Accumulate bounded HTTP CHUNK from PROCESS for ATTEMPT."
-  (let ((debug-on-error nil) (debug-on-signal nil) (debug-on-quit nil))
+  (unless (process-get process :responded)
+    (let ((debug-on-error nil) (debug-on-signal nil) (debug-on-quit nil))
     (condition-case nil
         (let* ((request (concat (process-get process :request) chunk))
                (end (string-match "\r\n\r\n" request))
@@ -265,8 +320,10 @@
               (dolist (line (butlast (cdr lines) 2))
                 (unless (string-match "\\`\\([!#$%&'*+.^_`|~0-9A-Za-z-]+\\):[ \t]*\\([^[:cntrl:]]*\\)\\'" line)
                   (signal 'ende-codex-identity-error nil))
-                (let ((key (downcase (match-string 1 line))) (value (string-trim (match-string 2 line))))
-                  (when (assoc key headers) (signal 'ende-codex-identity-error nil))
+                (let ((key (downcase (match-string 1 line)))
+                      (value (string-trim (match-string 2 line))))
+                  (when (assoc key headers)
+                    (signal 'ende-codex-identity-error nil))
                   (push (cons key value) headers)))
               (unless (and (equal (cdr (assoc "host" headers))
                                   (substring (ende-codex--login-redirect attempt) 7 -14))
@@ -275,16 +332,12 @@
                                (equal (cdr (assoc "content-length" headers)) "0")))
                 (signal 'ende-codex-identity-error nil))
               (let ((parameters (ende-codex--login-query query)))
-                (unless (equal (cdr (assoc "state" parameters)) (ende-codex--login-state attempt))
-                  (signal 'ende-codex-identity-error nil))
+                (ende-codex--login-discard-timeout process)
                 (ende-codex--login-http-response process t)
                 (process-put process :responded t)
                 (process-put process :request nil)
                 (ende-codex--login-receive-callback attempt parameters)))))
-      ((error quit)
-       (when (and (process-live-p process) (not (process-get process :responded)))
-         (ignore-errors (ende-codex--login-http-response process nil)))
-       (ende-codex--login-fail attempt)))))
+      ((error quit) (ende-codex--login-reject-client attempt process))))))
 
 (defun ende-codex--login-listen (attempt)
   "Bind ATTEMPT's one-shot callback listener specifically to IPv4 loopback."
@@ -302,7 +355,13 @@
                      (delete-process client)
                    (push client (ende-codex--login-clients attempt))
                    (set-process-query-on-exit-flag client nil)
-                   (set-process-coding-system client 'binary 'binary))))))
+                   (set-process-coding-system client 'binary 'binary)
+                   (set-process-filter client
+                                       (apply-partially #'ende-codex--login-http-filter attempt))
+                   (set-process-sentinel client
+                                         (apply-partially #'ende-codex--login-client-sentinel attempt))
+                   (process-put client :timeout
+                               (run-at-time 5 nil #'ende-codex--login-client-timeout attempt client)))))))
     (setf (ende-codex--login-listener attempt) listener
           (ende-codex--login-redirect attempt)
           (or (ende-codex--auth-property (ende-codex--login-method attempt) :redirect-uri)
