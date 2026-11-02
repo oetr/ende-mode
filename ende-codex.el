@@ -80,6 +80,29 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 ;;;; Credential handling
 
+(defun ende-codex--session-id-for-identity (identity &optional account)
+  "Return an opaque session ID for stable IDENTITY, isolated by ACCOUNT."
+  (secure-hash 'sha256 (prin1-to-string (list "ende-codex-session" account identity))))
+
+(defun ende-codex--new-session-id (&optional account)
+  "Return a fresh job-scoped session ID for ACCOUNT."
+  (ende-codex--session-id-for-identity
+   (format "job:%s:%s:%s" (emacs-pid) (float-time)
+           (random most-positive-fixnum)) account))
+
+(defun ende-codex--ensure-session-id (profile)
+  "Return detached PROFILE with one account-bound session ID.
+Retain an existing ID unless its recorded account has changed."
+  (let* ((profile (ende-provider-config-copy profile))
+         (account (plist-get profile :account)))
+    (when (or (not (plist-get profile :codex-session-id))
+              (and (plist-member profile :codex-session-account)
+                   (not (eq account (plist-get profile :codex-session-account)))))
+      (setq profile
+            (plist-put profile :codex-session-id
+                       (ende-codex--new-session-id account))))
+    (plist-put profile :codex-session-account account)))
+
 (defun ende-codex--validated-generation-url (url)
   "Require URL to be the fixed official Responses endpoint."
   (unless (equal url ende-codex--responses-url)
@@ -738,7 +761,8 @@ explicit efforts yields no choices instead of an error."
 (defun ende-codex--remember-output (session item index)
   "Capture completed replay ITEM at output INDEX for SESSION."
   (when (and (integerp index) (>= index 0)
-             (member (ende-protocol-json-get "type" item) '("message" "function_call")))
+             (member (ende-protocol-json-get "type" item)
+                     '("reasoning" "message" "function_call")))
     (setf (alist-get index (ende-codex--session-replay-items session))
           (ende-provider-config-copy item))))
 
@@ -908,6 +932,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (output-index (ende-protocol-json-get "output_index" json))
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
+    (ende-debug-record-response (ende-codex--session-debug-record session) response)
     (when (equal type "response.output_item.done")
       (ende-codex--remember-output session item output-index)
       (when (equal (ende-protocol-json-get "type" item) "image_generation_call")
@@ -971,6 +996,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
              :metadata (list :source :response
                              :model (ende-stream-session-actual-model
                                      (ende-codex--session-stream session))
+                             :service-tier (ende-protocol-json-get "service_tier" metadata)
                              :provider "OpenAI"))))
     (cond
      ((string= type "response.output_text.delta")
@@ -1261,7 +1287,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
      (ende-controls-encode body (plist-get profile :controls) profile) profile)))
 
 (defconst ende-codex--forbidden-body-fields
-  '("background" "conversation" "max_output_tokens" "max_tool_calls" "metadata"
+  '("background" "conversation" "previous_response_id" "max_output_tokens" "max_tool_calls" "metadata"
     "moderation" "multi_agent" "prompt" "prompt_cache_retention"
     "safety_identifier" "temperature" "top_logprobs" "top_p" "truncation"
     "user")
@@ -1299,6 +1325,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
   (let* ((body (list (cons :model (plist-get profile :model))
                      (cons :input
                            (ende-codex--request-messages messages profile))
+                     (cons :include ["reasoning.encrypted_content"])
                      (cons :store json-false)
                      (cons :stream t)))
          (tools (ende-codex--tool-definitions
@@ -1312,10 +1339,26 @@ When APPEND is non-nil, append the argument delta to the stored value."
                 (equal (plist-get profile :reasoning-effort) "none"))
       (setq body
             (ende-controls--set-path body '("reasoning" "summary") "auto")))
-    (ende-codex--validate-body
-     (ende-provider-config-encode-parameters
-      (ende-controls-encode body (plist-get profile :controls) profile)
-      profile))))
+    (setq body
+          (ende-provider-config-encode-parameters
+           (ende-controls-encode body (plist-get profile :controls) profile)
+           profile))
+    (let ((include (cdr (cl-find "include" body
+                                :key (lambda (entry) (ende-controls--json-key-name (car entry)))
+                                :test #'equal))))
+      (unless (and (vectorp include) (not (stringp include))
+                   (cl-every #'stringp include))
+        (error "ChatGPT-plan include must be an array of field names"))
+      (setq body (ende-controls--set-path
+                  body '("include")
+                  (vconcat (delete-dups (append include '("reasoning.encrypted_content")))))))
+    ;; Encode explicit parameters first: keyword/string aliases already have
+    ;; one effective value.  Only OAuth gets this automatic affinity default.
+    (unless (cl-find "prompt_cache_key" body
+                     :key (lambda (entry) (ende-controls--json-key-name (car entry)))
+                     :test #'equal)
+      (push (cons :prompt_cache_key (plist-get profile :codex-session-id)) body))
+    (ende-codex--validate-body body)))
 
 (defun ende-responses--start-prepared (session body _request-body record)
   "Start a public Responses SESSION with prepared BODY and debug RECORD."
@@ -1356,6 +1399,11 @@ When APPEND is non-nil, append the argument delta to the stored value."
   "Start SESSION with AUTH, prepared DATA, BODY and debug RECORD."
   (let* ((default-directory (ende-curl-local-directory))
          (profile (ende-codex--session-profile session))
+         (_ (let ((case-fold-search t))
+              (when (cl-some (lambda (header)
+                              (string-match-p "\\`session-id:" header))
+                            (plist-get profile :request-headers))
+                (error "Codex session-id is transport-owned; remove the profile header"))))
          (url (ende-codex--validated-generation-url
                (or (plist-get profile :url) ende-codex--responses-url)))
          (request
@@ -1364,7 +1412,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
            :url url
            :internal-headers
            (list (concat "Authorization: Bearer "
-                         (ende-codex--access-token auth)))
+                         (ende-codex--access-token auth))
+                 (concat "session-id: " (plist-get profile :codex-session-id)))
            :name (format "ende-codex-%s"
                          (or (plist-get profile :job-id) "request"))
            :command (lambda (headers config)
@@ -1408,7 +1457,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex-default (messages callbacks &optional options)
   "Send MESSAGES through the official Responses API for an Ende account."
-  (let* ((profile (ende-provider-config-copy options))
+  (let* ((profile (ende-codex--ensure-session-id options))
          (session
           (ende-codex--make-session
            :profile profile :callbacks callbacks :strict-completion t

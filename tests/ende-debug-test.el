@@ -58,7 +58,8 @@
                      (list :temperature 0.2
                            :controls '((:temperature :path ("temperature")))))
                    (when codex
-                     (list :codex-auth-source 'ende :account 'default))))
+                     (list :codex-auth-source 'ende :account 'default
+                           :codex-session-id "debug-test-session"))))
                  (chunks (if (eq transport 'codex)
                              (list (concat "data: {\"type\":\"response.completed\","
                                            "\"response\":{\"usage\":{"
@@ -81,8 +82,14 @@
                    "completion" (ende-debug-test--read-meta directory 1)))
                  (request-body (plist-get recorded :request-body)))
             (should (equal (plist-get unrecorded :request-body) request-body))
-            (should (equal (ende-debug-test--read-bytes recording-file)
-                           request-body))
+            (if codex
+                (let* ((json-false :false)
+                       (safe (ende-content-redact
+                              (ende-protocol-json-read-string request-body))))
+                  (should (equal (ende-debug-test--read-bytes recording-file)
+                                 (encode-coding-string (json-encode safe) 'utf-8))))
+              (should (equal (ende-debug-test--read-bytes recording-file)
+                             request-body)))
             (should (= (logand (file-modes recording-file) #o777) #o600))
             (should (= (logand
                         (file-modes (expand-file-name "0001-meta.json"
@@ -322,6 +329,102 @@
                                       (buffer-string)))
               (should buffer-read-only))))
       (delete-directory directory t))))
+
+(ert-deftest ende-debug-private-replay-and-cache-metadata ()
+  (let* ((directory (make-temp-file "ende-debug-private-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (item (ende-protocol-json-read-string
+                "{\"type\":\"reasoning\",\"encrypted_content\":\"secret-replay\"}"))
+         (body `((:model . "requested") (:input . [,item])
+                 (:prompt_cache_key . "secret-cache-identity")
+                 (:prompt_cache_options . ,(ende-protocol-json-read-string
+                                           "{\"mode\":\"implicit\"}")))))
+    (unwind-protect
+        (let ((record (ende-debug-record-request
+                       (json-encode body) body
+                       (list (list :protocol-history (list 'openai-responses item)))
+                       nil "test" "https://example.test")))
+          (ende-debug-record-response
+           record (ende-protocol-json-read-string
+                   "{\"model\":\"actual\",\"service_tier\":\"default\",\"id\":\"resp-1\",\"output\":[{\"encrypted_content\":\"secret-replay\"}]}"))
+          (ende-debug-record-completion
+           record 'success (ende-protocol-json-read-string
+                            "{\"input_tokens\":4096,\"input_tokens_details\":{\"cached_tokens\":2048},\"cache_creation_input_tokens\":0}") 200 nil)
+          (let ((meta (ende-debug-test--read-meta directory 1)))
+            (should (eq (gethash "cache_key_supplied" meta) t))
+            (should (equal (gethash "response_model" meta) "actual"))
+            (should (equal (gethash "response_service_tier" meta) "default")))
+          (dolist (file (directory-files directory t "^[^.].*"))
+            (let ((text (ende-debug-test--read-bytes file)))
+              (should-not (string-match-p "secret-replay\\|secret-cache-identity" text))))
+          (should (equal (gethash "encrypted_content" item) "secret-replay")))
+      (delete-directory directory t))))
+
+(ert-deftest ende-debug-weighted-reuse-and-missing-counts ()
+  (let* ((directory (make-temp-file "ende-cache-weighted-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (request '((:model . "test") (:input . []))))
+    (unwind-protect
+        (progn
+          (dolist (usage '((:input_tokens 1000 :output_tokens 10
+                           :input_tokens_details (:cached_tokens 900) :cache_write_tokens 0)
+                          (:input_tokens 100 :output_tokens 10
+                           :input_tokens_details (:cached_tokens 0))
+                          (:input_tokens 500 :output_tokens 0)))
+            (ende-debug-test--record-synthetic request 1 usage))
+          (let* ((captures (ende-debug--read-captures directory))
+                 (report (ende-debug--format-report directory captures))
+                 (zero (gethash "completion" (ende-debug-test--read-meta directory 2)))
+                 (missing (gethash "completion" (ende-debug-test--read-meta directory 3))))
+            (should (string-match-p "81.8% (900/1100 tokens; 2 requests with both counts)" report))
+            (should (string-match-p "Cache write: 0" report))
+            (should (= (gethash "cached_input_tokens" zero) 0))
+            (should (eq (gethash "cached_tokens_reported" zero) t))
+            (should-not (gethash "cached_input_tokens" missing))
+            (should (eq (gethash "cached_tokens_reported" missing) :false))
+            (should (eq (gethash "cache_write_tokens_reported" zero) :false))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-debug-protected-data-and-stable-fingerprints ()
+  (let* ((directory (make-temp-file "ende-cache-secrets-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (body '((:prompt_cache_key . "secret-cache")
+                 (:input . []) (:stream . t)))
+         (profile '(:codex-session-id "secret-session"))
+         (messages '((:authorization "secret-auth" :access-token "secret-access"
+                      :refresh_token "secret-refresh" :session-id "secret-session"
+                      :encrypted_content "secret-reasoning"))))
+    (unwind-protect
+        (progn
+          (dotimes (_ 2)
+            (ende-debug-record-request (json-encode body) body messages profile "test" nil))
+          (should (equal (gethash "session_fingerprint" (ende-debug-test--read-meta directory 1))
+                         (gethash "session_fingerprint" (ende-debug-test--read-meta directory 2))))
+          (should (stringp (gethash "session_fingerprint" (ende-debug-test--read-meta directory 1))))
+          (dolist (file (directory-files directory t "^[^.].*"))
+            (should-not (string-match-p "secret-" (ende-debug-test--read-bytes file)))))
+      (delete-directory directory t))
+    (dolist (text '("Authorization: Bearer secret-auth" "session-id: secret-session"
+                    "access_token=secret-access" "refresh_token: secret-refresh"
+                    "prompt_cache_key: secret-cache" "encrypted_content: secret-reasoning"))
+      (let* ((event (make-hash-table :test #'equal))
+             (error (make-hash-table :test #'equal))
+             (session (ende-codex--make-session)) received)
+        (puthash "message" text error)
+        (puthash "type" "error" event)
+        (puthash "error" error event)
+        (should-not (string-match-p "secret-" (ende-transport-safe-error-text text)))
+        (setq session (ende-codex--make-session
+                       :callbacks (list :on-error (lambda (value) (setq received value)))))
+        (ende-codex--handle-event session event)
+        (should received)
+        (should-not (string-match-p "secret-" (prin1-to-string received)))))))
 
 (provide 'ende-debug-test)
 

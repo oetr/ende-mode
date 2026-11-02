@@ -56,6 +56,10 @@
     (let ((clean (ende-provider-config-copy profile)))
       (setq clean (plist-put clean :job-id nil)
             clean (plist-put clean :tool-definitions nil))
+      (when (plist-member clean :codex-session-id)
+        (setq clean (plist-put clean :codex-session-id nil)))
+      (when (plist-member clean :codex-session-account)
+        (setq clean (plist-put clean :codex-session-account nil)))
       clean)))
 
 (defun ende-agent-freeze-registry (family registry)

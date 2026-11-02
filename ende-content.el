@@ -102,9 +102,24 @@ all their assistant content and before the corresponding results."
   (list (cons :type "image") (cons :sha256 (secure-hash 'sha256 bytes))
         (cons :media_type media) (cons :bytes (length bytes))))
 
+(defun ende-content--private-key-p (key)
+  "Return non-nil when KEY names private transport or replay data."
+  (and (or (stringp key) (symbolp key))
+       (let ((name (downcase (if (stringp key) key (symbol-name key)))))
+         (string-match-p
+          "encrypted_content\\|prompt_cache_key\\|session[-_]id\\|authorization\\|access[-_]token\\|refresh[-_]token\\|id[-_]token"
+          name))))
+
 (defun ende-content-redact (value)
-  "Replace encoded images and internal image parts in VALUE with descriptors."
+  "Redact images, encrypted reasoning, and cache identities in VALUE.
+This is for diagnostics only; never use the result for protocol replay."
   (cond
+   ((and (stringp value)
+         (let ((case-fold-search t))
+           (string-match-p
+            "encrypted_content\\|prompt_cache_key\\|session[-_]id[\"[:space:]]*[:=]\\|authorization[\"[:space:]]*[:=]\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token[\"[:space:]]*[:=]"
+            value)))
+    "[private provider value redacted]")
    ((and (stringp value) (string-prefix-p "data:image/" value))
     (if (string-match "\\`data:\\([^;]+\\);base64," value)
         (let ((media (match-string 1 value)) (start (match-end 0)))
@@ -128,6 +143,8 @@ all their assistant content and before the corresponding results."
       (maphash (lambda (key item)
                  (puthash key
                           (cond
+                           ((ende-content--private-key-p key)
+                            "[private provider value redacted]")
                            ((member key '("b64_json" "result"))
                             (if (stringp item) "[provider payload redacted]"
                               (ende-content-redact item)))
@@ -137,6 +154,13 @@ all their assistant content and before the corresponding results."
                                                 (ende-content-redact image))) item)))
                            (t (ende-content-redact item))) copy)) value)
       copy))
+   ((and (consp value)
+         (ende-content--private-key-p (car value)))
+    (cons (car value)
+          (if (consp (cdr value))
+              (cons "[private provider value redacted]"
+                    (ende-content-redact (cddr value)))
+            "[private provider value redacted]")))
    ((consp value) (cons (ende-content-redact (car value)) (ende-content-redact (cdr value))))
    ((vectorp value) (vconcat (mapcar #'ende-content-redact value)))
    (t value)))

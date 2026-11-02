@@ -96,6 +96,13 @@
            unless (memq key '(:messages :input :instructions :tools :model))
            collect (cons key value)))
 
+(defun ende-debug--request-field (name body)
+  "Return the member named NAME from encoded request BODY.
+Adapter fields use keywords; user parameters use string keys."
+  (cl-find name body :key (lambda (entry)
+                           (ende-controls--json-key-name (car entry)))
+           :test #'equal))
+
 (defun ende-debug--write-file (path contents &optional literal)
   "Write CONTENTS to PATH with owner-only permissions.
 When LITERAL is non-nil, preserve CONTENTS as exact bytes."
@@ -114,6 +121,17 @@ When LITERAL is non-nil, preserve CONTENTS as exact bytes."
     (ende-debug--write-file
      (expand-file-name (concat stem "-meta.json") directory)
      (concat (json-encode meta) "\n"))))
+
+(defun ende-debug-record-response (record response)
+  "Retain allowlisted provider RESPONSE metadata in debug RECORD.
+Never capture raw output or opaque reasoning.  Completion writes this record."
+  (when record
+    (dolist (key '("model" "service_tier"))
+      (let ((value (ende-protocol-json-get key response)))
+        (when (stringp value)
+          (setf (alist-get (concat "response_" key)
+                           (plist-get record :metadata) nil nil #'equal)
+                value))))))
 
 (defun ende-debug-record-completion (record outcome usage http-status value)
   "Write RECORD's terminal OUTCOME, normalized USAGE, and HTTP-STATUS.
@@ -162,7 +180,7 @@ errors are reported but never propagated into transport completion."
 
 (defun ende-debug-record-request
     (serialized-body request-body messages profile transport endpoint)
-  "Record exact SERIALIZED-BODY and internal MESSAGES for a request.
+  "Record redacted SERIALIZED-BODY and internal MESSAGES for a request.
 REQUEST-BODY is the encoded request object used to describe its settings.
 PROFILE, TRANSPORT, and ENDPOINT describe the transport.  Return an opaque
 record used to associate later completion metadata, or nil when debugging is
@@ -196,8 +214,13 @@ disabled."
                                                (alist-get :reasoning_effort
                                                           request-body)))
                   ("reasoning_settings" . ,reasoning)
-                  ("request_settings" . ,(ende-debug--request-settings
-                                            request-body))
+                  ("cache_key_supplied" . ,(if (ende-debug--request-field "prompt_cache_key" request-body)
+                                               t json-false))
+                  ("session_fingerprint" . ,(when (plist-get profile :codex-session-id)
+                                              (secure-hash 'sha256
+                                                           (plist-get profile :codex-session-id))))
+                  ("request_settings" . ,(ende-content-redact
+                                           (ende-debug--request-settings request-body)))
                   ("endpoint" . ,(ende-debug--safe-endpoint endpoint))))
                (record (list :directory directory :stem stem
                              :started started :metadata metadata)))
@@ -212,6 +235,7 @@ disabled."
                  (print-level nil)
                  (print-length nil))
              (concat (prin1-to-string (ende-content-redact messages)) "\n")))
+          (setf (plist-get record :metadata) (ende-content-redact metadata))
           (ende-debug--write-meta record)
           record)
       ((error quit)
@@ -541,6 +565,19 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
              (abbreviate-file-name directory))
      "Provider-reported usage (missing cached-token data is not zero):\n"
      (mapconcat #'ende-debug--cache-line captures "\n")
+     (let ((input 0) (cached 0) (reported 0))
+       (dolist (capture captures)
+         (let* ((completion (ende-protocol-json-get "completion" (plist-get capture :metadata)))
+                (tokens (ende-protocol-json-get "input_tokens" completion))
+                (hits (ende-protocol-json-get "cached_input_tokens" completion)))
+           (when (and (numberp tokens) (numberp hits))
+             (cl-incf reported)
+             (cl-incf input tokens)
+             (cl-incf cached hits))))
+       (if (> input 0)
+           (format "\nWeighted cache reuse: %.1f%% (%d/%d tokens; %d requests with both counts)"
+                   (* 100.0 (/ (float cached) input)) cached input reported)
+         "\nWeighted cache reuse: not reported"))
      "\n\n"
      (if (cl-some (lambda (group) (> (length (cdr group)) 1))
                   groups)

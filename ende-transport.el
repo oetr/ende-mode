@@ -142,7 +142,13 @@
       (substring text 0 low))))
 
 (defun ende-transport-safe-error-text (text)
-  "Prevent image-bearing provider payloads from entering error messages."
+  "Prevent private provider payloads from entering error messages."
+  (when (and (stringp text)
+             (let ((case-fold-search t))
+               (string-match-p
+                "encrypted_content\\|prompt_cache_key\\|session[-_]id\\|authorization\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token"
+                text)))
+    (setq text "Provider error contained private replay or cache data (payload redacted)"))
   (if (and (stringp text)
            (let ((case-fold-search t))
              (string-match-p "data:image/\\|b64_json\\|image_generation_call" text)))
