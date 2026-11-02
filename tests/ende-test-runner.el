@@ -18,7 +18,7 @@
        (unless (ert-test-result-expected-p test result)
          (message "TEST-FAILED: %s%s: %s"
                   (ert-test-name test)
-                  (if-let ((location (ert-test-location test)))
+                  (if-let* ((location (ert-test-location test)))
                       (format " (%s)" location)
                     "")
                   (if (ert-test-result-with-condition-p result)
