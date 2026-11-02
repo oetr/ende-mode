@@ -22,50 +22,50 @@
           :access-token (concat "synthetic-access-" suffix)
           :refresh-token (concat "synthetic-refresh-" suffix)
           :id-token (concat "synthetic-id-" suffix)
-          :scope ende-codex--scopes
+          :scope (ende-codex--auth-property 'chatgpt-plan-oauth :scopes)
           :expires-at (+ (floor (float-time)) 3600))))
 
 (ert-deftest ende-codex-auth-storage-independent-records-and-host ()
   (ende-codex-auth-test--with-store
-   (let* ((personal (ende-codex-auth--register
+   (let* ((personal (ende-codex-auth--register 'chatgpt-plan-oauth
                      'personal (ende-codex-auth-test--credentials)))
-          (work (ende-codex-auth--register
+          (work (ende-codex-auth--register 'chatgpt-plan-oauth
                  'work (ende-codex-auth-test--credentials "two"))))
-     (should (equal personal (ende-codex-auth-read 'personal)))
-     (should (equal work (ende-codex-auth-read 'work)))
+     (should (equal personal (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
+     (should (equal work (ende-codex-auth-read 'chatgpt-plan-oauth 'work)))
      (should (equal (plist-get personal :host-id) (plist-get work :host-id)))
      (should-not (equal (plist-get personal :registration-id)
                         (plist-get work :registration-id)))
      (should (= (logand (file-modes ende-codex-auth--directory) #o777) #o700))
-     (should (= (logand (file-modes (expand-file-name "accounts.json"
+     (should (= (logand (file-modes (expand-file-name "connections.json"
                                                       ende-codex-auth--directory))
                         #o777) #o600))
      ;; Reads are detached, and there is no persistent current-account field.
      (setf (plist-get personal :access-token) "mutated")
-     (should-not (equal personal (ende-codex-auth-read 'personal)))
+     (should-not (equal personal (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (with-temp-buffer
-       (insert-file-contents (expand-file-name "accounts.json" ende-codex-auth--directory))
+       (insert-file-contents (expand-file-name "connections.json" ende-codex-auth--directory))
        (should-not (string-match-p "current" (buffer-string)))))))
 
 (ert-deftest ende-codex-auth-storage-replacement-requires-explicit-cas ()
   (ende-codex-auth-test--with-store
-   (let* ((first (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+   (let* ((first (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))
           (other (ende-codex-auth-test--credentials "two")))
-     (should-error (ende-codex-auth--register 'personal other)
+     (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal other)
                    :type 'ende-codex-auth-conflict)
-     (should-error (ende-codex-auth--register 'personal other nil t)
+     (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal other nil t)
                    :type 'ende-codex-auth-conflict)
-     (let ((second (ende-codex-auth--register 'personal other (plist-get first :revision) t)))
+     (let ((second (ende-codex-auth--register 'chatgpt-plan-oauth 'personal other (plist-get first :revision) t)))
        (should-not (ende-codex-auth--same-registration-p first second))
-       (should-error (ende-codex-auth--register 'personal other (plist-get first :revision) t)
+       (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal other (plist-get first :revision) t)
                      :type 'ende-codex-auth-conflict)
-       (should (equal second (ende-codex-auth-read 'personal)))))))
+       (should (equal second (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))))))
 
 (ert-deftest ende-codex-auth-storage-rotation-preserves-registration-not-revision ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (personal (ende-codex-auth--register 'personal credentials))
-          (work (ende-codex-auth--register 'work credentials)))
+          (personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
+          (work (ende-codex-auth--register 'chatgpt-plan-oauth 'work credentials)))
      ;; Identical subjects/client IDs still need independent registrations.
      (should-not (ende-codex-auth--same-registration-p personal work))
      (setq credentials (plist-put credentials :refresh-token "synthetic-rotated"))
@@ -74,7 +74,7 @@
        (should-not (equal (plist-get personal :revision) (plist-get rotated :revision)))
        (should-error (ende-codex-auth--rotate personal credentials)
                      :type 'ende-codex-auth-conflict)
-       (should (equal work (ende-codex-auth-read 'work)))
+       (should (equal work (ende-codex-auth-read 'chatgpt-plan-oauth 'work)))
        (setq credentials (plist-put credentials :subject "another-identity"))
        (should-error (ende-codex-auth--rotate rotated credentials)
                      :type 'ende-codex-auth-conflict)))))
@@ -82,60 +82,60 @@
 (ert-deftest ende-codex-auth-storage-rejects-remote-symlink-and-insecure-paths ()
   (ende-codex-auth-test--with-store
    (let ((ende-codex-auth--directory "/ssh:unreachable:/credentials/"))
-     (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error))
+     (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error))
    (make-directory ende-codex-auth--directory)
    (set-file-modes ende-codex-auth--directory #o755)
-   (should-error (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
+   (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials))
                  :type 'ende-codex-auth-error)
    (set-file-modes ende-codex-auth--directory #o700)
-   (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
-   (let ((file (expand-file-name "accounts.json" ende-codex-auth--directory)))
+   (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials))
+   (let ((file (expand-file-name "connections.json" ende-codex-auth--directory)))
      (set-file-modes file #o644)
-     (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error)
+     (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error)
      (set-file-modes file #o600)
      (rename-file file (concat file ".real"))
      (make-symbolic-link (concat file ".real") file)
-     (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error)
+     (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error)
      (delete-file file)
      (make-symbolic-link (concat file ".missing") file)
-     (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error))
+     (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error))
    (let ((link (expand-file-name "link" root)))
      (make-symbolic-link ende-codex-auth--directory link)
      (let ((ende-codex-auth--directory (expand-file-name "child/" link)))
-       (should-error (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
+       (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials))
                      :type 'ende-codex-auth-error)))))
 
 (ert-deftest ende-codex-auth-storage-rejects-hardlinks-and-untrusted-ancestors ()
   (ende-codex-auth-test--with-store
-   (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
-   (let ((file (expand-file-name "accounts.json" ende-codex-auth--directory)))
+   (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials))
+   (let ((file (expand-file-name "connections.json" ende-codex-auth--directory)))
      (add-name-to-file file (concat file ".link"))
-     (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error)
+     (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error)
      (delete-file (concat file ".link")))
    (set-file-modes root #o777)
    (unwind-protect
-       (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error)
+       (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error)
      (set-file-modes root #o700))))
 
 (ert-deftest ende-codex-auth-storage-atomic-failure-leaves-old-record ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'personal credentials)))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials)))
      (cl-letf (((symbol-function 'rename-file) (lambda (&rest _) (error "write failed"))))
        (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-error))
-     (should (equal old (ende-codex-auth-read 'personal)))
+     (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (should-not (directory-files ende-codex-auth--directory nil "\\`\\.accounts-"))
      (should-not (file-exists-p (expand-file-name ".writer-lock" ende-codex-auth--directory))))))
 
 (ert-deftest ende-codex-auth-storage-lock-never-overwrites-another-writer ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (lock (expand-file-name ".writer-lock" ende-codex-auth--directory)))
      (make-directory lock)
      (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-busy)
      (should (file-directory-p lock))
-     (should (equal old (ende-codex-auth-read 'personal)))
+     (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (delete-directory lock))))
 
 (ert-deftest ende-codex-auth-storage-errors-never-print-credentials ()
@@ -143,15 +143,15 @@
    (let* ((credentials (ende-codex-auth-test--credentials))
           (secret (plist-get credentials :access-token)))
      (setq credentials (plist-put credentials :expires-at secret))
-     (let ((failure (should-error (ende-codex-auth--register 'personal credentials))))
+     (let ((failure (should-error (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))))
        (should-not (string-match-p (regexp-quote secret) (prin1-to-string failure))))
      (should-not (custom-variable-p 'ende-codex-auth--directory))
      (should-not (file-exists-p ende-codex-auth--directory)))))
 
 (ert-deftest ende-codex-auth-storage-malformed-json-and-wrong-owner-fail-closed ()
   (ende-codex-auth-test--with-store
-   (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials))
-   (let ((file (expand-file-name "accounts.json" ende-codex-auth--directory))
+   (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials))
+   (let ((file (expand-file-name "connections.json" ende-codex-auth--directory))
          (real-attributes (symbol-function 'file-attributes)))
      (cl-letf (((symbol-function 'file-attributes)
                 (lambda (path &optional format)
@@ -160,9 +160,9 @@
                       (setq attributes (copy-sequence attributes))
                       (setf (nth 2 attributes) (1+ (user-uid))))
                     attributes))))
-       (should-error (ende-codex-auth-read 'personal) :type 'ende-codex-auth-error))
+       (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :type 'ende-codex-auth-error))
      (with-temp-file file (insert "{synthetic-private-json-secret"))
-     (let ((failure (should-error (ende-codex-auth-read 'personal)
+     (let ((failure (should-error (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)
                                   :type 'ende-codex-auth-error)))
        (should-not (string-match-p "synthetic-private" (prin1-to-string failure)))))))
 
@@ -170,13 +170,14 @@
   "Return an internal request profile bound to Ende ACCOUNT."
   (ende-codex--account-profile
    (list :name 'codex-test :service 'openai-codex :account account
-         :api 'openai-responses :auth-method 'codex-oauth :model "synthetic-model"
-         :url "https://api.openai.com/v1/responses")))
+         :api 'openai-responses :auth-method 'chatgpt-plan-oauth :model "synthetic-model"
+         :url "https://api.openai.com/v1/responses"
+         :models-url "https://api.openai.com/v1/models")))
 
 (ert-deftest ende-codex-auth-binding-two-queued-accounts-reject-replacement ()
   (ende-codex-auth-test--with-store
-   (let* ((personal (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
-          (work (ende-codex-auth--register 'work (ende-codex-auth-test--credentials "two")))
+   (let* ((personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))
+          (work (ende-codex-auth--register 'chatgpt-plan-oauth 'work (ende-codex-auth-test--credentials "two")))
           (ende-credentials--bindings (make-hash-table :test #'eq)))
      (with-temp-buffer
        (let* ((target (ende-target-create :buffer (current-buffer) :start 1 :end 1 :cursor 1))
@@ -188,12 +189,12 @@
                                :profile (ende-codex-auth-test--profile 'work)))))
          (should-not (ende-codex--check-binding (ende-job-profile personal-job) personal))
          (should-not (ende-codex--check-binding (ende-job-profile work-job) work))
-         (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials "replacement")
+         (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials "replacement")
                                     (plist-get personal :revision) t)
          (should-error (ende-codex--check-binding
-                        (ende-job-profile personal-job) (ende-codex-auth-read 'personal)))
+                        (ende-job-profile personal-job) (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
          (should-not (ende-codex--check-binding
-                      (ende-job-profile work-job) (ende-codex-auth-read 'work)))
+                      (ende-job-profile work-job) (ende-codex-auth-read 'chatgpt-plan-oauth 'work)))
          (dolist (job (list personal-job work-job))
            (let ((printed (prin1-to-string (list (ende-job-profile job)
                                                  (ende-job-inference-template job)))))
@@ -204,29 +205,29 @@
 (ert-deftest ende-codex-auth-binding-rotation-survives-and-capture-stays-failed-closed ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (record (ende-codex-auth--register 'personal credentials))
+          (record (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           (missing (ende-codex-capture-binding (ende-codex-auth-test--profile 'missing))))
      (setq credentials (plist-put credentials :refresh-token "synthetic-rotation"))
      (should-not (ende-codex--check-binding profile (ende-codex-auth--rotate record credentials)))
-     (let ((new (ende-codex-auth--register 'missing (ende-codex-auth-test--credentials))))
+     (let ((new (ende-codex-auth--register 'chatgpt-plan-oauth 'missing (ende-codex-auth-test--credentials))))
        (should-error (ende-codex--check-binding missing new))
        (should-error (ende-codex--check-binding (ende-codex-capture-binding missing) new)))
      ;; Changing an alias, store, or opaque binding cannot rebind an old job.
      (should-error (ende-codex--check-binding
                     (plist-put (copy-sequence profile) :account 'work)
-                    (ende-codex-auth-read 'personal)))
+                    (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (should-error (ende-codex--check-binding
                     (plist-put (copy-sequence profile) :codex-binding (make-symbol "lost"))
-                    (ende-codex-auth-read 'personal)))
+                    (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (let ((ende-codex-auth--directory (expand-file-name "another" root)))
        (should-error (ende-codex--check-binding profile record))))))
 
 (ert-deftest ende-codex-auth-refresh-is-account-and-registration-scoped ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
-          (personal (ende-codex-auth--register 'personal credentials))
-          (work (ende-codex-auth--register 'work credentials))
+          (personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
+          (work (ende-codex-auth--register 'chatgpt-plan-oauth 'work credentials))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           flights cancellations)
      (cl-letf (((symbol-function 'ende-codex--start-refresh-flight)
@@ -240,7 +241,7 @@
              (should (= (length flights) 2))
              (mapc #'funcall cancellations)
              (setq cancellations nil)
-             (let ((replacement (ende-codex-auth--register
+             (let ((replacement (ende-codex-auth--register 'chatgpt-plan-oauth
                                  'personal credentials (plist-get personal :revision) t)))
                (push (ende-codex--refresh-auth replacement #'ignore) cancellations)
                (should (= (length flights) 3))))
@@ -249,7 +250,7 @@
 (ert-deftest ende-codex-auth-refresh-uses-issued-client-and-private-stdin ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (ende-codex--refresh-processes nil)
@@ -289,25 +290,25 @@
 (ert-deftest ende-codex-auth-refresh-stale-winner-must-have-the-same-registration ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (rotated (ende-codex-auth--rotate old credentials)))
      (should-error (ende-codex--store-refresh old "stale-access" "stale-refresh" 3600 nil)
                    :type 'ende-codex-auth-conflict)
      (should (equal rotated (ende-codex--refresh-current old)))
-     (ende-codex-auth--register 'personal credentials (plist-get rotated :revision) t)
+     (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials (plist-get rotated :revision) t)
      (should-not (ende-codex--refresh-current old)))))
 
 (ert-deftest ende-codex-auth-refresh-replacement-while-waiting-fails-closed ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           callback result)
      (cl-letf (((symbol-function 'ende-codex--refresh-auth)
                 (lambda (_auth function) (setq callback function) #'ignore)))
        (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
        (should-not result)
-       (let ((new (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)
+       (let ((new (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)
                                              (plist-get old :revision) t)))
          (funcall callback new)
          (should (ende-error-p result)))))))
@@ -316,7 +317,7 @@
   (ende-codex-auth-test--with-store
    (let* ((result nil)
           (verify nil)
-          (old (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           (payload (ende-codex-auth--json
                     "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"id_token\":\"replacement\",\"token_type\":\"Bearer\",\"expires_in\":3600}"))
@@ -330,13 +331,13 @@
        (ende-codex--refresh-response flight 200 payload)
        (should verify)
        (should-not result)
-       (should (equal old (ende-codex-auth-read 'personal)))
+       (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
        (funcall verify 'claims nil)
        (should (equal (plist-get result :refresh-token) "new-refresh"))
-       (should (equal (plist-get (ende-codex-auth-read 'personal) :refresh-token)
+       (should (equal (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :refresh-token)
                       "new-refresh")))
      (let* ((verify nil)
-            (old (ende-codex-auth--register 'work (ende-codex-auth-test--credentials "two")))
+            (old (ende-codex-auth--register 'chatgpt-plan-oauth 'work (ende-codex-auth-test--credentials "two")))
             (waiter (ende-codex--make-refresh-waiter :callback #'ignore))
             (flight (ende-codex--make-refresh-flight
                      :key 'cancelled :auth old :waiters (list waiter))))
@@ -346,7 +347,7 @@
          (ende-codex--refresh-response flight 200 payload)
          (ende-codex--refresh-cancel-waiter flight waiter)
          (funcall verify 'claims nil)
-         (should (equal old (ende-codex-auth-read 'work))))))))
+         (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'work))))))))
 
 (ert-deftest ende-codex-auth-resolve-never-falls-back-or-sends-replaced-account ()
   (ende-codex-auth-test--with-store
@@ -355,12 +356,12 @@
                                (ende-codex-auth-test--profile 'missing))
      (should (ende-error-p result)))
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           result)
      (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
      (should (equal old result))
-     (ende-codex-auth--register 'personal credentials (plist-get old :revision) t)
+     (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials (plist-get old :revision) t)
      (ende-codex--resolve-auth (lambda (value) (setq result value)) profile)
      (should (ende-error-p result)))))
 
@@ -418,13 +419,13 @@
    (let ((host (ende-codex-auth-host-id)))
      (should (ende-codex-auth--id-p host))
      (should (equal host (ende-codex-auth-host-id)))
-     (should (equal host (plist-get (ende-codex-auth--register
+     (should (equal host (plist-get (ende-codex-auth--register 'chatgpt-plan-oauth
                                      'personal (ende-codex-auth-test--credentials)) :host-id))))))
 
 (ert-deftest ende-codex-auth-storage-second-emacs-preserves-newer-records ()
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'personal credentials))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
           (host (plist-get old :host-id))
           (executable (expand-file-name invocation-name invocation-directory))
           (library-directory (file-name-directory (locate-library "ende-codex-auth"))))
@@ -436,19 +437,19 @@
               "-l" "ende-codex-auth" "--eval"
               (prin1-to-string
                `(let* ((ende-codex-auth--directory ,ende-codex-auth--directory)
-                       (record (ende-codex-auth-read 'personal))
+                       (record (ende-codex-auth-read 'chatgpt-plan-oauth 'personal))
                        (credentials (cl-loop for key in ende-codex-auth--credential-fields
                                              when (plist-member record key)
                                              append (list key (plist-get record key)))))
                   (ende-codex-auth--rotate record credentials)
-                  (ende-codex-auth--register 'work credentials)))))))
+                  (ende-codex-auth--register 'chatgpt-plan-oauth 'work credentials)))))))
      (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-conflict)
-     (should (equal host (plist-get (ende-codex-auth-read 'work) :host-id)))
-     (should (ende-codex-auth--same-registration-p old (ende-codex-auth-read 'personal))))))
+     (should (equal host (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'work) :host-id)))
+     (should (ende-codex-auth--same-registration-p old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal))))))
 
 (ert-deftest ende-codex-auth-secrets-absent-from-selections-debug-and-reload ()
   (ende-codex-auth-test--with-store
-   (let* ((record (ende-codex-auth--register 'personal (ende-codex-auth-test--credentials)))
+   (let* ((record (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))
           (profile (ende-codex-capture-binding (ende-codex-auth-test--profile 'personal)))
           (ende-providers '(codex-personal codex-work))
           (ende-builtin-provider-settings
@@ -498,7 +499,7 @@
                   (cl-position "ende-selector.el" files :test #'equal))))
      (ende-reload)
      (should (equal (plist-get record :host-id) (ende-codex-auth-host-id)))
-     (should-not (ende-codex--check-binding profile (ende-codex-auth-read 'personal))))))
+     (should-not (ende-codex--check-binding profile (ende-codex-auth-read 'chatgpt-plan-oauth 'personal))))))
 
 (provide 'ende-codex-auth-test)
 ;;; ende-codex-auth-test.el ends here

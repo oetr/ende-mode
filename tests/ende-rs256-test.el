@@ -76,7 +76,7 @@
                  (when (string-match-p "test-subject" bytes) (cl-incf parsed-claims))
                  (funcall read-json bytes))))
       (let* ((valid (alist-get 'valid ende-rs256-test--fixtures))
-             (claims (ende-codex--verify-id-token valid "test-client" "test-nonce")))
+             (claims (ende-codex--verify-id-token 'chatgpt-plan-oauth valid "test-client" "test-nonce")))
         (should (equal (gethash "sub" claims) "test-subject"))
         (let* ((directory (make-temp-file "ende-verified-refresh-" t))
                (ende-codex-auth--directory (expand-file-name "private" directory))
@@ -85,7 +85,7 @@
                                  "{\"alg\":\"RS256\",\"kid\":\"retired-key\"}" t)
                                 "." (cadr parts) "." (nth 2 parts))))
           (unwind-protect
-              (let ((record (ende-codex-auth--register
+              (let ((record (ende-codex-auth--register 'chatgpt-plan-oauth
                              'verified (list :client-id "test-client" :subject "test-subject"
                                              :id-token retired :access-token "access"
                                              :refresh-token "refresh" :expires-at 1800000000))))
@@ -102,7 +102,7 @@
                              record "next-access" "next-refresh" 3600 valid)))
                   (should (ende-codex-auth--same-registration-p record next))
                   (should (equal (plist-get next :subject) "test-subject"))
-                  (should (equal next (ende-codex-auth-read 'verified)))))
+                  (should (equal next (ende-codex-auth-read 'chatgpt-plan-oauth 'verified)))))
             (delete-directory directory t)))
         (dolist (scope '("openid offline_access" "offline_access openid profile"))
           (should (equal (ende-codex-auth--scopes scope)
@@ -111,16 +111,16 @@
                          "openid\noffline_access"))
           (should-error (ende-codex-auth--scopes scope)))
         (dolist (kind '(issuer audience nonce expired future issued subject azp))
-          (should-error (ende-codex--verify-id-token
+          (should-error (ende-codex--verify-id-token 'chatgpt-plan-oauth
                          (alist-get kind ende-rs256-test--fixtures) "test-client" "test-nonce")
                         :type 'ende-codex-identity-error))
         (let ((before parsed-claims))
-          (should-error (ende-codex--verify-id-token
+          (should-error (ende-codex--verify-id-token 'chatgpt-plan-oauth
                          (concat (substring valid 0 -2) "AA") "test-client" "test-nonce")
                         :type 'ende-codex-identity-error)
           (should (= parsed-claims before)))
         (dolist (token '("" "e30.e30" "e30..AA" "e30.e30.AA.extra"))
-          (should-error (ende-codex--verify-id-token token "test-client" "test-nonce")))
+          (should-error (ende-codex--verify-id-token 'chatgpt-plan-oauth token "test-client" "test-nonce")))
         (dolist (header '("{\"alg\":\"none\",\"kid\":\"test-key\"}"
                           "{\"alg\":\"HS256\",\"kid\":\"test-key\"}"
                           "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"kid\":\"other\"}"
@@ -129,12 +129,12 @@
                           "{\"alg\":\"RS256\",\"kid\":\"test-key\",\"jku\":\"https://attacker.test\"}"))
           (cl-letf (((symbol-function 'ende-codex-auth--jwks)
                      (lambda () (ert-fail "Unsupported header reached network"))))
-            (should-error (ende-codex--verify-id-token
+            (should-error (ende-codex--verify-id-token 'chatgpt-plan-oauth
                            (concat (base64url-encode-string header t) ".e30.AA")
                            "test-client" "test-nonce"))))
         (cl-letf (((symbol-function 'ende-codex-auth--jwks)
                    (lambda () (error "Unavailable"))))
-          (should-error (ende-codex--verify-id-token valid "test-client" "test-nonce")
+          (should-error (ende-codex--verify-id-token 'chatgpt-plan-oauth valid "test-client" "test-nonce")
                         :type 'ende-codex-identity-error))))))
 
 (provide 'ende-rs256-test)

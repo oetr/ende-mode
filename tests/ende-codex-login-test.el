@@ -21,13 +21,13 @@
                ((symbol-function 'ende-codex-auth--jwks-async)
                 (lambda (callback) (funcall callback jwks nil) #'ignore)))
        (dolist (scenario '(valid state signature nonce identity permission denied))
-         (let* ((before (ende-codex-auth-lookup 'personal))
+         (let* ((before (ende-codex-auth-lookup 'chatgpt-plan-oauth 'personal))
                 (token (alist-get (if (eq scenario 'nonce) 'nonce 'valid) ende-rs256-test--fixtures))
-                (scope (if (eq scenario 'permission) "openid offline_access" ende-codex--scopes))
+                (scope (if (eq scenario 'permission) "openid offline_access" (ende-codex--auth-property 'chatgpt-plan-oauth :scopes)))
                 client)
            (when (eq scenario 'signature) (setq token (concat (substring token 0 -2) "AA")))
            (when (eq scenario 'identity)
-             (setq before (ende-codex-auth--register
+             (setq before (ende-codex-auth--register 'chatgpt-plan-oauth
                            'personal (plist-put (ende-codex-auth-test--credentials) :client-id "test-client")
                            (plist-get before :revision) t)))
            (cl-letf (((symbol-function 'ende-codex-auth--request)
@@ -40,7 +40,7 @@
                                                  (expires_in . 3600) (scope . ,scope)))) nil)
                         #'ignore)))
              (setq result nil failure nil requests nil)
-             (ende-codex-login 'personal)
+             (ende-codex--begin-login 'chatgpt-plan-oauth 'personal #'ende-codex--login-report)
              (let* ((attempt ende-codex--pending-login)
                     (listener (ende-codex--login-listener attempt))
                     (port (process-contact listener :service))
@@ -50,7 +50,7 @@
                               ("client_id" . "test-client")))))
                (setf (ende-codex--login-callback attempt)
                      (lambda (record error) (setq result record failure error)))
-               (should (string-prefix-p ende-codex--authorize-url browser))
+               (should (string-prefix-p (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url) browser))
                (unwind-protect
                    (progn
                      (setq client (make-network-process :name "ende-login-test" :host "127.0.0.1"
@@ -65,21 +65,21 @@
                          (cl-decf tries) (accept-process-output nil 0.01)))
                      (should-not ende-codex--pending-login)
                      (should-not (process-live-p listener))
-                     (if (memq scenario '(valid permission))
+                     (if (memq scenario '(valid permission identity))
                          (progn (should result) (should-not failure)
                                 (should (equal (plist-get result :scope) scope)))
                        (should failure)
-                       (should (equal before (ende-codex-auth-lookup 'personal))))
+                       (should (equal before (ende-codex-auth-lookup 'chatgpt-plan-oauth 'personal))))
                      (when (memq scenario '(state denied)) (should-not requests)))
                  (when client (delete-process client))
                  (ende-codex-cancel-login))))
            (when (eq scenario 'identity)
-             (ende-codex-auth--register 'personal
+             (ende-codex-auth--register 'chatgpt-plan-oauth 'personal
                                         (list :client-id "test-client" :subject "test-subject"
                                               :access-token "access" :refresh-token "refresh" :id-token token
                                               :expires-at 1800003700)
-                                        (plist-get (ende-codex-auth-read 'personal) :revision) t))))
-       (ende-codex-login 'personal)
+                                        (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :revision) t))))
+       (ende-codex--begin-login 'chatgpt-plan-oauth 'personal #'ende-codex--login-report)
        (let ((listener (ende-codex--login-listener ende-codex--pending-login)))
          (ende-reload)
          (should-not ende-codex--pending-login)

@@ -14,14 +14,7 @@
 (require 'ende-provider-config)
 (require 'ende-curl)
 
-(defconst ende-codex--authorize-url "https://auth.openai.com/api/accounts/authorize")
-(defconst ende-codex--token-url "https://auth.openai.com/api/accounts/oauth/token")
 (defconst ende-codex--jwks-url "https://auth.openai.com/.well-known/jwks.json")
-(defconst ende-codex--resource "https://api.openai.com/v1")
-(defconst ende-codex--models-url "https://api.openai.com/v1/models")
-(defconst ende-codex--responses-url "https://api.openai.com/v1/responses")
-(defconst ende-codex--scopes
-  "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct")
 
 (defvar ende-codex-auth--trusted-jwks nil
   "Dynamically bound keys retrieved from the pinned endpoint.")
@@ -30,9 +23,19 @@
   "Validate URL against a fixed trusted EXPECTED endpoint before HTTPS."
   (let ((actual (url-generic-parse-url (ende-curl--validated-url (list :url url))))
         (trusted (url-generic-parse-url expected)))
-    (unless (and (member expected (list ende-codex--authorize-url ende-codex--token-url
-					ende-codex--jwks-url ende-codex--models-url
-					ende-codex--responses-url))
+    (unless (and (member expected
+                         (cons ende-codex--jwks-url
+                               (cl-loop for (_method . spec) in ende-codex--auth-methods
+                                        append (append
+                                                (mapcar (lambda (key) (plist-get spec key))
+                                                        '(:authorize-url :token-url :models-url :responses-url))
+                                                (when (plist-get spec :models-query)
+                                                  (list (concat
+                                                         (plist-get spec :models-url) "?"
+                                                         (ende-codex-auth--form
+                                                          (mapcar (lambda (key)
+                                                                    (cons key ende-client-version))
+                                                                  (plist-get spec :models-query))))))))))
                  (equal (url-type actual) "https")
                  (equal (url-host actual) (url-host trusted))
                  (= (or (url-port actual) 443) 443)
@@ -60,21 +63,26 @@
                        (url-hexify-string (cdr parameter))))
              parameters "&"))
 
-(defun ende-codex-auth--token-payload (payload &optional refresh)
-  "Validate a token endpoint PAYLOAD, optionally for REFRESH."
+(defun ende-codex-auth--token-payload (method payload &optional refresh)
+  "Validate METHOD's token endpoint PAYLOAD, optionally for REFRESH."
+  (ende-codex--auth-spec method)
   (unless (and (hash-table-p payload)
                (cl-every (lambda (key)
                            (let ((value (gethash key payload)))
                              (and (ende-codex-auth--text-p value)
                                   (<= (length value) 65536))))
-                         (if refresh '("access_token" "refresh_token")
+                         (if refresh '("access_token")
                            '("access_token" "refresh_token" "id_token")))
                (stringp (gethash "token_type" payload))
                (equal (downcase (gethash "token_type" payload)) "bearer")
                (integerp (gethash "expires_in" payload))
                (> (gethash "expires_in" payload) 0))
     (signal 'ende-codex-identity-error nil))
-  (when (or (not refresh) (ende-protocol-json-has-key-p "scope" payload))
+  (when (ende-protocol-json-has-key-p "refresh_token" payload)
+    (unless (ende-codex-auth--text-p (gethash "refresh_token" payload))
+      (signal 'ende-codex-identity-error nil)))
+  (when (or (and (not refresh) (ende-codex--auth-property method :resource))
+            (ende-protocol-json-has-key-p "scope" payload))
     (ende-codex-auth--scopes (gethash "scope" payload)))
   (when (ende-protocol-json-has-key-p "earliest_refresh_at" payload)
     (unless (and (integerp (gethash "earliest_refresh_at" payload))
@@ -224,8 +232,9 @@ CALLBACK receives (PAYLOAD ERROR).  Return a cancellation function."
   (or ende-codex-auth--trusted-jwks
       (signal 'ende-codex-identity-error nil)))
 
-(defun ende-codex-auth--claims (claims client-id nonce)
-  "Validate authenticated CLAIMS against CLIENT-ID and login NONCE."
+(defun ende-codex-auth--claims (claims client-id nonce &optional ignore-nonce)
+  "Validate authenticated CLAIMS against CLIENT-ID and login NONCE.
+IGNORE-NONCE is reserved for the state/PKCE-protected native protocol."
   (let* ((now (floor (float-time)))
          (skew 60)
          (audience (gethash "aud" claims))
@@ -246,8 +255,9 @@ CALLBACK receives (PAYLOAD ERROR).  Return a cancellation function."
                      (and (integerp not-before) (<= 0 not-before (+ now skew))
                           (< not-before expires)))
                  (ende-codex-auth--text-p (gethash "sub" claims))
-                 (if nonce (equal (gethash "nonce" claims) nonce)
-                   (eq (gethash "nonce" claims :absent) :absent)))
+                 (or ignore-nonce
+                     (if nonce (equal (gethash "nonce" claims) nonce)
+                       (eq (gethash "nonce" claims :absent) :absent))))
       (signal 'ende-codex-identity-error nil))
     claims))
 
@@ -276,17 +286,26 @@ CALLBACK receives (PAYLOAD ERROR).  Return a cancellation function."
         (funcall function)
       (error (signal 'ende-codex-identity-error nil)))))
 
-(defun ende-codex--verify-id-token (id-token expected-client-id expected-nonce)
+(defun ende-codex--verify-id-token (method id-token expected-client-id expected-nonce)
   "Authenticate ID-TOKEN for EXPECTED-CLIENT-ID and EXPECTED-NONCE.
 Return claims only after signature and OpenID validation."
   (ende-codex-auth--identity-guard
    (lambda ()
      (unless (and (ende-codex-auth--text-p expected-client-id)
-                  (ende-codex-auth--text-p expected-nonce))
+                  (or (not (ende-codex--auth-property method :nonce))
+                      (ende-codex-auth--text-p expected-nonce)))
        (signal 'ende-codex-identity-error nil))
      (ende-codex-auth--claims
       (ende-codex-auth--signed-claims id-token #'ende-codex-auth--jwks)
-      expected-client-id expected-nonce))))
+      expected-client-id expected-nonce (not (ende-codex--auth-property method :nonce))))))
+
+(defun ende-codex-native-account-id-from-claims (claims)
+  "Extract the native workspace identifier from verified CLAIMS."
+  (let* ((auth (gethash "https://api.openai.com/auth" claims))
+         (account (and (hash-table-p auth) (gethash "chatgpt_account_id" auth))))
+    (unless (ende-codex-auth--text-p account)
+      (signal 'ende-codex-identity-error nil))
+    account))
 
 (defun ende-codex-auth--refresh-nonce (claims record)
   "Return the nonce that refreshed CLAIMS must repeat from RECORD.
@@ -305,8 +324,13 @@ RECORD's token was verified before storage, so only its payload is decoded."
   "Verify replacement ID-TOKEN for RECORD against trusted JWKS.
 The replacement must continue RECORD's subject, issued client, and nonce."
   (let ((claims (ende-codex-auth--signed-claims id-token (lambda () jwks))))
-    (ende-codex-auth--claims claims (plist-get record :client-id)
-                             (ende-codex-auth--refresh-nonce claims record))
+    (let ((native (ende-codex--auth-property (plist-get record :auth-method) :account-header)))
+      (ende-codex-auth--claims claims (plist-get record :client-id)
+                               (unless native (ende-codex-auth--refresh-nonce claims record)) native)
+      (when native
+        (unless (equal (ende-codex-native-account-id-from-claims claims)
+                       (plist-get record :chatgpt-account-id))
+          (signal 'ende-codex-identity-error nil))))
     (unless (equal (gethash "sub" claims) (plist-get record :subject))
       (signal 'ende-codex-identity-error nil))
     claims))
@@ -346,12 +370,12 @@ replacement token was verified against the pinned JWKS endpoint."
     (:registration-id . "registration_id") (:revision . "revision")
     (:access-token . "access_token") (:refresh-token . "refresh_token")
     (:id-token . "id_token") (:expires-at . "expires_at")
-    (:scope . "scope") (:email . "email")
+    (:scope . "scope") (:email . "email") (:chatgpt-account-id . "chatgpt_account_id")
     (:earliest-refresh-at . "earliest_refresh_at") (:needs-login . "needs_login")))
 
 (defconst ende-codex-auth--credential-fields
   '(:client-id :subject :access-token :refresh-token :id-token :expires-at
-	       :scope :email :earliest-refresh-at :needs-login))
+	       :scope :email :chatgpt-account-id :earliest-refresh-at :needs-login))
 
 (defun ende-codex-auth--fail ()
   "Signal a value-free storage error, never including file contents."
@@ -364,6 +388,20 @@ replacement token was verified against the pinned JWKS endpoint."
         (funcall function)
       (ende-codex-auth-error (signal (car failure) nil))
       (error (ende-codex-auth--fail)))))
+
+(defun ende-codex-auth--key (method account)
+  "Return the independent storage key for METHOD and ACCOUNT."
+  (ende-codex--auth-spec method)
+  (concat (symbol-name method) "/" (ende-codex-auth--alias account)))
+
+(defun ende-codex-auth--validate-method (method credentials)
+  "Validate the METHOD-specific binding in CREDENTIALS."
+  (ende-codex--auth-spec method)
+  (when (ende-codex--auth-property method :account-header)
+    (unless (and (equal (plist-get credentials :client-id)
+                        (ende-codex--auth-property method :client-id))
+                 (ende-codex-auth--text-p (plist-get credentials :chatgpt-account-id)))
+      (ende-codex-auth--fail))))
 
 (defun ende-codex-auth--alias (account)
   "Validate ACCOUNT using the provider's existing :account grammar."
@@ -479,10 +517,10 @@ other users.  No symbolic links or multiply linked credential files are safe."
     (ende-codex-auth--ensure-directory directory create t)
     directory))
 
-(defun ende-codex-auth--decode-record (account entry host-id)
+(defun ende-codex-auth--decode-record (method account entry host-id)
   "Decode checked JSON ENTRY for ACCOUNT under installation HOST-ID."
   (unless (hash-table-p entry) (ende-codex-auth--fail))
-  (let ((record (list :account account)) credentials)
+  (let ((record (list :auth-method method :account account)) credentials)
     (maphash (lambda (key _value)
                (unless (rassoc key ende-codex-auth--fields) (ende-codex-auth--fail)))
              entry)
@@ -493,6 +531,7 @@ other users.  No symbolic links or multiply linked credential files are safe."
           (when (memq (car field) ende-codex-auth--credential-fields)
             (setq credentials (plist-put credentials (car field) value))))))
     (ende-codex-auth--validate-credentials credentials)
+    (ende-codex-auth--validate-method method credentials)
     (unless (and (equal (plist-get record :host-id) host-id)
                  (ende-codex-auth--id-p (plist-get record :registration-id))
                  (ende-codex-auth--id-p (plist-get record :revision)))
@@ -501,7 +540,7 @@ other users.  No symbolic links or multiply linked credential files are safe."
 
 (defun ende-codex-auth--read-state (directory)
   "Read and validate private JSON state under DIRECTORY, or return nil."
-  (let* ((file (expand-file-name "accounts.json" directory))
+  (let* ((file (expand-file-name "connections.json" directory))
          (attributes (ende-codex-auth--attributes file nil t)))
     (when attributes
       (when (> (file-attribute-size attributes) (* 1024 1024))
@@ -512,21 +551,23 @@ other users.  No symbolic links or multiply linked credential files are safe."
              (host-id (and (hash-table-p state) (gethash "host_id" state)))
              (accounts (and (hash-table-p state) (gethash "accounts" state))))
         (unless (and (hash-table-p state) (= (hash-table-count state) 3)
-                     (equal (gethash "version" state) 1)
+                     (equal (gethash "version" state) 2)
                      (ende-codex-auth--id-p host-id) (hash-table-p accounts))
           (ende-codex-auth--fail))
-        (maphash (lambda (alias entry)
-                   (unless (and (stringp alias)
+        (maphash (lambda (key entry)
+                   (unless (and (stringp key)
                                 (let ((case-fold-search nil))
-                                  (string-match-p "\\`[a-z0-9][a-z0-9_-]*\\'" alias)))
+                                  (string-match "\\`\\(chatgpt-plan-oauth\\|codex-oauth\\)/\\([a-z0-9][a-z0-9_-]*\\)\\'" key)))
                      (ende-codex-auth--fail))
-                   (ende-codex-auth--decode-record alias entry host-id))
+                   (let ((method (intern (match-string 1 key)))
+                         (account (intern (match-string 2 key))))
+                     (ende-codex-auth--decode-record method account entry host-id)))
                  accounts)
         state))))
 
 (defun ende-codex-auth--write-state (directory state)
   "Atomically write STATE beside its destination in private DIRECTORY."
-  (let ((file (expand-file-name "accounts.json" directory)) temporary)
+  (let ((file (expand-file-name "connections.json" directory)) temporary)
     (unwind-protect
         (progn
           (ende-codex-auth--attributes file nil t)
@@ -560,7 +601,7 @@ under the lock and must still compare the individual account revision."
           (ende-codex-auth--attributes lock t t)
           (let ((state (or (ende-codex-auth--read-state directory)
                            (let ((new (make-hash-table :test #'equal)))
-                             (puthash "version" 1 new)
+                             (puthash "version" 2 new)
                              (puthash "host_id" (ende-codex-auth--new-id) new)
                              (puthash "accounts" (make-hash-table :test #'equal) new)
                              new))))
@@ -577,19 +618,19 @@ This does not register, select, or authenticate an account."
        (if state (gethash "host_id" state)
          (ende-codex-auth--transaction (lambda (new) (gethash "host_id" new))))))))
 
-(defun ende-codex-auth-lookup (account)
-  "Return ACCOUNT's validated record or nil if absent; unsafe storage errors."
+(defun ende-codex-auth-lookup (method account)
+  "Return METHOD and ACCOUNT's validated record or nil; unsafe storage errors."
   (ende-codex-auth--guard
    (lambda ()
-     (let* ((alias (ende-codex-auth--alias account))
+     (let* ((alias (ende-codex-auth--key method account))
             (state (ende-codex-auth--read-state (ende-codex-auth--path nil)))
             (entry (and state (gethash alias (gethash "accounts" state)))))
        (when entry
-         (ende-codex-auth--decode-record account entry (gethash "host_id" state)))))))
+         (ende-codex-auth--decode-record method account entry (gethash "host_id" state)))))))
 
-(defun ende-codex-auth-read (account)
-  "Return ACCOUNT's detached private record, never importing other credentials."
-  (or (ende-codex-auth-lookup account) (ende-codex-auth--fail)))
+(defun ende-codex-auth-read (method account)
+  "Return METHOD and ACCOUNT's detached record, never importing credentials."
+  (or (ende-codex-auth-lookup method account) (ende-codex-auth--fail)))
 
 (defun ende-codex-auth--encode-record (record)
   "Encode private RECORD using only the fixed storage fields."
@@ -599,15 +640,16 @@ This does not register, select, or authenticate an account."
         (puthash (cdr field) (plist-get record (car field)) entry)))
     entry))
 
-(defun ende-codex-auth--register (account credentials &optional expected-revision replace)
-  "Store externally validated CREDENTIALS as a new ACCOUNT registration.
+(defun ende-codex-auth--register (method account credentials &optional expected-revision replace)
+  "Store validated CREDENTIALS as a new METHOD and ACCOUNT registration.
 An existing alias always requires explicit REPLACE authorization and its exact
 EXPECTED-REVISION, even for another registration of the same subject.  This
 internal function is not a login command or an identity verifier."
   (ende-codex-auth--guard
    (lambda ()
-     (let ((alias (ende-codex-auth--alias account)))
+     (let ((alias (ende-codex-auth--key method account)))
        (ende-codex-auth--validate-credentials credentials)
+       (ende-codex-auth--validate-method method credentials)
        (ende-codex-auth--transaction
         (lambda (state)
           (let* ((accounts (gethash "accounts" state))
@@ -615,20 +657,20 @@ internal function is not a login command or an identity verifier."
             (unless (and (equal expected-revision (and old (gethash "revision" old)))
                          (or (not old) replace))
               (signal 'ende-codex-auth-conflict nil))
-            (let ((record (append (list :account account
+            (let ((record (append (list :auth-method method :account account
                                         :host-id (gethash "host_id" state)
                                         :registration-id (ende-codex-auth--new-id)
                                         :revision (ende-codex-auth--new-id))
                                   (copy-tree credentials))))
               (puthash alias (ende-codex-auth--encode-record record) accounts)
               (ende-codex-auth--decode-record
-               account (gethash alias accounts) (gethash "host_id" state))))))))))
+               method account (gethash alias accounts) (gethash "host_id" state))))))))))
 
 (defun ende-codex-auth--same-registration-p (left right)
   "Return non-nil when private records LEFT and RIGHT name one registration."
   (and left right
        (cl-every (lambda (key) (equal (plist-get left key) (plist-get right key)))
-                 '(:account :host-id :registration-id :client-id :subject))))
+                 '(:auth-method :account :host-id :registration-id :client-id :subject :chatgpt-account-id))))
 
 (defun ende-codex-auth--rotate (expected credentials)
   "Rotate EXPECTED's tokens using CREDENTIALS for the same verified registration.
@@ -636,29 +678,33 @@ Refuse stale snapshots and changed subjects or issued client IDs.  Only refresh
 rotation preserves the registration identity used by queued requests."
   (ende-codex-auth--guard
    (lambda ()
-     (let* ((account (plist-get expected :account))
-            (alias (ende-codex-auth--alias account)))
+     (let* ((method (plist-get expected :auth-method))
+            (account (plist-get expected :account))
+            (alias (ende-codex-auth--key method account)))
        (ende-codex-auth--validate-credentials credentials)
+       (ende-codex-auth--validate-method method credentials)
        (unless (and (equal (plist-get expected :subject) (plist-get credentials :subject))
-                    (equal (plist-get expected :client-id) (plist-get credentials :client-id)))
+                    (equal (plist-get expected :client-id) (plist-get credentials :client-id))
+                    (equal (plist-get expected :chatgpt-account-id)
+                           (plist-get credentials :chatgpt-account-id)))
          (signal 'ende-codex-auth-conflict nil))
        (ende-codex-auth--transaction
         (lambda (state)
           (let* ((accounts (gethash "accounts" state))
                  (entry (gethash alias accounts))
                  (current (and entry (ende-codex-auth--decode-record
-                                      account entry (gethash "host_id" state)))))
+                                      method account entry (gethash "host_id" state)))))
             (unless (and (ende-codex-auth--same-registration-p expected current)
                          (equal (plist-get expected :revision) (plist-get current :revision)))
               (signal 'ende-codex-auth-conflict nil))
-            (let ((record (append (list :account account
+            (let ((record (append (list :auth-method method :account account
                                         :host-id (plist-get current :host-id)
                                         :registration-id (plist-get current :registration-id)
                                         :revision (ende-codex-auth--new-id))
                                   (copy-tree credentials))))
               (puthash alias (ende-codex-auth--encode-record record) accounts)
               (ende-codex-auth--decode-record
-               account (gethash alias accounts) (gethash "host_id" state))))))))))
+               method account (gethash alias accounts) (gethash "host_id" state))))))))))
 
 (defun ende-codex-auth--credentials (record)
   "Extract storage credentials from private RECORD."
