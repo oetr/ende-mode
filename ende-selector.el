@@ -17,7 +17,6 @@
 (require 'ende-core)
 (require 'ende-chat)
 (require 'ende-provider)
-(require 'ende-codex-usage)
 (require 'ende-commands)
 (require 'ende-rubber-duck)
 (require 'ende-queue-ui)
@@ -109,61 +108,6 @@
 
 (defvar-local ende-selector--window nil
   "Window displaying the current selector buffer.")
-
-(defvar-local ende-selector--usage nil
-  "OpenAI quota result or display status for the current selector.")
-
-(defvar-local ende-selector--usage-cancel nil
-  "Cancellation function for the current OpenAI quota request.")
-
-(defvar-local ende-selector--usage-timer nil
-  "Periodic quota refresh timer for the current selector.")
-
-(defun ende-selector--cancel-usage ()
-  "Cancel quota refresh and timer for the current selector."
-  (when (timerp ende-selector--usage-timer)
-    (cancel-timer ende-selector--usage-timer))
-  (setq ende-selector--usage-timer nil)
-  (when (functionp ende-selector--usage-cancel)
-    (funcall ende-selector--usage-cancel))
-  (setq ende-selector--usage-cancel nil))
-
-(defun ende-selector--usage-result (buffer quota error)
-  "Apply quota QUOTA or ERROR to selector BUFFER."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq ende-selector--usage-cancel nil)
-      (setq ende-selector--usage
-            (list :quota quota
-                  :error (and (ende-error-p error)
-                              (ende-error-message error))))
-      (ende-selector--render))))
-
-(defun ende-selector--usage-refresh (buffer)
-  "Refresh the OpenAI quota displayed by selector BUFFER."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when (and (eq (plist-get (ende-selector--provider-profile) :service)
-                     'openai-codex)
-                 (not ende-selector--usage-cancel))
-        (let ((completed nil))
-          (let ((cancel
-                 (ende-codex-usage-probe
-                  (ende-selector--provider-profile)
-                  (lambda (quota error)
-                    (setq completed t)
-                    (ende-selector--usage-result buffer quota error)))))
-            (unless completed
-              (setq ende-selector--usage-cancel cancel))))))))
-
-(defun ende-selector--start-usage-refresh ()
-  "Start periodic OpenAI quota refresh while the selector is active."
-  (ende-selector--cancel-usage)
-  (setq ende-selector--usage nil)
-  (when (eq (plist-get (ende-selector--provider-profile) :service) 'openai-codex)
-    (ende-selector--usage-refresh (current-buffer))
-    (setq ende-selector--usage-timer
-          (run-at-time 60 60 #'ende-selector--usage-refresh (current-buffer)))))
 
 (defun ende-selector--fit-window (window)
   "Fit WINDOW to the selector contents."
@@ -458,17 +402,6 @@ the discovered pricing metadata for those model IDs."
                       (or (plist-get profile :account) (plist-get profile :auth-source-user) "none")
                       (plist-get profile :url)
                       (if (plist-get profile :models-explicit-p) "static" "discovered/manual")))
-      (when (eq (plist-get profile :service) 'openai-codex)
-        (insert (format "Quota: %s\n"
-                        (let ((quota (plist-get ende-selector--usage :quota))
-                              (error (plist-get ende-selector--usage :error)))
-                          (cond (quota (concat (ende-codex-usage-string quota)
-                                               (if error
-                                                   (format " (stale; %s)" error)
-                                                 "")))
-                                (error (format "unavailable (%s)" error))
-                                (ende-selector--usage-cancel "loading...")
-                                (t "unavailable"))))))
       (insert (format "%-8s - %-18s %s%s\n" "C-n/C-p" "Model:"
                       model-status model))
       (when ende-selector--selection-required
@@ -705,7 +638,6 @@ PREFERRED is selected only when it is present in MODELS."
 
 (defun ende-selector--set-provider (index &optional remember-pair)
   "Select provider at INDEX and start dynamic model discovery if needed."
-  (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (unless (= index ende-selector--provider-index) (setq ende-selector--api nil))
@@ -742,7 +674,6 @@ PREFERRED is selected only when it is present in MODELS."
     (ende-selector--set-control-context)
     (when remember-pair
       (ende-selector--remember-selected-pair))
-    (ende-selector--start-usage-refresh)
     (ende-selector--render)))
 
 (defun ende-selector-select-api ()
@@ -1035,7 +966,6 @@ Return the saved selection, or nil when no valid model is selected."
 (defun ende-selector-close ()
   "Close the selector without starting a request."
   (interactive)
-  (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (let ((buffer (current-buffer))
@@ -1050,7 +980,6 @@ Return the saved selection, or nil when no valid model is selected."
 
 (defun ende-selector--buffer-killed ()
   "Cancel a selector probe when its buffer is killed externally."
-  (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe))
 
@@ -1230,7 +1159,6 @@ Return the saved selection, or nil when no valid model is selected."
     (with-current-buffer buffer
       (ende-selector--cancel-probe)
       (ende-selector--cancel-effort-probe)
-      (ende-selector--cancel-usage)
       (ende-selector-mode)
       (setq ende-selector--source-buffer source
             ende-selector--providers providers

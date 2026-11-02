@@ -76,5 +76,6 @@ syntax:
 test:
 	$(MAKE) clean
 	$(EMACS_BATCH) \
+		--eval '(setq auth-sources nil)' \
 		$(foreach file,$(TEST_FILES),-l $(file)) \
 		-f ert-run-tests-batch-and-exit

@@ -1207,21 +1207,6 @@
       (should-not (string-match-p "T  - select temperature\\|t  - select thinking\\|e  - select reasoning"
                                   (buffer-string))))))
 
-(ert-deftest ende-test/selector-renders-codex-quota-status ()
-  (let ((buffer (generate-new-buffer " *ende-selector-quota-test*"))
-        (ende-providers '(openai-codex)))
-    (unwind-protect
-        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 2000000000)))
-          (with-current-buffer buffer
-            (ende-selector-mode)
-            (setq ende-selector--providers '(openai-codex)
-                  ende-selector--usage
-                  '(:quota (:primary (:used-percent 25 :reset-at 2000003600
-                                                    :window-seconds 18000))))
-            (ende-selector--render)
-            (should (string-match-p "Quota: 1h: 75% left" (buffer-string)))))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
 (ert-deftest ende-test/selector-effort-picker-selects-provider-default-with-e ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-default-test*"))
         (ende-providers '(remote))

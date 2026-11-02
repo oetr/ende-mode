@@ -495,8 +495,6 @@
        (should (< (cl-position "ende-codex-auth.el" files :test #'equal)
                   (cl-position "ende-codex.el" files :test #'equal)))
        (should (< (cl-position "ende-codex.el" files :test #'equal)
-                  (cl-position "ende-codex-usage.el" files :test #'equal)))
-       (should (< (cl-position "ende-codex-usage.el" files :test #'equal)
                   (cl-position "ende-selector.el" files :test #'equal))))
      (ende-reload)
      (should (equal (plist-get record :host-id) (ende-codex-auth-host-id)))

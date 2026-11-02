@@ -5,7 +5,6 @@
 (require 'ert)
 (require 'ende-test-helpers)
 (require 'ende-codex-auth-test)
-(require 'ende-codex-usage)
 
 (ert-deftest ende-codex-account-isolation-and-refresh ()
   (ende-codex-auth-test--with-store
@@ -130,88 +129,6 @@
                   (plist-put (copy-sequence base) :model-discovery-key '("registration-b")))))
     (should first)
     (should-not (equal first second))))
-
-(ert-deftest ende-codex-usage-normalizes-and-renders-quota-windows ()
-  (let ((quota
-         (ende-codex-usage-parse
-          "{\"rate_limit\":{\"primary_window\":{\"used_percent\":25,\"reset_at\":2000003600,\"limit_window_seconds\":18000},\"secondary_window\":{\"used_percent\":50,\"reset_at\":2000010000,\"limit_window_seconds\":604800}}}")))
-    (should (equal (ende-codex-usage-string quota 2000000000)
-                   "1h: 75% left · weekly: 50% left · reset in 1h"))
-    (should-error (ende-codex-usage-parse "{\"rate_limit\":{}}"))))
-
-(ert-deftest ende-codex-usage-keeps-auth-out-of-url-arguments ()
-  (let* ((request nil)
-         (buffer (generate-new-buffer " *ende-usage-request-test*"))
-         (probe (ende-codex-usage--make-request))
-         (auth '(:access-token "secret-access")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'ende-codex-usage--account-id)
-                   (lambda (_auth) "account-id"))
-                  ((symbol-function 'ende-curl-start-request)
-                   (lambda (&rest arguments)
-                     (setq request arguments)
-                     (list :response-buffer buffer))))
-          (ende-codex-usage--start probe auth)
-          (let* ((headers (plist-get request :internal-headers))
-                 (command (funcall (plist-get request :command) "/tmp/headers" nil)))
-            (should (member "Authorization: Bearer secret-access" headers))
-            (should (member "ChatGPT-Account-ID: account-id" headers))
-            (should (member "GET" command))
-            (should (equal (car (last command))
-                           "https://chatgpt.com/backend-api/wham/usage"))
-            (should-not (member "secret-access" command))))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
-(ert-deftest ende-codex-usage-reports-http-status-without-response-body ()
-  (let* ((headers (make-temp-file "ende-usage-headers-"))
-         (buffer (generate-new-buffer " *ende-usage-response*"))
-         (process (make-process :name "ende-usage-status-test"
-                                :command '("true") :noquery t))
-         (result nil)
-         (request
-          (ende-codex-usage--make-request
-           :callback (lambda (quota error) (setq result (list quota error))))))
-    (unwind-protect
-        (progn
-          (while (process-live-p process)
-            (accept-process-output process 0.01))
-          (with-temp-file headers
-            (insert "HTTP/1.1 401 Unauthorized\r\n\r\n"))
-          (with-current-buffer buffer
-            (insert "secret access token in rejected body"))
-          (setf (ende-codex-usage--request-resources request)
-                (list :process process :response-buffer buffer :headers-file headers))
-          (ende-codex-usage--sentinel request process "finished\n")
-          (should (equal (ende-error-details (cadr result)) '(:status 401)))
-          (should (equal (ende-error-message (cadr result))
-                         "Usage request returned HTTP 401"))
-          (should-not (string-match-p "secret access token"
-                                      (ende-error-message (cadr result)))))
-      (when (process-live-p process) (delete-process process))
-      (when (buffer-live-p buffer) (kill-buffer buffer))
-      (when (file-exists-p headers) (delete-file headers)))))
-
-(ert-deftest ende-codex-usage-coalesces-and-caches-results ()
-  (let ((ende-codex-usage--cache (make-hash-table :test #'equal))
-        (ende-codex-usage--flights (make-hash-table :test #'equal))
-        (auth '(:account personal :host-id "host" :registration-id "registration"
-                :client-id "client" :subject "subject"))
-        (starts 0) complete values)
-    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 2000000000))
-              ((symbol-function 'ende-codex--profile-auth) (lambda (_profile) auth))
-              ((symbol-function 'ende-codex-usage-fetch)
-               (lambda (_profile callback)
-                 (cl-incf starts)
-                 (setq complete callback)
-                 #'ignore)))
-      (ende-codex-usage-probe nil (lambda (quota error) (push (list quota error) values)))
-      (ende-codex-usage-probe nil (lambda (quota error) (push (list quota error) values)))
-      (should (= starts 1))
-      (funcall complete '(:primary (:used-percent 20)) nil)
-      (ende-codex-usage-probe nil (lambda (quota error) (push (list quota error) values)))
-      (should (= starts 1))
-      (should (= (length values) 3))
-      (should (equal (caar values) '(:primary (:used-percent 20)))))))
 
 (provide 'ende-codex-test)
 ;;; ende-codex-test.el ends here
