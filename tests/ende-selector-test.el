@@ -178,8 +178,7 @@
             (let ((profile (ende-provider-profile 'remote)))
               (ende-selector--apply-model-catalog
                profile '("other") nil 1 "missing")
-              (should ende-selector--selection-required)
-              (should-error (ende-selector-confirm) :type 'user-error)
+              (should (equal (ende-selector--model-name) "other"))
               (should (buffer-live-p selector))
               (should (equal (plist-get (ende-model-selection-for-buffer source) :model)
                              "missing"))
@@ -241,9 +240,9 @@
           (should (equal (plist-get (nth 2 queued) :reasoning-effort)
                          "high"))
           (should (equal ende-model-selection--last-used
-                         '(:provider local :model "two")))
+                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions)))
           (should (equal (ende-model-selection-for-buffer source)
-                         '(:provider local :model "two")))
+                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions)))
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
@@ -607,8 +606,11 @@
             (should-not (ende-selector--model-name))
             (should (string-match-p "validating" (buffer-string)))
             (funcall probe-callback '("remote/first" "remote/second") nil)
-            (should ende-selector--selection-required)
-            (should-error (ende-selector--run 'insert))
+            (let (dispatched)
+              (cl-letf (((symbol-function 'ende-selector--dispatch)
+                         (lambda (&rest _) (setq dispatched (ende-selector--model-name)))))
+                (ende-selector--run 'insert))
+              (should (equal dispatched "remote/first")))
             (should (string= (ende-selector--model-name)
                              "remote/first"))
             (should (eq ende-selector--model-state :ready))))
@@ -1182,7 +1184,7 @@
       (should (ende-selector--provider-parallel-p))
       (ende-selector--render)
       (dolist (key '("Provider:" "Model:" "Concurrency:" "Parallel:"
-                     "Temperature:" "Thinking:" "Reasoning effort:"
+                     "Temperature:" "Account:" "Auth:" "API:"
                      "i  - insert" "a  - ask" "d  - queue dashboard"
                      "I  - insert anywhere"
                      "k  - compact chat context"
@@ -1197,10 +1199,7 @@
         (should (string-match-p (regexp-quote key) (buffer-string))))
       (should (string-match-p "^T        - Temperature:.*0.8 (profile)$"
                               (buffer-string)))
-      (should (string-match-p "^t        - Thinking:.*not mapped$"
-                              (buffer-string)))
-      (should (string-match-p "^e        - Reasoning effort:"
-                              (buffer-string)))
+      (should-not (string-match-p "Thinking:\\|Reasoning effort:" (buffer-string)))
       (should-not (string-match-p "Controls:\\|Reasoning:\\|E  - use provider-default"
                                   (buffer-string)))
       (should-not (string-match-p "T  - select temperature\\|t  - select thinking\\|e  - select reasoning"
@@ -1415,7 +1414,7 @@
             (ende-selector--set-provider 0)
             (should (= attempts 1))
             (should (eq ende-selector--model-state :error))
-            (should (string-match-p "probe failed" (buffer-string)))
+            (should (string-match-p "unavailable" (buffer-string)))
 
             (ende-selector--set-provider 0)
             (should (= attempts 2))

@@ -70,8 +70,11 @@
 (defvar-local ende-selector--api nil
   "Explicit wire API selection in this selector.")
 
-(defvar-local ende-selector--selection-required nil
-  "Non-nil when a catalog needs an explicit model choice.")
+(defvar-local ende-selector--connection nil
+  "Provisional nonsecret Account/Auth/API selection.")
+
+(defvar-local ende-selector--source-window nil
+  "Window to restore when the selector closes.")
 
 (defvar-local ende-selector--model-state nil
   "State of model discovery for the selected provider.")
@@ -122,8 +125,8 @@
   (let ((model (ende-selector--model-name))
         (provider (ende-selector--provider-name)))
     (if model
-        (ende-provider-profile-for-model provider model ende-selector--api)
-      (ende-provider--compose-profile provider nil ende-selector--api))))
+        (ende-provider-profile-for-model provider model ende-selector--api ende-selector--connection)
+      (ende-provider--compose-profile provider nil ende-selector--api ende-selector--connection))))
 
 (defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
@@ -133,7 +136,7 @@
   "Return the current provider/model profile with controls applied."
   (ende-provider-profile-for-selection
    (ende-selector--provider-name) (ende-selector--model-name)
-   ende-selector--control-preferences ende-selector--api))
+   ende-selector--control-preferences ende-selector--api ende-selector--connection))
 
 (defun ende-selector--control-setting (control)
   "Return CONTROL's resolved selector setting details."
@@ -172,7 +175,8 @@
   (condition-case nil
       (equal (ende-provider-selection-provenance profile)
              (ende-provider-selection-provenance
-              (ende-provider--compose-profile (plist-get profile :name) nil (plist-get profile :api))))
+              (ende-provider--compose-profile
+               (ende-selector--provider-name) nil ende-selector--api ende-selector--connection)))
     (error nil)))
 
 (defun ende-selector--preferred-model (provider profile)
@@ -195,7 +199,7 @@ Report an unavailable model once for each catalog identity."
             (unless (member model (plist-get record :warned))
               (push model (plist-get record :warned))
               (message
-               "ende: model %s is unavailable for %s; select explicitly from %s"
+               "ende: model %s is unavailable for %s; using %s"
                model
                (ende-provider-client-name profile)
                (or (car models) "the first available model")))
@@ -253,7 +257,11 @@ the discovered pricing metadata for those model IDs."
 
 (defun ende-selector--display-provider ()
   "Return a display name for the selected provider."
-  (ende-provider-client-name (ende-selector--provider-profile)))
+  (let ((name (ende-selector--provider-name)))
+    (or (alist-get name '((openai . "OpenAI") (openai-codex . "OpenAI Codex")
+                         (deepseek . "DeepSeek") (anthropic . "Anthropic")
+                         (openrouter . "OpenRouter")))
+        (symbol-name name))))
 
 (defun ende-selector--display-label (value width)
   "Return sanitized VALUE padded or truncated to display WIDTH columns."
@@ -324,117 +332,63 @@ the discovered pricing metadata for those model IDs."
         (setq text (concat text " (unverified mapping)"))))
     text))
 
+(defun ende-selector--row (key label value)
+  "Format KEY, LABEL and VALUE in the selector's fixed columns."
+  (if key
+      (format "%-8s - %-18s %s\n" key label value)
+    (format "           %-18s %s\n" label value)))
+
+(defun ende-selector--model-display ()
+  "Describe the selected model and its validation state."
+  (let ((model (ende-selector--model-name)))
+    (pcase ende-selector--model-state
+      ((or :loading :validating) (if model (concat model " (validating...)") "validating..."))
+      (:error (if model (concat model " (unavailable)") "unavailable"))
+      (_ (or model "none available")))))
+
+(defun ende-selector--control-rows (profile)
+  "Return editable control rows for PROFILE."
+  (mapconcat
+   (lambda (entry)
+     (pcase-let ((`(,control ,key ,label) entry))
+       (if (ende-selector--control-supported-p profile control)
+           (ende-selector--row key label
+            (if (eq control :reasoning-effort)
+                (pcase ende-selector--effort-state
+                  (:loading "validating...")
+                  (:invalid (format "%s (unsupported)" ende-selector--effort))
+                  (:error "lookup failed; retry")
+                  (_ (ende-selector--control-value control profile)))
+              (ende-selector--control-value control profile)))
+         "")))
+   '((:temperature "T" "Temperature:")
+     (:thinking "t" "Thinking:")
+     (:reasoning-effort "e" "Reasoning effort:")) ""))
+
 (defun ende-selector--render ()
-  "Render the current selector state."
-  (let* ((profile (ende-selector--provider-profile))
-         (model-name (ende-selector--model-name))
-         (provider (ende-selector--display-provider))
-         (model (or model-name
-                    (if (memq ende-selector--model-state
-                              '(:loading :validating))
-                        "validating..."
-                      "none available")))
-         (model-status
-          (pcase ende-selector--model-state
-            ((or :loading :validating)
-             (if model-name " validating..." ""))
-            (:error " probe failed")
-            (_ "")))
-         (thinking (plist-get (ende-selector--control-setting :thinking)
-                              :value))
-         (effort-label
-          (cond
-           ((eq thinking 'off)
-            (format "%s (inactive while thinking is off)"
-                    (ende-selector--control-value
-                     :reasoning-effort
-                     profile)))
-           ((eq ende-selector--effort-state :loading) "validating...")
-           ((eq ende-selector--effort-state :invalid)
-            (format "%s (unsupported; correct this setting)"
-                    ende-selector--effort))
-           ((eq ende-selector--effort-state :error)
-            (if ende-selector--effort
-                (format "%s (lookup failed; retry)" ende-selector--effort)
-              "lookup failed; retry"))
-           ((eq ende-selector--effort-state :unavailable)
-            "capability information unavailable")
-           (t (ende-selector--control-value :reasoning-effort profile))))
-         (temperature-value
-          (ende-selector--control-value :temperature profile))
-         (thinking-value
-          (if (and (ende-provider-deepseek-model-verified-p profile)
-                   (null thinking)
-                   (equal (plist-get
-                           (ende-selector--control-setting :reasoning-effort)
-                           :value)
-                          "none"))
-              "off (reasoning effort none)"
-            (ende-selector--control-value :thinking profile)))
-         (effort-value
-          (if (and (not (ende-selector--control-supported-p
-                         profile :reasoning-effort))
-                   (not (eq ende-selector--effort-state :loading)))
-              (if (plist-get (ende-selector--control-setting
-                              :reasoning-effort)
-                             :value)
-                  (concat effort-label " (capability unverified)")
-                "capability information unavailable")
-            effort-label))
-         (capability-note
-          (when (and (eq (plist-get profile :service) 'deepseek)
-                     model-name
-                     (not (ende-provider-deepseek-model-verified-p profile)))
-            (format "DeepSeek control support is unverified for %s.\n"
-                    model-name)))
-         (compatibility-note
-          (when-let* ((message
-                       (ende-provider-control-compatibility-error
-                        (ende-selector--resolved-profile))))
-            (format "Invalid controls: %s\n" message))))
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (format "%-8s - %-18s %s\n" "n/p" "Provider:" provider))
-      (insert (format "%-8s - %-18s %s / %s / %s\n" "A" "Service/API/auth:"
-                      (or (plist-get profile :service) 'custom)
-                      (plist-get profile :api) (plist-get profile :auth-method)))
-      (insert (format "Account: %s   Endpoint: %s   Catalog: %s\n"
-                      (or (plist-get profile :account) (plist-get profile :auth-source-user) "none")
-                      (plist-get profile :url)
-                      (if (plist-get profile :models-explicit-p) "static" "discovered/manual")))
-      (insert (format "%-8s - %-18s %s%s\n" "C-n/C-p" "Model:"
-                      model-status model))
-      (when ende-selector--selection-required
-        (insert "Select a model explicitly before starting a request.\n"))
-      (insert (format "%-8s - %-18s %d\n" "c/C" "Concurrency:"
-                      (ende-selector--provider-concurrency)))
-      (insert (format "%-8s - %-18s %s\n" "P" "Parallel:"
-                      (if (ende-selector--provider-parallel-p) "on" "off")))
-      (insert "\n")
-      (insert (format "%-8s - %-18s %s\n" "T" "Temperature:"
-                      temperature-value))
-      (insert (format "%-8s - %-18s %s\n" "t" "Thinking:"
-                      thinking-value))
-      (insert (format "%-8s - %-18s %s\n" "e" "Reasoning effort:"
-                      effort-value))
-      (when capability-note (insert capability-note))
-      (when compatibility-note (insert compatibility-note))
-      (insert "\n")
-      (insert "a  - ask\n"
-              "d  - queue dashboard\n"
-              "R  - reset controls to profile settings\n"
-              "i  - insert\n"
-              "I  - insert anywhere\n"
-              "k  - compact chat context\n"
-              "m  - select/search model\n"
-	      "r  - rubber duck\n"
-              "s  - summarize\n"
-	      "w  - write anywhere\n\n"
-              "C-c C-c   - approve all LLM changes\n"
-              "C-c C-k   - reject all LLM changes\n"
-              "RET       - commit selection and close\n"
-              "q/ESC     - close without changing active selection\n")
-      (goto-char (point-min)))))
+  "Render resolved selector state without changing it."
+  (let ((profile (ende-selector--provider-profile))
+        (inhibit-read-only t))
+    (erase-buffer)
+    (insert
+     (ende-selector--row "n/p" "Provider:"
+                         (format "%s - %s" (ende-selector--display-provider)
+                                 (plist-get profile :url)))
+     (ende-selector--row "A" "Account:" (or (plist-get profile :account) "none"))
+     (ende-selector--row nil "Auth:" (plist-get profile :auth-method))
+     (ende-selector--row nil "API:" (plist-get profile :api))
+     (ende-selector--row "c/C" "Concurrency:" (ende-selector--provider-concurrency))
+     (ende-selector--row "P" "Parallel:" (if (ende-selector--provider-parallel-p) "on" "off"))
+     "\n"
+     (ende-selector--row "C-n/C-p" "Model:" (ende-selector--model-display))
+     (ende-selector--control-rows profile)
+     "\n"
+     "a  - ask\nd  - queue dashboard\nR  - reset controls to profile settings\n"
+     "i  - insert\nI  - insert anywhere\nk  - compact chat context\n"
+     "m  - select/search model\nr  - rubber duck\ns  - summarize\nw  - write anywhere\n\n"
+     "C-c C-c   - approve all LLM changes\nC-c C-k   - reject all LLM changes\n"
+     "RET       - commit selection and close\nq/ESC     - close without changing active selection\n")
+    (goto-char (point-min))))
 
 (defun ende-selector--cancel-probe ()
   "Cancel the current model probe, if any."
@@ -475,8 +429,7 @@ the discovered pricing metadata for those model IDs."
   "Record the current ready provider/model as recently used."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name)))
-    (when (and (eq ende-selector--model-state :ready) provider model
-               (not ende-selector--selection-required))
+    (when (and (eq ende-selector--model-state :ready) provider model)
       (ende-model-selection-remember-pair
        provider model ende-selector--api
        (or ende-selector--source-buffer (current-buffer))))))
@@ -587,11 +540,6 @@ PREFERRED is selected only when it is present in MODELS."
                    profile models generation preferred)
                   preferred)))
         (ende-selector--set-models models selected)
-        (setq ende-selector--selection-required
-              (and models (not selected)
-                   (or preferred
-                       (and (not (ende-provider-configured-models-explicit-p profile))
-                            (> (length models) 1)))))
         (setq ende-selector--model-state
               (if models :ready :error))))))
 
@@ -640,7 +588,8 @@ PREFERRED is selected only when it is present in MODELS."
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
-  (unless (= index ende-selector--provider-index) (setq ende-selector--api nil))
+  (unless (= index ende-selector--provider-index)
+    (setq ende-selector--api nil ende-selector--connection nil))
   (setq ende-selector--provider-index
         (mod index (max 1 (length ende-selector--providers))))
   (cl-incf ende-selector--model-selection-generation)
@@ -704,7 +653,6 @@ PREFERRED is selected only when it is present in MODELS."
     (setq ende-selector--model-index
           (mod (+ ende-selector--model-index delta)
                (length ende-selector--models)))
-    (setq ende-selector--selection-required nil)
     (cl-incf ende-selector--model-selection-generation)
     (ende-selector--set-control-context)
     (ende-selector--remember-selected-pair)
@@ -735,7 +683,8 @@ performed locally so typing a search term never starts another network request."
        (let ((model (read-string "Manual model ID: ")))
          (when (string-blank-p model) (user-error "Supply a nonempty model ID"))
          (ende-selector--set-models (list model) model)
-         (setq ende-selector--model-state :ready ende-selector--selection-required nil)
+         (setq ende-selector--model-state :ready)
+         (ende-selector--set-control-context)
          (ende-selector--remember-selected-pair)
          (ende-selector--render))))
     (_
@@ -768,7 +717,7 @@ performed locally so typing a search term never starts another network request."
            (unless index
              (setq models (append models (list selected-model)) index (1- (length models))))
            (setq ende-selector--models models ende-selector--model-index index
-                 ende-selector--model-state :ready ende-selector--selection-required nil)
+                 ende-selector--model-state :ready)
            (cl-incf ende-selector--model-selection-generation)
            (ende-selector--set-control-context)
            (ende-selector--remember-selected-pair)
@@ -953,10 +902,10 @@ Return the saved selection, or nil when no valid model is selected."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
-    (when (and provider (stringp model) (not ende-selector--selection-required))
+    (when (and provider (stringp model) (eq ende-selector--model-state :ready))
       (ende-model-selection-save
        (append (list :provider provider :model model)
-               (when ende-selector--api (list :api ende-selector--api))
+               (ende-model-selection-connection (ende-selector--provider-profile))
                (when ende-selector--control-preferences
                  (list :control-preferences
                        (copy-tree ende-selector--control-preferences))))
@@ -993,7 +942,7 @@ Return the saved selection, or nil when no valid model is selected."
     ((error quit)
      (user-error "%s" (error-message-string validation-error))))
   (unless (ende-selector--save-selection)
-    (user-error "Select a model explicitly with the model picker"))
+    (user-error "No ready model available"))
   (ende-selector-close))
 
 (defun ende-selector--dispatch (type instruction)
@@ -1028,9 +977,8 @@ Return the saved selection, or nil when no valid model is selected."
 
 (defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model."
-  (when ende-selector--selection-required
-    (user-error "Select a model explicitly with the model picker"))
-  (ende-selector--save-selection)
+  (unless (eq ende-selector--model-state :ready)
+    (user-error "No ready model available"))
   (let* ((profile (ende-selector--resolved-profile))
          (effort (ende-provider-active-reasoning-effort profile)))
     (condition-case validation-error
@@ -1039,6 +987,7 @@ Return the saved selection, or nil when no valid model is selected."
        (setq ende-selector--effort-state (if effort :invalid :error))
        (ende-selector--render)
        (user-error "%s" (error-message-string validation-error))))
+    (ende-selector--save-selection)
     (ende-selector--dispatch type instruction)))
 
 (defun ende-selector-insert ()
