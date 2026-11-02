@@ -140,7 +140,7 @@
       (setq ende-selector--providers '(openai))
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (&rest _) "openai-chat-completions")))
-        (ende-selector-select-api))
+        (ende-test--select-api))
       (should (eq (plist-get (ende-selector--resolved-profile) :api) 'openai-chat-completions))
       (should (equal (plist-get (ende-selector--resolved-profile) :url)
                      "https://api.openai.com/v1/chat/completions")))))

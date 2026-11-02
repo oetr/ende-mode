@@ -6,6 +6,14 @@
 
 ;;; Code:
 
+(defun ende-test--select-api ()
+  "Exercise API selection through a connection draft."
+  (let ((parent (current-buffer)))
+    (ende-selector-configure-connection)
+    (with-current-buffer (buffer-local-value 'ende-selector--connection-buffer parent)
+      (ende-selector-connection-api)
+      (ende-selector-connection-apply))))
+
 (require 'ert)
 (require 'cl-lib)
 (require 'json)
