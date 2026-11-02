@@ -1089,6 +1089,70 @@
           (should-error (ende-tool-store-load-protocol id "Checking." nil))))
     (ende-test--reset)))
 
+(ert-deftest ende-test/chat-protocol-sidecar-codex-namespaced-followup ()
+  (ende-test--reset)
+  (unwind-protect
+      (with-temp-buffer
+        (org-mode)
+        (let* ((call '(:id "c" :name "read_file" :namespace "ende" :arguments "{}"))
+               (item (ende-protocol-json-read-string
+                      "{\"type\":\"function_call\",\"call_id\":\"c\",\"namespace\":\"ende\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
+               (history (list 'openai-responses item))
+               (id (ende-tool-store-save-protocol history "" (list call)))
+               (stored (ende-chat--prepare-tool-call call)))
+          (insert "* Topic\n** Question\nInspect.\n"
+                  (ende-chat--work-text 2 "q" "r")
+                  (ende-chat--assistant-protocol-text
+                   3 "q" "r" (ende-chat--metadata-property ende-chat-protocol-history-property id)
+                   '(:content "") (list stored))
+                  (ende-chat--tool-result-text 3 "r" stored "result")
+                  "** Follow-up\nContinue.\n")
+          (goto-char (point-min))
+          (re-search-forward "Agent: Work")
+          (org-entry-delete nil ende-chat-state-property)
+          ;; Reparse persisted Org, rather than reusing the original call plist.
+          (let* ((document (ende-chat--build-document))
+                 (work (cl-find-if (lambda (h) (ende-chat--property document h :work))
+                                   (ende-chat--document-headlines document)))
+                 (messages (ende-chat--protocol-work-messages document work))
+                 (input (ende-codex--request-messages messages)))
+            (should (equal (gethash "namespace" (car input)) "ende"))
+            (should (equal (gethash "call_id" (car input)) (alist-get :call_id (cadr input)))))
+          (should-error (ende-tool-store-load-protocol id "Edited" (list call)))
+          (should-error (ende-tool-store-load-protocol
+                         id "" '((:id "c" :name "write_file" :arguments "{}"))))))
+    (ende-test--reset)))
+
+(ert-deftest ende-test/chat-protocol-sidecar-heading-reply-roundtrip ()
+  (ende-test--reset)
+  (unwind-protect
+      (with-temp-buffer
+        (org-mode)
+        (let* ((content "* Sample analysis\n\nRead five slices.\n")
+               (history (list 'openai-responses
+                              (ende-protocol-json-read-string
+                               "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"* Sample analysis\\n\\nRead five slices.\\n\"}]}")))
+               (id (ende-tool-store-save-protocol history content nil))
+               (normalized (ende-chat--normalize-response content 2 t)))
+          (insert "* Topic\n** Question\nInspect.\n"
+                  (ende-chat--assistant-text
+                   2 "q" "r"
+                   (concat (ende-chat--metadata-property ende-chat-protocol-history-property id)
+                           (ende-chat--normalized-response-properties normalized))
+                   normalized)
+                  "** Follow-up\nContinue.\n")
+          (let* ((document (ende-chat--build-document))
+                 (reply (cl-find-if (lambda (h) (equal (ende-chat--property document h :request-id) "r"))
+                                    (ende-chat--document-headlines document)))
+                 (messages (ende-chat--section-messages
+                            document reply (org-element-property :begin reply)
+                            (org-element-property :end reply))))
+            (should (= (length messages) 1))
+            (should (equal (plist-get (car messages) :content) content))
+            (should (equal (gethash "phase" (cadr (plist-get (car messages) :protocol-history)))
+                           "final_answer")))))
+    (ende-test--reset)))
+
 (provide 'ende-chat-tool-store-test)
 
 ;;; ende-chat-tool-store-test.el ends here

@@ -402,6 +402,15 @@ Refuse an unknown destination rather than risk purging an active store."
                            (vector id payload))) filename)
       id)))
 
+(defun ende-tool-store--visible-protocol-calls (calls)
+  "Return the visible signature of JSON-decoded CALLS.
+Org tool references reconstruct only ID, name, and arguments.  Additional
+provider metadata stays untouched in the private replay items."
+  (mapcar (lambda (call)
+            (list (alist-get 'id call) (alist-get 'name call)
+                  (alist-get 'arguments call)))
+          (append calls nil)))
+
 (defun ende-tool-store-load-protocol (id content calls &optional filename)
   "Restore ID only when visible CONTENT and CALLS still match its captured turn."
   (when id
@@ -413,9 +422,11 @@ Refuse an unknown destination rather than risk purging an active store."
            (api (and object (alist-get 'api object))))
       (unless object (error "Assistant protocol history is unavailable; restore the selected tool store"))
       (unless (and (equal (alist-get 'content object) content)
-                   (equal (alist-get 'calls object)
-                          (json-parse-string (json-encode (vconcat calls))
-                                             :object-type 'alist :null-object nil :false-object :json-false)))
+                   (equal (ende-tool-store--visible-protocol-calls
+                           (alist-get 'calls object))
+                          (ende-tool-store--visible-protocol-calls
+                           (json-parse-string (json-encode (vconcat calls))
+                                              :object-type 'alist :null-object nil :false-object :json-false))))
         (error "Assistant protocol history changed; start a new conversation or restore the original turn"))
       (cons (pcase api ("openai-responses" 'openai-responses)
                          ("anthropic-messages" 'anthropic-messages)
