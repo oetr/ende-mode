@@ -692,13 +692,27 @@ PREFERRED is selected only when it is present in MODELS."
 
 (defun ende-selector-connection--render ()
   "Render the connection draft."
-  (let ((profile (ende-selector-connection--profile))
-        (inhibit-read-only t))
+  (let* ((profile (ende-selector-connection--profile))
+         (method (plist-get profile :auth-method))
+         (auth (and (eq (plist-get profile :service) 'openai-codex)
+                    (memq method '(chatgpt-plan-oauth codex-oauth))
+                    (condition-case nil
+                        (ende-codex-auth-lookup method (plist-get profile :account))
+                      (error :unavailable))))
+         (status (cond
+                  ((eq auth :unavailable) "unavailable")
+                  ((not (eq (plist-get profile :service) 'openai-codex)) "not applicable")
+                  ((not (memq method '(chatgpt-plan-oauth codex-oauth))) "not OAuth")
+                  ((null auth) "not connected")
+                  ((plist-get auth :needs-login) "sign-in required")
+                  (t "connected")))
+         (inhibit-read-only t))
     (erase-buffer)
     (insert (ende-selector--row "a" "Account:" (or (plist-get profile :account) "none"))
             (ende-selector--row "h" "Auth:" (plist-get profile :auth-method))
             (ende-selector--row "p" "API:" (plist-get profile :api))
-            "\nRET      - apply and return\nq/ESC    - cancel\n")
+            (ende-selector--row "l" "OAuth:" status)
+            "\nRET      - apply and return\nl        - connect/reconnect OAuth\nq/ESC    - cancel\n")
     (goto-char (point-min))))
 
 (defun ende-selector-connection--set (key value)
@@ -753,25 +767,44 @@ PREFERRED is selected only when it is present in MODELS."
       (with-current-buffer parent (setq ende-selector--connection-buffer nil))
       (pop-to-buffer parent))))
 
+(defun ende-selector-connection--login-finished (parent profile record failure)
+  "Report OAuth completion and refresh a still-matching selector."
+  (ende-codex--login-report record failure)
+  (when (and record (buffer-live-p parent))
+    (with-current-buffer parent
+      (when (and (derived-mode-p 'ende-selector-mode)
+                 (ende-selector--binding-current-p profile))
+        (ende-selector--set-provider ende-selector--provider-index)
+        (when (buffer-live-p ende-selector--connection-buffer)
+          (with-current-buffer ende-selector--connection-buffer
+            (when (equal (ende-model-selection-connection profile)
+                         (ende-model-selection-connection
+                          (ende-selector-connection--profile)))
+              (ende-selector-connection--render))))))))
+
+(defun ende-selector-connection-login ()
+  "Connect or reconnect the drafted OAuth account."
+  (interactive)
+  (let* ((profile (ende-selector-connection--profile))
+         (method (plist-get profile :auth-method))
+         (account (plist-get profile :account))
+         (parent ende-selector-connection--parent))
+    (unless (and (eq (plist-get profile :service) 'openai-codex)
+                 (memq method '(chatgpt-plan-oauth codex-oauth)))
+      (user-error "This connection does not use OAuth"))
+    (let ((existing (ende-codex-auth-lookup method account)))
+      (when (or (null existing)
+                (yes-or-no-p "Replace this account's OAuth registration? "))
+        (ende-codex--begin-login
+         method account
+         (apply-partially #'ende-selector-connection--login-finished parent profile))))))
+
 (defun ende-selector-connection-apply ()
   "Apply the validated connection atomically and revalidate its models."
   (interactive)
   (let* ((profile (ende-selector-connection--profile))
          (connection (ende-model-selection-connection profile))
          (parent ende-selector-connection--parent))
-    (when (and (eq (plist-get profile :service) 'openai-codex)
-               (let ((auth (ende-codex-auth-lookup
-                            (plist-get profile :auth-method) (plist-get profile :account))))
-                 (or (null auth) (plist-get auth :needs-login)))
-               (y-or-n-p "Authorize this OAuth connection in your browser? "))
-      (ende-codex--begin-login
-       (plist-get profile :auth-method) (plist-get profile :account)
-       (lambda (record failure)
-         (ende-codex--login-report record failure)
-         (when (and record (buffer-live-p parent))
-           (with-current-buffer parent
-             (when (equal connection ende-selector--connection)
-               (ende-selector--set-provider ende-selector--provider-index)))))))
     (with-current-buffer parent
       (let* ((model (ende-selector--model-name))
              (prepared
@@ -832,6 +865,7 @@ PREFERRED is selected only when it is present in MODELS."
   (dolist (binding '(("a" . ende-selector-connection-account)
                      ("h" . ende-selector-connection-auth)
                      ("p" . ende-selector-connection-api)
+                     ("l" . ende-selector-connection-login)
                      ("RET" . ende-selector-connection-apply)
                      ("q" . ende-selector-connection-cancel)
                      ("ESC" . ende-selector-connection-cancel)
