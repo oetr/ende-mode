@@ -311,23 +311,18 @@
               (should-not ende-selector--effort)
               (should (eq ende-selector--effort-state :none))
               (ende-selector--set-control-preference :reasoning-effort "low")
-              (ende-selector--remember-selected-pair)
-              (dolist (scope '(buffer global))
-                (let ((ende-model-selection-scope scope))
-                  (should (equal (ende-model-selection-control-preferences
-                                  'openai "gpt-5-test" nil source)
-                                 '(:reasoning-effort "high")))
-                  (should (equal (ende-model-selection-control-preferences
-                                  'openai "gpt-5-test" 'openai-chat-completions source)
-                                 '(:reasoning-effort "low")))))
-              (should (= (hash-table-count ende-model-selection--shared-control-preferences) 2))
+              (should-not (ende-model-selection-control-preferences
+                           'openai "gpt-5-test" nil source))
+              (should-not (ende-model-selection-control-preferences
+                           'openai "gpt-5-test" 'openai-chat-completions source))
+              (should (= (hash-table-count ende-model-selection--shared-control-preferences) 0))
               ;; Switching and confirming restore each API's own controls.
               (dolist (entry '((openai-responses . "high")
                                (openai-chat-completions . "low")))
                 (select-api (car entry))
                 (should (equal ende-selector--effort (cdr entry)))
                 (should (eq ende-selector--effort-state :remembered))
-                (ende-selector-confirm)
+                (ende-selector--commit)
                 (should (eq (plist-get (ende-model-selection-for-buffer source) :api)
                             (car entry)))
                 (check-profile (ende-provider-profile-for-buffer source t)
@@ -347,8 +342,9 @@
               (should-error (ende-selector--set-control-preference :thinking 'on)
                             :type 'user-error)
               (ende-selector-reset-controls)
-              (should-not (ende-model-selection-control-preferences
-                           'openai "gpt-5-test" 'openai-chat-completions source))
+              (should (equal (ende-model-selection-control-preferences
+                              'openai "gpt-5-test" 'openai-chat-completions source)
+                             '(:reasoning-effort "low")))
               (should (equal (ende-model-selection-control-preferences
                               'openai "gpt-5-test" nil source)
                              '(:reasoning-effort "high")))
@@ -444,10 +440,9 @@
           (should (= ende-selector--model-index 1))
           (should (string= (ende-selector--model-name) "remote/beta"))
           (should-not ende-model-selection--last-used)
-          (should (equal
-                   (ende-model-selection--control-preference-entry
-                    'remote "remote/beta" nil buffer)
-                   '(t))))
+          (should-not
+           (ende-model-selection--control-preference-entry
+            'remote "remote/beta" nil buffer)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
@@ -579,6 +574,7 @@
 
 (ert-deftest ende-test/selector-validates-first-model-without-preference ()
   (let ((buffer (generate-new-buffer " *ende-selector-first-model-test*"))
+        (source (generate-new-buffer " *ende-selector-first-model-source*"))
         (probe-callback nil)
         (ende-providers '(remote))
         (ende-custom-providers
@@ -587,7 +583,8 @@
     (unwind-protect
         (with-current-buffer buffer
           (ende-selector-mode)
-          (setq ende-selector--providers '(remote)
+          (setq ende-selector--source-buffer source
+                ende-selector--providers '(remote)
                 ende-selector--provider-index 0)
           (cl-letf (((symbol-function 'ende-provider-probe-models)
                      (lambda (_profile callback)
@@ -605,10 +602,56 @@
             (should (string= (ende-selector--model-name)
                              "remote/first"))
             (should (eq ende-selector--model-state :ready))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+      (dolist (candidate (list buffer source))
+        (when (buffer-live-p candidate)
+          (kill-buffer candidate))))))
 
-
+(ert-deftest ende-test/selector-dispatch-commits-once-before-dispatch ()
+  (let ((source (generate-new-buffer " *ende-selector-dispatch-source*"))
+        (ende-provider--runtime-settings (make-hash-table :test #'eq))
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection-scope 'buffer)
+        (ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method none
+                   :base-url "https://remote.test/v1" :models ("first")
+                   :controls ((:temperature :path ("temperature"))))))
+        (saves 0)
+        (runtime-commits 0)
+        (dispatches 0))
+    (unwind-protect
+        (with-temp-buffer
+          (ende-selector-mode)
+          (setq ende-selector--source-buffer source
+                ende-selector--providers '(remote)
+                ende-selector--models '("first")
+                ende-selector--model-state :ready)
+          (ende-selector--set-control-context)
+          (ende-selector--set-control-preference :temperature 0.3)
+          (ende-selector--set-draft-runtime :parallel t)
+          (cl-letf (((symbol-function 'ende-model-selection-save)
+                     (lambda (selection &optional _buffer _skip)
+                       (cl-incf saves)
+                       selection))
+                    ((symbol-function 'ende-provider-set-runtime-setting)
+                     (lambda (&rest _) (cl-incf runtime-commits)))
+                    ((symbol-function 'ende-process-next) #'ignore)
+                    ((symbol-function 'ende-selector-close) #'ignore)
+                    ((symbol-function 'ende-enqueue-operation)
+                     (lambda (&rest _) (cl-incf dispatches)))
+                    ((symbol-function 'ende-selector--dispatch)
+                     (lambda (type instruction)
+                       (with-current-buffer source
+                         (ende-enqueue-operation type instruction)))))
+            (ende-selector-insert))
+          (should (= saves 1))
+          (should (= runtime-commits 1))
+          (should (= dispatches 1)))
+      (when (buffer-live-p source)
+        (kill-buffer source)))))
 
 (ert-deftest ende-test/selector-warns-once-per-model-and-catalog ()
   (let ((buffer (generate-new-buffer " *ende-selector-validation-test*"))
@@ -706,7 +749,7 @@
 
 
 
-(ert-deftest ende-test/selector-effort-picker-remembers-setting-immediately ()
+(ert-deftest ende-test/selector-effort-picker-keeps-a-draft ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-picker-test*"))
         (probed-model nil)
         (ende-providers '(remote))
@@ -748,23 +791,21 @@
           (should (equal probed-model "remote-model"))
           (should (equal ende-selector--control-preferences
                          '(:reasoning-effort "high")))
-          (should (equal
-                   (ende-model-selection-control-preferences
-                    'remote "remote-model" nil buffer)
-                   '(:reasoning-effort "high")))
+          (should-not
+           (ende-model-selection-control-preferences
+            'remote "remote-model" nil buffer))
           (should-not ende-model-selection--last-used)
           (should (string-match-p "Effort:.*high (explicit)"
                                   (buffer-string)))
           (ende-selector-close)
           (should-not ende-model-selection--last-used)
-          (should (equal
-                   (ende-model-selection-control-preferences
-                    'remote "remote-model" nil buffer)
-                   '(:reasoning-effort "high"))))
+          (should-not
+           (ende-model-selection-control-preferences
+            'remote "remote-model" nil buffer)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest ende-test/selector-control-history-survives-switches-without-confirmation ()
+(ert-deftest ende-test/selector-control-drafts-survive-switches ()
   (let* ((test-buffer (generate-new-buffer "Test.org"))
          (dev-buffer (generate-new-buffer "Dev.org"))
          (selector nil)
@@ -831,10 +872,8 @@
                       ((symbol-function 'completing-read)
                        (lambda (&rest _) "high")))
               (ende-selector-select-effort))
-            (should (equal
-                     (ende-model-selection-control-preferences
-                      'alpha "alpha-one" nil test-buffer)
-                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (should-not (ende-model-selection-control-preferences
+                         'alpha "alpha-one" nil test-buffer))
             (ende-selector-next-model)
             (should (equal (ende-selector--model-name) "shared-model"))
             (let ((value 0.4))
@@ -858,14 +897,10 @@
                         ((symbol-function 'read-number)
                          (lambda (&rest _) value)))
                 (ende-selector-select-temperature)))
-            (should (equal
-                     (ende-model-selection-control-preferences
-                      'alpha "shared-model" nil test-buffer)
-                     '(:temperature 0.4)))
-            (should (equal
-                     (ende-model-selection-control-preferences
-                      'beta "shared-model" nil test-buffer)
-                     '(:temperature 0.2)))
+            (should-not (ende-model-selection-control-preferences
+                         'alpha "shared-model" nil test-buffer))
+            (should-not (ende-model-selection-control-preferences
+                         'beta "shared-model" nil test-buffer))
             (cl-letf (((symbol-function 'ende-provider-model-discovery-available-p)
                        (lambda (_) nil))
                       ((symbol-function 'ende-provider-cached-models)
@@ -873,21 +908,13 @@
                       ((symbol-function 'ende-selector--valid-model-p)
                        (lambda (&rest _) t)))
               (ende-selector-next-provider))
-            (should (equal (ende-selector--model-name) "alpha-one"))
+            (should (equal (ende-selector--model-name) "shared-model"))
             (should (= (plist-get (ende-selector--resolved-profile)
                                   :temperature)
-                       0))
-            (should (eq (plist-get (ende-selector--resolved-profile)
-                                   :thinking)
-                        'off))
-            (should (equal (plist-get (ende-selector--resolved-profile)
-                                      :reasoning-effort)
-                           "high"))
+                       0.4))
             (ende-selector-close))
           (should (equal (plist-get ende-model-selection--last-used :provider)
                          'beta))
-          (should (equal (plist-get ende-model-selection--last-used :model)
-                         "shared-model"))
           (cl-letf (((symbol-function 'display-buffer)
                      (lambda (&rest _) nil))
                     ((symbol-function 'ende-provider-model-discovery-available-p)
@@ -909,10 +936,9 @@
                        (lambda (&rest _) t)))
               (ende-selector-next-provider))
             (should (equal (ende-selector--model-name) "alpha-one"))
-            (should (equal
-                     (ende-model-selection-control-preferences
-                      'alpha "alpha-one" nil dev-buffer)
-                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (should (= (plist-get (ende-selector--resolved-profile)
+                                  :temperature)
+                       0.7))
             (let ((value 0.9))
               (cl-letf (((symbol-function 'completing-read)
                          (lambda (&rest _) "Set numeric value"))
@@ -920,10 +946,8 @@
                          (lambda (&rest _) value)))
                 (ende-selector-select-temperature)))
             (ende-selector-close))
-          (should (equal
-                   (ende-model-selection-control-preferences
-                    'alpha "alpha-one" nil dev-buffer)
-                   '(:temperature 0.9 :thinking off :reasoning-effort "high")))
+          (should-not (ende-model-selection-control-preferences
+                       'alpha "alpha-one" nil dev-buffer))
           (cl-letf (((symbol-function 'display-buffer)
                      (lambda (&rest _) nil))
                     ((symbol-function 'ende-provider-model-discovery-available-p)
@@ -938,17 +962,15 @@
           (with-current-buffer selector
             (should (eq (ende-selector--provider-name) 'alpha))
             (should (equal (ende-selector--model-name) "alpha-one"))
-            (should (zerop (plist-get (ende-selector--resolved-profile)
-                                      :temperature)))
-            (should (equal
-                     (ende-model-selection-control-preferences
-                      'alpha "alpha-one" nil test-buffer)
-                     '(:temperature 0 :thinking off :reasoning-effort "high")))
+            (should (= (plist-get (ende-selector--resolved-profile)
+                                  :temperature)
+                       0.7))
+            (should-not (ende-model-selection-control-preferences
+                         'alpha "alpha-one" nil test-buffer))
             (ende-selector-close))
-          (should (equal
-                   (gethash (ende-model-selection--pair-key 'alpha "alpha-one" nil)
-                            ende-model-selection--shared-control-preferences)
-                   '(:temperature 0 :thinking off :reasoning-effort "high")))
+          (should-not (gethash
+                       (ende-model-selection--pair-key 'alpha "alpha-one" nil)
+                       ende-model-selection--shared-control-preferences))
           (should (equal (plist-get ende-model-selection--last-used :provider)
                          'beta)))
       (dolist (buffer (list test-buffer dev-buffer selector
@@ -996,12 +1018,59 @@
           (should (equal (plist-get (ende-selector--resolved-profile)
                                     :reasoning-effort)
                          "high"))
-          (should (equal
-                   (ende-model-selection--control-preference-entry
-                    'remote "remote-model" nil buffer)
-                   '(t))))
+          (should-not
+           (ende-model-selection--control-preference-entry
+            'remote "remote-model" nil buffer)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(ert-deftest ende-test/selector-commit-is-transactional ()
+  (let* ((source (generate-new-buffer " *ende-selector-draft-source*"))
+         (selector (generate-new-buffer " *ende-selector-draft*"))
+         (ende-providers '(remote))
+         (ende-custom-providers
+          '((remote :api openai-chat-completions :auth-method none
+                    :base-url "https://remote.test/v1"
+                    :models ("first" "second") :max-concurrency 2
+                    :controls ((:temperature :path ("temperature"))))))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+         (ende-provider--runtime-settings (make-hash-table :test #'eq)))
+    (unwind-protect
+        (with-current-buffer selector
+          (ende-selector-mode)
+          (setq ende-selector--source-buffer source
+                ende-selector--providers '(remote)
+                ende-selector--models '("first" "second")
+                ende-selector--model-state :ready)
+          (ende-selector--set-control-context)
+          (ende-selector--set-control-preference :temperature 0.4)
+          (should-not (ende-model-selection-for-buffer source))
+          (cl-letf (((symbol-function 'read-number) (lambda (&rest _) 4)))
+            (ende-selector-set-concurrency))
+          (should (= (ende-selector--provider-concurrency) 4))
+          (should (= (ende-provider-max-concurrency
+                      (ende-provider-profile 'remote)) 2))
+          (ende-selector-next-model)
+          (should (equal (ende-selector--model-name) "second"))
+          (ende-selector-previous-model)
+          (should (equal (ende-selector--model-name) "first"))
+          (should (= (plist-get (ende-selector--resolved-profile) :temperature) 0.4))
+          (should (= (ende-selector--provider-concurrency) 4))
+          (ende-selector-confirm)
+          (should (equal (plist-get (ende-model-selection-for-buffer source) :model)
+                         "first"))
+          (should (equal (ende-model-selection-control-preferences
+                          'remote "first" nil source)
+                         '(:temperature 0.4)))
+          (should (= (ende-provider-max-concurrency
+                      (ende-provider-profile 'remote)) 4)))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
@@ -1099,6 +1168,53 @@
 
 
 
+(ert-deftest ende-test/selector-escape-discards-draft-settings ()
+  (let* ((source (generate-new-buffer " *ende-selector-escape-source*"))
+         (selector (generate-new-buffer " *ende-selector-escape*"))
+         (ende-providers '(remote))
+         (ende-custom-providers
+          '((remote :api openai-chat-completions :auth-method none
+                    :base-url "https://remote.test/v1" :models ("first")
+                    :max-concurrency 2
+                    :controls ((:temperature :path ("temperature"))))))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+         (ende-provider--runtime-settings (make-hash-table :test #'eq)))
+    (unwind-protect
+        (progn
+          (ende-model-selection-save
+           '(:provider remote :model "first" :control-preferences (:temperature 0.2))
+           source)
+          (ende-provider-set-runtime-setting 'remote :max-concurrency 2)
+          (with-current-buffer selector
+            (ende-selector-mode)
+            (setq ende-selector--source-buffer source
+                  ende-selector--providers '(remote)
+                  ende-selector--models '("first")
+                  ende-selector--model-state :ready)
+            (ende-selector--set-control-context)
+            (ende-selector--set-control-preference :temperature 0.7)
+            (cl-letf (((symbol-function 'read-number)
+                       (lambda (&rest _) 4)))
+              (ende-selector-set-concurrency))
+            (should (eq (lookup-key ende-selector-mode-map (kbd "ESC"))
+                        #'ende-selector-close))
+            (ende-selector-close)
+            (should-not (buffer-live-p selector))
+            (should (equal (ende-model-selection-control-preferences
+                            'remote "first" nil source)
+                           '(:temperature 0.2)))
+            (should (= (ende-provider-max-concurrency
+                        (ende-provider-profile 'remote)) 2)))
+          (should (eq (lookup-key ende-selector-mode-map (kbd "<escape>"))
+                      #'ende-selector-close)))
+      (dolist (buffer (list source selector))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ende-test/selector-uses-bottom-window-and-quits-it-on-close ()
   (let ((source (generate-new-buffer " *ende-selector-window-source*"))
         (display-action nil)
@@ -1155,8 +1271,8 @@
 
 
 (ert-deftest ende-test/selector-changes-provider-runtime-settings ()
-  (ende-provider-clear-runtime-settings)
-  (let ((ende-providers '(remote))
+  (let ((ende-provider--runtime-settings (make-hash-table :test #'eq))
+        (ende-providers '(remote))
         (ende-custom-providers
          '((remote :api openai-chat-completions :auth-method none :base-url "http://localhost:8080/v1" :models ("remote-model") :temperature 0.8 :max-concurrency 2
                    :parallel nil))))
@@ -1171,7 +1287,7 @@
         (ende-selector-set-concurrency))
       (should (= (ende-provider-max-concurrency
                   (ende-provider-profile 'remote))
-                 4))
+                 2))
       (should-not (ende-selector--provider-parallel-p))
       (ende-selector-toggle-parallel)
       (should (ende-selector--provider-parallel-p))

@@ -71,6 +71,18 @@
 (defvar-local ende-selector--control-preferences nil
   "Explicit control preferences for the current provider, model and API.")
 
+(defvar-local ende-selector--draft-controls nil
+  "Provisional controls keyed by provider, model and connection identity.")
+
+(defvar-local ende-selector--draft-runtime nil
+  "Provisional provider runtime settings keyed by provider name.")
+
+(defvar-local ende-selector--draft-connections nil
+  "Provisional connection selections keyed by provider name.")
+
+(defvar-local ende-selector--draft-models nil
+  "Provisional model choices keyed by provider and connection identity.")
+
 (defvar-local ende-selector--effort nil
   "Reasoning effort selected for the current provider, model and API.")
 
@@ -187,22 +199,101 @@
   (nth ende-selector--provider-index ende-selector--providers))
 
 (defun ende-selector--provider-profile ()
-  "Return the selected provider profile."
-  (let ((model (ende-selector--model-name))
-        (provider (ende-selector--provider-name)))
-    (if model
-        (ende-provider-profile-for-model provider model ende-selector--api ende-selector--connection)
-      (ende-provider--compose-profile provider nil ende-selector--api ende-selector--connection))))
+  "Return the selected provider profile with provisional runtime settings."
+  (let* ((model (ende-selector--model-name))
+         (provider (ende-selector--provider-name))
+         (profile
+          (if model
+              (ende-provider-profile-for-model provider model ende-selector--api
+                                               ende-selector--connection)
+            (ende-provider--compose-profile provider nil ende-selector--api
+                                            ende-selector--connection)))
+         (runtime (ende-selector--draft-runtime-state)))
+    (when runtime
+      (setq profile (plist-put profile :max-concurrency
+                               (plist-get runtime :max-concurrency))
+            profile (plist-put profile :parallel
+                               (plist-get runtime :parallel))))
+    profile))
 
 (defun ende-selector--model-name ()
   "Return the selected model name, or nil while discovery is unavailable."
   (nth ende-selector--model-index ende-selector--models))
 
+(defun ende-selector--connection-state (provider)
+  "Return provisional API and connection values for PROVIDER."
+  (or (and (hash-table-p ende-selector--draft-connections)
+           (gethash provider ende-selector--draft-connections))
+      (let ((selection
+             (ende-model-selection-for-buffer
+              (or ende-selector--source-buffer (current-buffer)))))
+        (when (eq provider (plist-get selection :provider))
+          (list :api (plist-get selection :api)
+                :connection (ende-model-selection-connection selection))))))
+
+(defun ende-selector--remember-connection-state ()
+  "Retain the current provisional connection under its provider identity."
+  (when-let* ((provider (ende-selector--provider-name)))
+    (unless (hash-table-p ende-selector--draft-connections)
+      (setq ende-selector--draft-connections (make-hash-table :test #'eq)))
+    (puthash provider (list :api ende-selector--api
+                           :connection (copy-tree ende-selector--connection))
+             ende-selector--draft-connections)))
+
+(defun ende-selector--model-key (&optional provider api connection)
+  "Return the model-draft key for PROVIDER, API and CONNECTION."
+  (list (or provider (ende-selector--provider-name))
+        (or api ende-selector--api)
+        (copy-tree (or connection ende-selector--connection))))
+
+(defun ende-selector--remember-model ()
+  "Retain the current model as a provisional provider choice."
+  (when (and (hash-table-p ende-selector--draft-models)
+             (ende-selector--provider-name)
+             (ende-selector--model-name)
+             (eq ende-selector--model-state :ready))
+    (puthash (ende-selector--model-key)
+             (ende-selector--model-name) ende-selector--draft-models)))
+
+(defun ende-selector--control-key ()
+  "Return the identity for provisional controls of the current model."
+  (let ((provider (ende-selector--provider-name))
+        (model (ende-selector--model-name)))
+    (and provider model
+         (ende-model-selection--pair-key
+          provider model ende-selector--api ende-selector--connection))))
+
+(defun ende-selector--draft-control-state ()
+  "Return the provisional control state for the current model."
+  (when-let* ((key (ende-selector--control-key)))
+    (unless (hash-table-p ende-selector--draft-controls)
+      (setq ende-selector--draft-controls (make-hash-table :test #'equal)))
+    (or (gethash key ende-selector--draft-controls)
+        (let* ((provider (ende-selector--provider-name))
+               (model (ende-selector--model-name))
+               (source (or ende-selector--source-buffer (current-buffer)))
+               (preferences
+                (ende-model-selection-control-preferences
+                 provider model ende-selector--api source ende-selector--connection))
+               (state
+                (list :provider provider :model model
+                      :api ende-selector--api
+                      :connection (copy-tree ende-selector--connection)
+                      :preferences (copy-tree preferences)
+                      :initial-preferences (copy-tree preferences))))
+          (puthash key state ende-selector--draft-controls)
+          state))))
+
 (defun ende-selector--resolved-profile ()
-  "Return the current provider/model profile with controls applied."
-  (ende-provider-profile-for-selection
-   (ende-selector--provider-name) (ende-selector--model-name)
-   ende-selector--control-preferences ende-selector--api ende-selector--connection))
+  "Resolve the current provider/model with draft controls and runtime values."
+  (let ((profile (ende-provider-profile-with-control-preferences
+                  (ende-selector--provider-profile)
+                  ende-selector--control-preferences)))
+    (setq profile (plist-put profile :max-concurrency
+                             (ende-selector--provider-concurrency))
+          profile (plist-put profile :parallel
+                             (ende-selector--provider-parallel-p)))
+    profile))
 
 (defun ende-selector--control-setting (control)
   "Return CONTROL's resolved selector setting details."
@@ -210,24 +301,30 @@
    (ende-selector--provider-profile) ende-selector--control-preferences control))
 
 (defun ende-selector--set-control-preference (control value)
-  "Save canonical VALUE for CONTROL and refresh the current profile."
+  "Draft canonical VALUE for CONTROL and refresh the current profile."
   (unless (ende-provider-control-descriptor (ende-selector--provider-profile) control)
     (user-error "%s is unavailable for this model" control))
-  (let ((old-effort ende-selector--effort))
+  (let* ((state (ende-selector--draft-control-state))
+         (preferences
+          (plist-put
+           (copy-tree (or ende-selector--control-preferences
+                          (plist-get state :preferences)))
+           control value))
+         (old-effort ende-selector--effort))
+    (unless state
+      (user-error "No model is selected"))
+    (setq state (plist-put state :preferences (copy-tree preferences))
+          state (plist-put state :dirty
+                           (not (equal preferences
+                                       (plist-get state :initial-preferences)))))
+    (puthash (ende-selector--control-key) state ende-selector--draft-controls)
     (setq ende-selector--control-preferences
-          (plist-put ende-selector--control-preferences control value)
+          preferences
           ende-selector--effort
           (plist-get (ende-selector--resolved-profile) :reasoning-effort))
     (unless (equal old-effort ende-selector--effort)
       (setq ende-selector--effort-state
             (if ende-selector--effort :remembered :none)))
-    (when (and (eq ende-selector--model-state :ready)
-               (ende-selector--provider-name)
-               (ende-selector--model-name))
-      (ende-model-selection-save-control-preferences
-       (ende-selector--provider-name) (ende-selector--model-name)
-       ende-selector--api ende-selector--control-preferences
-       (or ende-selector--source-buffer (current-buffer)) ende-selector--connection))
     (ende-selector--render)))
 
 (defun ende-selector--remembered-model (provider)
@@ -298,12 +395,41 @@ Report an unavailable model once for each catalog identity."
         (symbol-name name))))
 
 (defun ende-selector--provider-concurrency ()
-  "Return the selected provider's current concurrency limit."
-  (ende-provider-max-concurrency (ende-selector--provider-profile)))
+  "Return the selected provider's provisional concurrency limit."
+  (plist-get (ende-selector--draft-runtime-state) :max-concurrency))
 
 (defun ende-selector--provider-parallel-p ()
-  "Return whether the selected provider defaults to parallel jobs."
-  (ende-provider-parallel-enabled-p (ende-selector--provider-profile)))
+  "Return the selected provider's provisional parallel setting."
+  (plist-get (ende-selector--draft-runtime-state) :parallel))
+
+(defun ende-selector--draft-runtime-state ()
+  "Return the selected provider's provisional runtime settings."
+  (let ((provider (ende-selector--provider-name)))
+    (when provider
+      (unless (hash-table-p ende-selector--draft-runtime)
+        (setq ende-selector--draft-runtime (make-hash-table :test #'eq)))
+      (or (gethash provider ende-selector--draft-runtime)
+          (let* ((profile (ende-provider--compose-profile
+                           provider nil ende-selector--api ende-selector--connection))
+                 (concurrency (ende-provider-max-concurrency profile))
+                 (parallel (ende-provider-parallel-enabled-p profile))
+                 (state (list :max-concurrency concurrency :parallel parallel
+                              :initial (list :max-concurrency concurrency
+                                             :parallel parallel))))
+            (puthash provider state ende-selector--draft-runtime)
+            state)))))
+
+(defun ende-selector--set-draft-runtime (key value)
+  "Set provisional runtime setting KEY to VALUE for the selected provider."
+  (let* ((provider (ende-selector--provider-name))
+         (state (ende-selector--draft-runtime-state)))
+    (unless state (user-error "No provider is selected"))
+    (setq state (plist-put state key value)
+          state (plist-put state :changed
+                           (if (equal value (plist-get (plist-get state :initial) key))
+                               (delq key (plist-get state :changed))
+                             (cl-adjoin key (plist-get state :changed)))))
+    (puthash provider state ende-selector--draft-runtime)))
 
 (defun ende-selector--control-value-label (_control setting)
   "Format SETTING with its preference source."
@@ -446,30 +572,26 @@ Report an unavailable model once for each catalog identity."
       (ende-ignore-errors cancel))))
 
 (defun ende-selector--set-control-context ()
-  "Restore explicit controls for the selected provider, model and API."
-  (let* ((provider (ende-selector--provider-name))
-         (model (ende-selector--model-name))
-         (preferences
-          (and provider model
-               (copy-tree
-                (ende-model-selection-control-preferences
-                 provider model ende-selector--api
-                 (or ende-selector--source-buffer (current-buffer)) ende-selector--connection)))))
+  "Restore provisional controls for the selected provider, model and API."
+  (let ((state (ende-selector--draft-control-state)))
     (ende-selector--cancel-effort-probe)
-    (setq ende-selector--control-preferences preferences
-          ende-selector--effort
+    (setq ende-selector--control-preferences
+          (copy-tree (and state (plist-get state :preferences))))
+    (setq ende-selector--effort
           (plist-get (ende-selector--resolved-profile) :reasoning-effort)
           ende-selector--effort-state
           (if ende-selector--effort :remembered :none))))
 
-(defun ende-selector--remember-selected-pair ()
-  "Record the current ready provider/model as recently used."
-  (let ((provider (ende-selector--provider-name))
-        (model (ende-selector--model-name)))
-    (when (and (eq ende-selector--model-state :ready) provider model)
-      (ende-model-selection-remember-pair
-       provider model ende-selector--api
-       (or ende-selector--source-buffer (current-buffer)) ende-selector--connection))))
+(defun ende-selector--set-draft-controls (preferences)
+  "Use PREFERENCES in the current model's provisional control entry."
+  (setq ende-selector--control-preferences (copy-tree preferences))
+  (when-let* ((key (ende-selector--control-key))
+              (state (ende-selector--draft-control-state)))
+    (setq state (plist-put state :preferences (copy-tree preferences))
+          state (plist-put state :dirty
+                           (not (equal preferences
+                                       (plist-get state :initial-preferences)))))
+    (puthash key state ende-selector--draft-controls)))
 
 (defun ende-selector--effort-error-message (error)
   "Return a useful human-readable message for effort probe ERROR."
@@ -630,22 +752,35 @@ PREFERRED is selected only when it is present in MODELS."
                    (= ende-selector--probe-generation generation))
           (setq ende-selector--probe-cancel cancel))))))
 
-(defun ende-selector--set-provider (index &optional remember-pair preferred-model)
+(defun ende-selector--set-provider (index &optional preferred-model)
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
-  (unless (= index ende-selector--provider-index)
-    (setq ende-selector--api nil ende-selector--connection nil))
-  (setq ende-selector--provider-index
-        (mod index (max 1 (length ende-selector--providers))))
+  (let ((current-provider (ende-selector--provider-name))
+        (target-provider
+         (nth (mod index (max 1 (length ende-selector--providers)))
+              ende-selector--providers)))
+    (ende-selector--remember-model)
+    (ende-selector--remember-connection-state)
+    (setq ende-selector--provider-index
+          (mod index (max 1 (length ende-selector--providers))))
+    (unless (eq current-provider target-provider)
+      (let ((connection-state (ende-selector--connection-state target-provider)))
+        (setq ende-selector--api (plist-get connection-state :api)
+              ende-selector--connection
+              (copy-tree (plist-get connection-state :connection)))))
   (cl-incf ende-selector--model-selection-generation)
   (setq ende-selector--models nil
         ende-selector--model-error nil
         ende-selector--model-index 0)
   (let* ((provider (ende-selector--provider-name))
          (profile (ende-selector--provider-profile))
-         (preferred (or preferred-model (ende-selector--preferred-model provider profile)))
+         (preferred (or preferred-model
+                        (and (hash-table-p ende-selector--draft-models)
+                             (gethash (ende-selector--model-key)
+                                      ende-selector--draft-models))
+                        (ende-selector--preferred-model provider profile)))
          (catalog (ende-provider-cached-models profile)))
     (cond
      ((ende-provider-configured-models-explicit-p profile)
@@ -668,10 +803,9 @@ PREFERRED is selected only when it is present in MODELS."
       (ende-selector--apply-model-catalog
        profile (ende-provider-models profile) nil 0 preferred)))
     (ende-selector--set-control-context)
-    (when remember-pair
-      (ende-selector--remember-selected-pair))
+    (ende-selector--remember-model)
     (ende-selector--start-usage-refresh)
-    (ende-selector--render)))
+    (ende-selector--render))))
 
 (defvar-local ende-selector--connection-buffer nil
   "Connection configuration buffer owned by this selector.")
@@ -826,7 +960,7 @@ PREFERRED is selected only when it is present in MODELS."
                     (ende-selector--usage-suspended t))
                 (condition-case err
                     (atomic-change-group
-                      (ende-selector--set-provider ende-selector--provider-index nil model)
+                      (ende-selector--set-provider ende-selector--provider-index model)
                       (list ende-selector--models ende-selector--model-index
                             ende-selector--model-state ende-selector--model-error
                             ende-selector--model-selection-generation
@@ -843,6 +977,7 @@ PREFERRED is selected only when it is present in MODELS."
         (ende-selector--cancel-effort-probe)
         (setq ende-selector--connection connection
               ende-selector--api (plist-get connection :api))
+        (ende-selector--remember-connection-state)
         (ende-selector--start-usage-refresh)
         (cl-multiple-value-setq
             (ende-selector--models ende-selector--model-index
@@ -853,6 +988,8 @@ PREFERRED is selected only when it is present in MODELS."
              ende-selector--probe-cancel ende-selector--probe-generation
              ende-selector--effort-cancel ende-selector--effort-probe-generation)
           prepared)))
+    (with-current-buffer parent
+      (ende-selector--set-draft-controls ende-selector--control-preferences))
     (ende-selector-connection-cancel)))
 
 (defvar ende-selector-connection-mode-map (make-sparse-keymap)
@@ -900,12 +1037,12 @@ PREFERRED is selected only when it is present in MODELS."
 (defun ende-selector-next-provider ()
   "Select the next configured provider."
   (interactive)
-  (ende-selector--set-provider (1+ ende-selector--provider-index) t))
+  (ende-selector--set-provider (1+ ende-selector--provider-index)))
 
 (defun ende-selector-previous-provider ()
   "Select the previous configured provider."
   (interactive)
-  (ende-selector--set-provider (1- ende-selector--provider-index) t))
+  (ende-selector--set-provider (1- ende-selector--provider-index)))
 
 (defun ende-selector--move-model (delta)
   "Move the selected model by DELTA."
@@ -916,7 +1053,7 @@ PREFERRED is selected only when it is present in MODELS."
                (length ende-selector--models)))
     (cl-incf ende-selector--model-selection-generation)
     (ende-selector--set-control-context)
-    (ende-selector--remember-selected-pair)
+    (ende-selector--remember-model)
     (ende-selector--render)))
 
 (defun ende-selector-next-model ()
@@ -947,7 +1084,7 @@ performed locally so typing a search term never starts another network request."
          (ende-selector--set-models (list model) model)
          (setq ende-selector--model-state :ready)
          (ende-selector--set-control-context)
-         (ende-selector--remember-selected-pair)
+         (ende-selector--remember-model)
          (ende-selector--render))))
     (_
      (let ((models (cl-remove-if-not #'stringp ende-selector--models)))
@@ -984,7 +1121,7 @@ performed locally so typing a search term never starts another network request."
                  ende-selector--model-state :ready)
            (cl-incf ende-selector--model-selection-generation)
            (ende-selector--set-control-context)
-           (ende-selector--remember-selected-pair)
+           (ende-selector--remember-model)
            (ende-selector--render)))))))
 
 (defun ende-selector--effort-probe-failed (error)
@@ -1068,13 +1205,11 @@ performed locally so typing a search term never starts another network request."
         (plist-get (ende-selector--resolved-profile) :reasoning-effort)
         ende-selector--effort-state
         (if ende-selector--effort :remembered :none))
-  (when (and (eq ende-selector--model-state :ready)
-             (ende-selector--provider-name)
-             (ende-selector--model-name))
-    (ende-model-selection-save-control-preferences
-     (ende-selector--provider-name) (ende-selector--model-name)
-     ende-selector--api nil
-     (or ende-selector--source-buffer (current-buffer)) ende-selector--connection))
+  (when-let* ((state (ende-selector--draft-control-state)))
+    (setq state (plist-put state :preferences nil)
+          state (plist-put state :dirty
+                           (not (null (plist-get state :initial-preferences)))))
+    (puthash (ende-selector--control-key) state ende-selector--draft-controls))
   (ende-selector--render))
 
 (defun ende-selector--choose-effort (efforts)
@@ -1125,23 +1260,21 @@ performed locally so typing a search term never starts another network request."
          (ende-selector--choose-effort efforts))))))
 
 (defun ende-selector-set-concurrency ()
-  "Set and save the selected provider's session concurrency limit."
+  "Set the selected provider's provisional concurrency limit."
   (interactive)
-  (let* ((provider (ende-selector--provider-name))
-         (current (ende-selector--provider-concurrency))
+  (let* ((current (ende-selector--provider-concurrency))
          (value (read-number "Max concurrent jobs: " current)))
-    (ende-provider-set-runtime-setting provider :max-concurrency value)
-    (ende-selector--render)
-    (ende-process-next)))
+    (unless (and (integerp value) (> value 0))
+      (user-error "Provider concurrency must be a positive integer"))
+    (ende-selector--set-draft-runtime :max-concurrency value)
+    (ende-selector--render)))
 
 (defun ende-selector-toggle-parallel ()
-  "Toggle and save the selected provider's default parallel setting."
+  "Toggle the selected provider's provisional parallel setting."
   (interactive)
-  (let* ((provider (ende-selector--provider-name))
-         (enabled (not (ende-selector--provider-parallel-p))))
-    (ende-provider-set-runtime-setting provider :parallel enabled)
-    (ende-selector--render)
-    (ende-process-next)))
+  (let ((enabled (not (ende-selector--provider-parallel-p))))
+    (ende-selector--set-draft-runtime :parallel enabled)
+    (ende-selector--render)))
 
 (defun ende-selector--review-source (function)
   "Call review FUNCTION for the selector's source buffer and close selector."
@@ -1163,19 +1296,199 @@ performed locally so typing a search term never starts another network request."
   (ende-selector--review-source #'ende-reject-all-output))
 
 (defun ende-selector--save-selection ()
-  "Save the current provider/model and explicit controls.
-Return the saved selection, or nil when no valid model is selected."
+  "Save the current provider/model and explicit controls."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
     (when (and provider (stringp model) (eq ende-selector--model-state :ready))
-      (ende-model-selection-save
-       (append (list :provider provider :model model)
-               (ende-model-selection-connection (ende-selector--provider-profile))
-               (when ende-selector--control-preferences
-                 (list :control-preferences
-                       (copy-tree ende-selector--control-preferences))))
-       source))))
+      (let* ((state (ende-selector--draft-control-state))
+             (preferences (and state (plist-get state :preferences)))
+             (include-preferences (and state (or preferences (plist-get state :dirty))))
+             (saved
+              (ende-model-selection-save
+               (append (list :provider provider :model model)
+                       (ende-model-selection-connection (ende-selector--provider-profile))
+                       (when include-preferences
+                         (list :control-preferences (copy-tree preferences))))
+               source)))
+        saved))))
+
+(defun ende-selector--validate-draft ()
+  "Validate the current provisional selection and its dirty control entries."
+  (unless (eq ende-selector--model-state :ready)
+    (user-error "No ready model available"))
+  (when (eq ende-selector--effort-state :invalid)
+    (user-error "Choose a supported reasoning effort or Provider default"))
+  (let ((current-provider (ende-selector--provider-name)))
+    (ende-provider-validate-controls (ende-selector--resolved-profile))
+  (when (hash-table-p ende-selector--draft-controls)
+    (maphash
+     (lambda (_key state)
+       (when (and (plist-get state :dirty)
+                  (not (and (eq (plist-get state :provider) current-provider)
+                            (equal (plist-get state :model)
+                                   (ende-selector--model-name)))))
+         (let ((profile
+                (ende-provider-profile-for-selection
+                 (plist-get state :provider) (plist-get state :model)
+                 (plist-get state :preferences) (plist-get state :api)
+                 (plist-get state :connection))))
+           (ende-provider-validate-controls profile))))
+     ende-selector--draft-controls)))
+  (when (hash-table-p ende-selector--draft-runtime)
+    (maphash
+     (lambda (_provider state)
+       (dolist (key (plist-get state :changed))
+         (pcase key
+           (:max-concurrency
+            (unless (and (integerp (plist-get state key))
+                         (> (plist-get state key) 0))
+              (user-error "Provider concurrency must be a positive integer")))
+           (:parallel
+            (unless (memq (plist-get state key) '(nil t))
+              (user-error "Provider parallel setting must be boolean")))
+           (_ (user-error "Unsupported provider runtime setting: %s" key)))))
+     ende-selector--draft-runtime))
+  t)
+
+(defun ende-selector--commit-runtime-settings ()
+  "Commit provisional runtime settings once after validation."
+  (when (hash-table-p ende-selector--draft-runtime)
+    (let (changed)
+      (maphash
+       (lambda (provider state)
+         (dolist (key (plist-get state :changed))
+           (ende-provider-set-runtime-setting provider key (plist-get state key))
+           (setq changed t)))
+       ende-selector--draft-runtime)
+      changed)))
+
+(defun ende-selector--copy-hash-table (table)
+  "Copy TABLE's contents, including nested hash tables."
+  (let ((copy (make-hash-table :test (hash-table-test table))))
+    (maphash (lambda (key value)
+               (puthash key (if (hash-table-p value)
+                                (ende-selector--copy-hash-table value)
+                              (copy-tree value))
+                        copy))
+             table)
+    copy))
+
+(defun ende-selector--restore-hash-table (table snapshot)
+  "Restore TABLE from SNAPSHOT."
+  (clrhash table)
+  (maphash (lambda (key value) (puthash key value table)) snapshot))
+
+(defun ende-selector--commit-snapshot ()
+  "Capture committed selector state for rollback if a write fails."
+  (let ((source (or ende-selector--source-buffer (current-buffer))))
+    (list :runtime (ende-selector--copy-hash-table ende-provider--runtime-settings)
+          :last-used (copy-tree ende-model-selection--last-used)
+          :selections (ende-selector--copy-hash-table
+                       ende-model-selection--buffer-selections)
+          :shared-controls (ende-selector--copy-hash-table
+                            ende-model-selection--shared-control-preferences)
+          :buffer-controls (ende-selector--copy-hash-table
+                            ende-model-selection--buffer-control-preferences)
+          :provenance (ende-selector--copy-hash-table
+                       ende-model-selection--provenance)
+          :source source
+          :source-selection-local
+          (and (buffer-live-p source)
+               (buffer-local-value 'ende-model-selection--buffer-selection source))
+          :source-selection-local-p
+          (and (buffer-live-p source)
+               (local-variable-p 'ende-model-selection--buffer-selection source)))))
+
+(defun ende-selector--restore-commit-snapshot (snapshot)
+  "Restore committed selector state from SNAPSHOT."
+  (ende-selector--restore-hash-table
+   ende-provider--runtime-settings (plist-get snapshot :runtime))
+  (setq ende-model-selection--last-used (plist-get snapshot :last-used))
+  (ende-selector--restore-hash-table
+   ende-model-selection--buffer-selections (plist-get snapshot :selections))
+  (ende-selector--restore-hash-table
+   ende-model-selection--shared-control-preferences
+   (plist-get snapshot :shared-controls))
+  (ende-selector--restore-hash-table
+   ende-model-selection--buffer-control-preferences
+   (plist-get snapshot :buffer-controls))
+  (ende-selector--restore-hash-table
+   ende-model-selection--provenance (plist-get snapshot :provenance))
+  (let ((source (plist-get snapshot :source)))
+    (when (buffer-live-p source)
+      (with-current-buffer source
+        (if (plist-get snapshot :source-selection-local-p)
+            (setq-local ende-model-selection--buffer-selection
+                        (plist-get snapshot :source-selection-local))
+          (kill-local-variable 'ende-model-selection--buffer-selection))))))
+
+(defun ende-selector--finish-draft-commit ()
+  "Mark successfully committed drafts as their new initial values."
+  (when (hash-table-p ende-selector--draft-controls)
+    (maphash
+     (lambda (key state)
+       (when (plist-get state :dirty)
+         (setq state (plist-put state :dirty nil)
+               state (plist-put state :initial-preferences
+                                (copy-tree (plist-get state :preferences))))
+         (puthash key state ende-selector--draft-controls)))
+     ende-selector--draft-controls))
+  (when (hash-table-p ende-selector--draft-runtime)
+    (maphash
+     (lambda (provider state)
+       (setq state (plist-put state :changed nil)
+             state (plist-put state :initial
+                              (list :max-concurrency (plist-get state :max-concurrency)
+                                    :parallel (plist-get state :parallel))))
+       (puthash provider state ende-selector--draft-runtime))
+     ende-selector--draft-runtime)))
+
+(defun ende-selector--commit ()
+  "Commit validated provisional settings and the current model selection."
+  (ende-selector--validate-draft)
+  (let ((snapshot (ende-selector--commit-snapshot))
+        runtime-changed
+        selection)
+    (condition-case error-data
+        (progn
+          (when (hash-table-p ende-selector--draft-controls)
+            (maphash
+             (lambda (key state)
+               (when (and (plist-get state :dirty)
+                          (not (equal key (ende-selector--control-key))))
+                 (ende-model-selection-save-control-preferences
+                  (plist-get state :provider) (plist-get state :model)
+                  (plist-get state :api) (plist-get state :preferences)
+                  (or ende-selector--source-buffer (current-buffer))
+                  (plist-get state :connection))))
+             ende-selector--draft-controls))
+          (setq selection (ende-selector--save-selection))
+          (unless selection (user-error "No ready model available"))
+          (setq runtime-changed (ende-selector--commit-runtime-settings))
+          (ende-selector--finish-draft-commit))
+      ((error quit)
+       (ende-selector--restore-commit-snapshot snapshot)
+       (signal (car error-data) (cdr error-data))))
+    (when runtime-changed
+      (ende-ignore-errors #'ende-process-next))
+    selection))
+
+(defun ende-selector--validate-dispatch (type)
+  "Validate the local prerequisites for dispatching TYPE."
+  (unless (buffer-live-p ende-selector--source-buffer)
+    (user-error "ende source buffer no longer exists"))
+  (unless (stringp (ende-selector--model-name))
+    (user-error "ende has no selected model"))
+  (when (and (eq type 'chat-compact)
+             (not (with-current-buffer ende-selector--source-buffer
+                    (derived-mode-p 'org-mode))))
+    (user-error "Chat compaction requires an Org buffer")))
+
+(defun ende-selector--dispatch-with-commit (type _instruction)
+  "Validate and commit TYPE's selection before dispatch."
+  (ende-selector--validate-dispatch type)
+  (ende-selector--commit))
 
 (defun ende-selector-close ()
   "Close the selector without starting a request."
@@ -1210,24 +1523,16 @@ Return the saved selection, or nil when no valid model is selected."
 (defun ende-selector-confirm ()
   "Confirm the current choice and close the selector."
   (interactive)
-  (when (eq ende-selector--effort-state :invalid)
-    (user-error "Choose a supported reasoning effort or Provider default"))
-  (condition-case validation-error
-      (ende-provider-validate-controls (ende-selector--resolved-profile))
+  (condition-case error-data
+      (ende-selector--commit)
     ((error quit)
-     (user-error "%s" (error-message-string validation-error))))
-  (unless (ende-selector--save-selection)
-    (user-error "No ready model available"))
+     (user-error "%s" (error-message-string error-data))))
   (ende-selector-close))
 
 (defun ende-selector--dispatch (type instruction)
   "Dispatch TYPE and INSTRUCTION using the current selection."
   (let* ((source ende-selector--source-buffer)
          (profile (ende-selector--resolved-profile)))
-    (unless (buffer-live-p source)
-      (user-error "ende source buffer no longer exists"))
-    (unless (stringp (plist-get profile :model))
-      (user-error "ende has no selected model"))
     (if (eq type 'chat)
         (if (with-current-buffer source
               (derived-mode-p 'org-mode))
@@ -1240,9 +1545,6 @@ Return the saved selection, or nil when no valid model is selected."
             (ende-selector-close)
             (pop-to-buffer buffer)
             (message "ende: chat buffer ready; press C-c e a to ask")))
-      (when (and (eq type 'chat-compact)
-                 (not (with-current-buffer source (derived-mode-p 'org-mode))))
-        (user-error "Chat compaction requires an Org buffer"))
       (ende-selector-close)
       (with-current-buffer source
         (pcase type
@@ -1252,17 +1554,16 @@ Return the saved selection, or nil when no valid model is selected."
 
 (defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model."
-  (unless (eq ende-selector--model-state :ready)
-    (user-error "No ready model available"))
-  (let* ((profile (ende-selector--resolved-profile))
-         (effort (ende-provider-active-reasoning-effort profile)))
+  (let ((selector (current-buffer))
+        (effort (ende-provider-active-reasoning-effort
+                 (ende-selector--resolved-profile))))
     (condition-case validation-error
-        (ende-provider-validate-controls profile)
+        (ende-selector--dispatch-with-commit type instruction)
       ((error quit)
-       (setq ende-selector--effort-state (if effort :invalid :error))
-       (ende-selector--render)
+       (when (and (buffer-live-p selector) (eq (current-buffer) selector))
+         (setq ende-selector--effort-state (if effort :invalid :error))
+         (ende-selector--render))
        (user-error "%s" (error-message-string validation-error))))
-    (ende-selector--save-selection)
     (ende-selector--dispatch type instruction)))
 
 (defun ende-selector-insert ()
@@ -1396,15 +1697,21 @@ Return the saved selection, or nil when no valid model is selected."
             ende-selector--source-window (selected-window)
             ende-selector--provider-index provider-index
             ende-selector--models nil
-                ende-selector--model-index 0
+            ende-selector--model-index 0
             ende-selector--model-selection-generation 0
             ende-selector--model-state :ready
             ende-selector--control-preferences nil
+            ende-selector--draft-controls (make-hash-table :test #'equal)
+            ende-selector--draft-runtime (make-hash-table :test #'eq)
+            ende-selector--draft-connections (make-hash-table :test #'eq)
+            ende-selector--draft-models (make-hash-table :test #'equal)
             ende-selector--effort nil
             ende-selector--effort-state :none)
+      (when (eq last-provider (nth provider-index providers))
+        (setq ende-selector--api (plist-get selection :api)
+              ende-selector--connection
+              (ende-model-selection-connection selection)))
       (ende-selector--set-provider provider-index))
-    (with-current-buffer buffer
-      (ende-selector--remember-selected-pair))
     (let ((window
            (display-buffer
             buffer
