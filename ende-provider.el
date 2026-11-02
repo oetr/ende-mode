@@ -116,6 +116,50 @@ When nil, use only the response inactivity timeout."
 (defvar-local ende-model-selection--buffer-selection nil
   "Selection currently associated with this live buffer.")
 
+(defconst ende-provider--max-model-count 10000)
+
+(defun ende-provider--directional-control-p (text)
+  "Return non-nil when TEXT contains Unicode directional controls."
+  (and (stringp text)
+       (cl-loop for character across text
+                thereis (or (memq character '(#x061c #x200e #x200f))
+                            (<= #x202a character #x202e)
+                            (<= #x2066 character #x2069)))))
+
+(defun ende-provider--valid-model-id-p (id)
+  "Return non-nil when ID is a safe, bounded model identifier."
+  (and (stringp id) (<= 1 (length id) 512)
+       (not (cl-loop for character across id
+                     thereis (or (<= character #x1f)
+                                 (<= #x7f character #x9f)
+                                 (memq character '(#x2028 #x2029)))))
+       (not (string-match-p "[\u2028\u2029]" id))
+       (not (ende-provider--directional-control-p id))))
+
+(defun ende-provider--valid-model-catalog-p (models)
+  "Return non-nil when MODELS is a bounded list of safe model IDs."
+  (and (proper-list-p models)
+       (<= (length models) ende-provider--max-model-count)
+       (cl-every #'ende-provider--valid-model-id-p models)))
+
+(defun ende-provider--display-label (value)
+  "Return VALUE as a bounded, safe, single-line display string."
+  (when (stringp value)
+    (let ((text (ende-bounded-single-line value 80 t)))
+      (when text
+        (let ((safe
+               (apply #'string
+                      (cl-loop for character across text
+                               unless (or (<= #x202a character #x202e)
+                                          (<= #x2066 character #x2069)
+                                          (memq character '(#x061c #x200e #x200f)))
+                               collect (if (or (<= character #x1f)
+                                               (<= #x7f character #x9f)
+                                               (memq character '(#x2028 #x2029)))
+                                           ?\s character)))))
+          (unless (string-empty-p (string-trim safe))
+            (string-trim safe)))))))
+
 (defun ende-provider--runtime-value (name key)
   "Return runtime setting KEY for provider NAME, or `:unset'."
   (let ((settings (gethash name ende-provider--runtime-settings)))
@@ -290,8 +334,8 @@ Present preference keys override PROFILE even when their value is nil."
   (unless (assq (plist-get profile :api) ende-provider-config--apis)
     (error "Select a supported provider :api"))
   (let ((model (plist-get profile :model)))
-    (unless (and (stringp model) (not (string-empty-p model)))
-      (error "Provider profile must select a nonempty model")))
+    (unless (ende-provider--valid-model-id-p model)
+      (error "Provider profile must select a safe model ID")))
   (when (and (plist-member profile :stream-usage)
              (not (memq (plist-get profile :stream-usage) '(nil t))))
     (error ":stream-usage must be boolean"))
@@ -334,9 +378,16 @@ Present preference keys override PROFILE even when their value is nil."
   (let ((models (plist-get profile :models))
         (model (plist-get profile :model)))
     (cond
-     ((and (listp models) models)
-      (cl-remove-if-not #'stringp models))
-     ((stringp model) (list model))
+     ((and (proper-list-p models) models)
+      (unless (ende-provider--valid-model-catalog-p models)
+        (error "Provider profile has an invalid model catalog"))
+      (copy-sequence models))
+     (models (error "Provider profile has an invalid model catalog"))
+     ((stringp model)
+      (unless (ende-provider--valid-model-id-p model)
+        (error "Provider profile has an invalid model ID"))
+      (list model))
+     (model (error "Provider profile has an invalid model ID"))
      (t nil))))
 
 (defun ende-provider-configured-model (profile)
@@ -660,15 +711,17 @@ An unset buffer follows the current configured provider defaults."
 
 (defun ende-provider--friendly-name (name)
   "Return a friendly display spelling for provider NAME."
-  (if (not (stringp name))
-      (format "%s" name)
-    (let ((downcased (downcase name)))
-      (cond
-       ((member downcased '("openai" "openai.com")) "OpenAI")
-       ((member downcased '("openrouter" "openrouter.ai" "openrouter-batch"))
-        "OpenRouter")
-       ((member downcased '("llama.cpp" "llama-cpp")) "llama.cpp")
-       (t name)))))
+  (let ((name (if (stringp name) (ende-provider--display-label name)
+                (format "%s" name))))
+    (if name
+        (let ((downcased (downcase name)))
+          (cond
+           ((member downcased '("openai" "openai.com")) "OpenAI")
+           ((member downcased '("openrouter" "openrouter.ai" "openrouter-batch"))
+            "OpenRouter")
+           ((member downcased '("llama.cpp" "llama-cpp")) "llama.cpp")
+           (t name)))
+      "provider")))
 
 (defun ende-provider-client-name (profile &optional metadata)
   "Return a concise display name for provider PROFILE.
@@ -680,23 +733,25 @@ hosts and IP addresses otherwise retain their host spelling."
          (host (and parsed (url-host parsed)))
          (downcased (and host (downcase host)))
          (reported (and metadata
-                        (or (plist-get metadata :client)
-                            (plist-get metadata :provider)
-                            (plist-get metadata :owner))))
-         (explicit (plist-get profile :display-name)))
-    (cond
-     ((and (stringp explicit) (not (string-empty-p explicit)))
-      (ende-provider--friendly-name explicit))
-     ((and downcased (string= downcased "openrouter.ai")) "OpenRouter")
-     ((and downcased
-           (string-match-p "\\(?:\\`\\|\\.\\)openai\\.com\\'" downcased))
-      "OpenAI")
-     ((and (stringp reported) (not (string-empty-p reported)))
-      (ende-provider--friendly-name reported))
-     ((null host)
-      (ende-provider--friendly-name
-       (format "%s" (or (plist-get profile :name) "provider"))))
-     (t host))))
+                        (ende-provider--display-label
+                         (or (plist-get metadata :client)
+                             (plist-get metadata :provider)
+                             (plist-get metadata :owner)))))
+         (explicit (ende-provider--display-label
+                    (plist-get profile :display-name)))
+         (client
+          (cond
+           (explicit (ende-provider--friendly-name explicit))
+           ((and downcased (string= downcased "openrouter.ai")) "OpenRouter")
+           ((and downcased
+                 (string-match-p "\\(?:\\`\\|\\.\\)openai\\.com\\'" downcased))
+            "OpenAI")
+           (reported (ende-provider--friendly-name reported))
+           ((null host)
+            (ende-provider--friendly-name
+             (format "%s" (or (plist-get profile :name) "provider"))))
+           (t host))))
+    (or (ende-provider--display-label client) "provider")))
 
 (defun ende-provider-display-metadata (profile &optional metadata)
   "Return display CLIENT and MODEL values for PROFILE and METADATA."
@@ -805,8 +860,26 @@ selection without starting another model-list request."
   "Return model entries from discovery PAYLOAD as a list."
   (let ((data (ende-protocol-json-get "data" payload)))
     (cond
-     ((vectorp data) (append data nil))
-     ((listp data) data))))
+     ((and (vectorp data)
+           (<= (length data) ende-provider--max-model-count))
+      (append data nil))
+     ((and (proper-list-p data)
+           (<= (length data) ende-provider--max-model-count))
+      data))))
+
+(defun ende-provider--valid-price-string (value)
+  "Return VALUE when it is a bounded nonnegative decimal price."
+  (let ((text (cond ((stringp value) value)
+                    ((numberp value) (number-to-string value)))))
+    (when (and text (<= (length text) 64)
+               (string-match-p
+                "\\`[0-9]+\\(?:\\.[0-9]*\\)?\\(?:[eE][+-]?[0-9]+\\)?\\'"
+                text))
+      (let ((number (string-to-number text)))
+        (when (and (>= number 0) (< number 1000000)
+                   (= number number)
+                   (< (abs number) 1.0e+INF))
+          text)))))
 
 (defun ende-provider--model-pricing (entry)
   "Return supported pricing fields from model ENTRY."
@@ -814,19 +887,20 @@ selection without starting another model-list request."
         (result nil))
     (when (hash-table-p pricing)
       (dolist (field ende-provider--model-pricing-fields)
-        (let ((value (gethash (car field) pricing)))
-          (when (or (stringp value) (numberp value))
+        (let ((value (ende-provider--valid-price-string
+                      (gethash (car field) pricing))))
+          (when value
             (setq result
-                  (plist-put result (cdr field) (format "%s" value)))))))
+                  (plist-put result (cdr field) value))))))
     result))
 
 (defun ende-provider--model-detail (entry)
   "Return display metadata for model ENTRY, or nil without a valid ID."
   (let ((id (ende-protocol-json-get "id" entry))
         (name (ende-protocol-json-get "name" entry)))
-    (when (and (stringp id) (not (string-empty-p id)))
+    (when (ende-provider--valid-model-id-p id)
       (list :id id
-            :name (and (stringp name) (not (string-empty-p name)) name)
+            :name (ende-provider--display-label name)
             :pricing (ende-provider--model-pricing entry)))))
 
 (defun ende-provider--prune-cache (cache)
@@ -934,18 +1008,27 @@ The returned plist contains `:models', `:details', `:error', and
   (copy-tree (plist-get (ende-provider--catalog-for-profile profile) :details)))
 
 (defun ende-provider--catalog-from-models (models)
-  "Normalize MODEL IDs or `:id'/`:name' details into a catalog."
-  (let ((details
-         (delq nil
-               (mapcar
-                (lambda (model)
-                  (cond
-                   ((stringp model) (list :id model))
-                   ((and (listp model) (stringp (plist-get model :id))) model)))
-                models))))
-    (when details
-      (list :models (mapcar (lambda (detail) (plist-get detail :id)) details)
-            :details details))))
+  "Normalize bounded MODEL IDs and optional :id/:name details."
+  (when (and (proper-list-p models)
+             (<= (length models) ende-provider--max-model-count))
+    (let ((details
+           (delq nil
+                 (mapcar
+                  (lambda (model)
+                    (let* ((detail (cond ((stringp model) (list :id model))
+                                         ((listp model) (copy-sequence model))))
+                           (id (plist-get detail :id)))
+                      (when (ende-provider--valid-model-id-p id)
+                        (when (plist-member detail :name)
+                          (setq detail
+                                (plist-put detail :name
+                                           (ende-provider--display-label
+                                            (plist-get detail :name)))))
+                        detail)))
+                  models))))
+      (when details
+        (list :models (mapcar (lambda (detail) (plist-get detail :id)) details)
+              :details details)))))
 
 (defun ende-provider--catalog-from-payload (payload)
   "Normalize endpoint model-list PAYLOAD into one catalog."
@@ -957,7 +1040,9 @@ The returned plist contains `:models', `:details', `:error', and
                    (let ((detail (ende-provider--model-detail entry))
                          (owner (ende-protocol-json-get "owned_by" entry)))
                      (when (and detail (stringp owner))
-                       (setq detail (plist-put detail :owner owner)))
+                       (setq detail
+                             (plist-put detail :owner
+                                        (ende-provider--display-label owner))))
                      detail))
                  entries)))
          (provider (or (ende-protocol-json-get "provider" payload)
@@ -965,7 +1050,7 @@ The returned plist contains `:models', `:details', `:error', and
     (when details
       (list :models (mapcar (lambda (detail) (plist-get detail :id)) details)
             :details details
-            :provider (and (stringp provider) provider)))))
+            :provider (ende-provider--display-label provider)))))
 
 (defun ende-provider--curl-discovery-command
     (url headers-file config-file)

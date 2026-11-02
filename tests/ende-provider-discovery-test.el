@@ -76,6 +76,27 @@
     (should (string= (plist-get metadata :client) "llama.cpp"))))
 
 
+(ert-deftest ende-test/provider-model-catalog-validation ()
+  (let* ((payload (make-hash-table :test #'equal))
+         (safe (make-hash-table :test #'equal))
+         (unsafe (make-hash-table :test #'equal)))
+    (puthash "id" "org/model:v1.2_test-x" safe)
+    (puthash "id" (concat "line" (string 10) "break") unsafe)
+    (puthash "data" (vector safe unsafe) payload)
+    (should
+     (equal (plist-get (ende-provider--catalog-from-payload payload) :models)
+            '("org/model:v1.2_test-x")))
+    (let ((ende-provider--max-model-count 1))    (dolist (character '(#x7f #x85 #x2028 #x202e #x2066))
+      (should-not
+       (ende-provider--valid-model-id-p
+        (concat "model" (string character)))))
+    (should-not (ende-provider--valid-model-id-p (make-string 513 ?x)))
+
+      (should-not (ende-provider--catalog-from-payload
+                   (ende-protocol-json-read-string
+                    "{\"data\":[{\"id\":\"one\"},{\"id\":\"two\"}]}"))))))
+
+
 
 (ert-deftest ende-test/openrouter-effort-probe-is-live-and-cache-independent ()
   (let ((ende-provider-discovery-enabled t)
