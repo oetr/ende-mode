@@ -107,9 +107,7 @@
       (should (eq (alist-get :store body) json-false))
       (should (eq (alist-get :stream body) t))
       (should-not (assq :previous_response_id body))
-      (if (eq builder 'ende-codex--request-body)
-          (should (assq :prompt_cache_key body))
-        (should-not (assq :prompt_cache_key body))))))
+      (should-not (assq :prompt_cache_key body)))))
 
 (provide 'ende-responses-history-test)
 ;;; ende-responses-history-test.el ends here

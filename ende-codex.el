@@ -1352,12 +1352,6 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (setq body (ende-controls--set-path
                   body '("include")
                   (vconcat (delete-dups (append include '("reasoning.encrypted_content")))))))
-    ;; Encode explicit parameters first: keyword/string aliases already have
-    ;; one effective value.  Only OAuth gets this automatic affinity default.
-    (unless (cl-find "prompt_cache_key" body
-                     :key (lambda (entry) (ende-controls--json-key-name (car entry)))
-                     :test #'equal)
-      (push (cons :prompt_cache_key (plist-get profile :codex-session-id)) body))
     (ende-codex--validate-body body)))
 
 (defun ende-responses--start-prepared (session body _request-body record)

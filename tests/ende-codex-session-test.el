@@ -99,8 +99,8 @@
              (body (ende-protocol-json-read-string wire)))
         (should-not (plist-get result :error))
         (should (string-match-p (concat "session-id: " id) (plist-get result :config-text)))
-        (should (equal (gethash "prompt_cache_key" body) id))
-        (should (= (ende-test--count-matches "\"prompt_cache_key\"[[:space:]]*:" wire) 1))
+        (should-not (gethash "prompt_cache_key" body))
+        (should-not (string-match-p "prompt_cache_key" wire))
         (should (eq (gethash "store" body) :false))
         (should (eq (gethash "stream" body) t))
         (should (equal (gethash "include" body) ["reasoning.encrypted_content"]))))
@@ -113,26 +113,23 @@
         (should (equal (ende-protocol-json-get "prompt_cache_key"
                                               (ende-protocol-json-read-string wire))
                        (car (last parameters))))
-        (should (= (ende-test--count-matches "\"prompt_cache_key\"[[:space:]]*:" wire) 1))
         (should (string-match-p (concat "session-id: " id) (plist-get result :config-text)))))
     (let* ((other (ende-codex--ensure-session-id
                    (plist-put (copy-tree profile) :account 'work)))
            (result (ende-test--run-stream-request 'codex (list stream) nil nil other)))
       (should-not (equal id (plist-get other :codex-session-id)))
-      (should (equal (ende-protocol-json-get "prompt_cache_key"
-                                            (ende-protocol-json-read-string
-                                             (plist-get result :request-body)))
-                     (plist-get other :codex-session-id))))))
+      (should-not (ende-protocol-json-get "prompt_cache_key"
+                                          (ende-protocol-json-read-string
+                                           (plist-get result :request-body)))))))
 
 (ert-deftest ende-codex-session-direct-and-public-provider-isolation ()
   (let* ((profile (ende-codex-auth-test--profile 'personal))
          (stream "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")
          (result (ende-test--run-stream-request 'codex (list stream) nil nil profile))
-         (key (ende-protocol-json-get "prompt_cache_key"
-                                      (ende-protocol-json-read-string
-                                       (plist-get result :request-body)))))
-    (should (stringp key))
-    (should (string-match-p (concat "session-id: " key) (plist-get result :config-text)))
+         (body (ende-protocol-json-read-string
+                (plist-get result :request-body))))
+    (should-not (ende-protocol-json-get "prompt_cache_key" body))
+    (should (string-match-p "session-id: [0-9a-f]+" (plist-get result :config-text)))
     (should-not (plist-get profile :codex-session-id))
     (dolist (transport '(responses chat messages))
       (let* ((public (list :name 'public :service 'openai :model "test-model"
@@ -188,9 +185,10 @@
                     (let* ((result (ende-test--run-stream-request 'codex (list stream) nil nil profile nil messages))
                            (key (plist-get profile :codex-session-id)))
                       (should-not (plist-get result :error))
-                      (should (equal (ende-protocol-json-get "prompt_cache_key"
-                                                            (ende-protocol-json-read-string
-                                                             (plist-get result :request-body))) key))
+                      (should-not (ende-protocol-json-get
+                                   "prompt_cache_key"
+                                   (ende-protocol-json-read-string
+                                    (plist-get result :request-body))))
                       (should (string-match-p (concat "session-id: " key) (plist-get result :config-text)))
                       (setq messages
                             (append messages
