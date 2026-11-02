@@ -974,6 +974,7 @@ Return the saved selection, or nil when no valid model is selected."
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe)
   (let ((buffer (current-buffer))
+        (source-window ende-selector--source-window)
         (window (or (and (window-live-p ende-selector--window)
                          ende-selector--window)
                     (get-buffer-window (current-buffer) t))))
@@ -981,10 +982,17 @@ Return the saved selection, or nil when no valid model is selected."
     (when (window-live-p window)
       (quit-window t window))
     (when (buffer-live-p buffer)
-      (kill-buffer buffer))))
+      (kill-buffer buffer))
+    (when (window-live-p source-window)
+      (select-window source-window))))
 
 (defun ende-selector--buffer-killed ()
-  "Cancel a selector probe when its buffer is killed externally."
+  "Release discovery and the connection draft when the selector is killed."
+  (when (buffer-live-p ende-selector--connection-buffer)
+    (let ((buffer ende-selector--connection-buffer))
+      (when-let* ((window (get-buffer-window buffer t)))
+        (quit-window nil window))
+      (kill-buffer buffer)))
   (ende-selector--cancel-probe)
   (ende-selector--cancel-effort-probe))
 
@@ -1138,7 +1146,8 @@ Return the saved selection, or nil when no valid model is selected."
   (define-key ende-selector-mode-map (kbd "DEL") nil)
   (define-key ende-selector-mode-map (kbd "<backspace>") nil)
   (define-key ende-selector-mode-map (kbd "q") #'ende-selector-close)
-  (define-key ende-selector-mode-map (kbd "ESC") #'ende-selector-close))
+  (define-key ende-selector-mode-map (kbd "ESC") #'ende-selector-close)
+  (define-key ende-selector-mode-map (kbd "<escape>") #'ende-selector-close))
 
 (ende-selector--install-keybindings)
 

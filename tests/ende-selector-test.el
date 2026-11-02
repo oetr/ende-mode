@@ -1609,6 +1609,84 @@
 				    (should (string-match-p "Previous material"
 							    (buffer-string))))))))))
 
+(ert-deftest ende-test/selector-connection-drafts-and-escape-dispatch ()
+  (save-window-excursion
+    (let* ((source (generate-new-buffer " *ende-connection-source*"))
+           (ende-providers '(openai))
+           (ende-builtin-provider-settings '((openai :models ("first" "second"))))
+           (ende-model-selection--last-used nil)
+           (ende-model-selection--provenance (make-hash-table :test #'equal))
+           (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+           (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+           (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+           (source-window (selected-window))
+           (cancelled 0))
+      (unwind-protect
+          (progn
+            (switch-to-buffer source)
+            (dolist (escape (list (kbd "ESC") (kbd "<escape>")))
+              (ende-selector-open)
+              (let ((selector (current-buffer)))
+                (ende-selector-configure-connection)
+                (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "personal")))
+                  (ende-selector-connection-account))
+                (should (equal (plist-get ende-selector-connection--draft :account) "personal"))
+                (should-error (ende-selector-connection--set :account "") )
+                (should-error (ende-selector-connection--set :api 'anthropic-messages))
+                (execute-kbd-macro escape)
+                (should (eq (current-buffer) selector))
+                (should (eq (plist-get (ende-selector--provider-profile) :account) 'default))
+                (ende-selector-configure-connection)
+                (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "personal"))
+                          ((symbol-function 'completing-read)
+                           (lambda (_prompt choices _predicate required &rest _)
+                             (should required)
+                             (should (equal choices '("openai-responses" "openai-chat-completions")))
+                             "openai-chat-completions")))
+                  (ende-selector-connection-account)
+                  (ende-selector-connection-api))
+                (ende-selector-connection-apply)
+                (should (eq (current-buffer) selector))
+                (let ((profile (ende-selector--resolved-profile)))
+                  (should (equal (plist-get profile :auth-source-user) "personal"))
+                  (should (equal (plist-get profile :url)
+                                 "https://api.openai.com/v1/chat/completions"))
+                  (should (equal (plist-get profile :model) "first")))
+                (setq ende-selector--probe-cancel (lambda () (cl-incf cancelled)))
+                (execute-kbd-macro escape)
+                (should-not (buffer-live-p selector))
+                (should (eq (selected-window) source-window))
+                (should (eq (current-buffer) source))
+                (should-not (ende-model-selection-for-buffer source))))
+            (should (= cancelled 2)))
+        (when-let* ((selector (get-buffer ende-selector-buffer-name)))
+          (with-current-buffer selector (ende-selector-close)))
+        (kill-buffer source)))))
+
+(ert-deftest ende-test/selector-renders-codex-and-custom-identity ()
+  (let ((ende-providers '(openai-codex))
+        (ende-builtin-provider-settings '((openai-codex :models ("gpt-6.1-sol"))))
+        (ende-custom-providers nil)
+        (ende-model-selection--last-used nil))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--providers '(openai-codex))
+      (ende-selector--set-provider 0)
+      (should
+       (string-prefix-p
+        (concat "n/p      - Provider:          OpenAI Codex - https://api.openai.com/v1/responses\n"
+                "A        - Account:           default\n"
+                "           Auth:              codex-oauth\n"
+                "           API:               openai-responses\n"
+                "c/C      - Concurrency:       4\n"
+                "P        - Parallel:          off\n\n"
+                "C-n/C-p  - Model:             gpt-6.1-sol\n"
+                "e        - Reasoning effort:  Provider default (omitted)\n\n")
+        (buffer-string)))
+      (should-not (string-match-p "Service\\|Catalog\\|not mapped\\|explicitly" (buffer-string)))
+      (setq ende-selector--providers '(my-local-provider))
+      (should (equal (ende-selector--display-provider) "my-local-provider")))))
+
 (provide 'ende-selector-test)
 
 ;;; ende-selector-test.el ends here
