@@ -155,6 +155,14 @@
          (ende-model-selection-for-buffer
           (or ende-selector--source-buffer (current-buffer)))))
     (and (eq provider (plist-get selection :provider))
+         (condition-case nil
+             (equal
+              (ende-provider-selection-provenance (ende-selector--provider-profile))
+              (ende-provider-selection-provenance
+               (ende-provider--compose-profile
+                provider nil (plist-get selection :api)
+                (ende-model-selection-connection selection))))
+           (error nil))
          (plist-get selection :model))))
 
 (defun ende-selector--binding-current-p (profile)
@@ -253,22 +261,16 @@ Report an unavailable model once for each catalog identity."
              (functionp
               (plist-get profile :reasoning-effort-probe-function))))))
 
-(defun ende-selector--control-value (control profile)
-  "Render CONTROL's effective value and source in PROFILE."
-  (let* ((setting (ende-selector--control-setting control))
-         (mapped (ende-provider-control-descriptor profile control))
-         (text (if (and (not mapped)
-                        (null (plist-get setting :value))
-                        (eq (plist-get setting :source) 'provider-default))
-                   "not mapped"
-                 (ende-selector--control-value-label control setting))))
+(defun ende-selector--control-value (control _profile)
+  "Render an applicable CONTROL's effective value and source."
+  (let ((text (ende-selector--control-value-label
+               control (ende-selector--control-setting control))))
     (when (and (eq control :temperature)
-               (ende-selector--temperature-ignored-p
-                (ende-selector--resolved-profile)))
+               (ende-selector--temperature-ignored-p (ende-selector--resolved-profile)))
       (setq text (concat text " (no effect in thinking mode)")))
-    (unless mapped
-      (unless (equal text "not mapped")
-        (setq text (concat text " (unverified mapping)"))))
+    (when (and (eq control :reasoning-effort)
+               (eq (plist-get (ende-selector--resolved-profile) :thinking) 'off))
+      (setq text (concat text " (inactive while thinking is off)")))
     text))
 
 (defun ende-selector--row (key label value)
@@ -478,6 +480,9 @@ PREFERRED is selected only when it is present in MODELS."
                    (ende-selector--provider-name)
                    profile models generation preferred)
                   preferred)))
+        (unless selected
+          (let ((configured (ende-provider-configured-model profile)))
+            (when (member configured models) (setq selected configured))))
         (ende-selector--set-models models selected)
         (setq ende-selector--model-state
               (if models :ready :error))))))
@@ -965,8 +970,7 @@ Return the saved selection, or nil when no valid model is selected."
                (when ende-selector--control-preferences
                  (list :control-preferences
                        (copy-tree ende-selector--control-preferences))))
-       source
-       (not (eq ende-selector--model-state :ready))))))
+       source))))
 
 (defun ende-selector-close ()
   "Close the selector without starting a request."
