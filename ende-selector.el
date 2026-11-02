@@ -31,21 +31,6 @@
   :type 'integer
   :group 'ende)
 
-(defface ende-selector-model-face
-  '((t :inherit font-lock-constant-face :weight bold))
-  "Face used for model IDs in the completion picker."
-  :group 'ende)
-
-(defface ende-selector-price-muted-face
-  '((t :inherit shadow))
-  "Face used for non-output prices in the completion picker."
-  :group 'ende)
-
-(defface ende-selector-price-output-face
-  '((t :inherit error))
-  "Face used for output prices in the completion picker."
-  :group 'ende)
-
 (defvar ende-selector--model-warnings (make-hash-table :test #'eq)
   "Unavailable-model warnings for each provider's current catalog.")
 
@@ -145,6 +130,8 @@
 
 (defun ende-selector--set-control-preference (control value)
   "Save canonical VALUE for CONTROL and refresh the current profile."
+  (unless (ende-provider-control-descriptor (ende-selector--provider-profile) control)
+    (user-error "%s is unavailable for this model" control))
   (let ((old-effort ende-selector--effort))
     (setq ende-selector--control-preferences
           (plist-put ende-selector--control-preferences control value)
@@ -205,51 +192,9 @@ Report an unavailable model once for each catalog identity."
                (or (car models) "the first available model")))
             nil)))))
 
-(defun ende-selector--model-detail (model)
-  "Return cached display metadata for MODEL, or nil."
-  (cl-find model ende-selector--model-details
-           :key (lambda (detail) (plist-get detail :id))
-           :test #'equal))
-
 (defun ende-selector--model-candidates ()
-  "Return completion display candidates paired with their model IDs."
-  (mapcar
-   (lambda (model)
-     (cons (ende-bounded-single-line model 160 t) model))
-   (cl-remove-if-not #'stringp ende-selector--models)))
-
-(defun ende-selector--candidate-for-model (model candidates)
-  "Return the completion candidate for MODEL in CANDIDATES."
-  (car (cl-find model candidates :key #'cdr :test #'equal)))
-
-(defun ende-selector--model-affixations (completions candidates details)
-  "Return styled affixations for COMPLETIONS.
-CANDIDATES maps displayed completion strings to model IDs.  DETAILS contains
-the discovered pricing metadata for those model IDs."
-  (mapcar
-   (lambda (candidate)
-     (let* ((model (cdr (cl-find candidate candidates
-                                 :key #'car :test #'string=)))
-            (detail (cl-find model details
-                             :key (lambda (value) (plist-get value :id))
-                             :test #'equal))
-            (prices
-             (and detail
-                  (ende-provider-model-price-annotation
-                   detail
-                   (lambda (field text)
-                     (propertize
-                      text 'face
-                      (if (eq field :completion)
-                          'ende-selector-price-output-face
-                        'ende-selector-price-muted-face)))))))
-       (list (propertize candidate 'face 'ende-selector-model-face)
-             (or (and (plist-get detail :name)
-                      (propertize (plist-get detail :name)
-                                  'face 'ende-selector-price-muted-face))
-                 "")
-             (or prices ""))))
-   completions))
+  "Return raw model IDs for local completion."
+  (cl-remove-if-not #'stringp ende-selector--models))
 
 (defun ende-selector--index-of (value values)
   "Return the index of VALUE in VALUES, or nil."
@@ -262,12 +207,6 @@ the discovered pricing metadata for those model IDs."
                          (deepseek . "DeepSeek") (anthropic . "Anthropic")
                          (openrouter . "OpenRouter")))
         (symbol-name name))))
-
-(defun ende-selector--display-label (value width)
-  "Return sanitized VALUE padded or truncated to display WIDTH columns."
-  (let* ((text (or (ende-bounded-single-line value 80 t) ""))
-         (text (truncate-string-to-width text width 0 nil "...")))
-    (concat text (make-string (max 0 (- width (string-width text))) ?\s))))
 
 (defun ende-selector--provider-concurrency ()
   "Return the selected provider's current concurrency limit."
@@ -692,26 +631,18 @@ performed locally so typing a search term never starts another network request."
        (unless (or models (not (plist-get (ende-selector--provider-profile) :service)))
          (user-error "ende has no models available for this provider"))
        (let* ((candidates (ende-selector--model-candidates))
-              (candidate-names (mapcar #'car candidates))
-              (current (ende-selector--candidate-for-model
-                        (ende-selector--model-name) candidates))
-              (details ende-selector--model-details)
-              (completion-extra-properties
-               (list
-                :affixation-function
-                (lambda (completions)
-                  (ende-selector--model-affixations
-                   completions candidates details))))
+              (current (ende-selector--model-name))
+              (completion-extra-properties nil)
               (completion-ignore-case t)
               (completion-styles '(substring))
               (manual (and (not (plist-get (ende-selector--provider-profile) :service))
                            (not (ende-provider-configured-models-explicit-p
                                  (ende-selector--provider-profile)))))
-              (choice (completing-read "Model: " candidate-names
+              (choice (completing-read "Model: " candidates
                                        nil (not manual) nil nil current))
               (selected-model
-               (or (cdr (cl-find choice candidates :key #'car :test #'string=))
-                   (and manual (not (string-blank-p choice)) choice)))
+               (and (or (member choice candidates) manual)
+                    (not (string-blank-p choice)) choice))
               (index (cl-position selected-model models :test #'equal)))
          (when selected-model
            (unless index
@@ -749,7 +680,7 @@ performed locally so typing a search term never starts another network request."
 
 (defun ende-selector--require-control-mapping (profile control)
   "Signal a useful error unless PROFILE maps CONTROL."
-  (unless (ende-provider-control-descriptor profile control)
+  (unless (ende-selector--control-supported-p profile control)
     (user-error "%s has no verified mapping for model %s"
                 control (or (plist-get profile :model) "<unknown>"))))
 
@@ -835,6 +766,8 @@ performed locally so typing a search term never starts another network request."
 (defun ende-selector-select-effort ()
   "Choose a reasoning effort supported by the current profile/model."
   (interactive)
+  (ende-selector--require-control-mapping
+   (ende-selector--provider-profile) :reasoning-effort)
   (when (eq ende-selector--effort-state :loading)
     (user-error "ende reasoning-effort discovery is still loading"))
   (ende-selector--probe-efforts

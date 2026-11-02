@@ -344,10 +344,8 @@
                   (should (eq (nth 3 (car dispatched)) source))
                   (check-profile (nth 2 (car dispatched)) (car entry) (cdr entry))))
               ;; Unmapped preferences cannot affect a request.
-              (ende-selector--set-control-preference :thinking 'on)
-              (setq dispatched nil)
-              (ende-selector-insert)
-              (should-not (plist-get (nth 2 (car dispatched)) :thinking))
+              (should-error (ende-selector--set-control-preference :thinking 'on)
+                            :type 'user-error)
               (ende-selector-reset-controls)
               (should-not (ende-model-selection-control-preferences
                            'openai "gpt-5-test" 'openai-chat-completions source))
@@ -447,37 +445,7 @@
           (should-not (plist-get completion-call :initial-input))
           (should (equal (plist-get completion-call :default)
                          "remote/alpha"))
-          (let* ((properties (plist-get completion-call :extra-properties))
-                 (affixation (plist-get properties :affixation-function))
-                 (affixed (funcall affixation
-                                   (plist-get completion-call :collection)))
-                 (priced (car affixed))
-                 (unpriced (cadr affixed))
-                 (priced-model (car priced))
-                 (priced-suffix (nth 2 priced)))
-            (should (functionp affixation))
-            (should-not (plist-get properties :annotation-function))
-            (should (string= (substring-no-properties priced-model)
-                             "remote/alpha"))
-            (should (eq (get-text-property 0 'face priced-model)
-                        'ende-selector-model-face))
-            (should
-             (string=
-	      (substring-no-properties priced-suffix)
-	      "  in: $3  out: $9  cache-read: $1  cache-write: $4"))
-            (should (eq (get-text-property (string-match "in:" priced-suffix)
-                                           'face priced-suffix)
-                        'ende-selector-price-muted-face))
-            (should (eq (get-text-property (string-match "out:" priced-suffix)
-                                           'face priced-suffix)
-                        'ende-selector-price-output-face))
-            (should (eq (get-text-property
-                         (string-match "cache-read:" priced-suffix)
-                         'face priced-suffix)
-                        'ende-selector-price-muted-face))
-            (should (equal (mapcar #'substring-no-properties
-                                   (list (car unpriced) (nth 2 unpriced)))
-                           '("remote/beta" ""))))
+          (should-not (plist-get completion-call :extra-properties))
           (should (equal (plist-get completion-call :styles) '(substring)))
           (should (plist-get completion-call :ignore-case))
           (should (= ende-selector--model-index 1))
@@ -1035,7 +1003,9 @@
                 ende-selector--model-index 0
                 ende-selector--model-state :ready)
           (ende-selector--set-control-context)
-          (cl-letf (((symbol-function 'ende-provider-probe-reasoning-efforts)
+          (cl-letf (((symbol-function 'ende-selector--control-supported-p)
+                     (lambda (&rest _) t))
+                    ((symbol-function 'ende-provider-probe-reasoning-efforts)
                      (lambda (_profile _model probe-callback)
                        (setq callback probe-callback)
                        (lambda () (cl-incf cancelled))))
@@ -1337,15 +1307,11 @@
 
 
 
-(ert-deftest ende-test/selector-labels-are-single-line-and-display-bounded ()
-  (let ((multiline (ende-selector--display-label "provider\nspoof" 24))
-        (long (ende-selector--display-label
-               "provider-name-that-is-longer-than-the-row" 24)))
-    (should (string-match-p "provider spoof" multiline))
-    (should-not (string-match-p "\n" multiline))
-    (should (= (string-width multiline) 24))
-    (should (string-suffix-p "..." (string-trim-right long)))
-    (should (= (string-width long) 24))))
+(ert-deftest ende-test/selector-rows-use-fixed-columns ()
+  (should (equal (ende-selector--row "A" "Account:" "default")
+                 "A        - Account:           default\n"))
+  (should (equal (ende-selector--row nil "Auth:" 'codex-oauth)
+                 "           Auth:              codex-oauth\n")))
 
 
 
