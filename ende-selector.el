@@ -754,7 +754,17 @@ performed locally so typing a search term never starts another network request."
          (user-error "ende has no models available for this provider"))
        (let* ((candidates (ende-selector--model-candidates))
               (current (ende-selector--model-name))
-              (completion-extra-properties nil)
+              (details (and (eq (plist-get (ende-selector--provider-profile) :service)
+                                'openrouter)
+                            (ende-provider-model-details
+                             (ende-selector--provider-profile))))
+              (completion-extra-properties
+               (when details
+                 (list :annotation-function
+                       (lambda (model)
+                         (ende-provider-model-price-annotation
+                          (cl-find model details :key (lambda (detail) (plist-get detail :id))
+                                   :test #'equal))))))
               (completion-ignore-case t)
               (completion-styles '(substring))
               (manual (and (not (plist-get (ende-selector--provider-profile) :service))

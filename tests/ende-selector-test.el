@@ -453,6 +453,36 @@
 
 
 
+(ert-deftest ende-test/selector-openrouter-price-annotations ()
+  (let ((ende-builtin-provider-settings '((openrouter :models ("vendor/priced" "vendor/plain"))))
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (ende-selector-mode)
+      (setq ende-selector--providers '(openrouter))
+      (ende-selector--set-provider 0)
+      (cl-letf (((symbol-function 'ende-provider-model-details)
+                 (lambda (_profile)
+                   '((:id "vendor/priced" :name "Friendly name"
+                      :pricing (:prompt "0.000002" :completion "0.00001"
+                                :input-cache-read "0.0000002"))
+                     (:id "vendor/plain"))))
+                ((symbol-function 'ende-provider-probe-models)
+                 (lambda (&rest _) (ert-fail "Completion must not discover models")))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _)
+                   (should (equal candidates '("vendor/priced" "vendor/plain")))
+                   (should (equal completion-styles '(substring)))
+                   (let ((annotate (plist-get completion-extra-properties :annotation-function)))
+                     (should (equal (funcall annotate "vendor/priced")
+                                    "  in: $2  out: $10  cache-read: $0.20"))
+                     (should-not (funcall annotate "vendor/plain")))
+                   "vendor/plain")))
+        (ende-selector-select-model)
+        (should (equal (ende-selector--model-name) "vendor/plain"))))))
+
 (ert-deftest ende-test/selector-preserves-remembered-model-after-discovery ()
   (let ((buffer (generate-new-buffer " *ende-selector-discovery-test*"))
         (probe-callback nil)
