@@ -650,10 +650,49 @@ PREFERRED is selected only when it is present in MODELS."
          (connection (ende-model-selection-connection profile))
          (parent ende-selector-connection--parent))
     (with-current-buffer parent
-      (let ((model (ende-selector--model-name)))
+      (let* ((model (ende-selector--model-name))
+             (prepared
+              (let ((ende-selector--connection connection)
+                    (ende-selector--api (plist-get connection :api))
+                    (ende-selector--models ende-selector--models)
+                    (ende-selector--model-index ende-selector--model-index)
+                    (ende-selector--model-state ende-selector--model-state)
+                    (ende-selector--model-selection-generation
+                     ende-selector--model-selection-generation)
+                    (ende-selector--control-preferences nil)
+                    (ende-selector--effort nil)
+                    (ende-selector--effort-state :none)
+                    (ende-selector--probe-cancel nil)
+                    (ende-selector--probe-generation 0)
+                    (ende-selector--effort-cancel nil)
+                    (ende-selector--effort-probe-generation 0))
+                (condition-case err
+                    (atomic-change-group
+                      (ende-selector--set-provider ende-selector--provider-index nil model)
+                      (list ende-selector--models ende-selector--model-index
+                            ende-selector--model-state
+                            ende-selector--model-selection-generation
+                            ende-selector--control-preferences
+                            ende-selector--effort ende-selector--effort-state
+                            ende-selector--probe-cancel ende-selector--probe-generation
+                            ende-selector--effort-cancel
+                            ende-selector--effort-probe-generation))
+                  ((error quit)
+                   (ende-selector--cancel-probe)
+                   (ende-selector--cancel-effort-probe)
+                   (signal (car err) (cdr err)))))))
+        (ende-selector--cancel-probe)
+        (ende-selector--cancel-effort-probe)
         (setq ende-selector--connection connection
               ende-selector--api (plist-get connection :api))
-        (ende-selector--set-provider ende-selector--provider-index nil model)))
+        (cl-multiple-value-setq
+            (ende-selector--models ende-selector--model-index
+             ende-selector--model-state ende-selector--model-selection-generation
+             ende-selector--control-preferences
+             ende-selector--effort ende-selector--effort-state
+             ende-selector--probe-cancel ende-selector--probe-generation
+             ende-selector--effort-cancel ende-selector--effort-probe-generation)
+          prepared)))
     (ende-selector-connection-cancel)))
 
 (defvar ende-selector-connection-mode-map (make-sparse-keymap)
