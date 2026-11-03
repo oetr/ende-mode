@@ -53,7 +53,11 @@
                (should (string-prefix-p (ende-codex--auth-property 'chatgpt-plan-oauth :authorize-url) browser))
                (setq client (make-network-process :name "ende-login-invalid-test" :host "127.0.0.1"
                                                    :service port :family 'ipv4 :noquery t
-                                                   :filter #'ignore :sentinel #'ignore))
+                                                   :coding 'binary
+                                                   :filter (lambda (process chunk)
+                                                             (process-put process :response
+                                                                          (concat (process-get process :response) chunk)))
+                                                   :sentinel #'ignore))
                (unwind-protect
                    (progn
                      (process-send-string
@@ -61,23 +65,39 @@
                      (let ((tries 100))
                        (while (and (process-live-p client) (> tries 0))
                          (cl-decf tries) (accept-process-output nil 0.01)))
+                     (should (string-prefix-p "HTTP/1.1 400 Bad Request\r\n"
+                                              (process-get client :response)))
                      (should-not (ende-codex--login-consumed attempt))
                      (should (ende-codex--login-live-p attempt))
-                     (should-not (memq client (ende-codex--login-clients attempt))))
+                     (should-not (ende-codex--login-clients attempt)))
                  (when (process-live-p client) (delete-process client)))
                (setq client nil)
                (unwind-protect
                    (progn
                      (setq client (make-network-process :name "ende-login-test" :host "127.0.0.1"
                                                         :service port :family 'ipv4 :noquery t
-                                                        :filter #'ignore :sentinel #'ignore))
+                                                        :coding 'binary
+                                                        :filter (lambda (process chunk)
+                                                                  (process-put process :response
+                                                                               (concat (process-get process :response) chunk)))
+                                                        :sentinel #'ignore))
                      (process-send-string client "GET /auth/callback?")
                      (accept-process-output nil 0.01)
                      (process-send-string client
                                           (format "%s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" query port))
                      (let ((tries 100))
-                       (while (and ende-codex--pending-login (> tries 0))
+                       (while (and (process-live-p client) (> tries 0))
                          (cl-decf tries) (accept-process-output nil 0.01)))
+                     (let ((response (process-get client :response)))
+                       (should (string-prefix-p "HTTP/1.1 200 OK\r\n" response))
+                       (should (= (length (split-string response "HTTP/1\\.[01] ")) 2))
+                       (should (string-match "Content-Length: \\([0-9]+\\)\r\n\r\n" response))
+                       (should (= (string-to-number (match-string 1 response))
+                                  (string-bytes (substring response (match-end 0))))))
+                     (should-not (process-live-p client))
+                     (should-not (ende-codex--login-clients attempt))
+                     (should-not (ende-codex--login-timer attempt))
+                     (should (= (length requests) (if (eq scenario 'denied) 0 1)))
                      (should-not ende-codex--pending-login)
                      (should-not (process-live-p listener))
                      (if (memq scenario '(valid permission identity))

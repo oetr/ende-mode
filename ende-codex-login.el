@@ -67,8 +67,7 @@
 (defun ende-codex--login-reject-client (attempt process)
   "Reject one invalid callback connection without affecting ATTEMPT."
   (when (process-live-p process)
-    (ignore-errors (ende-codex--login-http-response process nil))
-    (delete-process process))
+    (ignore-errors (ende-codex--login-http-response process nil)))
   (ende-codex--login-discard-client attempt process))
 
 (defun ende-codex--login-client-sentinel (attempt process _event)
@@ -252,11 +251,18 @@
         (when (and returned (not (equal returned saved))) (signal 'ende-codex-identity-error nil)))
       (list code returned))))
 
-(defun ende-codex--login-receive-callback (attempt parameters)
-  "Validate and consume callback PARAMETERS for ATTEMPT exactly once."
+(defun ende-codex--login-receive-callback (attempt parameters &optional process)
+  "Consume valid PARAMETERS for ATTEMPT, acknowledge PROCESS, then exchange."
   (let ((callback (ende-codex--login-validate-callback attempt parameters)))
-    (setf (ende-codex--login-consumed attempt) t)
-    (ende-codex--login-stop-accepting attempt)
+    (setf (ende-codex--login-consumed attempt) t
+          (ende-codex--login-state attempt) nil)
+    (when process
+      (set-process-filter process #'ignore)
+      (ende-codex--login-discard-timeout process))
+    (ende-codex--login-stop-accepting attempt process)
+    (when process
+      (ende-codex--login-discard-client attempt process)
+      (ignore-errors (ende-codex--login-http-response process t)))
     (if (eq callback 'denied)
         (ende-codex--login-fail attempt "ChatGPT authorization was declined")
       (let ((code (car callback))
@@ -288,13 +294,21 @@
              (list (cons "resource" resource))))))
 
 (defun ende-codex--login-http-response (process success)
-  "Send a static, secret-free HTTP response to PROCESS for SUCCESS."
-  (let ((body (if success
-                  "<!doctype html><title>Ende</title><p>Authorization received. You can return to Emacs.</p>"
-                "<!doctype html><title>Ende</title><p>Authorization was not accepted. Return to Emacs.</p>")))
-    (process-send-string
-     process (format "HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s"
-                     (if success "200 OK" "400 Bad Request") (string-bytes body) body))))
+  "Send at most one secret-free response to PROCESS, then close after EOF."
+  (unless (process-get process :responded)
+    (process-put process :responded t)
+    (process-put process :request nil)
+    (set-process-filter process #'ignore)
+    (ende-codex--login-discard-timeout process)
+    (unwind-protect
+        (let ((body (if success
+                        "<!doctype html><title>Ende</title><p>Authorization received. You can return to Emacs.</p>"
+                      "<!doctype html><title>Ende</title><p>Authorization was not accepted. Return to Emacs.</p>")))
+          (process-send-string
+           process (format "HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: %d\r\n\r\n%s"
+                           (if success "200 OK" "400 Bad Request") (string-bytes body) body))
+          (process-send-eof process))
+      (when (process-live-p process) (delete-process process)))))
 
 (defun ende-codex--login-http-filter (attempt process chunk)
   "Accumulate bounded HTTP CHUNK from PROCESS for ATTEMPT."
@@ -332,11 +346,7 @@
                                (equal (cdr (assoc "content-length" headers)) "0")))
                 (signal 'ende-codex-identity-error nil))
               (let ((parameters (ende-codex--login-query query)))
-                (ende-codex--login-discard-timeout process)
-                (ende-codex--login-http-response process t)
-                (process-put process :responded t)
-                (process-put process :request nil)
-                (ende-codex--login-receive-callback attempt parameters)))))
+                (ende-codex--login-receive-callback attempt parameters process)))))
       ((error quit) (ende-codex--login-reject-client attempt process))))))
 
 (defun ende-codex--login-listen (attempt)
