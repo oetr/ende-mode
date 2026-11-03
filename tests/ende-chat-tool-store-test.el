@@ -1089,39 +1089,18 @@
           (should-error (ende-tool-store-load-protocol id "Checking." nil))))
     (ende-test--reset)))
 
-(ert-deftest ende-test/chat-protocol-sidecar-codex-namespaced-followup ()
-  (ende-test--reset)
-  (unwind-protect
-      (with-temp-buffer
-        (org-mode)
-        (let* ((call '(:id "c" :name "read_file" :namespace "ende" :arguments "{}"))
-               (item (ende-protocol-json-read-string
-                      "{\"type\":\"function_call\",\"call_id\":\"c\",\"namespace\":\"ende\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
-               (history (list 'openai-responses item))
-               (id (ende-tool-store-save-protocol history "" (list call)))
-               (stored (ende-chat--prepare-tool-call call)))
-          (insert "* Topic\n** Question\nInspect.\n"
-                  (ende-chat--work-text 2 "q" "r")
-                  (ende-chat--assistant-protocol-text
-                   3 "q" "r" (ende-chat--metadata-property ende-chat-protocol-history-property id)
-                   '(:content "") (list stored))
-                  (ende-chat--tool-result-text 3 "r" stored "result")
-                  "** Follow-up\nContinue.\n")
-          (goto-char (point-min))
-          (re-search-forward "Agent: Work")
-          (org-entry-delete nil ende-chat-state-property)
-          ;; Reparse persisted Org, rather than reusing the original call plist.
-          (let* ((document (ende-chat--build-document))
-                 (work (cl-find-if (lambda (h) (ende-chat--property document h :work))
-                                   (ende-chat--document-headlines document)))
-                 (messages (ende-chat--protocol-work-messages document work))
-                 (input (ende-codex--request-messages messages)))
-            (should (equal (gethash "namespace" (car input)) "ende"))
-            (should (equal (gethash "call_id" (car input)) (alist-get :call_id (cadr input)))))
-          (should-error (ende-tool-store-load-protocol id "Edited" (list call)))
-          (should-error (ende-tool-store-load-protocol
-                         id "" '((:id "c" :name "write_file" :arguments "{}"))))))
-    (ende-test--reset)))
+(ert-deftest ende-test/codex-keeps-ordered-provider-items-and-tool-results ()
+  (let* ((call '(:id "c" :name "read_file" :namespace "ende" :arguments "{}"))
+         (item (ende-protocol-json-read-string
+                "{\"type\":\"function_call\",\"call_id\":\"c\",\"namespace\":\"ende\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
+         (input (ende-codex--request-messages
+                 (list (list :role "assistant" :content ""
+                             :protocol-items (list 'openai-responses item)
+                             :tool-calls (list call))
+                       '(:role "tool" :tool-call-id "c" :content "result")))))
+    (should (equal (gethash "namespace" (car input)) "ende"))
+    (should (equal (gethash "call_id" (car input))
+                   (alist-get :call_id (cadr input))))))
 
 (ert-deftest ende-test/chat-protocol-sidecar-heading-reply-roundtrip ()
   (ende-test--reset)

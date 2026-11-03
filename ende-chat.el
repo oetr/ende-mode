@@ -84,6 +84,11 @@ assistant role of its enclosing section."
   :type 'boolean
   :group 'ende)
 
+(defcustom ende-chat-replay-opaque-reasoning t
+  "Replay opaque provider items referenced by generated chat headings."
+  :type 'boolean
+  :group 'ende)
+
 (defcustom ende-chat-compact-instruction
   "Summarize the conversation for continued work. Preserve the user's goals,
 requirements and preferences, decisions and their rationale, important facts
@@ -183,8 +188,15 @@ discarding superseded details. Be concise but self-contained."
 
 (defconst ende-chat-protocol-history-property "ENDE_PROTOCOL_HISTORY")
 
+(defconst ende-chat-protocol-item-kind-property "ENDE_PROTOCOL_ITEM_KIND")
+(defconst ende-chat-protocol-provider-property "ENDE_PROTOCOL_PROVIDER")
+(defconst ende-chat-protocol-item-id-property "ENDE_PROTOCOL_ITEM_ID")
+
 (defconst ende-chat--parsed-property-descriptors
   (list (cons ende-chat-protocol-history-property :protocol-history)
+        (cons ende-chat-protocol-item-kind-property :protocol-item-kind)
+        (cons ende-chat-protocol-provider-property :protocol-provider)
+        (cons ende-chat-protocol-item-id-property :protocol-item-id)
         (cons ende-chat-role-property :role)
         (cons ende-chat-visibility-property :visibility)
         (cons ende-chat-id-property :id)
@@ -906,6 +918,30 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
       (ende-chat--property document headline :tool-execution-id)
       (ende-chat--property document headline :tool-name)))
 
+(defun ende-chat--opaque-reference-p (document headline)
+  "Return non-nil when HEADLINE carries opaque protocol metadata."
+  (or (ende-chat--property document headline :protocol-item-kind)
+      (ende-chat--property document headline :protocol-provider)
+      (ende-chat--property document headline :protocol-item-id)))
+
+(defun ende-chat--validate-opaque-reference (document work headline)
+  "Validate opaque protocol HEADLINE under WORK."
+  (let ((kind (ende-chat--property document headline :protocol-item-kind))
+        (provider (ende-chat--property document headline :protocol-provider))
+        (item-id (ende-chat--property document headline :protocol-item-id)))
+    (unless (and (equal (org-element-property :raw-value headline) "Agent: Opaque BS")
+                 (equal (ende-chat--property document headline :request-id)
+                        (ende-chat--property document work :request-id))
+                 (member provider '("openai-responses" "anthropic-messages"))
+                 (stringp kind) (string-prefix-p "opaque-" kind)
+                 (not (string-match-p "[[:cntrl:]]" kind))
+                 (stringp item-id) (not (string-empty-p item-id))
+                 (null (ende-chat--children document headline))
+                 (string-blank-p (ende-chat--protocol-body-string headline)))
+      (error "Malformed generated opaque protocol item: %s"
+             (org-element-property :raw-value headline)))
+    headline))
+
 (defun ende-chat--tool-call-protocol-p (document headline)
   "Return non-nil when HEADLINE carries generated tool-call metadata."
   (equal (ende-chat--property document headline :tool-kind) "call"))
@@ -1006,6 +1042,8 @@ reflects Org history rather than the existence of a stored result payload."
       (error "Malformed generated Agent: Work: missing request ID"))
     (dolist (child (ende-chat--children document work))
       (cond
+       ((ende-chat--opaque-reference-p document child)
+        (ende-chat--validate-opaque-reference document work child))
        ((ende-chat--tool-reference-p document child)
         (ende-chat--validate-tool-reference document work child))
        ((ende-chat--assistant-protocol-p document child)
@@ -1061,6 +1099,8 @@ reflects Org history rather than the existence of a stored result payload."
           (error "Malformed generated assistant protocol role"))
         (ende-chat--protocol-body-string child)
         (push child replies))
+       ((ende-chat--opaque-reference-p document child)
+        (ende-chat--validate-opaque-reference document work child))
        ((or (ende-chat--tool-call-protocol-p document child)
             (ende-chat--tool-result-protocol-p document child)))
        (t
@@ -1075,6 +1115,9 @@ reflects Org history rather than the existence of a stored result payload."
                    (ende-chat--assistant-protocol-p document headline)
                    (equal (org-element-property :raw-value headline)
                           "Agent: Reply")))
+             (final-opaque
+              (and (not within-work)
+                   (ende-chat--opaque-reference-p document headline)))
              (direct-work-child
               (and (eq parent work)
                    (or (and (ende-chat--assistant-protocol-p
@@ -1083,14 +1126,23 @@ reflects Org history rather than the existence of a stored result payload."
                                    "Agent: Reply"))
                        (ende-chat--tool-call-protocol-p document headline)
                        (ende-chat--tool-result-protocol-p document headline)
+                       (ende-chat--opaque-reference-p document headline)
                        (equal (ende-chat--property document headline :visibility)
                               "reasoning_summary"))))
              (valid (or (eq headline work)
-                        final-reply
+                        final-reply final-opaque
                         (and within-work direct-work-child))))
         (unless valid
           (error "Malformed generated protocol section outside Agent: Work: %s"
                  (org-element-property :raw-value headline)))
+        (when final-opaque
+          (ende-chat--validate-opaque-reference document work headline)
+          (unless (and (eq parent (ende-chat--parent document work))
+                       (= (org-element-property :level headline)
+                          (org-element-property :level work))
+                       (> (org-element-property :begin headline)
+                          (org-element-property :begin work)))
+            (error "Malformed generated opaque protocol item outside Agent: Work")))
         (when final-reply
           (push headline replies))))
     (let ((final-replies
@@ -1098,17 +1150,14 @@ reflects Org history rather than the existence of a stored result payload."
             (lambda (headline)
               (null (ende-chat--work-ancestor document headline)))
             replies)))
-      (when (> (length final-replies) 1)
-        (error "Multiple final replies for generated Agent: Work request %s"
-               request-id))
-      (when (and final-replies
-                 (or (not (eq (ende-chat--parent document work)
-                              (ende-chat--parent document (car final-replies))))
-                     (not (= (org-element-property :level work)
-                             (org-element-property :level (car final-replies))))
-                     (>= (org-element-property :begin work)
-                         (org-element-property :begin (car final-replies)))))
-        (error "Malformed generated Agent: Work: final reply must follow its container"))
+      (dolist (reply final-replies)
+        (unless (and (eq (ende-chat--parent document work)
+                         (ende-chat--parent document reply))
+                     (= (org-element-property :level work)
+                        (org-element-property :level reply))
+                     (> (org-element-property :begin reply)
+                        (org-element-property :begin work)))
+          (error "Malformed generated Agent: Work: final reply must follow its container")))
       (if (member state '("pending" "failed"))
           (when final-replies
             (error "Malformed generated Agent: Work: unfinished request has a final reply"))
