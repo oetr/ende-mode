@@ -59,7 +59,7 @@
       (should (equal (ende-protocol-json-get "encrypted_content" (nth 1 input)) "second"))
       (should (equal (ende-protocol-json-get "phase" (nth 2 input)) "final_answer")))))
 
-(ert-deftest ende-responses-history-done-and-legacy-fallback ()
+(ert-deftest ende-responses-history-done-and-tool-call-shape ()
   (let ((session (ende-codex--make-session)))
     (ende-codex--handle-event
      session (ende-responses-history-test--json
@@ -71,20 +71,6 @@
                        (list :tool-call-id "old-call" :content "result")))))
     (should (= (length input) 3))
     (should (equal (alist-get :type (nth 1 input)) "function_call"))))
-
-(ert-deftest ende-responses-history-private-store-roundtrip ()
-  (let* ((directory (make-temp-file "ende-replay-test-" t))
-         (file (expand-file-name "payloads.sqlite3" directory))
-         (history (list 'openai-responses
-                        (ende-responses-history-test--json
-                         "{\"type\":\"reasoning\",\"encrypted_content\":\"unchanged-secret\",\"summary\":[]}"))))
-    (unwind-protect
-        (let* ((id (ende-tool-store-save-protocol history "answer" nil file))
-               (restored (ende-tool-store-load-protocol id "answer" nil file)))
-          (should (equal (json-encode (vconcat (cdr restored)))
-                         (json-encode (vconcat (cdr history)))))
-          (should (= (logand (file-modes file) #o777) #o600)))
-      (delete-directory directory t))))
 
 (ert-deftest ende-responses-history-private-redaction ()
   (let* ((object (ende-responses-history-test--json

@@ -40,12 +40,17 @@
      (lambda (headline) (ende-chat--tool-result-protocol-p document headline)))
    (ende-chat--document-headlines document)))
 
+(defun ende-test--message-property-p (message property)
+  "Return non-nil when plist MESSAGE has PROPERTY."
+  (and (not (stringp (car-safe message)))
+       (plist-member message property)))
+
 (defun ende-test--stored-tool-messages (messages)
   "Return assistant tool-call messages from serialized MESSAGES."
   (cl-remove-if-not
    (lambda (message)
      (and (equal (plist-get message :role) "assistant")
-          (plist-member message :tool-calls)))
+          (ende-test--message-property-p message :tool-calls)))
    messages))
 
 (ert-deftest ende-test/chat-editable-history-preserves-roles-and-tool-turns ()
@@ -643,9 +648,11 @@
                  (first-prose
                   (cl-find-if
                    (lambda (message)
-                     (and (consp message)
-                          (equal (car message) "assistant")
-                          (string-match-p "First turn prose" (cdr message))))
+                     (and (equal (ende-content-role message) "assistant")
+                          (string-match-p
+                           "First turn prose"
+                           (ende-content-readable
+                            (ende-content-body message)))))
                    messages)))
             (should first-prose)
             (should (= (length tool-turns) 1))
@@ -688,7 +695,7 @@
           (cl-letf (((symbol-function 'message)
                      (lambda (format-string &rest arguments)
                        (let ((text (apply #'format format-string arguments)))
-                          (when (string-match-p "Some tool payloads are unavailable" text)
+                          (when (string-match-p "Some protocol payloads are unavailable" text)
                             (setq notices (cons text notices)))
                           text))))
             (ende-test--chat-goto "** Follow-up")
@@ -775,7 +782,7 @@
              (cl-letf (((symbol-function 'message)
                        (lambda (format-string &rest arguments)
                          (let ((text (apply #'format format-string arguments)))
-                           (when (string-match-p "Some tool payloads are unavailable" text)
+                           (when (string-match-p "Some protocol payloads are unavailable" text)
                              (push text notices))
                             text)))
                        ((symbol-function 'ende-tools-call-async)
@@ -858,7 +865,7 @@
             (cl-letf (((symbol-function 'message)
                        (lambda (format-string &rest arguments)
                          (let ((text (apply #'format format-string arguments)))
-                           (when (equal text "Some tool payloads are unavailable; omitting affected tool history")
+                           (when (equal text "Some protocol payloads are unavailable; omitting affected history")
                              (push text notices))
                            text))))
               (let* ((messages (ende-chat-context-at-point))
@@ -1054,83 +1061,171 @@
                 (should (equal (gethash "provider_call_id" record)
                                "provider-reused")))))
           (should (cl-some (lambda (message)
-                             (plist-member message :tool-calls))
+                             (ende-test--message-property-p message :tool-calls))
                            (ende-test--chat-protocol-messages
                             (plist-get (nth 2 ende-test--calls) :messages)))))
       (ende-test--reset))))
 
-(ert-deftest ende-test/chat-protocol-sidecar-restores-signed-turns ()
-  (ende-test--reset)
-  (unwind-protect
-      (with-temp-buffer
-        (org-mode)
-        (let* ((block (ende-protocol-json-read-string
-                       "{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"signed\"}"))
-               (call '(:id "c" :name "read_file" :arguments "{}"))
-               (history (list 'anthropic-messages block))
-               (id (ende-tool-store-save-protocol history "Checking." (list call)))
-               (stored (ende-chat--prepare-tool-call call)))
-          (insert "* Topic\n** Question\nInspect.\n"
-                  (ende-chat--work-text 2 "q" "r")
-                  (ende-chat--assistant-protocol-text
-                   3 "q" "r" (ende-chat--metadata-property ende-chat-protocol-history-property id)
-                   '(:content "Checking.") (list stored))
-                  (ende-chat--tool-result-text 3 "r" stored "result")
-                  "** Follow-up\nContinue.\n")
-          (goto-char (point-min))
-          (re-search-forward "Agent: Work")
-          (org-entry-delete nil ende-chat-state-property)
-          (let* ((document (ende-chat--build-document))
-                 (work (cl-find-if (lambda (h) (ende-chat--property document h :work))
-                                   (ende-chat--document-headlines document)))
-                 (messages (ende-chat--protocol-work-messages document work)))
-            (should (equal (gethash "signature" (cadr (plist-get (car messages) :protocol-history))) "signed")))
-          (should-error (ende-tool-store-load-protocol id "Edited." (list call)))
-          (should-error (ende-tool-store-load-protocol id "Checking." nil))))
-    (ende-test--reset)))
-
-(ert-deftest ende-test/codex-keeps-ordered-provider-items-and-tool-results ()
-  (let* ((call '(:id "c" :name "read_file" :namespace "ende" :arguments "{}"))
-         (item (ende-protocol-json-read-string
-                "{\"type\":\"function_call\",\"call_id\":\"c\",\"namespace\":\"ende\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
-         (input (ende-codex--request-messages
-                 (list (list :role "assistant" :content ""
-                             :protocol-items (list 'openai-responses item)
-                             :tool-calls (list call))
-                       '(:role "tool" :tool-call-id "c" :content "result")))))
-    (should (equal (gethash "namespace" (car input)) "ende"))
-    (should (equal (gethash "call_id" (car input))
-                   (alist-get :call_id (cadr input))))))
-
-(ert-deftest ende-test/chat-protocol-sidecar-heading-reply-roundtrip ()
-  (ende-test--reset)
-  (unwind-protect
-      (with-temp-buffer
-        (org-mode)
-        (let* ((content "* Sample analysis\n\nRead five slices.\n")
-               (history (list 'openai-responses
-                              (ende-protocol-json-read-string
-                               "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"* Sample analysis\\n\\nRead five slices.\\n\"}]}")))
-               (id (ende-tool-store-save-protocol history content nil))
-               (normalized (ende-chat--normalize-response content 2 t)))
-          (insert "* Topic\n** Question\nInspect.\n"
-                  (ende-chat--assistant-text
-                   2 "q" "r"
-                   (concat (ende-chat--metadata-property ende-chat-protocol-history-property id)
-                           (ende-chat--normalized-response-properties normalized))
-                   normalized)
-                  "** Follow-up\nContinue.\n")
-          (let* ((document (ende-chat--build-document))
-                 (reply (cl-find-if (lambda (h) (equal (ende-chat--property document h :request-id) "r"))
-                                    (ende-chat--document-headlines document)))
-                 (messages (ende-chat--section-messages
-                            document reply (org-element-property :begin reply)
-                            (org-element-property :end reply))))
-            (should (= (length messages) 1))
-            (should (equal (plist-get (car messages) :content) content))
-            (should (equal (gethash "phase" (cadr (plist-get (car messages) :protocol-history)))
-                           "final_answer")))))
-    (ende-test--reset)))
+(ert-deftest ende-test/chat-rebuilds-mixed-protocol-events-from-org ()
+  (let* ((directory (make-temp-file "ende-chat-events-" t))
+         (file (expand-file-name "payloads.sqlite3" directory)))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (setq buffer-file-name (expand-file-name "chat.org" directory))
+          (setq-local ende-tool-store--local-file file)
+          (insert "* Topic\n** Question\nInspect the records.\n")
+          (let* ((question-id "question-events")
+                 (request-id "request-events")
+                 (call (ende-chat--prepare-tool-call
+                        '(:id "provider-call" :name "read_file" :arguments "{}")
+                        file))
+                 (before (ende-protocol-json-read-string
+                          "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Before.\"}]}"))
+                 (reasoning (ende-protocol-json-read-string
+                             "{\"type\":\"reasoning\",\"encrypted_content\":\"reasoning-secret\",\"summary\":[]}"))
+                 (after (ende-protocol-json-read-string
+                         "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"After.\"}]}"))
+                 (function-call (ende-protocol-json-read-string
+                                 "{\"type\":\"function_call\",\"call_id\":\"provider-call\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
+                 (thinking (ende-protocol-json-read-string
+                            "{\"type\":\"thinking\",\"thinking\":\"private-thinking\",\"signature\":\"signed-value\"}")))
+            (insert
+             (ende-chat--work-text 2 question-id request-id)
+             (ende-chat--assistant-protocol-text
+              3 question-id request-id ""
+              (ende-chat--normalize-response "Before." 3 t) nil nil
+              (cons 'openai-responses (list before reasoning)) file)
+             (ende-chat--opaque-protocol-text
+              3 request-id
+              (list :provider "anthropic-messages" :kind "opaque-thinking"
+                    :item thinking)
+              "" file)
+             (ende-chat--assistant-protocol-text
+              3 question-id request-id ""
+              (ende-chat--normalize-response "After." 3 t) (list call) nil
+              (cons 'openai-responses (list after function-call)) file)
+             (ende-chat--tool-result-text 3 request-id call "TOOL_RESULT")
+             (ende-chat--assistant-text
+              2 question-id request-id
+              (ende-chat--metadata-property
+               ende-chat-protocol-history-property "stale-snapshot-id")
+              (ende-chat--normalize-response "Final answer." 2 t))
+             "** Follow-up\nContinue.\n")
+            (save-excursion
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* Agent: Work")
+              (org-back-to-heading t)
+              (org-entry-delete nil ende-chat-state-property))
+            (let* ((document (ende-chat--build-document))
+                   (work (ende-chat--request-work-section document request-id))
+                   (call-headlines (ende-test--tool-headlines document 'call))
+                   (result-headlines (ende-test--tool-headlines document 'result))
+                   (execution
+                    (ende-tool-store-load-execution
+                     (ende-chat--property
+                      document (car call-headlines) :tool-execution-id)))
+                   (events (ende-chat--protocol-work-messages document work))
+                   (opaque (cl-remove-if-not
+                            (lambda (message)
+                              (ende-test--message-property-p message :protocol-opaque))
+                            events))
+                   (request (append events (list '("assistant" . "Final answer."))))
+                   (responses (ende-codex--request-messages request))
+                   (messages-body
+                    (ende-messages--request-body
+                     request '(:model "test" :output-tokens 100)))
+                   (blocks (alist-get :content (car (alist-get :messages messages-body)))))
+              (should (= (length call-headlines) 1))
+              (should (= (length result-headlines) 1))
+              (should (plist-get execution :request-present-p))
+              (should (plist-get execution :result-present-p))
+              (should (equal (mapcar (lambda (message)
+                                       (cond
+                                        ((ende-test--message-property-p message :protocol-opaque) 'opaque)
+                                        ((ende-test--message-property-p message :tool-calls) 'tool-call)
+                                        ((equal (ende-content-role message) "tool") 'tool-result)
+                                        (t 'text)))
+                                     events)
+                             '(text opaque opaque tool-call tool-result)))
+              (should (equal (gethash "encrypted_content"
+                                      (plist-get (car opaque) :protocol-opaque))
+                             "reasoning-secret"))
+              (should (equal (mapcar (lambda (item)
+                                       (if (hash-table-p item)
+                                           (gethash "type" item)
+                                         (alist-get :type item)))
+                                     responses)
+                             '(nil "reasoning" nil "function_call"
+                               "function_call_output" nil)))
+              (should (equal (ende-protocol-json-get "encrypted_content"
+                                                     (nth 1 responses))
+                             "reasoning-secret"))
+              (should (equal (mapcar (lambda (block)
+                                       (if (hash-table-p block)
+                                           (gethash "type" block)
+                                         (alist-get :type block)))
+                                     blocks)
+                             '("text" "thinking" "text" "tool_use")))
+              (should (equal (ende-protocol-json-get "signature" (nth 1 blocks))
+                             "signed-value"))
+              (let ((result-block
+                     (car (alist-get :content
+                                     (nth 1 (alist-get :messages messages-body))))))
+                (should (equal (if (hash-table-p result-block)
+                                   (gethash "type" result-block)
+                                 (alist-get :type result-block))
+                               "tool_result")))
+              (should-not (string-match-p "reasoning-secret" (buffer-string)))
+              (should-not (string-match-p "private-thinking" (buffer-string))))
+            (goto-char (point-min))
+            (search-forward "Before.")
+            (replace-match "Edited before.")
+            (let* ((document (ende-chat--build-document))
+                   (response-item
+                    (cl-find "openai-responses"
+                             (ende-chat--document-headlines document)
+                             :key (lambda (headline)
+                                    (ende-chat--property document headline
+                                                         :protocol-provider))
+                             :test #'equal)))
+              (goto-char (org-element-property :begin response-item))
+              (org-back-to-heading t)
+              (org-move-subtree-down 1))
+            (let* ((document (ende-chat--build-document))
+                   (opaque (cl-remove-if-not
+                            (lambda (headline)
+                              (ende-chat--opaque-reference-p document headline))
+                            (ende-chat--document-headlines document)))
+                   (providers (mapcar (lambda (headline)
+                                        (ende-chat--property document headline
+                                                             :protocol-provider))
+                                      opaque)))
+              (should (equal providers
+                             '("anthropic-messages" "openai-responses")))
+              (let ((anthropic-item (car opaque)))
+                (delete-region (org-element-property :begin anthropic-item)
+                               (org-element-property :end anthropic-item))))
+            (let* ((document (ende-chat--build-document))
+                   (work (ende-chat--request-work-section document request-id))
+                   (ende-chat-replay-opaque-reasoning nil)
+                   (events (ende-chat--protocol-work-messages document work)))
+              (should-not (cl-some (lambda (message)
+                                     (ende-test--message-property-p message :protocol-opaque))
+                                   events))
+              (should (cl-some (lambda (message)
+                                 (ende-test--message-property-p message :tool-calls))
+                               events))
+              (should (cl-some (lambda (message)
+                                 (equal (plist-get message :role) "tool"))
+                               events)))
+            (ende-test--chat-goto "** Follow-up")
+            (let ((history (ende-chat-context-at-point)))
+              (should (string-match-p "Final answer."
+                                      (ende-test--chat-context-text history)))
+              (should-not (string-match-p "stale-snapshot-id"
+                                          (prin1-to-string history))))))
+      (delete-directory directory t))))
 
 (provide 'ende-chat-tool-store-test)
 

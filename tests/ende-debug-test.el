@@ -344,7 +344,7 @@
     (unwind-protect
         (let ((record (ende-debug-record-request
                        (json-encode body) body
-                       (list (list :protocol-history (list 'openai-responses item)))
+                       (list (list :protocol-items (list 'openai-responses item)))
                        nil "test" "https://example.test")))
           (ende-debug-record-response
            record (ende-protocol-json-read-string

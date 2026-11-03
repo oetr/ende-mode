@@ -952,7 +952,9 @@ explicit efforts yields no choices instead of an error."
 
 (defun ende-codex--remember-output (session item index)
   "Capture completed replay ITEM at output INDEX for SESSION."
-  (when (and (integerp index) (>= index 0) (hash-table-p item))
+  (when (and (integerp index) (>= index 0) (hash-table-p item)
+             (not (equal (ende-protocol-json-get "type" item)
+                         "image_generation_call")))
     (setf (alist-get index (ende-codex--session-replay-items session))
           (ende-provider-config-copy item))))
 
@@ -1423,6 +1425,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                                 (plist-get call :id))) (cdr items))) calls))))
           ((and opaque (equal provider "openai-responses"))
            (list (ende-provider-config-copy opaque)))
+          (opaque nil)
           (calls
            (append
             (when (and (stringp content) (not (string-empty-p content)))

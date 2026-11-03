@@ -811,6 +811,10 @@ SELECTED-HEADLINES supplies an already selected current section."
                  (flush)
                  (setq messages
                        (append (reverse tool-messages) messages))))
+              ((and selected (ende-chat--opaque-reference-p document headline))
+               (flush)
+               (let ((event (ende-chat--protocol-opaque-message document headline)))
+                 (when event (push event messages))))
               ((and selected (ende-chat--tool-reference-p document headline))
                (error "Malformed tool reference outside Agent: Work: %s"
                       (org-element-property :raw-value headline)))
@@ -1317,14 +1321,25 @@ COMPLETE means TEXT reaches the generated wrapper's end."
         (unless complete
           (setq transform (plist-put transform :synthetic-end nil))))
       (let* ((content (ende-chat--restore-response-parts
-                       (ende-chat--content document headline text 'assistant) transform))
-             (reference (ende-chat--property document headline :protocol-history)))
-        (if (and reference (not (ende-chat--tool-call-protocol-p
-				 document (cadr (memq headline
-                                                      (ende-chat--children document (ende-chat--parent document headline)))))))
-            (list :role "assistant" :content content
-                  :protocol-history (ende-tool-store-load-protocol reference content nil))
-          (ende-chat--message 'assistant content))))))
+                       (ende-chat--content document headline text 'assistant) transform)))
+        (ende-chat--message 'assistant content)))))
+
+(defun ende-chat--protocol-opaque-message (document headline)
+  "Reconstruct opaque ITEM represented by HEADLINE, or omit it if missing."
+  (let* ((request-id (ende-chat--property document headline :request-id))
+         (work (ende-chat--request-work-section document request-id))
+         (provider (ende-chat--property document headline :protocol-provider))
+         (kind (ende-chat--property document headline :protocol-item-kind))
+         (item-id (ende-chat--property document headline :protocol-item-id)))
+    (unless work
+      (error "Opaque protocol item has no matching Agent: Work section"))
+    (ende-chat--validate-opaque-reference document work headline)
+    (when ende-chat-replay-opaque-reasoning
+      (if-let* ((item (ende-tool-store-load-opaque item-id provider kind)))
+          (list :role "assistant" :protocol-opaque item
+                :protocol-provider provider :protocol-item-kind kind)
+        (setq ende-chat--expired-history-in-request t)
+        nil))))
 
 (defun ende-chat--protocol-tool-result-message (document headline)
   "Reconstruct the tool-result message represented by HEADLINE."
@@ -1340,108 +1355,115 @@ COMPLETE means TEXT reaches the generated wrapper's end."
             :content (plist-get execution :content)))))
 
 (defun ende-chat--protocol-work-messages (document work)
-  "Reconstruct complete tool turns in WORK from its direct child order."
+  "Reconstruct WORK's current provider events in document order."
   (ende-chat--validate-work-contents document work)
-  (let ((children (ende-chat--children document work))
-        (messages nil))
-    (cl-labels
-        ((take-while (predicate)
-           (let (taken)
-             (while (and children (funcall predicate (car children)))
-               (push (pop children) taken))
-             (nreverse taken)))
-         (take-calls ()
-           (take-while (lambda (headline)
-                         (ende-chat--tool-call-protocol-p document headline))))
-         (take-results ()
-           (take-while (lambda (headline)
-                         (ende-chat--tool-result-protocol-p document headline))))
-         (read-section (headline)
-           (ende-chat--section-messages
-            document headline (org-element-property :begin headline)
-            (org-element-property :end headline)))
-         (add-turn (prose calls results &optional assistant)
-           (if calls
-               (setq messages
-                     (nconc messages
-                            (ende-chat--protocol-tool-turn-messages
-                             document work prose calls results)))
-             (when (and prose (not (ende-content-empty-p prose)))
-               (setq messages
-                     (nconc messages
-                            (list (or assistant (ende-chat--message 'assistant prose)))))))))
-      (while children
-        (let ((child (car children)))
-          (cond
-           ((equal (ende-chat--property document child :visibility)
-                   "reasoning_summary")
-            (pop children))
-           ((ende-chat--assistant-protocol-p document child)
-            (pop children)
-            (let* ((section-messages (read-section child))
-                   (last (car (last section-messages)))
-                   (prose (and (equal (ende-content-role last) "assistant")
-                               (ende-content-body last)))
-                   (calls (take-calls)))
-              (setq messages
-                    (nconc messages
-                           (if prose (butlast section-messages)
-                             section-messages)))
-              (add-turn prose calls (take-results) last)))
-           ((ende-chat--tool-call-protocol-p document child)
-            (add-turn nil (take-calls) (take-results)))
-           ((ende-chat--tool-result-protocol-p document child)
-            (take-results))
-           (t
-            (pop children)
-            (setq messages (nconc messages (read-section child)))))))
-      messages)))
-
-(defun ende-chat--protocol-tool-turn-messages
-    (document work prose calls results)
-  "Reconstruct PROSE and complete CALLS paired with RESULTS in one turn."
-  (let ((result-queues (make-hash-table :test #'equal))
-        (complete nil))
-    (dolist (result results)
-      (when (ende-chat--eligible-p document result)
-        (let* ((execution-id
-                (ende-chat--property document result :tool-execution-id))
-               (queue (gethash execution-id result-queues)))
-          (puthash execution-id (append queue (list result)) result-queues))))
-    (dolist (call calls)
-      (when (ende-chat--eligible-p document call)
-        (let* ((execution-id
-                (ende-chat--property document call :tool-execution-id))
-               (queue (gethash execution-id result-queues))
-               (result (pop queue)))
-          (puthash execution-id queue result-queues)
-          (when result
-            (let ((call-message
-                   (ende-chat--protocol-tool-call document work call))
-                  (result-message
-                   (ende-chat--protocol-tool-result-message document result)))
-              (when (and call-message result-message)
-                (push (list call-message result result-message) complete)))))))
-    (setq complete (nreverse complete))
-    (let ((messages nil)
-          (stored-calls (mapcar #'car complete))
-          (stored-results
-           (cl-loop for result in results
-                    for pair = (cl-find result complete :key #'cadr :test #'eq)
-                    when pair collect (nth 2 pair))))
-      (when (or stored-calls (and prose (not (ende-content-empty-p prose))))
-        (push (if stored-calls
-                  (list :role "assistant" :content (or prose "")
-                        :tool-calls stored-calls
-                        :protocol-history
-                        (ende-tool-store-load-protocol
-                         (and calls (ende-chat--property document (car calls) :protocol-history))
-                         (or prose "") stored-calls))
-                (ende-chat--message 'assistant prose))
-              messages))
-      (dolist (result stored-results)
-        (push result messages))
-      (nreverse messages))))
+  (let* ((children (ende-chat--children document work))
+         (messages nil)
+         (assistant nil)
+         (pending-calls nil)
+         (complete-tools (make-hash-table :test #'equal)))
+    (dolist (child children)
+      (when (ende-chat--eligible-p document child)
+        (cond
+         ((ende-chat--assistant-protocol-p document child)
+          (setq pending-calls nil))
+         ((ende-chat--tool-call-protocol-p document child)
+          (push child pending-calls))
+         ((ende-chat--tool-result-protocol-p document child)
+          (let* ((execution-id
+                  (ende-chat--property document child :tool-execution-id))
+                 (call
+                  (cl-find execution-id pending-calls
+                           :key (lambda (headline)
+                                  (ende-chat--property
+                                   document headline :tool-execution-id))
+                           :test #'equal)))
+            (when call
+              (setq pending-calls (delq call pending-calls))
+              (let ((execution (ende-tool-store-load-execution execution-id)))
+                (if (and (plist-get execution :request-present-p)
+                         (plist-get execution :result-present-p))
+                    (puthash execution-id t complete-tools)
+                  (setq ende-chat--expired-history-in-request t)))))))))
+    (dolist (child children)
+      (when (ende-chat--eligible-p document child)
+        (cond
+         ((equal (ende-chat--property document child :visibility)
+                 "reasoning_summary"))
+         ((ende-chat--opaque-reference-p document child)
+          (when assistant
+            (push (if (plist-get assistant :tool-calls) assistant
+                    (ende-chat--message 'assistant
+                                        (plist-get assistant :content)))
+                  messages)
+            (setq assistant nil))
+          (let ((event (ende-chat--protocol-opaque-message document child)))
+            (when event (push event messages))))
+         ((ende-chat--assistant-protocol-p document child)
+          (when assistant
+            (push (if (plist-get assistant :tool-calls) assistant
+                    (ende-chat--message 'assistant
+                                        (plist-get assistant :content)))
+                  messages)
+            (setq assistant nil))
+          (dolist (message
+                   (ende-chat--section-messages
+                    document child (org-element-property :begin child)
+                    (org-element-property :end child)))
+            (if (equal (ende-content-role message) "assistant")
+                (if assistant
+                    (setf (plist-get assistant :content)
+                          (ende-content-concat
+                           (list (plist-get assistant :content)
+                                 (ende-content-body message))))
+                  (setq assistant
+                        (list :role "assistant"
+                              :content (ende-content-body message))))
+              (when assistant
+                (push (if (plist-get assistant :tool-calls) assistant
+                        (ende-chat--message 'assistant
+                                            (plist-get assistant :content)))
+                      messages)
+                (setq assistant nil))
+              (push message messages))))
+         ((ende-chat--tool-call-protocol-p document child)
+          (when (gethash (ende-chat--property
+                          document child :tool-execution-id) complete-tools)
+            (when-let* ((call (ende-chat--protocol-tool-call
+                               document work child)))
+              (unless assistant
+                (setq assistant (list :role "assistant" :content "")))
+              (setf (plist-get assistant :tool-calls)
+                    (append (plist-get assistant :tool-calls) (list call))))))
+         ((ende-chat--tool-result-protocol-p document child)
+          (when (gethash (ende-chat--property
+                          document child :tool-execution-id) complete-tools)
+            (when assistant
+              (push (if (plist-get assistant :tool-calls) assistant
+                      (ende-chat--message 'assistant
+                                          (plist-get assistant :content)))
+                    messages)
+              (setq assistant nil))
+            (when-let* ((result (ende-chat--protocol-tool-result-message
+                                 document child)))
+              (push result messages))))
+         (t
+          (dolist (message
+                   (ende-chat--section-messages
+                    document child (org-element-property :begin child)
+                    (org-element-property :end child)))
+            (when assistant
+              (push (if (plist-get assistant :tool-calls) assistant
+                      (ende-chat--message 'assistant
+                                          (plist-get assistant :content)))
+                    messages)
+              (setq assistant nil))
+            (push message messages))))))
+    (when assistant
+      (push (if (plist-get assistant :tool-calls) assistant
+              (ende-chat--message 'assistant (plist-get assistant :content)))
+            messages))
+    (nreverse messages)))
 
 (defun ende-chat--context-prefix (document section &optional root)
   "Read SECTION's preceding context according to the configured policy.
@@ -1472,7 +1494,7 @@ ROOT supplies the source scope when the destination is a new root sibling."
                         (list (ende-chat--message 'user content)))))
              (expired ende-chat--expired-history-in-request))
         (when expired
-          (message "Some tool payloads are unavailable; omitting affected tool history"))
+          (message "Some protocol payloads are unavailable; omitting affected history"))
         messages))))
 
 (defun ende-chat--context-messages (document headline)
@@ -1497,7 +1519,7 @@ ROOT supplies the source scope when the destination is a new root sibling."
               (lambda (node) (memq node current)))
             current))))
     (when ende-chat--expired-history-in-request
-      (message "Some tool payloads are unavailable; omitting affected tool history"))
+      (message "Some protocol payloads are unavailable; omitting affected history"))
     messages))
 
 (defun ende-chat-context-at-point (&optional document)
@@ -2965,13 +2987,6 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
          (thinking (plist-get profile :thinking))
          (effort (ende-provider-active-reasoning-effort profile)))
     (concat
-     (when (and (not (eq (ende-job-type job) 'chat-compact))
-                (plist-get result :protocol-history))
-       (ende-chat--metadata-property
-        ende-chat-protocol-history-property
-        (ende-tool-store-save-protocol
-         (plist-get result :protocol-history) (or (plist-get result :content) "")
-         (plist-get result :tool-calls) (plist-get (ende-job-instruction job) :tool-store-file))))
      (ende-chat--metadata-property ende-chat-model-property model)
      (ende-chat--metadata-property
       ende-chat-temperature-property
@@ -3148,34 +3163,155 @@ OPTIONS are passed to `json-serialize'."
              (when (plist-get normalized :synthetic-newline)
                (ende-chat--response-property ende-chat-content-synthetic-newline-property "t"))))))
 
+(defun ende-chat--protocol-item-text (item)
+  "Return visible text in Responses ITEM."
+  (let ((content (ende-protocol-json-get "content" item)))
+    (if (stringp content)
+        content
+      (mapconcat
+       (lambda (part) (ende-protocol-json-get "text" part))
+       (cl-remove-if-not
+        (lambda (part)
+          (and (member (ende-protocol-json-get "type" part)
+                       '("text" "output_text" "refusal"))
+               (stringp (ende-protocol-json-get "text" part))))
+        (append content nil))
+       ""))))
+
+(defun ende-chat--protocol-item-events (protocol-items)
+  "Return visible, tool, and opaque events from provider PROTOCOL-ITEMS."
+  (when (and (consp protocol-items)
+             (memq (car protocol-items) '(openai-responses anthropic-messages)))
+    (let ((provider (symbol-name (car protocol-items))))
+      (cl-loop for item in (cdr protocol-items)
+               for type = (ende-protocol-json-get "type" item)
+               for call-id =
+               (ende-protocol-json-get
+                (if (equal type "function_call") "call_id" "id") item)
+               append
+               (cond
+                ((and (equal provider "openai-responses")
+                      (equal type "message"))
+                 (let ((text (ende-chat--protocol-item-text item)))
+                   (when (not (string-empty-p text))
+                     (list (list :type 'text :text text)))))
+                ((and (equal provider "anthropic-messages")
+                      (equal type "text"))
+                 (let ((text (ende-protocol-json-get "text" item)))
+                   (when (and (stringp text) (not (string-empty-p text)))
+                     (list (list :type 'text :text text)))))
+                ((and (equal provider "openai-responses")
+                      (equal type "function_call") call-id)
+                 (list (list :type 'tool-call :id call-id)))
+                ((and (equal provider "anthropic-messages")
+                      (equal type "tool_use") call-id)
+                 (list (list :type 'tool-call :id call-id)))
+                (t
+                 (list (list :type 'opaque :provider provider
+                             :kind (concat "opaque-" (or type "unknown"))
+                             :item item))))))))
+
+(defun ende-chat--opaque-protocol-text
+    (level request-id event result-properties store-file)
+  "Store EVENT and return its opaque Org heading at LEVEL."
+  (let* ((provider (plist-get event :provider))
+         (kind (plist-get event :kind))
+         (item-id (ende-tool-store-save-opaque
+                   provider kind (plist-get event :item) store-file)))
+    (concat (make-string level ?*) " Agent: Opaque BS\n"
+            ":PROPERTIES:\n"
+            (ende-chat--response-property ende-chat-request-id-property request-id)
+            (ende-chat--response-property ende-chat-protocol-item-kind-property kind)
+            (ende-chat--response-property ende-chat-protocol-provider-property provider)
+            (ende-chat--response-property ende-chat-protocol-item-id-property item-id)
+            result-properties
+            ":END:\n\n")))
+
+(defun ende-chat--protocol-event-text
+    (event level question-id request-id properties calls pending store-file)
+  "Render one assistant protocol EVENT."
+  (pcase (plist-get event :type)
+    ('text
+     (let* ((part (ende-chat--normalize-response
+                   (plist-get event :text) level t))
+            (content (plist-get part :content))
+            (part-properties
+             (concat properties
+                     (ende-chat--normalized-response-properties part))))
+       (unless (string-blank-p content)
+         (ende-chat--assistant-text
+          level question-id request-id
+          (concat part-properties
+                  (when pending
+                    (ende-chat--response-property
+                     ende-chat-state-property "pending")))
+          part))))
+    ('opaque
+     (ende-chat--opaque-protocol-text
+      level request-id event properties store-file))
+    ('tool-call
+     (when-let* ((call (cl-find
+                        (plist-get event :id) calls
+                        :key (lambda (entry) (ende-tools-call-value entry :id))
+                        :test #'equal)))
+       (ende-chat--tool-call-text level request-id call properties)))))
+
+(defun ende-chat--protocol-events-simple-p (events)
+  "Return non-nil when EVENTS are linear text followed by tool calls."
+  (let ((after-call nil)
+        (simple t))
+    (dolist (event events)
+      (pcase (plist-get event :type)
+        ('opaque (setq simple nil))
+        ('tool-call (setq after-call t))
+        ('text (when after-call (setq simple nil)))))
+    simple))
+
 (defun ende-chat--assistant-protocol-text
     (level question-id request-id result-properties normalized calls
-           &optional pending)
-  "Render one assistant protocol message and its ordered tool CALLS."
+           &optional pending protocol-items store-file)
+  "Render ordered assistant PROTOCOL-ITEMS and their tool CALLS."
   (let* ((content (plist-get normalized :content))
-         (result-properties
-          (concat result-properties
+         (events (ende-chat--protocol-item-events protocol-items))
+         (properties result-properties)
+         (fallback-properties
+          (concat properties
                   (unless (string-match-p
                            (concat ":" ende-chat-content-headline-shift-property ":\\|:"
                                    ende-chat-content-synthetic-end-property ":")
-                           result-properties)
-                    (ende-chat--normalized-response-properties normalized))))
-         (reply
-          (when (or (null calls)
-                    (and (stringp content) (not (string-blank-p content))))
-            (ende-chat--assistant-text
-             level question-id request-id
-             (concat result-properties
-                     (when pending
-                       (ende-chat--response-property ende-chat-state-property
-                                                     "pending")))
-             normalized)))
-         (call-sections
-          (mapconcat (lambda (call)
-                       (ende-chat--tool-call-text
-                        level request-id call result-properties))
-                     calls "")))
-    (concat reply call-sections)))
+                           properties)
+                    (ende-chat--normalized-response-properties normalized)))))
+    (if (or (null events) (ende-chat--protocol-events-simple-p events))
+        (concat
+         (when (or (null calls)
+                   (and (stringp content) (not (string-blank-p content))))
+           (ende-chat--assistant-text
+            level question-id request-id
+            (concat fallback-properties
+                    (when pending
+                      (ende-chat--response-property ende-chat-state-property "pending")))
+            normalized))
+         (mapconcat (lambda (call)
+                      (ende-chat--tool-call-text
+                       level request-id call fallback-properties))
+                    calls ""))
+      (concat
+       (mapconcat (lambda (event)
+                    (or (ende-chat--protocol-event-text
+                         event level question-id request-id properties calls
+                         pending store-file)
+                        ""))
+                  events "")
+       (mapconcat
+        (lambda (call)
+          (unless (cl-some
+                   (lambda (event)
+                     (and (eq (plist-get event :type) 'tool-call)
+                          (equal (plist-get event :id)
+                                 (ende-tools-call-value call :id))))
+                   events)
+            (ende-chat--tool-call-text level request-id call properties)))
+        calls "")))))
 
 (defun ende-chat--tool-result-text (level request-id call result)
   "Store RESULT and render its compact sibling reference."
@@ -3367,19 +3503,15 @@ FINAL includes retained tool images and trims compaction output."
                        (ende-chat--reasoning-text
                         reasoning-level question-id request-id result-properties
                         normalized-thinking)))
-                 (protocol-properties
-                  (if compact
-                      result-properties
-                    (concat result-properties
-                            (ende-chat--normalized-response-properties normalized))))
                  (answer
                   (if compact
                       (ende-chat--assistant-text
                        level question-id request-id result-properties
                        normalized t)
                     (ende-chat--assistant-protocol-text
-                     level question-id request-id protocol-properties
-                     normalized nil)))
+                     level question-id request-id result-properties normalized nil nil
+                     (plist-get result :protocol-items)
+                     (plist-get instruction :tool-store-file))))
                  (response (if compact
                                (concat answer reasoning)
                              (concat reasoning answer)))
@@ -3593,7 +3725,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                     calls))
            (assistant
             (list :role "assistant" :content (plist-get prepared :parts)
-                  :tool-calls normalized-calls))
+                  :tool-calls normalized-calls
+                  :protocol-items (plist-get assistant-result :protocol-items)))
            (messages (list assistant)))
       (ende-chat--stage-agent-section
        job
@@ -3602,7 +3735,9 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
         (if assistant-result
             (ende-chat--result-properties job assistant-result)
           "")
-        (plist-get prepared :normalized) calls)
+        (plist-get prepared :normalized) calls nil
+        (plist-get assistant-result :protocol-items)
+        (plist-get (ende-job-instruction job) :tool-store-file))
        t)
       (dolist (entry (cl-mapcar #'cons calls guidance))
         (let* ((call (car entry))
@@ -3672,14 +3807,16 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                         :tool-calls calls
                         :reasoning-content
                         (plist-get result :reasoning-content)
-                        :protocol-history (plist-get result :protocol-history))))
+                        :protocol-items (plist-get result :protocol-items))))
             (unless title-phase
               (ende-chat--stage-agent-section
                job
                (ende-chat--assistant-protocol-text
                 level question-id request-id
                 (ende-chat--result-properties job result)
-                (plist-get prepared :normalized) stored-calls)
+                (plist-get prepared :normalized) stored-calls nil
+                (plist-get result :protocol-items)
+                (plist-get instruction :tool-store-file))
                t))
             (list :message assistant :calls stored-calls)))
         :tool-result-message
