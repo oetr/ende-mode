@@ -3601,36 +3601,47 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
         :execute-spawn-batch #'ende-agent--spawn-batch
         :assistant-message
         (lambda (job result calls)
-          (let* ((instruction (ende-job-instruction job))
+          (let* ((title-phase (eq (ende-job-request-phase job) 'title))
+                 (instruction (ende-job-instruction job))
                  (request-id (plist-get instruction :request-id))
                  (question-id (plist-get instruction :question-id))
                  (level (1+ (plist-get instruction :response-level)))
-                 (prepared (ende-chat--prepare-response job result level))
+                 (prepared (unless title-phase
+                             (ende-chat--prepare-response job result level)))
                  (stored-calls
-                  (mapcar (lambda (call)
-                            (ende-chat--prepare-tool-call
-                             call (plist-get instruction :tool-store-file)))
-                          calls))
+                  (if title-phase
+                      calls
+                    (mapcar (lambda (call)
+                              (ende-chat--prepare-tool-call
+                               call (plist-get instruction :tool-store-file)))
+                            calls)))
                  (assistant
-                  (list :role "assistant" :content (plist-get prepared :parts) :tool-calls calls
+                  (list :role "assistant"
+                        :content (if title-phase
+                                     (or (ende--result-content result) "")
+                                   (plist-get prepared :parts))
+                        :tool-calls calls
                         :reasoning-content
                         (plist-get result :reasoning-content)
                         :protocol-history (plist-get result :protocol-history))))
-            (ende-chat--stage-agent-section
-             job
-             (ende-chat--assistant-protocol-text
-              level question-id request-id
-              (ende-chat--result-properties job result)
-              (plist-get prepared :normalized) stored-calls)
-             t)
+            (unless title-phase
+              (ende-chat--stage-agent-section
+               job
+               (ende-chat--assistant-protocol-text
+                level question-id request-id
+                (ende-chat--result-properties job result)
+                (plist-get prepared :normalized) stored-calls)
+               t))
             (list :message assistant :calls stored-calls)))
         :tool-result-message
         (lambda (job call content)
-          (let* ((instruction (ende-job-instruction job))
+          (let* ((title-phase (eq (ende-job-request-phase job) 'title))
+                 (instruction (ende-job-instruction job))
                  (level (1+ (plist-get instruction :response-level)))
                  (request-id (plist-get instruction :request-id)))
-            (ende-chat--stage-agent-section
-             job (ende-chat--tool-result-text level request-id call content) t)
+            (unless title-phase
+              (ende-chat--stage-agent-section
+               job (ende-chat--tool-result-text level request-id call content) t))
             (list :role "tool"
                   :tool-call-id (ende-tools-call-value call :id)
                   :content content)))
@@ -3747,6 +3758,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (defun ende-chat--job-event (job event)
   "Accumulate provider summaries and retain failure markers for chat replies."
   (when (and (eq (ende-job-type job) 'chat)
+             (not (eq (ende-job-request-phase job) 'title))
              (eq (plist-get event :type) :reasoning-summary)
              (ende-job-current-p job))
     (ende-chat--handle-reasoning-summary job event))

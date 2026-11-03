@@ -86,12 +86,56 @@
               (should-not (member "generate_title"
                                   (ende-test--tool-definition-names
                                    (plist-get (cdr second) :tool-definitions)))))
+            (let* ((work-messages (car (caddr (reverse requests))))
+                   (assistant
+                    (cl-find-if
+                     (lambda (message)
+                       (and (equal (plist-get message :role) "assistant")
+                            (plist-get message :tool-calls)))
+                     work-messages))
+                   (tool-result
+                    (cl-find-if (lambda (message)
+                                  (equal (plist-get message :role) "tool"))
+                                work-messages)))
+              (should (equal (ende-tools-call-value
+                              (car (plist-get assistant :tool-calls)) :name)
+                             "title_test_effect"))
+              (should tool-result))
+            (should
+             (= 1 (ende-tool-store--call-with-database
+                   nil
+                   (lambda (database)
+                     (caar (sqlite-select
+                            database
+                            "SELECT COUNT(*) FROM tool_payloads WHERE kind = 'request'")))
+                   ende-test--tool-store-file)))
+            (should
+             (= 1 (ende-tool-store--call-with-database
+                   nil
+                   (lambda (database)
+                     (caar (sqlite-select
+                            database
+                            "SELECT COUNT(*) FROM tool_payloads WHERE kind = 'result'")))
+                   ende-test--tool-store-file)))
             (should (string-match-p "Actual answer" (buffer-string)))
+            (should-not (string-match-p "Title-only prose" (buffer-string)))
+            (should-not (string-match-p "Ende temporary title phase"
+                                        (buffer-string)))
+            (should-not (string-match-p "generate_title" (buffer-string)))
+            (should-not (string-match-p "spawn_agent" (buffer-string)))
+            (should (string-match-p "\\*\\* Inspect queue lifecycle"
+                                    (buffer-string)))
             (should (string-match-p "ENDE_CHAT_GENERATED_TITLE: t" (buffer-string)))
             (ende-test--chat-goto "** Next")
-            (should-not (string-match-p "\\*\\* Inspect queue lifecycle"
-                                        (ende-test--chat-context-text
-                                         (ende-chat-context-at-point))))))
+            (let ((context (ende-test--chat-context-text
+                            (ende-chat-context-at-point))))
+              (should-not (string-match-p "generate_title" context))
+              (should-not (string-match-p "Title-only prose" context))
+              (should-not (string-match-p "Ende temporary title phase" context))
+              (should-not (string-match-p "spawn_agent" context))
+              (should (string-match-p "title_test_effect" context))
+              (should-not (string-match-p "\\*\\* Inspect queue lifecycle"
+                                          context)))))
       (ende-test--reset))))
 
 (ert-deftest ende-test/title-correction-is-bounded-and-keeps-the-local-fallback ()
@@ -119,6 +163,8 @@
                    (retry (cadr ordered))
                    (work (caddr ordered)))
               (should (equal (butlast first) work))
+              (should (string-match-p "Do not use this as the answer"
+                                      (ende-test--chat-context-text retry)))
               (should (string-match-p "Title correction"
                                       (ende-test--chat-context-text retry)))
               (should-not (string-match-p "temporary title phase"
