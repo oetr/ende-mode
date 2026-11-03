@@ -50,5 +50,84 @@
           (should (equal (ende-credentials-secret profile) "test-key")))
       (delete-file file))))
 
+(ert-deftest ende-credentials-verifies-exact-stored-attributes ()
+  (let* ((backend (make-instance 'auth-source-backend
+                                 :type 'netrc :source "private source"
+                                 :host t :user t :port t
+                                 :search-function 'auth-source-netrc-search))
+         (entry '(:host "example.test" :port 443 :user "work" :secret "test-key")))
+    (cl-letf (((symbol-function 'ende-credentials--discover-backends)
+               (lambda () (list backend)))
+              ((symbol-function 'auth-source-search-backends)
+               (lambda (&rest _) (list entry))))
+      (should (= 1 (length (ende-credentials--candidates "example.test" 443 "work"))))
+      (should-not (ende-credentials--candidates "example.test" 444 "work")))))
+
+(ert-deftest ende-credentials-keeps-secret-service-unverifiable ()
+  (let ((backend (make-instance 'auth-source-backend
+                                :type 'secrets :source "Login"
+                                :host t :user t :port t
+                                :search-function 'auth-source-secrets-search)))
+    (should-not (ende-credentials--adapter backend))))
+
+(ert-deftest ende-credentials-keeps-pass-unverifiable ()
+  (let ((backend (make-instance 'auth-source-backend
+                                :type 'password-store :source "."
+                                :host t :user t :port t
+                                :search-function 'auth-source-pass-search)))
+    (should-not (ende-credentials--adapter backend))))
+
+(ert-deftest ende-credentials-rejects-unverifiable-and-duplicate-results ()
+  (let* ((backend (make-instance 'auth-source-backend
+                                 :type 'netrc :source "test"
+                                 :host t :user t :port t
+                                 :search-function 'auth-source-netrc-search))
+         (entry '(:host "example.test" :port 443 :user "work" :secret "test-key")))
+    (cl-letf (((symbol-function 'ende-credentials--discover-backends)
+               (lambda () (list backend)))
+              ((symbol-function 'auth-source-search-backends)
+               (lambda (&rest _) (list entry entry))))
+      (should-error (ende-credentials--resolve
+                     '(:auth-source-host "example.test" :auth-source-port 443
+                       :auth-source-user "work"))))
+    (cl-letf (((symbol-function 'ende-credentials--discover-backends)
+               (lambda () (list backend)))
+              ((symbol-function 'auth-source-search-backends)
+               (lambda (&rest _) (list '(:host t :port 443 :user "work" :secret "test-key")))))
+      (should-error (ende-credentials--candidates "example.test" 443 "work")))
+    (cl-letf (((symbol-function 'ende-credentials--discover-backends)
+               (lambda () (list backend)))
+              ((symbol-function 'auth-source-search-backends)
+               (lambda (&rest _) (list '(:host "example.test" :user "work" :secret "test-key")))))
+      (should-error (ende-credentials--candidates "example.test" 443 "work")))))
+
+(ert-deftest ende-credentials-names-unsupported-backend-safely ()
+  (let ((backend (make-instance 'auth-source-backend
+                                :type 'password-store :source "secret backend record"
+                                :host t :user t :port t
+                                :search-function 'ignore)))
+    (cl-letf (((symbol-function 'ende-credentials--discover-backends)
+               (lambda () (list backend))))
+      (let ((message (condition-case err
+                         (progn (ende-credentials--candidates "example.test" 443 "work") "")
+                       (error (error-message-string err)))))
+        (should (string-match-p "password-store" message))
+        (should-not (string-match-p "secret backend record" message))))))
+
+(ert-deftest ende-credentials-captured-binding-rejects-replacement ()
+  (let* ((file (make-temp-file "ende-authinfo-"))
+         (auth-sources (list file))
+         (profile '(:auth-method auth-source :auth-source-host "example.test"
+                    :auth-source-port 443 :auth-source-user "work")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "machine example.test port 443 login work password first\n"))
+          (let ((snapshot (ende-credentials-capture profile)))
+            (with-temp-file file
+              (insert "machine example.test port 443 login work password replacement\n"))
+            (should-error (ende-credentials-secret snapshot))))
+      (delete-file file))))
+
 (provide 'ende-credentials-test)
 ;;; ende-credentials-test.el ends here
