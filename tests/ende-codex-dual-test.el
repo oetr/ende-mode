@@ -68,7 +68,7 @@
            (native (ende-codex-auth--register 'codex-oauth 'personal
                                             (ende-codex-dual-test--credentials 'codex-oauth)))
            flights results cancels)
-      (cl-letf (((symbol-function 'ende-codex--lock-refresh)
+      (cl-letf (((symbol-function 'ende-codex--refresh-flight-begin)
                  (lambda (flight) (cl-pushnew flight flights))))
         (dolist (record (list native native siwc))
           (push (ende-codex--refresh-auth record (lambda (result) (push result results))) cancels))
@@ -375,7 +375,7 @@
       (let ((auth (append (list :auth-method method :account 'personal)
                           (ende-codex-dual-test--credentials method))))
         (unwind-protect
-            (cl-letf (((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight)
+            (cl-letf (((symbol-function 'ende-codex--refresh-flight-begin) #'ende-codex--start-refresh-flight)
                       ((symbol-function 'make-process)
                        (lambda (&rest args)
                          (setq command (plist-get args :command))

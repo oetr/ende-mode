@@ -223,7 +223,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                      (should (string-match-p "refresh_token=test-refresh" body)))
                    (cl-incf send-count)))
 		((symbol-function 'ende-codex--profile-auth) (lambda (_profile) auth))
-		((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight))
+		((symbol-function 'ende-codex--refresh-flight-begin) #'ende-codex--start-refresh-flight))
 	(unwind-protect
             (let ((callbacks (list :on-start (lambda (value) (setq cancel value))
                                    :on-error (lambda (value) (setq failure value)))))
@@ -916,7 +916,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                    (lambda (&rest _) '("sleep" "30")))
                   ((symbol-function 'process-send-string) #'ignore)
                   ((symbol-function 'process-send-eof) #'ignore)
-                  ((symbol-function 'ende-codex--lock-refresh) #'ende-codex--start-refresh-flight))
+                  ((symbol-function 'ende-codex--refresh-flight-begin) #'ende-codex--start-refresh-flight))
           (setq cancel (ende-codex--refresh-auth
                         '(:auth-method chatgpt-plan-oauth :account default :client-id "issued" :refresh-token "test-refresh")
                         (lambda (result) (setq failure result))))

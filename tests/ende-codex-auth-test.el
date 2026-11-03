@@ -125,31 +125,7 @@
        (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-error))
      (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
      (should-not (directory-files ende-codex-auth--directory nil "\\`\\.accounts-"))
-     (should-not (file-exists-p (expand-file-name ".writer-lock" ende-codex-auth--directory))))))
-
-(ert-deftest ende-codex-auth-storage-lock-never-overwrites-another-writer ()
-  (ende-codex-auth-test--with-store
-   (let* ((credentials (ende-codex-auth-test--credentials))
-          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
-          (lock (expand-file-name ".writer-lock" ende-codex-auth--directory)))
-     (make-directory lock)
-     (should-error (ende-codex-auth--rotate old credentials) :type 'ende-codex-auth-busy)
-     (should (file-directory-p lock))
-     (should (equal old (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
-     (delete-directory lock))))
-
-(ert-deftest ende-codex-auth-lock-recovery-checks-owner-and-lock-identity ()
-  (ende-codex-auth-test--with-store
-   (ende-codex-auth--path t)
-   (let ((lock (expand-file-name ".writer-lock" ende-codex-auth--directory)))
-     (let ((id (ende-codex-auth--make-lock lock)))
-       (dotimes (_ 20)
-         (should-error (ende-codex-auth--recover-lock ".writer-lock") :type 'user-error))
-       (ende-codex-auth--delete-lock lock id))
-     (ende-codex-auth--make-lock lock)
-     (cl-letf (((symbol-function 'process-attributes) (lambda (_pid) nil)))
-       (should (ende-codex-auth--recover-lock ".writer-lock")))
-     (should-not (file-exists-p lock)))))
+     (should (file-exists-p (expand-file-name ".credentials.lock.sqlite" ende-codex-auth--directory))))))
 
 (ert-deftest ende-codex-auth-storage-errors-never-print-credentials ()
   (ende-codex-auth-test--with-store
@@ -240,25 +216,154 @@
   (ende-codex-auth-test--with-store
    (let* ((credentials (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
           (personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))
+          (personal-new (ende-codex-auth--rotate personal credentials))
           (work (ende-codex-auth--register 'chatgpt-plan-oauth 'work credentials))
           (ende-codex--refresh-flights (make-hash-table :test #'equal))
           flights cancellations)
-     (cl-letf (((symbol-function 'ende-codex--start-refresh-flight)
+     (cl-letf (((symbol-function 'ende-codex--refresh-flight-begin)
                 (lambda (flight) (push flight flights))))
        (unwind-protect
            (progn
              (push (ende-codex--refresh-auth personal #'ignore) cancellations)
-             (push (ende-codex--refresh-auth personal #'ignore) cancellations)
+             (push (ende-codex--refresh-auth personal-new #'ignore) cancellations)
              (should (= (length flights) 1))
+             (should (equal (ende-codex--refresh-key personal)
+                            (ende-codex--refresh-key personal-new)))
              (push (ende-codex--refresh-auth work #'ignore) cancellations)
              (should (= (length flights) 2))
              (mapc #'funcall cancellations)
              (setq cancellations nil)
              (let ((replacement (ende-codex-auth--register 'chatgpt-plan-oauth
-                                 'personal credentials (plist-get personal :revision) t)))
+                                 'personal credentials (plist-get personal-new :revision) t)))
                (push (ende-codex--refresh-auth replacement #'ignore) cancellations)
                (should (= (length flights) 3))))
          (mapc #'funcall cancellations))))))
+
+(ert-deftest ende-codex-auth-refresh-flight-shares-outcome-and-isolates-cancellation ()
+  (let* ((ende-codex--refresh-flights (make-hash-table :test #'equal))
+         (received nil)
+         (cancelled (ende-codex--make-refresh-waiter :callback #'ignore))
+         (waiting (ende-codex--make-refresh-waiter
+                   :callback (lambda (value) (setq received value))))
+         (flight (ende-codex--make-refresh-flight
+                  :key 'registration :waiters (list cancelled waiting))))
+    (puthash 'registration flight ende-codex--refresh-flights)
+    (ende-codex--refresh-cancel-waiter flight cancelled)
+    (should-not (ende-codex--refresh-flight-finished flight))
+    (should (equal (ende-codex--refresh-flight-waiters flight) (list waiting)))
+    (ende-codex--refresh-finish flight 'shared-result)
+    (should (eq received 'shared-result))
+    (should (ende-codex--refresh-flight-finished flight))
+    (should-not (gethash 'registration ende-codex--refresh-flights))))
+
+(ert-deftest ende-codex-auth-refresh-flight-callback-errors-do-not-strand-waiters ()
+  (let* ((ende-codex--refresh-flights (make-hash-table :test #'equal))
+         (called nil)
+         (first (ende-codex--make-refresh-waiter :callback (lambda (_) (error "callback failed"))))
+         (second (ende-codex--make-refresh-waiter :callback (lambda (value) (setq called value))))
+         (flight (ende-codex--make-refresh-flight :key 'key :waiters (list first second))))
+    (puthash 'key flight ende-codex--refresh-flights)
+    (ende-codex--refresh-finish flight 'shared-result)
+    (should (eq called 'shared-result))
+    (should (ende-codex--refresh-flight-finished flight))
+    (should-not (gethash 'key ende-codex--refresh-flights))))
+
+(ert-deftest ende-codex-auth-refresh-before-http-adopts-newer-current-record ()
+  (ende-codex-auth-test--with-store
+   (let* ((expired (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal expired))
+          (current (ende-codex-auth--rotate old (ende-plist-merge
+                                                  expired (list :expires-at (+ (floor (float-time)) 3600)))))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
+          (calls 0) result)
+     (let ((flight (ende-codex--make-refresh-flight
+                    :key (ende-codex--refresh-key old) :auth old
+                    :waiters (list (ende-codex--make-refresh-waiter
+                                    :callback (lambda (value) (setq result value)))))))
+       (puthash (ende-codex--refresh-flight-key flight) flight ende-codex--refresh-flights)
+       (cl-letf (((symbol-function 'ende-codex--start-refresh-flight)
+                  (lambda (_) (cl-incf calls))))
+         (ende-codex--refresh-flight-begin flight))
+       (should (equal result current))
+       (should (= calls 0))
+       (should-not (gethash (ende-codex--refresh-flight-key flight) ende-codex--refresh-flights))))))
+
+(ert-deftest ende-codex-auth-refresh-stale-success-adopts-newer-record ()
+  (ende-codex-auth-test--with-store
+   (let* ((expired (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal expired))
+          (newer (ende-codex-auth--rotate
+                  old (ende-plist-merge expired
+                                        (list :access-token "newer-access"
+                                              :refresh-token "newer-refresh"
+                                              :expires-at (+ (floor (float-time)) 3600)))))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
+          result
+          (flight (ende-codex--make-refresh-flight
+                   :key 'flight :auth old
+                   :waiters (list (ende-codex--make-refresh-waiter
+                                   :callback (lambda (value) (setq result value))))))
+          (payload (ende-codex-auth--json
+                    "{\"access_token\":\"stale-access\",\"refresh_token\":\"stale-refresh\",\"token_type\":\"Bearer\",\"expires_in\":3600}")))
+     (puthash 'flight flight ende-codex--refresh-flights)
+     (ende-codex--refresh-rotate flight payload nil)
+     (should (equal newer result))
+     (should (equal newer (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)))
+     (should-not (equal "stale-refresh"
+                        (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'personal)
+                                   :refresh-token))))))
+
+(ert-deftest ende-codex-auth-refresh-rejected-token-adopts-newer-same-registration ()
+  (ende-codex-auth-test--with-store
+   (let* ((expired (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal expired))
+          (rotated (ende-codex-auth--rotate old
+                                            (ende-plist-merge expired
+                                                              (list :refresh-token "newer-refresh"
+                                                                    :expires-at (+ (floor (float-time)) 3600)))))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
+          (result nil)
+          (flight (ende-codex--make-refresh-flight
+                   :key 'flight :auth old
+                   :waiters (list (ende-codex--make-refresh-waiter
+                                   :callback (lambda (value) (setq result value)))))))
+     (puthash 'flight flight ende-codex--refresh-flights)
+     (cl-letf (((symbol-function 'ende-codex--refresh-finish)
+                (lambda (current value &optional _cancelled)
+                  (setq result value)
+                  (setf (ende-codex--refresh-flight-finished current) t))))
+       (ende-codex--refresh-response
+        flight 400 (ende-codex-auth--json "{\"error\":\"invalid_grant\"}")))
+     (should (equal result rotated))
+     (should-not (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :needs-login)))))
+
+(ert-deftest ende-codex-auth-refresh-conflict-never-adopts-reconnect ()
+  (ende-codex-auth-test--with-store
+   (let* ((expired (plist-put (ende-codex-auth-test--credentials) :expires-at 0))
+          (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal expired))
+          (ende-codex--refresh-flights (make-hash-table :test #'equal))
+          (result nil)
+          (flight (ende-codex--make-refresh-flight
+                   :key 'flight :auth old
+                   :waiters (list (ende-codex--make-refresh-waiter
+                                   :callback (lambda (value) (setq result value)))))))
+     (ende-codex-auth--register 'chatgpt-plan-oauth 'personal
+                                (ende-codex-auth-test--credentials "reconnect")
+                                (plist-get old :revision) t)
+     (puthash 'flight flight ende-codex--refresh-flights)
+     (cl-letf (((symbol-function 'run-at-time)
+                (lambda (_delay _repeat function &rest args)
+                  (when (eq function #'ende-codex--refresh-rejected)
+                    (setf (ende-codex--refresh-flight-attempts flight) 2)
+                    (apply function args))))
+               ((symbol-function 'ende-codex--refresh-finish)
+                (lambda (current value &optional _cancelled)
+                  (setq result value)
+                  (setf (ende-codex--refresh-flight-finished current) t))))
+       (ende-codex--refresh-response
+        flight 400 (ende-codex-auth--json "{\"error\":\"invalid_grant\"}")))
+     (should (ende-error-p result))
+     (should-not (plist-get (ende-codex-auth-read 'chatgpt-plan-oauth 'personal) :needs-login)))))
 
 (ert-deftest ende-codex-auth-refresh-uses-issued-client-and-private-stdin ()
   (ende-codex-auth-test--with-store
@@ -307,9 +412,9 @@
           (rotated (ende-codex-auth--rotate old credentials)))
      (should-error (ende-codex--store-refresh old "stale-access" "stale-refresh" 3600 nil)
                    :type 'ende-codex-auth-conflict)
-     (should (equal rotated (ende-codex--refresh-current old)))
+     (should (equal rotated (ende-codex--refresh-fresh-winner old)))
      (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials (plist-get rotated :revision) t)
-     (should-not (ende-codex--refresh-current old)))))
+     (should-not (ende-codex--refresh-fresh-winner old)))))
 
 (ert-deftest ende-codex-auth-refresh-replacement-while-waiting-fails-closed ()
   (ende-codex-auth-test--with-store
