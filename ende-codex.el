@@ -42,10 +42,10 @@
   "One coalesced OAuth refresh and its waiting callbacks."
   key auth waiters process response-buffer stderr-buffer stderr-process
   headers-file
-  received-bytes finished lock lock-id timer verification (attempts 0))
+  received-bytes finished timer verification (attempts 0))
 
 (defvar ende-codex--refresh-flights (make-hash-table :test #'equal)
-  "In-flight OAuth refreshes keyed by credential source and client identity.")
+  "In-flight refreshes keyed by method, account, and registration.")
 
 (defvar ende-codex--model-probe-processes nil
   "In-flight ChatGPT/Codex model discovery processes.")
@@ -247,21 +247,21 @@ An inherited binding, including an unusable one, survives delegation."
       (setf (ende-codex--refresh-flight-waiters flight) nil
             ende-codex--refresh-processes
             (delq process ende-codex--refresh-processes))
-      (when-let* ((timer (ende-codex--refresh-flight-timer flight))) (cancel-timer timer))
-      (when-let* ((verification (ende-codex--refresh-flight-verification flight)))
-        (setf (ende-codex--refresh-flight-verification flight) nil)
-        (funcall verification))
-      (when-let* ((lock (ende-codex--refresh-flight-lock flight)))
+      (let ((timer (ende-codex--refresh-flight-timer flight))
+            (verification (ende-codex--refresh-flight-verification flight)))
+        (setf (ende-codex--refresh-flight-process flight) nil
+              (ende-codex--refresh-flight-timer flight) nil
+              (ende-codex--refresh-flight-verification flight) nil)
+        (ende-ignore-errors #'cancel-timer timer)
+        (when (and (processp process) (process-live-p process))
+          (ende-ignore-errors #'delete-process process))
         (ende-ignore-errors
-         #'ende-codex-auth--delete-lock
-         lock (ende-codex--refresh-flight-lock-id flight)))
-      (when (and (processp process) (process-live-p process))
-        (ende-ignore-errors #'delete-process process))
-      (ende-curl-cleanup-resources
-       (list (ende-codex--refresh-flight-response-buffer flight)
-             (ende-codex--refresh-flight-stderr-buffer flight))
-       (list (ende-codex--refresh-flight-headers-file flight))
-       (list (ende-codex--refresh-flight-stderr-process flight)))
+         #'ende-curl-cleanup-resources
+         (list (ende-codex--refresh-flight-response-buffer flight)
+               (ende-codex--refresh-flight-stderr-buffer flight))
+         (list (ende-codex--refresh-flight-headers-file flight))
+         (list (ende-codex--refresh-flight-stderr-process flight)))
+        (ende-ignore-errors #'funcall verification))
       (unless cancelled
         (dolist (waiter waiters)
           (unless (ende-codex--refresh-waiter-cancelled waiter)
@@ -334,7 +334,9 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
           auth (gethash "access_token" payload) (gethash "refresh_token" payload)
           (gethash "expires_in" payload) id-token payload))
       (ende-codex-auth-conflict
-       (ende-codex--refresh-finish flight (ende-codex--refresh-current auth)))
+       (ende-codex--refresh-finish
+        flight (or (ende-codex--refresh-newer auth)
+                   (ende-codex--refresh-refusal))))
       ((error quit)
        (ende-codex--refresh-finish flight (ende-codex--refresh-refusal))))))
 
@@ -342,15 +344,31 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
   "Finish FLIGHT after verifying ID-TOKEN from PAYLOAD, or refuse FAILURE."
   (unless (ende-codex--refresh-flight-finished flight)
     (if failure
-        (ende-codex--refresh-finish flight (ende-codex--refresh-refusal))
+        (ende-codex--refresh-finish
+         flight (or (ende-codex--refresh-newer (ende-codex--refresh-flight-auth flight))
+                    (ende-codex--refresh-refusal)))
       (ende-codex--refresh-rotate flight payload id-token))))
 
-(defun ende-codex--refresh-current (auth)
-  "Return a fresh concurrent winner only for AUTH's retained registration."
+(defun ende-codex--refresh-latest (auth)
+  "Return the stored record only while it retains AUTH's registration."
+  (let ((current (ende-codex-auth-read
+                  (plist-get auth :auth-method) (plist-get auth :account))))
+    (and (ende-codex-auth--same-registration-p auth current) current)))
+
+(defun ende-codex--refresh-newer (auth)
+  "Return a changed record for AUTH's registration, if one is stored."
   (condition-case nil
-      (let ((current (ende-codex-auth-read (plist-get auth :auth-method) (plist-get auth :account))))
-        (and (ende-codex--auth-fresh-p current)
-             (ende-codex-auth--same-registration-p auth current) current))
+      (let ((current (ende-codex--refresh-latest auth)))
+        (and current
+             (not (equal (plist-get auth :revision) (plist-get current :revision)))
+             current))
+    ((error quit) nil)))
+
+(defun ende-codex--refresh-fresh-winner (auth)
+  "Return a fresh concurrent winner for AUTH's retained registration."
+  (condition-case nil
+      (let ((current (ende-codex--refresh-latest auth)))
+        (and current (ende-codex--auth-fresh-p current) current))
     ((error quit) nil)))
 
 (defun ende-codex--refresh-response (flight status payload)
@@ -370,17 +388,17 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
                        (apply-partially #'ende-codex--refresh-verified
                                         flight payload id-token)))
               (ende-codex--refresh-rotate flight payload nil))))
-      (let ((winner (ende-codex--refresh-current auth)))
-        (if winner (ende-codex--refresh-finish flight winner)
-          (when terminal (ende-codex-auth--require-login auth))
-          (ende-codex--refresh-finish
-           flight (ende-error-create
-                   :kind (if terminal 'auth 'transport)
-                   :message (if terminal "Codex requires sign-in; connect through the connection selector"
-                              "OpenAI refresh was rejected; credentials retained")
-                   :details (list :status status
-                                  :code (and (stringp code) (<= (length code) 100)
-                                             (string-match-p "\\`[a-z_]+\\'" code) code)))))))))
+      (let ((winner (ende-codex--refresh-fresh-winner auth)))
+        (cond
+         (winner (ende-codex--refresh-finish flight winner))
+         (terminal (ende-codex--refresh-rejected flight status code))
+         (t (ende-codex--refresh-finish
+             flight (ende-error-create
+                     :kind 'transport
+                     :message "OpenAI refresh was rejected; credentials retained"
+                     :details (list :status status
+                                    :code (and (stringp code) (<= (length code) 100)
+                                               (string-match-p "\\`[a-z_]+\\'" code) code))))))))))
 
 (defun ende-codex--refresh-sentinel (flight process _event)
   "Handle terminal PROCESS for refresh FLIGHT without leaking token responses."
@@ -399,7 +417,8 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
                (ende-codex-auth--json (buffer-string)))))
         ((error quit)
          (ende-codex--refresh-finish
-          flight (or (and (eq (car failure) 'ende-codex-auth-conflict) (ende-codex--refresh-current auth))
+          flight (or (and (eq (car failure) 'ende-codex-auth-conflict)
+                          (ende-codex--refresh-newer auth))
                      (ende-codex--refresh-refusal))))))))
 
 (defun ende-codex--start-refresh-flight (flight)
@@ -461,47 +480,61 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
          :message "Codex credential refresh could not be started"))))))
 
 (defun ende-codex--refresh-key (auth)
-  "Return the private coalescing key for AUTH's exact account/registration."
-  (append (ende-codex--account-binding-state auth) (list (plist-get auth :revision))))
+  "Return AUTH's in-process flight key."
+  (list (plist-get auth :auth-method) (plist-get auth :account)
+        (plist-get auth :registration-id)))
 
-(defun ende-codex--retry-lock-refresh (flight)
-  "Retry lock acquisition for FLIGHT, or finish after bounded contention."
-  (if (< (cl-incf (ende-codex--refresh-flight-attempts flight)) 40)
-      (setf (ende-codex--refresh-flight-timer flight)
-            (run-at-time 0.5 nil #'ende-codex--lock-refresh flight))
-    (ende-codex--refresh-finish
-     flight (ende-error-create :kind 'auth
-                               :message "Codex refresh is locked or credentials changed; retry or connect through the connection selector"))))
+(defun ende-codex--refresh-rejected (flight status code)
+  "Recheck a rejected refresh before invalidating FLIGHT's credentials."
+  (unless (ende-codex--refresh-flight-finished flight)
+    (let* ((auth (ende-codex--refresh-flight-auth flight))
+           (current (condition-case nil (ende-codex--refresh-latest auth)
+                      ((error quit) nil))))
+      (cond
+       ((and current
+             (not (equal (plist-get auth :revision) (plist-get current :revision))))
+        (ende-codex--refresh-finish flight current))
+       ((< (ende-codex--refresh-flight-attempts flight) 2)
+        (cl-incf (ende-codex--refresh-flight-attempts flight))
+        (setf (ende-codex--refresh-flight-timer flight)
+              (run-at-time 0.2 nil #'ende-codex--refresh-rejected flight status code)))
+       ((null current)
+        (ende-codex--refresh-finish flight (ende-codex--refresh-refusal)))
+       (t
+        (condition-case nil
+            (progn
+              (ende-codex-auth--require-login auth)
+              (ende-codex--refresh-finish
+               flight (ende-error-create
+                       :kind 'auth
+                       :message "Codex requires sign-in; connect through the connection selector"
+                       :details (list :status status
+                                      :code (and (stringp code) (<= (length code) 100)
+                                                 (string-match-p "\\`[a-z_]+\\'" code) code)))))
+          (ende-codex-auth-conflict
+           (ende-codex--refresh-finish
+            flight (or (ende-codex--refresh-newer auth)
+                       (ende-codex--refresh-refusal))))
+          ((error quit)
+           (ende-codex--refresh-finish flight (ende-codex--refresh-refusal)))))))))
 
-(defun ende-codex--lock-refresh (flight)
-  "Serialize rotating token use across Emacs instances before starting FLIGHT."
+(defun ende-codex--refresh-flight-begin (flight)
+  "Re-read credentials before starting FLIGHT's single HTTP request."
   (unless (ende-codex--refresh-flight-finished flight)
     (condition-case nil
         (let* ((auth (ende-codex--refresh-flight-auth flight))
-               (directory (ende-codex-auth--path nil))
-               (lock (expand-file-name
-                      (concat ".refresh-" (symbol-name (plist-get auth :auth-method))
-                              "-" (symbol-name (plist-get auth :account))) directory)))
-          (condition-case nil
-              (setf (ende-codex--refresh-flight-lock-id flight)
-                    (ende-codex-auth--make-lock lock)
-                    (ende-codex--refresh-flight-lock flight) lock)
-            (file-already-exists (ende-codex-auth--attributes lock t t)))
-          (let ((current (ende-codex-auth-read (plist-get auth :auth-method) (plist-get auth :account))))
-            (unless (ende-codex-auth--same-registration-p auth current)
-              (signal 'ende-codex-auth-conflict nil))
-            (cond
-             ((ende-codex--auth-fresh-p current) (ende-codex--refresh-finish flight current))
-             ((not (equal (plist-get auth :revision) (plist-get current :revision)))
-              (error "Refusing to reuse changed refresh credentials"))
-             ((ende-codex--refresh-flight-lock flight) (ende-codex--start-refresh-flight flight))
-             (t (ende-codex--retry-lock-refresh flight)))))
-      (ende-codex-auth-busy
-       (ende-codex--retry-lock-refresh flight))
+               (current (ende-codex--refresh-latest auth)))
+          (unless current (signal 'ende-codex-auth-conflict nil))
+          (cond
+           ((ende-codex--auth-fresh-p current)
+            (ende-codex--refresh-finish flight current))
+           ((plist-get current :needs-login)
+            (ende-codex--refresh-finish flight (ende-codex--refresh-refusal)))
+           (t
+            (setf (ende-codex--refresh-flight-auth flight) current)
+            (ende-codex--start-refresh-flight flight))))
       ((error quit)
-       (ende-codex--refresh-finish
-        flight (ende-error-create :kind 'auth
-                                  :message "Codex refresh is locked or credentials changed; retry or connect through the connection selector"))))))
+       (ende-codex--refresh-finish flight (ende-codex--refresh-refusal))))))
 
 (defun ende-codex--refresh-auth (auth callback)
   "Coalesce a refresh for AUTH and register CALLBACK as a waiter.
@@ -519,7 +552,7 @@ Return a cancellation function that only removes this callback."
     (setf (ende-codex--refresh-flight-waiters flight)
           (cons waiter (ende-codex--refresh-flight-waiters flight)))
     (when new-flight
-      (ende-codex--lock-refresh flight))
+      (ende-codex--refresh-flight-begin flight))
     (apply-partially #'ende-codex--refresh-cancel-waiter flight waiter)))
 
 (defun ende-codex--scopes (auth)

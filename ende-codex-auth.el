@@ -363,7 +363,7 @@ replacement token was verified against the pinned JWKS endpoint."
               "Codex credentials changed; retry from the current registration"
               'ende-codex-auth-error)
 (define-error 'ende-codex-auth-busy
-              "Codex credential storage is locked by another writer"
+              "Codex credential storage is busy"
               'ende-codex-auth-error)
 
 (defconst ende-codex-auth--fields
@@ -494,228 +494,7 @@ other users.  No symbolic links or multiply linked credential files are safe."
           (ende-codex-auth--fail))))
     attributes))
 
-(defun ende-codex-auth--lock-name-p (name)
-  "Return non-nil when NAME is a recognized credential lock."
-  (and (stringp name)
-       (or (equal name ".writer-lock")
-           (string-match-p
-            "\\`\\.refresh-\\(?:chatgpt-plan-oauth\\|codex-oauth\\)-[a-z0-9][a-z0-9_-]*\\'"
-            name))))
 
-(defun ende-codex-auth--lock-owner (lock)
-  "Return validated owner metadata in LOCK, nil if absent, or :invalid."
-  (let* ((file (expand-file-name "owner" lock))
-         (attributes (file-attributes file 'integer)))
-    (if (null attributes)
-        :invalid
-      (when (file-symlink-p file)
-        (ende-codex-auth--fail))
-      (ende-codex-auth--attributes file nil t)
-      (if (> (file-attribute-size attributes) 4096)
-          :invalid
-        (condition-case nil
-            (let* ((data (with-temp-buffer
-                           (insert-file-contents-literally file)
-                           (json-parse-string (buffer-string) :object-type 'hash-table)))
-                   (pid (and (hash-table-p data) (gethash "pid" data)))
-                   (host (and (hash-table-p data) (gethash "host" data)))
-                   (started (and (hash-table-p data) (gethash "started" data)))
-                   (id (and (hash-table-p data) (gethash "id" data))))
-              (if (and (hash-table-p data) (= (hash-table-count data) 4)
-                       (integerp pid) (> pid 0)
-                       (ende-codex-auth--text-p host)
-                       (or (null started) (stringp started))
-                       (ende-codex-auth--id-p id))
-                  (list :pid pid :host host :started started :id id)
-                :invalid))
-          (error :invalid))))))
-
-(defun ende-codex-auth--process-start (pid)
-  "Return PID's stable Linux start ticks, or nil if unavailable."
-  (condition-case nil
-      (with-temp-buffer
-        (insert-file-contents-literally (format "/proc/%d/stat" pid))
-        (goto-char (point-max))
-        (when (search-backward ") " nil t)
-          (let ((ticks (nth 19 (split-string
-                                (buffer-substring-no-properties (+ (point) 2)
-                                                                (point-max))))))
-            (and ticks (string-match-p "\\`[0-9]+\\'" ticks) ticks))))
-    (error nil)))
-
-(defun ende-codex-auth--raw-lock (lock)
-  "Create LOCK and its owner metadata inside the shared mutex."
-  (let ((original (default-file-modes)) identity complete)
-    (unwind-protect
-        (progn
-          (unwind-protect
-              (progn
-                (set-default-file-modes #o700)
-                (make-directory lock)
-                (setq identity (ende-codex-auth--lock-identity lock)))
-            (set-default-file-modes original))
-          (ende-codex-auth--attributes lock t t)
-          (let* ((started (ende-codex-auth--process-start (emacs-pid)))
-                 (owner (let ((data (make-hash-table :test #'equal)))
-                          (puthash "pid" (emacs-pid) data)
-                          (puthash "host" (system-name) data)
-                          (puthash "started" started data)
-                          (puthash "id" (ende-codex-auth--new-id) data)
-                          data))
-                 (file (expand-file-name "owner" lock))
-                 (original (default-file-modes)))
-            (unwind-protect
-                (progn
-                  (set-default-file-modes #o600)
-                  (with-temp-buffer
-                    (insert (json-encode owner) "\n")
-                    (write-region (point-min) (point-max) file nil 'silent)))
-              (set-default-file-modes original))
-            (set-file-modes file #o600)
-            (ende-codex-auth--attributes file nil t)
-            (setq identity (ende-codex-auth--lock-identity lock)
-                  complete t)
-            identity))
-      (when (and identity (not complete)
-                 (equal (car identity) (car (ende-codex-auth--lock-identity lock))))
-        (ende-codex-auth--remove-lock lock)))))
-
-(defun ende-codex-auth--with-lock-guard (function &optional timeout)
-  "Call FUNCTION under the mutex, optionally waiting TIMEOUT milliseconds."
-  (condition-case nil
-      (ende-lock-call (expand-file-name ".lock-guard.sqlite" (ende-codex-auth--path t))
-                      function timeout)
-    (ende-lock-busy (signal 'ende-codex-auth-busy nil))
-    (ende-lock-error (ende-codex-auth--fail))))
-
-(defun ende-codex-auth--lock-contents (lock)
-  "Validate LOCK and return its recognized contents."
-  (unless (ende-codex-auth--attributes lock t t)
-    (user-error "Credential lock no longer exists"))
-  (let ((contents (directory-files lock nil directory-files-no-dot-files-regexp)))
-    (unless (or (null contents) (equal contents '("owner")))
-      (user-error "Credential lock has unrecognized contents"))
-    contents))
-
-(defun ende-codex-auth--remove-lock (lock)
-  "Remove only recognized contents of LOCK inside the shared mutex."
-  (when (ende-codex-auth--lock-contents lock)
-    (ende-codex-auth--attributes (expand-file-name "owner" lock) nil t)
-    (delete-file (expand-file-name "owner" lock)))
-  (delete-directory lock))
-
-(defun ende-codex-auth--delete-lock-now (lock identity timeout)
-  "Remove LOCK only when its complete IDENTITY is unchanged."
-  (ende-codex-auth--with-lock-guard
-   (lambda ()
-     (when (and (file-exists-p lock)
-                (equal identity (ende-codex-auth--lock-identity lock)))
-       (ende-codex-auth--remove-lock lock)))
-   timeout))
-
-(defun ende-codex-auth--delete-lock-retry (lock identity)
-  "Retry deleting LOCK after transient guard contention."
-  (condition-case nil
-      (ende-codex-auth--delete-lock-now lock identity 0)
-    (ende-codex-auth-busy
-     (run-at-time 0.5 nil #'ende-codex-auth--delete-lock-retry lock identity))
-    ((error quit) nil)))
-
-(defun ende-codex-auth--delete-lock (lock identity)
-  "Remove LOCK, deferring only transient guard contention."
-  (condition-case nil
-      (ende-codex-auth--delete-lock-now lock identity 5000)
-    (ende-codex-auth-busy
-     (run-at-time 0.5 nil #'ende-codex-auth--delete-lock-retry lock identity))))
-
-(defun ende-codex-auth--make-lock (lock)
-  "Create LOCK and owner metadata while holding the shared mutex."
-  (ende-codex-auth--with-lock-guard
-   (lambda () (ende-codex-auth--raw-lock lock))))
-
-(defun ende-codex-auth--lock-identity (lock)
-  "Return LOCK's identity, entries, and exact bounded owner contents."
-  (let ((attributes (ende-codex-auth--attributes lock t t)))
-    (when attributes
-      (let* ((contents (ende-codex-auth--lock-contents lock))
-             (file (expand-file-name "owner" lock))
-             (owner (and contents (ende-codex-auth--attributes file nil t))))
-        (when (and owner (> (file-attribute-size owner) 4096))
-          (ende-codex-auth--fail))
-        (list (list (file-attribute-device-number attributes)
-                    (file-attribute-inode-number attributes))
-              contents
-              (when owner
-                (list (file-attribute-device-number owner)
-                      (file-attribute-inode-number owner)
-                      (with-temp-buffer
-                        (insert-file-contents-literally file)
-                        (buffer-string)))))))))
-
-(defun ende-codex-auth--lock-owner-status (owner)
-  "Return whether OWNER is active, abandoned, or unverifiable."
-  (cond
-   ((not (listp owner)) 'unknown)
-   ((not (equal (plist-get owner :host) (system-name))) 'unknown)
-   ((not (fboundp 'process-attributes)) 'unknown)
-   (t
-    (let ((attributes (condition-case nil
-                          (process-attributes (plist-get owner :pid))
-                        (error :unavailable))))
-      (cond
-       ((eq attributes :unavailable) 'unknown)
-       ((null attributes) 'abandoned)
-       ((equal (cdr (assq 'state attributes)) "Z") 'abandoned)
-       (t
-        (let ((started (ende-codex-auth--process-start (plist-get owner :pid))))
-          (if (or (null started) (null (plist-get owner :started))
-                  (equal started (plist-get owner :started)))
-              'active
-            'abandoned))))))))
-
-(defun ende-codex-auth--recover-lock (name &optional confirmed)
-  "Recover recognized abandoned lock NAME, requiring CONFIRMED if uncertain."
-  (unless (ende-codex-auth--lock-name-p name)
-    (user-error "Not a recognized credential lock"))
-  (let* ((directory (ende-codex-auth--path nil))
-         (lock (expand-file-name name directory)))
-    (ende-codex-auth--lock-contents lock)
-    (let* ((owner (ende-codex-auth--lock-owner lock))
-           (identity (ende-codex-auth--lock-identity lock))
-           (status (ende-codex-auth--lock-owner-status owner)))
-      (unless identity (user-error "Credential lock no longer exists"))
-      (when (eq status 'active)
-        (user-error "Credential lock owner is still active"))
-      (when (and (eq status 'unknown) (not confirmed))
-        (unless (yes-or-no-p "Cannot verify lock owner; remove it anyway? ")
-          (user-error "Credential lock was not recovered"))
-        (setq confirmed t))
-      (ende-codex-auth--with-lock-guard
-       (lambda ()
-         (unless (equal identity (ende-codex-auth--lock-identity lock))
-           (user-error "Credential lock changed during recovery"))
-         (let ((current (ende-codex-auth--lock-owner-status
-                         (ende-codex-auth--lock-owner lock))))
-           (when (eq current 'active)
-             (user-error "Credential lock owner is still active"))
-           (when (and (eq current 'unknown) (not confirmed))
-             (user-error "Credential lock now requires confirmation; retry recovery")))
-         (ende-codex-auth--remove-lock lock)
-         t)))))
-
-;;;###autoload
-(defun ende-codex-auth-recover-lock ()
-  "Interactively recover an abandoned private credential lock."
-  (interactive)
-  (let* ((directory (ende-codex-auth--path nil))
-         (locks (cl-remove-if-not
-                 #'ende-codex-auth--lock-name-p
-                 (directory-files directory nil "\\`\\."))))
-    (if (null locks)
-        (message "ende: no credential locks found")
-      (let ((name (completing-read "Recover credential lock: " locks nil t)))
-        (when (ende-codex-auth--recover-lock name)
-          (message "ende: recovered %s" name))))))
 
 (defun ende-codex-auth--ensure-directory (path create private)
   "Validate PATH and its ancestors; CREATE missing directories privately."
@@ -808,25 +587,23 @@ other users.  No symbolic links or multiply linked credential files are safe."
       (when temporary (delete-file temporary)))))
 
 (defun ende-codex-auth--transaction (function)
-  "Run FUNCTION with fresh state under an exclusive cross-instance lock.
-Never recover an existing lock automatically.  Every writer rereads under the
-lock and must still compare the individual account revision."
+  "Run FUNCTION on fresh state under the permanent SQLite store mutex."
   (let* ((directory (ende-codex-auth--path t))
-         (lock (expand-file-name ".writer-lock" directory)) lock-id)
-    (unwind-protect
-        (progn
-          (condition-case nil
-              (setq lock-id (ende-codex-auth--make-lock lock))
-            (file-already-exists (signal 'ende-codex-auth-busy nil)))
-          (let ((state (or (ende-codex-auth--read-state directory)
-                           (let ((new (make-hash-table :test #'equal)))
-                             (puthash "version" 2 new)
-                             (puthash "host_id" (ende-codex-auth--new-id) new)
-                             (puthash "accounts" (make-hash-table :test #'equal) new)
-                             new))))
-            (prog1 (funcall function state)
-              (ende-codex-auth--write-state directory state))))
-      (when lock-id (ende-codex-auth--delete-lock lock lock-id)))))
+         (mutex (expand-file-name ".credentials.lock.sqlite" directory)))
+    (condition-case nil
+        (ende-lock-call
+         mutex
+         (lambda ()
+           (let ((state (or (ende-codex-auth--read-state directory)
+                            (let ((new (make-hash-table :test #'equal)))
+                              (puthash "version" 2 new)
+                              (puthash "host_id" (ende-codex-auth--new-id) new)
+                              (puthash "accounts" (make-hash-table :test #'equal) new)
+                              new))))
+             (prog1 (funcall function state)
+               (ende-codex-auth--write-state directory state)))))
+      (ende-lock-busy (signal 'ende-codex-auth-busy nil))
+      (ende-lock-error (ende-codex-auth--fail)))))
 
 (defun ende-codex-auth-host-id ()
   "Return the installation's persistent opaque ID, creating it if necessary.
