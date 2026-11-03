@@ -666,11 +666,18 @@ HANDLER receives one `ende-job' object."
          (profile (ende-job-profile job))
          (overrides (ende-job-scheduling-overrides job))
          (parallel-default
-          (let ((runtime (ende-provider--runtime-value
-                          (plist-get profile :name) :parallel)))
-            (if (eq runtime :unset)
-                (ende-provider-parallel-enabled-p profile)
-              (eq runtime t))))
+          (let* ((buffer (and (ende-target-p (ende-job-target job))
+                              (ende-target-buffer (ende-job-target job))))
+                 (selection (and (buffer-live-p buffer)
+                                 (ende-model-selection-provider-for-buffer
+                                  (plist-get profile :name) buffer))))
+            (if (and selection (plist-member selection :parallel))
+                (eq (plist-get selection :parallel) t)
+              (let ((runtime (ende-provider--runtime-value
+                              (plist-get profile :name) :parallel)))
+                (if (eq runtime :unset)
+                    (ende-provider-parallel-enabled-p profile)
+                  (eq runtime t))))))
          (limit-default (ende-provider-max-concurrency profile)))
     (if (and family (ende-job-family-policy-frozen-p family))
         (list :parallel (ende-job-family-parallel family)

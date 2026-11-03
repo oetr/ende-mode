@@ -446,9 +446,9 @@ kept lexical so recording a preference never initiates a TRAMP connection."
 (defun ende-model-selection-provider-for-buffer (provider &optional buffer)
   "Return BUFFER's saved selection for PROVIDER, or its latest saved value."
   (let* ((buffer (or buffer (current-buffer)))
-         (table (ende-model-selection-provider-table buffer)))
-    (or (and table
-             (copy-tree (gethash provider table)))
+         (table (and (eq ende-model-selection-scope 'buffer)
+                     (ende-model-selection-provider-table buffer))))
+    (or (and table (copy-tree (gethash provider table)))
         (copy-tree (gethash provider ende-model-selection--provider-selections)))))
 
 (defun ende-model-selection-save-provider (selection &optional buffer)
@@ -480,10 +480,16 @@ SELECTION must contain a provider symbol and a nonempty model string."
                    (plist-get selection :control-preferences))))))
       (when (and (symbolp provider) provider
                  (stringp model) (not (string-empty-p model)))
-        (append (list :provider provider :model model)
-                (ende-model-selection-connection selection)
-                (when preferences-present
-                  (list :control-preferences preferences)))))))
+        (let ((parallel (plist-get selection :parallel)))
+          (when (and (plist-member selection :parallel)
+                     (not (memq parallel '(nil t))))
+            (error "Provider parallel setting must be boolean"))
+          (append (list :provider provider :model model)
+                  (ende-model-selection-connection selection)
+                  (when (plist-member selection :parallel)
+                    (list :parallel parallel))
+                  (when preferences-present
+                    (list :control-preferences preferences))))))))
 
 (defun ende-model-selection--pair-key (provider model api &optional connection)
   "Return the preference-history key for PROVIDER, MODEL and API, or nil.
@@ -645,6 +651,8 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
       (error "Invalid `ende-model-selection-scope': %s"
              ende-model-selection-scope))
     (unless skip-preference-history
+      (ende-model-selection-save-provider selection buffer))
+    (unless skip-preference-history
       (if (plist-member selection :control-preferences)
           (ende-model-selection-save-control-preferences
            (plist-get selection :provider) (plist-get selection :model)
@@ -711,6 +719,8 @@ An unset buffer follows the current configured provider defaults."
           (ende-model-selection-control-preferences provider model api buffer connection))
          (profile (ende-provider-profile-for-selection
                    provider model preferences api connection)))
+    (when (and matching-selection-p (plist-member selection :parallel))
+      (setq profile (plist-put profile :parallel (plist-get selection :parallel))))
     (let ((provenance (gethash (ende-model-selection--provenance-key selection)
                                ende-model-selection--provenance)))
       (when (and provenance (not (equal provenance (ende-provider-selection-provenance profile))))

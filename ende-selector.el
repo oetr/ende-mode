@@ -83,6 +83,9 @@
 (defvar-local ende-selector--draft-models nil
   "Provisional model choices keyed by provider and connection identity.")
 
+(defvar-local ende-selector--draft-selections nil
+  "Provisional provider configurations keyed by provider name.")
+
 (defvar-local ende-selector--effort nil
   "Reasoning effort selected for the current provider, model and API.")
 
@@ -225,9 +228,9 @@
   (or (and (hash-table-p ende-selector--draft-connections)
            (gethash provider ende-selector--draft-connections))
       (let ((selection
-             (ende-model-selection-for-buffer
-              (or ende-selector--source-buffer (current-buffer)))))
-        (when (eq provider (plist-get selection :provider))
+             (ende-model-selection-provider-for-buffer
+              provider (or ende-selector--source-buffer (current-buffer)))))
+        (when selection
           (list :api (plist-get selection :api)
                 :connection (ende-model-selection-connection selection))))))
 
@@ -253,7 +256,15 @@
              (ende-selector--model-name)
              (eq ende-selector--model-state :ready))
     (puthash (ende-selector--model-key)
-             (ende-selector--model-name) ende-selector--draft-models)))
+             (ende-selector--model-name) ende-selector--draft-models)
+    (let* ((provider (ende-selector--provider-name))
+           (selection
+            (append (list :provider provider :model (ende-selector--model-name))
+                    (ende-model-selection-connection (ende-selector--provider-profile))
+                    (list :parallel (ende-selector--provider-parallel-p)))))
+      (unless (hash-table-p ende-selector--draft-selections)
+        (setq ende-selector--draft-selections (make-hash-table :test #'eq)))
+      (puthash provider selection ende-selector--draft-selections))))
 
 (defun ende-selector--control-key ()
   "Return the identity for provisional controls of the current model."
@@ -330,16 +341,18 @@
 (defun ende-selector--remembered-model (provider)
   "Return the remembered model for PROVIDER, or nil."
   (let ((selection
-         (ende-model-selection-for-buffer
-          (or ende-selector--source-buffer (current-buffer)))))
-    (and (eq provider (plist-get selection :provider))
+         (ende-model-selection-provider-for-buffer
+          provider (or ende-selector--source-buffer (current-buffer)))))
+    (and selection
          (condition-case nil
              (equal
-              (ende-provider-selection-provenance (ende-selector--provider-profile))
               (ende-provider-selection-provenance
                (ende-provider--compose-profile
                 provider nil (plist-get selection :api)
-                (ende-model-selection-connection selection))))
+                (ende-model-selection-connection selection)))
+              (ende-provider-selection-provenance
+               (ende-provider--compose-profile
+                provider nil ende-selector--api ende-selector--connection)))
            (error nil))
          (plist-get selection :model))))
 
@@ -409,10 +422,15 @@ Report an unavailable model once for each catalog identity."
       (unless (hash-table-p ende-selector--draft-runtime)
         (setq ende-selector--draft-runtime (make-hash-table :test #'eq)))
       (or (gethash provider ende-selector--draft-runtime)
-          (let* ((profile (ende-provider--compose-profile
+          (let* ((selection
+                  (ende-model-selection-provider-for-buffer
+                   provider (or ende-selector--source-buffer (current-buffer))))
+                 (profile (ende-provider--compose-profile
                            provider nil ende-selector--api ende-selector--connection))
                  (concurrency (ende-provider-max-concurrency profile))
-                 (parallel (ende-provider-parallel-enabled-p profile))
+                 (parallel (if (and selection (plist-member selection :parallel))
+                               (plist-get selection :parallel)
+                             (ende-provider-parallel-enabled-p profile)))
                  (state (list :max-concurrency concurrency :parallel parallel
                               :initial (list :max-concurrency concurrency
                                              :parallel parallel))))
@@ -1310,9 +1328,11 @@ performed locally so typing a search term never starts another network request."
       (let* ((state (ende-selector--draft-control-state))
              (preferences (and state (plist-get state :preferences)))
              (include-preferences (and state (or preferences (plist-get state :dirty))))
+             (runtime (ende-selector--draft-runtime-state))
              (saved
               (ende-model-selection-save
-               (append (list :provider provider :model model)
+               (append (list :provider provider :model model
+                             :parallel (plist-get runtime :parallel))
                        (ende-model-selection-connection (ende-selector--provider-profile))
                        (when include-preferences
                          (list :control-preferences (copy-tree preferences))))
@@ -1354,13 +1374,14 @@ performed locally so typing a search term never starts another network request."
   t)
 
 (defun ende-selector--commit-runtime-settings ()
-  "Commit provisional runtime settings once after validation."
+  "Commit provisional concurrency settings once after validation."
   (when (hash-table-p ende-selector--draft-runtime)
     (let (changed)
       (maphash
        (lambda (provider state)
-         (dolist (key (plist-get state :changed))
-           (ende-provider-set-runtime-setting provider key (plist-get state key))
+         (when (memq :max-concurrency (plist-get state :changed))
+           (ende-provider-set-runtime-setting
+            provider :max-concurrency (plist-get state :max-concurrency))
            (setq changed t)))
        ende-selector--draft-runtime)
       changed)))
@@ -1388,6 +1409,12 @@ performed locally so typing a search term never starts another network request."
           :last-used (copy-tree ende-model-selection--last-used)
           :selections (ende-selector--copy-hash-table
                        ende-model-selection--buffer-selections)
+          :provider-selections
+          (ende-selector--copy-hash-table
+           ende-model-selection--provider-selections)
+          :buffer-provider-selections
+          (ende-selector--copy-hash-table
+           ende-model-selection--buffer-provider-selections)
           :shared-controls (ende-selector--copy-hash-table
                             ende-model-selection--shared-control-preferences)
           :buffer-controls (ende-selector--copy-hash-table
@@ -1409,6 +1436,12 @@ performed locally so typing a search term never starts another network request."
   (setq ende-model-selection--last-used (plist-get snapshot :last-used))
   (ende-selector--restore-hash-table
    ende-model-selection--buffer-selections (plist-get snapshot :selections))
+  (ende-selector--restore-hash-table
+   ende-model-selection--provider-selections
+   (plist-get snapshot :provider-selections))
+  (ende-selector--restore-hash-table
+   ende-model-selection--buffer-provider-selections
+   (plist-get snapshot :buffer-provider-selections))
   (ende-selector--restore-hash-table
    ende-model-selection--shared-control-preferences
    (plist-get snapshot :shared-controls))
@@ -1465,6 +1498,12 @@ performed locally so typing a search term never starts another network request."
                   (or ende-selector--source-buffer (current-buffer))
                   (plist-get state :connection))))
              ende-selector--draft-controls))
+          (when (hash-table-p ende-selector--draft-selections)
+            (maphash
+             (lambda (_provider saved)
+               (ende-model-selection-save-provider
+                saved (or ende-selector--source-buffer (current-buffer))))
+             ende-selector--draft-selections))
           (setq selection (ende-selector--save-selection))
           (unless selection (user-error "No ready model available"))
           (setq runtime-changed (ende-selector--commit-runtime-settings))
@@ -1707,6 +1746,7 @@ performed locally so typing a search term never starts another network request."
             ende-selector--draft-runtime (make-hash-table :test #'eq)
             ende-selector--draft-connections (make-hash-table :test #'eq)
             ende-selector--draft-models (make-hash-table :test #'equal)
+            ende-selector--draft-selections (make-hash-table :test #'eq)
             ende-selector--effort nil
             ende-selector--effort-state :none)
       (when (eq last-provider (nth provider-index providers))

@@ -978,6 +978,95 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest ende-test/provider-configuration-is-buffer-specific-and-restored ()
+  (let* ((source (generate-new-buffer " *ende-provider-history-source*"))
+         (other (generate-new-buffer " *ende-provider-history-other*"))
+         (selector nil)
+         (ende-providers '(alpha beta))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
+         (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+         (ende-model-selection--provenance (make-hash-table :test #'equal))
+         (ende-model-selection--shared-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-model-selection--buffer-control-preferences
+          (make-hash-table :test #'equal))
+         (ende-custom-providers
+          '((alpha :api openai-chat-completions :auth-method auth-source
+                   :base-url "https://alpha.test/v1"
+                   :models ("alpha-default" "alpha-choice"))
+            (beta :api openai-chat-completions :auth-method none
+                  :base-url "http://localhost:8081/v1"
+                  :models ("beta-default" "beta-choice")))))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'display-buffer) (lambda (&rest _) nil))
+                    ((symbol-function 'ende-provider-model-discovery-available-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-provider-cached-models) (lambda (_) nil)))
+            (with-current-buffer source (ende-selector-open))
+            (setq selector (get-buffer ende-selector-buffer-name))
+            (with-current-buffer selector
+              (ende-selector-configure-connection))
+            (with-current-buffer (get-buffer "*ende-connection*")
+              (cl-letf (((symbol-function 'read-string)
+                         (lambda (&rest _) "work"))
+                        ((symbol-function 'completing-read)
+                         (lambda (&rest _) "openai-chat-completions")))
+                (ende-selector-connection-account)
+                (ende-selector-connection-api)
+                (ende-selector-connection-apply)))
+            (with-current-buffer selector
+              (ende-selector-next-model)
+              (ende-selector-toggle-parallel)
+              (ende-selector--set-provider 1)
+              (ende-selector-next-model)
+              (ende-selector-confirm)))
+          (let ((saved (ende-model-selection-provider-for-buffer 'alpha source)))
+            (should (equal (plist-get saved :model) "alpha-choice"))
+            (should (equal (plist-get saved :account) "work"))
+            (should (eq (plist-get saved :parallel) t)))
+          (with-current-buffer source
+            (let* ((job (ende--make-job
+                         :target (ende-target-create
+                                  :buffer source :start 1 :end 1 :cursor 1)
+                         :profile '(:name alpha :max-concurrency 2 :parallel nil)))
+                   (policy (ende--family-scheduling-policy job)))
+              (should (eq (plist-get policy :parallel) t))))
+          (should (equal (plist-get
+                          (ende-model-selection-provider-for-buffer 'alpha other)
+                          :model)
+                         "alpha-choice"))
+          (ende-model-selection-save-provider
+           '(:provider beta :model "beta-choice" :parallel nil) other)
+          (should (equal (plist-get
+                          (ende-model-selection-provider-for-buffer 'alpha other)
+                          :model)
+                         "alpha-choice"))
+          (cl-letf (((symbol-function 'display-buffer) (lambda (&rest _) nil))
+                    ((symbol-function 'ende-provider-model-discovery-available-p)
+                     (lambda (_) nil))
+                    ((symbol-function 'ende-provider-cached-models) (lambda (_) nil)))
+            (with-current-buffer source (ende-selector-open))
+            (setq selector (get-buffer ende-selector-buffer-name))
+            (with-current-buffer selector
+              (ende-selector--set-provider 0)
+              (should (equal (ende-selector--model-name) "alpha-choice"))
+              (should (equal (plist-get (ende-selector--provider-profile) :account)
+                             "work"))
+              (should (ende-selector--provider-parallel-p))
+              (ende-selector-close)))
+          (with-current-buffer other
+            (should (equal (plist-get
+                            (ende-model-selection-provider-for-buffer 'alpha)
+                            :model)
+                           "alpha-choice"))))
+      (dolist (buffer (list source other selector (get-buffer ende-selector-buffer-name)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ende-test/selector-clearing-one-control-preserves-other-values ()
   (let ((buffer (generate-new-buffer " *ende-selector-clear-control*"))
         (ende-model-selection-scope 'buffer)

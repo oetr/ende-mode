@@ -427,6 +427,8 @@ non-nil, is signalled from the event callback."
   (clrhash ende-selector--model-warnings)
   (clrhash ende-model-selection--provenance)
   (clrhash ende-model-selection--buffer-selections)
+  (clrhash ende-model-selection--provider-selections)
+  (clrhash ende-model-selection--buffer-provider-selections)
   (clrhash ende-model-selection--shared-control-preferences)
   (clrhash ende-model-selection--buffer-control-preferences)
   (ende-provider-clear-runtime-settings)
