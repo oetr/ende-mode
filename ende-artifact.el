@@ -805,7 +805,7 @@ ARTIFACTS supplies descriptors, overridden by explicit reference captions."
                                                      :width pixels-x :height pixels-y)
                                      (create-image path nil nil :width pixels-x :height pixels-y)))
                             ;; The link's end can remain visible outside a fold.
-                            (collapse `(when (invisible-p (overlay-start ,overlay)) . "")))
+                            (collapse `(when (invisible-p (1- (overlay-start ,overlay))) . "")))
                         (when (display-graphic-p) (image-flush image t))
                         (overlay-put overlay 'after-string
                                      (propertize
