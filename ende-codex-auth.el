@@ -13,6 +13,7 @@
 (require 'ende-protocol)
 (require 'ende-provider-config)
 (require 'ende-curl)
+(require 'ende-lock)
 
 (defconst ende-codex--jwks-url "https://auth.openai.com/.well-known/jwks.json")
 
@@ -530,15 +531,15 @@ other users.  No symbolic links or multiply linked credential files are safe."
           (error :invalid))))))
 
 (defun ende-codex-auth--raw-lock (lock)
-  "Exclusively create LOCK and store private process ownership metadata."
-  (let ((original (default-file-modes)) created complete id)
+  "Create LOCK and its owner metadata inside the shared mutex."
+  (let ((original (default-file-modes)) identity complete)
     (unwind-protect
         (progn
           (unwind-protect
               (progn
                 (set-default-file-modes #o700)
                 (make-directory lock)
-                (setq created t))
+                (setq identity (ende-codex-auth--lock-identity lock)))
             (set-default-file-modes original))
           (ende-codex-auth--attributes lock t t)
           (let* ((attributes (and (fboundp 'process-attributes)
@@ -563,40 +564,68 @@ other users.  No symbolic links or multiply linked credential files are safe."
               (set-default-file-modes original))
             (set-file-modes file #o600)
             (ende-codex-auth--attributes file nil t)
-            (setq id (gethash "id" owner)
+            (setq identity (ende-codex-auth--lock-identity lock)
                   complete t)
-            id))
-      (when (and created (not complete) (file-directory-p lock))
-        (delete-directory lock t)))))
+            identity))
+      (when (and identity (not complete)
+                 (equal (car identity) (car (ende-codex-auth--lock-identity lock))))
+        (ende-codex-auth--remove-lock lock)))))
 
-(defun ende-codex-auth--delete-lock (lock id)
-  "Remove LOCK only when its owner identifier is still ID."
-  (when (file-exists-p lock)
-    (ende-codex-auth--attributes lock t t)
-    (let ((owner (ende-codex-auth--lock-owner lock)))
-      (when (and (listp owner) (equal (plist-get owner :id) id))
-        (delete-directory lock t)))))
+(defun ende-codex-auth--with-lock-guard (function)
+  "Call FUNCTION while holding the private lock-management mutex."
+  (condition-case nil
+      (ende-lock-call (expand-file-name ".lock-guard.sqlite" (ende-codex-auth--path t))
+                      function)
+    (ende-lock-busy (signal 'ende-codex-auth-busy nil))
+    (ende-lock-error (ende-codex-auth--fail))))
+
+(defun ende-codex-auth--lock-contents (lock)
+  "Validate LOCK and return its recognized contents."
+  (unless (ende-codex-auth--attributes lock t t)
+    (user-error "Credential lock no longer exists"))
+  (let ((contents (directory-files lock nil directory-files-no-dot-files-regexp)))
+    (unless (or (null contents) (equal contents '("owner")))
+      (user-error "Credential lock has unrecognized contents"))
+    contents))
+
+(defun ende-codex-auth--remove-lock (lock)
+  "Remove only recognized contents of LOCK inside the shared mutex."
+  (when (ende-codex-auth--lock-contents lock)
+    (ende-codex-auth--attributes (expand-file-name "owner" lock) nil t)
+    (delete-file (expand-file-name "owner" lock)))
+  (delete-directory lock))
+
+(defun ende-codex-auth--delete-lock (lock identity)
+  "Remove LOCK only when its complete IDENTITY is unchanged."
+  (ende-codex-auth--with-lock-guard
+   (lambda ()
+     (when (and (file-exists-p lock)
+                (equal identity (ende-codex-auth--lock-identity lock)))
+       (ende-codex-auth--remove-lock lock)))))
 
 (defun ende-codex-auth--make-lock (lock)
-  "Create LOCK while holding the shared recovery guard."
-  (let* ((directory (file-name-directory (directory-file-name lock)))
-         (guard (expand-file-name ".recovery-lock" directory))
-         (guard-id (condition-case nil
-                       (ende-codex-auth--raw-lock guard)
-                     (file-already-exists
-                      (signal 'ende-codex-auth-busy nil)))))
-    (unwind-protect
-        (ende-codex-auth--raw-lock lock)
-      (ende-codex-auth--delete-lock guard guard-id))))
+  "Create LOCK and owner metadata while holding the shared mutex."
+  (ende-codex-auth--with-lock-guard
+   (lambda () (ende-codex-auth--raw-lock lock))))
 
 (defun ende-codex-auth--lock-identity (lock)
-  "Return LOCK's filesystem identity and owner metadata."
-  (let* ((attributes (file-attributes lock 'integer))
-         (owner (and attributes (ende-codex-auth--lock-owner lock))))
+  "Return LOCK's identity, entries, and exact bounded owner contents."
+  (let ((attributes (ende-codex-auth--attributes lock t t)))
     (when attributes
-      (list (file-attribute-device-number attributes)
-            (file-attribute-inode-number attributes)
-            (and (listp owner) owner)))))
+      (let* ((contents (ende-codex-auth--lock-contents lock))
+             (file (expand-file-name "owner" lock))
+             (owner (and contents (ende-codex-auth--attributes file nil t))))
+        (when (and owner (> (file-attribute-size owner) 4096))
+          (ende-codex-auth--fail))
+        (list (list (file-attribute-device-number attributes)
+                    (file-attribute-inode-number attributes))
+              contents
+              (when owner
+                (list (file-attribute-device-number owner)
+                      (file-attribute-inode-number owner)
+                      (with-temp-buffer
+                        (insert-file-contents-literally file)
+                        (buffer-string)))))))))
 
 (defun ende-codex-auth--lock-owner-status (owner)
   "Return whether OWNER is active, abandoned, or unverifiable."
@@ -624,14 +653,7 @@ other users.  No symbolic links or multiply linked credential files are safe."
     (user-error "Not a recognized credential lock"))
   (let* ((directory (ende-codex-auth--path nil))
          (lock (expand-file-name name directory)))
-    (unless (and (file-directory-p lock) (not (file-symlink-p lock)))
-      (user-error "Credential lock no longer exists"))
-    (ende-codex-auth--attributes lock t t)
-    (let ((contents (cl-remove-if
-                     (lambda (file) (member file '("." "..")))
-                     (directory-files lock nil))))
-      (unless (or (null contents) (equal contents '("owner")))
-        (user-error "Credential lock has unrecognized contents")))
+    (ende-codex-auth--lock-contents lock)
     (let* ((owner (ende-codex-auth--lock-owner lock))
            (identity (ende-codex-auth--lock-identity lock))
            (status (ende-codex-auth--lock-owner-status owner)))
@@ -642,34 +664,18 @@ other users.  No symbolic links or multiply linked credential files are safe."
         (unless (yes-or-no-p "Cannot verify lock owner; remove it anyway? ")
           (user-error "Credential lock was not recovered"))
         (setq confirmed t))
-      (let* ((guard (expand-file-name ".recovery-lock" directory))
-             (guard-id (condition-case nil
-                           (ende-codex-auth--raw-lock guard)
-                         (file-already-exists
-                          (user-error "Another lock recovery is in progress")))))
-        (unwind-protect
-            (progn
-              (ende-codex-auth--attributes lock t t)
-              (unless (and (file-directory-p lock) (not (file-symlink-p lock)))
-                (user-error "Credential lock no longer exists"))
-              (let ((contents (cl-remove-if
-                               (lambda (file) (member file '("." "..")))
-                               (directory-files lock nil))))
-                (unless (or (null contents) (equal contents '("owner")))
-                  (user-error "Credential lock has unrecognized contents")))
-              (unless (equal identity (ende-codex-auth--lock-identity lock))
-                (user-error "Credential lock changed during recovery"))
-              (let ((current (ende-codex-auth--lock-owner-status
-                              (ende-codex-auth--lock-owner lock))))
-                (when (eq current 'active)
-                  (user-error "Credential lock owner is still active"))
-                (when (and (eq current 'unknown) (not confirmed)
-                           (not (yes-or-no-p
-                                 "Cannot verify lock owner; remove it anyway? ")))
-                  (user-error "Credential lock was not recovered")))
-              (delete-directory lock t)
-              t)
-          (ende-codex-auth--delete-lock guard guard-id))))))
+      (ende-codex-auth--with-lock-guard
+       (lambda ()
+         (unless (equal identity (ende-codex-auth--lock-identity lock))
+           (user-error "Credential lock changed during recovery"))
+         (let ((current (ende-codex-auth--lock-owner-status
+                         (ende-codex-auth--lock-owner lock))))
+           (when (eq current 'active)
+             (user-error "Credential lock owner is still active"))
+           (when (and (eq current 'unknown) (not confirmed))
+             (user-error "Credential lock now requires confirmation; retry recovery")))
+         (ende-codex-auth--remove-lock lock)
+         t)))))
 
 ;;;###autoload
 (defun ende-codex-auth-recover-lock ()
