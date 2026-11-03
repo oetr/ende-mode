@@ -146,8 +146,9 @@ stat device numbers must agree; stacked or disconnected mounts fail closed."
   (unless (equal mount (ende-lock--mount file)) (ende-lock--fail))
   (ende-lock--files file identity))
 
-(defun ende-lock-call (file function)
+(defun ende-lock-call (file function &optional timeout)
   "Call FUNCTION with no arguments while holding FILE's SQLite mutex.
+TIMEOUT is the acquisition wait in milliseconds, defaulting to zero.
 The caller must already have validated FILE's private 0700 parent and
 its ancestors.  FILE is permanent: never unlink or replace it, even to
 recover an abandoned lock.  All users must follow this protocol.
@@ -181,7 +182,9 @@ Signal `ende-lock-busy' only for acquisition contention, otherwise
                           (setq db (sqlite-open file nil t)))
                         (ende-lock--check file mount identity)
                         (setq identity (ende-lock--files file nil t))
-                        (sqlite-execute db "PRAGMA busy_timeout = 0")
+                        (unless (and (integerp (or timeout 0)) (<= 0 (or timeout 0) 5000))
+                          (ende-lock--fail))
+                        (sqlite-execute db (format "PRAGMA busy_timeout = %d" (or timeout 0)))
                         (unless (equal (sqlite-select db "PRAGMA locking_mode = NORMAL")
                                        '(("normal")))
                           (ende-lock--fail))

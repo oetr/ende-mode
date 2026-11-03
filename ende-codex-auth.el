@@ -580,11 +580,11 @@ other users.  No symbolic links or multiply linked credential files are safe."
                  (equal (car identity) (car (ende-codex-auth--lock-identity lock))))
         (ende-codex-auth--remove-lock lock)))))
 
-(defun ende-codex-auth--with-lock-guard (function)
-  "Call FUNCTION while holding the private lock-management mutex."
+(defun ende-codex-auth--with-lock-guard (function &optional timeout)
+  "Call FUNCTION under the mutex, optionally waiting TIMEOUT milliseconds."
   (condition-case nil
       (ende-lock-call (expand-file-name ".lock-guard.sqlite" (ende-codex-auth--path t))
-                      function)
+                      function timeout)
     (ende-lock-busy (signal 'ende-codex-auth-busy nil))
     (ende-lock-error (ende-codex-auth--fail))))
 
@@ -610,7 +610,8 @@ other users.  No symbolic links or multiply linked credential files are safe."
    (lambda ()
      (when (and (file-exists-p lock)
                 (equal identity (ende-codex-auth--lock-identity lock)))
-       (ende-codex-auth--remove-lock lock)))))
+       (ende-codex-auth--remove-lock lock)))
+   5000))
 
 (defun ende-codex-auth--make-lock (lock)
   "Create LOCK and owner metadata while holding the shared mutex."
