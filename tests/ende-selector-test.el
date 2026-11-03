@@ -209,6 +209,8 @@
                                :path ("reasoning" "effort")
                                :choices ("high" "low"))))))
          (queued nil)
+         (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+         (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
          (ende-model-selection-scope 'buffer)
          (ende-model-selection--last-used nil)
          (ende-model-selection--buffer-selections
@@ -240,9 +242,9 @@
           (should (equal (plist-get (nth 2 queued) :reasoning-effort)
                          "high"))
           (should (equal ende-model-selection--last-used
-                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions)))
+                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions :parallel nil)))
           (should (equal (ende-model-selection-for-buffer source)
-                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions)))
+                         '(:provider local :model "two" :account nil :auth-method none :api openai-chat-completions :parallel nil)))
           (should (eq (nth 3 queued) source)))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
@@ -483,6 +485,11 @@
         (probe-callback nil)
         (ende-model-selection--last-used
          '(:provider remote :model "remote/remembered"))
+        (ende-model-selection--provider-selections
+         (let ((table (make-hash-table :test #'eq)))
+           (puthash 'remote '(:provider remote :model "remote/remembered") table)
+           table))
+        (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
         (ende-model-selection-scope 'buffer)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
@@ -525,6 +532,8 @@
             (ende-selector--set-provider 0)
             (setq ende-model-selection--last-used
                   '(:provider remote :model "remote/default"))
+            (puthash 'remote '(:provider remote :model "remote/default")
+                     ende-model-selection--provider-selections)
             (funcall probe-callback
                      '("remote/default" "remote/remembered") nil)
             (should (equal (ende-selector--model-name) "remote/default"))))
@@ -541,6 +550,11 @@
           ende-test--custom-providers)
          (ende-model-selection--last-used
           '(:provider remote :model "remote/saved"))
+         (ende-model-selection--provider-selections
+          (let ((table (make-hash-table :test #'eq)))
+            (puthash 'remote '(:provider remote :model "remote/saved") table)
+            table))
+         (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
          (ende-provider--catalog-cache (make-hash-table :test #'equal))
          (ende-provider--catalog-inflight (make-hash-table :test #'equal))
          (ende-provider--model-generation 0))
@@ -564,6 +578,7 @@
 			       "remote/saved"))
 	      (should (eq ende-selector--model-state :ready))
 	      (setq ende-model-selection--last-used nil)
+	      (remhash 'remote ende-model-selection--provider-selections)
 	      (ende-selector--set-provider 0)
 	      (should (string= (ende-selector--model-name)
 			       "remote/first")))))
@@ -610,6 +625,8 @@
   (let ((source (generate-new-buffer " *ende-selector-dispatch-source*"))
         (ende-provider--runtime-settings (make-hash-table :test #'eq))
         (ende-model-selection--last-used nil)
+        (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+        (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
         (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
         (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
         (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal))
@@ -621,6 +638,7 @@
                    :controls ((:temperature :path ("temperature"))))))
         (saves 0)
         (runtime-commits 0)
+        (saved-selection nil)
         (dispatches 0))
     (unwind-protect
         (with-temp-buffer
@@ -635,6 +653,7 @@
           (cl-letf (((symbol-function 'ende-model-selection-save)
                      (lambda (selection &optional _buffer _skip)
                        (cl-incf saves)
+                       (setq saved-selection selection)
                        selection))
                     ((symbol-function 'ende-provider-set-runtime-setting)
                      (lambda (&rest _) (cl-incf runtime-commits)))
@@ -648,7 +667,9 @@
                          (ende-enqueue-operation type instruction)))))
             (ende-selector-insert))
           (should (= saves 1))
-          (should (= runtime-commits 1))
+          ;; Parallel is persisted in the selected-model history, not runtime settings.
+          (should (= runtime-commits 0))
+          (should (eq (plist-get saved-selection :parallel) t))
           (should (= dispatches 1)))
       (when (buffer-live-p source)
         (kill-buffer source)))))
@@ -661,6 +682,11 @@
          ende-test--custom-providers)
         (ende-model-selection--last-used
          '(:provider remote :model "remote/missing"))
+        (ende-model-selection--provider-selections
+         (let ((table (make-hash-table :test #'eq)))
+           (puthash 'remote '(:provider remote :model "remote/missing") table)
+           table))
+        (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
         (ende-selector--model-warnings (make-hash-table :test #'eq))
         (ende-provider--catalog-cache (make-hash-table :test #'equal))
         (ende-provider--catalog-inflight (make-hash-table :test #'equal))
@@ -692,6 +718,8 @@
 		       1))
             (setq ende-model-selection--last-used
                   '(:provider remote :model "remote/second"))
+            (puthash 'remote '(:provider remote :model "remote/second")
+                     ende-model-selection--provider-selections)
             (ende-selector--set-provider 0)
             (should (string= (ende-selector--model-name)
                              "remote/second"))
@@ -703,6 +731,8 @@
             (ende-provider-clear-discovery-cache)
             (setq ende-model-selection--last-used
                   '(:provider remote :model "remote/missing"))
+            (puthash 'remote '(:provider remote :model "remote/missing")
+                     ende-model-selection--provider-selections)
             (ende-selector--set-provider 0)
             (should (= (cl-count-if
                         (lambda (value)
@@ -1587,6 +1617,8 @@
         (callbacks nil)
         (cancelled 0)
         (ende-model-selection-scope 'buffer)
+        (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+        (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
         (ende-model-selection--last-used nil)
         (ende-model-selection--buffer-selections
          (make-hash-table :test #'equal))
@@ -2035,21 +2067,24 @@
   (let ((ende-providers '(openai-codex))
         (ende-builtin-provider-settings '((openai-codex :models ("gpt-6.1-sol"))))
         (ende-custom-providers nil)
-        (ende-model-selection--last-used nil))
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+        (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal)))
     (with-temp-buffer
       (ende-selector-mode)
       (setq ende-selector--providers '(openai-codex))
       (ende-selector--set-provider 0)
       (should
        (string-prefix-p
-        (concat "n/p      - Provider:          OpenAI Codex - https://api.openai.com/v1/responses\n"
+        (concat "n/p      - Provider:          OpenAI Codex - https://chatgpt.com/backend-api/codex/responses\n"
                 "A        - Account:           default\n"
-                "           Auth:              chatgpt-plan-oauth\n"
+                "           Auth:              codex-oauth\n"
                 "           API:               openai-responses\n"
                 "c/C      - Concurrency:       4\n"
                 "P        - Parallel:          off\n\n"
                 "C-n/C-p  - Model:             gpt-6.1-sol\n"
-                "e        - Reasoning effort:  Provider default (omitted)\n\n")
+                "e        - Reasoning effort:  Provider default (omitted)\n\n"
+                "Quota: loading...\n\n")
         (buffer-string)))
       (should-not (string-match-p "Service\\|Catalog\\|not mapped\\|explicitly" (buffer-string)))
       (setq ende-selector--providers '(my-local-provider))
