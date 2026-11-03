@@ -901,20 +901,25 @@ PREFERRED is selected only when it is present in MODELS."
       (with-current-buffer parent (setq ende-selector--connection-buffer nil))
       (pop-to-buffer parent))))
 
-(defun ende-selector-connection--login-finished (parent profile record failure)
-  "Report OAuth completion and refresh a still-matching selector."
+(defun ende-selector-connection--login-finished (editor parent profile record failure)
+  "Report OAuth completion and refresh each still-matching UI."
   (ende-codex--login-report record failure)
-  (when (and record (buffer-live-p parent))
+  (when (buffer-live-p parent)
     (with-current-buffer parent
-      (when (and (derived-mode-p 'ende-selector-mode)
-                 (ende-selector--binding-current-p profile))
-        (ende-selector--set-provider ende-selector--provider-index)
-        (when (buffer-live-p ende-selector--connection-buffer)
-          (with-current-buffer ende-selector--connection-buffer
-            (when (equal (ende-model-selection-connection profile)
-                         (ende-model-selection-connection
-                          (ende-selector-connection--profile)))
-              (ende-selector-connection--render))))))))
+      (when (derived-mode-p 'ende-selector-mode)
+        (when (buffer-live-p editor)
+          (with-current-buffer editor
+            (when (and (derived-mode-p 'ende-selector-connection-mode)
+                       (eq parent ende-selector-connection--parent))
+              (let ((current (ende-selector-connection--profile)))
+                (when (and (eq (plist-get profile :name) (plist-get current :name))
+                           (eq (plist-get profile :auth-method) (plist-get current :auth-method))
+                           (equal (plist-get profile :account) (plist-get current :account)))
+                  (ende-selector-connection--render))))))
+        (when (and record
+                   (eq (plist-get profile :name) (ende-selector--provider-name))
+                   (ende-selector--binding-current-p profile))
+          (ende-selector--set-provider ende-selector--provider-index))))))
 
 (defun ende-selector-connection-login ()
   "Connect or reconnect the drafted OAuth account."
@@ -931,7 +936,8 @@ PREFERRED is selected only when it is present in MODELS."
                 (yes-or-no-p "Replace this account's OAuth registration? "))
         (ende-codex--begin-login
          method account
-         (apply-partially #'ende-selector-connection--login-finished parent profile))))))
+         (apply-partially #'ende-selector-connection--login-finished
+                          (current-buffer) parent profile))))))
 
 (defun ende-selector-connection-apply ()
   "Apply the validated connection atomically and revalidate its models."
