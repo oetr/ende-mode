@@ -129,7 +129,9 @@ Ende directory has its existing permissions changed."
              version filename))
      (t nil)))
   (sqlite-execute database
-                  "CREATE TABLE IF NOT EXISTS assistant_protocol (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"))
+                  "CREATE TABLE IF NOT EXISTS assistant_protocol (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+  (sqlite-execute database
+                  "CREATE TABLE IF NOT EXISTS protocol_items (id TEXT PRIMARY KEY, provider TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)"))
 
 (defun ende-tool-store--open (filename create)
   "Open and validate FILENAME.  CREATE allows making a missing database."
@@ -310,6 +312,58 @@ returned plist, and provider call IDs are checked when both records exist."
           :request-present-p (and request t)
           :result-present-p (and result t)
           :content (and result (gethash "content" result)))))
+
+(defun ende-tool-store-save-opaque (provider kind item &optional filename)
+  "Store provider ITEM as an opaque protocol item and return its identity."
+  (unless (and (member provider '("openai-responses" "anthropic-messages"))
+               (stringp kind) (not (string-empty-p kind))
+               (not (string-match-p "[[:cntrl:]]" kind))
+               (hash-table-p item))
+    (error "Invalid opaque protocol item"))
+  (let ((id (ende-tool-store--new-execution-id))
+        (payload (decode-coding-string (json-serialize item) 'utf-8-unix)))
+    (ende-tool-store--call-with-database
+     t
+     (lambda (database)
+       (sqlite-execute
+        database
+        "INSERT INTO protocol_items (id, provider, kind, payload) VALUES (?, ?, ?, ?)"
+        (vector id provider kind payload)))
+     filename)
+    id))
+
+(defun ende-tool-store-load-opaque (id &optional provider kind filename)
+  "Load opaque ID from FILENAME, checking optional PROVIDER and KIND.
+Return nil if the database or item is missing."
+  (unless (and (stringp id) (not (string-empty-p id)))
+    (error "Invalid opaque protocol item identity"))
+  (let ((record
+         (ende-tool-store--call-with-database
+          nil
+          (lambda (database)
+            (car (sqlite-select
+                  database
+                  "SELECT provider, kind, payload FROM protocol_items WHERE id = ?"
+                  (vector id))))
+          filename)))
+    (when record
+      (let ((stored-provider (nth 0 record))
+            (stored-kind (nth 1 record))
+            (payload (nth 2 record)))
+        (unless (and (or (null provider) (equal provider stored-provider))
+                     (or (null kind) (equal kind stored-kind)))
+          (error "Opaque protocol item metadata does not match item %s" id))
+        (let ((item
+               (condition-case error-data
+                   (json-parse-string payload :object-type 'hash-table
+                                      :array-type 'array
+                                      :null-object nil :false-object json-false)
+                 (error
+                  (error "Malformed opaque protocol item %s: %s"
+                         id (error-message-string error-data))))))
+          (unless (hash-table-p item)
+            (error "Malformed opaque protocol item %s" id))
+          item)))))
 
 (defun ende-tool-store--footprint ()
   "Return the configured filename and existing database files with sizes."
