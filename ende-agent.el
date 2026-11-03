@@ -465,8 +465,14 @@ scheduler when asynchronous children have settled."
   (when-let* ((function (plist-get callbacks key)))
     (apply function arguments)))
 
-(defun ende-agent--send (job messages configuration callbacks rounds)
-  "Send MESSAGES for JOB under CONFIGURATION using loop CALLBACKS."
+(defun ende-agent--send
+    (job messages configuration callbacks rounds base-messages)
+  "Send MESSAGES for JOB under CONFIGURATION using loop CALLBACKS.
+BASE-MESSAGES is the immutable context preceding any title-phase prompt."
+  (setf (ende-job-profile job)
+        (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
+                   (ende-tool-definitions
+                    configuration (ende-job-request-phase job))))
   (ende--dispatch-llm
    job messages
    (lambda (result)
@@ -475,14 +481,15 @@ scheduler when asynchronous children have settled."
         job
         (lambda ()
           (ende-agent--handle-result
-           job result messages configuration callbacks rounds)))))
+           job result messages configuration callbacks rounds base-messages)))))
    nil nil t))
 
 (defun ende-agent--handle-result
-    (job result messages configuration callbacks rounds)
+    (job result messages configuration callbacks rounds base-messages)
   "Handle model RESULT for JOB under CONFIGURATION using CALLBACKS."
   (if (eq (ende-job-request-phase job) 'title)
-      (ende-agent--handle-title job result messages configuration callbacks rounds)
+      (ende-agent--handle-title
+       job result messages configuration callbacks rounds base-messages)
     (let ((calls (ende-agent--invoke callbacks :tool-calls result)))
       (if (null calls)
           (let ((next (if (plist-member callbacks :before-final)
@@ -492,7 +499,8 @@ scheduler when asynchronous children have settled."
             (if (and (listp next) (not (eq next :finish)))
                 (progn
                   (ende--validate-messages next)
-                  (ende-agent--send job next configuration callbacks rounds))
+                  (ende-agent--send
+                   job next configuration callbacks rounds base-messages))
               (ende-agent--invoke callbacks :on-final job result messages)))
         (let ((definitions (plist-get (ende-job-profile job) :tool-definitions))
               (maximum ende-agent-max-tool-rounds))
@@ -522,7 +530,7 @@ scheduler when asynchronous children have settled."
                              next-messages)))
                    (ende--validate-messages next-messages)
                    (ende-agent--send job next-messages configuration callbacks
-                                     (1+ rounds))))))))))))
+                                     (1+ rounds) base-messages)))))))))))
 
 (defconst ende-agent--title-control
   (concat "Ende temporary title phase. Call generate_title exactly once for the "
@@ -532,7 +540,7 @@ scheduler when asynchronous children have settled."
           "(clear-tools)\n"
           "(tools generate_title)\n"
           "#+end_ende\n")
-  "Append-only host instruction for the first request.")
+  "Temporary instruction appended to the title request.")
 
 (defun ende-agent--accept-title (job title generation)
   "Accept TITLE for JOB in GENERATION at most once."
@@ -547,8 +555,9 @@ scheduler when asynchronous children have settled."
     (ende-job-emit-event job (list :type :title :title title))
     t))
 
-(defun ende-agent--handle-title (job result messages configuration callbacks rounds)
-  "Keep title RESULT out of final-answer handling and continue the shared loop."
+(defun ende-agent--handle-title
+    (job result messages configuration callbacks rounds base-messages)
+  "Keep title RESULT transient and continue from BASE-MESSAGES after title."
   (cl-incf (ende-job-title-attempts job))
   (let* ((calls (ende-agent--invoke callbacks :tool-calls result))
          (assistant-data (ende-agent--invoke callbacks :assistant-message
@@ -556,21 +565,26 @@ scheduler when asynchronous children have settled."
          (assistant (if (plist-member assistant-data :message)
                         (plist-get assistant-data :message) assistant-data))
          (execution-calls (or (plist-get assistant-data :calls) calls))
-         (prefix (append messages (list assistant))))
+         (prefix (append messages (when assistant (list assistant)))))
     (cl-labels
         ((continue (tool-messages)
            (when (ende-job-current-p job)
-             (let* ((finished (or (ende-job-title-generated-p job)
-                                  (>= (ende-job-title-attempts job) 2)))
-                    (instruction
-                     (if finished
-                         "The temporary title override has ended. Proceed with the original task using its original capabilities. Do not call generate_title again."
-                       "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title-only override is still in force."))
-                    (next (append prefix tool-messages
-                                  (list (cons "user" instruction)))))
-               (when finished (setf (ende-job-request-phase job) 'work))
-               (ende--validate-messages next)
-               (ende-agent--send job next configuration callbacks rounds)))))
+             (if (or (ende-job-title-generated-p job)
+                     (>= (ende-job-title-attempts job) 2))
+                 (progn
+                   (setf (ende-job-request-phase job) 'work)
+                   (ende--validate-messages base-messages)
+                   (ende-agent--send
+                    job base-messages configuration callbacks rounds
+                    base-messages))
+               (let ((next
+                      (append prefix tool-messages
+                              (list
+                               (cons "user"
+                                     "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title-only override is still in force.")))))
+                 (ende--validate-messages next)
+                 (ende-agent--send
+                  job next configuration callbacks rounds base-messages))))))
       (if calls
           (ende-agent--run-tools job execution-calls configuration callbacks
                                  #'continue)
@@ -704,18 +718,21 @@ Chat persistence and guidance stay in those callbacks."
                      "OpenRouter batch transport; choose an interactive transport")))
     (setf (ende-job-profile job) profile)
     (ende-job-emit-event job '(:type :tool-call-count :count 0))
-    (let ((messages (if (plist-get callbacks :omit-source-metadata)
-                        messages
-                      (ende-operations--add-source-metadata job messages))))
+    (let* ((messages (if (plist-get callbacks :omit-source-metadata)
+                         messages
+                       (ende-operations--add-source-metadata job messages)))
+           (base-messages messages))
       (when (null (ende-job-request-phase job))
         (pcase (ende-job-type job)
           ('agent (setf (ende-job-request-phase job) 'work))
           ('chat
            (setf (ende-job-request-phase job) 'title
                  (ende-job-title-attempts job) 0)
-           (setq messages (append messages
-                                  (list (cons "user" ende-agent--title-control)))))))
-      (ende-agent--send job messages configuration callbacks 0))))
+           (setq messages
+                 (append base-messages
+                         (list (cons "user" ende-agent--title-control)))))))
+      (ende-agent--send
+       job messages configuration callbacks 0 base-messages))))
 
 (provide 'ende-agent)
 

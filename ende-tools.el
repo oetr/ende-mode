@@ -199,20 +199,29 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
            (cl-loop for (name . tool) in ende-tools--registry
                     when (ende-tool-always-available tool) collect name))))
 
-(defun ende-tool-definitions (&optional access-config)
-  "Return registered tool definitions, resolving schemas with ACCESS-CONFIG."
-  (mapcar
-   (lambda (tool)
-     (list (cons :type "function")
-           (cons :function
-                 (list (cons :name (symbol-name (ende-tool-name tool)))
-                       (cons :description (ende-tool-description tool))
-                       (cons :parameters
-                             (let ((parameters (ende-tool-parameters tool)))
-                               (if (functionp parameters)
-                                   (funcall parameters access-config)
-                                 parameters)))))))
-   (mapcar #'cdr ende-tools--registry)))
+(defun ende-tool-definitions (&optional access-config phase)
+  "Return registered tool definitions, resolving schemas with ACCESS-CONFIG.
+When PHASE is supplied, omit `generate_title' except during the title phase."
+  (let ((definitions
+         (mapcar
+          (lambda (tool)
+            (list (cons :type "function")
+                  (cons :function
+                        (list (cons :name (symbol-name (ende-tool-name tool)))
+                              (cons :description (ende-tool-description tool))
+                              (cons :parameters
+                                    (let ((parameters (ende-tool-parameters tool)))
+                                      (if (functionp parameters)
+                                          (funcall parameters access-config)
+                                        parameters)))))))
+          (mapcar #'cdr ende-tools--registry))))
+    (if (and phase (not (eq phase 'title)))
+        (cl-remove-if
+         (lambda (definition)
+           (equal (alist-get :name (alist-get :function definition))
+                  "generate_title"))
+         definitions)
+      definitions)))
 
 (defun ende-tool--call-root (tool root access-config)
   (let* ((tool-name (ende-tool-name tool))

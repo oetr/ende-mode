@@ -72,10 +72,20 @@
             (should-not (ende-job-children job))
             (should (= (length requests) 3))
             (let* ((ordered (reverse requests))
-                   (first (car ordered)) (second (cadr ordered)))
-              (should (equal (car (car first)) (car (car second))))
-              (should (equal (cdr first) (cdr second)))
-              (should (equal (car first) (seq-take (car second) (length (car first))))))
+                   (first (car ordered)) (second (cadr ordered))
+                   (title-request (car first))
+                   (work-request (car second)))
+              (should (equal (cdr (car (last title-request)))
+                             ende-agent--title-control))
+              (should (equal (butlast title-request) work-request))
+              (should (string-match-p "Inspect the queue."
+                                      (ende-test--chat-context-text work-request)))
+              (should (member "generate_title"
+                              (ende-test--tool-definition-names
+                               (plist-get (cdr first) :tool-definitions))))
+              (should-not (member "generate_title"
+                                  (ende-test--tool-definition-names
+                                   (plist-get (cdr second) :tool-definitions)))))
             (should (string-match-p "Actual answer" (buffer-string)))
             (should (string-match-p "ENDE_CHAT_GENERATED_TITLE: t" (buffer-string)))
             (ende-test--chat-goto "** Next")
@@ -87,9 +97,10 @@
 (ert-deftest ende-test/title-correction-is-bounded-and-keeps-the-local-fallback ()
   (ende-test--reset)
   (let* ((ende-test--title-prelude t)
-         (phases nil)
+         (phases nil) (requests nil)
          (ende-llm-function
-          (lambda (_messages callbacks &optional profile)
+          (lambda (messages callbacks &optional profile)
+            (push messages requests)
             (let ((job (ende-queue-live-job-by-id (plist-get profile :job-id))))
               (push (ende-job-request-phase job) phases))
             (funcall (plist-get callbacks :on-done)
@@ -103,6 +114,15 @@
           (goto-char (point-min))
           (let ((job (ende-ask)))
             (should (equal (nreverse phases) '(title title work)))
+            (let* ((ordered (nreverse requests))
+                   (first (car ordered))
+                   (retry (cadr ordered))
+                   (work (caddr ordered)))
+              (should (equal (butlast first) work))
+              (should (string-match-p "Title correction"
+                                      (ende-test--chat-context-text retry)))
+              (should-not (string-match-p "temporary title phase"
+                                          (ende-test--chat-context-text work))))
             (should (equal (ende-job-title job) "User heading"))
             (should (eq (ende-job-state job) 'completed))
             (should (string-match-p "Actual final answer" (buffer-string)))))
