@@ -1072,6 +1072,45 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest ende-test/selector-validates-dirty-connections-before-commit ()
+  (let ((ende-providers '(remote))
+        (ende-custom-providers
+         '((remote :api openai-chat-completions :auth-method auth-source
+                   :base-url "https://remote.test/v1" :models ("model")
+                   :controls ((:temperature :path ("temperature")
+                                            :choices (0.2 0.4))))))
+        (ende-model-selection-scope 'buffer)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--provenance (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-selections (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal))
+        (ende-model-selection--buffer-control-preferences (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (let ((source (current-buffer)))
+        (ende-model-selection-save
+         '(:provider remote :model "model" :account "current"
+                     :control-preferences (:temperature 0.2)) source)
+        (with-temp-buffer
+          (ende-selector-mode)
+          (setq ende-selector--source-buffer source
+                ende-selector--providers '(remote)
+                ende-selector--models '("model")
+                ende-selector--model-state :ready
+                ende-selector--connection '(:account "other"))
+          (ende-selector--set-control-context)
+          (ende-selector--set-draft-controls '(:temperature 0.8))
+          (setq ende-selector--connection '(:account "current"))
+          (ende-selector--set-control-context)
+          (ende-selector--set-draft-controls '(:temperature 0.4))
+          (let ((before (copy-tree (ende-model-selection-for-buffer source))))
+            (should-error (ende-selector--commit))
+            (should (equal before (ende-model-selection-for-buffer source)))
+            (should (equal (ende-model-selection-control-preferences
+                            'remote "model" nil source '(:account "current"))
+                           '(:temperature 0.2)))
+            (should-not (ende-model-selection--control-preference-entry
+                         'remote "model" nil source '(:account "other")))))))))
+
 (ert-deftest ende-test/selector-effort-probes-cancel-on-model-change ()
   (let ((buffer (generate-new-buffer " *ende-selector-effort-cancel-test*"))
         (callback nil)

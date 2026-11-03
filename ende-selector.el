@@ -1325,22 +1325,18 @@ performed locally so typing a search term never starts another network request."
     (user-error "No ready model available"))
   (when (eq ende-selector--effort-state :invalid)
     (user-error "Choose a supported reasoning effort or Provider default"))
-  (let ((current-provider (ende-selector--provider-name)))
-    (ende-provider-validate-controls (ende-selector--resolved-profile))
+  (ende-provider-validate-controls (ende-selector--resolved-profile))
   (when (hash-table-p ende-selector--draft-controls)
     (maphash
-     (lambda (_key state)
+     (lambda (key state)
        (when (and (plist-get state :dirty)
-                  (not (and (eq (plist-get state :provider) current-provider)
-                            (equal (plist-get state :model)
-                                   (ende-selector--model-name)))))
-         (let ((profile
-                (ende-provider-profile-for-selection
-                 (plist-get state :provider) (plist-get state :model)
-                 (plist-get state :preferences) (plist-get state :api)
-                 (plist-get state :connection))))
-           (ende-provider-validate-controls profile))))
-     ende-selector--draft-controls)))
+                  (not (equal key (ende-selector--control-key))))
+         (ende-provider-validate-controls
+          (ende-provider-profile-for-selection
+           (plist-get state :provider) (plist-get state :model)
+           (plist-get state :preferences) (plist-get state :api)
+           (plist-get state :connection)))))
+     ende-selector--draft-controls))
   (when (hash-table-p ende-selector--draft-runtime)
     (maphash
      (lambda (_provider state)
