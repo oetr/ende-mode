@@ -21,14 +21,14 @@
         (ende-codex--remember-output session call 1)
         (ende-codex--remember-output session reasoning 0)
         (ende-codex--remember-output session call 1)
-        (let ((history (ende-codex--history session)))
+        (let ((history (ende-codex--protocol-items session)))
           (should (equal (json-encode (vconcat (cdr history)))
                          (json-encode (vector reasoning call))))
           (should-not (eq reasoning (cadr history)))
           (setq messages
                 (append messages
                         (list (list :role "assistant" :content ""
-                                    :protocol-history history
+                                    :protocol-items history
                                     :tool-calls (list (list :id id :name "read_file" :arguments "{}")))
                               (list :role "tool" :tool-call-id id :content "result")))))))
     (let ((input (ende-codex--request-messages messages)))
@@ -52,9 +52,9 @@
                   "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"first\",\"summary\":[]},{\"type\":\"reasoning\",\"encrypted_content\":\"second\",\"summary\":[]},{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}"))
          (session (ende-codex--make-session)))
     (ende-codex--handle-event session output)
-    (let* ((history (ende-codex--history session))
+    (let* ((history (ende-codex--protocol-items session))
            (input (ende-codex--request-messages
-                   (list (list :role "assistant" :content "answer" :protocol-history history)))))
+                   (list (list :role "assistant" :content "answer" :protocol-items history)))))
       (should (= (length input) 3))
       (should (equal (ende-protocol-json-get "encrypted_content" (nth 1 input)) "second"))
       (should (equal (ende-protocol-json-get "phase" (nth 2 input)) "final_answer")))))
@@ -64,7 +64,7 @@
     (ende-codex--handle-event
      session (ende-responses-history-test--json
               "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"}}"))
-    (should (= (length (cdr (ende-codex--history session))) 1)))
+    (should (= (length (cdr (ende-codex--protocol-items session))) 1)))
   (let* ((call '(:id "old-call" :name "read_file" :arguments "{}"))
          (input (ende-codex--request-messages
                  (list (list :role "assistant" :content "Checking" :tool-calls (list call))

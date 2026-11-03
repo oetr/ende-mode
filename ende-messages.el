@@ -30,8 +30,8 @@
            collect (list :id (gethash "id" block) :name (gethash "name" block)
                          :arguments (json-encode (gethash "input" block)))))
 
-(defun ende-messages--history (session)
-  "Return SESSION's exact replayable content blocks without local state."
+(defun ende-messages--protocol-items (session)
+  "Return SESSION's provider content blocks without local state."
   (mapcar (lambda (block)
             (let ((copy (copy-hash-table block)))
               (remhash "ende_arguments" copy)
@@ -45,7 +45,7 @@
    (ende-messages--session-stream session) "output_tokens"
    (plist-get (ende-messages--session-profile session) :model) "Anthropic"
    (list :tool-calls (ende-messages--calls session)
-         :protocol-history (cons 'anthropic-messages (ende-messages--history session)))))
+         :protocol-items (cons 'anthropic-messages (ende-messages--protocol-items session)))))
 
 (defun ende-messages--settle (session outcome value)
   "Settle SESSION with OUTCOME and VALUE, preserving partial output."
@@ -211,17 +211,28 @@
   (let (system encoded)
     (unless (plist-get profile :output-tokens)
       (error "Messages requires :output-tokens; configure a requested output budget"))
-    (dolist (message (ende-content-provider-messages messages))
-      (let* ((role (ende-content-role message))
-             (history (plist-get (unless (stringp (car message)) message) :protocol-history))
-             (content (unless (eq (car-safe history) 'anthropic-messages)
-                        (ende-messages--content (ende-content-body message))))
-             (calls (plist-get (unless (stringp (car message)) message) :tool-calls))
-             (id (plist-get (unless (stringp (car message)) message) :tool-call-id)))
+    (dolist (message
+             (cl-remove-if
+              (lambda (entry)
+                (and (consp entry) (not (stringp (car entry)))
+                     (plist-get entry :protocol-opaque)
+                     (not (equal (plist-get entry :protocol-provider)
+                                 "anthropic-messages"))))
+              (ende-content-provider-messages messages)))
+      (let* ((message-data (unless (stringp (car message)) message))
+             (role (ende-content-role message))
+             (items (plist-get message-data :protocol-items))
+             (opaque (plist-get message-data :protocol-opaque))
+             (content (cond
+                       (opaque (list opaque))
+                       ((eq (car-safe items) 'anthropic-messages) (cdr items))
+                       (t (ende-messages--content (ende-content-body message)))))
+             (calls (plist-get message-data :tool-calls))
+             (id (plist-get message-data :tool-call-id)))
         (if (equal role "system")
             (setq system (append system content))
-          (when (and history (eq (car history) 'anthropic-messages))
-            (setq content (cdr history)
+          (when (eq (car-safe items) 'anthropic-messages)
+            (setq content (cdr items)
                   calls (cl-remove-if
                          (lambda (call)
                            (cl-some (lambda (block)

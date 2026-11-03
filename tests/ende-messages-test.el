@@ -23,7 +23,7 @@
            (body (ende-messages--request-body
                   (list '("system" . "instructions") '("user" . "hello")
                         (list :role "assistant" :content "" :tool-calls (list call)
-                              :protocol-history (plist-get result :protocol-history))
+                              :protocol-items (plist-get result :protocol-items))
                         '(:role "tool" :tool-call-id "c" :content "result"))
                   '(:model "m" :output-tokens 100))))
       (should (= (gethash "input_tokens" (plist-get result :usage)) 10))

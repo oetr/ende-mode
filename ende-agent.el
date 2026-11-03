@@ -320,7 +320,7 @@ clarification; do not proceed with the disputed change.\n\n"
              (list :role "assistant" :content (or (plist-get result :content) "")
                    :tool-calls calls
                    :reasoning-content (plist-get result :reasoning-content)
-                   :protocol-history (plist-get result :protocol-history)))
+                   :protocol-items (plist-get result :protocol-items)))
            :tool-result-message
            (lambda (child call content)
              (ende-agent--work-section

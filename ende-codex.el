@@ -944,17 +944,15 @@ explicit efforts yields no choices instead of an error."
     (mapcar #'cdr
             (sort calls (lambda (left right) (< (car left) (car right)))))))
 
-(defun ende-codex--history (session)
-  "Return completed replayable output in SESSION's wire order."
+(defun ende-codex--protocol-items (session)
+  "Return completed provider items in SESSION's wire order."
   (let ((items (sort (copy-sequence (ende-codex--session-replay-items session))
                      (lambda (a b) (< (car a) (car b))))))
     (when items (cons 'openai-responses (mapcar #'cdr items)))))
 
 (defun ende-codex--remember-output (session item index)
   "Capture completed replay ITEM at output INDEX for SESSION."
-  (when (and (integerp index) (>= index 0)
-             (member (ende-protocol-json-get "type" item)
-                     '("reasoning" "message" "function_call")))
+  (when (and (integerp index) (>= index 0) (hash-table-p item))
     (setf (alist-get index (ende-codex--session-replay-items session))
           (ende-provider-config-copy item))))
 
@@ -964,7 +962,7 @@ explicit efforts yields no choices instead of an error."
    (ende-codex--session-stream session) "output_tokens"
    (plist-get (ende-codex--session-profile session) :model) "OpenAI"
    (list :tool-calls (ende-codex--tool-call-list session)
-         :protocol-history (ende-codex--history session))))
+         :protocol-items (ende-codex--protocol-items session))))
 
 (defun ende-codex--response-status (session)
   "Return SESSION's HTTP response status, or nil."
@@ -984,7 +982,7 @@ explicit efforts yields no choices instead of an error."
     (ende-stream-settle-generation
      (ende-codex--session-stream session) outcome value "output_tokens"
      (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-     (list :tool-calls tool-calls :protocol-history (ende-codex--history session))
+     (list :tool-calls tool-calls :protocol-items (ende-codex--protocol-items session))
      tool-calls nil t)))
 
 (defun ende-codex--fail (session error)
@@ -1408,19 +1406,23 @@ When APPEND is non-nil, append the argument delta to the stored value."
                        (cons :content
                              (ende-codex--message-content
                               role (cdr message) profile)))))
-       (let ((history (plist-get message :protocol-history))
+       (let ((items (plist-get message :protocol-items))
              (calls (plist-get message :tool-calls))
              (content (plist-get message :content))
+             (opaque (plist-get message :protocol-opaque))
+             (provider (plist-get message :protocol-provider))
              (call-id (plist-get message :tool-call-id)))
          (cond
-          ((eq (car-safe history) 'openai-responses)
-           (append (ende-provider-config-copy (cdr history))
+          ((eq (car-safe items) 'openai-responses)
+           (append (ende-provider-config-copy (cdr items))
                    (mapcar #'ende-codex--function-call-item
                            (cl-remove-if
                             (lambda (call)
                               (cl-some (lambda (item)
                                          (equal (ende-protocol-json-get "call_id" item)
-                                                (plist-get call :id))) (cdr history))) calls))))
+                                                (plist-get call :id))) (cdr items))) calls))))
+          ((and opaque (equal provider "openai-responses"))
+           (list (ende-provider-config-copy opaque)))
           (calls
            (append
             (when (and (stringp content) (not (string-empty-p content)))
