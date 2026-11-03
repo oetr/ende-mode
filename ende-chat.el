@@ -1119,9 +1119,6 @@ reflects Org history rather than the existence of a stored result payload."
                    (ende-chat--assistant-protocol-p document headline)
                    (equal (org-element-property :raw-value headline)
                           "Agent: Reply")))
-             (final-opaque
-              (and (not within-work)
-                   (ende-chat--opaque-reference-p document headline)))
              (direct-work-child
               (and (eq parent work)
                    (or (and (ende-chat--assistant-protocol-p
@@ -1134,19 +1131,11 @@ reflects Org history rather than the existence of a stored result payload."
                        (equal (ende-chat--property document headline :visibility)
                               "reasoning_summary"))))
              (valid (or (eq headline work)
-                        final-reply final-opaque
+                        final-reply
                         (and within-work direct-work-child))))
         (unless valid
           (error "Malformed generated protocol section outside Agent: Work: %s"
                  (org-element-property :raw-value headline)))
-        (when final-opaque
-          (ende-chat--validate-opaque-reference document work headline)
-          (unless (and (eq parent (ende-chat--parent document work))
-                       (= (org-element-property :level headline)
-                          (org-element-property :level work))
-                       (> (org-element-property :begin headline)
-                          (org-element-property :begin work)))
-            (error "Malformed generated opaque protocol item outside Agent: Work")))
         (when final-reply
           (push headline replies))))
     (let ((final-replies
@@ -3227,6 +3216,19 @@ OPTIONS are passed to `json-serialize'."
             result-properties
             ":END:\n\n")))
 
+(defun ende-chat--stage-opaque-protocol-events (job events properties)
+  "Store opaque protocol EVENTS from JOB's final response inside Agent: Work."
+  (let* ((instruction (ende-job-instruction job))
+         (level (1+ (plist-get instruction :response-level)))
+         (request-id (plist-get instruction :request-id))
+         (store-file (plist-get instruction :tool-store-file)))
+    (ende-chat--stage-agent-section
+     job
+     (mapconcat (lambda (event)
+                  (ende-chat--opaque-protocol-text
+                   level request-id event properties store-file))
+                events ""))))
+
 (defun ende-chat--protocol-event-text
     (event level question-id request-id properties calls pending store-file)
   "Render one assistant protocol EVENT."
@@ -3478,10 +3480,31 @@ FINAL includes retained tool images and trims compaction output."
                (instruction (ende-job-instruction job))
                (question-id (plist-get instruction :question-id))
                (request-id (plist-get instruction :request-id))
-               (staged (and (not compact)
-                            (ende-chat--staged-text job)))
+               (result-protocol-items (plist-get result :protocol-items))
+               (protocol-events
+                (ende-chat--protocol-item-events result-protocol-items))
+               (opaque-events
+                (cl-remove-if-not
+                 (lambda (event) (eq (plist-get event :type) 'opaque))
+                 protocol-events))
+               (opaque-items
+                (mapcar (lambda (event) (plist-get event :item)) opaque-events))
+               (protocol-items
+                (if opaque-events
+                    (cons (car result-protocol-items)
+                          (cl-remove-if
+                           (lambda (item) (memq item opaque-items))
+                           (cdr result-protocol-items)))
+                  result-protocol-items))
                (result-properties
                 (ende-chat--result-properties job result))
+               (staged
+                (and (not compact)
+                     (progn
+                       (when opaque-events
+                         (ende-chat--stage-opaque-protocol-events
+                          job opaque-events result-properties))
+                       (ende-chat--staged-text job))))
                (placeholder
                 (unless staged
                   (ende-chat--resolve-request-destination job))))
@@ -3510,7 +3533,7 @@ FINAL includes retained tool images and trims compaction output."
                        normalized t)
                     (ende-chat--assistant-protocol-text
                      level question-id request-id result-properties normalized nil nil
-                     (plist-get result :protocol-items)
+                     protocol-items
                      (plist-get instruction :tool-store-file))))
                  (response (if compact
                                (concat answer reasoning)

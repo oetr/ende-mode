@@ -95,6 +95,46 @@
 						 "chat-model"))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/chat-stages-opaque-protocol-items-without-tools ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-chat-opaque-" t))
+         (item (ende-protocol-json-read-string
+                "{\"type\":\"reasoning\",\"encrypted_content\":\"private\",\"summary\":[]}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content "Answer"
+                       :protocol-items (list 'openai-responses item))))))
+    (unwind-protect
+        (ende-test--with-buffer
+         "* Chat\n** Question\nAsk.\n** Follow-up\nContinue.\n"
+         (org-mode)
+         (setq buffer-file-name (expand-file-name "chat.org" directory))
+         (setq-local ende-tool-store--local-file
+                     (expand-file-name "payloads.sqlite3" directory))
+         (ende-test--chat-goto "** Question")
+         (let* ((job (ende-ask))
+                (request-id (plist-get (ende-job-instruction job) :request-id))
+                (document (ende-chat--build-document))
+                (work (ende-chat--request-work-section document request-id))
+                (opaque (cl-find-if
+                         (lambda (headline)
+                           (ende-chat--opaque-reference-p document headline))
+                         (ende-chat--document-headlines document))))
+           (should (eq (ende-job-state job) 'completed))
+           (should (eq (ende-chat--parent document opaque) work))
+           (save-excursion
+             (goto-char (org-element-property :begin opaque))
+             (should (org-invisible-p (line-beginning-position))))
+           (ende-test--chat-goto "** Follow-up")
+           (should
+            (cl-some (lambda (message)
+                       (and (listp message)
+                            (not (stringp (car-safe message)))
+                            (plist-get message :protocol-opaque)))
+                     (ende-chat-context-at-point)))))
+      (delete-directory directory t)
+      (ende-test--reset))))
+
 ;;;; Org-backed chat
 
 (ert-deftest ende-test/chat-staging-buffer-is-read-only-but-appendable ()
