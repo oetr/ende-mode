@@ -85,6 +85,13 @@ When nil, use only the response inactivity timeout."
 (defvar ende-model-selection--buffer-selections (make-hash-table :test #'equal)
   "Selections keyed by buffer name and visited file for this Emacs session.")
 
+(defvar ende-model-selection--buffer-provider-selections
+  (make-hash-table :test #'equal)
+  "Provider selections keyed by buffer identity and provider name.")
+
+(defvar ende-model-selection--provider-selections (make-hash-table :test #'eq)
+  "Most recently saved selection keyed by provider name.")
+
 (defvar ende-model-selection--shared-control-preferences
   (make-hash-table :test #'equal)
   "Control preferences keyed by provider/model/binding for this Emacs session.")
@@ -97,6 +104,8 @@ When nil, use only the response inactivity timeout."
   "Nonsecret bindings captured when explicit selections are saved.")
 
 (dolist (variable '(ende-model-selection--last-used ende-model-selection--buffer-selections
+						    ende-model-selection--buffer-provider-selections
+						    ende-model-selection--provider-selections
 						    ende-model-selection--shared-control-preferences
 						    ende-model-selection--buffer-control-preferences ende-model-selection--provenance))
   (add-to-list 'savehist-additional-variables variable))
@@ -423,6 +432,37 @@ kept lexical so recording a preference never initiates a TRAMP connection."
       (with-current-buffer buffer
         (list (buffer-name)
               (ende-model-selection--file-identity buffer-file-name))))))
+
+(defun ende-model-selection-provider-table (buffer &optional create)
+  "Return provider-selection table for BUFFER, creating it when CREATE."
+  (let ((identity (ende-model-selection--buffer-key buffer)))
+    (when identity
+      (or (gethash identity ende-model-selection--buffer-provider-selections)
+          (when create
+            (let ((table (make-hash-table :test #'eq)))
+              (puthash identity table ende-model-selection--buffer-provider-selections)
+              table))))))
+
+(defun ende-model-selection-provider-for-buffer (provider &optional buffer)
+  "Return BUFFER's saved selection for PROVIDER, or its latest saved value."
+  (let* ((buffer (or buffer (current-buffer)))
+         (table (ende-model-selection-provider-table buffer)))
+    (or (and table
+             (copy-tree (gethash provider table)))
+        (copy-tree (gethash provider ende-model-selection--provider-selections)))))
+
+(defun ende-model-selection-save-provider (selection &optional buffer)
+  "Save SELECTION as the provider-specific choice for BUFFER."
+  (let* ((selection (ende-model-selection--normalize selection))
+         (provider (plist-get selection :provider))
+         (buffer (or buffer (current-buffer))))
+    (unless selection
+      (error "A model selection requires a provider and model"))
+    (puthash provider (copy-tree selection) ende-model-selection--provider-selections)
+    (when (and (eq ende-model-selection-scope 'buffer) (buffer-live-p buffer))
+      (puthash provider (copy-tree selection)
+               (ende-model-selection-provider-table buffer t)))
+    (copy-tree selection)))
 
 (defun ende-model-selection--normalize (selection)
   "Return a detached provider/model/control selection, or nil.
