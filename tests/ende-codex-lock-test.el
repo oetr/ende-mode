@@ -122,5 +122,17 @@
       (ende-lock-test--stop process)
       (delete-directory directory t))))
 
+(ert-deftest ende-codex-lock-release-retries-contention ()
+  (let ((identity '(identity)) scheduled)
+    (cl-letf (((symbol-function 'ende-codex-auth--delete-lock-now)
+               (lambda (_lock _identity _timeout)
+                 (signal 'ende-codex-auth-busy nil)))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest arguments)
+                 (setq scheduled (cons function arguments)))))
+      (ende-codex-auth--delete-lock "lock" identity)
+      (should (eq (car scheduled) #'ende-codex-auth--delete-lock-retry))
+      (should (equal (cdr scheduled) (list "lock" identity))))))
+
 (provide 'ende-codex-lock-test)
 ;;; ende-codex-lock-test.el ends here

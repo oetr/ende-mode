@@ -253,8 +253,8 @@ An inherited binding, including an unusable one, survives delegation."
         (funcall verification))
       (when-let* ((lock (ende-codex--refresh-flight-lock flight)))
         (ende-ignore-errors
-         (ende-codex-auth--delete-lock
-          lock (ende-codex--refresh-flight-lock-id flight))))
+         #'ende-codex-auth--delete-lock
+         lock (ende-codex--refresh-flight-lock-id flight)))
       (when (and (processp process) (process-live-p process))
         (ende-ignore-errors #'delete-process process))
       (ende-curl-cleanup-resources
@@ -464,6 +464,15 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
   "Return the private coalescing key for AUTH's exact account/registration."
   (append (ende-codex--account-binding-state auth) (list (plist-get auth :revision))))
 
+(defun ende-codex--retry-lock-refresh (flight)
+  "Retry lock acquisition for FLIGHT, or finish after bounded contention."
+  (if (< (cl-incf (ende-codex--refresh-flight-attempts flight)) 40)
+      (setf (ende-codex--refresh-flight-timer flight)
+            (run-at-time 0.5 nil #'ende-codex--lock-refresh flight))
+    (ende-codex--refresh-finish
+     flight (ende-error-create :kind 'auth
+                               :message "Codex refresh is locked or credentials changed; retry or connect through the connection selector"))))
+
 (defun ende-codex--lock-refresh (flight)
   "Serialize rotating token use across Emacs instances before starting FLIGHT."
   (unless (ende-codex--refresh-flight-finished flight)
@@ -486,10 +495,9 @@ PAYLOAD supplies optional updated scopes and earliest refresh time."
              ((not (equal (plist-get auth :revision) (plist-get current :revision)))
               (error "Refusing to reuse changed refresh credentials"))
              ((ende-codex--refresh-flight-lock flight) (ende-codex--start-refresh-flight flight))
-             ((< (cl-incf (ende-codex--refresh-flight-attempts flight)) 40)
-              (setf (ende-codex--refresh-flight-timer flight)
-                    (run-at-time 0.5 nil #'ende-codex--lock-refresh flight)))
-             (t (error "Another instance is refreshing this account")))))
+             (t (ende-codex--retry-lock-refresh flight)))))
+      (ende-codex-auth-busy
+       (ende-codex--retry-lock-refresh flight))
       ((error quit)
        (ende-codex--refresh-finish
         flight (ende-error-create :kind 'auth

@@ -604,14 +604,29 @@ other users.  No symbolic links or multiply linked credential files are safe."
     (delete-file (expand-file-name "owner" lock)))
   (delete-directory lock))
 
-(defun ende-codex-auth--delete-lock (lock identity)
+(defun ende-codex-auth--delete-lock-now (lock identity timeout)
   "Remove LOCK only when its complete IDENTITY is unchanged."
   (ende-codex-auth--with-lock-guard
    (lambda ()
      (when (and (file-exists-p lock)
                 (equal identity (ende-codex-auth--lock-identity lock)))
        (ende-codex-auth--remove-lock lock)))
-   5000))
+   timeout))
+
+(defun ende-codex-auth--delete-lock-retry (lock identity)
+  "Retry deleting LOCK after transient guard contention."
+  (condition-case nil
+      (ende-codex-auth--delete-lock-now lock identity 0)
+    (ende-codex-auth-busy
+     (run-at-time 0.5 nil #'ende-codex-auth--delete-lock-retry lock identity))
+    ((error quit) nil)))
+
+(defun ende-codex-auth--delete-lock (lock identity)
+  "Remove LOCK, deferring only transient guard contention."
+  (condition-case nil
+      (ende-codex-auth--delete-lock-now lock identity 5000)
+    (ende-codex-auth-busy
+     (run-at-time 0.5 nil #'ende-codex-auth--delete-lock-retry lock identity))))
 
 (defun ende-codex-auth--make-lock (lock)
   "Create LOCK and owner metadata while holding the shared mutex."
