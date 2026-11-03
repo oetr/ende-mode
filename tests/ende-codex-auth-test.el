@@ -142,11 +142,8 @@
   (ende-codex-auth-test--with-store
    (ende-codex-auth--path t)
    (let ((lock (expand-file-name ".writer-lock" ende-codex-auth--directory)))
-     (let* ((id (ende-codex-auth--make-lock lock))
-            (owner (ende-codex-auth--lock-owner lock))
-            (started (read (plist-get owner :started))))
-       (cl-letf (((symbol-function 'process-attributes)
-                  (lambda (_pid) (list (cons 'start started)))))
+     (let ((id (ende-codex-auth--make-lock lock)))
+       (dotimes (_ 20)
          (should-error (ende-codex-auth--recover-lock ".writer-lock") :type 'user-error))
        (ende-codex-auth--delete-lock lock id))
      (ende-codex-auth--make-lock lock)

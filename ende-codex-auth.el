@@ -530,6 +530,19 @@ other users.  No symbolic links or multiply linked credential files are safe."
                 :invalid))
           (error :invalid))))))
 
+(defun ende-codex-auth--process-start (pid)
+  "Return PID's stable Linux start ticks, or nil if unavailable."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents-literally (format "/proc/%d/stat" pid))
+        (goto-char (point-max))
+        (when (search-backward ") " nil t)
+          (let ((ticks (nth 19 (split-string
+                                (buffer-substring-no-properties (+ (point) 2)
+                                                                (point-max))))))
+            (and ticks (string-match-p "\\`[0-9]+\\'" ticks) ticks))))
+    (error nil)))
+
 (defun ende-codex-auth--raw-lock (lock)
   "Create LOCK and its owner metadata inside the shared mutex."
   (let ((original (default-file-modes)) identity complete)
@@ -542,15 +555,11 @@ other users.  No symbolic links or multiply linked credential files are safe."
                 (setq identity (ende-codex-auth--lock-identity lock)))
             (set-default-file-modes original))
           (ende-codex-auth--attributes lock t t)
-          (let* ((attributes (and (fboundp 'process-attributes)
-                                  (condition-case nil
-                                      (process-attributes (emacs-pid))
-                                    (error nil))))
-                 (started (cdr (assq 'start attributes)))
+          (let* ((started (ende-codex-auth--process-start (emacs-pid)))
                  (owner (let ((data (make-hash-table :test #'equal)))
                           (puthash "pid" (emacs-pid) data)
                           (puthash "host" (system-name) data)
-                          (puthash "started" (and started (prin1-to-string started)) data)
+                          (puthash "started" started data)
                           (puthash "id" (ende-codex-auth--new-id) data)
                           data))
                  (file (expand-file-name "owner" lock))
@@ -641,11 +650,12 @@ other users.  No symbolic links or multiply linked credential files are safe."
        ((eq attributes :unavailable) 'unknown)
        ((null attributes) 'abandoned)
        ((equal (cdr (assq 'state attributes)) "Z") 'abandoned)
-       ((or (null (plist-get owner :started))
-            (null (cdr (assq 'start attributes)))) 'active)
-       ((equal (plist-get owner :started)
-               (prin1-to-string (cdr (assq 'start attributes)))) 'active)
-       (t 'abandoned))))))
+       (t
+        (let ((started (ende-codex-auth--process-start (plist-get owner :pid))))
+          (if (or (null started) (null (plist-get owner :started))
+                  (equal started (plist-get owner :started)))
+              'active
+            'abandoned))))))))
 
 (defun ende-codex-auth--recover-lock (name &optional confirmed)
   "Recover recognized abandoned lock NAME, requiring CONFIRMED if uncertain."
