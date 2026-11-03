@@ -5,15 +5,7 @@
 (defconst ende-codex-native-client-id "app_EMoamEEZ73f0CkXaXp7hrann")
 
 (defconst ende-codex--auth-methods
-  '((chatgpt-plan-oauth
-     :authorize-url "https://auth.openai.com/api/accounts/authorize"
-     :token-url "https://auth.openai.com/api/accounts/oauth/token"
-     :responses-url "https://api.openai.com/v1/responses"
-     :models-url "https://api.openai.com/v1/models"
-     :scopes "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
-     :resource "https://api.openai.com/v1" :client-kind dynamic :nonce t
-     :catalog-schema public)
-    (codex-oauth
+  '((codex-oauth
      :authorize-url "https://auth.openai.com/oauth/authorize"
      :token-url "https://auth.openai.com/oauth/token"
      :responses-url "https://chatgpt.com/backend-api/codex/responses"
@@ -24,7 +16,15 @@
      :redirect-uri "http://localhost:1455/auth/callback"
      :callback-port 1455 :client-kind fixed
      :account-header "ChatGPT-Account-Id" :catalog-schema native
-     :models-query ("client_version")))
+     :models-query ("client_version"))
+    (chatgpt-plan-oauth
+     :authorize-url "https://auth.openai.com/api/accounts/authorize"
+     :token-url "https://auth.openai.com/api/accounts/oauth/token"
+     :responses-url "https://api.openai.com/v1/responses"
+     :models-url "https://api.openai.com/v1/models"
+     :scopes "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+     :resource "https://api.openai.com/v1" :client-kind dynamic :nonce t
+     :catalog-schema public))
   "Single authority for the two trusted OAuth protocols.
 Native Codex authorization and backend access remain experimental until live
 verification; the public client registration does not imply approval for Ende.")

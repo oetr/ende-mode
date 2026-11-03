@@ -5,7 +5,7 @@
 
 (ert-deftest ende-codex-methods-fixed-protocols ()
   (should (equal (mapcar #'car ende-codex--auth-methods)
-                 '(chatgpt-plan-oauth codex-oauth)))
+                 '(codex-oauth chatgpt-plan-oauth)))
   (dolist (pair '((chatgpt-plan-oauth "https://api.openai.com/v1")
                   (codex-oauth "https://chatgpt.com/backend-api/codex")))
     (should (equal (ende-codex--auth-property (car pair) :responses-url)
@@ -21,7 +21,7 @@
         (ende-custom-providers nil)
         (ende-builtin-provider-settings nil))
     (should (eq (plist-get (ende-provider-config-resolve 'openai-codex) :auth-method)
-                'chatgpt-plan-oauth))
+                'codex-oauth))
     (dolist (method '(chatgpt-plan-oauth codex-oauth))
       (let ((profile (ende-provider-config-resolve
                       'openai-codex nil nil (list :auth-method method))))
@@ -30,7 +30,7 @@
         (should (equal (plist-get profile :models-url)
                        (ende-codex--auth-property method :models-url)))
         (should (equal (ende-provider-config-supported-auth profile)
-                       '(chatgpt-plan-oauth codex-oauth)))))
+                       '(codex-oauth chatgpt-plan-oauth)))))
     (let ((ende-builtin-provider-settings '((openai-codex :auth-method codex-oauth))))
       (should (eq (plist-get (ende-provider-config-resolve 'openai-codex) :auth-method)
                   'codex-oauth))

@@ -245,7 +245,7 @@ manually entered model.  :model-settings refines shared model defaults."
           (unless (assq api (plist-get integration :endpoints))
             (error ":api: choose a verified API for %s" service))
           (when (eq service 'openai-codex)
-            (ende-codex--auth-spec (or (plist-get settings :auth-method) 'chatgpt-plan-oauth)))
+            (ende-codex--auth-spec (or (plist-get settings :auth-method) 'codex-oauth)))
           (when (and (plist-member settings :transport) (not (eq service 'openrouter)))
             (error ":transport: only OpenRouter supports transport overrides")))
         (when custom
@@ -488,7 +488,7 @@ Nil OVERRIDES clears BASE.  Nested objects and arrays replace whole values."
 (defun ende-provider-config-supported-auth (profile)
   "Return authentication methods implemented for PROFILE's connection."
   (if (eq (plist-get profile :service) 'openai-codex)
-      '(chatgpt-plan-oauth codex-oauth)
+      '(codex-oauth chatgpt-plan-oauth)
     (list (plist-get profile :auth-method))))
 
 (defun ende-provider-config-resolve (name &optional model api connection)
@@ -522,7 +522,7 @@ selects another explicitly available wire endpoint.  No network is started."
          (auth (if custom (plist-get configured :auth-method)
                  (if (eq service 'openai-codex)
                      (or (plist-get connection :auth-method)
-                         (plist-get configured :auth-method) 'chatgpt-plan-oauth)
+                         (plist-get configured :auth-method) 'codex-oauth)
                    'auth-source)))
          (controls (ende-provider-config--controls service api model))
          (profile
