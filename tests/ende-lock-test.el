@@ -2,6 +2,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'ende-lock)
 
 (defun ende-lock-test--start (form)
   "Start an independent Emacs evaluating FORM."
@@ -60,6 +61,23 @@
           (ende-lock-test--await b "acquired"))
       (ende-lock-test--stop a)
       (ende-lock-test--stop b)
+      (delete-directory directory t))))
+
+(ert-deftest ende-lock-fails-closed-and-retains-database ()
+  (let* ((directory (make-temp-file "ende-lock-" t))
+         (file (expand-file-name "guard.sqlite" directory)))
+    (unwind-protect
+        (progn
+          (should-error (ende-lock-call file (lambda () (error "callback"))))
+          (let ((identity (ende-lock--identity (file-attributes file))))
+            (should (eq (ende-lock-call file (lambda () 'released)) 'released))
+            (should (equal identity (ende-lock--identity (file-attributes file)))))
+          (dolist (path (list file (concat file "-journal")))
+            (when (file-exists-p path) (delete-file path))
+            (make-symbolic-link (expand-file-name "missing" directory) path)
+            (should-error (ende-lock-call file (lambda () (ert-fail "Entered unsafe mutex")))
+                          :type 'ende-lock-error)
+            (delete-file path)))
       (delete-directory directory t))))
 
 (provide 'ende-lock-test)
