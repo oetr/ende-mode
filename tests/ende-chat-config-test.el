@@ -855,7 +855,7 @@
                   ("** Direct grants" (read_file))
                   ("** Information" (project_info))
                   ("** Redefine only" nil)))
-         (catalog (ende-tool-definitions))
+         (catalog (ende-tool-definitions nil 'work))
          (catalog-names (ende-test--tool-definition-names catalog))
          (previous-definitions nil))
     (ende-test--reset)
@@ -1387,7 +1387,8 @@
                                         (plist-get second :tool-resources)))
                              '(project)))
               (should (equal first-definitions second-definitions))
-              (should (equal first-definitions (ende-tool-definitions)))
+              (should (equal first-definitions
+                             (ende-tool-definitions nil 'work)))
               (should
                (cl-some
                 (lambda (message)

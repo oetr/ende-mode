@@ -1071,7 +1071,7 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                   (should fragmented)
                   (should (equal (sort names #'string<)
                                  (sort (ende-test--tool-definition-names
-                                        (ende-tool-definitions))
+                                        (ende-tool-definitions nil 'work))
                                        #'string<)))
                    (should-not (string-match-p "attacker\\.invalid" (buffer-string)))
                   (should-not

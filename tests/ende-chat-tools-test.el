@@ -333,7 +333,8 @@
                            :content content)))
              (lambda (messages)
                (setq results messages)
-               (ende-agent--send job '(("user" . "Continue")) nil nil 1)))
+               (ende-agent--send job '(("user" . "Continue")) nil nil 1
+                                  '(("user" . "Continue")))))
             (should (equal (ende-job-status job) "read_file"))
             (with-temp-buffer (funcall pending "first"))
             (should (equal (ende-job-status job) "web_fetch"))
