@@ -95,15 +95,18 @@
 						 "chat-model"))))
       (ende-test--reset))))
 
-(ert-deftest ende-test/chat-stages-opaque-protocol-items-without-tools ()
+(ert-deftest ende-test/chat-records-opaque-protocol-items-without-tools ()
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-opaque-" t))
          (item (ende-protocol-json-read-string
                 "{\"type\":\"reasoning\",\"encrypted_content\":\"private\",\"summary\":[]}"))
+         (answer-item
+          (ende-protocol-json-read-string
+           "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :content "Answer"
-                       :protocol-items (list 'openai-responses item))))))
+                       :protocol-items (list 'openai-responses item answer-item))))))
     (unwind-protect
         (ende-test--with-buffer
          "* Chat\n** Question\nAsk.\n** Follow-up\nContinue.\n"
@@ -137,83 +140,51 @@
 
 ;;;; Org-backed chat
 
-(ert-deftest ende-test/chat-staging-buffer-is-read-only-but-appendable ()
+(ert-deftest ende-test/chat-transcript-is-independent-of-disposable-work-viewer ()
   (ende-test--reset)
-  (let* ((job (ende--make-job :instruction '(:request-id "readonly-staging")))
-         (buffer (ende-chat--staging-buffer job t)))
+  (let* ((call '(:id "viewer-call" :name "about_thinking"
+                     :arguments "{\"title\":\"Checking\",\"status\":\"Recorded work\"}"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :tool-calls (list call)) "Final answer") t))
+         viewer)
     (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (should (derived-mode-p 'org-mode))
-            (unless noninteractive (should font-lock-mode))
-            (should buffer-read-only)
-            (should-error (insert "user edit") :type 'buffer-read-only))
-          (ende-chat--staging-append job "first")
-          (ende-chat--staging-append job " second")
-          (ende-chat--staging-append
-           job "\n** Agent: Work\n:PROPERTIES:\n:ENDE_CHAT_WORK: t\n:END:\n\n")
-          (ende-chat--staging-append
-           job "*** Section\nbody\n**** Nested\nnested body\n*** Another\nmore body\n")
-          (with-current-buffer buffer
-            (should buffer-read-only)
-            (should (string-match-p "first second" (buffer-string)))
-            (should (= (how-many org-heading-regexp (point-min) (point-max)) 4))
-            (goto-char (point-min))
-            (search-forward "Agent: Work")
-            (should-not (org-invisible-p (line-beginning-position)))
-            (dolist (text '("body" "nested body" "more body"))
-              (goto-char (point-min))
-              (search-forward text)
-              (should (org-invisible-p (point))))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-(ert-deftest ende-test/chat-staging-append-preserves-current-point ()
-  (ende-test--reset)
-  (let* ((job (ende--make-job
-               :instruction '(:request-id "staging-point-neutral-current")))
-         (buffer (ende-chat--staging-buffer job t)))
-    (unwind-protect
-        (save-window-excursion
-          (delete-other-windows)
-          (set-window-buffer (selected-window) buffer)
-          (ende-chat--staging-append job "First section\nSecond section\n")
-          (with-current-buffer buffer
-            (goto-char (+ (point-min) 5))
-            (let ((previous-point (point)))
-              (ende-chat--staging-append job "Third section\n")
-              (should (= (point) previous-point)))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
-
-(ert-deftest ende-test/chat-staging-append-preserves-nonselected-window-position ()
-  (ende-test--reset)
-  (let* ((job (ende--make-job
-               :instruction '(:request-id "staging-point-neutral-window")))
-         (buffer (ende-chat--staging-buffer job t))
-         (other-buffer (generate-new-buffer "*staging-window-other*")))
-    (unwind-protect
-        (save-window-excursion
-          (delete-other-windows)
-          (ende-chat--staging-append
-           job "First section\nSecond section\nThird section\n")
-          (let* ((work-window (selected-window))
-                 (other-window (split-window-right)))
-            (set-window-buffer work-window buffer)
-            (set-window-buffer other-window other-buffer)
-            (with-selected-window work-window
-              (goto-char (+ (point-min) 5))
-              (set-window-start work-window (point-min) t))
-            (let ((previous-point (window-point work-window))
-                  (previous-start (window-start work-window)))
-              (select-window other-window)
-              (ende-chat--staging-append job "Fourth section\n")
-              (should (= (window-point work-window) previous-point))
-              (should (= (window-start work-window) previous-start)))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer))
-      (when (buffer-live-p other-buffer)
-        (kill-buffer other-buffer)))))
+        (ende-test--with-buffer
+         "* Root\n** Question\nAsk\n"
+         (org-mode)
+         (ende-test--chat-goto "** Question")
+         (let* ((job (ende-ask))
+                (before (buffer-string)))
+           (ende-test--complete-call (car ende-test--calls))
+           (should (ende-job-transcript job))
+           (should-not (ende-job-work-buffer job))
+           (let ((rendered (ende-chat--render-transcript job))
+                 (model (prin1-to-string (ende-job-transcript job)))
+                 visible)
+             (should (string-match-p "ENDE_TOOL_KIND: result" rendered))
+             (setq viewer (ende-work-buffer-open job)
+                   visible (with-current-buffer viewer (buffer-string)))
+             (with-current-buffer viewer
+               (should buffer-read-only)
+               (let ((inhibit-read-only t))
+                 (erase-buffer)
+                 (insert "Corrupted viewer, not canonical history.")))
+             (should (equal rendered (ende-chat--render-transcript job)))
+             (should (equal model (prin1-to-string (ende-job-transcript job))))
+             (kill-buffer viewer)
+             (should-not (ende-job-work-buffer job))
+             (should (eq (ende-job-state job) 'running))
+             (setq viewer (ende-work-buffer-open job))
+             (should (equal visible (with-current-buffer viewer (buffer-string))))
+             (kill-buffer viewer))
+           (should (equal before (buffer-string)))
+           (ende-test--complete-call (nth 1 ende-test--calls))
+           (should (eq (ende-job-state job) 'completed))
+           (should-not (ende-job-work-buffer job))
+           (should (string-match-p "Recorded work" (buffer-string)))
+           (should (string-match-p "Final answer" (buffer-string)))
+           (should-not (string-match-p "Corrupted viewer" (buffer-string)))))
+      (when (buffer-live-p viewer) (kill-buffer viewer)))))
 
 (ert-deftest ende-test/chat-completion-reduces-whole-transcript-parsing ()
   (ende-test--reset)
@@ -335,8 +306,15 @@
        (let* ((document (ende-chat--build-document))
               (question (ende-chat--find-by-property
                          document ende-chat-id-property question-id))
-              (reply (ende-chat--find-by-property
-                      document ende-chat-request-id-property request-id))
+              (reply
+               (cl-find-if
+                (lambda (headline)
+                  (and (equal (org-element-property :raw-value headline)
+                              "Agent: Reply")
+                       (equal (ende-chat--property document headline :request-id)
+                              request-id)
+                       (null (ende-chat--work-ancestor document headline))))
+                (ende-chat--document-headlines document)))
               (inserted (cl-find-if
                          (lambda (headline)
                            (equal (org-element-property :raw-value headline)
@@ -381,8 +359,15 @@
        (let* ((document (ende-chat--build-document))
               (question (ende-chat--find-by-property
                          document ende-chat-id-property question-id))
-              (reply (ende-chat--find-by-property
-                      document ende-chat-request-id-property request-id)))
+              (reply
+               (cl-find-if
+                (lambda (headline)
+                  (and (equal (org-element-property :raw-value headline)
+                              "Agent: Reply")
+                       (equal (ende-chat--property document headline :request-id)
+                              request-id)
+                       (null (ende-chat--work-ancestor document headline))))
+                (ende-chat--document-headlines document))))
          (should question)
          (should reply)
          (should (equal (ende-chat--property document reply :reply-to)
@@ -434,8 +419,9 @@
        (should (eq (ende-job-state job) 'failed))
        (should (string-match-p "User-edited destination" (buffer-string)))
        (should-not (string-match-p "Generated answer" (buffer-string)))
-       (should (string-match-p "destination was edited or moved"
-                               (buffer-string)))))))
+       (should (string-match-p
+                "destination was edited or moved"
+                (ende-error-display-message (ende-job-error job))))))))
 
 
 
@@ -533,11 +519,11 @@
          (org-end-of-meta-data t)
          (insert "Added during the asynchronous tool round.\n")
          (funcall deferred-tool-completion "{\\\"ok\\\":true}")
-         (let ((staged (ende-chat--staged-text job)))
-           (should staged)
-           (should (string-match-p "Agent: Work" staged))
-           (should (string-match-p "about_thinking" staged))
-           (should (string-match-p "ENDE_TOOL_KIND: result" staged))
+         (let ((rendered (ende-chat--render-transcript job)))
+           (should rendered)
+           (should (string-match-p "Agent: Work" rendered))
+           (should (string-match-p "about_thinking" rendered))
+           (should (string-match-p "ENDE_TOOL_KIND: result" rendered))
            (should (string-match-p "Agent: Reply" (buffer-string)))
            (should-not (string-match-p "Agent: Work" (buffer-string)))
            (should-not (string-match-p "ENDE_TOOL_KIND" (buffer-string)))))
@@ -729,7 +715,8 @@
      (should-not (ende-running-jobs))
      (should-not (ende-queued-jobs))
      (should-not (ende-queue-family-markers))
-     (should (cl-every #'buffer-live-p child-buffers))
+     (should-not (cl-some #'buffer-live-p child-buffers))
+     (should-not (cl-some #'ende-job-work-buffer children))
      (dolist (call (cdr ende-test--calls))
        (ende-test--callback call :on-done '(:content "late child answer"))
        (cl-incf late-count))
@@ -739,7 +726,7 @@
 
 (ert-deftest ende-test/chat-intermediate-tool-round-ignores-stale-destination-marker ()
   (ende-test--reset)
-  (let* ((directory (make-temp-file "ende-chat-staging-rounds-" t))
+  (let* ((directory (make-temp-file "ende-chat-transcript-rounds-" t))
          (user-emacs-directory directory)
          (first '(:id "round-one" :name "about_thinking"
                       :arguments "{\"title\":\"First\",\"status\":\"Done\"}"))
@@ -766,7 +753,7 @@
            (should (eq (ende-job-state job) 'running))
            (should (= (length ende-test--calls) 3))
            (should (string-match-p "Second"
-                                   (ende-chat--staged-text job)))
+                                   (ende-chat--render-transcript job)))
            (should-not (string-match-p "Agent: Work" (buffer-string)))
            (should-not (string-match-p "ENDE_TOOL_KIND" (buffer-string)))
            (ende-job-fail job "test cleanup")
@@ -775,10 +762,10 @@
 
 (ert-deftest ende-test/chat-failure-materializes-by-durable-request-id ()
   (ende-test--reset)
-  (let* ((directory (make-temp-file "ende-chat-staged-failure-id-" t))
+  (let* ((directory (make-temp-file "ende-chat-transcript-failure-id-" t))
          (user-emacs-directory directory)
          (call '(:id "durable-failure-call" :name "about_thinking"
-                     :arguments "{\"title\":\"Staged\",\"status\":\"Done\"}"))
+                     :arguments "{\"title\":\"Recorded\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call)) "Unused final") t)))
@@ -808,8 +795,10 @@
              (let ((summary
                     (cl-find-if
                      (lambda (headline)
-                       (equal (ende-chat--property document headline :visibility)
-                              "reasoning_summary"))
+                       (and (equal (ende-chat--property document headline :visibility)
+                                   "reasoning_summary")
+                            (equal (org-element-property :raw-value headline)
+                                   "Agent: Failure context")))
                      (ende-chat--children document work))))
                (should summary)
                (should (equal (org-element-property :raw-value summary)
@@ -823,7 +812,7 @@
 
 (ert-deftest ende-test/chat-failed-materialization-retains-current-recovery ()
   (ende-test--reset)
-  (let* ((directory (make-temp-file "ende-chat-staged-retain-" t))
+  (let* ((directory (make-temp-file "ende-chat-transcript-retain-" t))
          (user-emacs-directory directory)
          (call '(:id "retained-work-call" :name "about_thinking"
                      :arguments "{\"title\":\"Durable\",\"status\":\"Done\"}"))
@@ -856,52 +845,6 @@
                                          (cadr recovery))))))))
       (delete-directory directory t))))
 
-(ert-deftest ende-test/chat-staging-buffer-creation-remains-lazy ()
-  (let ((job (ende--make-job :instruction '(:request-id "lazy-staging"))))
-    (should-not (ende-chat--staging-buffer job))
-    (should-not (plist-get (ende-job-instruction job) :staging-buffer))))
-
-(ert-deftest ende-test/chat-staging-keybinding-is-buffer-local ()
-  (let ((org-buffer (generate-new-buffer " *ende-chat-org-test*"))
-        (job (ende--make-job :instruction '(:request-id "keymap-test")))
-        staging-buffer)
-    (unwind-protect
-        (progn
-          (with-current-buffer org-buffer (org-mode))
-          (let ((org-q (with-current-buffer org-buffer (key-binding (kbd "q")))))
-            (setq staging-buffer (ende-chat--staging-buffer job t))
-            (should (eq (with-current-buffer org-buffer
-                          (key-binding (kbd "q")))
-                        org-q))
-            (should (eq (with-current-buffer staging-buffer
-                          (key-binding (kbd "q")))
-                        #'ende-work-buffer-quit))))
-      (when (buffer-live-p staging-buffer) (kill-buffer staging-buffer))
-      (kill-buffer org-buffer))))
-
-(ert-deftest ende-test/chat-staging-does-not-copy-to-kill-ring ()
-  (let* ((buffer (generate-new-buffer " *ende-chat-staging-test*"))
-         (kill-ring '("previous entry"))
-        (kill-ring-yank-pointer nil)
-        clipboard-text
-        clipboard-read
-        (interprogram-cut-function
-         (lambda (text) (setq clipboard-text text)))
-        (interprogram-paste-function
-         (lambda ()
-           (setq clipboard-read t)
-           "Unrelated clipboard contents")))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer (org-mode))
-          (ende-chat--staging-insert buffer "* Work\n** Summary\n")
-          (should (equal kill-ring '("previous entry")))
-          (should-not clipboard-text)
-          (should-not clipboard-read)
-          (with-current-buffer buffer
-            (should (equal (buffer-string) "* Work\n** Summary\n"))))
-      (kill-buffer buffer))))
-
 (ert-deftest ende-test/chat-reasoning-summaries-follow-tool-rounds ()
   (ende-test--reset)
   (let* ((call '(:id "summary-call" :name "about_thinking"
@@ -923,19 +866,19 @@
            (insert "ambient callback buffer")
            (ende--handle-llm-event
             job '(:type :reasoning-summary :item "before" :text "Before "))
-           (with-current-buffer (ende-chat--staging-buffer job)
-             (should (string-match-p "Agent: Before" (buffer-string))))
+           (should (string-match-p "Agent: Before"
+                                   (ende-chat--render-transcript job)))
            (ende--handle-llm-event
             job '(:type :reasoning-summary :item "before" :text "tools"))
-           (with-current-buffer (ende-chat--staging-buffer job)
-             (should (string-match-p "Agent: Before tools" (buffer-string))))
+           (should (string-match-p "Agent: Before tools"
+                                   (ende-chat--render-transcript job)))
            (should (equal (buffer-string) "ambient callback buffer")))
          (with-current-buffer chat-buffer
            (should-not (string-match-p "Agent: Before tools"
                                        (buffer-string))))
          (ende-test--complete-call (car ende-test--calls))
          (funcall tool-completion "{}")
-         (should (ende-chat--staging-buffer job))
+         (should-not (ende-job-work-buffer job))
          (with-temp-buffer
            (insert "ambient callback buffer")
            (ende--handle-llm-event
@@ -947,9 +890,9 @@
          (ende--handle-llm-event
           job '(:type :reasoning-summary :item "after" :text "After tools"
                       :replace t))
-         (with-current-buffer (ende-chat--staging-buffer job)
-           (should (string-match-p "Agent: After tools" (buffer-string)))
-           (should (= 1 (how-many "Agent: After" (point-min) (point-max)))))
+         (let ((rendered (ende-chat--render-transcript job)))
+           (should (string-match-p "Agent: After tools" rendered))
+           (should (= 1 (ende-test--count-matches "Agent: After" rendered))))
          (ende-test--complete-call (nth 1 ende-test--calls)))
        (should (eq (ende-job-state job) 'completed))
        (let* ((document (ende-chat--build-document))
@@ -961,8 +904,9 @@
                      headlines))
               (reply (cl-find-if
                       (lambda (headline)
-                        (equal (org-element-property :raw-value headline)
-                               "Agent: Reply"))
+                        (and (equal (org-element-property :raw-value headline)
+                                    "Agent: Reply")
+                             (null (ende-chat--work-ancestor document headline))))
                       headlines)))
          (should work)
          (should reply)
@@ -1097,12 +1041,12 @@
        (should (string-match-p "Done" text))
        (should-not (string-match-p "Unremarkable title" text))))))
 
-(ert-deftest ende-test/chat-malformed-staged-work-rolls-back-and-retains-recovery ()
+(ert-deftest ende-test/chat-transcript-commit-failure-rolls-back-and-retains-recovery ()
   (ende-test--reset)
-  (let* ((directory (make-temp-file "ende-chat-staged-malformed-" t))
+  (let* ((directory (make-temp-file "ende-chat-commit-failure-" t))
          (user-emacs-directory directory)
-         (call '(:id "malformed-work-call" :name "about_thinking"
-                     :arguments "{\"title\":\"Malformed\",\"status\":\"Done\"}"))
+         (call '(:id "commit-failure-call" :name "about_thinking"
+                     :arguments "{\"title\":\"Retained work\",\"status\":\"Done\"}"))
          (ende-llm-function
           (ende-test--fake-llm
            (list (list :tool-calls (list call))
@@ -1116,13 +1060,13 @@
                 (request-id (plist-get (ende-job-instruction job) :request-id))
                 (before (buffer-string)))
            (ende-test--complete-call (car ende-test--calls))
-           (with-current-buffer (ende-chat--staging-buffer job)
-             (let ((inhibit-read-only t))
-               (goto-char (point-min))
-               (should (re-search-forward "^:ENDE_CHAT_WORK: t$" nil t))
-               (replace-match ":ENDE_CHAT_WORK: malformed")))
-           (ende-test--complete-call (nth 1 ende-test--calls))
+           ;; Fail after insertion so the atomic commit must restore the source.
+           (cl-letf (((symbol-function 'ende-chat--hide-control-drawers-in-region)
+                      (lambda (&rest _) (error "Injected transcript commit failure"))))
+             (ende-test--complete-call (nth 1 ende-test--calls)))
            (should (eq (ende-job-state job) 'failed))
+           (should (string-match-p "Injected transcript commit failure"
+                                   (ende-error-display-message (ende-job-error job))))
            (should (equal before (buffer-string)))
            (let* ((document (ende-chat--build-document))
                   (pending (ende-chat--request-state-headline
@@ -1131,12 +1075,11 @@
                   (recovery (ende-chat--read-recovery-file file)))
              (should pending)
              (should (file-exists-p file))
-             (should (string-match-p "ENDE_CHAT_WORK: malformed"
-                                     (cadr recovery)))
+             (should (string-match-p "Retained work" (cadr recovery)))
              (should (string-match-p "Final answer" (cadr recovery))))))
       (delete-directory directory t))))
 
-(ert-deftest ende-test/chat-failure-after-tool-work-keeps-staged-transcript ()
+(ert-deftest ende-test/chat-failure-after-tool-work-keeps-recorded-transcript ()
   (ende-test--reset)
   (let* ((call '(:id "failed-call" :name "about_thinking"
                      :arguments "{\"title\":\"Working\",\"status\":\"Done\"}"))
@@ -1156,7 +1099,8 @@
        (should (string-match-p "Agent: Work" (buffer-string)))
        (should (string-match-p "Agent: Reply" (buffer-string)))
        (should (string-match-p "mock failure" (buffer-string)))
-       (should (buffer-live-p (ende-job-work-buffer job)))
+       (should (ende-job-transcript job))
+       (should-not (ende-job-work-buffer job))
        (let* ((document (ende-chat--build-document))
               (reply (ende-chat--request-state-headline
                       document request-id "failed")))
@@ -1212,7 +1156,8 @@
                             (concat request-id ".org")
                             (expand-file-name "ende/chat-recovery/"
                                               user-emacs-directory))))
-              (should (buffer-live-p (ende-job-work-buffer job))))))
+              (should (ende-job-transcript job))
+              (should-not (ende-job-work-buffer job)))))
       (delete-directory directory t))))
 
 (ert-deftest ende-test/chat-unsafe-recovery-only-opens-inspection-buffer ()
@@ -1716,9 +1661,14 @@
 				  (should (equal (ende-chat--property document (car pair)
 								      :reasoning-for)
 						 request-id))
-				  (should (eq (ende-chat--find-by-property
-					       document ende-chat-request-id-property request-id)
-					      (cdr pair))))))
+				  (should (equal
+                                           (cl-remove-if-not
+                                            (lambda (reply)
+                                              (equal (ende-chat--property
+                                                      document reply :request-id)
+                                                     request-id))
+                                            replies)
+                                           (list (cdr pair)))))))
 			    (should-not (cl-some #'ende-review-overlay-p
 						 (overlays-in (point-min) (point-max)))))))
 
