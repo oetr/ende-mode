@@ -250,6 +250,9 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
       (let* ((start (point-max))
              (body-start (+ start (length heading)))
              (end (+ body-start (length body))))
+        ;; Keep the preceding fold from hiding this heading's line break.
+        (when (> start (point-min))
+          (org-fold-region (1- start) start nil 'outline))
         (ende-work-buffer--splice start start (concat heading body))
         (setq section (ende-work-buffer--make-section
                        :start (copy-marker start t) :body-start (copy-marker body-start)

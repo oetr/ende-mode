@@ -103,6 +103,9 @@
                 (should (cl-every (lambda (headline) (= (org-element-property :level headline) 1)) headlines))
                 (dolist (headline headlines)
                   (goto-char (org-element-property :begin headline))
+                  (save-excursion
+                    (forward-visible-line 0)
+                    (should (= (point) (org-element-property :begin headline))))
                   (dolist (property '(("ENDE_MODEL" . "reported-model")
                                       ("ENDE_REASONING_EFFORT" . "high")
                                       ("ENDE_INPUT_TOKENS" . "12")
