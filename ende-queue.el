@@ -877,7 +877,8 @@ bypassed by a later same-provider job."
   (ende--job-release-owned-buffer job)
   (when (buffer-live-p (ende-job-work-buffer job))
     (kill-buffer (ende-job-work-buffer job)))
-  (setf (ende-job-work-buffer job) nil)
+  (setf (ende-job-work-buffer job) nil
+        (ende-job-transcript job) nil)
   job)
 
 (defun ende--job-release-owned-buffer (job)

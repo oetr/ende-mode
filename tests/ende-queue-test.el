@@ -350,6 +350,7 @@
           (ende-test--fake-llm (append responses '("child answer")) t))
          (ende--queue-suspended t)
          (root-buffer nil)
+         (settlements 0)
          family child)
     (ende-test--with-buffer "user source"
       (setq root-buffer (current-buffer)
@@ -365,6 +366,7 @@
              :access-policy '(:root nil :active-tools (about_thinking)
                               :tool-resources nil)
              :instruction (list :task "inspect safely" :registry nil)
+             :delegated-settlement (lambda (_job) (cl-incf settlements))
              :schedule-path '(1)))
       (setf (ende-job-family-root family) child
             (ende-job-family child) family
@@ -380,7 +382,19 @@
         (should-not (string-match-p "Name:"
                                     (format "%s" sent))))
       (dotimes (index (length texts))
-        (ende-test--complete-call (nth index ende-test--calls)))
+        (let* ((target (ende-job-target child))
+               (owned (ende-job-owned-buffer child))
+               (viewer (ende-work-buffer-open child)))
+          (with-current-buffer viewer (org-overview))
+          (ende-test--complete-call (nth index ende-test--calls))
+          (let ((visible (with-current-buffer viewer (buffer-string))))
+            (kill-buffer viewer)
+            (setq viewer (ende-work-buffer-open child))
+            (should (equal visible (with-current-buffer viewer (buffer-string)))))
+          (kill-buffer viewer)
+          (should (eq (ende-job-state child) 'running))
+          (should (eq target (ende-job-target child)))
+          (should (eq owned (ende-job-owned-buffer child)))))
       (let* ((messages (plist-get (car (last ende-test--calls)) :messages))
              (protocol (nthcdr 2 messages))
              (assistants (cl-remove-if-not
@@ -404,6 +418,8 @@
         (should-not (buffer-live-p owned)))
       (should (eq (ende-job-state child) 'completed))
       (should (equal (ende-job-result child) "child answer"))
+      (ende-test--complete-call (car (last ende-test--calls)))
+      (should (= settlements 1))
       (should-not (buffer-live-p (ende-job-owned-buffer child)))
       (should-not (ende-job-work-buffer child))
       (let* ((entries (ende-transcript-entries (ende-job-transcript child)))

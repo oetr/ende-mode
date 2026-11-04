@@ -96,6 +96,7 @@
               (should-error (ende-enqueue request)))
             (should-not (gethash (ende-job-id job) ende--retained-jobs))
             (should-not (buffer-live-p work))
+            (should-not (ende-job-transcript job))
             (should-not (buffer-live-p buffer))
             (should-not (ende-job-owned-buffer job))
             (should-not (ende-job-owned-buffer-hook job))
