@@ -1003,6 +1003,74 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (plist-get out :cleaned))
       (should (eq (car (last (plist-get out :order))) :done)))))
 
+(ert-deftest ende-test/stream-adapters-expose-item-identities ()
+  (dolist (case
+           '((responses openai-responses
+                        ("{\"type\":\"response.output_item.added\",\"output_index\":4,\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"}}"
+                         "{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":4,\"delta\":\"summary\"}"
+                         "{\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"lookup\",\"arguments\":\"\"}}"
+                         "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{}\"}"
+                         "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"image_generation_call\",\"result\":\"private-image\"}}"
+                         "{\"type\":\"response.output_text.delta\",\"output_index\":7,\"delta\":\"answer\"}"
+                         "{\"type\":\"response.output_item.done\",\"output_index\":7,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}"
+                         "{\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"lookup\",\"arguments\":\"{}\"}}"
+                         "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}"))
+             (messages anthropic-messages
+                       ("{\"type\":\"content_block_start\",\"index\":4,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque\"}}"
+                        "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c\",\"name\":\"lookup\",\"input\":{}}}"
+                        "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}"
+                        "{\"type\":\"content_block_start\",\"index\":7,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"
+                        "{\"type\":\"content_block_delta\",\"index\":7,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}"
+                        "{\"type\":\"content_block_stop\",\"index\":7}"
+                        "{\"type\":\"content_block_stop\",\"index\":2}"
+                        "{\"type\":\"content_block_stop\",\"index\":4}"
+                        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}"
+                        "{\"type\":\"message_stop\"}"))
+             (chat openai-chat-completions
+                   ("{\"choices\":[{\"delta\":{\"reasoning_content\":\"thought\"}}]}"
+                    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"c\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}"
+                    "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":2,\"function\":{\"arguments\":\"{}\"}}]}}]}"
+                    "{\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}"
+                    "[DONE]"))))
+    (let* ((chat (eq (car case) 'chat))
+           (profile (list :api (nth 1 case) :auth-method 'none
+                          :url "https://example.test/api" :model "m" :output-tokens 50))
+           (chunks (mapcar (lambda (json) (concat "data: " json "\n\n")) (nth 2 case)))
+           (out (ende-test--run-stream-request (car case) chunks nil nil profile))
+           (result (plist-get out :result))
+           (events (plist-get out :events))
+           (items (cl-remove-if-not (lambda (event) (eq (plist-get event :type) :item)) events))
+           (calls (cl-remove-if-not (lambda (event) (eq (plist-get event :kind) 'tool-call)) items))
+           (call-key (if chat '(tool-call . 2) 2)))
+      (should-not (plist-get out :error))
+      (should (equal (plist-get result :content) "answer"))
+      (should (equal (delete-dups
+                      (cl-loop for event in events
+                               when (memq (plist-get event :type) '(:item :delta :reasoning-summary))
+                               collect (if (eq (plist-get event :type) :item)
+                                           (plist-get event :key)
+                                         (plist-get event :item-key))))
+                     (if chat '(:thinking (tool-call . 2) :content) '(4 2 7))))
+      (should (equal (plist-get (car calls) :key) call-key))
+      (should-not (plist-member (cadr calls) :item))
+      (should (equal (plist-get (plist-get (car (last calls)) :call) :arguments) "{}"))
+      (should (equal (plist-get (car (plist-get result :tool-calls)) :key) call-key))
+      (should (equal (plist-get result :protocol-item-keys) (unless chat '(2 4 7))))
+      (should-not (string-match-p "private-image" (prin1-to-string events)))
+      (unless chat
+        (should (eq (plist-get (car items) :kind) 'opaque))
+        (should (equal (plist-get (car items) :provider) (symbol-name (nth 1 case))))
+        (should-not (string-match-p "ende_\\|\"key\""
+                                    (json-encode (vconcat (cdr (plist-get result :protocol-items))))))
+        (let* ((failed (ende-test--run-stream-request (car case) (list (car chunks)) nil nil profile))
+               (partial (plist-get
+                         (cl-find-if (lambda (event) (eq (plist-get event :type) :partial-result))
+                                     (plist-get failed :events)) :result)))
+          (should (plist-get failed :error))
+          (should (equal (plist-get partial :protocol-item-keys) '(4)))
+          (should (equal (json-encode (cadr (plist-get partial :protocol-items)))
+                         (json-encode (plist-get (car items) :item)))))))))
+
 (provide 'ende-transport-test)
 
 ;;; ende-transport-test.el ends here

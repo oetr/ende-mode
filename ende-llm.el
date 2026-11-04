@@ -179,7 +179,7 @@ The :callbacks argument initializes the composed transport lifecycle."
   "Record and emit nonempty TEXT on CHANNEL for SESSION."
   (when (ende-stream-record-delta
          (ende-llm--session-stream session) channel text
-         (apply-partially #'ende-llm--fail session))
+         (apply-partially #'ende-llm--fail session) channel)
     (let ((now (float-time)))
       (when (or (null (ende-llm--session-last-usage-update session))
                 (>= (- now (ende-llm--session-last-usage-update session))
@@ -318,14 +318,18 @@ The :callbacks argument initializes the composed transport lifecycle."
                   (and (stringp arguments) (> (length arguments) 0)))
           (ende-stream-note-generation-start
            (ende-llm--session-stream session)))
-        (puthash index
-                 (list :id id
-                       :name (concat (or (plist-get previous :name) "")
-                                     (or name ""))
-                       :arguments
-                       (concat (or (plist-get previous :arguments) "")
-                               (or arguments "")))
-                 table)))))
+        (let* ((key (cons 'tool-call index))
+               (collected
+                (list :key key :id id
+                      :name (concat (or (plist-get previous :name) "")
+                                    (or name ""))
+                      :arguments
+                      (concat (or (plist-get previous :arguments) "")
+                              (or arguments "")))))
+          (puthash index collected table)
+          (ende-stream-emit-item
+           (ende-llm--session-stream session) key 'tool-call
+           "openai-chat-completions" :call collected))))))
 
 (defun ende-llm--tool-call-list (session)
   "Return collected calls from SESSION in provider index order."

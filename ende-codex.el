@@ -962,14 +962,18 @@ explicit efforts yields no choices instead of an error."
     (mapcar #'cdr
             (sort calls (lambda (left right) (< (car left) (car right)))))))
 
+(defun ende-codex--ordered-output (session)
+  "Return SESSION's replay entries in output-index order."
+  (sort (copy-sequence (ende-codex--session-replay-items session))
+        (lambda (a b) (< (car a) (car b)))))
+
 (defun ende-codex--protocol-items (session)
-  "Return completed provider items in SESSION's wire order."
-  (let ((items (sort (copy-sequence (ende-codex--session-replay-items session))
-                     (lambda (a b) (< (car a) (car b))))))
+  "Return provider items in SESSION's wire order."
+  (let ((items (ende-codex--ordered-output session)))
     (when items (cons 'openai-responses (mapcar #'cdr items)))))
 
 (defun ende-codex--remember-output (session item index)
-  "Capture completed replay ITEM at output INDEX for SESSION."
+  "Capture replay ITEM at output INDEX for SESSION."
   (when (and (integerp index) (>= index 0) (hash-table-p item)
              (not (equal (ende-protocol-json-get "type" item)
                          "image_generation_call")))
@@ -982,7 +986,8 @@ explicit efforts yields no choices instead of an error."
    (ende-codex--session-stream session) "output_tokens"
    (plist-get (ende-codex--session-profile session) :model) "OpenAI"
    (list :tool-calls (ende-codex--tool-call-list session)
-         :protocol-items (ende-codex--protocol-items session))))
+         :protocol-items (ende-codex--protocol-items session)
+         :protocol-item-keys (mapcar #'car (ende-codex--ordered-output session)))))
 
 (defun ende-codex--response-status (session)
   "Return SESSION's HTTP response status, or nil."
@@ -1002,8 +1007,9 @@ explicit efforts yields no choices instead of an error."
     (ende-stream-settle-generation
      (ende-codex--session-stream session) outcome value "output_tokens"
      (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-     (list :tool-calls tool-calls :protocol-items (ende-codex--protocol-items session))
-     tool-calls nil t)))
+     (list :tool-calls tool-calls :protocol-items (ende-codex--protocol-items session)
+           :protocol-item-keys (mapcar #'car (ende-codex--ordered-output session)))
+     (ende-codex--session-replay-items session) nil t)))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -1018,16 +1024,16 @@ explicit efforts yields no choices instead of an error."
   "Emit EVENT unless SESSION has settled."
   (ende-stream-emit (ende-codex--session-stream session) event))
 
-(defun ende-codex--emit-delta (session channel text)
+(defun ende-codex--emit-delta (session channel text &optional item-key)
   "Record and emit TEXT on CHANNEL."
   (ende-stream-record-delta
    (ende-codex--session-stream session) channel text
-   (apply-partially #'ende-codex--fail session)))
+   (apply-partially #'ende-codex--fail session) item-key))
 
-(defun ende-codex--emit-reasoning-summary (session item text)
+(defun ende-codex--emit-reasoning-summary (session item text &optional item-key)
   "Record and emit summary TEXT for provider ITEM."
   (ende-stream-record-reasoning-summary
-   (ende-codex--session-stream session) item text))
+   (ende-codex--session-stream session) item text item-key))
 
 (defun ende-codex--handle-usage (session usage)
   "Record and emit Responses API USAGE."
@@ -1050,7 +1056,8 @@ explicit efforts yields no choices instead of an error."
            (arguments (ende-protocol-json-get "arguments" item)))
       (puthash
        output-index
-       (list :id (or (ende-protocol-json-get "call_id" item)
+       (list :key output-index
+             :id (or (ende-protocol-json-get "call_id" item)
                      (plist-get old :id))
              :name (or (ende-protocol-json-get "name" item)
                        (plist-get old :name))
@@ -1062,13 +1069,27 @@ explicit efforts yields no choices instead of an error."
                           (plist-get old :arguments)))
        table))))
 
-(defun ende-codex--collect-tool-calls (session items)
-  "Collect Responses API function-call ITEMS for SESSION."
-  (let ((index 0))
-    (dolist (item (ende-codex--output-items items))
-      (ende-codex--collect-tool-call-item
-       session item (or (ende-protocol-json-get "output_index" item) index))
-      (cl-incf index))))
+(defun ende-codex--observe-output (session item index)
+  "Record and emit provider ITEM at output INDEX for SESSION."
+  (when (and (integerp index) (>= index 0) (hash-table-p item)
+             (not (equal (ende-protocol-json-get "type" item)
+                         "image_generation_call")))
+    (ende-codex--remember-output session item index)
+    (let* ((type (ende-protocol-json-get "type" item))
+           (call (ende-codex--collect-tool-call-item session item index))
+           (text (when (equal type "message")
+                   (mapconcat
+                    (lambda (part) (or (ende-protocol-json-get "text" part) ""))
+                    (ende-codex--output-items
+                     (ende-protocol-json-get "content" item)) ""))))
+      (apply #'ende-stream-emit-item
+             (ende-codex--session-stream session) index
+             (cond (call 'tool-call) ((equal type "message") 'text) (t 'opaque))
+             "openai-responses"
+             (append
+              (list :item (alist-get index (ende-codex--session-replay-items session)))
+              (when call (list :call call))
+              (when text (list :text text)))))))
 
 (defun ende-codex--update-tool-call-arguments
     (session output-index arguments &optional append)
@@ -1078,12 +1099,15 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (call (and (hash-table-p table) (gethash output-index table))))
     (when (and call (stringp arguments))
       (setq call
-            (plist-put call :arguments
+            (plist-put (copy-sequence call) :arguments
                        (if append
                            (concat (or (plist-get call :arguments) "")
                                    arguments)
                          arguments)))
-      (puthash output-index call table))))
+      (puthash output-index call table)
+      (ende-stream-emit-item
+       (ende-codex--session-stream session) output-index 'tool-call
+       "openai-responses" :call call))))
 
 (defun ende-codex--output-items (items)
   "Return ITEMS as a list from a Responses API JSON array."
@@ -1143,15 +1167,16 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
     (ende-debug-record-response (ende-codex--session-debug-record session) response)
-    (when (equal type "response.output_item.done")
-      (ende-codex--remember-output session item output-index)
-      (when (equal (ende-protocol-json-get "type" item) "image_generation_call")
-        (ende-stream-record-image
-         (ende-codex--session-stream session)
-         (ende-content-generated-image (ende-protocol-json-get "result" item)))))
-    (when (member type '("response.completed" "response.done"))
+    (when (and (equal type "response.output_item.done")
+               (equal (ende-protocol-json-get "type" item) "image_generation_call"))
+      (ende-stream-record-image
+       (ende-codex--session-stream session)
+       (ende-content-generated-image (ende-protocol-json-get "result" item))))
+    (when (member type '("response.completed" "response.done" "response.incomplete"))
       (cl-loop for entry in (ende-codex--output-items output) for index from 0
-               do (ende-codex--remember-output session entry index))
+               do (ende-codex--observe-output
+                   session entry (or (ende-protocol-json-get "output_index" entry) index))))
+    (when (member type '("response.completed" "response.done"))
       (when (cl-some (lambda (entry)
                        (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
                      (ende-codex--output-items output))
@@ -1169,13 +1194,11 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-codex--emit-diagnostic
          session
          (format "OpenAI Responses output items: %s"
-                 (ende-codex--diagnostic-output-items output))))
-      (ende-codex--collect-tool-calls
-       session output))
+                 (ende-codex--diagnostic-output-items output)))))
     (when (and item
                (member type '("response.output_item.added"
                               "response.output_item.done")))
-      (ende-codex--collect-tool-call-item session item output-index)
+      (ende-codex--observe-output session item output-index)
       (ende-codex--diagnose-output-item session type item))
     (when (member type '("response.function_call_arguments.delta"
                          "response.function_call_arguments.done"))
@@ -1213,18 +1236,18 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (ende-codex--emit
        session '(:type :status :status "Generating"))
       (ende-codex--emit-delta
-       session :content (ende-protocol-json-get "delta" json)))
+       session :content (ende-protocol-json-get "delta" json) output-index))
      ((string= type "response.reasoning_summary_text.delta")
       (ende-codex--emit
        session '(:type :status :status "Thinking"))
       (ende-codex--emit-reasoning-summary
        session (ende-codex--reasoning-summary-key json)
-       (ende-protocol-json-get "delta" json)))
+       (ende-protocol-json-get "delta" json) output-index))
      ((string= type "response.reasoning_summary_text.done")
       (ende-stream-complete-reasoning-summary
        (ende-codex--session-stream session)
        (ende-codex--reasoning-summary-key json)
-       (ende-protocol-json-get "text" json)))
+       (ende-protocol-json-get "text" json) output-index))
      ((member type '("response.completed" "response.done" "response.incomplete"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))

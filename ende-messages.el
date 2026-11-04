@@ -41,29 +41,59 @@
   "Return SESSION's lifecycle."
   (ende-stream-lifecycle (ende-messages--session-stream session)))
 
-(defun ende-messages--ordered-blocks (session)
-  "Return SESSION's blocks in protocol order."
+(defun ende-messages--ordered-entries (session)
+  "Return SESSION's indexed blocks in protocol order."
   (let (entries)
     (maphash (lambda (index block) (push (cons index block) entries))
              (ende-messages--session-blocks session))
-    (mapcar #'cdr (sort entries (lambda (a b) (< (car a) (car b)))))))
+    (sort entries (lambda (a b) (< (car a) (car b))))))
+
+(defun ende-messages--ordered-blocks (session)
+  "Return SESSION's blocks in protocol order."
+  (mapcar #'cdr (ende-messages--ordered-entries session)))
+
+(defun ende-messages--block-call (index block)
+  "Return the normalized tool call for BLOCK at INDEX, if any."
+  (when (equal (gethash "type" block) "tool_use")
+    (list :key index :id (gethash "id" block) :name (gethash "name" block)
+          :arguments (or (and (not (gethash "ende_complete" block))
+                              (gethash "ende_arguments" block))
+                         (json-encode (gethash "input" block))))))
 
 (defun ende-messages--calls (session)
   "Return completed tool calls from SESSION."
-  (cl-loop for block in (ende-messages--ordered-blocks session)
+  (cl-loop for (index . block) in (ende-messages--ordered-entries session)
            when (and (equal (gethash "type" block) "tool_use")
                      (gethash "ende_complete" block))
-           collect (list :id (gethash "id" block) :name (gethash "name" block)
-                         :arguments (json-encode (gethash "input" block)))))
+           collect (ende-messages--block-call index block)))
+
+(defun ende-messages--protocol-item (block)
+  "Return provider BLOCK without local state."
+  (let ((copy (copy-hash-table block)))
+    (remhash "ende_arguments" copy)
+    (remhash "ende_complete" copy)
+    copy))
 
 (defun ende-messages--protocol-items (session)
   "Return SESSION's provider content blocks without local state."
-  (mapcar (lambda (block)
-            (let ((copy (copy-hash-table block)))
-              (remhash "ende_arguments" copy)
-              (remhash "ende_complete" copy)
-              copy))
+  (mapcar #'ende-messages--protocol-item
           (ende-messages--ordered-blocks session)))
+
+(defun ende-messages--emit-block (session index &optional call-only)
+  "Emit SESSION's block at INDEX, or just its updated call when CALL-ONLY."
+  (let* ((block (gethash index (ende-messages--session-blocks session)))
+         (type (gethash "type" block))
+         (call (ende-messages--block-call index block)))
+    (unless (equal type "image")
+      (apply #'ende-stream-emit-item
+             (ende-messages--session-stream session) index
+             (cond (call 'tool-call) ((equal type "text") 'text) (t 'opaque))
+             "anthropic-messages"
+             (append (unless call-only
+                       (list :item (ende-messages--protocol-item block)))
+                     (when call (list :call call))
+                     (when (equal type "text")
+                       (list :text (gethash "text" block))))))))
 
 (defun ende-messages--result (session)
   "Return normalized output and protocol history for SESSION."
@@ -71,7 +101,8 @@
    (ende-messages--session-stream session) "output_tokens"
    (plist-get (ende-messages--session-profile session) :model) "Anthropic"
    (list :tool-calls (ende-messages--calls session)
-         :protocol-items (cons 'anthropic-messages (ende-messages--protocol-items session)))))
+         :protocol-items (cons 'anthropic-messages (ende-messages--protocol-items session))
+         :protocol-item-keys (mapcar #'car (ende-messages--ordered-entries session)))))
 
 (defun ende-messages--settle (session outcome value)
   "Settle SESSION with OUTCOME and VALUE, preserving partial output."
@@ -83,7 +114,7 @@
        (ende-stream-session-usage stream)
        (condition-case nil (car (ende-stream-response-headers stream)) (error nil)) value))
     (ende-stream-settle stream outcome value
-                        (when (ende-stream-has-result-p stream (plist-get partial :tool-calls))
+                        (when (ende-stream-has-result-p stream (cdr (plist-get partial :protocol-items)))
                           partial))))
 
 (defun ende-messages--fail (session error)
@@ -120,10 +151,11 @@
          (error "Invalid or duplicate Messages content index"))
        (let ((initial (copy-hash-table (gethash "content_block" json))))
          (puthash index initial blocks)
+         (ende-messages--emit-block session index)
          (dolist (field '(("text" . :content) ("thinking" . :thinking)))
            (when-let* ((text (gethash (car field) initial)))
              (ende-stream-record-delta stream (cdr field) text
-                                       (apply-partially #'ende-messages--fail session))))))
+                                       (apply-partially #'ende-messages--fail session) index)))))
       ("content_block_delta"
        (unless (and block (not (gethash "ende_complete" block)))
          (error "Messages delta has no active content block"))
@@ -132,18 +164,19 @@
           (let ((text (gethash "text" delta)))
             (puthash "text" (concat (gethash "text" block "") text) block)
             (ende-stream-record-delta stream :content text
-                                      (apply-partially #'ende-messages--fail session))))
+                                      (apply-partially #'ende-messages--fail session) index)))
          ("thinking_delta"
           (let ((text (gethash "thinking" delta)))
             (puthash "thinking" (concat (gethash "thinking" block "") text) block)
             (ende-stream-record-delta stream :thinking text
-                                      (apply-partially #'ende-messages--fail session))))
+                                      (apply-partially #'ende-messages--fail session) index)))
          ("signature_delta"
           (puthash "signature" (concat (gethash "signature" block "")
                                        (gethash "signature" delta)) block))
          ("input_json_delta"
           (puthash "ende_arguments" (concat (gethash "ende_arguments" block "")
-                                            (gethash "partial_json" delta)) block))))
+                                            (gethash "partial_json" delta)) block)
+          (ende-messages--emit-block session index t))))
       ("content_block_stop"
        (unless block (error "Messages stop has no content block"))
        (when (equal (gethash "type" block) "tool_use")
@@ -154,7 +187,8 @@
                         (stringp (gethash "name" block)) (not (string-empty-p (gethash "name" block))))
              (error "Incomplete Messages tool call"))
            (puthash "input" input block)))
-       (puthash "ende_complete" t block))
+       (puthash "ende_complete" t block)
+       (ende-messages--emit-block session index))
       ("message_delta"
        (setf (ende-stream-session-finish-reason stream) (gethash "stop_reason" delta))
        (ende-messages--usage session (gethash "usage" json)))

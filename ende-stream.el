@@ -76,9 +76,10 @@
                (numberp elapsed) (>= elapsed 0.1))
       (/ (float tokens) elapsed))))
 
-(defun ende-stream-record-delta (stream channel text limit-callback)
+(defun ende-stream-record-delta (stream channel text limit-callback &optional item-key)
   "Accumulate and emit TEXT on CHANNEL for STREAM.
 Call LIMIT-CALLBACK with a resource error if the output limit is exceeded.
+ITEM-KEY identifies the response item supplying the delta.
 Return non-nil when the delta was accepted and STREAM remains active."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
@@ -103,8 +104,16 @@ Return non-nil when the delta was accepted and STREAM remains active."
         (cl-incf (ende-stream-session-estimated-chars stream) (length text))
         (ende-stream-note-generation-start stream)
         (ende-stream-emit
-         stream (list :type :delta :channel channel :text text))
+         stream (append (list :type :delta :channel channel :text text)
+                        (when item-key (list :item-key item-key))))
         (not (ende-stream-terminal-p stream))))))
+
+(defun ende-stream-emit-item (stream key kind provider &rest fields)
+  "Emit an observation of STREAM's item KEY of KIND from PROVIDER.
+FIELDS supplies its raw :item, normalized :call, or full :text."
+  (ende-stream-emit
+   stream (append (list :type :item :key key :kind kind :provider provider)
+                  fields)))
 
 (defun ende-stream-record-image (stream part)
   "Record generated image PART without emitting its bytes as an event."
@@ -125,27 +134,29 @@ TOKEN-KEY names the provider-specific output-token field."
                           now)
                   :usage usage))))
 
-(defun ende-stream-record-reasoning-summary (stream item text)
-  "Emit summary TEXT for provider ITEM in STREAM."
+(defun ende-stream-record-reasoning-summary (stream item text &optional item-key)
+  "Emit summary TEXT for provider ITEM in STREAM, with source ITEM-KEY."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (let ((summaries (ende-stream-session-reasoning-summaries stream)))
       (puthash item (concat (gethash item summaries "") text) summaries)
       (ende-stream-note-generation-start stream)
       (ende-stream-emit
-       stream (list :type :reasoning-summary :item item :text text))
+       stream (append (list :type :reasoning-summary :item item :text text)
+                      (when item-key (list :item-key item-key))))
       (not (ende-stream-terminal-p stream)))))
 
-(defun ende-stream-complete-reasoning-summary (stream item text)
-  "Emit completed summary TEXT for ITEM unless its deltas already did so."
+(defun ende-stream-complete-reasoning-summary (stream item text &optional item-key)
+  "Emit completed TEXT for ITEM with source ITEM-KEY unless already emitted."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (let* ((summaries (ende-stream-session-reasoning-summaries stream))
            (existing (gethash item summaries)))
       (unless (equal existing text)
         (ende-stream-emit
-         stream (list :type :reasoning-summary :item item :text text
-                      :replace t))
+         stream (append (list :type :reasoning-summary :item item :text text
+                              :replace t)
+                        (when item-key (list :item-key item-key))))
         (puthash item text summaries)))))
 
 (defun ende-stream-emit-estimated-usage (stream)
