@@ -150,14 +150,15 @@ ACCOUNT is resolved OAuth registration continuity, supplied by the transport."
              (and (ende-debug--usable-id-p (plist-get profile :codex-session-id)) account))))
          (provider (or (plist-get profile :name) (plist-get profile :service))))
     (when (and credential provider (stringp endpoint) (not (string-empty-p endpoint)))
-      (secure-hash
-       'sha256
-       (prin1-to-string
-        (list transport endpoint credential
-              (mapcar (lambda (key) (plist-get profile key))
-                      '(:name :service :api :auth-method :account :codex-session-id
-                        :auth-source-host :auth-source-port :auth-source-user
-                        :auth-scheme :request-headers))))))))
+      (let ((print-length nil) (print-level nil))
+        (secure-hash
+         'sha256
+         (prin1-to-string
+          (list transport endpoint credential
+                (mapcar (lambda (key) (plist-get profile key))
+                        '(:name :service :api :auth-method :account :codex-session-id
+                          :auth-source-host :auth-source-port :auth-source-user
+                          :auth-scheme :request-headers)))))))))
 
 (defun ende-debug-prepare-request (profile transport endpoint account eligible)
   "Reserve immutable capture data for PROFILE in the main process.
@@ -837,7 +838,7 @@ Fall back to saved values when fingerprints cannot establish equality."
         (let ((identity (mapcar (lambda (key)
                                  (ende-protocol-json-get key metadata))
                                '("provider" "transport" "endpoint"
-                                 "session_fingerprint"))))
+                                 "session_fingerprint" "connection_fingerprint"))))
           (and (cl-every (lambda (value)
                           (and (stringp value) (not (string-empty-p value))))
                         identity)
@@ -901,6 +902,7 @@ Fall back to saved values when fingerprints cannot establish equality."
      (format "Model:           %s\nReasoning:       %s\nTools:           %s\nInstructions:    %s\n"
              model reasoning tools
              (if instructions-changed "changed" "unchanged"))
+     "Settings, tools, and instructions above compare saved JSON; redacted originals remain unknown.\n"
      (format "Session:         %s\n"
              (cond
               ((not (and old-session new-session)) "unknown")
@@ -947,7 +949,7 @@ Fall back to saved values when fingerprints cannot establish equality."
              prefix-bytes old-length)
      (if (and original prefix-identical (not instructions-changed)
               (equal tools "unchanged"))
-         (concat "\nObserved: no change to instructions, tools, or the prior message prefix.\n"
+         (concat "\nObserved: original input prefix preserved; saved instructions and tools match.\n"
                  "The provider cache outcome's cause is not determined by this comparison.\n\n")
        (concat (if (and prefix-identical (not original))
                    "\nObserved: saved input prefix matches; concealed original contents remain unknown.\n"

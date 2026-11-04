@@ -68,6 +68,7 @@
         :metadata (ende-protocol-json-read-string
                    (json-encode `((:job_id . ,job)
                                   (:session_fingerprint . ,fingerprint)
+                                  (:connection_fingerprint . "fixture-connection")
                                   (:provider . "test-provider")
                                   (:transport . "test-transport")
                                   (:endpoint . "https://example.test/v1"))))))
@@ -382,12 +383,12 @@
                          #'string<)))))
 
 (ert-deftest ende-debug-cross-job-pairs-require-known-scoped-identities ()
-  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint"))
+  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint" "connection_fingerprint"))
     (let ((previous (ende-debug-test--capture 7 11 "session"))
           (current (ende-debug-test--capture 8 12 "session")))
       (puthash key "different" (plist-get current :metadata))
       (should-not (ende-debug-test--pair-headers (list previous current)))))
-  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint" "job_id"))
+  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint" "connection_fingerprint" "job_id"))
     (dolist (unknown '(absent nil ""))
       (let ((captures (list (ende-debug-test--capture 7 11 "session")
                             (ende-debug-test--capture 8 12 "session"))))
@@ -699,6 +700,7 @@
          (ende-debug-provider-cache-comparisons t)
          (ende-debug--baselines (make-hash-table :test #'equal))
          (ende-debug--sequence 0)
+         (print-length 2) (print-level 2)
          (parent '(:name fixture :api openai-responses :auth-method none
                    :job-id 1 :model "model" :url "https://example.test/responses"))
          (child (plist-put (copy-sequence parent) :job-id 2)))
