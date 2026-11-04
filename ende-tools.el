@@ -2411,7 +2411,7 @@ process-group cancellation function with the active Ende job."
                      :connection-type 'pipe :coding 'utf-8-unix :noquery t
                      :filter (lambda (_proc chunk) (capture stdout chunk))
                      :sentinel #'on-sentinel)))
-            (process-send-eof process)
+            (ignore-errors (process-send-eof process))
             (setq timer (run-at-time timeout nil #'on-timeout))
             (when (functionp register-cancellation)
               (setq registered t)
