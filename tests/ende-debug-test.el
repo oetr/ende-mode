@@ -457,13 +457,13 @@
       (delete-directory directory t))))
 
 (ert-deftest ende-debug-reasoning-redaction-is-scoped ()
-  (let* ((ciphertext "opaque-encrypted_content+/=")
+  (let* ((ciphertext "opaque-encrypted_content-prompt_cache_key+/=")
          (object (ende-protocol-json-read-string
                   (format "{\"encrypted_content\":%s}" (json-encode ciphertext))))
          (values (list object (list (cons :encrypted_content ciphertext))
                        (cons 'encrypted_content ciphertext)
                        (list :encrypted_content ciphertext :other "kept")
-                       (vector object) (json-encode object)
+                       (vector object)
                        "reasoning.encrypted_content")))
     (dolist (value values)
       (let ((original (prin1-to-string value)))

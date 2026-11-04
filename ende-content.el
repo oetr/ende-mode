@@ -107,6 +107,11 @@ all their assistant content and before the corresponding results."
 (defvar ende-content--debug-preserve-encrypted-content nil
   "Non-nil only while debug captures retain encrypted reasoning.")
 
+(defun ende-content--debug-opaque-key-p (key)
+  "Return non-nil when debug recording must keep KEY's value opaque."
+  (and ende-content--debug-preserve-encrypted-content
+       (member key '("encrypted_content" encrypted_content :encrypted_content))))
+
 (defun ende-content--private-key-p (key)
   "Return non-nil when KEY names private transport or replay data."
   (and (or (stringp key) (symbolp key))
@@ -152,6 +157,7 @@ This is for diagnostics only; never use the result for protocol replay."
       (maphash (lambda (key item)
                  (puthash key
                           (cond
+                           ((ende-content--debug-opaque-key-p key) item)
                            ((ende-content--private-key-p key)
                             "[private provider value redacted]")
                            ((member key '("b64_json" "result"))
@@ -164,12 +170,15 @@ This is for diagnostics only; never use the result for protocol replay."
                            (t (ende-content-redact item))) copy)) value)
       copy))
    ((and (consp value)
-         (ende-content--private-key-p (car value)))
-    (cons (car value)
-          (if (consp (cdr value))
-              (cons "[private provider value redacted]"
-                    (ende-content-redact (cddr value)))
-            "[private provider value redacted]")))
+         (or (ende-content--debug-opaque-key-p (car value))
+             (ende-content--private-key-p (car value))))
+    (let ((item (if (ende-content--debug-opaque-key-p (car value))
+                    (if (consp (cdr value)) (cadr value) (cdr value))
+                  "[private provider value redacted]")))
+      (cons (car value)
+            (if (consp (cdr value))
+                (cons item (ende-content-redact (cddr value)))
+              item))))
    ((consp value) (cons (ende-content-redact (car value)) (ende-content-redact (cdr value))))
    ((vectorp value) (vconcat (mapcar #'ende-content-redact value)))
    (t value)))
