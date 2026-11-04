@@ -60,11 +60,7 @@ Only actual newlines in decoded string values become display newlines."
          (indent (make-string (* 2 depth) ?\s))
          (next-indent (concat indent "  ")))
     (cond
-     ((stringp value)
-      (concat "\""
-              (mapconcat (lambda (line) (substring (json-serialize line) 1 -1))
-                         (split-string value "\n" nil) "\n")
-              "\""))
+     ((stringp value) (concat "\"" value "\""))
      ((hash-table-p value)
       (let (fields)
         (maphash (lambda (key item)
@@ -217,9 +213,10 @@ Only actual newlines in decoded string values become display newlines."
       (goto-char (ende-work-buffer--section-start section))
       (org-fold-hide-subtree))))
 
-(defun ende-work-buffer--put (key entry title body &optional parent before)
+(defun ende-work-buffer--put (key entry title body &optional parent before folded)
   "Insert or update KEY's ENTRY section with TITLE and BODY.
-PARENT owns nested sections; BEFORE is a section to insert before."
+PARENT owns nested sections; BEFORE is a section to insert before.
+FOLDED hides a newly inserted section, never overriding a reader's choice."
   (let* ((section (gethash key ende-work-buffer--sections))
          (parent (if section (ende-work-buffer--section-parent section) parent))
          (level (if parent (1+ (ende-work-buffer--section-level parent)) 1))
@@ -250,6 +247,7 @@ PARENT owns nested sections; BEFORE is a section to insert before."
                        :start (copy-marker start t) :body-start (copy-marker body-start)
                        :body-end (copy-marker end) :end (copy-marker end)))
         (puthash key section ende-work-buffer--sections)
+        (when folded (push section folds))
         (unless parent
           (put-text-property end (+ end (length ende-work-buffer--separator))
                              'ende-work-buffer-separator t))))
@@ -280,8 +278,10 @@ PARENT owns nested sections; BEFORE is a section to insert before."
 
 (defun ende-work-buffer--response-title (entry)
   "Return the host-owned response heading for ENTRY."
-  (format "Response %s (%s)" (ende-transcript-entry-round entry)
-          (ende-transcript-entry-status entry)))
+  (format "Response %s (%s)%s" (ende-transcript-entry-round entry)
+          (ende-transcript-entry-status entry)
+          (if (plist-get (ende-transcript-entry-data entry) :final)
+              " — Final reply" "")))
 
 (defun ende-work-buffer--response (entry)
   "Render ENTRY's response boundary and its ordered semantic items."
@@ -323,7 +323,7 @@ PARENT owns nested sections; BEFORE is a section to insert before."
        (ende-transcript-entry-id entry) entry
        (format "Result (%s)" (ende-transcript-entry-status entry))
        (ende-work-buffer--example
-        (ende-work-buffer--readable-json (ende-transcript-entry-content entry))) parent))))
+        (ende-work-buffer--readable-json (ende-transcript-entry-content entry))) parent nil t))))
 
 (defun ende-work-buffer--entry (entry &optional parent before)
   "Render changed ENTRY, optionally beneath PARENT and BEFORE a sibling."
@@ -336,22 +336,23 @@ PARENT owns nested sections; BEFORE is a section to insert before."
       ('tool-call
        (let* ((call (plist-get data :call))
               (section (ende-work-buffer--put
-                        id entry (concat "Tool: " (plist-get call :name)) "" parent before)))
+                        id entry (concat "Tool: " (plist-get call :name)) "" parent before t)))
          (puthash (plist-get call :execution-id) section ende-work-buffer--calls)
          (ende-work-buffer--put
           (cons 'arguments id) entry "Arguments"
           (ende-work-buffer--example
-           (ende-work-buffer--readable-json (plist-get call :arguments))) section)))
+           (ende-work-buffer--readable-json (plist-get call :arguments))) section nil t)))
       ('tool-result (ende-work-buffer--tool-result entry))
       ('opaque
        (ende-work-buffer--put
         id entry (format "Provider item: %s / %s" (plist-get data :provider) (plist-get data :kind))
         (ende-work-buffer--example
          (ende-work-buffer--readable-json (ende-work-buffer--payload-text (plist-get data :item))))
-        parent before))
-      ('summary (ende-work-buffer--put id entry "Reasoning summary" (ende-work-buffer--example content)))
+        parent before t))
+      ('summary (ende-work-buffer--put id entry "Reasoning summary" (ende-work-buffer--example content)
+                                      nil nil t))
       ('progress (ende-work-buffer--put id entry (concat "Progress: " (or (plist-get data :title) ""))
-                                       (ende-work-buffer--example content)))
+                                       (ende-work-buffer--example content) nil nil t))
       ('status
        (when ende-work-buffer--last-response
          (let ((response ende-work-buffer--last-response))

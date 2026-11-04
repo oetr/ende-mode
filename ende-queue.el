@@ -148,7 +148,7 @@
       (ende--job-release-owned-buffer job)
       (when (buffer-live-p (ende-job-work-buffer job))
         (kill-buffer (ende-job-work-buffer job)))
-      (setf (ende-job-work-buffer job) nil
+      (setf (ende-job-work-buffer job) nil (ende-job-transcript job) nil
             (ende-job-target job) nil (ende-job-overlay job) nil
             (ende-job-family job) nil (ende-job-parent job) nil
             (ende-job-children job) nil (ende-job-profile job) nil
@@ -874,23 +874,28 @@ bypassed by a later same-provider job."
   "Release target and private buffer resources for unpublished JOB."
   (when (ende-target-p (ende-job-target job))
     (ende-ignore-errors #'ende-target-release (ende-job-target job)))
-  (when-let* ((buffer (ende--job-release-owned-buffer job)))
-    (kill-buffer buffer))
+  (ende--job-release-owned-buffer job)
   (when (buffer-live-p (ende-job-work-buffer job))
     (kill-buffer (ende-job-work-buffer job)))
   (setf (ende-job-work-buffer job) nil)
   job)
 
 (defun ende--job-release-owned-buffer (job)
-  "Detach JOB's private-buffer ownership and return its surviving buffer."
+  "Dispose of JOB's owned execution buffer without cancelling JOB."
   (let ((buffer (ende-job-owned-buffer job))
-        (hook (ende-job-owned-buffer-hook job)))
+        (hook (ende-job-owned-buffer-hook job))
+        (target (ende-job-target job)))
     (setf (ende-job-owned-buffer job) nil
           (ende-job-owned-buffer-hook job) nil)
     (when (and hook (buffer-live-p buffer))
       (with-current-buffer buffer
         (remove-hook 'kill-buffer-hook hook t)))
-    (and (buffer-live-p buffer) buffer)))
+    (when (and buffer (ende-target-p target)
+               (eq (ende-target-buffer target) buffer))
+      (ende-ignore-errors #'ende-target-release target)
+      (setf (ende-job-target job) nil))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))))
 
 (defun ende-enqueue (request)
   "Add REQUEST to the queue and trigger processing if idle.
