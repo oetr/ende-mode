@@ -131,6 +131,9 @@ discarding superseded details. Be concise but self-contained."
 (defconst ende-chat-request-id-property "ENDE_CHAT_REQUEST_ID"
   "Org property storing the request identity for a reply.")
 
+(defconst ende-chat-response-id-property "ENDE_CHAT_RESPONSE_ID")
+(defconst ende-chat-reply-reference-property "ENDE_CHAT_REPLY_REFERENCE")
+
 (defconst ende-chat-tool-execution-id-property "ENDE_TOOL_EXECUTION_ID"
   "Org property storing Ende's identity for a tool execution.")
 
@@ -203,6 +206,8 @@ discarding superseded details. Be concise but self-contained."
         (cons ende-chat-generated-title-property :generated-title)
         (cons ende-chat-reply-to-property :reply-to)
         (cons ende-chat-request-id-property :request-id)
+        (cons ende-chat-response-id-property :response-id)
+        (cons ende-chat-reply-reference-property :reply-reference)
         (cons ende-chat-work-property :work)
         (cons ende-chat-tool-execution-id-property :tool-execution-id)
         (cons ende-chat-tool-name-property :tool-name)
@@ -236,6 +241,7 @@ discarding superseded details. Be concise but self-contained."
   "Session-local counter used to make fresh chat identifiers.")
 
 (defvar ende-chat--expired-history-in-request nil)
+(defvar ende-chat--reading-reply-reference nil)
 
 (cl-defstruct (ende-chat--document (:constructor ende-chat--make-document))
   "Parsed Org document and its headline relationships."
@@ -372,7 +378,10 @@ discarding superseded details. Be concise but self-contained."
                 (ende-chat--property document node :tool-kind))
         (setq owner node))
       (setq node (ende-chat--parent document node)))
-    owner))
+    (if (and owner (ende-chat--referenced-reply-p document owner))
+        (ende-chat--request-work-section
+         document (ende-chat--property document owner :request-id))
+      owner)))
 
 (defun ende-chat--check-question-section (document question)
   "Reject questions inside generated agent sections."
@@ -804,6 +813,9 @@ SELECTED-HEADLINES supplies an already selected current section."
              (when (and selected role-marked)
                (flush))
              (cond
+              ((and selected (not ende-chat--reading-reply-reference)
+                    (ende-chat--referenced-reply-p document headline))
+               (flush))
               ((and selected
                     (ende-chat--work-section-p document headline))
                (let ((tool-messages
@@ -1039,6 +1051,40 @@ reflects Org history rather than the existence of a stored result payload."
       (setq parent (ende-chat--parent document parent)))
     parent))
 
+(defun ende-chat--referenced-reply-p (document headline)
+  "Return whether HEADLINE is replayed at a position inside its Work section."
+  (and (equal (org-element-property :raw-value headline) "Agent: Reply")
+       (not (ende-chat--work-ancestor document headline))
+       (when-let* ((work (ende-chat--request-work-section
+                         document (ende-chat--property document headline :request-id))))
+         (cl-some (lambda (child) (ende-chat--property document child :reply-reference))
+                  (ende-chat--children document work)))))
+
+(defun ende-chat--reply-reference-target (document work reference)
+  "Validate REFERENCE and resolve its editable sibling reply under WORK."
+  (let* ((request-id (ende-chat--property document work :request-id))
+         (references (cl-remove-if-not
+                      (lambda (child) (ende-chat--property document child :reply-reference))
+                      (ende-chat--children document work)))
+         (replies (cl-remove-if-not
+                   (lambda (headline)
+                     (and (equal (org-element-property :raw-value headline) "Agent: Reply")
+                          (equal (ende-chat--property document headline :request-id) request-id)
+                          (not (ende-chat--work-ancestor document headline))))
+                   (ende-chat--document-headlines document)))
+         (reply (car replies)))
+    (unless (and (= (length references) 1) (= (length replies) 1)
+                 (eq reference (car references))
+                 (equal (ende-chat--property document reference :reply-reference) "t")
+                 (equal (ende-chat--property document reference :request-id) request-id)
+                 (equal (ende-chat--property document reference :response-id)
+                        (ende-chat--property document reply :response-id))
+                 (eq (ende-chat--parent document reply) (ende-chat--parent document work))
+                 (not (ende-chat--children document reference))
+                 (string-blank-p (ende-chat--protocol-body-string reference)))
+      (error "Malformed generated final reply reference"))
+    reply))
+
 (defun ende-chat--validate-work-contents (document work)
   "Validate the identities needed to read WORK's protocol contents."
   (let ((request-id (ende-chat--property document work :request-id)))
@@ -1046,6 +1092,8 @@ reflects Org history rather than the existence of a stored result payload."
       (error "Malformed generated Agent: Work: missing request ID"))
     (dolist (child (ende-chat--children document work))
       (cond
+       ((ende-chat--property document child :reply-reference)
+        (ende-chat--reply-reference-target document work child))
        ((ende-chat--opaque-reference-p document child)
         (ende-chat--validate-opaque-reference document work child))
        ((ende-chat--tool-reference-p document child)
@@ -1089,6 +1137,8 @@ reflects Org history rather than the existence of a stored result payload."
                        "reasoning_summary")
           (error "Malformed generated Agent: Work: child request ID mismatch")))
       (cond
+       ((ende-chat--property document child :reply-reference)
+        (ende-chat--reply-reference-target document work child))
        ((equal (ende-chat--property document child :visibility)
                "reasoning_summary")
         (unless (and (equal (ende-chat--property document child :role) "assistant")
@@ -1128,6 +1178,7 @@ reflects Org history rather than the existence of a stored result payload."
                        (ende-chat--tool-call-protocol-p document headline)
                        (ende-chat--tool-result-protocol-p document headline)
                        (ende-chat--opaque-reference-p document headline)
+                       (ende-chat--property document headline :reply-reference)
                        (equal (ende-chat--property document headline :visibility)
                               "reasoning_summary"))))
              (valid (or (eq headline work)
@@ -1350,16 +1401,26 @@ COMPLETE means TEXT reaches the generated wrapper's end."
 (defun ende-chat--protocol-work-messages (document work)
   "Reconstruct WORK's current provider events in document order."
   (ende-chat--validate-work-contents document work)
-  (let* ((children (ende-chat--children document work))
+  (let* ((children (mapcar
+                    (lambda (child)
+                      (if (ende-chat--property document child :reply-reference)
+                          (ende-chat--reply-reference-target document work child)
+                        child))
+                    (ende-chat--children document work)))
          (messages nil)
          (assistant nil)
          (pending-calls nil)
+         (response-id nil)
          (complete-tools (make-hash-table :test #'equal)))
     (dolist (child children)
       (when (ende-chat--eligible-p document child)
+        (when-let* ((id (ende-chat--property document child :response-id)))
+          (unless (equal id response-id)
+            (setq response-id id pending-calls nil)))
         (cond
          ((ende-chat--assistant-protocol-p document child)
-          (setq pending-calls nil))
+          (unless (ende-chat--property document child :response-id)
+            (setq pending-calls nil)))
          ((ende-chat--tool-call-protocol-p document child)
           (push child pending-calls))
          ((ende-chat--tool-result-protocol-p document child)
@@ -1400,9 +1461,10 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                   messages)
             (setq assistant nil))
           (dolist (message
-                   (ende-chat--section-messages
-                    document child (org-element-property :begin child)
-                    (org-element-property :end child)))
+                   (let ((ende-chat--reading-reply-reference t))
+                     (ende-chat--section-messages
+                      document child (org-element-property :begin child)
+                      (org-element-property :end child))))
             (if (equal (ende-content-role message) "assistant")
                 (if assistant
                     (setf (plist-get assistant :content)
@@ -3275,10 +3337,13 @@ Keep it while another queued compaction still refers to its durable identity."
          (level (plist-get instruction :response-level))
          (question-id (plist-get instruction :question-id))
          (request-id (plist-get instruction :request-id))
-         (properties (ende-chat--metadata-properties (plist-get data :metadata)))
+         (properties (concat (ende-chat--metadata-properties (plist-get data :metadata))
+                             (ende-chat--response-property ende-chat-response-id-property
+                                                           (ende-transcript-entry-id entry))))
          (items (plist-get data :items))
          (final (plist-get data :final))
          (last-text (and final (cl-find 'text (reverse items) :key #'ende-transcript-entry-kind)))
+         (reference (and last-text (not (eq last-text (car (last items))))))
          work reply)
     (dolist (item items)
       (let ((item-data (ende-transcript-entry-data item)))
@@ -3290,7 +3355,15 @@ Keep it while another queued compaction still refers to its durable identity."
                          question-id request-id
                          (concat properties (ende-chat--normalized-response-properties normalized))
                          normalized)))
-             (if (eq item last-text) (setq reply text) (push text work))))
+             (if (eq item last-text)
+                 (progn
+                   (setq reply text)
+                   (when reference
+                     (push (concat (make-string (1+ level) ?*) " Agent: Reply reference\n:PROPERTIES:\n"
+                                   (ende-chat--response-property ende-chat-request-id-property request-id)
+                                   (ende-chat--response-property ende-chat-reply-reference-property "t")
+                                   properties ":END:\n\n") work)))
+               (push text work))))
           ('tool-call
            (push (ende-chat--tool-call-text
                   (1+ level) request-id (plist-get item-data :call) properties) work))

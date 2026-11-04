@@ -124,5 +124,50 @@
     ;; Identities are deterministic at creation, not normalized after the fact.
     (should (equal (run nil) (run t)))))
 
+(ert-deftest ende-transcript-history-preserves-mixed-turns-and-editable-final ()
+  (ende-test--reset)
+  (let* ((call '(:id "mixed" :name "about_thinking"
+                     :arguments "{\"title\":\"Working\",\"status\":\"Reading\"}"))
+         (message (lambda (text)
+                    (ende-protocol-json-read-string
+                     (json-encode (list :type "message" :role "assistant"
+                                        :content (vector (list :type "output_text" :text text)))))))
+         (opaque (ende-protocol-json-read-string
+                  "{\"type\":\"reasoning\",\"encrypted_content\":\"tail\"}"))
+         (provider-call (ende-protocol-json-read-string
+                         (json-encode (list :type "function_call" :call_id "mixed"
+                                            :name (plist-get call :name)
+                                            :arguments (plist-get call :arguments)))))
+         (first (list :content "After call" :tool-calls (list call)
+                      :protocol-items (list 'openai-responses provider-call (funcall message "After call"))))
+         (final (list :content "Final answer"
+                      :protocol-items (list 'openai-responses (funcall message "Final answer") opaque)))
+         (ende-llm-function (ende-test--fake-llm (list first final))))
+    (ende-test--with-buffer "* Chat\n** Question\nInvestigate.\n"
+      (org-mode)
+      (ende-test--chat-goto "** Question")
+      (should (eq (ende-job-state (ende-ask)) 'completed))
+      (goto-char (point-min))
+      (search-forward "Final answer")
+      (replace-match "Edited answer")
+      (goto-char (point-max))
+      (insert "** Next\nContinue\n")
+      (ende-test--chat-goto "** Next")
+      (let* ((messages (ende-chat-context-at-point))
+             (items (ende-codex--request-messages messages))
+             (types (mapcar (lambda (item)
+                              (if (hash-table-p item) (gethash "type" item)
+                                (or (alist-get :type item) "message"))) items)))
+        (should (equal (cl-remove-if (lambda (type) (equal type "message")) types)
+                       '("function_call" "function_call_output" "reasoning")))
+        (should (< (cl-position "function_call" types :test #'equal)
+                   (cl-position "function_call_output" types :test #'equal)))
+        (should (string-match-p "Edited answer" (ende-test--chat-context-text messages)))
+        (should-not (string-match-p "Final answer" (ende-test--chat-context-text messages)))
+        (should (equal (ende-protocol-json-get "encrypted_content" (nth (- (length items) 2) items)) "tail")))
+      (ende-test--chat-goto "** Agent: Reply")
+      (should (= 1 (cl-count "Edited answer" (ende-chat-context-at-point)
+                             :key #'ende-content-body :test #'equal))))))
+
 (provide 'ende-transcript-test)
 ;;; ende-transcript-test.el ends here
