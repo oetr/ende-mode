@@ -278,7 +278,9 @@ clarification; do not proceed with the disputed change.\n\n"
              (let* ((transcript (ende-job-ensure-transcript child))
                     (stored-calls (ende-agent--prepare-calls child calls result)))
                (ende-transcript-accept transcript result stored-calls
-                                       (list :metadata (ende--job-display-metadata child result)))
+                                       (list :metadata (ende-provider-result-display-metadata
+                                                        (ende-job-profile child)
+                                                        (ende-transcript-metadata (ende-job-transcript child)) result)))
                (list :message
                      (list :role "assistant" :content (or (plist-get result :content) "")
                            :tool-calls calls
@@ -295,7 +297,9 @@ clarification; do not proceed with the disputed change.\n\n"
              (let ((answer (or (plist-get result :content) "")))
                (ende-transcript-accept
                 (ende-job-ensure-transcript child) result nil
-                (list :metadata (ende--job-display-metadata child result)) t)
+                (list :metadata (ende-provider-result-display-metadata
+                                                        (ende-job-profile child)
+                                                        (ende-transcript-metadata (ende-job-transcript child)) result)) t)
                (ende-job-finish child answer)))))))
 
 (ende-register-job-handler 'agent #'ende-agent--run-child)

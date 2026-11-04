@@ -7,7 +7,7 @@
 (require 'ende-protocol)
 
 (cl-defstruct (ende-transcript (:constructor ende-transcript-create))
-  task entries tail (next-id 0) (round 0) response terminal)
+  task entries tail (next-id 0) (round 0) response terminal metadata usage)
 
 (cl-defstruct (ende-transcript-entry (:constructor ende-transcript--entry))
   id kind round content status data)
@@ -45,7 +45,9 @@
     (when (eq (ende-transcript-entry-status entry) 'streaming)
       (setf (ende-transcript-entry-status entry) 'interrupted)))
   (cl-incf (ende-transcript-round transcript))
-  (setf (ende-transcript-response transcript) nil))
+  (setf (ende-transcript-response transcript) nil
+        (ende-transcript-metadata transcript) nil
+        (ende-transcript-usage transcript) nil))
 
 (defun ende-transcript--response (transcript)
   "Return TRANSCRIPT's current response, allocating it when necessary."
@@ -120,6 +122,8 @@ one final reply; accepting the current response again does not duplicate it."
       (setf (ende-transcript-entry-content entry) (or (plist-get result :content) "")
             (ende-transcript-entry-data entry)
             (append (list :result result :calls calls :final final
+                          :response-metadata (ende-transcript-metadata transcript)
+                          :usage (or (plist-get result :usage) (ende-transcript-usage transcript))
                           :items (or (plist-get data :items)
                                      (ende-transcript-items transcript result calls)))
                     data)
@@ -141,6 +145,21 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
 (defun ende-transcript-event (transcript event)
   "Record public streaming and activity EVENT in TRANSCRIPT."
   (pcase (plist-get event :type)
+    (:metadata
+     (let ((metadata (plist-get event :metadata)))
+       (unless (and (eq (plist-get (ende-transcript-metadata transcript) :source) :response)
+                    (not (eq (plist-get metadata :source) :response)))
+         (setf (ende-transcript-metadata transcript) metadata))))
+    (:usage (setf (ende-transcript-usage transcript) (plist-get event :usage)))
+    (:partial-result
+     (let* ((entry (ende-transcript--response transcript))
+            (result (plist-get event :result)))
+       (when (eq (ende-transcript-entry-status entry) 'streaming)
+         (setf (ende-transcript-entry-data entry)
+               (plist-put (ende-transcript-entry-data entry) :partial-result result))
+         (when (plist-member result :content)
+           (setf (ende-transcript-entry-content entry) (plist-get result :content)))
+         (ende-transcript-notify transcript entry))))
     (:delta
      (when (memq (plist-get event :channel) '(:content :thinking))
        (let* ((entry (ende-transcript--response transcript))

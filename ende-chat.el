@@ -2907,9 +2907,14 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 (defun ende-chat--response-metadata (job result)
   "Capture semantic provenance when JOB accepts RESULT."
   (let* ((profile (ende-job-profile job))
-         (display (ende--job-display-metadata job result))
+         (transcript (ende-job-transcript job))
+         (display (ende-provider-result-display-metadata
+                   profile (if transcript (ende-transcript-metadata transcript)
+                             (ende-job-metadata job)) result))
          (model (plist-get display :model))
-         (counts (ende--usage-token-counts (plist-get result :usage)))
+         (counts (ende--usage-token-counts
+                  (or (plist-get result :usage)
+                      (and transcript (ende-transcript-usage transcript)))))
          (temperature (plist-get profile :temperature))
          (thinking (plist-get profile :thinking))
          (effort (ende-provider-active-reasoning-effort profile)))

@@ -293,9 +293,22 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
   (setq ende-work-buffer--last-response entry)
   (let* ((id (ende-transcript-entry-id entry))
          (parent (ende-work-buffer--put id entry (ende-work-buffer--response-title entry) ""))
-         (items (plist-get (ende-transcript-entry-data entry) :items))
+         (data (ende-transcript-entry-data entry))
+         (result (or (plist-get data :result) (plist-get data :partial-result)))
+         (thinking (or (plist-get result :thinking) (plist-get result :reasoning-content)
+                       (and (stringp (plist-get data :thinking)) (plist-get data :thinking))))
+         (items (plist-get data :items))
          (stream-key (cons 'stream id))
          (stream (gethash stream-key ende-work-buffer--sections)))
+    (when (and (stringp thinking) (not (string-blank-p thinking)))
+      (let* ((key (cons 'thinking id))
+             (existing (gethash key ende-work-buffer--sections))
+             (section (ende-work-buffer--put key entry "Reasoning"
+                                             (ende-work-buffer--example thinking) parent stream)))
+        (unless existing
+          (save-excursion
+            (goto-char (ende-work-buffer--section-start section))
+            (org-fold-hide-subtree)))))
     (if (null items)
         (ende-work-buffer--put stream-key entry "Assistant"
                               (ende-work-buffer--example (ende-transcript-entry-content entry)) parent)
@@ -446,7 +459,11 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
                 (ende-tool-store-load-opaque (plist-get data :item-id)
                                             (plist-get data :provider) (plist-get data :kind)
                                             (plist-get data :store-file)))))
-      ('response (or (plist-get data :result) (ende-transcript-entry-content entry)))
+      ('response (or (plist-get data :result) (plist-get data :partial-result)
+                     (and (plist-get data :thinking)
+                          (list :content (ende-transcript-entry-content entry)
+                                :thinking (plist-get data :thinking)))
+                     (ende-transcript-entry-content entry)))
       ('status (plist-get data :error))
       (_ (ende-transcript-entry-content entry)))))
 
