@@ -754,16 +754,19 @@
          (ende-debug--sequence 0)
          (completed '("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-completed\",\"output\":[]}}\n\n")))
     (unwind-protect
-        (dolist (transport '(responses codex))
+        (dolist (connection '((responses . none) (codex . chatgpt-plan-oauth) (codex . codex-oauth)))
           (clrhash ende-debug--baselines)
-          (let* ((codex (eq transport 'codex))
+          (let* ((transport (car connection))
+                 (method (cdr connection))
+                 (codex (eq transport 'codex))
                  (profile (list :name 'fixture :api 'openai-responses :job-id 3 :model "model"
                                 :service (if codex 'openai-codex 'openai)
-                                :auth-method (if codex 'chatgpt-plan-oauth 'none)
+                                :auth-method method
                                 :account (and codex 'default) :codex-auth-source (and codex 'ende)
                                 :codex-session-id (and codex "fixture-session")
-                                :url "https://api.openai.com/v1/responses"
-                                :models-url (and codex "https://api.openai.com/v1/models")
+                                :url (if codex (ende-codex--auth-property method :responses-url)
+                                       "https://api.openai.com/v1/responses")
+                                :models-url (and codex (ende-codex--auth-property method :models-url))
                                 :parameters '(:prompt_cache_options (:mode "implicit" :prewarm :json-false))))
                  (original (prin1-to-string profile))
                  (first (ende-test--run-stream-request transport completed nil nil profile))
@@ -796,6 +799,65 @@
             (let* ((ende-debug-provider-cache-comparisons nil)
                    (passive (ende-test--run-stream-request transport completed nil nil profile)))
               (should (equal (plist-get first :request-body) (plist-get passive :request-body))))))
+      (delete-directory directory t))))
+
+(ert-deftest ende-debug-provider-results-do-not-change-transport-outcomes ()
+  (let* ((directory (make-temp-file "ende-debug-results-" t))
+         (ende-debug--session-directory directory)
+         (ende-debugging-enabled t)
+         (ende-debug-provider-cache-comparisons t)
+         (ende-debug--baselines (make-hash-table :test #'equal))
+         (ende-debug--sequence 0)
+         (profile '(:name fixture :api openai-responses :auth-method none
+                    :job-id 21 :model "model" :url "https://example.test/responses")))
+    (unwind-protect
+        (progn
+          (ende-test--run-stream-request
+           'responses '("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-seed\",\"output\":[]}}\n\n")
+           nil nil profile)
+          (let ((baseline (copy-hash-table ende-debug--baselines)))
+            (dolist (fixture '(("response.completed" nil nil)
+                               ("response.completed" "unavailable" nil)
+                               ("response.completed" "comparison_response_not_found" nil)
+                               ("response.completed" "cache_hit" nil)
+                               ("response.completed" "cache_miss" nil)
+                               ("response.completed" nil http)
+                               ("response.incomplete" nil incomplete)
+                               ("response.created" nil protocol)))
+              (setq ende-debug--baselines (copy-hash-table baseline))
+              (let* ((diagnostic (cadr fixture))
+                     (failure (nth 2 fixture))
+                     (rejected (eq failure 'http))
+                     (headers (concat "HTTP/1.1 200 Connection established\r\nx-request-id: req-proxy\r\n\r\n"
+                                      (if rejected "HTTP/2 400\r\nContent-Type: application/json\r\n"
+                                        "HTTP/2 200\r\nContent-Type: text/event-stream\r\n")
+                                      "x-request-id: req-fixture\r\nSet-Cookie: private-cookie\r\n\r\n"))
+                     (chunk (if rejected
+                                "{\"error\":{\"code\":\"unsupported_parameter\",\"param\":\"prompt_cache_options.comparison_response_id\",\"message\":\"Unsupported comparison field\"}}"
+                              (concat "data: {\"type\":" (json-encode (car fixture))
+                                      ",\"response\":{\"id\":\"resp-fixture\",\"output\":[],\"prompt_cache_diagnostics\":"
+                                      (if diagnostic
+                                          (json-encode `((:type . ,diagnostic))) "null") "}}\n\n")))
+                     (state (ende-test--run-stream-request 'responses (list chunk) nil nil profile nil nil headers))
+                     (meta (ende-debug-test--read-meta directory ende-debug--sequence))
+                     (capture (ende-debug--read-capture directory ende-debug--sequence)))
+                (should (= (plist-get state :request-count) 1))
+                (should (plist-get state :cleaned))
+                (should (equal (gethash "comparison_response_id" meta) "resp-seed"))
+                (should (equal (gethash "http_request_id" meta) "req-fixture"))
+                (if failure
+                    (progn
+                      (should (eq (ende-error-kind (plist-get state :error)) failure))
+                      (should (equal (hash-table-values ende-debug--baselines) (hash-table-values baseline)))
+                      (when rejected
+                        (should (equal (gethash "error_param" (gethash "completion" meta))
+                                       "prompt_cache_options.comparison_response_id"))))
+                  (should (plist-get state :result))
+                  (should-not (plist-get state :error))
+                  (should (string-match-p (or diagnostic "requested, not returned")
+                                          (ende-debug--response-lines capture)))))))
+          (dolist (path (directory-files directory t "-meta.json$"))
+            (should-not (string-match-p "private-cookie\\|req-proxy" (ende-debug-test--read-bytes path)))))
       (delete-directory directory t))))
 
 (provide 'ende-debug-test)

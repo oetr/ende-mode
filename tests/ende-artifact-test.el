@@ -147,24 +147,43 @@
            (messages (list (cons "user" "Draw")
                            (list :role "assistant" :content (list image))
                            (cons "user" "Continue")))
-           (profile '(:model "vision"))
+           (profile '(:name fixture :model "vision" :api openai-responses
+                      :auth-method none :job-id 17 :url "https://example.test/responses"))
+           (debug '("openai-responses" "https://example.test/responses"))
+           (ende-debugging-enabled t)
+           (ende-debug-provider-cache-comparisons t)
+           (ende-debug--session-directory directory)
+           (ende-debug--sequence 0)
+           (ende-debug--baselines (make-hash-table :test #'equal))
            (ende-default-output-tokens 123))
-      (dolist (builder '(ende-llm--request-body ende-codex--request-body))
-        (let* ((expected (encode-coding-string (json-encode (funcall builder messages profile)) 'utf-8))
+      (dolist (builder '(ende-llm--request-body ende-responses--request-body ende-codex--request-body))
+        (let* ((library (if (eq builder 'ende-llm--request-body) 'ende-llm 'ende-codex))
                (lifecycle (ende-transport-session-create nil #'ert-fail))
-               done file actual)
+               seed done file actual record expected)
           (unwind-protect
               (progn
+                (ende-request-prepare lifecycle library builder '(("user" . "seed")) profile debug
+                                      (lambda (_data _body capture) (setq seed capture)))
+                (ende-debug-record-response seed (ende-protocol-json-read-string "{\"id\":\"resp-worker-baseline\"}") t)
+                (ende-debug-record-completion seed 'success nil 200 nil)
+                (setq expected (ende-request--encode
+                                builder messages profile debug
+                                (ende-debug-prepare-request profile (car debug) (cadr debug) nil
+                                                            (not (eq library 'ende-llm)))))
                 (ende-artifact-clear-cache)
                 (ende-request-prepare
-                 lifecycle (if (eq builder 'ende-llm--request-body) 'ende-llm 'ende-codex)
-                 builder messages profile nil
-                 (lambda (data _body _record)
+                 lifecycle library builder messages profile debug
+                 (lambda (data _body capture)
                    (setq file (plist-get data :file)
-                         actual (ende-artifact--read-bytes file) done t)))
+                         actual (ende-artifact--read-bytes file) record capture done t)))
                 (should-not done)
+                (clrhash ende-debug--baselines)
                 (ende-test--wait-for (lambda () done))
-                (should (equal expected actual)))
+                (should (equal (car expected) actual))
+                (dolist (key '("input_fingerprints" "input_reasoning_items" "comparison_response_id"
+                               "comparison_source" "comparison_request_sequence"))
+                  (should (equal (alist-get key (plist-get (nth 2 expected) :metadata) nil nil #'equal)
+                                 (alist-get key (plist-get record :metadata) nil nil #'equal)))))
             (ende-transport-session-cleanup lifecycle))
           (should-not (file-exists-p file)))))))
 

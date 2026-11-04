@@ -251,7 +251,7 @@ process for cancellation tests."
 
 (defun ende-test--run-stream-request
     (transport chunks &optional cancel-on-start response-limit profile
-               event-callback-error messages)
+               event-callback-error messages response-headers)
   "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
 When CANCEL-ON-START is non-nil, cancel from the start callback.
 RESPONSE-LIMIT dynamically sets `ende-max-response-bytes'.  PROFILE overrides
@@ -262,6 +262,7 @@ non-nil, is signalled from the event callback."
          (real-make-process (symbol-function 'make-process))
          (real-process-send-string (symbol-function 'process-send-string))
          (request-args nil)
+         (request-count 0)
          (request-body nil)
          (config-text nil)
          (process nil)
@@ -321,6 +322,7 @@ non-nil, is signalled from the event callback."
                      :expires-at 9999999999)))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest args)
+                 (cl-incf request-count)
                  (setq request-args args)
                  (setq process
                        (funcall real-make-process
@@ -355,10 +357,10 @@ non-nil, is signalled from the event callback."
                     (insert-file-contents config-file)
                     (setq config-text (buffer-string))))
                 (with-temp-file headers-file
-                  (insert "HTTP/1.1 200 OK\r\n"
-                          (if (eq transport 'codex)
-                              "\r\n"
-                            "Content-Type: text/event-stream\r\n\r\n")))
+                  (insert (or response-headers
+                              (concat "HTTP/1.1 200 OK\r\n"
+                                      (if (eq transport 'codex) "\r\n"
+                                        "Content-Type: text/event-stream\r\n\r\n")))))
                 (dolist (chunk chunks)
                   (funcall filter process chunk))
                 (when (process-live-p process)
@@ -383,7 +385,7 @@ non-nil, is signalled from the event callback."
               (list :events (nreverse events)
                     :order (nreverse order)
                     :result result :error failure
-                    :request-body request-body :command command
+                    :request-body request-body :request-count request-count :command command
                     :config-text config-text
                     :cleaned
                     (and (not (and (processp process)
