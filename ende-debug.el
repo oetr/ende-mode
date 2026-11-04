@@ -145,6 +145,48 @@ When LITERAL is non-nil, preserve CONTENTS as exact bytes."
   (let ((ende-content--debug-preserve-encrypted-content t))
     (ende-content-redact value)))
 
+(defun ende-debug--structural-json (value)
+  "Encode parsed JSON VALUE deterministically for diagnostic hashing."
+  (cond
+   ((hash-table-p value)
+    (concat "{"
+            (mapconcat (lambda (key)
+                         (concat (json-encode key) ":"
+                                 (ende-debug--structural-json (gethash key value))))
+                       (sort (hash-table-keys value) #'string<) ",")
+            "}"))
+   ((and (vectorp value) (not (stringp value)))
+    (concat "[" (mapconcat #'ende-debug--structural-json value ",") "]"))
+   (t (let ((json-false :false)
+            (json-encoding-pretty-print nil))
+        (json-encode value)))))
+
+(defun ende-debug--input-fingerprints (serialized-body)
+  "Fingerprint original input values in final outgoing SERIALIZED-BODY.
+Lengths describe the UTF-8 diagnostic encoding, not provider tokenization."
+  (let* ((request (ende-protocol-json-read-string
+                   (if (multibyte-string-p serialized-body) serialized-body
+                     (decode-coding-string serialized-body 'utf-8))))
+         (field (cond ((ende-protocol-json-has-key-p "input" request) "input")
+                      ((ende-protocol-json-has-key-p "messages" request) "messages")))
+         (items (ende-protocol-json-get field request)))
+    (when (ende-debug--json-array-p items)
+      `(("format" . "structural-input-sha256-v1")
+        ("field" . ,field)
+        ("count" . ,(length items))
+        ("items" . ,(cl-map 'vector
+                           (lambda (item index)
+                             (let ((bytes (encode-coding-string
+                                           (ende-debug--structural-json item) 'utf-8)))
+                               (append
+                                `(("index" . ,index)
+                                  ("sha256" . ,(secure-hash 'sha256 bytes))
+                                  ("byte_length" . ,(length bytes)))
+                                (cl-loop for key in '("type" "role" "id" "call_id")
+                                         for value = (ende-protocol-json-get key item)
+                                         when (stringp value) collect (cons key value)))))
+                           items (number-sequence 0 (1- (length items)))))))))
+
 (defun ende-debug-record-response (record response)
   "Retain allowlisted provider RESPONSE metadata in debug RECORD.
 Never capture raw output or opaque reasoning.  Completion writes this record."
@@ -215,6 +257,7 @@ disabled."
                (directory ende-debug--session-directory)
                (started (float-time))
                (session (plist-get profile :codex-session-id))
+               (fingerprints (ende-debug--input-fingerprints serialized-body))
                (reasoning
                 (cl-loop for (key . value) in request-body
                          when (memq key '(:reasoning :reasoning_effort))
@@ -238,6 +281,11 @@ disabled."
                                                (alist-get :reasoning_effort
                                                           request-body)))
                   ("reasoning_settings" . ,reasoning)
+                  ("input_fingerprints" . ,fingerprints)
+                  ("input_reasoning_items" . ,(when fingerprints
+                                                (cl-count "reasoning" (cdr (assoc "items" fingerprints))
+                                                          :key (lambda (item) (cdr (assoc "type" item)))
+                                                          :test #'equal)))
                   ("cache_key_supplied" . ,(if (ende-debug--request-field "prompt_cache_key" request-body)
                                                t json-false))
                   ("session_fingerprint" . ,(when (and (stringp session)
@@ -454,6 +502,69 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
       (cl-incf index))
     index))
 
+(defun ende-debug--valid-fingerprints (capture)
+  "Return complete, supported structural input fingerprints in CAPTURE."
+  (let* ((fingerprints (ende-protocol-json-get
+                        "input_fingerprints" (plist-get capture :metadata)))
+         (field (ende-protocol-json-get "field" fingerprints))
+         (count (ende-protocol-json-get "count" fingerprints))
+         (items (ende-protocol-json-get "items" fingerprints))
+         (input (ende-protocol-json-get field (plist-get capture :request))))
+    (when (and (equal (ende-protocol-json-get "format" fingerprints)
+                      "structural-input-sha256-v1")
+               (member field '("input" "messages"))
+               (integerp count) (>= count 0)
+               (ende-debug--json-array-p input) (= count (length input))
+               (ende-debug--json-array-p items) (= count (length items))
+               (cl-loop for item across items for index from 0
+                        for digest = (ende-protocol-json-get "sha256" item)
+                        for bytes = (ende-protocol-json-get "byte_length" item)
+                        always (and (equal (ende-protocol-json-get "index" item) index)
+                                    (stringp digest)
+                                    (string-match-p "\\`[0-9a-f]\\{64\\}\\'" digest)
+                                    (integerp bytes) (>= bytes 0))))
+      fingerprints)))
+
+(defun ende-debug--input-comparison (previous current)
+  "Compare original input fingerprints in PREVIOUS and CURRENT captures.
+Fall back to saved values when fingerprints cannot establish equality."
+  (let ((old (ende-debug--valid-fingerprints previous))
+        (new (ende-debug--valid-fingerprints current)))
+    (if (not (and old new
+                  (equal (gethash "field" old) (gethash "field" new))))
+        (let ((saved (ende-debug--messages-prefix
+                      (plist-get previous :request) (plist-get current :request))))
+          (list :preserved (car saved) :appended (cadr saved)))
+      (let* ((old-items (gethash "items" old))
+             (new-items (gethash "items" new))
+             (limit (min (length old-items) (length new-items)))
+             (index 0))
+        (while (and (< index limit)
+                    (equal (gethash "sha256" (aref old-items index))
+                           (gethash "sha256" (aref new-items index)))
+                    (equal (gethash "byte_length" (aref old-items index))
+                           (gethash "byte_length" (aref new-items index))))
+          (cl-incf index))
+        (let ((preserved (= index (length old-items))))
+          (list :original t :field (gethash "field" old) :preserved preserved
+                :changed-index (unless preserved index)
+                :appended (if preserved (- (length new-items) index) 0)
+                :appended-reasoning
+                (when preserved
+                  (cl-count "reasoning" new-items :start index
+                            :key (lambda (item) (gethash "type" item)) :test #'equal))))))))
+
+(defun ende-debug--history-request (request)
+  "Detach REQUEST, excluding the diagnostic comparison identifier."
+  (let* ((copy (copy-hash-table request))
+         (options (gethash "prompt_cache_options" copy)))
+    (when (hash-table-p options)
+      (setq options (copy-hash-table options))
+      (remhash "comparison_response_id" options)
+      (if (zerop (hash-table-count options)) (remhash "prompt_cache_options" copy)
+        (puthash "prompt_cache_options" options copy)))
+    copy))
+
 (defun ende-debug--cache-line (capture)
   "Return a concise provider cache utilization line for CAPTURE."
   (let* ((metadata (plist-get capture :metadata))
@@ -529,13 +640,17 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
 
 (defun ende-debug--pair-report (previous current)
   "Return a concise structural comparison of PREVIOUS and CURRENT captures."
-  (let* ((old-request (plist-get previous :request))
-         (new-request (plist-get current :request))
+  (let* ((old-request (ende-debug--history-request (plist-get previous :request)))
+         (new-request (ende-debug--history-request (plist-get current :request)))
          (old-meta (plist-get previous :metadata))
          (new-meta (plist-get current :metadata))
-         (messages (ende-debug--messages-prefix old-request new-request))
-         (prefix-identical (car messages))
-         (appended (cadr messages))
+         (messages (ende-debug--input-comparison previous current))
+         (original (plist-get messages :original))
+         (prefix-identical (plist-get messages :preserved))
+         (appended (plist-get messages :appended))
+         (field (or (plist-get messages :field)
+                    (if (gethash "input" old-request) "input" "messages")))
+         (changed-index (plist-get messages :changed-index))
          (tools (ende-debug--changed-label old-request new-request "tools"))
          (instructions-changed
           (not (ende-debug--json-equal-p
@@ -583,19 +698,42 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
               ((equal old-session new-session) "unchanged")
               (t "changed")))
      (if prefix-identical
-         (format "Messages:        %d appended, previous prefix identical\n"
-                 appended)
-       "Messages:        previous prefix modified, removed, or reordered\n")
-     (if difference
-         (format "\nFirst changed path:\n  %s\n" difference)
-       "\nFirst changed path: none (JSON bodies structurally identical)\n")
+         (format "Local input:     %s; %d appended%s\n"
+                 (if original "previous original input prefix was preserved"
+                   "saved request prefix identical")
+                 appended
+                 (if original (format " (%d reasoning)"
+                                      (plist-get messages :appended-reasoning)) ""))
+       (format "Local input:     %s prefix modified, removed, or reordered\n"
+               (if original "original input" "saved request")))
+     (unless original
+       "Limitation: original fingerprints absent, incompatible, or incomplete; saved values cannot establish equality of redacted originals.\n")
+     (cond
+      (changed-index
+       (format "Changed input item: %s[%d]%s\n"
+               field changed-index
+               (if (cl-every
+                    (lambda (request)
+                      (let ((items (gethash field request)))
+                        (and (< changed-index (length items))
+                             (string-match-p "redacted"
+                                             (json-encode (aref items changed-index))))))
+                    (list old-request new-request))
+                   " (contents redacted)" "")))
+      ((and prefix-identical (> appended 0))
+       (format "First appended item: %s[%d]\n" field
+               (- (length (gethash field new-request)) appended)))
+      (difference (format "First changed path: %s\n" difference))
+      (t "First changed path: none in saved JSON\n"))
      (format "Byte common prefix: %d/%d bytes (supplementary only)\n"
              prefix-bytes old-length)
-     (if (and prefix-identical (not instructions-changed)
+     (if (and original prefix-identical (not instructions-changed)
               (equal tools "unchanged"))
          (concat "\nObserved: no change to instructions, tools, or the prior message prefix.\n"
                  "The provider cache outcome's cause is not determined by this comparison.\n\n")
-       (concat "\nObserved: prompt-relevant request structure changed.\n"
+       (concat (if (and prefix-identical (not original))
+                   "\nObserved: saved input prefix matches; concealed original contents remain unknown.\n"
+                 "\nObserved: prompt-relevant request structure changed.\n")
                "This comparison does not establish whether that change caused a cache miss.\n\n")))))
 
 (defun ende-debug--capture-groups (captures &optional session)

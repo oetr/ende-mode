@@ -169,11 +169,13 @@
          (ende-debug--sequence 0))
     (unwind-protect
         (progn
-          (should-not
-           (ende-debug-record-request
-            "{}" '((:model . "test-model"))
-            '(("user" . "prompt")) '(:model "test-model")
-            "openai-compatible" "https://example.test/v1/chat/completions"))
+          (cl-letf (((symbol-function 'ende-debug--input-fingerprints)
+                     (lambda (&rest _) (ert-fail "Debugging is disabled"))))
+            (should-not
+             (ende-debug-record-request
+              "{}" '((:model . "test-model"))
+              '(("user" . "prompt")) '(:model "test-model")
+              "openai-compatible" "https://example.test/v1/chat/completions")))
           (should (= ende-debug--sequence 0))
           (should (equal (directory-files directory nil "^[^.]") nil)))
       (delete-directory directory t))))
@@ -333,9 +335,9 @@
           (setq report
                 (ende-debug--format-report
                  directory (ende-debug--read-captures directory)))
-          (should (string-match-p "0 appended, previous prefix identical" report))
-          (should (string-match-p "2 appended, previous prefix identical" report))
-          (should (string-match-p "previous prefix modified, removed, or reordered"
+          (should (string-match-p "prefix was preserved; 0 appended" report))
+          (should (string-match-p "prefix was preserved; 2 appended" report))
+          (should (string-match-p "original input prefix modified, removed, or reordered"
                                   report))
           (should (string-match-p "Tools:           changed" report))
           (should (string-match-p "Model:           changed" report))
@@ -344,7 +346,7 @@
           (should (string-match-p "input\\[1\\]" report))
           (should (string-match-p "Cached: 0 (0.0%)" report))
           (should (string-match-p "Cached: not reported" report))
-          (should (string-match-p "First changed path:" report))
+          (should (string-match-p "First appended item:" report))
           (should (= (ende-protocol-json-get
                       "cache_write_tokens"
                       (ende-protocol-json-get
@@ -598,6 +600,50 @@
         (ende-codex--handle-event session event)
         (should received)
         (should-not (string-match-p secret (prin1-to-string received)))))))
+
+(ert-deftest ende-debug-structural-fingerprints-represent-json-values ()
+  (let ((fingerprint (lambda (item)
+                       (cdr (assoc "items" (ende-debug--input-fingerprints
+                                           (concat "{\"input\":[" item "]}")))))))
+    (should (equal (funcall fingerprint "{\"a\":[true,false,null,{},[]],\"b\":{\"x\":\"世界\\n café\",\"y\":1}}")
+                   (funcall fingerprint "{\"b\":{\"y\":1,\"x\":\"世界\\n café\"},\"a\":[true,false,null,{},[]]}")))
+    (let* ((values '("null" "false" "true" "{}" "[]" "{\"a\":null}"
+                     "[1,2]" "[2,1]" "\"世界\\n café\"" "\"世界 café\""))
+           (entries (mapcar (lambda (value) (aref (funcall fingerprint value) 0)) values)))
+      (should (= (length entries)
+                 (length (delete-dups (mapcar (lambda (entry) (cdr (assoc "sha256" entry))) entries))))))
+    (let ((entry (aref (funcall fingerprint "\"世界\\n\"") 0))
+          (bytes (encode-coding-string (json-encode "世界\n") 'utf-8)))
+      (should (= (cdr (assoc "byte_length" entry)) (length bytes))))))
+
+(ert-deftest ende-debug-original-prefix-survives-redaction-and-appended-reasoning ()
+  (let* ((directory (make-temp-file "ende-debug-originals-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (reasoning '((:type . "reasoning") (:id . "rs-input") (:encrypted_content . "opaque")))
+         (tool '((:type . "function_call_output") (:call_id . "call-input")
+                 (:output . "Authorization: Bearer original")))
+         (changed '((:type . "function_call_output") (:call_id . "call-input")
+                    (:output . "Authorization: Bearer changed"))))
+    (unwind-protect
+        (progn
+          (dolist (items (list (vector reasoning tool) (vector reasoning changed)
+                              (vector reasoning changed reasoning)))
+            (ende-debug-test--record-synthetic `((:input . ,items)) 1 nil))
+          (let* ((captures (ende-debug--read-captures directory))
+                 (collision (ende-debug--pair-report (nth 0 captures) (nth 1 captures)))
+                 (grown (ende-debug--pair-report (nth 1 captures) (nth 2 captures))))
+            (should (ende-debug--json-equal-p (plist-get (nth 0 captures) :request)
+                                             (plist-get (nth 1 captures) :request)))
+            (should (string-match-p "input\\[1\\] (contents redacted)" collision))
+            (should (string-match-p "previous original input prefix was preserved" grown))
+            (should (string-match-p "1 appended (1 reasoning)" grown))
+            (should (string-match-p "First appended item: input\\[2\\]" grown))
+            (remhash "input_fingerprints" (plist-get (nth 0 captures) :metadata))
+            (should (string-match-p "cannot establish equality of redacted originals"
+                                    (ende-debug--pair-report (nth 0 captures) (nth 1 captures))))))
+      (delete-directory directory t))))
 
 (provide 'ende-debug-test)
 
