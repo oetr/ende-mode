@@ -232,7 +232,15 @@
                      '(:content "" :tool-calls
                        ((:id "spawn" :name "spawn_agent" :arguments "{\"title\":\"Inspect child task\",\"task\":\"Child task\"}"))))
             (should (eq (ende-job-state root) 'suspended))
-            (let ((child (car (ende-job-children root))))
+            (let* ((child (car (ende-job-children root)))
+                   (root-tools
+                    (ende-test--tool-definition-names
+                     (plist-get (nth 2 (nth 1 requests)) :tool-definitions)))
+                   (child-tools
+                    (ende-test--tool-definition-names
+                     (plist-get (nth 2 (nth 2 requests)) :tool-definitions))))
+              (should (member "generate_title" root-tools))
+              (should (equal child-tools (remove "generate_title" root-tools)))
               (should (eq (ende-job-request-phase child) 'work))
               (should (equal (mapcar #'car (car (nth 2 requests)))
                              '("system" "user")))

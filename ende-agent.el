@@ -489,7 +489,7 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
   (setf (ende-job-profile job)
         (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
                    (ende-tool-definitions
-                    configuration (ende-job-request-phase job))))
+                    configuration (ende-job-parent job))))
   (unless (eq (ende-job-request-phase job) 'title)
     (ende-transcript-begin-response (ende-job-ensure-transcript job)))
   (ende--dispatch-llm
@@ -731,7 +731,7 @@ optional :before-final and :after-tool-round message transforms.
 Chat persistence and guidance stay in those callbacks."
   (let* ((image-profile (when (memq 'generate_image (plist-get configuration :active-tools))
                           (ende-image--profile)))
-         (definitions (ende-tool-definitions configuration))
+         (definitions (ende-tool-definitions configuration (ende-job-parent job)))
          (profile (ende-plist-merge (copy-tree (ende-job-profile job))
                                     (list :tool-definitions definitions
                                           :image-profile image-profile))))
