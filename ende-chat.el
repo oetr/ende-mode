@@ -1261,7 +1261,9 @@ If an edited drawer is malformed, fall back to the line after the heading."
             nil)
         (list :id (plist-get execution :provider-call-id)
               :name (plist-get execution :name)
-              :arguments (plist-get execution :arguments))))))
+              :arguments (plist-get execution :arguments)
+              :protocol-provider (plist-get execution :protocol-provider)
+              :protocol-item (plist-get execution :protocol-item))))))
 
 (defun ende-chat--restore-response-parts (parts normalized)
   "Restore presentation in already split PARTS using NORMALIZED metadata.
@@ -3083,19 +3085,28 @@ OPTIONS are passed to `json-serialize'."
         (truncate-string-to-width title width 0 nil "…")
       title)))
 
-(defun ende-chat--prepare-tool-call (call &optional store-file)
-  "Store CALL in STORE-FILE and return it with a fresh execution identity."
-  (let ((store-file (or store-file (ende-tool-store--filename)))
-        (id (ende-tools-call-value call :id))
-        (name (ende-tools-call-value call :name))
-        (arguments (ende-tools-call-value call :arguments)))
-    (let ((execution
-           (ende-tool-store-create-execution id name arguments store-file)))
-      (list :id (plist-get execution :provider-call-id)
-            :name (plist-get execution :name)
-            :arguments (plist-get execution :arguments)
-            :execution-id (plist-get execution :execution-id)
-            :store-file store-file))))
+(defun ende-chat--prepare-tool-call (call &optional store-file protocol-items)
+  "Store CALL and its matching PROTOCOL-ITEMS entry in STORE-FILE."
+  (let* ((store-file (or store-file (ende-tool-store--filename)))
+         (id (ende-tools-call-value call :id))
+         (name (ende-tools-call-value call :name))
+         (arguments (ende-tools-call-value call :arguments))
+         (item (when (eq (car-safe protocol-items) 'openai-responses)
+                 (cl-find-if
+                  (lambda (item)
+                    (and (equal (ende-protocol-json-get "type" item) "function_call")
+                         (equal (ende-protocol-json-get "call_id" item) id)))
+                  (cdr protocol-items))))
+         (execution (ende-tool-store-create-execution
+                     id name arguments store-file
+                     (when item "openai-responses") item)))
+    (list :id (plist-get execution :provider-call-id)
+          :name (plist-get execution :name)
+          :arguments (plist-get execution :arguments)
+          :protocol-provider (plist-get execution :protocol-provider)
+          :protocol-item (plist-get execution :protocol-item)
+          :execution-id (plist-get execution :execution-id)
+          :store-file store-file)))
 
 (defun ende-chat--store-tool-result (call content)
   "Store CONTENT as CALL's exact result payload."
@@ -3820,7 +3831,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                       calls
                     (mapcar (lambda (call)
                               (ende-chat--prepare-tool-call
-                               call (plist-get instruction :tool-store-file)))
+                               call (plist-get instruction :tool-store-file)
+                               (plist-get result :protocol-items)))
                             calls)))
                  (assistant
                   (list :role "assistant"

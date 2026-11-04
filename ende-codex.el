@@ -1390,13 +1390,16 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--function-call-item (call)
   "Return a replayed Responses function_call item for CALL."
-  (append
-   (list (cons :type "function_call")
-         (cons :call_id (plist-get call :id)))
-   (when (plist-get call :namespace)
-     (list (cons :namespace (plist-get call :namespace))))
-   (list (cons :name (plist-get call :name))
-         (cons :arguments (plist-get call :arguments)))))
+  (if (and (equal (plist-get call :protocol-provider) "openai-responses")
+           (plist-get call :protocol-item))
+      (ende-protocol-json-for-request (plist-get call :protocol-item))
+    (append
+     (list (cons :type "function_call")
+           (cons :call_id (plist-get call :id)))
+     (when (plist-get call :namespace)
+       (list (cons :namespace (plist-get call :namespace))))
+     (list (cons :name (plist-get call :name))
+           (cons :arguments (plist-get call :arguments))))))
 
 (defun ende-codex--request-messages (messages &optional profile)
   "Convert internal MESSAGES to Responses API input objects."
@@ -1416,7 +1419,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
              (call-id (plist-get message :tool-call-id)))
          (cond
           ((eq (car-safe items) 'openai-responses)
-           (append (ende-provider-config-copy (cdr items))
+           (append (mapcar #'ende-protocol-json-for-request (cdr items))
                    (mapcar #'ende-codex--function-call-item
                            (cl-remove-if
                             (lambda (call)
@@ -1424,7 +1427,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                          (equal (ende-protocol-json-get "call_id" item)
                                                 (plist-get call :id))) (cdr items))) calls))))
           ((and opaque (equal provider "openai-responses"))
-           (list (ende-provider-config-copy opaque)))
+           (list (ende-protocol-json-for-request opaque)))
           (opaque nil)
           (calls
            (append

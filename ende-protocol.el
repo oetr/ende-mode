@@ -262,6 +262,21 @@ Errors are signaled so the transport can turn them into protocol failures."
   (and (hash-table-p object)
        (gethash key object)))
 
+(defun ende-protocol-json-for-request (value)
+  "Copy parsed JSON VALUE using the request encoder's boolean representation."
+  (cond
+   ((eq value :false) json-false)
+   ((hash-table-p value)
+    (let ((copy (make-hash-table :test #'equal)))
+      (maphash (lambda (key item)
+                 (puthash (substring-no-properties key)
+                          (ende-protocol-json-for-request item) copy))
+               value)
+      copy))
+   ((vectorp value) (vconcat (mapcar #'ende-protocol-json-for-request value)))
+   ((stringp value) (substring-no-properties value))
+   (t value)))
+
 (defun ende-protocol-json-has-key-p (key object)
   "Return non-nil when parsed JSON hash table OBJECT contains KEY."
   (and (hash-table-p object)

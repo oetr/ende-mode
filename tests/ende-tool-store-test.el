@@ -97,8 +97,8 @@
                (loaded (ende-tool-store-load-execution id)))
           (should-not (member id '("fc_item" "call_result")))
           (should (equal (plist-get loaded :protocol-provider) "openai-responses"))
-          (should (equal (json-encode (plist-get loaded :protocol-item))
-                         (json-encode item)))
+          (should (equal (json-serialize (plist-get loaded :protocol-item) :null-object nil)
+                         (json-serialize item :null-object nil)))
           (should-error (ende-tool-store-create-execution
                          "different-call" "read_file" arguments nil
                          "openai-responses" item)))

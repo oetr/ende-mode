@@ -1066,6 +1066,83 @@
                             (plist-get (nth 2 ende-test--calls) :messages)))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/chat-roundtrips-provider-calls-between-turns ()
+  (ende-test--reset)
+  (let* ((ende-tools--registry (copy-sequence ende-tools--registry))
+         (items
+          (cl-loop for n from 1 to 2
+                   collect
+                   (ende-protocol-json-read-string
+                    (json-encode
+                     `((type . "function_call") (id . ,(format "fc_%d" n))
+                       (call_id . ,(format "call_%d" n))
+                       (namespace . "ende") (status . "completed")
+                       (name . "ende_test_payload_boundary")
+                       (extra . [nil ,json-false])
+                       (arguments . ,(if (= n 1) "{ }" "{\n}")))))))
+         (reasoning (ende-protocol-json-read-string
+                     "{\"type\":\"reasoning\",\"encrypted_content\":\"exact-ciphertext\",\"summary\":[]}"))
+         (text (ende-protocol-json-read-string
+                "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking both.\"}]}"))
+         (calls (mapcar (lambda (item)
+                          (list :id (gethash "call_id" item)
+                                :name (gethash "name" item)
+                                :arguments (gethash "arguments" item)))
+                        items))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list (list :content "Checking both." :tool-calls calls
+                       :protocol-items (cons 'openai-responses
+                                             (append (list reasoning text) items)))
+                 "Final answer.") t))
+         (effects 0))
+    (ende-test--register-store-boundary-tool
+     (lambda (_arguments _root) (format "result-%d" (cl-incf effects))))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (insert (ende-test--chat-config-block '((tools ende_test_payload_boundary)))
+                  "* Topic\n** Question\nInspect both.\n")
+          (ende-test--chat-goto "** Question")
+          (let ((job (ende-ask)))
+            (ende-test--complete-call (car ende-test--calls))
+            (ende-test--complete-call (cadr ende-test--calls))
+            (should (eq (ende-job-state job) 'completed)))
+          (let ((live (ende-codex--request-messages
+                       (plist-get (cadr ende-test--calls) :messages)))
+                prefixes)
+            (dolist (replay '(t nil))
+              (let ((ende-chat-replay-opaque-reasoning replay))
+                (ende-test--chat-goto "** Agent: Reply")
+                (push (json-encode (vconcat (ende-codex--request-messages
+                                            (ende-chat-context-at-point))))
+                      prefixes)))
+            (setq prefixes (nreverse prefixes))
+            (goto-char (point-max))
+            (insert "** Follow-up\nWhat next?\n")
+            (dolist (replay '(t nil))
+              (ende-test--chat-goto "** Follow-up")
+              (let* ((ende-chat-replay-opaque-reasoning replay)
+                     (input (ende-codex--request-messages (ende-chat-context-at-point)))
+                     (restored (cl-remove-if-not #'hash-table-p input))
+                     (wire (ende-protocol-json-read-string (json-encode (vconcat restored)))))
+                (should (equal (json-encode (vconcat (butlast input))) (pop prefixes)))
+                (should (equal (json-serialize wire :null-object nil)
+                               (json-serialize (vconcat (append (when replay (list reasoning)) items))
+                                               :null-object nil)))
+                (should (equal
+                         (cl-remove-if-not (lambda (item) (alist-get :type item))
+                                           (cl-remove-if #'hash-table-p input))
+                         (cl-remove-if-not (lambda (item) (alist-get :type item))
+                                           (cl-remove-if #'hash-table-p live))))
+                (should (cl-some
+                         (lambda (item)
+                           (and (not (hash-table-p item))
+                                (equal (alist-get :content item)
+                                       '(((:type . "output_text") (:text . "Checking both."))))))
+                         input))))))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/chat-rebuilds-mixed-protocol-events-from-org ()
   (let* ((directory (make-temp-file "ende-chat-events-" t))
          (file (expand-file-name "payloads.sqlite3" directory)))
