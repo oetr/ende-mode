@@ -323,7 +323,7 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
        (ende-transcript-entry-id entry) entry
        (format "Result (%s)" (ende-transcript-entry-status entry))
        (ende-work-buffer--example
-        (ende-work-buffer--readable-json (ende-transcript-entry-content entry))) parent nil t))))
+        (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) parent nil t))))
 
 (defun ende-work-buffer--entry (entry &optional parent before)
   "Render changed ENTRY, optionally beneath PARENT and BEFORE a sibling."
@@ -332,7 +332,13 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
         (content (ende-transcript-entry-content entry)))
     (pcase (ende-transcript-entry-kind entry)
       ('response (ende-work-buffer--response entry))
-      ('text (ende-work-buffer--put id entry "Assistant" (ende-work-buffer--example content) parent before))
+      ('text
+       (ende-work-buffer--put
+        id entry "Assistant"
+        (ende-work-buffer--example
+         (if (string-blank-p (or content ""))
+             (or (plist-get (plist-get data :normalized) :content) content)
+           content)) parent before))
       ('tool-call
        (let* ((call (plist-get data :call))
               (section (ende-work-buffer--put
@@ -341,7 +347,7 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
          (ende-work-buffer--put
           (cons 'arguments id) entry "Arguments"
           (ende-work-buffer--example
-           (ende-work-buffer--readable-json (plist-get call :arguments))) section nil t)))
+           (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) section nil t)))
       ('tool-result (ende-work-buffer--tool-result entry))
       ('opaque
        (ende-work-buffer--put
@@ -368,7 +374,11 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
               ((buffer-live-p buffer)))
     (with-current-buffer buffer
       (when (eq transcript ende-work-buffer--transcript)
-        (ende-work-buffer--update (lambda () (ende-work-buffer--entry entry)))))))
+        (ende-work-buffer--update
+         (lambda ()
+           (ende-work-buffer--put 'task nil "Task"
+                                  (ende-work-buffer--example (ende-transcript-task transcript)))
+           (ende-work-buffer--entry entry)))))))
 
 (add-hook 'ende-transcript-change-functions #'ende-work-buffer--transcript-change)
 

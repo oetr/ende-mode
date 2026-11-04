@@ -20,7 +20,7 @@
   (dolist (function ende-transcript-change-functions)
     (condition-case failure
         (funcall function transcript entry)
-      (error (display-warning 'ende (format "Work display: %s" (error-message-string failure)))))))
+      ((error quit) (display-warning 'ende (format "Work display: %s" (error-message-string failure)))))))
 
 (defun ende-transcript-new-entry (transcript kind &optional content data status)
   "Allocate an unattached KIND entry in TRANSCRIPT."
@@ -128,8 +128,15 @@ one final reply; accepting the current response again does not duplicate it."
     entry))
 
 (defun ende-transcript-tool-result (transcript call content)
-  "Record exact tool CONTENT associated with prepared CALL."
-  (ende-transcript-append transcript 'tool-result content (list :call call) 'returned))
+  "Record exact tool CONTENT associated with prepared CALL.
+Only an explicit outer JSON boolean `ok' determines success or failure."
+  (let ((ok (condition-case nil
+                (ende-protocol-json-get "ok" (ende-protocol-json-read-string content))
+              (error nil))))
+    (ende-transcript-append transcript 'tool-result content (list :call call)
+                            (cond ((eq ok t) 'succeeded)
+                                  ((eq ok :false) 'failed)
+                                  (t 'returned)))))
 
 (defun ende-transcript-event (transcript event)
   "Record public streaming and activity EVENT in TRANSCRIPT."
