@@ -7,6 +7,7 @@
 (require 'ende-queue)
 (require 'ende-queue-source)
 (require 'ende-history)
+(require 'ende-work-buffer)
 
 (defface ende-queue-ui-heading-face
   '((t :inherit font-lock-keyword-face))
@@ -350,11 +351,9 @@
   "Visit the originating source of the selected retained job."
   (interactive) (ende-queue-visit-source (ende-queue-ui--current-job)))
 (defun ende-queue-ui-visit-agent-work ()
-  "Inspect retained private work without creating a replacement."
+  "Open or recreate the selected retained job's disposable Work viewer."
   (interactive)
-  (let ((buffer (ende-job-work-buffer (ende-queue-ui--current-job))))
-    (unless (buffer-live-p buffer) (user-error "Work buffer is unavailable"))
-    (pop-to-buffer buffer) (goto-char (point-max))))
+  (pop-to-buffer (ende-work-buffer-open (ende-queue-ui--current-job))))
 
 (defun ende-queue-ui-next-entry (&optional direction)
   "Move DIRECTION through visible job rows."
