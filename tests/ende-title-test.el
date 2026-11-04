@@ -33,8 +33,16 @@
                                         "/not/a/required/project"
                                         '(:active-tools nil :root "/missing")) :ok))
       (should (equal title "Inspect queue lifecycle"))))
-  (should-not (plist-get (ende-tool-call 'generate_title
-                                        '(:title "Forbidden in work")) :ok)))
+  (let* ((title nil)
+         (ende-tools--request-phase 'work)
+         (ende-tools--generate-title-function
+          (lambda (value) (setq title value))))
+    (let ((result (ende-tool-call 'generate_title
+                                  '(:title "Forbidden in work"))))
+      (should-not (plist-get result :ok))
+      (should (equal (plist-get result :error)
+                     "title generation was not requested"))
+      (should-not title))))
 
 (ert-deftest ende-test/title-phase-isolates-a-whole-batch-and-continues ()
   (ende-test--reset)
@@ -54,7 +62,9 @@
                     (:id "effect" :name "title_test_effect" :arguments "{}")))
                (if (= (length requests) 2)
                    '(:content "" :tool-calls
-                     ((:id "effect-work" :name "title_test_effect" :arguments "{}")))
+                     ((:id "title-work" :name "generate_title"
+                       :arguments "{\"title\":\"Unauthorized rewrite\"}")
+                      (:id "effect-work" :name "title_test_effect" :arguments "{}")))
                  '(:content "Actual answer")))))))
     (ende-tool-register 'title_test_effect "Test effect" '((:type . "object"))
                         (lambda (&rest _) (cl-incf effects)) nil :no-resource
@@ -73,6 +83,7 @@
             (should (= (length requests) 3))
             (let* ((ordered (reverse requests))
                    (first (car ordered)) (second (cadr ordered))
+                   (third (caddr ordered))
                    (title-request (car first))
                    (work-request (car second)))
               (should (equal (cdr (car (last title-request)))
@@ -83,9 +94,13 @@
               (should (member "generate_title"
                               (ende-test--tool-definition-names
                                (plist-get (cdr first) :tool-definitions))))
-              (should-not (member "generate_title"
-                                  (ende-test--tool-definition-names
-                                   (plist-get (cdr second) :tool-definitions)))))
+              (should (member "generate_title"
+                              (ende-test--tool-definition-names
+                               (plist-get (cdr second) :tool-definitions))))
+              (should (equal (plist-get (cdr first) :tool-definitions)
+                             (plist-get (cdr second) :tool-definitions)))
+              (should (equal (plist-get (cdr first) :tool-definitions)
+                             (plist-get (cdr third) :tool-definitions))))
             (let* ((work-messages (car (caddr (reverse requests))))
                    (assistant
                     (cl-find-if
@@ -95,33 +110,24 @@
                      work-messages))
                    (tool-result
                     (cl-find-if (lambda (message)
-                                  (equal (plist-get message :role) "tool"))
+                                  (and (equal (plist-get message :role) "tool")
+                                       (equal (plist-get message :tool-call-id)
+                                              "title-work")))
                                 work-messages)))
-              (should (equal (ende-tools-call-value
-                              (car (plist-get assistant :tool-calls)) :name)
-                             "title_test_effect"))
-              (should tool-result))
-            (should
-             (= 1 (ende-tool-store--call-with-database
-                   nil
-                   (lambda (database)
-                     (caar (sqlite-select
-                            database
-                            "SELECT COUNT(*) FROM tool_payloads WHERE kind = 'request'")))
-                   ende-test--tool-store-file)))
-            (should
-             (= 1 (ende-tool-store--call-with-database
-                   nil
-                   (lambda (database)
-                     (caar (sqlite-select
-                            database
-                            "SELECT COUNT(*) FROM tool_payloads WHERE kind = 'result'")))
-                   ende-test--tool-store-file)))
+              (should (equal (mapcar (lambda (call)
+                                       (ende-tools-call-value call :name))
+                                     (plist-get assistant :tool-calls))
+                             '("generate_title" "title_test_effect")))
+              (should tool-result)
+              (let ((rejection (ende-protocol-json-read-string
+                                (plist-get tool-result :content))))
+                (should (eq (ende-protocol-json-get "ok" rejection) :false))
+                (should (equal (ende-protocol-json-get "error" rejection)
+                               "title generation was not requested"))))
             (should (string-match-p "Actual answer" (buffer-string)))
             (should-not (string-match-p "Title-only prose" (buffer-string)))
             (should-not (string-match-p "Ende temporary title phase"
                                         (buffer-string)))
-            (should-not (string-match-p "generate_title" (buffer-string)))
             (should-not (string-match-p "spawn_agent" (buffer-string)))
             (should (string-match-p "\\*\\* Inspect queue lifecycle"
                                     (buffer-string)))
@@ -129,7 +135,7 @@
             (ende-test--chat-goto "** Next")
             (let ((context (ende-test--chat-context-text
                             (ende-chat-context-at-point))))
-              (should-not (string-match-p "generate_title" context))
+              (should (string-match-p "title generation was not requested" context))
               (should-not (string-match-p "Title-only prose" context))
               (should-not (string-match-p "Ende temporary title phase" context))
               (should-not (string-match-p "spawn_agent" context))

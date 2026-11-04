@@ -604,6 +604,12 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
       (push (pop remaining) spawns))
     (cons (nreverse spawns) remaining)))
 
+(defun ende-agent--tool-phase-error (name phase)
+  "Return the rejection message for tool NAME during PHASE."
+  (if (equal name "generate_title")
+      "title generation was not requested"
+    (format "Tool disabled during %s phase" phase)))
+
 (defun ende-agent--run-tools (job calls configuration callbacks done)
   "Run CALLS sequentially for JOB and return ordered results through DONE."
   (let ((remaining (copy-sequence calls))
@@ -691,7 +697,7 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                        (funcall complete
                                 (ende-tools--json-encode-tool-result
                                  (list :ok nil :tool name
-                                       :error (format "Tool disabled during %s phase" phase))))))
+                                       :error (ende-agent--tool-phase-error name phase))))))
                    (setq synchronous nil)
                    (when completed
                      (next))))))))

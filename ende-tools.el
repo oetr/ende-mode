@@ -201,27 +201,20 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
 
 (defun ende-tool-definitions (&optional access-config phase)
   "Return registered tool definitions, resolving schemas with ACCESS-CONFIG.
-When PHASE is supplied, omit `generate_title' except during the title phase."
-  (let ((definitions
-         (mapcar
-          (lambda (tool)
-            (list (cons :type "function")
-                  (cons :function
-                        (list (cons :name (symbol-name (ende-tool-name tool)))
-                              (cons :description (ende-tool-description tool))
-                              (cons :parameters
-                                    (let ((parameters (ende-tool-parameters tool)))
-                                      (if (functionp parameters)
-                                          (funcall parameters access-config)
-                                        parameters)))))))
-          (mapcar #'cdr ende-tools--registry))))
-    (if (and phase (not (eq phase 'title)))
-        (cl-remove-if
-         (lambda (definition)
-           (equal (alist-get :name (alist-get :function definition))
-                  "generate_title"))
-         definitions)
-      definitions)))
+PHASE does not affect tool visibility."
+  (ignore phase)
+  (mapcar
+   (lambda (tool)
+     (list (cons :type "function")
+           (cons :function
+                 (list (cons :name (symbol-name (ende-tool-name tool)))
+                       (cons :description (ende-tool-description tool))
+                       (cons :parameters
+                             (let ((parameters (ende-tool-parameters tool)))
+                               (if (functionp parameters)
+                                   (funcall parameters access-config)
+                                 parameters)))))))
+   (mapcar #'cdr ende-tools--registry)))
 
 (defun ende-tool--call-root (tool root access-config)
   (let* ((tool-name (ende-tool-name tool))
@@ -229,8 +222,10 @@ When PHASE is supplied, omit `generate_title' except during the title phase."
          (assigned (cdr (assq tool-name
                               (plist-get access-config :tool-resources)))))
     (unless (ende-tools-phase-allows-p tool-name ende-tools--request-phase)
-      (error "tool is disabled during the %s phase: %s"
-             ende-tools--request-phase tool-name))
+      (if (eq tool-name 'generate_title)
+          (error "title generation was not requested")
+        (error "tool is disabled during the %s phase: %s"
+               ende-tools--request-phase tool-name)))
     (when (and (ende-tool-internal-only tool)
                (not (functionp ende-tools--generate-title-function)))
       (error "internal tool requires a host-created title phase"))
