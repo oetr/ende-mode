@@ -30,6 +30,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'org-colview)
 (require 'ende-work-buffer)
 (require 'ende-queue-ui)
 
@@ -118,7 +119,13 @@
                                  headlines)
                          (cl-remove 'response (ende-transcript-entries ende-work-buffer--transcript)
                                     :key #'ende-transcript-entry-kind))))
-              (should (string-prefix-p "#+begin_example\nTask text" (buffer-string)))
+              (goto-char (point-min))
+              (org-columns)
+              (should (equal (mapcar #'car org-columns-current-fmt-compiled)
+                             '("ITEM" "ENDE_MODEL" "ENDE_REASONING_EFFORT"
+                               "ENDE_INPUT_TOKENS" "ENDE_CACHED_TOKENS" "ENDE_OUTPUT_TOKENS")))
+              (org-columns-quit)
+              (should (string-match-p (regexp-quote "#+begin_example\nTask text") (buffer-string)))
               (should (= 1 (how-many "^\\* --> inspect:" (point-min) (point-max))))
               (should (= 1 (how-many "^\\* inspect:" (point-min) (point-max)))))))
       (dolist (buffer buffers) (when (buffer-live-p buffer) (kill-buffer buffer))))))

@@ -436,6 +436,11 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               (add-hook 'change-major-mode-hook #'ende-work-buffer--detach nil t)
               (ende-work-buffer--update
                (lambda ()
+                 (ende-work-buffer--splice
+                  (point-min) (point-min)
+                  (concat "#+COLUMNS: %45ITEM(Heading) %15ENDE_MODEL(Model)"
+                          " %7ENDE_REASONING_EFFORT(Effort) %10ENDE_INPUT_TOKENS(I tok)"
+                          " %6ENDE_CACHED_TOKENS(Cached) %10ENDE_OUTPUT_TOKENS(O tok)\n\n"))
                  (ende-work-buffer--put 'task nil nil
                                        (ende-work-buffer--example (ende-transcript-task transcript)))
                  (dolist (entry (ende-transcript-entries transcript))
