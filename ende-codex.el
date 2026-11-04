@@ -1726,7 +1726,10 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
   (ende-request-prepare
    (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
    messages (ende-codex--session-profile session)
-   (list "openai-responses" (ende-codex--validated-generation-url (ende-codex--session-profile session)))
+   (list "openai-responses" (ende-codex--validated-generation-url (ende-codex--session-profile session))
+         (when (and ende-debugging-enabled ende-debug--session-directory
+                    (ende-codex-auth--text-p (plist-get auth :registration-id)))
+           (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth)))))
    (apply-partially #'ende-codex--start-prepared session auth)))
 
 (defun ende-codex--auth-ready (session messages auth)

@@ -36,6 +36,16 @@
 (require 'ende-core)
 (require 'ende-content)
 (require 'ende-protocol)
+(require 'ende-credentials)
+
+(defcustom ende-debug-provider-cache-comparisons nil
+  "Request provider cache comparisons while Ende debugging is enabled.
+Use the previous completed response in the same job and connection.
+Subscription-endpoint support is unverified; rejection follows the normal
+provider-error path, without probes or retries.  This does not continue a
+server-managed conversation."
+  :type 'boolean
+  :group 'ende)
 
 (defvar ende-debugging-enabled nil
   "Non-nil when new streaming LLM requests should be recorded.")
@@ -45,6 +55,9 @@
 
 (defvar ende-debug--sequence 0
   "Next request sequence number in the active debugging session.")
+
+(defvar ende-debug--baselines (make-hash-table :test #'equal)
+  "Completed provider responses keyed by job and connection in this capture.")
 
 (defun ende-debug--timestamp (&optional time)
   "Format TIME as a local ISO-like timestamp, or the current time."
@@ -76,6 +89,7 @@
   (interactive)
   (setq ende-debug--session-directory (ende-debug--new-session-directory)
         ende-debug--sequence 0
+        ende-debug--baselines (make-hash-table :test #'equal)
         ende-debugging-enabled t)
   (message "ende debugging enabled; recordings: %s"
            ende-debug--session-directory))
@@ -117,9 +131,91 @@
 (defun ende-debug--request-field (name body)
   "Return the member named NAME from encoded request BODY.
 Adapter fields use keywords; user parameters use string keys."
-  (cl-find name body :key (lambda (entry)
-                           (ende-controls--json-key-name (car entry)))
-           :test #'equal))
+  (if (hash-table-p body)
+      (when (ende-protocol-json-has-key-p name body) (cons name (gethash name body)))
+    (cl-find name body :key (lambda (entry)
+                             (ende-controls--json-key-name (car entry)))
+             :test #'equal)))
+
+(defun ende-debug--connection-fingerprint (profile transport endpoint account)
+  "Identify PROFILE's connection for TRANSPORT and ENDPOINT privately.
+ACCOUNT is resolved OAuth registration continuity, supplied by the transport."
+  (let* ((method (plist-get profile :auth-method))
+         (credential
+          (pcase method
+            ('none 'anonymous)
+            ('auth-source (gethash (plist-get profile :credential-binding)
+                                   ende-credentials--bindings))
+            ((or 'codex-oauth 'chatgpt-plan-oauth)
+             (and (ende-debug--usable-id-p (plist-get profile :codex-session-id)) account))))
+         (provider (or (plist-get profile :name) (plist-get profile :service))))
+    (when (and credential provider (stringp endpoint) (not (string-empty-p endpoint)))
+      (secure-hash
+       'sha256
+       (prin1-to-string
+        (list transport endpoint credential
+              (mapcar (lambda (key) (plist-get profile key))
+                      '(:name :service :api :auth-method :account :codex-session-id
+                        :auth-source-host :auth-source-port :auth-source-user
+                        :auth-scheme :request-headers))))))))
+
+(defun ende-debug-prepare-request (profile transport endpoint account eligible)
+  "Reserve immutable capture data for PROFILE in the main process.
+TRANSPORT, ENDPOINT, and ACCOUNT scope a baseline when ELIGIBLE is non-nil."
+  (let* ((job (plist-get profile :job-id))
+         (connection (and eligible
+                          (condition-case nil
+                              (ende-debug--connection-fingerprint profile transport endpoint account)
+                            ((error quit) nil))))
+         (key (and connection
+                   (or (integerp job) (and (stringp job) (not (string-empty-p job))))
+                   (list job connection))))
+    (list :directory ende-debug--session-directory :sequence (cl-incf ende-debug--sequence)
+          :baseline-key key :connection connection
+          :baseline (and key (copy-sequence (gethash key ende-debug--baselines)))
+          :compare ende-debug-provider-cache-comparisons)))
+
+(defun ende-debug-prepare-body (body preparation)
+  "Return detached (BODY . PREPARATION) with the selected comparison applied.
+An explicitly supplied comparison member, including null, is never replaced."
+  (let* ((preparation (copy-sequence preparation))
+         (entry (ende-debug--request-field "prompt_cache_options" body))
+         (options (cdr entry))
+         (explicit (and (or (hash-table-p options) (listp options))
+                        (ende-debug--request-field "comparison_response_id" options)))
+         (baseline (plist-get preparation :baseline))
+         (identifier (plist-get baseline :response-id)))
+    (cond
+     (explicit
+      (setq preparation (plist-put preparation :comparison-source "explicit"))
+      (when (equal (cdr explicit) identifier)
+        (setq preparation (plist-put preparation :comparison-sequence (plist-get baseline :sequence)))))
+     ((and identifier (plist-get preparation :compare)
+           (or (not entry) (hash-table-p options) (consp options)))
+      (setq options (if (hash-table-p options) (copy-hash-table options)
+                      (if entry (copy-tree options) (make-hash-table :test #'equal))))
+      (if (hash-table-p options) (puthash "comparison_response_id" identifier options)
+        (setq options (append options (list (cons :comparison_response_id identifier)))))
+      (setq body (append (cl-remove "prompt_cache_options" body
+                                   :key (lambda (item) (ende-controls--json-key-name (car item)))
+                                   :test #'equal)
+                         (list (cons :prompt_cache_options options)))
+            preparation (plist-put preparation :comparison-source "automatic")
+            preparation (plist-put preparation :comparison-sequence (plist-get baseline :sequence)))))
+    (cons body preparation)))
+
+(defun ende-debug--advance-baseline (record outcome)
+  "Advance RECORD's job baseline only after a successful completed OUTCOME."
+  (let* ((key (plist-get record :baseline-key))
+         (metadata (plist-get record :metadata))
+         (identifier (alist-get "provider_response_id" metadata nil nil #'equal))
+         (sequence (alist-get "sequence" metadata nil nil #'equal))
+         (previous (and key (gethash key ende-debug--baselines))))
+    (when (and (eq outcome 'success) key (plist-get record :response-completed)
+               (equal (plist-get record :directory) ende-debug--session-directory)
+               (ende-debug--usable-id-p identifier)
+               (> sequence (or (plist-get previous :sequence) 0)))
+      (puthash key (list :response-id identifier :sequence sequence) ende-debug--baselines))))
 
 (defun ende-debug--write-file (path contents &optional literal)
   "Write CONTENTS to PATH with owner-only permissions.
@@ -260,7 +356,7 @@ Never capture raw output or opaque reasoning.  Completion writes this record."
   "Write RECORD's terminal OUTCOME, normalized USAGE, and HTTP-STATUS.
 VALUE is the successful result or structured transport error.  Recording
 errors are reported but never propagated into transport completion."
-  (when record
+  (when (and record (not (plist-get record :finished)))
     (condition-case failure
         (let* ((counts (ende--usage-token-counts usage))
                (error-kind (and (ende-error-p value)
@@ -303,26 +399,32 @@ errors are reported but never propagated into transport completion."
                            (equal (car entry) "completion"))
                          metadata)
                         (list (cons "completion" completion))))
+          (setf (plist-get record :finished) t)
+          (ende-debug--advance-baseline record outcome)
           (ende-debug--write-meta record))
        ((error quit)
         (message "ende debugging: could not record completion: %s"
                 (error-message-string failure))))))
 
 (defun ende-debug-record-request
-    (serialized-body request-body messages profile transport endpoint)
+    (serialized-body request-body messages profile transport endpoint &optional preparation)
   "Record redacted SERIALIZED-BODY and internal MESSAGES for a request.
 REQUEST-BODY is the encoded request object used to describe its settings.
-PROFILE, TRANSPORT, and ENDPOINT describe the transport.  Return an opaque
+PROFILE, TRANSPORT, and ENDPOINT describe the transport; PREPARATION was
+resolved in the main process before encoding.  Return an opaque
 record used to associate later completion metadata, or nil when debugging is
 disabled."
   (when (and ende-debugging-enabled ende-debug--session-directory)
     (condition-case failure
-        (let* ((sequence (cl-incf ende-debug--sequence))
+        (let* ((sequence (or (plist-get preparation :sequence) (cl-incf ende-debug--sequence)))
                (stem (format "%04d" sequence))
-               (directory ende-debug--session-directory)
+               (directory (or (plist-get preparation :directory) ende-debug--session-directory))
                (started (float-time))
                (session (plist-get profile :codex-session-id))
                (fingerprints (ende-debug--input-fingerprints serialized-body))
+               (comparison (ende-debug--request-field
+                            "comparison_response_id"
+                            (cdr (ende-debug--request-field "prompt_cache_options" request-body))))
                (reasoning
                 (cl-loop for (key . value) in request-body
                          when (memq key '(:reasoning :reasoning_effort))
@@ -351,6 +453,11 @@ disabled."
                                                 (cl-count "reasoning" (cdr (assoc "items" fingerprints))
                                                           :key (lambda (item) (cdr (assoc "type" item)))
                                                           :test #'equal)))
+                  ("connection_fingerprint" . ,(plist-get preparation :connection))
+                  ("comparison_response_id" . ,(when (stringp (cdr comparison)) (cdr comparison)))
+                  ("comparison_source" . ,(or (plist-get preparation :comparison-source)
+                                               (and comparison "explicit")))
+                  ("comparison_request_sequence" . ,(plist-get preparation :comparison-sequence))
                   ("cache_key_supplied" . ,(if (ende-debug--request-field "prompt_cache_key" request-body)
                                                t json-false))
                   ("session_fingerprint" . ,(when (and (stringp session)
@@ -360,6 +467,8 @@ disabled."
                                            (ende-debug--request-settings request-body)))
                   ("endpoint" . ,(ende-debug--safe-endpoint endpoint))))
                (record (list :directory directory :stem stem
+                             :baseline-key (plist-get preparation :baseline-key)
+                             :response-completed nil :finished nil
                              :started started :metadata metadata)))
           (ende-debug--write-file
            (expand-file-name (concat stem "-request.json") directory)
@@ -684,6 +793,8 @@ Fall back to saved values when fingerprints cannot establish equality."
       '(("provider_response_id" . "Provider response ID")
         ("http_request_id" . "HTTP x-request-id")
         ("comparison_response_id" . "Comparison response ID sent")
+        ("comparison_source" . "Comparison source")
+        ("comparison_request_sequence" . "Comparison baseline local sequence")
         ("response_model" . "Returned model")
         ("response_service_tier" . "Returned service tier")
         ("response_reasoning" . "Effective reasoning")) "")

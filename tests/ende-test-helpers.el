@@ -309,6 +309,8 @@ non-nil, is signalled from the event callback."
                     :require-sse t)))
          (auth (list :auth-method (plist-get profile :auth-method)
                      :account (plist-get profile :account)
+                     :host-id "fixture-host" :registration-id "fixture-registration"
+                     :subject "fixture-subject"
                      :client-id (if (eq (plist-get profile :auth-method) 'codex-oauth)
                                     ende-codex-native-client-id "issued-test-client")
                      :chatgpt-account-id (and (eq (plist-get profile :auth-method) 'codex-oauth) "verified-workspace")

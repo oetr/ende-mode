@@ -37,46 +37,57 @@
 (require 'ende-debug)
 (require 'ende-worker)
 
-(defun ende-request--write (library builder messages profile file debug)
+(defun ende-request--encode (builder messages profile debug preparation)
+  "Build MESSAGES for PROFILE with immutable debug PREPARATION.
+Return the outgoing bytes, encoded body, and optional capture record."
+  (let* ((body (funcall builder messages profile))
+         (prepared (when debug
+                     (condition-case nil (ende-debug-prepare-body body preparation)
+                       ((error quit) (cons body preparation)))))
+         (body (if prepared (car prepared) body))
+         (data (encode-coding-string (json-encode body) 'utf-8))
+         (record (when debug
+                   (ende-debug-record-request data body messages profile
+                                              (car debug) (cadr debug) (cdr prepared)))))
+    (list data body record)))
+
+(defun ende-request--write (library builder messages profile file debug preparation)
   "Build and write a request to FILE; return payload-free diagnostics."
   (require library)
-  (let* ((body (funcall builder messages profile))
-         (data (encode-coding-string (json-encode body) 'utf-8))
-         (coding-system-for-write 'no-conversion))
+  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation))
+               (coding-system-for-write 'no-conversion))
     (write-region data nil file nil 'silent)
     (list :body (list (assq :tools body))
-          :debug-record (when debug
-                          (apply #'ende-debug-record-request data body messages profile debug)))))
+          :debug-record record)))
 
 (defun ende-request-prepare (lifecycle library builder messages profile debug callback)
   "Prepare MESSAGES for PROFILE and call CALLBACK with data, body and record.
 Image-bearing requests use a worker and a file owned by LIFECYCLE.
-DEBUG contains transport, endpoint and optional session ID for recording."
+DEBUG contains transport, endpoint, and optional OAuth account continuity."
   (let* ((debug (when (and ende-debugging-enabled ende-debug--session-directory) debug))
+         (preparation (when debug
+                        (ende-debug-prepare-request
+                         profile (car debug) (cadr debug) (nth 2 debug)
+                         (memq builder '(ende-responses--request-body ende-codex--request-body)))))
          (images (cl-some (lambda (message)
                             (let ((content (ende-content-body message)))
                               (and (listp content)
                                    (cl-some (lambda (part) (eq (plist-get part :type) :image)) content))))
                           messages)))
     (if (not images)
-        (let* ((body (funcall builder messages profile))
-               (data (encode-coding-string (json-encode body) 'utf-8))
-               (record (when debug
-                         (apply #'ende-debug-record-request data body messages profile debug))))
-          (funcall callback data body record))
+        (apply callback (ende-request--encode builder messages profile debug preparation))
       (let* ((file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
              (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
                                '(ende-debugging-enabled
                                  ende-debug--session-directory ende-debug--sequence)))
              (failed (ende-transport-session-callback-error-handler lifecycle)))
-        (when debug (cl-incf ende-debug--sequence))
         (ende-transport-session-add-canceller
          lifecycle (lambda () (ende-ignore-errors #'delete-file file)))
         (ende-transport-session-add-canceller
          lifecycle
          (ende-worker-run
           'ende-request #'ende-request--write
-          (list library builder messages profile file debug) bindings
+          (list library builder messages profile file debug preparation) bindings
           (lambda (result error)
             (unless (ende-transport-session-terminal lifecycle)
               (condition-case failure
