@@ -82,14 +82,8 @@
                    "completion" (ende-debug-test--read-meta directory 1)))
                  (request-body (plist-get recorded :request-body)))
             (should (equal (plist-get unrecorded :request-body) request-body))
-            (if codex
-                (let* ((json-false :false)
-                       (safe (ende-content-redact
-                              (ende-protocol-json-read-string request-body))))
-                  (should (equal (ende-debug-test--read-bytes recording-file)
-                                 (encode-coding-string (json-encode safe) 'utf-8))))
-              (should (equal (ende-debug-test--read-bytes recording-file)
-                             request-body)))
+            (should (equal (ende-debug-test--read-bytes recording-file)
+                           request-body))
             (should (= (logand (file-modes recording-file) #o777) #o600))
             (should (= (logand
                         (file-modes (expand-file-name "0001-meta.json"
@@ -336,31 +330,88 @@
          (ende-debug--session-directory directory)
          (ende-debug--sequence 0)
          (item (ende-protocol-json-read-string
-                "{\"type\":\"reasoning\",\"encrypted_content\":\"secret-replay\"}"))
+                "{\"type\":\"reasoning\",\"encrypted_content\":\"secret-replay+/=encrypted_content\"}"))
          (body `((:model . "requested") (:input . [,item])
+                 (:include . ["reasoning.encrypted_content"])
                  (:prompt_cache_key . "secret-cache-identity")
                  (:prompt_cache_options . ,(ende-protocol-json-read-string
-                                           "{\"mode\":\"implicit\"}")))))
+                                           "{\"mode\":\"implicit\"}"))))
+         (messages (list (list :protocol-items (list 'openai-responses item))))
+         (original-body (json-encode body))
+         (original-messages (prin1-to-string messages)))
     (unwind-protect
         (let ((record (ende-debug-record-request
-                       (json-encode body) body
-                       (list (list :protocol-items (list 'openai-responses item)))
+                       original-body body messages
                        nil "test" "https://example.test")))
           (ende-debug-record-response
            record (ende-protocol-json-read-string
-                   "{\"model\":\"actual\",\"service_tier\":\"default\",\"id\":\"resp-1\",\"output\":[{\"encrypted_content\":\"secret-replay\"}]}"))
+                   "{\"model\":\"actual\",\"service_tier\":\"default\",\"id\":\"resp-1\",\"output\":[{\"encrypted_content\":\"response-only-replay\"}]}"))
           (ende-debug-record-completion
            record 'success (ende-protocol-json-read-string
                             "{\"input_tokens\":4096,\"input_tokens_details\":{\"cached_tokens\":2048},\"cache_creation_input_tokens\":0}") 200 nil)
           (let ((meta (ende-debug-test--read-meta directory 1)))
             (should (eq (gethash "cache_key_supplied" meta) t))
             (should (equal (gethash "response_model" meta) "actual"))
-            (should (equal (gethash "response_service_tier" meta) "default")))
+            (should (equal (gethash "response_service_tier" meta) "default"))
+            (should (equal (gethash "include" (gethash "request_settings" meta))
+                           ["reasoning.encrypted_content"])))
+          (let* ((request (ende-protocol-json-read-string
+                           (ende-debug-test--read-bytes
+                            (expand-file-name "0001-request.json" directory))))
+                 (saved-messages
+                  (with-temp-buffer
+                    (insert-file-contents
+                     (expand-file-name "0001-messages.el" directory))
+                    (read (current-buffer)))))
+            (should (equal (gethash "encrypted_content"
+                                    (aref (gethash "input" request) 0))
+                           (gethash "encrypted_content" item)))
+            (should (equal (gethash "include" request)
+                           ["reasoning.encrypted_content"]))
+            (should (equal (gethash "encrypted_content"
+                                    (cadr (plist-get (car saved-messages)
+                                                     :protocol-items)))
+                           (gethash "encrypted_content" item))))
           (dolist (file (directory-files directory t "^[^.].*"))
             (let ((text (ende-debug-test--read-bytes file)))
-              (should-not (string-match-p "secret-replay\\|secret-cache-identity" text))))
-          (should (equal (gethash "encrypted_content" item) "secret-replay")))
+              (should-not (string-match-p "secret-cache-identity\\|response-only-replay" text))))
+          (should (equal (json-encode body) original-body))
+          (should (equal (prin1-to-string messages) original-messages)))
       (delete-directory directory t))))
+
+(ert-deftest ende-debug-reasoning-redaction-is-scoped ()
+  (let* ((ciphertext "opaque-encrypted_content+/=")
+         (object (ende-protocol-json-read-string
+                  (format "{\"encrypted_content\":%s}" (json-encode ciphertext))))
+         (values (list object (list (cons :encrypted_content ciphertext))
+                       (cons 'encrypted_content ciphertext)
+                       (list :encrypted_content ciphertext :other "kept")
+                       (vector object) (json-encode object)
+                       "reasoning.encrypted_content")))
+    (dolist (value values)
+      (let ((original (prin1-to-string value)))
+        (should (equal (prin1-to-string (ende-debug--redact value)) original))
+        (should-not (equal (ende-content-redact value) value))
+        (should-not (string-match-p
+                     "opaque-encrypted_content"
+                     (prin1-to-string (ende-content-redact value))))
+        (should (equal (prin1-to-string value) original))))
+    (let* ((body `((:input . [,object])
+                   (:include . ["reasoning.encrypted_content"])))
+           (bytes (encode-coding-string
+                   (concat "  " (json-encode body) "\n") 'utf-8))
+           (directory (make-temp-file "ende-debug-reasoning-" t))
+           (ende-debugging-enabled t)
+           (ende-debug--session-directory directory)
+           (ende-debug--sequence 0))
+      (unwind-protect
+          (progn
+            (should (ende-debug-record-request
+                     bytes body nil nil "test" "https://example.test"))
+            (should (equal (ende-debug-test--read-bytes
+                            (expand-file-name "0001-request.json" directory))
+                           bytes)))
+        (delete-directory directory t)))))
 
 (ert-deftest ende-debug-weighted-reuse-and-missing-counts ()
   (let* ((directory (make-temp-file "ende-cache-weighted-" t))
@@ -395,11 +446,14 @@
          (ende-debug--session-directory directory)
          (ende-debug--sequence 0)
          (body '((:prompt_cache_key . "secret-cache")
+                 (:authorization . "secret-request-auth")
+                 (:include . ["reasoning.encrypted_content"])
                  (:input . []) (:stream . t)))
          (profile '(:codex-session-id "secret-session"))
          (messages '((:authorization "secret-auth" :access-token "secret-access"
                       :refresh_token "secret-refresh" :session-id "secret-session"
-                      :encrypted_content "secret-reasoning"))))
+                      :id-token "secret-id" :encrypted_content "secret-reasoning")
+                     ("user" . "reasoning.encrypted_content Authorization: Bearer secret-inline"))))
     (unwind-protect
         (progn
           (dotimes (_ 2)
@@ -408,23 +462,38 @@
                          (gethash "session_fingerprint" (ende-debug-test--read-meta directory 2))))
           (should (stringp (gethash "session_fingerprint" (ende-debug-test--read-meta directory 1))))
           (dolist (file (directory-files directory t "^[^.].*"))
-            (should-not (string-match-p "secret-" (ende-debug-test--read-bytes file)))))
+            (let ((text (ende-debug-test--read-bytes file)))
+              (dolist (secret '("secret-cache" "secret-session" "secret-request-auth"
+                                "secret-auth" "secret-access" "secret-refresh"
+                                "secret-id" "secret-inline"))
+                (should-not (string-match-p (regexp-quote secret) text)))))
+          (should (string-match-p
+                   "secret-reasoning"
+                   (ende-debug-test--read-bytes
+                    (expand-file-name "0001-messages.el" directory)))))
       (delete-directory directory t))
-    (dolist (text '("Authorization: Bearer secret-auth" "session-id: secret-session"
-                    "access_token=secret-access" "refresh_token: secret-refresh"
-                    "prompt_cache_key: secret-cache" "encrypted_content: secret-reasoning"))
-      (let* ((event (make-hash-table :test #'equal))
+    (dolist (entry '(("Authorization: Bearer secret-auth" . "secret-auth")
+                     ("session-id: secret-session" . "secret-session")
+                     ("access_token=secret-access" . "secret-access")
+                     ("refresh_token: secret-refresh" . "secret-refresh")
+                     ("id_token=secret-id" . "secret-id")
+                     ("prompt_cache_key: secret-cache" . "secret-cache")
+                     ("encrypted_content: secret-reasoning" . "secret-reasoning")))
+      (let* ((text (car entry))
+             (secret (regexp-quote (cdr entry)))
+             (event (make-hash-table :test #'equal))
              (error (make-hash-table :test #'equal))
              (session (ende-codex--make-session)) received)
         (puthash "message" text error)
         (puthash "type" "error" event)
         (puthash "error" error event)
-        (should-not (string-match-p "secret-" (ende-transport-safe-error-text text)))
+        (should-not (string-match-p secret (ende-content-redact text)))
+        (should-not (string-match-p secret (ende-transport-safe-error-text text)))
         (setq session (ende-codex--make-session
                        :callbacks (list :on-error (lambda (value) (setq received value)))))
         (ende-codex--handle-event session event)
         (should received)
-        (should-not (string-match-p "secret-" (prin1-to-string received)))))))
+        (should-not (string-match-p secret (prin1-to-string received)))))))
 
 (provide 'ende-debug-test)
 

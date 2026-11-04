@@ -122,6 +122,11 @@ When LITERAL is non-nil, preserve CONTENTS as exact bytes."
      (expand-file-name (concat stem "-meta.json") directory)
      (concat (json-encode meta) "\n"))))
 
+(defun ende-debug--redact (value)
+  "Redact VALUE for request debugging, retaining encrypted reasoning."
+  (let ((ende-content--debug-preserve-encrypted-content t))
+    (ende-content-redact value)))
+
 (defun ende-debug-record-response (record response)
   "Retain allowlisted provider RESPONSE metadata in debug RECORD.
 Never capture raw output or opaque reasoning.  Completion writes this record."
@@ -219,23 +224,23 @@ disabled."
                   ("session_fingerprint" . ,(when (plist-get profile :codex-session-id)
                                               (secure-hash 'sha256
                                                            (plist-get profile :codex-session-id))))
-                  ("request_settings" . ,(ende-content-redact
+                  ("request_settings" . ,(ende-debug--redact
                                            (ende-debug--request-settings request-body)))
                   ("endpoint" . ,(ende-debug--safe-endpoint endpoint))))
                (record (list :directory directory :stem stem
                              :started started :metadata metadata)))
           (ende-debug--write-file
            (expand-file-name (concat stem "-request.json") directory)
-           (let ((safe (ende-content-redact request-body)))
-             (if (equal safe request-body) serialized-body
-               (json-encode safe))) t)
+           (let ((safe (json-encode (ende-debug--redact request-body))))
+             (if (equal safe (json-encode request-body)) serialized-body
+               safe)) t)
           (ende-debug--write-file
            (expand-file-name (concat stem "-messages.el") directory)
            (let ((print-circle t)
                  (print-level nil)
                  (print-length nil))
-             (concat (prin1-to-string (ende-content-redact messages)) "\n")))
-          (setf (plist-get record :metadata) (ende-content-redact metadata))
+             (concat (prin1-to-string (ende-debug--redact messages)) "\n")))
+          (setf (plist-get record :metadata) (ende-debug--redact metadata))
           (ende-debug--write-meta record)
           record)
       ((error quit)

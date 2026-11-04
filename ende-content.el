@@ -104,12 +104,17 @@ all their assistant content and before the corresponding results."
   (list (cons :type "image") (cons :sha256 (secure-hash 'sha256 bytes))
         (cons :media_type media) (cons :bytes (length bytes))))
 
+(defvar ende-content--debug-preserve-encrypted-content nil
+  "Non-nil only while debug captures retain encrypted reasoning.")
+
 (defun ende-content--private-key-p (key)
   "Return non-nil when KEY names private transport or replay data."
   (and (or (stringp key) (symbolp key))
        (let ((name (downcase (if (stringp key) key (symbol-name key)))))
          (string-match-p
-          "encrypted_content\\|prompt_cache_key\\|session[-_]id\\|authorization\\|access[-_]token\\|refresh[-_]token\\|id[-_]token"
+          (concat (unless ende-content--debug-preserve-encrypted-content
+                    "encrypted_content\\|")
+                  "prompt_cache_key\\|session[-_]id\\|authorization\\|access[-_]token\\|refresh[-_]token\\|id[-_]token")
           name))))
 
 (defun ende-content-redact (value)
@@ -119,7 +124,9 @@ This is for diagnostics only; never use the result for protocol replay."
    ((and (stringp value)
          (let ((case-fold-search t))
            (string-match-p
-            "encrypted_content\\|prompt_cache_key\\|session[-_]id[\"[:space:]]*[:=]\\|authorization[\"[:space:]]*[:=]\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token[\"[:space:]]*[:=]"
+            (concat (unless ende-content--debug-preserve-encrypted-content
+                      "encrypted_content\\|")
+                    "prompt_cache_key\\|session[-_]id[\"[:space:]]*[:=]\\|authorization[\"[:space:]]*[:=]\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token[\"[:space:]]*[:=]")
             value)))
     "[private provider value redacted]")
    ((and (stringp value) (string-prefix-p "data:image/" value))
