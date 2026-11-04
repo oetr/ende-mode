@@ -1854,7 +1854,8 @@ The returned plist includes `:content' and the reversible
 metadata required for protocol serialization.  Actual Org headlines are shifted
 uniformly beneath the host-created section wrapper;
 stars in any `#+begin_...` block are left untouched.  Unterminated blocks
-are closed at the end of CONTENT, never against text elsewhere in the chat."
+are closed at the end of CONTENT, never against text elsewhere in the chat.
+The :edits describe normalization in the repaired block content's coordinates."
   (let* ((blocks (or blocks (ende-org--blocks content t)))
          (content (plist-get blocks :content))
          (edits nil))
@@ -1883,6 +1884,7 @@ are closed at the end of CONTENT, never against text elsewhere in the chat."
         (list :headline-shift (and minimum (- target minimum))
               :synthetic-end (plist-get blocks :synthetic-end)
               :synthetic-newline (plist-get blocks :synthetic-newline)
+              :edits edits
               :content
               (let ((result (ende-org--apply-edits content edits)))
                 (if preserve-trailing result (ende-trim-trailing result))))))))
@@ -3298,18 +3300,20 @@ Keep it while another queued compaction still refers to its durable identity."
              (level (+ (plist-get instruction :response-level) (if final 0 1)))
              (prepared (or prepared (ende-chat--prepare-response job result level final)))
              (items (ende-transcript-items transcript result calls))
-             (texts (cl-remove-if-not
-                     (lambda (item) (eq (ende-transcript-entry-kind item) 'text)) items))
+             (fragments (or (plist-get prepared :fragments)
+                            (list (plist-get prepared :normalized))))
              (thinking (plist-get result :thinking)))
+        (when (and (not (cl-find 'text items :key #'ende-transcript-entry-kind))
+                   (not (string-blank-p
+                         (plist-get (plist-get prepared :normalized) :content))))
+          (setq items (append items (list (ende-transcript-new-entry
+                                          transcript 'text "" nil 'complete)))))
         (dolist (item items)
           (pcase (ende-transcript-entry-kind item)
             ('text
              (setf (ende-transcript-entry-data item)
                    (plist-put (ende-transcript-entry-data item) :normalized
-                              (if (= (length texts) 1)
-                                  (plist-get prepared :normalized)
-                                (ende-chat--normalize-response
-                                 (ende-transcript-entry-content item) level t)))))
+                              (pop fragments))))
             ('opaque
              (setf (ende-transcript-entry-data item)
                    (ende-chat--prepare-opaque-event
@@ -3409,6 +3413,65 @@ Keep it while another queued compaction still refers to its durable identity."
         (concat (when work (ende-chat--work-text level question-id request-id))
                 (apply #'concat (nreverse work)) reasoning reply)))))
 
+(defun ende-chat--response-map-positions (positions edits &optional reverse)
+  "Map source POSITIONS through EDITS, or backwards when REVERSE is non-nil.
+A boundary inside a replacement follows that replacement, keeping an artifact
+that spans text items in the item where its reference began."
+  (let ((offset 0) changes)
+    (dolist (edit (sort (copy-sequence edits)
+                        (lambda (left right) (< (car left) (car right)))))
+      (pcase-let ((`(,begin ,end ,replacement) edit))
+        (let ((size (length replacement)))
+          (push (if reverse
+                    (list (+ begin offset) (+ begin offset size) (- end begin))
+                  (list begin end size)) changes)
+          (cl-incf offset (- size (- end begin))))))
+    (setq changes (nreverse changes))
+    (mapcar
+     (lambda (position)
+       (let ((offset 0))
+         (catch 'mapped
+           (dolist (change changes)
+             (pcase-let ((`(,begin ,end ,size) change))
+               (cond
+                ((<= position begin) (throw 'mapped (+ position offset)))
+                ((< position end) (throw 'mapped (+ begin offset size)))
+                (t (cl-incf offset (- size (- end begin)))))))
+           (+ position offset))))
+     positions)))
+
+(defun ende-chat--prepare-response-fragments
+    (source boundaries block-edits normalized resolved appendages level final)
+  "Prepare SOURCE fragments at BOUNDARIES using already RESOLVED artifacts.
+BLOCK-EDITS and NORMALIZED map the whole preparation back to SOURCE.  Retain
+APPENDAGES on the last fragment; FINAL puts only that fragment at LEVEL."
+  (let* ((resolved-edits (plist-get resolved :edits))
+         (positions (cl-mapcan (lambda (edit) (list (car edit) (cadr edit))) resolved-edits))
+         (positions (ende-chat--response-map-positions
+                     (ende-chat--response-map-positions
+                      positions (plist-get normalized :edits) t)
+                     block-edits t))
+         (edits (mapcar (lambda (edit)
+                         (list (pop positions) (pop positions) (nth 2 edit)))
+                        resolved-edits))
+         (boundaries (ende-chat--response-map-positions boundaries edits))
+         (content (concat (ende-org--apply-edits source edits)
+                          ;; Host appendages must stay outside a trailing raw block.
+                          (when (and appendages (plist-get normalized :synthetic-end))
+                            (concat (when (plist-get normalized :synthetic-newline) "\n")
+                                    "#+end_" (plist-get normalized :synthetic-end) "\n"))
+                          (apply #'concat appendages)))
+         (ends (append boundaries (list (1+ (length content)))))
+         (begin 1) fragments)
+    (while ends
+      (let ((end (pop ends)))
+        (push (ende-chat--normalize-response
+               (substring content (1- begin) (1- end))
+               (+ level (if (and final ends) 1 0)) t)
+              fragments)
+        (setq begin end)))
+    (nreverse fragments)))
+
 (defun ende-chat--prepare-response (job result level &optional final)
   "Prepare JOB's RESULT as normalized Org and ordered context parts at LEVEL.
 FINAL includes retained tool images and trims compaction output."
@@ -3421,7 +3484,17 @@ FINAL includes retained tool images and trims compaction output."
             (org-file (and (buffer-live-p buffer) (buffer-local-value 'buffer-file-name buffer)))
             (output (or (and (listp result) (plist-get result :output-parts))
                         (list (list :type :text :text (or (ende--result-content result) "")))))
-            storage chunks run last-blocks)
+            (texts (cl-remove-if-not
+                    (lambda (event) (eq (plist-get event :type) 'text))
+                    (ende-transcript-protocol-events (plist-get result :protocol-items))))
+            (fragmented (> (length texts) 1))
+            (cuts (when fragmented
+                    (let ((offset 0))
+                      (mapcar (lambda (event)
+                                (cl-incf offset (length (plist-get event :text))))
+                              (butlast texts)))))
+            (source-length 0) (text-offset 0)
+            storage chunks run last-blocks source-chunks source-edits boundaries appendages)
        (cl-labels
            ((storage ()
               (or storage
@@ -3437,20 +3510,46 @@ FINAL includes retained tool images and trims compaction output."
                                 (list (ende-artifact-base)
                                       (ende-chat--property document
                                                            (ende-chat--root document question) :id)))))))))
-            (flush ()
+            (flush (&optional before-image)
               (when run
-                (setq last-blocks (ende-org--blocks (apply #'concat (nreverse run)) t))
-                (push (plist-get last-blocks :content) chunks)
-                (setq run nil))))
+                (let* ((raw (apply #'concat (nreverse run)))
+                       (blocks (ende-org--blocks raw t)))
+                  (setq last-blocks blocks)
+                  (push (plist-get blocks :content) chunks)
+                  (when fragmented
+                    ;; Keep a repair before an image, but let each fragment repair
+                    ;; its own trailing block when normalized under its wrapper.
+                    (let* ((suffix (when (and before-image (plist-get blocks :synthetic-end))
+                                     (concat (when (plist-get blocks :synthetic-newline) "\n")
+                                             "#+end_" (plist-get blocks :synthetic-end) "\n")))
+                           (source (concat raw suffix))
+                           (edits (if suffix (butlast (plist-get blocks :edits))
+                                    (plist-get blocks :edits)))
+                           (end (+ text-offset (length raw))))
+                      (while (and cuts (<= (car cuts) end))
+                        (let ((cut (pop cuts)))
+                          (push (+ source-length 1 (- cut text-offset)
+                                   (if (= cut end) (length suffix) 0)) boundaries)))
+                      (dolist (edit edits)
+                        (push (list (+ source-length (car edit))
+                                    (+ source-length (cadr edit)) (nth 2 edit)) source-edits))
+                      (push source source-chunks)
+                      (cl-incf source-length (length source))
+                      (setq text-offset end)))
+                  (setq run nil)))))
          (dolist (part output)
            (pcase (plist-get part :type)
              (:text (push (plist-get part :text) run))
              (:generated-image
-              (flush)
+              (flush t)
               (pcase-let* ((`(,base ,id) (storage))
                            (name (ende-artifact-store base id (plist-get part :bytes)
-                                                      (plist-get part :media-type))))
-                (push (concat "\n" (ende-artifact-render base id name org-file)) chunks))
+                                                      (plist-get part :media-type)))
+                           (block (concat "\n" (ende-artifact-render base id name org-file))))
+                (push block chunks)
+                (when fragmented
+                  (push block source-chunks)
+                  (cl-incf source-length (length block))))
               (setq last-blocks nil))
              (_ (error "Unsupported generated response part"))))
          (flush)
@@ -3475,13 +3574,22 @@ FINAL includes retained tool images and trims compaction output."
                           (name (plist-get artifact :name))
                           (part (ende-artifact-resolve base id name)))
                (unless (member (plist-get part :path) paths)
-                 (let ((block (ende-artifact-render base id name org-file (plist-get artifact :caption))))
-                   (setq persisted (concat persisted "\n" block)
+                 (let* ((block (ende-artifact-render base id name org-file (plist-get artifact :caption)))
+                        (appendage (concat "\n" block)))
+                   (push appendage appendages)
+                   (setq persisted (concat persisted appendage)
                          parts (ende-content-concat
                                 (list parts (with-current-buffer buffer (ende-artifact-content block))))))
                  (push (plist-get part :path) paths))))
            (setq normalized (plist-put normalized :content persisted))
            (let ((prepared (list :normalized normalized
+                                 :fragments
+                                 (if fragmented
+                                     (ende-chat--prepare-response-fragments
+                                      (apply #'concat (nreverse source-chunks))
+                                      (nreverse boundaries) source-edits normalized resolved
+                                      (nreverse appendages) level final)
+                                   (list normalized))
                                  :parts (ende-chat--restore-response-parts parts normalized))))
              (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
              prepared)))))))

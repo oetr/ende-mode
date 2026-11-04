@@ -29,10 +29,11 @@
 (defun ende-org--blocks (text &optional repair)
   "Classify literal blocks in TEXT, optionally REPAIR assistant presentation.
 Read-only analysis retains source coordinates, including for unfinished blocks.
-REPAIR escapes block bodies and closes open blocks at this text's boundary."
+REPAIR escapes block bodies and closes open blocks at this text's boundary.
+The returned :edits retain the input coordinates of those repairs."
   (with-temp-buffer
     (insert (or text ""))
-    (let (open-block block-start synthetic-newline ranges)
+    (let (open-block block-start synthetic-newline ranges edits (offset 0))
       (goto-char (point-min))
       (while (< (point) (point-max))
         (let* ((line-start (point))
@@ -48,18 +49,25 @@ REPAIR escapes block bodies and closes open blocks at this text's boundary."
                 (when repair
                   (skip-chars-forward " \t")
                   (when (looking-at "\\(?:\\*\\|#\\+\\|,\\(?:\\*\\|#\\+\\|,\\)\\)")
-                    (insert ","))))
+                    (let ((position (- (point) offset)))
+                      (push (list position position ",") edits))
+                    (insert ",")
+                    (cl-incf offset))))
             (when (and directive (eq (car directive) 'begin))
               (setq open-block (cdr directive) block-start line-start)))
           (forward-line 1)))
       (when open-block
         (goto-char (point-max))
         (when repair
-          (unless (bolp) (insert "\n") (setq synthetic-newline t))
-          (insert (format "#+end_%s\n" open-block)))
+          (let* ((position (- (point) offset))
+                 (suffix (concat (unless (bolp) (setq synthetic-newline t) "\n")
+                                 (format "#+end_%s\n" open-block))))
+            (push (list position position suffix) edits)
+            (insert suffix)))
         (push (cons block-start (point-max)) ranges))
       (let ((content (buffer-string)))
         (list :content content :ranges (reverse ranges)
+              :edits (nreverse edits)
               :synthetic-end (and repair open-block)
               :synthetic-newline synthetic-newline
               :parse-content (ende-org--mask-ranges content ranges))))))

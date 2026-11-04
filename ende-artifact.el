@@ -656,7 +656,8 @@ Explicit references use their file link; RESOLVE-FILE enables user attachments."
 (defun ende-artifact-prepare-text (text storage org-file &optional artifacts)
   "Resolve normalized TEXT once into persisted Org and ordered content parts.
 STORAGE lazily returns (BASE CHAT-ID) for creation-time references only.
-ARTIFACTS supplies descriptors, overridden by explicit reference captions."
+ARTIFACTS supplies descriptors, overridden by explicit reference captions.
+The returned :edits retain TEXT coordinates and the resolved reference strings."
   (let ((references (ende-artifact--references text t)) edits)
     (dolist (reference references)
       (let* ((generated (cl-find (plist-get reference :name) artifacts
@@ -686,6 +687,7 @@ ARTIFACTS supplies descriptors, overridden by explicit reference captions."
                      caption)) edits)))
     (list :content (ende-org--apply-edits text edits)
           :parts (ende-artifact--parts text references)
+          :edits edits
           :references references)))
 
 (defvar-local ende-artifact--overlays nil)

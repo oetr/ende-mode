@@ -508,6 +508,138 @@
                                parts))))))
     (ende-test--reset)))
 
+(ert-deftest ende-artifact-prepared-protocol-fragments ()
+  (ende-test--reset)
+  (unwind-protect
+      (ende-artifact-test-with-files
+        (let* ((base (ende-artifact-base))
+               (source (ende-artifact-store base "source" ende-artifact-test-png "image/png"))
+               (reused (ende-artifact-store base "generated" ende-artifact-test-png "image/png"))
+               (pending (ende-artifact-store base "generated" ende-artifact-test-jpeg "image/jpeg"))
+               (before (concat "* Earlier\n"
+                               (ende-artifact-render base "source" source buffer-file-name)
+                               "#+ENDE_ARTIFACT: " reused "\n#+CAPTION: Reused image\n"
+                               "Literal block follows\n#+begin_example\n* Literal heading\n"
+                               "#+ENDE_ARTIFACT: not-an-image\n#+end_example\n"))
+               (after (concat "** Final\n" ende-artifact-test-svg
+                              "\nAfter SVG\n#+begin_example\n* Trailing literal"))
+               (message (lambda (text)
+                          (ende-protocol-json-read-string
+                           (json-encode (list :type "message" :role "assistant"
+                                              :content (vector (list :type "output_text" :text text)))))))
+               (opaque (ende-protocol-json-read-string
+                        "{\"type\":\"reasoning\",\"encrypted_content\":\"retained\"}"))
+               (result (list :content (concat before after)
+                             :output-parts
+                             (list (list :type :text :text before)
+                                   (list :type :generated-image :bytes ende-artifact-test-png
+                                         :media-type "image/png")
+                                   (list :type :text :text after))
+                             :protocol-items (list 'openai-responses
+                                                   (funcall message before) opaque
+                                                   (funcall message after) opaque)))
+               (original (prin1-to-string result))
+               (ende-llm-function (ende-test--fake-llm (list result) t))
+               (prepare (symbol-function 'ende-artifact-prepare-text))
+               (store (symbol-function 'ende-artifact-store))
+               (preparations 0) (stores 0))
+          (insert "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: generated\n:END:\n** Question\nDraw\n")
+          (goto-char (point-max))
+          (let ((job (ende-ask)))
+            (setf (ende-job-instruction job)
+                  (plist-put (ende-job-instruction job) :generated-artifacts
+                             (list (list :name reused :caption "Default caption")
+                                   (list :name pending :caption "Pending tool image"))))
+            (cl-letf (((symbol-function 'ende-artifact-prepare-text)
+                       (lambda (&rest arguments)
+                         (cl-incf preparations) (apply prepare arguments)))
+                      ((symbol-function 'ende-artifact-store)
+                       (lambda (&rest arguments)
+                         (cl-incf stores) (apply store arguments))))
+              (ende-test--complete-call (car ende-test--calls)))
+            (should (eq (ende-job-state job) 'completed))
+            (should (= preparations 1))
+            (should (= stores 2))
+            (should (equal original (prin1-to-string result)))
+            (let* ((entry (ende-transcript-response (ende-job-transcript job)))
+                   (data (ende-transcript-entry-data entry))
+                   (prepared (plist-get data :prepared))
+                   (texts (cl-remove-if-not
+                           (lambda (item) (eq (ende-transcript-entry-kind item) 'text))
+                           (plist-get data :items)))
+                   (parts (plist-get prepared :parts))
+                   (retained (prin1-to-string parts))
+                   (images (cl-remove-if-not (lambda (part) (eq (plist-get part :type) :image)) parts))
+                   (rendered (ende-chat--render-transcript job)))
+              (should (eq result (plist-get data :result)))
+              (should (equal (mapcar #'ende-transcript-entry-content texts) (list before after)))
+              (cl-mapc (lambda (item normalized)
+                         (should (eq normalized (plist-get (ende-transcript-entry-data item) :normalized))))
+                       texts (plist-get prepared :fragments))
+              (should (= 5 (length images)))
+              (should (equal (mapcar (lambda (part) (plist-get part :path)) images)
+                             (cl-mapcan
+                              (lambda (normalized)
+                                (mapcar (lambda (part) (plist-get part :path))
+                                        (cl-remove-if-not
+                                         (lambda (part) (eq (plist-get part :type) :image))
+                                         (ende-artifact-content (plist-get normalized :content)))))
+                              (plist-get prepared :fragments))))
+              (should (string-match-p (regexp-quote "* Earlier") (ende-content-readable parts)))
+              (should (string-match-p (regexp-quote "** Final") (ende-content-readable parts)))
+              (should (string-match-p "Pending tool image" rendered))
+              (should (string-match-p ",\\* Trailing literal\n#\\+end_example" rendered))
+              (should-not (string-match-p (regexp-quote ende-artifact-test-svg) rendered))
+              (should (string-match-p (concat ":" ende-chat-reply-reference-property ": t") rendered))
+              (cl-letf (((symbol-function 'ende-artifact-prepare-text) (lambda (&rest _) (ert-fail "Reprepared")))
+                        ((symbol-function 'ende-artifact-store) (lambda (&rest _) (ert-fail "Stored while rendering"))))
+                (should (equal rendered (ende-chat--render-transcript job))))
+              (should (equal retained (prin1-to-string parts))))
+            (let* ((document (ende-chat--build-document))
+                   (headlines (ende-chat--document-headlines document))
+                   (earlier (cl-find "Earlier" headlines :key (lambda (h) (org-element-property :raw-value h))
+                                     :test #'equal))
+                   (final (cl-find "Final" headlines :key (lambda (h) (org-element-property :raw-value h))
+                                   :test #'equal)))
+              (should (= 4 (org-element-property :level earlier)))
+              (should (= 3 (org-element-property :level final)))
+              (should (equal "Agent: Reply" (org-element-property :raw-value (ende-chat--parent document earlier))))
+              (should (equal "Agent: Reply" (org-element-property :raw-value (ende-chat--parent document final))))))))
+    (ende-test--reset)))
+
+(ert-deftest ende-artifact-opaque-only-image-completion ()
+  (ende-test--reset)
+  (unwind-protect
+      (ende-artifact-test-with-files
+        (let* ((result (list :content ""
+                             :output-parts (list (list :type :generated-image :bytes ende-artifact-test-png
+                                                       :media-type "image/png"))
+                             :protocol-items
+                             (list 'openai-responses
+                                   (ende-protocol-json-read-string
+                                    "{\"type\":\"image_generation_call\",\"id\":\"generated\"}"))))
+               (original (prin1-to-string result))
+               (ende-llm-function (ende-test--fake-llm (list result)))
+               (prepare (symbol-function 'ende-artifact-prepare-text))
+               (preparations 0))
+          (insert "* Topic\n** Question\nDraw\n")
+          (goto-char (point-max))
+          (cl-letf (((symbol-function 'ende-artifact-prepare-text)
+                     (lambda (&rest arguments)
+                       (cl-incf preparations) (apply prepare arguments))))
+            (let* ((job (ende-ask))
+                   (data (ende-transcript-entry-data (ende-transcript-response (ende-job-transcript job))))
+                   (items (plist-get data :items)))
+              (should (eq (ende-job-state job) 'completed))
+              (should (= preparations 1))
+              (should (equal original (prin1-to-string result)))
+              (should (equal '(opaque text) (mapcar #'ende-transcript-entry-kind items)))
+              (should (equal "" (ende-transcript-entry-content (cadr items))))
+              (should (string-match-p "#\\+ENDE_ARTIFACT:" (plist-get (ende-chat--render-response-items
+                                                                      job (ende-transcript-response
+                                                                           (ende-job-transcript job))) :reply)))))))
+    (ende-test--reset)))
+
 (ert-deftest ende-artifact-structural-persistence ()
   (ende-test--reset)
   (unwind-protect
