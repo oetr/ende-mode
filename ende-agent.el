@@ -224,54 +224,20 @@ clarification; do not proceed with the disputed change.\n\n"
              (ende-job-live-p job))
     (ende--cancel-live-jobs (list job))))
 
-(defun ende-agent--work-section (job title text)
-  "Append escaped TEXT beneath a fixed, host-owned TITLE in JOB's work log."
-  (when-let* ((buffer (ende-job-owned-buffer job))
-              ((buffer-live-p buffer)))
-    (ende-work-buffer-at-end
-     buffer
-     (lambda ()
-       (insert "* " title "\n\n"
-               "#+begin_example\n"
-               (org-escape-code-in-string (or text ""))
-               "\n#+end_example\n\n")))))
-
-(defun ende-agent--work-event (job event)
-  "Record public progress and terminal status EVENT in agent JOB's work log."
-  (when (and (eq (ende-job-type job) 'agent)
-             (buffer-live-p (ende-job-owned-buffer job)))
-    (pcase (plist-get event :type)
-      (:agent-activity
-       (ende-agent--work-section
-        job "Progress" (concat (plist-get event :title) "\n\n"
-                               (plist-get event :status))))
-      (:settled
-       (ende-agent--work-section
-        job "Status"
-        (concat (symbol-name (plist-get event :state))
-                (when-let* ((error (ende-job-error job)))
-                  (concat ": " (ende-error-display-message error)))))))))
-
-(add-hook 'ende-job-event-functions #'ende-agent--work-event)
-
 (defun ende-agent-private-target (job)
   "Create JOB's private execution buffer and target."
   (let ((buffer (generate-new-buffer
                  (format " *ende-agent-%d*" (ende-job-id job)))))
-    (setf (ende-job-owned-buffer job) buffer
-          (ende-job-work-buffer job) buffer)
+    (setf (ende-job-owned-buffer job) buffer)
     (let* ((owned-buffer buffer)
            (hook (lambda ()
                    (ende-agent--owned-buffer-killed job owned-buffer))))
       (setf (ende-job-owned-buffer-hook job) hook)
       (with-current-buffer buffer
-        (org-mode)
-        (ende-work-buffer-mode 1)
         (setq-local default-directory
                     (or (plist-get (ende-job-access-policy job) :root)
                         default-directory))
         (add-hook 'kill-buffer-hook hook nil t)
-        (ende-agent--work-section job "Task" (plist-get (ende-job-instruction job) :task))
         (setf (ende-job-target job)
               (ende-target-create
                :buffer buffer :start (point-min) :end (point-max)
@@ -309,32 +275,48 @@ clarification; do not proceed with the disputed change.\n\n"
            :omit-source-metadata t
            :assistant-message
            (lambda (child result calls)
-             (when-let* ((text (plist-get result :content))
-                         ((not (string-blank-p text))))
-               (ende-agent--work-section child "Assistant" text))
-             (dolist (call calls)
-               (ende-agent--work-section
-                child "Tool request"
-                (format "%s\n\n%s" (ende-tools-call-value call :name)
-                        (ende-tools-call-value call :arguments))))
-             (list :role "assistant" :content (or (plist-get result :content) "")
-                   :tool-calls calls
-                   :reasoning-content (plist-get result :reasoning-content)
-                   :protocol-items (plist-get result :protocol-items)))
+             (let* ((transcript (ende-job-ensure-transcript child))
+                    (stored-calls (ende-agent--prepare-calls child calls result)))
+               (ende-transcript-accept transcript result stored-calls
+                                       (list :metadata (ende--job-display-metadata child result)))
+               (list :message
+                     (list :role "assistant" :content (or (plist-get result :content) "")
+                           :tool-calls calls
+                           :reasoning-content (plist-get result :reasoning-content)
+                           :protocol-items (plist-get result :protocol-items))
+                     :calls stored-calls)))
            :tool-result-message
            (lambda (child call content)
-             (ende-agent--work-section
-              child "Tool result"
-              (format "%s\n\n%s" (ende-tools-call-value call :name) content))
+             (ende-transcript-tool-result (ende-job-ensure-transcript child) call content)
              (list :role "tool" :tool-call-id
                    (ende-tools-call-value call :id) :content content))
            :on-final
            (lambda (child result _messages)
              (let ((answer (or (plist-get result :content) "")))
-               (ende-agent--work-section child "Reply" answer)
+               (ende-transcript-accept
+                (ende-job-ensure-transcript child) result nil
+                (list :metadata (ende--job-display-metadata child result)) t)
                (ende-job-finish child answer)))))))
 
 (ende-register-job-handler 'agent #'ende-agent--run-child)
+
+(defun ende-agent--prepare-calls (job calls result)
+  "Give child CALLS stable execution identities without changing RESULT."
+  (let ((transcript (ende-job-ensure-transcript job))
+        (protocol (plist-get result :protocol-items)))
+    (mapcar
+     (lambda (call)
+       (let* ((id (ende-tools-call-value call :id))
+              (item (and (eq (car-safe protocol) 'openai-responses)
+                         (cl-find id (cdr protocol)
+                                  :key (lambda (item) (ende-protocol-json-get "call_id" item))
+                                  :test #'equal))))
+         (list :id id :name (ende-tools-call-value call :name)
+               :arguments (ende-tools-call-value call :arguments)
+               :execution-id (format "%s:%s" (ende-job-id job)
+                                     (cl-incf (ende-transcript-next-id transcript)))
+               :protocol-provider (when item "openai-responses") :protocol-item item)))
+     calls)))
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))
@@ -473,6 +455,8 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
         (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
                    (ende-tool-definitions
                     configuration (ende-job-request-phase job))))
+  (unless (eq (ende-job-request-phase job) 'title)
+    (ende-transcript-begin-response (ende-job-ensure-transcript job)))
   (ende--dispatch-llm
    job messages
    (lambda (result)
@@ -716,6 +700,10 @@ Chat persistence and guidance stay in those callbacks."
          (profile (ende-plist-merge (copy-tree (ende-job-profile job))
                                     (list :tool-definitions definitions
                                           :image-profile image-profile))))
+    (let ((transcript (ende-job-ensure-transcript job)))
+      (setf (ende-transcript-task transcript)
+            (or (plist-get (ende-job-instruction job) :task)
+                (ende-operations--latest-user-message messages))))
     (when (and definitions
                (or (not (memq 'about_thinking
                               (plist-get configuration :active-tools)))

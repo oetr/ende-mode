@@ -2006,60 +2006,17 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
                       "\n" nil)
                      " ↵ ")))
 
-(cl-defstruct (ende-chat--summary (:constructor ende-chat--make-summary))
-  item text marker)
 
-(defun ende-chat--reasoning-summary-text (summary level)
+(defun ende-chat--reasoning-summary-text (entry level)
   "Return SUMMARY as a bodyless Org heading at LEVEL."
   (concat (make-string level ?*) " "
           (ende-chat--reasoning-summary-heading
-           (ende-chat--summary-text summary))
+           (ende-transcript-entry-content entry))
           "\n:PROPERTIES:\n"
           (ende-chat--response-property ende-chat-role-property "assistant")
           (ende-chat--response-property
            ende-chat-visibility-property "reasoning_summary")
           ":END:\n"))
-
-(defun ende-chat--render-reasoning-summary (job summary)
-  "Show SUMMARY in JOB's live work transcript."
-  (unless (string-blank-p (or (ende-chat--summary-text summary) ""))
-    (let ((marker (ende-chat--summary-marker summary)))
-      (if (and (markerp marker) (marker-buffer marker))
-          (with-current-buffer (marker-buffer marker)
-            (let ((inhibit-read-only t))
-              (save-excursion
-                (goto-char marker)
-                (org-edit-headline
-                 (ende-chat--reasoning-summary-heading
-                  (ende-chat--summary-text summary))))))
-        (let* ((instruction (ende-job-instruction job))
-               (level (1+ (plist-get instruction :response-level))))
-          (ende-chat--stage-agent-section job "")
-          (let* ((buffer (ende-chat--staging-buffer job))
-                 (marker (with-current-buffer buffer
-                           (copy-marker (point-max)))))
-            (ende-chat--stage-agent-section
-             job (ende-chat--reasoning-summary-text summary level))
-            (setf (ende-chat--summary-marker summary) marker)))))))
-
-(defun ende-chat--handle-reasoning-summary (job event)
-  "Accumulate and display provider reasoning summary EVENT."
-  (let* ((instruction (ende-job-instruction job))
-         (item (plist-get event :item))
-         (summaries (plist-get instruction :reasoning-summaries))
-         (summary (cl-find item summaries :test #'equal
-                           :key #'ende-chat--summary-item)))
-    (unless summary
-      (setq summary (ende-chat--make-summary :item item)
-            summaries (append summaries (list summary))))
-    (setf (ende-chat--summary-text summary)
-          (if (plist-get event :replace)
-              (plist-get event :text)
-            (concat (ende-chat--summary-text summary)
-                    (plist-get event :text))))
-    (setf (ende-job-instruction job)
-          (plist-put instruction :reasoning-summaries summaries))
-    (ende-chat--render-reasoning-summary job summary)))
 
 (defun ende-chat--release-request-markers (job)
   "Detach request-local markers owned by JOB."
@@ -2067,89 +2024,8 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
     (when-let* ((marker (plist-get instruction :question-marker)))
       (set-marker marker nil)
       (setq instruction (plist-put instruction :question-marker nil)))
-    (dolist (summary (plist-get instruction :reasoning-summaries))
-      (when-let* ((marker (ende-chat--summary-marker summary)))
-        (set-marker marker nil)
-        (setf (ende-chat--summary-marker summary) nil)))
     (setq instruction (plist-put instruction :generated-title-function nil))
     (setf (ende-job-instruction job) instruction)))
-
-(defun ende-chat--staging-buffer (job &optional create)
-  "Return JOB's staging buffer, creating it lazily when CREATE is non-nil."
-  (let* ((instruction (ende-job-instruction job))
-         (buffer (plist-get instruction :staging-buffer)))
-    (when (and create (not (buffer-live-p buffer)))
-      (setq buffer
-            (generate-new-buffer
-             (format " *ende-chat-work:%s*"
-                     (plist-get instruction :request-id))))
-      (with-current-buffer buffer
-        (org-mode)
-        (ende-work-buffer-mode 1))
-      (setf (ende-job-work-buffer job) buffer)
-      (setf (ende-job-instruction job)
-            (plist-put instruction :staging-buffer buffer)))
-    (and (buffer-live-p buffer) buffer)))
-
-(defun ende-chat--staging-insert (buffer text)
-  "Append TEXT to BUFFER, copying its Org subsections while folded."
-  (with-temp-buffer
-    (org-mode)
-    (insert text)
-    (let* ((headings
-            (org-element-map (org-element-parse-buffer) 'headline #'identity)))
-      (if (null headings)
-          (ende-work-buffer-at-end buffer (lambda () (insert text)))
-        (let* ((first (car headings))
-               (work-root
-                (save-excursion
-                  (goto-char (org-element-property :begin first))
-                  (org-entry-get nil ende-chat-work-property)))
-               (level (if work-root
-                          (1+ (org-element-property :level first))
-                        (org-element-property :level first)))
-               (sections
-                (cl-remove-if-not
-                 (lambda (heading)
-                   (= (org-element-property :level heading) level))
-                 headings))
-               (prefix-end
-                (if work-root
-                    (save-excursion
-                      (goto-char (org-element-property :begin first))
-                      (org-end-of-meta-data t)
-                      (point))
-                  (org-element-property :begin first))))
-          (if (null sections)
-              (ende-work-buffer-at-end buffer (lambda () (insert text)))
-            (let ((prefix (buffer-substring-no-properties
-                           (point-min) prefix-end)))
-              (unless (string-empty-p prefix)
-                (ende-work-buffer-at-end
-                 buffer (lambda () (insert prefix)))))
-            (dolist (section sections)
-              (goto-char (org-element-property :begin section))
-              (org-fold-hide-subtree)
-              (let ((kill-ring nil)
-                    (kill-ring-yank-pointer nil)
-                    (interprogram-cut-function nil)
-                    (interprogram-paste-function nil))
-                (let ((inhibit-message t))
-                  (org-copy-subtree 1))
-                (ende-work-buffer-at-end
-                 buffer (lambda () (org-paste-subtree level)))))))))))
-
-(defun ende-chat--staging-append (job text &optional checkpoint)
-  "Append generated Org TEXT to JOB's private staging buffer.
-When CHECKPOINT is non-nil, save the completed semantic boundary."
-  (let ((buffer (ende-chat--staging-buffer job t)))
-    (when (not (string-empty-p text))
-      (setf (ende-job-instruction job)
-            (plist-put (ende-job-instruction job) :recovery-current nil)))
-    (ende-chat--staging-insert buffer text)
-    (when checkpoint
-      (ende-chat--checkpoint-staging job))
-    buffer))
 
 (defun ende-chat--recovery-file (job)
   "Return JOB's persistent recovery file path, creating its directory."
@@ -2166,9 +2042,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
               (plist-put instruction :recovery-file file))))
     file))
 
-(defun ende-chat--checkpoint-staging (job)
-  "Atomically save JOB's staged Org transcript."
-  (let ((transcript (ende-chat--staged-text job)))
+(defun ende-chat--checkpoint-transcript (job)
+  "Atomically checkpoint JOB's completed structured transcript."
+  (let ((transcript (ende-chat--render-transcript job)))
     (when transcript
       (let* ((file (ende-chat--recovery-file job))
              (temporary (make-temp-file (concat file ".tmp-")))
@@ -2198,12 +2074,12 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
           (when (file-exists-p temporary)
             (delete-file temporary)))))))
 
-(defun ende-chat--materialize-staged-failure (job error)
-  "Commit staged agent work for JOB and mark its reply failed."
-  (let ((transcript (ende-chat--staged-text job)))
+(defun ende-chat--materialize-failure (job error &optional transcript)
+  "Commit completed work for JOB, retaining its failed reply indication."
+  (let ((transcript (or transcript (ende-chat--render-transcript job))))
     (when (and transcript (eq (ende-job-type job) 'chat))
-      (if (ende-chat--staged-final-reply-p job transcript)
-          (ende-chat--commit-staged-transcript job transcript 'staged)
+      (if (ende-chat--transcript-final-reply-p job transcript)
+          (ende-chat--commit-transcript job transcript 'snapshot)
         (let* ((instruction (ende-job-instruction job))
                (level (plist-get instruction :response-level))
                (request-id (plist-get instruction :request-id))
@@ -2221,9 +2097,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                                                       "failed")
                         ":END:\n\n"
                         (ende-chat--failure-text error))))
-          (ende-chat--commit-staged-transcript
+          (ende-chat--commit-transcript
            job (concat transcript reply)
-           'staged))))))
+           'snapshot))))))
 
 (defun ende-chat--recovery-files ()
   "Return persistent staged-transcript snapshots."
@@ -2293,14 +2169,9 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
                 (progn
                   (unless question
                     (error "Recovery request's question no longer exists"))
-                  (ende-chat--staging-append job transcript)
                   (setq recovered
-                        (if (ende-chat--staged-final-reply-p job transcript)
-                            (ende-chat--commit-staged-transcript job transcript 'staged)
-                          (ende-chat--materialize-staged-failure job nil)))
+                        (ende-chat--materialize-failure job nil transcript))
                   recovered)
-              (when-let* ((staging (ende-chat--staging-buffer job)))
-                (kill-buffer staging))
               (ende-target-release target)
               (when question-marker
                 (set-marker question-marker nil)))))))))
@@ -2339,32 +2210,12 @@ When CHECKPOINT is non-nil, save the completed semantic boundary."
       (let ((file (completing-read "Recover agent work: " files nil t)))
         (ende-chat--recover-one-file file)))))
 
-(defun ende-chat--stage-agent-section (job text &optional checkpoint)
-  "Append generated agent TEXT to JOB's staging transcript.
-When CHECKPOINT is non-nil, persist the completed boundary."
-  (let ((buffer (ende-chat--staging-buffer job)))
-    (unless buffer
-      (let ((instruction (ende-job-instruction job)))
-        (ende-chat--staging-append
-         job
-         (ende-chat--work-text
-          (plist-get instruction :response-level)
-          (plist-get instruction :question-id)
-          (plist-get instruction :request-id)))))
-    (ende-chat--staging-append job text checkpoint)))
-
-(defun ende-chat--staged-text (job)
-  "Return JOB's staged Org transcript, or nil when none exists."
-  (when-let* ((buffer (ende-chat--staging-buffer job)))
-    (with-current-buffer buffer
-      (buffer-substring-no-properties (point-min) (point-max)))))
-
-(defun ende-chat--dispose-staging-buffer (job event)
+(defun ende-chat--release-recovery (job event)
   "Release recovery files only after JOB's transcript is safely materialized."
   (when (eq (plist-get event :type) :settled)
     (let* ((instruction (ende-job-instruction job))
            (file (plist-get instruction :recovery-file))
-           (materialized (plist-get instruction :staging-materialized)))
+           (materialized (plist-get instruction :transcript-materialized)))
       (when (and materialized file (file-exists-p file))
         (ignore-errors (delete-file file)))
       (when materialized
@@ -2376,7 +2227,7 @@ When CHECKPOINT is non-nil, persist the completed boundary."
 
 
 
-(add-hook 'ende-job-event-functions #'ende-chat--dispose-staging-buffer 90)
+(add-hook 'ende-job-event-functions #'ende-chat--release-recovery 90)
 
 (defun ende-chat--release-insertion-info (information)
   "Detach temporary markers carried in response insertion INFORMATION."
@@ -2405,7 +2256,7 @@ When CHECKPOINT is non-nil, persist the completed boundary."
           (ende-chat--hide-control-drawers-in-region
            start-marker end-marker))))))
 
-(defun ende-chat--persist-ordinary-reply (job text)
+(defun ende-chat--persist-ordinary-reply (job text &optional allow-edited)
   "Replace JOB's pending placeholder with ordinary reply TEXT."
   (let* ((instruction (ende-job-instruction job))
          (request-id (plist-get instruction :request-id))
@@ -2428,7 +2279,7 @@ When CHECKPOINT is non-nil, persist the completed boundary."
                 (let ((inhibit-read-only t))
                   (atomic-change-group
                     (let* ((placeholder
-                            (ende-chat--resolve-request-destination job))
+                            (ende-chat--resolve-request-destination job allow-edited))
                            (anchor (cadr placeholder))
                            (anchor-level
                             (and anchor (org-element-property :level anchor))))
@@ -2623,7 +2474,7 @@ exact durable request ID and pending state."
 
 (defun ende-chat--resolve-request-destination (job &optional allow-edited)
   "Return JOB's pending reply from its live markers, or nil.
-ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
+ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure."
   (let* ((instruction (ende-job-instruction job))
          (buffer (ende-target-buffer (ende-job-target job)))
          (request-id (plist-get instruction :request-id))
@@ -2641,7 +2492,7 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
                        (headline (ende-chat--request-state-headline
                                   document request-id "pending")))
                   (when headline
-                    (when (eq allow-edited 'staged)
+                    (when (eq allow-edited 'snapshot)
                       (ende-chat--validate-pending-placeholder
                        job document headline))
                     (list document headline)))
@@ -2754,7 +2605,7 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
               (ende-error-display-message error))
     "Ende chat request was cancelled or skipped.\n"))
 
-(defun ende-chat--staged-final-reply-p (job transcript)
+(defun ende-chat--transcript-final-reply-p (job transcript)
   "Return non-nil when TRANSCRIPT contains JOB's final sibling reply."
   (with-temp-buffer
     (org-mode)
@@ -2770,10 +2621,29 @@ ALLOW-EDITED selects durable-ID lookup; `staged' also validates its structure."
               (null (ende-chat--work-ancestor document headline))))
        (ende-chat--document-headlines document)))))
 
-(defun ende-chat--commit-staged-transcript
+(defun ende-chat--commit-transcript (job transcript &optional allow-edited)
+  "Commit rendered TRANSCRIPT at JOB's validated pending request."
+  (if (string-match-p (concat "\\`\\*+ " (regexp-quote ende-chat--work-title) "[ \n]") transcript)
+      (ende-chat--commit-work-transcript job transcript allow-edited)
+    (let ((information (ende-chat--persist-ordinary-reply job transcript allow-edited))
+          (buffer (ende-target-buffer (ende-job-target job))))
+      (unwind-protect
+          (progn
+            (ende-chat--finish-request job information)
+            (with-current-buffer buffer
+              (ende-chat--hide-reasoning-section-at-marker (plist-get information :reasoning))
+              (when (bound-and-true-p ende-mode)
+                (ende-artifact-refresh (plist-get information :section-start)
+                                       (plist-get information :section-end))))
+            (setf (ende-job-instruction job)
+                  (plist-put (ende-job-instruction job) :transcript-materialized t))
+            t)
+        (ende-chat--release-insertion-info information)))))
+
+(defun ende-chat--commit-work-transcript
     (job transcript &optional allow-edited)
   "Replace JOB's pending request with complete staged TRANSCRIPT atomically.
-When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
+When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
   (let* ((buffer (ende-target-buffer (ende-job-target job)))
          (instruction (ende-job-instruction job))
          (request-id (plist-get instruction :request-id))
@@ -2936,7 +2806,7 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
       (when work-marker (set-marker work-marker nil))
       (when reasoning-marker (set-marker reasoning-marker nil)))
     (setf (ende-job-instruction job)
-          (plist-put (ende-job-instruction job) :staging-materialized t))
+          (plist-put (ende-job-instruction job) :transcript-materialized t))
     t))
 
 (defun ende-chat--mark-failed (job &optional error)
@@ -2970,8 +2840,8 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
                             (ende-chat--hide-control-drawers))))))))))))
     ((error quit) nil)))
 
-(defun ende-chat--result-properties (job result)
-  "Return provenance properties for JOB's RESULT."
+(defun ende-chat--response-metadata (job result)
+  "Capture semantic provenance when JOB accepts RESULT."
   (let* ((profile (ende-job-profile job))
          (display (ende--job-display-metadata job result))
          (model (plist-get display :model))
@@ -2979,28 +2849,31 @@ When ALLOW-EDITED is `staged', resolve and validate the durable pending ID."
          (temperature (plist-get profile :temperature))
          (thinking (plist-get profile :thinking))
          (effort (ende-provider-active-reasoning-effort profile)))
-    (concat
-     (ende-chat--metadata-property ende-chat-model-property model)
-     (ende-chat--metadata-property
-      ende-chat-temperature-property
-      (and (numberp temperature) (format "%s" temperature)))
-     (ende-chat--metadata-property
-      ende-chat-thinking-property
-      (and (memq thinking '(on off)) (symbol-name thinking)))
-     (ende-chat--metadata-property ende-chat-reasoning-effort-property
-                                   effort)
-     (ende-chat--metadata-property
-      ende-chat-input-tokens-property
-      (let ((count (plist-get counts :input)))
-        (and (numberp count) (number-to-string (truncate count)))))
-     (ende-chat--metadata-property
-      ende-chat-output-tokens-property
-      (let ((count (plist-get counts :output)))
-        (and (numberp count) (number-to-string (truncate count)))))
-     (ende-chat--metadata-property
-      ende-chat-cached-tokens-property
-      (let ((count (plist-get counts :cached)))
-        (and (numberp count) (number-to-string (truncate count))))))))
+    (list :model model :temperature temperature :thinking thinking
+          :reasoning-effort effort :input-tokens (plist-get counts :input)
+          :output-tokens (plist-get counts :output) :cached-tokens (plist-get counts :cached))))
+
+(defun ende-chat--metadata-properties (metadata)
+  "Render retained response METADATA as durable Org properties."
+  (mapconcat
+   (lambda (field)
+     (let ((value (plist-get metadata (car field))))
+       (or (ende-chat--metadata-property
+            (cdr field)
+            (cond ((numberp value) (format "%s" value))
+                  ((stringp value) value)
+                  ((memq value '(on off)) (symbol-name value)))) "")))
+   (list (cons :model ende-chat-model-property)
+         (cons :temperature ende-chat-temperature-property)
+         (cons :thinking ende-chat-thinking-property)
+         (cons :reasoning-effort ende-chat-reasoning-effort-property)
+         (cons :input-tokens ende-chat-input-tokens-property)
+         (cons :output-tokens ende-chat-output-tokens-property)
+         (cons :cached-tokens ende-chat-cached-tokens-property)) ""))
+
+(defun ende-chat--result-properties (job result)
+  "Render provenance for JOB's RESULT."
+  (ende-chat--metadata-properties (ende-chat--response-metadata job result)))
 
 (defun ende-chat--reasoning-text
     (level question-id request-id result-properties normalized)
@@ -3165,61 +3038,20 @@ OPTIONS are passed to `json-serialize'."
              (when (plist-get normalized :synthetic-newline)
                (ende-chat--response-property ende-chat-content-synthetic-newline-property "t"))))))
 
-(defun ende-chat--protocol-item-text (item)
-  "Return visible text in Responses ITEM."
-  (let ((content (ende-protocol-json-get "content" item)))
-    (if (stringp content)
-        content
-      (mapconcat
-       (lambda (part) (ende-protocol-json-get "text" part))
-       (cl-remove-if-not
-        (lambda (part)
-          (and (member (ende-protocol-json-get "type" part)
-                       '("text" "output_text" "refusal"))
-               (stringp (ende-protocol-json-get "text" part))))
-        (append content nil))
-       ""))))
-
-(defun ende-chat--protocol-item-events (protocol-items)
-  "Return visible, tool, and opaque events from provider PROTOCOL-ITEMS."
-  (when (and (consp protocol-items)
-             (memq (car protocol-items) '(openai-responses anthropic-messages)))
-    (let ((provider (symbol-name (car protocol-items))))
-      (cl-loop for item in (cdr protocol-items)
-               for type = (ende-protocol-json-get "type" item)
-               for call-id =
-               (ende-protocol-json-get
-                (if (equal type "function_call") "call_id" "id") item)
-               append
-               (cond
-                ((and (equal provider "openai-responses")
-                      (equal type "message"))
-                 (let ((text (ende-chat--protocol-item-text item)))
-                   (when (not (string-empty-p text))
-                     (list (list :type 'text :text text)))))
-                ((and (equal provider "anthropic-messages")
-                      (equal type "text"))
-                 (let ((text (ende-protocol-json-get "text" item)))
-                   (when (and (stringp text) (not (string-empty-p text)))
-                     (list (list :type 'text :text text)))))
-                ((and (equal provider "openai-responses")
-                      (equal type "function_call") call-id)
-                 (list (list :type 'tool-call :id call-id)))
-                ((and (equal provider "anthropic-messages")
-                      (equal type "tool_use") call-id)
-                 (list (list :type 'tool-call :id call-id)))
-                (t
-                 (list (list :type 'opaque :provider provider
-                             :kind (concat "opaque-" (or type "unknown"))
-                             :item item))))))))
+(defun ende-chat--prepare-opaque-event (event store-file)
+  "Store EVENT once, retaining its explicit payload STORE-FILE."
+  (append (list :item-id (ende-tool-store-save-opaque
+                         (plist-get event :provider) (plist-get event :kind)
+                         (plist-get event :item) store-file)
+                :store-file store-file) event))
 
 (defun ende-chat--opaque-protocol-text
-    (level request-id event result-properties store-file)
-  "Store EVENT and return its opaque Org heading at LEVEL."
+    (level request-id event result-properties)
+  "Render a previously stored opaque EVENT at LEVEL."
   (let* ((provider (plist-get event :provider))
          (kind (plist-get event :kind))
-         (item-id (ende-tool-store-save-opaque
-                   provider kind (plist-get event :item) store-file)))
+         (item-id (plist-get event :item-id)))
+    (unless item-id (error "Opaque item has not been stored"))
     (concat (make-string level ?*) " Agent: Opaque BS\n"
             ":PROPERTIES:\n"
             (ende-chat--response-property ende-chat-request-id-property request-id)
@@ -3229,21 +3061,8 @@ OPTIONS are passed to `json-serialize'."
             result-properties
             ":END:\n\n")))
 
-(defun ende-chat--stage-opaque-protocol-events (job events properties)
-  "Store opaque protocol EVENTS from JOB's final response inside Agent: Work."
-  (let* ((instruction (ende-job-instruction job))
-         (level (1+ (plist-get instruction :response-level)))
-         (request-id (plist-get instruction :request-id))
-         (store-file (plist-get instruction :tool-store-file)))
-    (ende-chat--stage-agent-section
-     job
-     (mapconcat (lambda (event)
-                  (ende-chat--opaque-protocol-text
-                   level request-id event properties store-file))
-                events ""))))
-
 (defun ende-chat--protocol-event-text
-    (event level question-id request-id properties calls pending store-file)
+    (event level question-id request-id properties calls pending)
   "Render one assistant protocol EVENT."
   (pcase (plist-get event :type)
     ('text
@@ -3263,7 +3082,7 @@ OPTIONS are passed to `json-serialize'."
           part))))
     ('opaque
      (ende-chat--opaque-protocol-text
-      level request-id event properties store-file))
+      level request-id event properties))
     ('tool-call
      (when-let* ((call (cl-find
                         (plist-get event :id) calls
@@ -3284,10 +3103,10 @@ OPTIONS are passed to `json-serialize'."
 
 (defun ende-chat--assistant-protocol-text
     (level question-id request-id result-properties normalized calls
-           &optional pending protocol-items store-file)
+           &optional pending protocol-items _store-file)
   "Render ordered assistant PROTOCOL-ITEMS and their tool CALLS."
   (let* ((content (plist-get normalized :content))
-         (events (ende-chat--protocol-item-events protocol-items))
+         (events (ende-transcript-protocol-events protocol-items))
          (properties result-properties)
          (fallback-properties
           (concat properties
@@ -3314,7 +3133,7 @@ OPTIONS are passed to `json-serialize'."
        (mapconcat (lambda (event)
                     (or (ende-chat--protocol-event-text
                          event level question-id request-id properties calls
-                         pending store-file)
+                         pending)
                         ""))
                   events "")
        (mapconcat
@@ -3328,14 +3147,13 @@ OPTIONS are passed to `json-serialize'."
             (ende-chat--tool-call-text level request-id call properties)))
         calls "")))))
 
-(defun ende-chat--tool-result-text (level request-id call result)
-  "Store RESULT and render its compact sibling reference."
+(defun ende-chat--tool-result-text (level request-id call &optional _result)
+  "Render CALL's already stored result as a compact sibling reference."
   (let ((execution-id (ende-tools-call-value call :execution-id))
         (name (ende-tools-call-value call :name))
         (arguments (ende-tools-call-value call :arguments)))
     (unless (and (stringp execution-id) (stringp name) (stringp arguments))
       (error "Malformed generated tool result"))
-    (ende-chat--store-tool-result call result)
     (let* ((summary (ende-chat--tool-argument-summary arguments))
            (title (concat name (if summary (concat ": " summary) ""))))
       (concat (make-string level ?*) " "
@@ -3406,6 +3224,117 @@ Keep it while another queued compaction still refers to its durable identity."
       (when (and untitled (not empty))
         (ende-chat--set-headline-title
          question ende-chat--compact-instructions-title))))))
+
+(defun ende-chat--record-response (job result calls &optional prepared final synthetic)
+  "Accept JOB's RESULT with prepared CALLS and response transformations."
+  (let* ((transcript (ende-job-ensure-transcript job))
+         (current (ende-transcript-response transcript)))
+    (if (and (not synthetic) current
+             (eq (ende-transcript-entry-status current) 'complete))
+        current
+      (let* ((instruction (ende-job-instruction job))
+             (level (+ (plist-get instruction :response-level) (if final 0 1)))
+             (prepared (or prepared (ende-chat--prepare-response job result level final)))
+             (items (ende-transcript-items transcript result calls))
+             (texts (cl-remove-if-not
+                     (lambda (item) (eq (ende-transcript-entry-kind item) 'text)) items))
+             (thinking (plist-get result :thinking)))
+        (dolist (item items)
+          (pcase (ende-transcript-entry-kind item)
+            ('text
+             (setf (ende-transcript-entry-data item)
+                   (plist-put (ende-transcript-entry-data item) :normalized
+                              (if (= (length texts) 1)
+                                  (plist-get prepared :normalized)
+                                (ende-chat--normalize-response
+                                 (ende-transcript-entry-content item) level t)))))
+            ('opaque
+             (setf (ende-transcript-entry-data item)
+                   (ende-chat--prepare-opaque-event
+                    (ende-transcript-entry-data item)
+                    (plist-get instruction :tool-store-file))))))
+        (prog1
+            (ende-transcript-accept
+             transcript result calls
+             (list :items items :prepared prepared :synthetic synthetic
+                   :metadata (ende-chat--response-metadata job result)
+                   :thinking (and (stringp thinking) (not (string-blank-p thinking))
+                                  (ende-chat--normalize-response thinking level))) final)
+          (ende-chat--checkpoint-transcript job))))))
+
+(defun ende-chat--record-tool-result (job call content)
+  "Store and record JOB's exact tool CONTENT before updating any viewer."
+  (ende-chat--store-tool-result call content)
+  (prog1 (ende-transcript-tool-result (ende-job-ensure-transcript job) call content)
+    (ende-chat--checkpoint-transcript job)))
+
+(defun ende-chat--render-response-items (job entry)
+  "Render accepted response ENTRY using only retained data from JOB."
+  (let* ((instruction (ende-job-instruction job))
+         (data (ende-transcript-entry-data entry))
+         (level (plist-get instruction :response-level))
+         (question-id (plist-get instruction :question-id))
+         (request-id (plist-get instruction :request-id))
+         (properties (ende-chat--metadata-properties (plist-get data :metadata)))
+         (items (plist-get data :items))
+         (final (plist-get data :final))
+         (last-text (and final (cl-find 'text (reverse items) :key #'ende-transcript-entry-kind)))
+         work reply)
+    (dolist (item items)
+      (let ((item-data (ende-transcript-entry-data item)))
+        (pcase (ende-transcript-entry-kind item)
+          ('text
+           (let* ((normalized (plist-get item-data :normalized))
+                  (text (ende-chat--assistant-text
+                         (if (eq item last-text) level (1+ level))
+                         question-id request-id
+                         (concat properties (ende-chat--normalized-response-properties normalized))
+                         normalized)))
+             (if (eq item last-text) (setq reply text) (push text work))))
+          ('tool-call
+           (push (ende-chat--tool-call-text
+                  (1+ level) request-id (plist-get item-data :call) properties) work))
+          ('opaque
+           (push (ende-chat--opaque-protocol-text
+                  (1+ level) request-id item-data properties) work)))))
+    (list :work (apply #'concat (nreverse work)) :reply reply
+          :reasoning (when (and final (plist-get data :thinking))
+                       (ende-chat--reasoning-text
+                        level question-id request-id properties (plist-get data :thinking))))))
+
+(defun ende-chat--render-transcript (job)
+  "Serialize JOB's completed records without reading a viewer or storing data."
+  (when-let* ((transcript (ende-job-transcript job)))
+    (let* ((instruction (ende-job-instruction job))
+           (level (plist-get instruction :response-level))
+           (question-id (plist-get instruction :question-id))
+           (request-id (plist-get instruction :request-id))
+           work reply reasoning)
+      (dolist (entry (ende-transcript-entries transcript))
+        (let ((data (ende-transcript-entry-data entry)))
+          (pcase (ende-transcript-entry-kind entry)
+            ((or 'summary 'progress)
+             (unless (string-blank-p (or (ende-transcript-entry-content entry) ""))
+               (push (if (eq (ende-transcript-entry-kind entry) 'summary)
+                         (ende-chat--reasoning-summary-text entry (1+ level))
+                       (concat (make-string (1+ level) ?*) " "
+                               (ende-chat--reasoning-summary-heading
+                                (concat (plist-get data :title) " — "
+                                        (ende-transcript-entry-content entry)))
+                               "\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n")) work)))
+            ('tool-result
+             (push (ende-chat--tool-result-text (1+ level) request-id (plist-get data :call)) work))
+            ('response
+             (when (eq (ende-transcript-entry-status entry) 'complete)
+               (let ((rendered (ende-chat--render-response-items job entry)))
+                 (unless (string-empty-p (plist-get rendered :work))
+                   (push (plist-get rendered :work) work))
+                 (when (plist-get rendered :reply)
+                   (setq reply (plist-get rendered :reply)
+                         reasoning (plist-get rendered :reasoning)))))))))
+      (when (or work reply)
+        (concat (when work (ende-chat--work-text level question-id request-id))
+                (apply #'concat (nreverse work)) reasoning reply)))))
 
 (defun ende-chat--prepare-response (job result level &optional final)
   "Prepare JOB's RESULT as normalized Org and ordered context parts at LEVEL.
@@ -3484,7 +3413,7 @@ FINAL includes retained tool images and trims compaction output."
              (setf (ende-job-instruction job) (plist-put instruction :generated-artifacts nil))
              prepared)))))))
 
-(defun ende-chat--apply-result (job result &optional prepared)
+(defun ende-chat--apply-compact-result (job result &optional prepared)
   "Persist JOB's final RESULT, reusing PREPARED output when available."
   (when (ende-job-current-p job)
     (condition-case failure
@@ -3493,40 +3422,13 @@ FINAL includes retained tool images and trims compaction output."
                (instruction (ende-job-instruction job))
                (question-id (plist-get instruction :question-id))
                (request-id (plist-get instruction :request-id))
-               (result-protocol-items (plist-get result :protocol-items))
-               (protocol-events
-                (ende-chat--protocol-item-events result-protocol-items))
-               (opaque-events
-                (cl-remove-if-not
-                 (lambda (event) (eq (plist-get event :type) 'opaque))
-                 protocol-events))
-               (opaque-items
-                (mapcar (lambda (event) (plist-get event :item)) opaque-events))
-               (protocol-items
-                (if opaque-events
-                    (cons (car result-protocol-items)
-                          (cl-remove-if
-                           (lambda (item) (memq item opaque-items))
-                           (cdr result-protocol-items)))
-                  result-protocol-items))
-               (result-properties
-                (ende-chat--result-properties job result))
-               (staged
-                (and (not compact)
-                     (progn
-                       (when opaque-events
-                         (ende-chat--stage-opaque-protocol-events
-                          job opaque-events result-properties))
-                       (ende-chat--staged-text job))))
-               (placeholder
-                (unless staged
-                  (ende-chat--resolve-request-destination job))))
-          (unless (or staged placeholder)
+               (protocol-items (plist-get result :protocol-items))
+               (result-properties (ende-chat--result-properties job result))
+               (placeholder (ende-chat--resolve-request-destination job)))
+          (unless placeholder
             (error "Chat response destination no longer exists"))
           (let* ((old-headline (cadr placeholder))
-                 (level (if staged
-                            (plist-get instruction :response-level)
-                          (org-element-property :level old-headline)))
+                 (level (org-element-property :level old-headline))
                  (prepared (or prepared (ende-chat--prepare-response job result level t)))
                  (normalized (plist-get prepared :normalized))
                  (reasoning-level (if compact (1+ level) level))
@@ -3675,17 +3577,8 @@ FINAL includes retained tool images and trims compaction output."
                                     (set-marker start-marker nil))
                                   (when end-marker
                                     (set-marker end-marker nil))))))))
-                    (if staged
-                        (progn
-                          (unless (ende-chat--staging-buffer job)
-                            (ende-chat--stage-agent-section job ""))
-                          (ende-chat--staging-append job response t)
-                          (ende-chat--commit-staged-transcript
-                           job (ende-chat--staged-text job)))
-                      (setq insertion-info
-                            (ende-chat--persist-ordinary-reply
-                             job response))
-                      (ende-chat--finish-request job insertion-info)))
+                    (setq insertion-info (ende-chat--persist-ordinary-reply job response))
+                    (ende-chat--finish-request job insertion-info))
                   (when-let* ((reasoning-marker
                                (plist-get insertion-info :reasoning)))
                     (with-current-buffer buffer
@@ -3702,6 +3595,24 @@ FINAL includes retained tool images and trims compaction output."
        (ende-job-fail job (ende--application-error failure))))))
 
 ;;;; Queue execution and commands
+
+(defun ende-chat--apply-result (job result &optional prepared)
+  "Finalize JOB's structured RESULT and commit its durable Org rendering."
+  (if (eq (ende-job-type job) 'chat-compact)
+      (ende-chat--apply-compact-result job result prepared)
+    (when (ende-job-current-p job)
+      (condition-case failure
+          (let* ((prepared (or prepared
+                               (ende-chat--prepare-response
+                                job result (plist-get (ende-job-instruction job) :response-level) t)))
+                 (transcript (ende-job-ensure-transcript job)))
+            (when (string-blank-p (plist-get (plist-get prepared :normalized) :content))
+              (error "Chat completion was empty"))
+            (ende-chat--record-response job result nil prepared t)
+            (ende-transcript-finish transcript 'completed)
+            (ende-chat--commit-transcript job (ende-chat--render-transcript job))
+            (ende-job-finish job result))
+        ((error quit) (ende-job-fail job (ende--application-error failure)))))))
 
 (defun ende-chat--compact-messages (document question destination source-fence)
   "Build compaction messages from QUESTION through DESTINATION.
@@ -3744,8 +3655,6 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
            (level (1+ (plist-get instruction :response-level)))
            (prepared (ende-chat--prepare-response job (or assistant-result '(:content "")) level))
            (guidance (ende-job-take-pending-guidance job))
-           (question-id (plist-get instruction :question-id))
-           (request-id (plist-get instruction :request-id))
            (calls
             (mapcar (lambda (_text)
                       (ende-chat--prepare-tool-call
@@ -3764,23 +3673,13 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                   :tool-calls normalized-calls
                   :protocol-items (plist-get assistant-result :protocol-items)))
            (messages (list assistant)))
-      (ende-chat--stage-agent-section
-       job
-       (ende-chat--assistant-protocol-text
-        level question-id request-id
-        (if assistant-result
-            (ende-chat--result-properties job assistant-result)
-          "")
-        (plist-get prepared :normalized) calls nil
-        (plist-get assistant-result :protocol-items)
-        (plist-get (ende-job-instruction job) :tool-store-file))
-       t)
+      (ende-chat--record-response job (or assistant-result '(:content "")) calls
+                                  prepared nil (null assistant-result))
       (dolist (entry (cl-mapcar #'cons calls guidance))
         (let* ((call (car entry))
                (text (cdr entry))
                (id (ende-tools-call-value call :id)))
-          (ende-chat--stage-agent-section
-           job (ende-chat--tool-result-text level request-id call text) t)
+          (ende-chat--record-tool-result job call text)
           (setq messages
                 (nconc messages
                        (list (list :role "tool" :tool-call-id id
@@ -3823,8 +3722,6 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
         (lambda (job result calls)
           (let* ((title-phase (eq (ende-job-request-phase job) 'title))
                  (instruction (ende-job-instruction job))
-                 (request-id (plist-get instruction :request-id))
-                 (question-id (plist-get instruction :question-id))
                  (level (1+ (plist-get instruction :response-level)))
                  (prepared (unless title-phase
                              (ende-chat--prepare-response job result level)))
@@ -3846,25 +3743,13 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                         (plist-get result :reasoning-content)
                         :protocol-items (plist-get result :protocol-items))))
             (unless title-phase
-              (ende-chat--stage-agent-section
-               job
-               (ende-chat--assistant-protocol-text
-                level question-id request-id
-                (ende-chat--result-properties job result)
-                (plist-get prepared :normalized) stored-calls nil
-                (plist-get result :protocol-items)
-                (plist-get instruction :tool-store-file))
-               t))
+              (ende-chat--record-response job result stored-calls prepared))
             (list :message assistant :calls stored-calls)))
         :tool-result-message
         (lambda (job call content)
-          (let* ((title-phase (eq (ende-job-request-phase job) 'title))
-                 (instruction (ende-job-instruction job))
-                 (level (1+ (plist-get instruction :response-level)))
-                 (request-id (plist-get instruction :request-id)))
+          (let ((title-phase (eq (ende-job-request-phase job) 'title)))
             (unless title-phase
-              (ende-chat--stage-agent-section
-               job (ende-chat--tool-result-text level request-id call content) t))
+              (ende-chat--record-tool-result job call content))
             (list :role "tool"
                   :tool-call-id (ende-tools-call-value call :id)
                   :content content)))
@@ -3980,17 +3865,12 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 
 (defun ende-chat--job-event (job event)
   "Accumulate provider summaries and retain failure markers for chat replies."
-  (when (and (eq (ende-job-type job) 'chat)
-             (not (eq (ende-job-request-phase job) 'title))
-             (eq (plist-get event :type) :reasoning-summary)
-             (ende-job-current-p job))
-    (ende-chat--handle-reasoning-summary job event))
   (when (memq (ende-job-type job) '(chat chat-compact))
     (pcase (plist-get event :type)
       ((or :error :cancelled :skipped)
        (if (and (eq (ende-job-type job) 'chat)
-                (ende-chat--staged-text job))
-           (ende-chat--materialize-staged-failure
+                (ende-chat--render-transcript job))
+           (ende-chat--materialize-failure
             job (plist-get event :error))
          (ende-chat--mark-failed job (plist-get event :error))))
       (:settled

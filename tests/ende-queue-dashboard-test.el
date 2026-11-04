@@ -336,7 +336,7 @@
 (ert-deftest ende-test/dashboard-retained-work-and-hooks-survive-two-reloads ()
   (save-window-excursion
     (ende-test--dashboard-reset)
-    (let ((ende--queue-suspended t) root child work dashboard source)
+    (let ((ende--queue-suspended t) root child work execution transcript dashboard source)
       (unwind-protect
           (with-temp-buffer
             (setq source (current-buffer))
@@ -344,8 +344,14 @@
             (setq root (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
             (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
             (setq child (ende-test--dashboard-child root "Retained work")
-                  work (ende-job-work-buffer child))
+                  execution (ende-job-owned-buffer child)
+                  transcript (ende-job-ensure-transcript child))
+            (should-not (ende-job-work-buffer child))
+            (setq work (ende-work-buffer-open child))
             (ende--job-settle root 'cancelled)
+            (should-not (buffer-live-p execution))
+            (should-not (ende-job-target child))
+            (should (buffer-live-p work))
             (setq dashboard (ende-queue-open))
             (dotimes (_ 2)
               (ende-reload)
@@ -363,14 +369,24 @@
                 (should (eq (key-binding (kbd "i")) #'ende-queue-ui-inject-guidance))
                 (should (memq (key-binding (kbd "v")) '(nil undefined)))
                 (should (memq (key-binding (kbd "d")) '(nil undefined))))
-              (dolist (observer '(ende-agent--work-event ende-chat--dispose-staging-buffer
+              (dolist (observer '(ende-chat--release-recovery ende-chat--job-event
                                    ende-queue-ui--job-event))
                 (should (= (cl-count observer ende-job-event-functions) 1)))
+              (dolist (observer '(ende-agent--work-event ende-chat--dispose-staging-buffer))
+                (should-not (memq observer ende-job-event-functions)))
               (should (= (cl-count #'ende-queue-ui--queue-event ende-queue-event-functions) 1))
               (should (buffer-live-p source)))
             (kill-buffer work)
+            (should-not (ende-job-work-buffer child))
+            (should (eq transcript (ende-job-transcript child)))
+            (should (eq child (ende-queue-retained-job-by-id (ende-job-id child))))
             (with-current-buffer dashboard
-              (should-error (ende-queue-ui-visit-agent-work) :type 'user-error))
+              (let ((recreated (ende-queue-ui-visit-agent-work)))
+                (should (buffer-live-p recreated))
+                (should-not (eq recreated work))
+                (should (eq recreated (ende-job-work-buffer child)))
+                (should (buffer-local-value 'buffer-read-only recreated))
+                (should (string-match-p "Retained work" (with-current-buffer recreated (buffer-string))))))
             (should (member "ende-queue-source.el"
                             (ende-reload--files default-directory))))
         (ende-test--dashboard-reset)))))
@@ -379,15 +395,17 @@
   (save-window-excursion
     (ende-test--dashboard-reset)
     (let ((ende--queue-suspended t) (ende-queue-finished-limit 0)
-          root child work dashboard terminal-events)
+          root child work execution dashboard terminal-events)
       (unwind-protect
           (with-temp-buffer
             (insert "source stays alive")
             (setq root (ende-enqueue (ende-test--dashboard-request ende-test--dashboard-profile)))
             (setf (ende-job-family-policy-frozen-p (ende-job-family root)) t)
             (setq child (ende-test--dashboard-child root "Child")
-                  work (ende-job-work-buffer child)
+                  execution (ende-job-owned-buffer child)
+                  work (ende-work-buffer-open child)
                   dashboard (ende-queue-open))
+            (ende-job-ensure-transcript root)
             (puthash (ende-job-id root) 'expanded ende-queue-ui--folds)
             (puthash (ende-job-id child) t ende-queue-ui--marked-ids)
             (with-current-buffer dashboard
@@ -401,6 +419,9 @@
               (ende--job-settle root 'cancelled))
             (should (= (length terminal-events) 2))
             (should-not (buffer-live-p work))
+            (should-not (buffer-live-p execution))
+            (should-not (ende-job-transcript root))
+            (should-not (ende-job-transcript child))
             (should-not (gethash (ende-job-id root) ende-queue-ui--folds))
             (should-not (gethash (ende-job-id child) ende-queue-ui--marked-ids))
             (with-current-buffer dashboard
