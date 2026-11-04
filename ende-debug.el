@@ -196,6 +196,7 @@ disabled."
                (stem (format "%04d" sequence))
                (directory ende-debug--session-directory)
                (started (float-time))
+               (session (plist-get profile :codex-session-id))
                (reasoning
                 (cl-loop for (key . value) in request-body
                          when (memq key '(:reasoning :reasoning_effort))
@@ -221,9 +222,9 @@ disabled."
                   ("reasoning_settings" . ,reasoning)
                   ("cache_key_supplied" . ,(if (ende-debug--request-field "prompt_cache_key" request-body)
                                                t json-false))
-                  ("session_fingerprint" . ,(when (plist-get profile :codex-session-id)
-                                              (secure-hash 'sha256
-                                                           (plist-get profile :codex-session-id))))
+                  ("session_fingerprint" . ,(when (and (stringp session)
+                                                      (not (string-empty-p session)))
+                                              (secure-hash 'sha256 session)))
                   ("request_settings" . ,(ende-debug--redact
                                            (ende-debug--request-settings request-body)))
                   ("endpoint" . ,(ende-debug--safe-endpoint endpoint))))
@@ -491,6 +492,23 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
   (if (ende-debug--same-json-field-p left right key)
       "unchanged" "changed"))
 
+(defun ende-debug--capture-identity (capture &optional session)
+  "Return CAPTURE's known job ID, or scoped session identity if SESSION."
+  (let ((metadata (plist-get capture :metadata)))
+    (if session
+        (let ((identity (mapcar (lambda (key)
+                                 (ende-protocol-json-get key metadata))
+                               '("provider" "transport" "endpoint"
+                                 "session_fingerprint"))))
+          (and (cl-every (lambda (value)
+                          (and (stringp value) (not (string-empty-p value))))
+                        identity)
+               identity))
+      (let ((job (ende-protocol-json-get "job_id" metadata)))
+        (and (or (numberp job)
+                 (and (stringp job) (not (string-empty-p job))))
+             job)))))
+
 (defun ende-debug--pair-report (previous current)
   "Return a concise structural comparison of PREVIOUS and CURRENT captures."
   (let* ((old-request (plist-get previous :request))
@@ -521,17 +539,31 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
           (ende-debug--common-byte-prefix-length
            (plist-get previous :bytes) (plist-get current :bytes)))
          (old-length (length (plist-get previous :bytes)))
-         (job (ende-protocol-json-get "job_id" new-meta)))
+         (old-job (ende-debug--capture-identity previous))
+         (new-job (ende-debug--capture-identity current))
+         (old-session (ende-debug--capture-identity previous t))
+         (new-session (ende-debug--capture-identity current t)))
     (concat
      (format "Request #%d -> #%d%s\n\n"
              (plist-get previous :sequence) (plist-get current :sequence)
-             (if job (format " (job %s)" job) ""))
+             (cond
+              ((and old-job new-job (equal old-job new-job))
+               (format " (job %s)" new-job))
+              ((or old-job new-job)
+               (format " (job %s -> job %s)"
+                       (or old-job "unknown") (or new-job "unknown")))
+              (t "")))
      (format "Previous cache: %s\nCurrent cache:  %s\n\n"
              (ende-debug--cache-summary previous)
              (ende-debug--cache-summary current))
      (format "Model:           %s\nReasoning:       %s\nTools:           %s\nInstructions:    %s\n"
              model reasoning tools
              (if instructions-changed "changed" "unchanged"))
+     (format "Session:         %s\n"
+             (cond
+              ((not (and old-session new-session)) "unknown")
+              ((equal old-session new-session) "unchanged")
+              (t "changed")))
      (if prefix-identical
          (format "Messages:        %d appended, previous prefix identical\n"
                  appended)
@@ -548,23 +580,33 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
        (concat "\nObserved: prompt-relevant request structure changed.\n"
                "This comparison does not establish whether that change caused a cache miss.\n\n")))))
 
-(defun ende-debug--capture-groups (captures)
-  "Group CAPTURES by Ende job ID, preserving per-job sequence order."
+(defun ende-debug--capture-groups (captures &optional session)
+  "Group CAPTURES by known job ID, preserving sequence order.
+When SESSION is non-nil, group by known provider-scoped session identity."
   (let (groups)
     (dolist (capture captures)
-      (let* ((metadata (plist-get capture :metadata))
-             (job (ende-protocol-json-get "job_id" metadata))
-             (group (cl-assoc job groups :test #'equal)))
-        (if group
-            (setcdr group (cons capture (cdr group)))
-          (push (cons job (list capture)) groups))))
+      (when-let* ((identity (ende-debug--capture-identity capture session)))
+        (let ((group (cl-assoc identity groups :test #'equal)))
+          (if group
+              (setcdr group (cons capture (cdr group)))
+            (push (cons identity (list capture)) groups)))))
     (dolist (group groups)
       (setcdr group (nreverse (cdr group))))
     (nreverse groups)))
 
 (defun ende-debug--format-report (directory captures)
   "Format a readable report for CAPTURES in DIRECTORY."
-  (let ((groups (ende-debug--capture-groups captures)))
+  (let (pairs)
+    (dolist (session '(nil t))
+      (dolist (group (ende-debug--capture-groups captures session))
+        (let ((requests (cdr group)))
+          (while (cdr requests)
+            (let ((old-job (ende-debug--capture-identity (car requests)))
+                  (new-job (ende-debug--capture-identity (cadr requests))))
+              (when (or (not session)
+                        (and old-job new-job (not (equal old-job new-job))))
+                (push (cons (car requests) (cadr requests)) pairs)))
+            (setq requests (cdr requests))))))
     (concat
      (format "Ende cache report\nSession: %s\n\n"
              (abbreviate-file-name directory))
@@ -584,19 +626,13 @@ Return (PREFIX-IDENTICAL APPENDED-COUNT)."
                    (* 100.0 (/ (float cached) input)) cached input reported)
          "\nWeighted cache reuse: not reported"))
      "\n\n"
-     (if (cl-some (lambda (group) (> (length (cdr group)) 1))
-                  groups)
-         (concat "Consecutive requests within each job:\n\n"
+     (if pairs
+         (concat "Consecutive requests within each job or known provider session:\n\n"
                  (mapconcat
-                  (lambda (group)
-                    (let ((requests (cdr group)) reports)
-                      (while (cdr requests)
-                        (push (ende-debug--pair-report
-                               (car requests) (cadr requests)) reports)
-                        (setq requests (cdr requests)))
-                      (mapconcat #'identity (nreverse reports) "")))
-                  groups ""))
-       "No consecutive requests in the same job to compare.\n"))))
+                  (lambda (pair)
+                    (ende-debug--pair-report (car pair) (cdr pair)))
+                  (nreverse pairs) ""))
+       "No consecutive requests with a known job or provider session to compare.\n"))))
 
 ;;;###autoload
 (defun ende-debug-cache-report ()

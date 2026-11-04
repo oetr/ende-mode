@@ -39,6 +39,23 @@
                   "synthetic" "https://example.test/v1")))
     (ende-debug-record-completion record 'success usage 200 nil)))
 
+(defun ende-debug-test--capture (sequence job fingerprint)
+  "Return a synthetic capture for SEQUENCE, JOB, and FINGERPRINT."
+  (list :sequence sequence :bytes "{\"input\":[]}"
+        :request (ende-protocol-json-read-string "{\"input\":[]}")
+        :metadata (ende-protocol-json-read-string
+                   (json-encode `((:job_id . ,job)
+                                  (:session_fingerprint . ,fingerprint)
+                                  (:provider . "test-provider")
+                                  (:transport . "test-transport")
+                                  (:endpoint . "https://example.test/v1"))))))
+
+(defun ende-debug-test--pair-headers (captures)
+  "Return comparison headings in the report for CAPTURES."
+  (cl-remove-if-not
+   (lambda (line) (string-prefix-p "Request #" line))
+   (split-string (ende-debug--format-report "/synthetic" captures) "\n" t)))
+
 (ert-deftest ende-test/debug-captures-exact-transport-body-without-altering-it ()
   (let ((directory (make-temp-file "ende-debug-fidelity-" t)))
     (unwind-protect
@@ -313,6 +330,8 @@
                      3))
           (should (string-match-p
                    "The provider cache outcome's cause is not determined" report))
+          (should (string-match-p
+                   "does not establish whether that change caused a cache miss" report))
           (let (opened-buffer)
             (cl-letf (((symbol-function 'pop-to-buffer)
                        (lambda (buffer &rest _) (setq opened-buffer buffer))))
@@ -323,6 +342,64 @@
                                       (buffer-string)))
               (should buffer-read-only))))
       (delete-directory directory t))))
+
+(ert-deftest ende-debug-cross-job-pairs-follow-interleaved-sessions ()
+  (let ((captures (list (ende-debug-test--capture 7 11 "session-a")
+                        (ende-debug-test--capture 8 12 "session-a")
+                        (ende-debug-test--capture 9 21 "session-b")
+                        (ende-debug-test--capture 10 12 "session-a")
+                        (ende-debug-test--capture 11 22 "session-b")
+                        (ende-debug-test--capture 12 13 "session-a"))))
+    (should (equal (sort (ende-debug-test--pair-headers captures) #'string<)
+                   (sort (list "Request #7 -> #8 (job 11 -> job 12)"
+                               "Request #8 -> #10 (job 12)"
+                               "Request #9 -> #11 (job 21 -> job 22)"
+                               "Request #10 -> #12 (job 12 -> job 13)")
+                         #'string<)))))
+
+(ert-deftest ende-debug-cross-job-pairs-require-known-scoped-identities ()
+  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint"))
+    (let ((previous (ende-debug-test--capture 7 11 "session"))
+          (current (ende-debug-test--capture 8 12 "session")))
+      (puthash key "different" (plist-get current :metadata))
+      (should-not (ende-debug-test--pair-headers (list previous current)))))
+  (dolist (key '("provider" "transport" "endpoint" "session_fingerprint" "job_id"))
+    (dolist (unknown '(absent nil ""))
+      (let ((captures (list (ende-debug-test--capture 7 11 "session")
+                            (ende-debug-test--capture 8 12 "session"))))
+        (dolist (capture captures)
+          (if (eq unknown 'absent)
+              (remhash key (plist-get capture :metadata))
+            (puthash key unknown (plist-get capture :metadata))))
+        (should-not (ende-debug-test--pair-headers captures)))))
+  (let ((captures (list (ende-debug-test--capture 7 nil nil)
+                        (ende-debug-test--capture 8 nil nil))))
+    (dolist (capture captures)
+      (setf (plist-get capture :metadata) nil))
+    (should-not (ende-debug-test--pair-headers captures)))
+  (should-not (ende-debug-test--pair-headers
+               (list (ende-debug-test--capture 7 11 "session")
+                     (ende-debug-test--capture 8 nil "session")
+                     (ende-debug-test--capture 9 12 "session")))))
+
+(ert-deftest ende-debug-within-job-pairs-survive-session-changes ()
+  (let* ((captures (list (ende-debug-test--capture 1 11 "session-a")
+                         (ende-debug-test--capture 2 22 "session-b")
+                         (ende-debug-test--capture 3 11 "changed-session")
+                         (ende-debug-test--capture 4 11 nil)
+                         (ende-debug-test--capture 5 11 "")
+                         (ende-debug-test--capture 6 11 nil)))
+         (old-metadata (plist-get (car (last captures)) :metadata)))
+    (dolist (key '("provider" "transport" "endpoint" "session_fingerprint"))
+      (remhash key old-metadata))
+    (should (equal (ende-debug-test--pair-headers captures)
+                   '("Request #1 -> #3 (job 11)"
+                     "Request #3 -> #4 (job 11)"
+                     "Request #4 -> #5 (job 11)"
+                     "Request #5 -> #6 (job 11)")))
+    (let ((report (ende-debug--format-report "/synthetic" captures)))
+      (should (string-match-p "Session:         changed" report))
+      (should (string-match-p "Session:         unknown" report)))))
 
 (ert-deftest ende-debug-private-replay-and-cache-metadata ()
   (let* ((directory (make-temp-file "ende-debug-private-" t))
@@ -461,6 +538,11 @@
           (should (equal (gethash "session_fingerprint" (ende-debug-test--read-meta directory 1))
                          (gethash "session_fingerprint" (ende-debug-test--read-meta directory 2))))
           (should (stringp (gethash "session_fingerprint" (ende-debug-test--read-meta directory 1))))
+          (dolist (session '(nil ""))
+            (ende-debug-record-request
+             (json-encode body) body messages (list :codex-session-id session) "test" nil)
+            (should-not (gethash "session_fingerprint"
+                                 (ende-debug-test--read-meta directory ende-debug--sequence))))
           (dolist (file (directory-files directory t "^[^.].*"))
             (let ((text (ende-debug-test--read-bytes file)))
               (dolist (secret '("secret-cache" "secret-session" "secret-request-auth"
