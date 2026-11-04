@@ -16,10 +16,6 @@
                (:constructor ende-work-buffer--make-section))
   key entry parent level start body-start body-end end heading body)
 
-(defconst ende-work-buffer--separator
-  "* ────────────────────────────────────────\n"
-  "A sibling heading, so even a folded final section has a visible divider.")
-
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
 (defvar-local ende-work-buffer--job nil)
@@ -239,18 +235,13 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
                           (t (point-max))))
              (body-start (+ start (length heading)))
              (end (+ body-start (length body))))
-        (ende-work-buffer--splice start start
-                                  (concat heading body (unless parent ende-work-buffer--separator))
-                                  parent)
+        (ende-work-buffer--splice start start (concat heading body) parent)
         (setq section (ende-work-buffer--make-section
                        :key key :parent parent :level level
                        :start (copy-marker start t) :body-start (copy-marker body-start)
                        :body-end (copy-marker end) :end (copy-marker end)))
         (puthash key section ende-work-buffer--sections)
-        (when folded (push section folds))
-        (unless parent
-          (put-text-property end (+ end (length ende-work-buffer--separator))
-                             'ende-work-buffer-separator t))))
+        (when folded (push section folds))))
     (setf (ende-work-buffer--section-entry section) entry
           (ende-work-buffer--section-heading section) heading
           (ende-work-buffer--section-body section) body)
