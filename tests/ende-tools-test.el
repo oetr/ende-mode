@@ -155,7 +155,6 @@
                 (setq attributes (process-attributes pid))
                 (not (equal (cdr (assq 'state attributes)) "Z")))
       (accept-process-output nil 0.05))
-    (setq attributes (process-attributes pid))
     (should (or (null attributes)
                 (equal (cdr (assq 'state attributes)) "Z")))))
 
