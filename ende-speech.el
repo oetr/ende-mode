@@ -1,9 +1,27 @@
 ;;; ende-speech.el --- Local realtime speech dictation -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Peter
-;; Author: Peter
+;; Copyright (C) 2026 Peter Samarin
+;;
+;; Author: Peter Samarin <peter.samarin@gmail.com>
+;; Maintainer: Peter Samarin <peter.samarin@gmail.com>
 ;; Version: 0.3
-;; Keywords: convenience, speech
+;; Keywords: convenience, tools
+;; URL: https://github.com/oetr/ende-mode
+;; SPDX-License-Identifier: AGPL-3.0-only
+
+;; This file is part of Ende.
+
+;; Ende is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as published
+;; by the Free Software Foundation, version 3 of the License.
+;;
+;; Ende is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU Affero General Public License for more details.
+;;
+;; You should have received a copy of the GNU Affero General Public License
+;; along with Ende.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -46,8 +64,6 @@
   "Port of the realtime speech server."
   :type 'integer
   :group 'ende-speech)
-
-;;; Code:
 
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
