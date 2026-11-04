@@ -56,16 +56,19 @@
          (call (list :id (format "benchmark-call-%d" index)
                      :name "read_file"
                      :arguments (format "{\"path\":\"src/%d.el\"}" index)
-                     :execution-id (format "benchmark-execution-%d" index))))
-    (concat
-     (replace-regexp-in-string
-      ":ENDE_CHAT_STATE: pending\n" ""
-      (ende-chat--work-text 2 question-id request-id))
-     (ende-chat--assistant-protocol-text
-      3 question-id request-id "" '(:content "Inspecting a source file.")
-      (list call))
-     (ende-chat--assistant-text
-      2 question-id request-id "" '(:content "The source check is incomplete.")))))
+                     :execution-id (format "benchmark-execution-%d" index)))
+         (job (ende--make-job
+               :type 'chat :profile ende-chat-benchmark--profile
+               :instruction (list :response-level 2 :question-id question-id
+                                  :request-id request-id)))
+         (work '(:content "Inspecting a source file."))
+         (reply '(:content "The source check is incomplete.")))
+    (cl-letf (((symbol-function 'ende-chat--checkpoint-transcript) #'ignore))
+      (ende-chat--record-response job work (list call) (list :normalized work))
+      (ende-transcript-begin-response (ende-job-transcript job))
+      (ende-chat--record-response job reply nil (list :normalized reply) t))
+    (replace-regexp-in-string
+     ":ENDE_CHAT_STATE: pending\n" "" (ende-chat--render-transcript job))))
 
 (defun ende-chat-benchmark--transcript (section-count)
   "Return a synthetic Org transcript with SECTION-COUNT exchanges."

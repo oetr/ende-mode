@@ -2107,7 +2107,7 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
     file))
 
 (defun ende-chat--checkpoint-transcript (job)
-  "Atomically checkpoint JOB's completed structured transcript."
+  "Atomically checkpoint JOB's completed records as a rendered transcript."
   (let ((transcript (ende-chat--render-transcript job)))
     (when transcript
       (let* ((file (ende-chat--recovery-file job))
@@ -2166,7 +2166,7 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
            'snapshot))))))
 
 (defun ende-chat--recovery-files ()
-  "Return persistent staged-transcript snapshots."
+  "Return persistent rendered-transcript snapshots."
   (let ((directory (expand-file-name "ende/chat-recovery/"
                                      user-emacs-directory)))
     (when (file-directory-p directory)
@@ -2706,7 +2706,7 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
 
 (defun ende-chat--commit-work-transcript
     (job transcript &optional allow-edited)
-  "Replace JOB's pending request with complete staged TRANSCRIPT atomically.
+  "Replace JOB's pending request with rendered TRANSCRIPT atomically.
 When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
   (let* ((buffer (ende-target-buffer (ende-job-target job)))
          (instruction (ende-job-instruction job))
@@ -2719,7 +2719,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
          (reasoning-marker nil))
     (unless (and (buffer-live-p buffer) (stringp transcript)
                  (not (string-empty-p transcript)))
-      (error "Staged agent transcript is unavailable"))
+      (error "Rendered agent transcript is unavailable"))
     (unwind-protect
         (with-current-buffer buffer
           (save-excursion
@@ -2765,7 +2765,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 					 (equal (ende-chat--property
 						 document work :state)
 						"pending"))
-                              (error "Malformed staged Agent: Work"))
+                              (error "Malformed rendered Agent: Work"))
                             (goto-char (org-element-property :begin work))
                             (org-entry-delete nil ende-chat-state-property)
                             (let* ((updated
@@ -2822,7 +2822,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
                                                       "failed"))
                                            (null (ende-chat--property
                                                   updated reply :visibility)))
-				(error "Malformed staged final Agent: Reply"))
+				(error "Malformed rendered final Agent: Reply"))
                               (unless (<= (length reasoning) 1)
 				(error "Multiple reasoning sections for chat request %s"
                                        request-id))
@@ -2844,7 +2844,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
                                               (org-element-property :begin section))
 					   (< (org-element-property :begin section)
                                               (org-element-property :begin reply)))
-                                    (error "Malformed staged Agent: Reasoning"))))
+                                    (error "Malformed rendered Agent: Reasoning"))))
                               (setq work-marker
                                     (copy-marker
                                      (org-element-property :begin updated-work))
@@ -3130,93 +3130,7 @@ OPTIONS are passed to `json-serialize'."
             result-properties
             ":END:\n\n")))
 
-(defun ende-chat--protocol-event-text
-    (event level question-id request-id properties calls pending)
-  "Render one assistant protocol EVENT."
-  (pcase (plist-get event :type)
-    ('text
-     (let* ((part (ende-chat--normalize-response
-                   (plist-get event :text) level t))
-            (content (plist-get part :content))
-            (part-properties
-             (concat properties
-                     (ende-chat--normalized-response-properties part))))
-       (unless (string-blank-p content)
-         (ende-chat--assistant-text
-          level question-id request-id
-          (concat part-properties
-                  (when pending
-                    (ende-chat--response-property
-                     ende-chat-state-property "pending")))
-          part))))
-    ('opaque
-     (ende-chat--opaque-protocol-text
-      level request-id event properties))
-    ('tool-call
-     (when-let* ((call (cl-find
-                        (plist-get event :id) calls
-                        :key (lambda (entry) (ende-tools-call-value entry :id))
-                        :test #'equal)))
-       (ende-chat--tool-call-text level request-id call properties)))))
-
-(defun ende-chat--protocol-events-simple-p (events)
-  "Return non-nil when EVENTS are linear text followed by tool calls."
-  (let ((after-call nil)
-        (simple t))
-    (dolist (event events)
-      (pcase (plist-get event :type)
-        ('opaque (setq simple nil))
-        ('tool-call (setq after-call t))
-        ('text (when after-call (setq simple nil)))))
-    simple))
-
-(defun ende-chat--assistant-protocol-text
-    (level question-id request-id result-properties normalized calls
-           &optional pending protocol-items _store-file)
-  "Render ordered assistant PROTOCOL-ITEMS and their tool CALLS."
-  (let* ((content (plist-get normalized :content))
-         (events (ende-transcript-protocol-events protocol-items))
-         (properties result-properties)
-         (fallback-properties
-          (concat properties
-                  (unless (string-match-p
-                           (concat ":" ende-chat-content-headline-shift-property ":\\|:"
-                                   ende-chat-content-synthetic-end-property ":")
-                           properties)
-                    (ende-chat--normalized-response-properties normalized)))))
-    (if (or (null events) (ende-chat--protocol-events-simple-p events))
-        (concat
-         (when (or (null calls)
-                   (and (stringp content) (not (string-blank-p content))))
-           (ende-chat--assistant-text
-            level question-id request-id
-            (concat fallback-properties
-                    (when pending
-                      (ende-chat--response-property ende-chat-state-property "pending")))
-            normalized))
-         (mapconcat (lambda (call)
-                      (ende-chat--tool-call-text
-                       level request-id call fallback-properties))
-                    calls ""))
-      (concat
-       (mapconcat (lambda (event)
-                    (or (ende-chat--protocol-event-text
-                         event level question-id request-id properties calls
-                         pending)
-                        ""))
-                  events "")
-       (mapconcat
-        (lambda (call)
-          (unless (cl-some
-                   (lambda (event)
-                     (and (eq (plist-get event :type) 'tool-call)
-                          (equal (plist-get event :id)
-                                 (ende-tools-call-value call :id))))
-                   events)
-            (ende-chat--tool-call-text level request-id call properties)))
-        calls "")))))
-
-(defun ende-chat--tool-result-text (level request-id call &optional _result)
+(defun ende-chat--tool-result-text (level request-id call)
   "Render CALL's already stored result as a compact sibling reference."
   (let ((execution-id (ende-tools-call-value call :execution-id))
         (name (ende-tools-call-value call :name))
@@ -3600,15 +3514,13 @@ FINAL includes retained tool images and trims compaction output."
              prepared)))))))
 
 (defun ende-chat--apply-compact-result (job result &optional prepared)
-  "Persist JOB's final RESULT, reusing PREPARED output when available."
+  "Persist JOB's compaction RESULT, reusing PREPARED output when available."
   (when (ende-job-current-p job)
     (condition-case failure
-        (let* ((compact (eq (ende-job-type job) 'chat-compact))
-               (thinking (and (listp result) (plist-get result :thinking)))
+        (let* ((thinking (and (listp result) (plist-get result :thinking)))
                (instruction (ende-job-instruction job))
                (question-id (plist-get instruction :question-id))
                (request-id (plist-get instruction :request-id))
-               (protocol-items (plist-get result :protocol-items))
                (result-properties (ende-chat--result-properties job result))
                (placeholder (ende-chat--resolve-request-destination job)))
           (unless placeholder
@@ -3617,154 +3529,140 @@ FINAL includes retained tool images and trims compaction output."
                  (level (org-element-property :level old-headline))
                  (prepared (or prepared (ende-chat--prepare-response job result level t)))
                  (normalized (plist-get prepared :normalized))
-                 (reasoning-level (if compact (1+ level) level))
                  (normalized-thinking
                   (and (stringp thinking)
                        (not (string-blank-p thinking))
-                       (ende-chat--normalize-response thinking reasoning-level)))
+                       (ende-chat--normalize-response thinking (1+ level))))
                  (reasoning
                   (and normalized-thinking
                        (ende-chat--reasoning-text
-                        reasoning-level question-id request-id result-properties
+                        (1+ level) question-id request-id result-properties
                         normalized-thinking)))
                  (answer
-                  (if compact
-                      (ende-chat--assistant-text
-                       level question-id request-id result-properties
-                       normalized t)
-                    (ende-chat--assistant-protocol-text
-                     level question-id request-id result-properties normalized nil nil
-                     protocol-items
-                     (plist-get instruction :tool-store-file))))
-                 (response (if compact
-                               (concat answer reasoning)
-                             (concat reasoning answer)))
+                  (ende-chat--assistant-text
+                   level question-id request-id result-properties normalized t))
+                 (response (concat answer reasoning))
                  (buffer (ende-target-buffer (ende-job-target job)))
-                 (question-pair
-                  (when compact (ende-chat--marked-question-document job)))
+                 (question-pair (ende-chat--marked-question-document job))
                  (question-document (car question-pair))
                  (question (cadr question-pair))
                  (insertion-info nil))
             (when (string-blank-p (plist-get normalized :content))
               (error "Chat completion was empty"))
-            (when (and compact
-                       (not (plist-get instruction :source-fence))
+            (when (and (not (plist-get instruction :source-fence))
                        (null question))
               (error "Chat question no longer exists"))
             (unwind-protect
                 (progn
-                  (if compact
-                      (with-current-buffer buffer
-                        (save-excursion
-                          (save-restriction
-                            (widen)
-                            (atomic-change-group
-                              (let ((start-marker nil)
-                                    (end-marker nil)
-                                    (destination-marker
-                                     (ende-target-cursor-marker
-                                      (ende-job-target job))))
-                                (unwind-protect
-                                    (progn
-                                      (when (and question
-                                                 (not (plist-get instruction
-                                                                 :source-fence)))
-                                        (ende-chat--finish-compact-instructions
-                                         question-document question job))
-                                      (let* ((pending-pair
-                                              (ende-chat--adjacent-request-header
-                                               buffer destination-marker
-                                               request-id))
-                                             (pending-document
-                                              (car pending-pair))
-                                             (pending (cadr pending-pair))
-                                             (begin (and pending
-                                                         (org-element-property
-                                                          :begin pending)))
-                                             (old-start (and begin
-                                                             (copy-marker begin t)))
-                                             (old-end (and begin
-                                                           (copy-marker
-                                                            (save-excursion
-                                                              (goto-char begin)
-                                                              (org-end-of-subtree t t)
-                                                              (point))
-                                                            t))))
-                                        (unless (and pending
-                                                     (equal
-                                                      (ende-chat--property
-                                                       pending-document pending
-                                                       :request-id)
-                                                      request-id)
-                                                     (equal
-                                                      (ende-chat--property
-                                                       pending-document pending
-                                                       :state)
-                                                      "pending"))
-                                          (error "Chat response destination no longer exists"))
-                                        (unwind-protect
-                                            (progn
-                                              ;; Insert the response first and
-                                              ;; delete the old fence second.
-                                              ;; A marker sitting exactly on the
-                                              ;; old fence's end boundary (the
-                                              ;; next queued request's
-                                              ;; destination) then lands on the
-                                              ;; new fence start rather than on
-                                              ;; the deletion start.
-                                              (goto-char begin)
-                                              (set-marker destination-marker
-                                                          begin buffer)
-                                              (setq start-marker
-                                                    (copy-marker begin))
-                                              (insert response)
-                                              (setq end-marker
-                                                    (copy-marker (point)))
-                                              (delete-region old-start old-end))
-                                          (when old-start
-                                            (set-marker old-start nil))
-                                          (when old-end
-                                            (set-marker old-end nil))))
-                                      (ende-chat--hide-control-drawers-in-region
-                                       start-marker end-marker)
-                                      (let* ((updated-response
-                                              (ende-chat--build-document-in-region
-                                               start-marker end-marker))
-                                             (reasoning-headlines
-                                              (cl-remove-if-not
-                                               (lambda (headline)
-                                                 (and
-                                                  (equal
+                  (with-current-buffer buffer
+                    (save-excursion
+                      (save-restriction
+                        (widen)
+                        (atomic-change-group
+                          (let ((start-marker nil)
+                                (end-marker nil)
+                                (destination-marker
+                                 (ende-target-cursor-marker
+                                  (ende-job-target job))))
+                            (unwind-protect
+                                (progn
+                                  (when (and question
+                                             (not (plist-get instruction
+                                                             :source-fence)))
+                                    (ende-chat--finish-compact-instructions
+                                     question-document question job))
+                                  (let* ((pending-pair
+                                          (ende-chat--adjacent-request-header
+                                           buffer destination-marker
+                                           request-id))
+                                         (pending-document
+                                          (car pending-pair))
+                                         (pending (cadr pending-pair))
+                                         (begin (and pending
+                                                     (org-element-property
+                                                      :begin pending)))
+                                         (old-start (and begin
+                                                         (copy-marker begin t)))
+                                         (old-end (and begin
+                                                       (copy-marker
+                                                        (save-excursion
+                                                          (goto-char begin)
+                                                          (org-end-of-subtree t t)
+                                                          (point))
+                                                        t))))
+                                    (unless (and pending
+                                                 (equal
+                                                  (ende-chat--property
+                                                   pending-document pending
+                                                   :request-id)
+                                                  request-id)
+                                                 (equal
+                                                  (ende-chat--property
+                                                   pending-document pending
+                                                   :state)
+                                                  "pending"))
+                                      (error "Chat response destination no longer exists"))
+                                    (unwind-protect
+                                        (progn
+                                          ;; Insert the response first and
+                                          ;; delete the old fence second.
+                                          ;; A marker sitting exactly on the
+                                          ;; old fence's end boundary (the
+                                          ;; next queued request's
+                                          ;; destination) then lands on the
+                                          ;; new fence start rather than on
+                                          ;; the deletion start.
+                                          (goto-char begin)
+                                          (set-marker destination-marker
+                                                      begin buffer)
+                                          (setq start-marker
+                                                (copy-marker begin))
+                                          (insert response)
+                                          (setq end-marker
+                                                (copy-marker (point)))
+                                          (delete-region old-start old-end))
+                                      (when old-start
+                                        (set-marker old-start nil))
+                                      (when old-end
+                                        (set-marker old-end nil))))
+                                  (ende-chat--hide-control-drawers-in-region
+                                   start-marker end-marker)
+                                  (let* ((updated-response
+                                          (ende-chat--build-document-in-region
+                                           start-marker end-marker))
+                                         (reasoning-headlines
+                                          (cl-remove-if-not
+                                           (lambda (headline)
+                                             (and
+                                              (equal
+                                               (org-element-property
+                                                :raw-value headline)
+                                               "Agent: Reasoning")
+                                              (equal
+                                               (ende-chat--property
+                                                updated-response headline
+                                                :reasoning-for)
+                                               request-id)))
+                                           (ende-chat--document-headlines
+                                            updated-response))))
+                                    (unless (<= (length reasoning-headlines) 1)
+                                      (error "Multiple reasoning sections for chat request %s"
+                                             request-id))
+                                    (setq insertion-info
+                                          (list :section-start
+                                                (copy-marker start-marker)
+                                                :section-end
+                                                (copy-marker end-marker)
+                                                :reasoning
+                                                (when reasoning-headlines
+                                                  (copy-marker
                                                    (org-element-property
-                                                    :raw-value headline)
-                                                   "Agent: Reasoning")
-                                                  (equal
-                                                   (ende-chat--property
-                                                    updated-response headline
-                                                    :reasoning-for)
-                                                   request-id)))
-                                               (ende-chat--document-headlines
-                                                updated-response))))
-                                        (unless (<= (length reasoning-headlines) 1)
-                                          (error "Multiple reasoning sections for chat request %s"
-                                                 request-id))
-                                        (setq insertion-info
-                                              (list :section-start
-                                                    (copy-marker start-marker)
-                                                    :section-end
-                                                    (copy-marker end-marker)
-                                                    :reasoning
-                                                    (when reasoning-headlines
-                                                      (copy-marker
-                                                       (org-element-property
-                                                        :begin
-                                                        (car reasoning-headlines))))))))
-                                  (when start-marker
-                                    (set-marker start-marker nil))
-                                  (when end-marker
-                                    (set-marker end-marker nil))))))))
-                    (setq insertion-info (ende-chat--persist-ordinary-reply job response))
-                    (ende-chat--finish-request job insertion-info))
+                                                    :begin
+                                                    (car reasoning-headlines))))))))
+                              (when start-marker
+                                (set-marker start-marker nil))
+                              (when end-marker
+                                (set-marker end-marker nil))))))))
                   (when-let* ((reasoning-marker
                                (plist-get insertion-info :reasoning)))
                     (with-current-buffer buffer

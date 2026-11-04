@@ -1206,44 +1206,27 @@
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-recovery-safe-" t))
          (user-emacs-directory directory)
-         (recovery-directory (expand-file-name "ende/chat-recovery/" directory))
          (file nil))
     (unwind-protect
-        (progn
-          (make-directory recovery-directory t)
-          (ende-test--with-buffer
-           "* Root\n** Question\nAsk\n"
-           (org-mode)
-           (ende-test--chat-goto "** Question")
-           (let* ((job (ende-ask))
-                  (instruction (ende-job-instruction job))
-                  (request-id (plist-get instruction :request-id))
-                  (question-id (plist-get instruction :question-id))
-                  (transcript
-                   (concat
-                    (ende-chat--work-text 2 question-id request-id)
-                    (ende-chat--assistant-protocol-text
-                     3 question-id request-id "" '(:content "Recovered turn")
-                     nil)))
-                  (metadata
-                   (list :request-id request-id :question-id question-id
-                         :source-buffer (buffer-name))))
-             (setq file (expand-file-name (concat request-id ".org")
-                                          recovery-directory))
-             (with-temp-file file
-               (insert "# ENDE_CHAT_RECOVERY: "
-                       (prin1-to-string metadata) "\n" transcript))
-             (cl-letf (((symbol-function 'completing-read)
-                        (lambda (&rest _) file)))
-               (ende-chat-recover-work))
-             (should (eq (ende-job-state job) 'running))
-             (should (string-match-p "Recovered turn" (buffer-string)))
-             (should-not (file-exists-p file))
-             (let* ((document (ende-chat--build-document))
-                    (reply (ende-chat--request-state-headline
-                            document request-id "failed")))
-               (should reply))
-             (ende-job-fail job "test cleanup"))))
+        (ende-test--with-buffer
+         "* Root\n** Question\nAsk\n"
+         (org-mode)
+         (ende-test--chat-goto "** Question")
+         (let* ((job (ende-ask))
+                (request-id (plist-get (ende-job-instruction job) :request-id)))
+           (ende-chat--record-response job '(:content "Recovered turn") nil)
+           (setq file (plist-get (ende-job-instruction job) :recovery-file))
+           (cl-letf (((symbol-function 'completing-read)
+                      (lambda (&rest _) file)))
+             (ende-chat-recover-work))
+           (should (eq (ende-job-state job) 'running))
+           (should (string-match-p "Recovered turn" (buffer-string)))
+           (should-not (file-exists-p file))
+           (let* ((document (ende-chat--build-document))
+                  (reply (ende-chat--request-state-headline
+                          document request-id "failed")))
+             (should reply))
+           (ende-job-fail job "test cleanup")))
       (delete-directory directory t))))
 
 (ert-deftest ende-test/chat-recovery-opens-an-unvisited-source-file ()
@@ -1258,12 +1241,15 @@
          (recovery-file
           (expand-file-name (concat request-id ".org") recovery-directory))
          (source-buffer nil)
+         (job (ende--make-job
+               :type 'chat
+               :instruction (list :response-level 2 :question-id question-id
+                                  :request-id request-id)))
+         (result '(:content "Recovered after restart"))
          (transcript
-          (concat
-           (ende-chat--work-text 2 question-id request-id)
-           (ende-chat--assistant-protocol-text
-            3 question-id request-id "" '(:content "Recovered after restart")
-            nil))))
+          (cl-letf (((symbol-function 'ende-chat--checkpoint-transcript) #'ignore))
+            (ende-chat--record-response job result nil (list :normalized result))
+            (ende-chat--render-transcript job))))
     (unwind-protect
         (progn
           (make-directory recovery-directory t)
@@ -1367,7 +1353,9 @@
              (ende-llm-function
               (ende-test--fake-llm
                '((:content "* Facts\nSummary"
-			   :thinking "Plan")) t)))
+			   :thinking "Plan"
+                   :usage (:input_tokens 17 :output_tokens 9
+                           :input_tokens_details (:cached_tokens 4)))) t)))
         (ende-test--with-buffer "* Topic\nEarlier conversation\n"
 				(org-mode)
 				(goto-char (point-max))
@@ -1412,10 +1400,16 @@
 				      (should (equal (org-element-property :raw-value fence)
 						     "Agent: Context Fence"))
 				      (should (eq (ende-chat--parent document reasoning) fence))
+				      (should (= (org-element-property :level reasoning) (1+ level)))
 				      (should-not (ende-chat--context-fence-p document reasoning))
-				      (should (equal (ende-test--chat-headline-property
-						      fence ende-chat-model-property)
-						     "compact-model"))
+                                      (dolist (section (list fence reasoning))
+                                        (dolist (field `((,ende-chat-model-property . "compact-model")
+                                                         (,ende-chat-input-tokens-property . "17")
+                                                         (,ende-chat-output-tokens-property . "9")
+                                                         (,ende-chat-cached-tokens-property . "4")))
+                                          (should (equal (ende-test--chat-headline-property
+                                                          section (car field))
+                                                         (cdr field)))))
 				      (if (and (string-empty-p title) (string-empty-p body)
 					       (not late-note))
 					  (should-not question)
@@ -1835,15 +1829,19 @@
          (ende-test--fake-llm '("Answer"))))
     (with-temp-buffer
       (org-mode)
-      (insert "* Root\n** Original question\nAsk.\n"
-              (ende-chat--work-text 2 "original-question" "original-request")
-              (ende-chat--assistant-protocol-text
-               3 "original-question" "original-request" ""
-               '(:content "Working.\n**** Work detail\nGenerated detail.") nil)
-              (ende-chat--assistant-text
-               2 "original-question" "original-request" ""
-               '(:content "Answer.\n*** Reply detail\nGenerated detail."))
-              "** \nA new question.\n")
+      (let ((job (ende--make-job
+                  :type 'chat
+                  :instruction '(:response-level 2 :question-id "original-question"
+                                 :request-id "original-request")))
+            (work '(:content "Working.\n**** Work detail\nGenerated detail."))
+            (reply '(:content "Answer.\n*** Reply detail\nGenerated detail.")))
+        (cl-letf (((symbol-function 'ende-chat--checkpoint-transcript) #'ignore))
+          (ende-chat--record-response job work nil (list :normalized work))
+          (ende-transcript-begin-response (ende-job-transcript job))
+          (ende-chat--record-response job reply nil (list :normalized reply) t))
+        (insert "* Root\n** Original question\nAsk.\n"
+                (ende-chat--render-transcript job)
+                "** \nA new question.\n"))
       (ende-test--chat-goto "** Agent: Work")
       (org-entry-delete nil ende-chat-state-property)
       (ende-test--chat-goto "*** Reply detail")
