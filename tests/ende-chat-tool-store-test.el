@@ -13,18 +13,26 @@
          (request-id "request-tool-store")
          (calls (mapcar (lambda (entry)
                           (ende-chat--prepare-tool-call (car entry)))
-                        entries)))
-    (insert (ende-chat--work-text 2 question-id request-id)
-            (ende-chat--assistant-protocol-text
-             3 question-id request-id ""
-             (or normalized '(:content "Checking both sources."))
-             calls))
-    (cl-mapc (lambda (call entry)
-               (insert (ende-chat--tool-result-text
-                        3 request-id call (cdr entry))))
-             calls entries)
-    (insert (ende-chat--assistant-text
-             2 question-id request-id "" '(:content "Final stored answer.")))
+                        entries))
+         (normalized (or normalized '(:content "Checking both sources.")))
+         (job (ende--make-job
+               :type 'chat
+               :target (ende-target-create :buffer (current-buffer)
+                                           :review-policy 'ignore)
+               :instruction (list :response-level 2 :question-id question-id
+                                  :request-id request-id
+                                  :tool-store-file (ende-tool-store--filename)))))
+    (cl-letf (((symbol-function 'ende-chat--checkpoint-transcript) #'ignore))
+      (ende-chat--record-response
+       job (list :content (plist-get normalized :content)) calls
+       (list :normalized normalized))
+      (cl-mapc (lambda (call entry)
+                 (ende-chat--record-tool-result job call (cdr entry)))
+               calls entries)
+      (ende-transcript-begin-response (ende-job-transcript job))
+      (ende-chat--record-response
+       job '(:content "Final stored answer.") nil nil t))
+    (insert (ende-chat--render-transcript job))
     (save-excursion
       (goto-char (point-min))
       (re-search-forward "^\\*\\* Agent: Work")
@@ -591,20 +599,21 @@
                (call-b (ende-chat--prepare-tool-call
                         '(:id "provider-B" :name "read_file"
                           :arguments "{\"path\":\"b.el\"}")))
-               (call-a-text (ende-chat--tool-call-text 3 request-id call-a))
-               (result-a-text (ende-chat--tool-result-text
-                               3 request-id call-a "RESULT_A")))
+               (call-a-text (ende-chat--tool-call-text 3 request-id call-a)))
+          (ende-chat--store-tool-result call-a "RESULT_A")
+          (ende-chat--store-tool-result call-b "RESULT_B")
           (insert (ende-chat--work-text 2 question-id request-id)
-                  (ende-chat--assistant-protocol-text
+                  (ende-chat--assistant-text
                    3 question-id request-id ""
-                   '(:content "First turn prose") (list call-a))
+                   '(:content "First turn prose"))
                   call-a-text
-                  result-a-text
-                  (ende-chat--assistant-protocol-text
+                  call-a-text
+                  (ende-chat--tool-result-text 3 request-id call-a)
+                  (ende-chat--assistant-text
                    3 question-id request-id ""
-                   '(:content "Second turn prose") (list call-b))
-                  (ende-chat--tool-result-text
-                   3 request-id call-b "RESULT_B")
+                   '(:content "Second turn prose"))
+                  (ende-chat--tool-call-text 3 request-id call-b)
+                  (ende-chat--tool-result-text 3 request-id call-b)
                   (ende-chat--assistant-text
                    2 question-id request-id "" '(:content "Final answer.")))
           (save-excursion
@@ -731,10 +740,10 @@
                (call (ende-chat--prepare-tool-call
                       '(:id "provider-empty" :name "read_file"
                         :arguments "{\"path\":\"empty.el\"}"))))
+          (ende-chat--store-tool-result call "EMPTY_RESULT")
           (insert (ende-chat--work-text 2 question-id request-id)
-                  (ende-chat--assistant-protocol-text
-                   3 question-id request-id "" '(:content "") (list call))
-                  (ende-chat--tool-result-text 3 request-id call "EMPTY_RESULT")
+                  (ende-chat--tool-call-text 3 request-id call)
+                  (ende-chat--tool-result-text 3 request-id call)
                   (ende-chat--assistant-text
                    2 question-id request-id "" '(:content "Final answer.")))
           (save-excursion
@@ -1154,9 +1163,12 @@
           (insert "* Topic\n** Question\nInspect the records.\n")
           (let* ((question-id "question-events")
                  (request-id "request-events")
-                 (call (ende-chat--prepare-tool-call
-                        '(:id "provider-call" :name "read_file" :arguments "{}")
-                        file))
+                 (job (ende--make-job
+                       :type 'chat
+                       :target (ende-target-create :buffer (current-buffer)
+                                                   :review-policy 'ignore)
+                       :instruction (list :response-level 2 :question-id question-id
+                                          :request-id request-id :tool-store-file file)))
                  (before (ende-protocol-json-read-string
                           "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Before.\"}]}"))
                  (reasoning (ende-protocol-json-read-string
@@ -1166,29 +1178,32 @@
                  (function-call (ende-protocol-json-read-string
                                  "{\"type\":\"function_call\",\"call_id\":\"provider-call\",\"name\":\"read_file\",\"arguments\":\"{}\"}"))
                  (thinking (ende-protocol-json-read-string
-                            "{\"type\":\"thinking\",\"thinking\":\"private-thinking\",\"signature\":\"signed-value\"}")))
-            (insert
-             (ende-chat--work-text 2 question-id request-id)
-             (ende-chat--assistant-protocol-text
-              3 question-id request-id ""
-              (ende-chat--normalize-response "Before." 3 t) nil nil
-              (cons 'openai-responses (list before reasoning)) file)
-             (ende-chat--opaque-protocol-text
-              3 request-id
-              (list :provider "anthropic-messages" :kind "opaque-thinking"
-                    :item thinking)
-              "" file)
-             (ende-chat--assistant-protocol-text
-              3 question-id request-id ""
-              (ende-chat--normalize-response "After." 3 t) (list call) nil
-              (cons 'openai-responses (list after function-call)) file)
-             (ende-chat--tool-result-text 3 request-id call "TOOL_RESULT")
-             (ende-chat--assistant-text
-              2 question-id request-id
-              (ende-chat--metadata-property
-               ende-chat-protocol-history-property "stale-snapshot-id")
-              (ende-chat--normalize-response "Final answer." 2 t))
-             "** Follow-up\nContinue.\n")
+                            "{\"type\":\"thinking\",\"thinking\":\"private-thinking\",\"signature\":\"signed-value\"}"))
+                 (protocol-items (cons 'openai-responses (list after function-call)))
+                 (call (ende-chat--prepare-tool-call
+                        '(:id "provider-call" :name "read_file" :arguments "{}")
+                        file protocol-items)))
+            (cl-letf (((symbol-function 'ende-chat--checkpoint-transcript) #'ignore))
+              (ende-chat--record-response
+               job (list :content "Before."
+                         :protocol-items (cons 'openai-responses (list before reasoning)))
+               nil)
+              (ende-transcript-begin-response (ende-job-transcript job))
+              (ende-chat--record-response
+               job (list :content ""
+                         :protocol-items (cons 'anthropic-messages (list thinking)))
+               nil)
+              (ende-transcript-begin-response (ende-job-transcript job))
+              (ende-chat--record-response
+               job (list :content "After." :protocol-items protocol-items) (list call))
+              (ende-chat--record-tool-result job call "TOOL_RESULT")
+              (ende-transcript-begin-response (ende-job-transcript job))
+              (ende-chat--record-response job '(:content "Final answer.") nil nil t))
+            (insert (ende-chat--render-transcript job)
+                    "** Follow-up\nContinue.\n")
+            (save-excursion
+              (ende-test--chat-goto "** Agent: Reply")
+              (org-entry-put nil ende-chat-protocol-history-property "stale-snapshot-id"))
             (save-excursion
               (goto-char (point-min))
               (re-search-forward "^\\*\\* Agent: Work")
