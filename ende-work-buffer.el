@@ -32,6 +32,7 @@
 (require 'json)
 (require 'org)
 (require 'subr-x)
+(require 'ende-org)
 (require 'ende-queue)
 (require 'ende-transcript)
 (require 'ende-tool-store)
@@ -40,15 +41,15 @@
 
 (cl-defstruct (ende-work-buffer--section
                (:constructor ende-work-buffer--make-section))
-  key entry parent level start body-start body-end end heading body)
+  key entry start body-start body-end heading body)
 
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
 (defvar-local ende-work-buffer--job nil)
 (defvar-local ende-work-buffer--transcript nil)
 (defvar-local ende-work-buffer--sections nil)
-(defvar-local ende-work-buffer--calls nil)
-(defvar-local ende-work-buffer--last-response nil)
+(defvar-local ende-work-buffer--responses nil)
+(defvar-local ende-work-buffer--rounds nil)
 (defvar-local ende-work-buffer--dirty-start nil)
 (defvar-local ende-work-buffer--dirty-end nil)
 
@@ -178,28 +179,22 @@ Only actual newlines in decoded string values become display newlines."
               (set-window-start window start t)
               (set-window-point window point))))))))
 
-(defun ende-work-buffer--splice (begin end text &optional owner)
-  "Replace BEGIN through END with TEXT, retaining OWNER's ancestor boundaries."
-  (let ((section owner) boundaries)
-    (while section
-      (when (= (ende-work-buffer--section-end section) end)
-        (push (ende-work-buffer--section-end section) boundaries))
-      (setq section (ende-work-buffer--section-parent section)))
-    (goto-char begin)
-    (delete-region begin end)
-    (insert text)
-    (dolist (marker boundaries) (set-marker marker (point)))
-    (if ende-work-buffer--dirty-start
-        (progn
-          (set-marker ende-work-buffer--dirty-start
-                      (min begin ende-work-buffer--dirty-start))
-          (set-marker ende-work-buffer--dirty-end
-                      (max (point) ende-work-buffer--dirty-end)))
-      (setq ende-work-buffer--dirty-start (copy-marker begin)
-            ende-work-buffer--dirty-end (copy-marker (point) t)))))
+(defun ende-work-buffer--splice (begin end text)
+  "Replace BEGIN through END with TEXT and mark the changed region."
+  (goto-char begin)
+  (delete-region begin end)
+  (insert text)
+  (if ende-work-buffer--dirty-start
+      (progn
+        (set-marker ende-work-buffer--dirty-start
+                    (min begin ende-work-buffer--dirty-start))
+        (set-marker ende-work-buffer--dirty-end
+                    (max (point) ende-work-buffer--dirty-end)))
+    (setq ende-work-buffer--dirty-start (copy-marker begin)
+          ende-work-buffer--dirty-end (copy-marker (point) t))))
 
-(defun ende-work-buffer--replace (begin old new owner)
-  "Update OLD at BEGIN to NEW, changing only their differing span in OWNER."
+(defun ende-work-buffer--replace (begin old new)
+  "Update OLD at BEGIN to NEW, changing only their differing span."
   (unless (equal old new)
     (let* ((old-length (length old)) (new-length (length new))
            (prefix 0) (suffix 0))
@@ -211,7 +206,7 @@ Only actual newlines in decoded string values become display newlines."
                      (aref new (- new-length suffix 1))))
         (cl-incf suffix))
       (ende-work-buffer--splice (+ begin prefix) (+ begin (- old-length suffix))
-                                (substring new prefix (- new-length suffix)) owner))))
+                                (substring new prefix (- new-length suffix))))))
 
 (defun ende-work-buffer--folded-p (section)
   "Return whether SECTION itself is folded, not merely inside a hidden parent."
@@ -220,54 +215,33 @@ Only actual newlines in decoded string values become display newlines."
     (and (not (org-fold-folded-p (point) 'outline))
          (org-fold-folded-p (line-end-position) 'outline))))
 
-(defun ende-work-buffer--folds (section)
-  "Return folded SECTION and ancestors whose folds an insertion must extend."
-  (let (folds)
-    (while section
-      (when (ende-work-buffer--folded-p section) (push section folds))
-      (setq section (ende-work-buffer--section-parent section)))
-    folds))
-
-(defun ende-work-buffer--refold (sections)
-  "Extend the original folds of SECTIONS over newly inserted content."
-  (dolist (section sections)
-    (save-excursion
-      (goto-char (ende-work-buffer--section-start section))
-      (org-fold-hide-subtree))))
-
-(defun ende-work-buffer--put (key entry title body &optional parent before folded)
+(defun ende-work-buffer--put (key entry title body &optional folded)
   "Insert or update KEY's ENTRY section with TITLE and BODY.
-PARENT owns nested sections; BEFORE is a section to insert before.
+Nil TITLE makes an unheaded prologue.
 FOLDED hides a newly inserted section, never overriding a reader's choice."
   (let* ((section (gethash key ende-work-buffer--sections))
-         (parent (if section (ende-work-buffer--section-parent section) parent))
-         (level (if parent (1+ (ende-work-buffer--section-level parent)) 1))
-         (heading (concat (make-string level ?*) " "
-                          (ende-work-buffer--one-line title) "\n\n"))
-         (folds (ende-work-buffer--folds (or section parent))))
+         (heading (if title (concat "* " (ende-work-buffer--one-line title) "\n\n") ""))
+         (folded (if section (and title (ende-work-buffer--folded-p section)) folded)))
     (if section
         (let ((start (marker-position (ende-work-buffer--section-start section))))
           (ende-work-buffer--replace start (ende-work-buffer--section-heading section)
-                                     heading section)
+                                     heading)
           (set-marker (ende-work-buffer--section-start section) start)
           (set-marker (ende-work-buffer--section-body-start section) (+ start (length heading)))
           (let ((body-start (marker-position (ende-work-buffer--section-body-start section))))
             (ende-work-buffer--replace body-start (ende-work-buffer--section-body section)
-                                       body section)
+                                       body)
             (set-marker (ende-work-buffer--section-body-start section) body-start)
             (set-marker (ende-work-buffer--section-body-end section) (+ body-start (length body)))))
-      (let* ((start (cond (before (marker-position (ende-work-buffer--section-start before)))
-                          (parent (marker-position (ende-work-buffer--section-end parent)))
-                          (t (point-max))))
+      (let* ((start (point-max))
              (body-start (+ start (length heading)))
              (end (+ body-start (length body))))
-        (ende-work-buffer--splice start start (concat heading body) parent)
+        (ende-work-buffer--splice start start (concat heading body))
         (setq section (ende-work-buffer--make-section
-                       :key key :parent parent :level level
+                       :key key
                        :start (copy-marker start t) :body-start (copy-marker body-start)
-                       :body-end (copy-marker end) :end (copy-marker end)))
-        (puthash key section ende-work-buffer--sections)
-        (when folded (push section folds))))
+                       :body-end (copy-marker end)))
+        (puthash key section ende-work-buffer--sections)))
     (setf (ende-work-buffer--section-entry section) entry
           (ende-work-buffer--section-heading section) heading
           (ende-work-buffer--section-body section) body)
@@ -276,124 +250,87 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
        (ende-work-buffer--section-start section) (ende-work-buffer--section-body-end section)
        (list 'ende-work-buffer-section section 'ende-work-buffer-entry entry
              'rear-nonsticky '(ende-work-buffer-section ende-work-buffer-entry))))
-    (ende-work-buffer--refold folds)
+    (when folded
+      (save-excursion
+        (goto-char (ende-work-buffer--section-start section))
+        (org-fold-hide-subtree)))
     section))
 
-(defun ende-work-buffer--remove (section)
-  "Remove the provisional leaf SECTION, not its surrounding response."
-  (let ((folds (ende-work-buffer--folds (ende-work-buffer--section-parent section))))
-    (ende-work-buffer--splice (marker-position (ende-work-buffer--section-start section))
-                              (marker-position (ende-work-buffer--section-end section)) ""
-                              (ende-work-buffer--section-parent section))
-    (ende-work-buffer--refold folds))
-  (remhash (ende-work-buffer--section-key section) ende-work-buffer--sections)
-  (dolist (marker (list (ende-work-buffer--section-start section)
-                        (ende-work-buffer--section-body-start section)
-                        (ende-work-buffer--section-body-end section)
-                        (ende-work-buffer--section-end section)))
-    (set-marker marker nil)))
+(defun ende-work-buffer--record-response (entry)
+  "Index ENTRY's retained response metadata without rendering a wrapper."
+  (puthash (ende-transcript-entry-id entry) entry ende-work-buffer--responses)
+  (unless (plist-get (ende-transcript-entry-data entry) :synthetic)
+    (puthash (ende-transcript-entry-round entry) entry ende-work-buffer--rounds)))
 
-(defun ende-work-buffer--response-title (entry)
-  "Return the host-owned response heading for ENTRY."
-  (format "Response %s (%s)%s" (ende-transcript-entry-round entry)
-          (ende-transcript-entry-status entry)
-          (if (plist-get (ende-transcript-entry-data entry) :final)
-              " — Final reply" "")))
+(defun ende-work-buffer--response-for (entry)
+  "Return the originating response for ENTRY."
+  (or (gethash (ende-transcript-entry-response-id entry) ende-work-buffer--responses)
+      (gethash (ende-transcript-entry-round entry) ende-work-buffer--rounds)))
 
-(defun ende-work-buffer--response (entry)
-  "Render ENTRY's response boundary and its ordered semantic items."
-  (when (and ende-work-buffer--last-response
-             (not (eq entry ende-work-buffer--last-response)))
-    (let ((previous ende-work-buffer--last-response))
-      (ende-work-buffer--put (ende-transcript-entry-id previous) previous
-                            (ende-work-buffer--response-title previous) "")))
-  (setq ende-work-buffer--last-response entry)
-  (let* ((id (ende-transcript-entry-id entry))
-         (parent (ende-work-buffer--put id entry (ende-work-buffer--response-title entry) ""))
-         (data (ende-transcript-entry-data entry))
-         (result (or (plist-get data :result) (plist-get data :partial-result)))
-         (thinking (or (plist-get result :thinking) (plist-get result :reasoning-content)
-                       (and (stringp (plist-get data :thinking)) (plist-get data :thinking))))
-         (items (plist-get data :items))
-         (stream-key (cons 'stream id))
-         (stream (gethash stream-key ende-work-buffer--sections)))
-    (when (and (stringp thinking) (not (string-blank-p thinking)))
-      (let* ((key (cons 'thinking id))
-             (existing (gethash key ende-work-buffer--sections))
-             (section (ende-work-buffer--put key entry "Reasoning"
-                                             (ende-work-buffer--example thinking) parent stream)))
-        (unless existing
-          (save-excursion
-            (goto-char (ende-work-buffer--section-start section))
-            (org-fold-hide-subtree)))))
-    (if (null items)
-        (ende-work-buffer--put stream-key entry "Assistant"
-                              (ende-work-buffer--example (ende-transcript-entry-content entry)) parent)
-      (let ((first-text (cl-find 'text items :key #'ende-transcript-entry-kind)))
-        (when stream
-          (if first-text
-              ;; Adopt the streamed text in place.  Its heading, reader anchors,
-              ;; and folding choice survive the semantic acceptance boundary.
-              (progn
-                (remhash stream-key ende-work-buffer--sections)
-                (setf (ende-work-buffer--section-key stream) (ende-transcript-entry-id first-text))
-                (puthash (ende-transcript-entry-id first-text) stream ende-work-buffer--sections))
-            (ende-work-buffer--remove stream)
-            (setq stream nil)))
-        (dolist (item items)
-          (ende-work-buffer--entry item parent (and stream (not (eq item first-text)) stream))
-          (when (eq item first-text) (setq stream nil)))))))
-
-(defun ende-work-buffer--tool-result (entry)
-  "Attach exact returned ENTRY to its existing execution's tool subtree."
+(defun ende-work-buffer--tool-title (entry)
+  "Return ENTRY's compact tool heading."
   (let* ((call (plist-get (ende-transcript-entry-data entry) :call))
-         (parent (gethash (plist-get call :execution-id) ende-work-buffer--calls)))
-    (when parent
-      (ende-work-buffer--put
-       (ende-transcript-entry-id entry) entry
-       (format "Result (%s)" (ende-transcript-entry-status entry))
-       (ende-work-buffer--example
-        (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) parent nil t))))
+         (arguments (plist-get call :arguments))
+         (summary (ende-org--tool-argument-summary arguments)))
+    (ende-org--truncate-heading
+     (concat (when (eq (ende-transcript-entry-kind entry) 'tool-call) "--> ")
+             (or (plist-get call :name) "tool")
+             (when summary (concat ": " summary))) 1)))
 
-(defun ende-work-buffer--entry (entry &optional parent before)
-  "Render changed ENTRY, optionally beneath PARENT and BEFORE a sibling."
+(defun ende-work-buffer--summary-title (text)
+  "Return a prominent Org heading for summary TEXT."
+  (let ((text (string-trim (replace-regexp-in-string "\\*\\*" "*" (or text "")))))
+    (concat "Agent: " (if (string-prefix-p "*" text) text (concat "*" text "*")))))
+
+(defun ende-work-buffer--entry (entry)
+  "Render changed ENTRY in its first-observation position."
   (let ((id (ende-transcript-entry-id entry))
         (data (ende-transcript-entry-data entry))
         (content (ende-transcript-entry-content entry)))
     (pcase (ende-transcript-entry-kind entry)
-      ('response (ende-work-buffer--response entry))
+      ('response
+       (ende-work-buffer--record-response entry)
+       (when (eq (ende-transcript-entry-status entry) 'complete)
+         (maphash
+          (lambda (_key section)
+            (when-let* ((item (ende-work-buffer--section-entry section)))
+              (when (eq (ende-work-buffer--response-for item) entry)
+                (ende-work-buffer--entry item))))
+          ende-work-buffer--sections)))
       ('text
-       (ende-work-buffer--put
-        id entry "Assistant"
-        (ende-work-buffer--example
-         (if (string-blank-p (or content ""))
-             (or (plist-get (plist-get data :normalized) :content) content)
-           content)) parent before))
-      ('tool-call
-       (let* ((call (plist-get data :call))
-              (section (ende-work-buffer--put
-                        id entry (concat "Tool: " (plist-get call :name)) "" parent before t)))
-         (puthash (plist-get call :execution-id) section ende-work-buffer--calls)
+       (let* ((response (ende-work-buffer--response-for entry))
+              (response-data (and response (ende-transcript-entry-data response)))
+              (final (and (plist-get response-data :final)
+                          (eq entry (cl-find 'text (reverse (plist-get response-data :items))
+                                             :key #'ende-transcript-entry-kind)))))
          (ende-work-buffer--put
-          (cons 'arguments id) entry "Arguments"
+          id entry (if final "Agent: Final reply" "Agent: Reply")
           (ende-work-buffer--example
-           (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) section nil t)))
-      ('tool-result (ende-work-buffer--tool-result entry))
+           (if (string-blank-p (or content ""))
+               (or (plist-get (plist-get data :normalized) :content) content)
+             content)))))
+      ((or 'tool-call 'tool-result)
+       (ende-work-buffer--put
+        id entry (ende-work-buffer--tool-title entry)
+        (ende-work-buffer--example
+         (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) t))
       ('opaque
        (ende-work-buffer--put
-        id entry (format "Provider item: %s / %s" (plist-get data :provider) (plist-get data :kind))
+        id entry "Agent: Opaque BS"
         (ende-work-buffer--example
-         (ende-work-buffer--readable-json (ende-work-buffer--payload-text (plist-get data :item))))
-        parent before t))
-      ('summary (ende-work-buffer--put id entry "Reasoning summary" (ende-work-buffer--example content)
-                                      nil nil t))
-      ('progress (ende-work-buffer--put id entry (concat "Progress: " (or (plist-get data :title) ""))
-                                       (ende-work-buffer--example content) nil nil t))
+         (ende-work-buffer--readable-json
+          (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry)))) t))
+      ('thinking
+       (ende-work-buffer--put id entry "Agent: Reasoning" (ende-work-buffer--example content) t))
+      ('summary
+       (ende-work-buffer--put id entry (ende-work-buffer--summary-title content)
+                              (ende-work-buffer--example content) t))
+      ('progress
+       (ende-work-buffer--put
+        id entry (ende-work-buffer--summary-title
+                  (concat (plist-get data :title) " — " content))
+        (ende-work-buffer--example content) t))
       ('status
-       (when ende-work-buffer--last-response
-         (let ((response ende-work-buffer--last-response))
-           (ende-work-buffer--put (ende-transcript-entry-id response) response
-                                 (ende-work-buffer--response-title response) "")))
        (ende-work-buffer--put
         id entry (format "Status: %s" (ende-transcript-entry-status entry))
         (ende-work-buffer--example (ende-work-buffer--payload-text (plist-get data :error))))))))
@@ -406,7 +343,7 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
       (when (eq transcript ende-work-buffer--transcript)
         (ende-work-buffer--update
          (lambda ()
-           (ende-work-buffer--put 'task nil "Task"
+           (ende-work-buffer--put 'task nil nil
                                   (ende-work-buffer--example (ende-transcript-task transcript)))
            (ende-work-buffer--entry entry)))))))
 
@@ -435,8 +372,9 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
             (with-current-buffer buffer
               (org-mode)
               (setq ende-work-buffer--job job ende-work-buffer--transcript transcript
-                    ende-work-buffer--sections (make-hash-table :test #'equal)
-                    ende-work-buffer--calls (make-hash-table :test #'equal))
+                    ende-work-buffer--sections (make-hash-table :test #'eql)
+                    ende-work-buffer--responses (make-hash-table :test #'eql)
+                    ende-work-buffer--rounds (make-hash-table :test #'eql))
               (when-let* ((root (plist-get (ende-job-access-policy job) :root)))
                 (setq-local default-directory (file-name-as-directory root)))
               (buffer-disable-undo)
@@ -445,10 +383,14 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               (add-hook 'change-major-mode-hook #'ende-work-buffer--detach nil t)
               (ende-work-buffer--update
                (lambda ()
-                 (ende-work-buffer--put 'task nil "Task"
+                 (ende-work-buffer--put 'task nil nil
                                        (ende-work-buffer--example (ende-transcript-task transcript)))
                  (dolist (entry (ende-transcript-entries transcript))
-                   (ende-work-buffer--entry entry))))
+                   (when (eq (ende-transcript-entry-kind entry) 'response)
+                     (ende-work-buffer--record-response entry)))
+                 (dolist (entry (ende-transcript-entries transcript))
+                   (unless (eq (ende-transcript-entry-kind entry) 'response)
+                     (ende-work-buffer--entry entry)))))
               (setf (ende-job-work-buffer job) buffer)
               (puthash transcript buffer ende-work-buffer--viewers)
               (setq ready t)

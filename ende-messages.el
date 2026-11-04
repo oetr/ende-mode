@@ -151,11 +151,11 @@
          (error "Invalid or duplicate Messages content index"))
        (let ((initial (copy-hash-table (gethash "content_block" json))))
          (puthash index initial blocks)
-         (ende-messages--emit-block session index)
          (dolist (field '(("text" . :content) ("thinking" . :thinking)))
            (when-let* ((text (gethash (car field) initial)))
              (ende-stream-record-delta stream (cdr field) text
-                                       (apply-partially #'ende-messages--fail session) index)))))
+                                       (apply-partially #'ende-messages--fail session) index)))
+         (ende-messages--emit-block session index)))
       ("content_block_delta"
        (unless (and block (not (gethash "ende_complete" block)))
          (error "Messages delta has no active content block"))

@@ -3022,7 +3022,8 @@ COMPACT marks the completed response as a context fence."
          (execution (ende-tool-store-create-execution
                      id name arguments store-file
                      (when item "openai-responses") item)))
-    (list :id (plist-get execution :provider-call-id)
+    (list :key (ende-tools-call-value call :key)
+          :id (plist-get execution :provider-call-id)
           :name (plist-get execution :name)
           :arguments (plist-get execution :arguments)
           :protocol-provider (plist-get execution :protocol-provider)
@@ -3196,14 +3197,14 @@ Keep it while another queued compaction still refers to its durable identity."
       (let* ((instruction (ende-job-instruction job))
              (level (+ (plist-get instruction :response-level) (if final 0 1)))
              (prepared (or prepared (ende-chat--prepare-response job result level final)))
-             (items (ende-transcript-items transcript result calls))
+             (items (ende-transcript-items transcript result calls synthetic))
              (fragments (or (plist-get prepared :fragments)
                             (list (plist-get prepared :normalized))))
              (thinking (plist-get result :thinking)))
         (when (and (not (cl-find 'text items :key #'ende-transcript-entry-kind))
                    (not (string-blank-p
                          (plist-get (plist-get prepared :normalized) :content))))
-          (setq items (append items (list (ende-transcript-new-entry
+          (setq items (append items (list (ende-transcript-append
                                           transcript 'text "" nil 'complete)))))
         (dolist (item items)
           (pcase (ende-transcript-entry-kind item)
@@ -3382,7 +3383,9 @@ FINAL includes retained tool images and trims compaction output."
             (output (or (and (listp result) (plist-get result :output-parts))
                         (list (list :type :text :text (or (ende--result-content result) "")))))
             (texts (cl-remove-if-not
-                    (lambda (event) (eq (plist-get event :type) 'text))
+                    (lambda (event)
+                      (and (eq (plist-get event :type) 'text)
+                           (not (string-empty-p (or (plist-get event :text) "")))))
                     (ende-transcript-protocol-events (plist-get result :protocol-items))))
             (fragmented (> (length texts) 1))
             (cuts (when fragmented
