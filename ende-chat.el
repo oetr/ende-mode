@@ -1951,14 +1951,6 @@ The :edits describe normalization in the repaired block content's coordinates."
   "Return one Org property line for NAME and VALUE."
   (format ":%s: %s\n" name value))
 
-(defun ende-chat--metadata-property (name value)
-  "Return a single-line Org property for nonempty VALUE, or nil."
-  (when (stringp value)
-    (let ((value (string-trim
-                  (replace-regexp-in-string "[\r\n]+" " " value))))
-      (unless (string-empty-p value)
-        (ende-chat--response-property name value)))))
-
 (defun ende-chat--placeholder-text (level question-id request-id &optional compact)
   "Return a hidden pending response section at LEVEL.
 COMPACT selects the context-fence title."
@@ -2924,43 +2916,15 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 
 (defun ende-chat--response-metadata (job result)
   "Capture semantic provenance when JOB accepts RESULT."
-  (let* ((profile (ende-job-profile job))
-         (transcript (ende-job-transcript job))
-         (display (ende-provider-result-display-metadata
-                   profile (if transcript (ende-transcript-metadata transcript)
-                             (ende-job-metadata job)) result))
-         (model (plist-get display :model))
-         (counts (ende--usage-token-counts
-                  (or (plist-get result :usage)
-                      (and transcript (ende-transcript-usage transcript)))))
-         (temperature (plist-get profile :temperature))
-         (thinking (plist-get profile :thinking))
-         (effort (ende-provider-active-reasoning-effort profile)))
-    (list :model model :temperature temperature :thinking thinking
-          :reasoning-effort effort :input-tokens (plist-get counts :input)
-          :output-tokens (plist-get counts :output) :cached-tokens (plist-get counts :cached))))
-
-(defun ende-chat--metadata-properties (metadata)
-  "Render retained response METADATA as durable Org properties."
-  (mapconcat
-   (lambda (field)
-     (let ((value (plist-get metadata (car field))))
-       (or (ende-chat--metadata-property
-            (cdr field)
-            (cond ((numberp value) (format "%s" value))
-                  ((stringp value) value)
-                  ((memq value '(on off)) (symbol-name value)))) "")))
-   (list (cons :model ende-chat-model-property)
-         (cons :temperature ende-chat-temperature-property)
-         (cons :thinking ende-chat-thinking-property)
-         (cons :reasoning-effort ende-chat-reasoning-effort-property)
-         (cons :input-tokens ende-chat-input-tokens-property)
-         (cons :output-tokens ende-chat-output-tokens-property)
-         (cons :cached-tokens ende-chat-cached-tokens-property)) ""))
+  (let ((transcript (ende-job-transcript job)))
+    (ende-provider-response-metadata
+     (ende-job-profile job)
+     (if transcript (ende-transcript-metadata transcript) (ende-job-metadata job))
+     result (and transcript (ende-transcript-usage transcript)))))
 
 (defun ende-chat--result-properties (job result)
   "Render provenance for JOB's RESULT."
-  (ende-chat--metadata-properties (ende-chat--response-metadata job result)))
+  (ende-org--metadata-properties (ende-chat--response-metadata job result)))
 
 (defun ende-chat--reasoning-text
     (level question-id request-id result-properties normalized)
@@ -3239,7 +3203,7 @@ Keep it while another queued compaction still refers to its durable identity."
          (level (plist-get instruction :response-level))
          (question-id (plist-get instruction :question-id))
          (request-id (plist-get instruction :request-id))
-         (properties (concat (ende-chat--metadata-properties (plist-get data :metadata))
+         (properties (concat (ende-org--metadata-properties (plist-get data :metadata))
                              (ende-chat--response-property ende-chat-response-id-property
                                                            (ende-transcript-entry-id entry))))
          (items (plist-get data :items))

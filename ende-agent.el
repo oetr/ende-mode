@@ -303,10 +303,12 @@ clarification; do not proceed with the disputed change.\n\n"
            (lambda (child result calls)
              (let* ((transcript (ende-job-ensure-transcript child))
                     (stored-calls (ende-agent--prepare-calls child calls result)))
-               (ende-transcript-accept transcript result stored-calls
-                                       (list :metadata (ende-provider-result-display-metadata
-                                                        (ende-job-profile child)
-                                                        (ende-transcript-metadata (ende-job-transcript child)) result)))
+               (ende-transcript-accept
+                transcript result stored-calls
+                (list :metadata (ende-provider-response-metadata
+                                 (ende-job-profile child)
+                                 (ende-transcript-metadata transcript)
+                                 result (ende-transcript-usage transcript))))
                (list :message
                      (list :role "assistant" :content (or (plist-get result :content) "")
                            :tool-calls calls
@@ -320,12 +322,14 @@ clarification; do not proceed with the disputed change.\n\n"
                    (ende-tools-call-value call :id) :content content))
            :on-final
            (lambda (child result _messages)
-             (let ((answer (or (plist-get result :content) "")))
+             (let ((answer (or (plist-get result :content) ""))
+                   (transcript (ende-job-ensure-transcript child)))
                (ende-transcript-accept
-                (ende-job-ensure-transcript child) result nil
-                (list :metadata (ende-provider-result-display-metadata
-                                                        (ende-job-profile child)
-                                                        (ende-transcript-metadata (ende-job-transcript child)) result)) t)
+                transcript result nil
+                (list :metadata (ende-provider-response-metadata
+                                 (ende-job-profile child)
+                                 (ende-transcript-metadata transcript)
+                                 result (ende-transcript-usage transcript))) t)
                (ende-job-finish child answer)))))))
 
 (ende-register-job-handler 'agent #'ende-agent--run-child)

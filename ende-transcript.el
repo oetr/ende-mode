@@ -96,7 +96,21 @@
   "Return TRANSCRIPT's current response, allocating it when necessary."
   (or (ende-transcript-response transcript)
       (setf (ende-transcript-response transcript)
-            (ende-transcript-append transcript 'response "" nil 'streaming))))
+            (ende-transcript-append
+             transcript 'response ""
+             (list :response-metadata (ende-transcript-metadata transcript)
+                   :usage (ende-transcript-usage transcript)) 'streaming))))
+
+(defun ende-transcript--snapshot-metadata (transcript)
+  "Retain TRANSCRIPT's metadata on its current streaming response."
+  (when-let* ((entry (ende-transcript-response transcript))
+              ((eq (ende-transcript-entry-status entry) 'streaming)))
+    (setf (ende-transcript-entry-data entry)
+          (ende-plist-merge
+           (ende-transcript-entry-data entry)
+           (list :response-metadata (ende-transcript-metadata transcript)
+                 :usage (ende-transcript-usage transcript))))
+    (ende-transcript-notify transcript entry)))
 
 (defun ende-transcript-item-text (item)
   "Return the visible text in a Responses ITEM."
@@ -217,7 +231,7 @@ DATA may include :items, :prepared, :metadata, and :synthetic.  FINAL marks
 one final reply; accepting the current response again does not duplicate it."
   (let* ((synthetic (plist-get data :synthetic))
          (entry (if synthetic
-                    (ende-transcript-append transcript 'response "" nil 'streaming)
+                    (ende-transcript-append transcript 'response "" '(:synthetic t) 'streaming)
                   (ende-transcript--response transcript))))
     (when (eq (ende-transcript-entry-status entry) 'streaming)
       (let ((items (if (plist-member data :items) (plist-get data :items)
@@ -254,13 +268,20 @@ one final reply; accepting the current response again does not duplicate it."
 (defun ende-transcript-tool-result (transcript call content)
   "Record exact tool CONTENT associated with prepared CALL.
 Only an explicit outer JSON boolean `ok' determines success or failure."
-  (let ((ok (condition-case nil
-                (ende-protocol-json-get "ok" (ende-protocol-json-read-string content))
-              (error nil))))
-    (ende-transcript-append transcript 'tool-result content (list :call call)
-                            (cond ((eq ok t) 'succeeded)
-                                  ((eq ok :false) 'failed)
-                                  (t 'returned)))))
+  (let* ((ok (condition-case nil
+                 (ende-protocol-json-get "ok" (ende-protocol-json-read-string content))
+               (error nil)))
+         (response (cl-find-if
+                    (lambda (entry)
+                      (and entry (eq (ende-transcript-entry-kind entry) 'response)
+                           (memq call (plist-get (ende-transcript-entry-data entry) :calls))))
+                    (cons (ende-transcript-response transcript) (ende-transcript-entries transcript))))
+         (entry (ende-transcript-new-entry
+                 transcript 'tool-result content (list :call call)
+                 (cond ((eq ok t) 'succeeded) ((eq ok :false) 'failed) (t 'returned)))))
+    (when response
+      (setf (ende-transcript-entry-response-id entry) (ende-transcript-entry-id response)))
+    (ende-transcript--append-entry transcript entry)))
 
 (defun ende-transcript-event (transcript event)
   "Record public streaming and activity EVENT in TRANSCRIPT."
@@ -269,8 +290,14 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
      (let ((metadata (plist-get event :metadata)))
        (unless (and (eq (plist-get (ende-transcript-metadata transcript) :source) :response)
                     (not (eq (plist-get metadata :source) :response)))
-         (setf (ende-transcript-metadata transcript) metadata))))
-    (:usage (setf (ende-transcript-usage transcript) (plist-get event :usage)))
+         (unless (equal metadata (ende-transcript-metadata transcript))
+           (setf (ende-transcript-metadata transcript) metadata)
+           (ende-transcript--snapshot-metadata transcript)))))
+    (:usage
+     (when-let* ((usage (plist-get event :usage))
+                 ((not (equal usage (ende-transcript-usage transcript)))))
+       (setf (ende-transcript-usage transcript) usage)
+       (ende-transcript--snapshot-metadata transcript)))
     (:partial-result
      (let* ((entry (ende-transcript--response transcript))
             (result (plist-get event :result)))

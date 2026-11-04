@@ -844,6 +844,18 @@ metadata and configured profile values."
       (setq metadata (plist-put metadata :client reported-provider)))
     (ende-provider-display-metadata profile metadata)))
 
+(defun ende-provider-response-metadata (profile metadata result &optional usage)
+  "Return response provenance for PROFILE, cached METADATA, and RESULT.
+USAGE supplies token counts when RESULT has no usage."
+  (let ((counts (ende--usage-token-counts (or (plist-get result :usage) usage))))
+    (append (ende-provider-result-display-metadata profile metadata result)
+            (list :temperature (plist-get profile :temperature)
+                  :thinking (plist-get profile :thinking)
+                  :reasoning-effort (ende-provider-active-reasoning-effort profile)
+                  :input-tokens (plist-get counts :input)
+                  :output-tokens (plist-get counts :output)
+                  :cached-tokens (plist-get counts :cached)))))
+
 ;;;; Provider discovery
 
 (defvar ende-provider--catalog-cache (make-hash-table :test #'equal)

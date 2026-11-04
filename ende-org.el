@@ -30,6 +30,30 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'subr-x)
+
+(defun ende-org--property (name value)
+  "Return a sanitized, nonempty Org property for NAME and VALUE, or nil."
+  (let ((value (cond ((stringp value) value)
+                     ((numberp value) (format "%s" value))
+                     ((memq value '(on off)) (symbol-name value)))))
+    (when value
+      (setq value (string-trim (replace-regexp-in-string "[\r\n]+" " " value)))
+      (unless (string-empty-p value)
+        (format ":%s: %s\n" name value)))))
+
+(defun ende-org--metadata-properties (metadata)
+  "Render retained response METADATA as durable Org properties."
+  (mapconcat
+   (lambda (field)
+     (or (ende-org--property (cdr field) (plist-get metadata (car field))) ""))
+   '((:model . "ENDE_MODEL")
+     (:temperature . "ENDE_TEMPERATURE")
+     (:thinking . "ENDE_THINKING")
+     (:reasoning-effort . "ENDE_REASONING_EFFORT")
+     (:input-tokens . "ENDE_INPUT_TOKENS")
+     (:output-tokens . "ENDE_OUTPUT_TOKENS")
+     (:cached-tokens . "ENDE_CACHED_TOKENS")) ""))
 
 (defun ende-org--json-display-text (object &rest options)
   "Return OBJECT serialized as JSON text using OPTIONS."

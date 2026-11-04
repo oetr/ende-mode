@@ -41,11 +41,14 @@
          (message (ende-protocol-json-read-string "{\"type\":\"message\",\"content\":\"A reply\"}"))
          (tool (ende-protocol-json-read-string "{\"type\":\"function_call\",\"call_id\":\"provider-call\"}")))
     (ende-transcript-begin-response transcript)
+    (ende-transcript-event transcript '(:type :metadata :metadata (:model "reported-model")))
     (ende-transcript-event transcript '(:type :delta :channel :content :item-key 7 :text "A reply"))
     (ende-transcript-event transcript '(:type :reasoning-summary :item "reason" :text "**A summary**"))
     (ende-transcript-event transcript (list :type :item :key 2 :kind 'tool-call :call call))
     (ende-transcript-event transcript (list :type :item :key 4 :kind 'opaque
                                           :provider "openai-responses" :item opaque))
+    (ende-transcript-event transcript '(:type :usage :usage (:input_tokens 12 :output_tokens 4
+                                                           :input_tokens_details (:cached_tokens 0))))
     (ende-transcript-accept transcript
                             (list :content "A reply" :protocol-items (list 'openai-responses opaque tool message)
                                   :protocol-item-keys '(4 2 7)) (list call))
@@ -54,8 +57,9 @@
     (ende-transcript-finish transcript 'completed)))
 
 (ert-deftest ende-test/work-disposable-main-child-and-dashboard-parity ()
-  (let* ((main (ende--make-job :id 800 :state 'running :instruction '(:task "Task text")))
-         (child (ende--make-job :id 801 :parent main :state 'completed :instruction '(:task "Task text")))
+  (let* ((profile '(:model "requested-model" :reasoning-effort "high"))
+         (main (ende--make-job :id 800 :profile profile :state 'running :instruction '(:task "Task text")))
+         (child (ende--make-job :id 801 :profile profile :parent main :state 'completed :instruction '(:task "Task text")))
          (ende--retained-jobs (make-hash-table :test #'eql))
          (org-mode-hook (list (lambda () (setq-local ende-test-work-hook-ran t))))
          buffers)
@@ -97,6 +101,14 @@
               (let ((headlines (org-element-map (org-element-parse-buffer) 'headline #'identity)))
                 (should (= (1- (hash-table-count ende-work-buffer--sections)) (length headlines)))
                 (should (cl-every (lambda (headline) (= (org-element-property :level headline) 1)) headlines))
+                (dolist (headline headlines)
+                  (goto-char (org-element-property :begin headline))
+                  (dolist (property '(("ENDE_MODEL" . "reported-model")
+                                      ("ENDE_REASONING_EFFORT" . "high")
+                                      ("ENDE_INPUT_TOKENS" . "12")
+                                      ("ENDE_OUTPUT_TOKENS" . "4")
+                                      ("ENDE_CACHED_TOKENS" . "0")))
+                    (should (equal (org-entry-get nil (car property)) (cdr property)))))
                 (should (equal
                          (mapcar (lambda (headline)
                                    (get-text-property (org-element-property :begin headline) 'ende-work-buffer-entry))

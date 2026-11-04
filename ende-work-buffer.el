@@ -33,6 +33,7 @@
 (require 'org)
 (require 'subr-x)
 (require 'ende-org)
+(require 'ende-provider)
 (require 'ende-queue)
 (require 'ende-transcript)
 (require 'ende-tool-store)
@@ -41,7 +42,7 @@
 
 (cl-defstruct (ende-work-buffer--section
                (:constructor ende-work-buffer--make-section))
-  key entry start body-start body-end heading body)
+  entry start body-start body-end heading body)
 
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
@@ -50,6 +51,7 @@
 (defvar-local ende-work-buffer--sections nil)
 (defvar-local ende-work-buffer--responses nil)
 (defvar-local ende-work-buffer--rounds nil)
+(defvar-local ende-work-buffer--metadata nil)
 (defvar-local ende-work-buffer--dirty-start nil)
 (defvar-local ende-work-buffer--dirty-end nil)
 
@@ -209,18 +211,30 @@ Only actual newlines in decoded string values become display newlines."
                                 (substring new prefix (- new-length suffix))))))
 
 (defun ende-work-buffer--folded-p (section)
-  "Return whether SECTION itself is folded, not merely inside a hidden parent."
+  "Return whether SECTION's body is folded."
   (save-excursion
     (goto-char (ende-work-buffer--section-start section))
-    (and (not (org-fold-folded-p (point) 'outline))
-         (org-fold-folded-p (line-end-position) 'outline))))
+    (org-fold-folded-p (line-end-position) 'outline)))
 
 (defun ende-work-buffer--put (key entry title body &optional folded)
   "Insert or update KEY's ENTRY section with TITLE and BODY.
 Nil TITLE makes an unheaded prologue.
 FOLDED hides a newly inserted section, never overriding a reader's choice."
   (let* ((section (gethash key ende-work-buffer--sections))
-         (heading (if title (concat "* " (ende-work-buffer--one-line title) "\n\n") ""))
+         (properties (and entry (ende-work-buffer--properties entry)))
+         (drawer (and properties (not (string-empty-p properties))))
+         (hide-drawer
+          (and drawer
+               (or (not section)
+                   (not (string-match-p "\n:PROPERTIES:\n" (ende-work-buffer--section-heading section)))
+                   (save-excursion
+                     (goto-char (ende-work-buffer--section-start section))
+                     (forward-line)
+                     (org-fold-folded-p (line-end-position) 'drawer)))))
+         (heading (if title
+                      (concat "* " (ende-work-buffer--one-line title) "\n"
+                              (when drawer (concat ":PROPERTIES:\n" properties ":END:\n")) "\n")
+                    ""))
          (folded (if section (and title (ende-work-buffer--folded-p section)) folded)))
     (if section
         (let ((start (marker-position (ende-work-buffer--section-start section))))
@@ -238,7 +252,6 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
              (end (+ body-start (length body))))
         (ende-work-buffer--splice start start (concat heading body))
         (setq section (ende-work-buffer--make-section
-                       :key key
                        :start (copy-marker start t) :body-start (copy-marker body-start)
                        :body-end (copy-marker end)))
         (puthash key section ende-work-buffer--sections)))
@@ -250,6 +263,11 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
        (ende-work-buffer--section-start section) (ende-work-buffer--section-body-end section)
        (list 'ende-work-buffer-section section 'ende-work-buffer-entry entry
              'rear-nonsticky '(ende-work-buffer-section ende-work-buffer-entry))))
+    (when hide-drawer
+      (save-excursion
+        (goto-char (ende-work-buffer--section-start section))
+        (forward-line)
+        (org-fold-hide-drawer-toggle t t)))
     (when folded
       (save-excursion
         (goto-char (ende-work-buffer--section-start section))
@@ -257,15 +275,46 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
     section))
 
 (defun ende-work-buffer--record-response (entry)
-  "Index ENTRY's retained response metadata without rendering a wrapper."
+  "Index ENTRY and return whether its displayed metadata changed."
   (puthash (ende-transcript-entry-id entry) entry ende-work-buffer--responses)
   (unless (plist-get (ende-transcript-entry-data entry) :synthetic)
-    (puthash (ende-transcript-entry-round entry) entry ende-work-buffer--rounds)))
+    (puthash (ende-transcript-entry-round entry) entry ende-work-buffer--rounds))
+  (let* ((data (ende-transcript-entry-data entry))
+         (profile (ende-job-profile ende-work-buffer--job))
+         (metadata
+          (copy-sequence
+           (or (plist-get data :metadata)
+               (ende-provider-response-metadata
+                profile (or (plist-get data :response-metadata)
+                            (list :model (plist-get profile :model)))
+                (or (plist-get data :result) (plist-get data :partial-result))
+                (plist-get data :usage)))))
+         (id (ende-transcript-entry-id entry)))
+    (when (plist-get data :synthetic)
+      (dolist (field '(:input-tokens :output-tokens :cached-tokens))
+        (setq metadata (plist-put metadata field nil))))
+    (let ((properties (ende-org--metadata-properties metadata)))
+      (prog1 (not (equal properties (gethash id ende-work-buffer--metadata)))
+        (puthash id properties ende-work-buffer--metadata)))))
 
 (defun ende-work-buffer--response-for (entry)
   "Return the originating response for ENTRY."
   (or (gethash (ende-transcript-entry-response-id entry) ende-work-buffer--responses)
       (gethash (ende-transcript-entry-round entry) ende-work-buffer--rounds)))
+
+(defun ende-work-buffer--properties (entry)
+  "Return available provenance and tool identity properties for ENTRY."
+  (let* ((response (ende-work-buffer--response-for entry))
+         (kind (ende-transcript-entry-kind entry))
+         (call (plist-get (ende-transcript-entry-data entry) :call)))
+    (concat
+     (and response (gethash (ende-transcript-entry-id response) ende-work-buffer--metadata))
+     (ende-org--property "ENDE_CHAT_REQUEST_ID"
+                         (plist-get (ende-job-instruction ende-work-buffer--job) :request-id))
+     (when (memq kind '(tool-call tool-result))
+       (concat (ende-org--property "ENDE_TOOL_EXECUTION_ID" (plist-get call :execution-id))
+               (ende-org--property "ENDE_TOOL_NAME" (plist-get call :name))
+               (ende-org--property "ENDE_TOOL_KIND" (if (eq kind 'tool-call) "call" "result")))))))
 
 (defun ende-work-buffer--tool-title (entry)
   "Return ENTRY's compact tool heading."
@@ -289,8 +338,8 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
         (content (ende-transcript-entry-content entry)))
     (pcase (ende-transcript-entry-kind entry)
       ('response
-       (ende-work-buffer--record-response entry)
-       (when (eq (ende-transcript-entry-status entry) 'complete)
+       (when (or (ende-work-buffer--record-response entry)
+                 (eq (ende-transcript-entry-status entry) 'complete))
          (maphash
           (lambda (_key section)
             (when-let* ((item (ende-work-buffer--section-entry section)))
@@ -374,7 +423,8 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               (setq ende-work-buffer--job job ende-work-buffer--transcript transcript
                     ende-work-buffer--sections (make-hash-table :test #'eql)
                     ende-work-buffer--responses (make-hash-table :test #'eql)
-                    ende-work-buffer--rounds (make-hash-table :test #'eql))
+                    ende-work-buffer--rounds (make-hash-table :test #'eql)
+                    ende-work-buffer--metadata (make-hash-table :test #'eql))
               (when-let* ((root (plist-get (ende-job-access-policy job) :root)))
                 (setq-local default-directory (file-name-as-directory root)))
               (buffer-disable-undo)
@@ -418,11 +468,6 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
                 (ende-tool-store-load-opaque (plist-get data :item-id)
                                             (plist-get data :provider) (plist-get data :kind)
                                             (plist-get data :store-file)))))
-      ('response (or (plist-get data :result) (plist-get data :partial-result)
-                     (and (plist-get data :thinking)
-                          (list :content (ende-transcript-entry-content entry)
-                                :thinking (plist-get data :thinking)))
-                     (ende-transcript-entry-content entry)))
       ('status (plist-get data :error))
       (_ (ende-transcript-entry-content entry)))))
 
