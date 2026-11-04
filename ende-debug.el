@@ -187,16 +187,74 @@ Lengths describe the UTF-8 diagnostic encoding, not provider tokenization."
                                          when (stringp value) collect (cons key value)))))
                            items (number-sequence 0 (1- (length items)))))))))
 
-(defun ende-debug-record-response (record response)
+(defun ende-debug--record-field (record key value)
+  "Set metadata KEY to VALUE in RECORD."
+  (setf (alist-get key (plist-get record :metadata) nil nil #'equal) value))
+
+(defun ende-debug--usable-id-p (value)
+  "Return non-nil for a nonempty, bounded provider identifier VALUE."
+  (and (stringp value) (< 0 (length value) 513)
+       (not (string-match-p "[[:space:][:cntrl:]]" value))
+       (equal value (ende-debug--redact value))))
+
+(defun ende-debug-record-http-request-id (record identifier)
+  "Retain only the selected HTTP request IDENTIFIER in RECORD."
+  (when (and record (ende-debug--usable-id-p identifier))
+    (ende-debug--record-field record "http_request_id" identifier)))
+
+(defun ende-debug-record-response (record response &optional completed)
   "Retain allowlisted provider RESPONSE metadata in debug RECORD.
+COMPLETED marks a completed response object, not an intermediate event.
 Never capture raw output or opaque reasoning.  Completion writes this record."
   (when record
-    (dolist (key '("model" "service_tier"))
-      (let ((value (ende-protocol-json-get key response)))
-        (when (stringp value)
-          (setf (alist-get (concat "response_" key)
-                           (plist-get record :metadata) nil nil #'equal)
-                value))))))
+    (condition-case nil
+        (progn
+          (when-let* ((id (ende-protocol-json-get "id" response))
+                      (_ (ende-debug--usable-id-p id)))
+            (ende-debug--record-field record "provider_response_id" id))
+          (dolist (key '("model" "service_tier"))
+            (let ((value (ende-protocol-json-get key response)))
+              (when (stringp value)
+                (ende-debug--record-field record (concat "response_" key)
+                                          (ende-debug--redact value)))))
+          (let ((reasoning (ende-protocol-json-get "reasoning" response))
+                (settings (alist-get "response_reasoning" (plist-get record :metadata)
+                                     nil nil #'equal)))
+            (dolist (key '("effort" "summary" "context"))
+              (let ((value (ende-protocol-json-get key reasoning)))
+                (when (stringp value)
+                  (setf (alist-get key settings nil nil #'equal) (ende-debug--redact value)))))
+            (when settings (ende-debug--record-field record "response_reasoning" settings)))
+          (when completed
+            (setf (plist-get record :response-completed) t)
+            (let* ((diagnostics (ende-protocol-json-get "prompt_cache_diagnostics" response))
+                   (selected (alist-get "prompt_cache_diagnostics" (plist-get record :metadata)
+                                        nil nil #'equal))
+                   (output (ende-protocol-json-get "output" response))
+                   (tokens (ende-protocol-json-get
+                            "reasoning_tokens"
+                            (ende-protocol-json-get
+                             "output_tokens_details" (ende-protocol-json-get "usage" response)))))
+              (dolist (key '("type" "reason" "comparison_reusable_tokens" "cache_missed_tokens"))
+                (let ((value (ende-protocol-json-get key diagnostics)))
+                  (when (if (member key '("type" "reason"))
+                            (member value '("cache_hit" "cache_miss" "unavailable"
+                                            "comparison_response_not_found" "model_changed"
+                                            "prompt_cache_key_changed" "tools_changed"
+                                            "text_format_changed" "reasoning_effort_changed"
+                                            "verbosity_changed" "context_compacted"
+                                            "input_changed" "service_tier_changed"))
+                          (and (integerp value) (>= value 0)))
+                    (setf (alist-get key selected nil nil #'equal) value))))
+              (when selected (ende-debug--record-field record "prompt_cache_diagnostics" selected))
+              (when (ende-debug--json-array-p output)
+                (ende-debug--record-field
+                 record "output_reasoning_items"
+                 (cl-count "reasoning" output
+                           :key (lambda (item) (ende-protocol-json-get "type" item)) :test #'equal)))
+              (when (and (integerp tokens) (>= tokens 0))
+                (ende-debug--record-field record "response_reasoning_tokens" tokens)))))
+      ((error quit) nil))))
 
 (defun ende-debug-record-completion (record outcome usage http-status value)
   "Write RECORD's terminal OUTCOME, normalized USAGE, and HTTP-STATUS.
@@ -207,6 +265,9 @@ errors are reported but never propagated into transport completion."
         (let* ((counts (ende--usage-token-counts usage))
                (error-kind (and (ende-error-p value)
                                 (ende-error-kind value)))
+               (error-details (and (ende-error-p value)
+                                   (listp (ende-error-details value))
+                                   (ende-error-details value)))
                (state (cond
                        ((eq outcome 'success) "success")
                        ((eq error-kind 'cancelled) "cancelled")
@@ -216,6 +277,10 @@ errors are reported but never propagated into transport completion."
                 `(("outcome" . ,state)
                   ("error_kind" . ,(and error-kind (symbol-name error-kind)))
                   ("http_status" . ,http-status)
+                  ("error_code" . ,(when (stringp (plist-get error-details :code))
+                                       (ende-debug--redact (plist-get error-details :code))))
+                  ("error_param" . ,(when (stringp (plist-get error-details :param))
+                                        (ende-debug--redact (plist-get error-details :param))))
                   ("completed_timestamp" . ,(ende-debug--timestamp))
                   ("completion_time_epoch" . ,completed)
                   ("elapsed_seconds" . ,(- completed
@@ -570,6 +635,7 @@ Fall back to saved values when fingerprints cannot establish equality."
   (let* ((metadata (plist-get capture :metadata))
          (completion (ende-protocol-json-get "completion" metadata))
          (input (ende-protocol-json-get "input_tokens" completion))
+         (output (ende-protocol-json-get "output_tokens" completion))
          (cached (ende-protocol-json-get "cached_input_tokens" completion))
          (cache-write
           (ende-protocol-json-get "cache_write_tokens" completion))
@@ -582,9 +648,11 @@ Fall back to saved values when fingerprints cannot establish equality."
                           (format "%.1f%%" (* 100.0 (/ (float cached) input)))
                         "n/a"))
             "not reported")))
-    (format "#%-4d Input: %6s  Cached: %s%s%s"
+    (format "#%-4d Job: %s  Input: %6s  Output: %s  Cached: %s%s%s%s"
             sequence
+            (or (ende-protocol-json-get "job_id" metadata) "unknown")
             (if (numberp input) (number-to-string input) "n/a")
+            (if (numberp output) (number-to-string output) "n/a")
             cache-description
             (if (numberp cache-write)
                 (format "  Cache write: %d" cache-write)
@@ -599,7 +667,37 @@ Fall back to saved values when fingerprints cannot establish equality."
                                     (ende-protocol-json-get
                                      "http_status" completion))
                           ""))
-              "  [pending]"))))
+              "  [pending]")
+            (ende-debug--response-lines capture))))
+
+(defun ende-debug--response-lines (capture)
+  "Describe selected provider identifiers and reasoning for CAPTURE."
+  (let* ((metadata (plist-get capture :metadata))
+         (diagnostics (ende-protocol-json-get "prompt_cache_diagnostics" metadata))
+         (comparison (ende-protocol-json-get "comparison_response_id" metadata))
+         (type (ende-protocol-json-get "type" diagnostics)))
+    (concat
+     (mapconcat
+      (lambda (field)
+        (when-let* ((value (ende-protocol-json-get (car field) metadata)))
+          (format "\n  %s: %s" (cdr field) (if (hash-table-p value) (json-encode value) value))))
+      '(("provider_response_id" . "Provider response ID")
+        ("http_request_id" . "HTTP x-request-id")
+        ("comparison_response_id" . "Comparison response ID sent")
+        ("response_model" . "Returned model")
+        ("response_service_tier" . "Returned service tier")
+        ("response_reasoning" . "Effective reasoning")) "")
+     (format "\n  Reasoning already sent in this request: %s items; new reasoning produced by this response: %s items; reasoning tokens: %s"
+             (or (ende-protocol-json-get "input_reasoning_items" metadata) "unknown")
+             (or (ende-protocol-json-get "output_reasoning_items" metadata) "unknown")
+             (or (ende-protocol-json-get "response_reasoning_tokens" metadata) "not reported"))
+     (format "\n  Provider diagnostic: %s%s"
+             (or type (if comparison "requested, not returned" "not returned"))
+             (mapconcat
+              (lambda (key)
+                (when-let* ((value (ende-protocol-json-get key diagnostics)))
+                  (format "; %s=%s" key value)))
+              '("reason" "comparison_reusable_tokens" "cache_missed_tokens") "")))))
 
 (defun ende-debug--cache-summary (capture)
   "Return a concise cache percentage for CAPTURE."
@@ -697,6 +795,15 @@ Fall back to saved values when fingerprints cannot establish equality."
               ((not (and old-session new-session)) "unknown")
               ((equal old-session new-session) "unchanged")
               (t "changed")))
+     (mapconcat
+      (lambda (key)
+        (when (and (ende-protocol-json-has-key-p key old-meta)
+                   (ende-protocol-json-has-key-p key new-meta)
+                   (not (ende-debug--same-json-field-p old-meta new-meta key)))
+          (format "Returned %s changed: %s -> %s\n" key
+                  (json-encode (gethash key old-meta))
+                  (json-encode (gethash key new-meta)))))
+      '("response_model" "response_service_tier" "response_reasoning") "")
      (if prefix-identical
          (format "Local input:     %s; %d appended%s\n"
                  (if original "previous original input prefix was preserved"
@@ -781,7 +888,7 @@ When SESSION is non-nil, group by known provider-scoped session identity."
            (format "\nWeighted cache reuse: %.1f%% (%d/%d tokens; %d requests with both counts)"
                    (* 100.0 (/ (float cached) input)) cached input reported)
          "\nWeighted cache reuse: not reported"))
-     "\n\n"
+     "\n\nStructural input fingerprints compare represented values, not provider tokenization.\nA provider cache_hit does not mean all current input tokens were cached; usage measures reuse.\n\n"
      (if pairs
          (concat "Consecutive requests within each job or known provider session:\n\n"
                  (mapconcat

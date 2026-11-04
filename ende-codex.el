@@ -998,18 +998,29 @@ explicit efforts yields no choices instead of an error."
 
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
-  (when (ende-codex--session-debug-record session)
-    (ende-debug-record-completion
-     (ende-codex--session-debug-record session) outcome
-     (ende-stream-session-usage (ende-codex--session-stream session))
-     (ende-codex--response-status session) value))
-  (let ((tool-calls (ende-codex--tool-call-list session)))
-    (ende-stream-settle-generation
-     (ende-codex--session-stream session) outcome value "output_tokens"
-     (plist-get (ende-codex--session-profile session) :model) "OpenAI"
-     (list :tool-calls tool-calls :protocol-items (ende-codex--protocol-items session)
-           :protocol-item-keys (mapcar #'car (ende-codex--ordered-output session)))
-     (ende-codex--session-replay-items session) nil t)))
+  (unless (ende-codex--terminal-p session)
+    (let ((record (ende-codex--session-debug-record session)))
+      (when record
+        (condition-case nil
+            (ende-debug-record-http-request-id
+             record
+             (ende-curl-response-request-id
+              (ende-transport-session-headers-file
+               (ende-codex--lifecycle session))))
+          ((error quit) nil))
+        (condition-case nil
+            (ende-debug-record-completion
+             record outcome
+             (ende-stream-session-usage (ende-codex--session-stream session))
+             (ende-codex--response-status session) value)
+          ((error quit) nil))))
+    (let ((tool-calls (ende-codex--tool-call-list session)))
+      (ende-stream-settle-generation
+       (ende-codex--session-stream session) outcome value "output_tokens"
+       (plist-get (ende-codex--session-profile session) :model) "OpenAI"
+       (list :tool-calls tool-calls :protocol-items (ende-codex--protocol-items session)
+             :protocol-item-keys (mapcar #'car (ende-codex--ordered-output session)))
+       (ende-codex--session-replay-items session) nil t))))
 
 (defun ende-codex--fail (session error)
   "Settle SESSION with structured ERROR."
@@ -1166,7 +1177,9 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (output-index (ende-protocol-json-get "output_index" json))
          (metadata (or response json))
          (model (ende-protocol-json-get "model" metadata)))
-    (ende-debug-record-response (ende-codex--session-debug-record session) response)
+    (ende-ignore-errors
+     #'ende-debug-record-response (ende-codex--session-debug-record session) response
+     (member type '("response.completed" "response.done")))
     (when (and (equal type "response.output_item.done")
                (equal (ende-protocol-json-get "type" item) "image_generation_call"))
       (ende-stream-record-image

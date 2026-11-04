@@ -769,12 +769,33 @@ Use COMMAND for the process, or a silent sleep process by default."
     (unwind-protect
         (progn
           (with-temp-file file
-            (insert "HTTP/1.1 200 Connection established\r\n\r\n"
-                    "HTTP/2 103 Early Hints\r\nLink: </model>\r\n\r\n"
+            (insert "HTTP/1.1 200 Connection established\r\n"
+                    "x-request-id: proxy-request\r\n\r\n"
+                    "HTTP/2 103 Early Hints\r\nLink: </model>\r\n"
+                    "x-request-id: hint-request\r\n\r\n"
                     "HTTP/2 200\r\n"
-                    "CoNtEnT-TyPe: text/event-stream; charset=utf-8\r\n\r\n"))
+                    "CoNtEnT-TyPe: text/event-stream; charset=utf-8\r\n"
+                    "X-ReQuEsT-Id: final-request\r\n"
+                    "Set-Cookie: private-cookie\r\n"
+                    "Authorization: Bearer private-auth\r\n\r\n"))
           (should (equal (ende-curl-response-headers file)
                          '(200 . "text/event-stream; charset=utf-8")))
+          (should (equal (ende-curl-response-request-id file) "final-request"))
+          (should (equal (ende-curl--final-response-headers file)
+                         '(200 "text/event-stream; charset=utf-8" "final-request")))
+          (let ((ende-max-response-header-bytes 1))
+            (should-error (ende-curl-response-headers file))
+            (should-error (ende-curl-response-request-id file)))
+          (with-temp-file file
+            (insert "HTTP/2 103 Early Hints\r\n"
+                    "content-type: application/json\r\n"
+                    "x-request-id: hint-request\r\n\r\n"
+                    "HTTP/2 204\r\n"
+                    "Set-Cookie: private-cookie\r\n"
+                    "Authorization: Bearer private-auth\r\n\r\n"))
+          (should (equal (ende-curl-response-headers file) '(204)))
+          (should-not (ende-curl-response-request-id file))
+          (should (equal (ende-curl--final-response-headers file) '(204 nil nil)))
           (should (ende-curl-event-stream-p
                    "text/event-stream; charset=utf-8"))
           (should-not (ende-curl-event-stream-p

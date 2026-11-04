@@ -645,6 +645,52 @@
                                     (ende-debug--pair-report (nth 0 captures) (nth 1 captures))))))
       (delete-directory directory t))))
 
+(ert-deftest ende-debug-response-metadata-is-selected-and-nonfatal ()
+  (let* ((directory (make-temp-file "ende-debug-responses-" t))
+         (ende-debugging-enabled t)
+         (ende-debug--session-directory directory)
+         (ende-debug--sequence 0)
+         (item "{\"type\":\"reasoning\",\"id\":\"rs-new\",\"encrypted_content\":\"private-response-output\",\"summary\":[]}")
+         (events (list
+                  "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-provider\",\"model\":\"returned\"}}"
+                  (concat "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" item "}")
+                  (concat "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" item "}")
+                  (concat "{\"type\":\"response.completed\",\"response\":{\"service_tier\":\"default\","
+                          "\"reasoning\":{\"effort\":\"high\",\"context\":\"all_turns\",\"private\":\"private-setting\"},"
+                          "\"prompt_cache_diagnostics\":{\"type\":\"cache_miss\",\"reason\":\"prompt_cache_key_changed\","
+                          "\"comparison_reusable_tokens\":512,\"cache_missed_tokens\":128,\"private\":\"private-diagnostic\"},"
+                          "\"output\":[" item "],\"usage\":{\"output_tokens\":10,\"output_tokens_details\":{\"reasoning_tokens\":8}}}}"))))
+    (unwind-protect
+        (progn
+          (dolist (transport '(responses codex))
+            (let ((state (ende-test--run-stream-request
+                          transport (mapcar (lambda (event) (concat "data: " event "\n\n")) events))))
+              (should (plist-get state :result))
+              (should-not (plist-get state :error))
+              (let* ((meta (ende-debug-test--read-meta directory ende-debug--sequence))
+                     (diagnostics (gethash "prompt_cache_diagnostics" meta)))
+                (should (equal (gethash "provider_response_id" meta) "resp-provider"))
+                (should (equal (gethash "response_model" meta) "returned"))
+                (should (equal (gethash "context" (gethash "response_reasoning" meta)) "all_turns"))
+                (should (equal (gethash "reason" diagnostics) "prompt_cache_key_changed"))
+                (should (= (gethash "comparison_reusable_tokens" diagnostics) 512))
+                (should (= (gethash "cache_missed_tokens" diagnostics) 128))
+                (should (= (gethash "input_reasoning_items" meta) 0))
+                (should (= (gethash "output_reasoning_items" meta) 1))
+                (should (= (gethash "response_reasoning_tokens" meta) 8)))))
+          (let ((record (ende-debug-record-request "{}" nil nil nil "test" nil)))
+            (ende-debug-record-http-request-id record "req-selected")
+            (ende-debug-record-response record (ende-protocol-json-read-string
+                                               "{\"id\":{},\"reasoning\":false,\"output\":true,\"prompt_cache_diagnostics\":{\"reason\":\"Authorization: Bearer secret\",\"cache_missed_tokens\":{}},\"usage\":[]}") t)
+            (ende-debug-record-response record nil t)
+            (ende-debug-record-completion record 'success nil 200 nil)
+            (should (equal (gethash "http_request_id" (ende-debug-test--read-meta directory ende-debug--sequence))
+                           "req-selected")))
+          (dolist (path (directory-files directory t "-meta.json$"))
+            (should-not (string-match-p "private-response-output\\|private-setting\\|private-diagnostic\\|Bearer secret"
+                                        (ende-debug-test--read-bytes path)))))
+      (delete-directory directory t))))
+
 (provide 'ende-debug-test)
 
 ;;; ende-debug-test.el ends here

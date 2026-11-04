@@ -408,8 +408,8 @@ being re-signaled to the caller."
        "\\`[ \t]*text/event-stream\\(?:[ \t]*;\\|[ \t]*\\'\\)"
        content-type))))
 
-(defun ende-curl-response-headers (file)
-  "Return final (STATUS . CONTENT-TYPE) from curl header FILE."
+(defun ende-curl--final-response-headers (file)
+  "Return final (STATUS CONTENT-TYPE REQUEST-ID) from curl header FILE."
   (when (file-readable-p file)
     (let ((size (file-attribute-size (file-attributes file))))
       (when (and ende-max-response-header-bytes
@@ -420,7 +420,8 @@ being re-signaled to the caller."
       (goto-char (point-min))
       (let ((case-fold-search t)
             (status nil)
-            (content-type nil))
+            (content-type nil)
+            (request-id nil))
         (while (re-search-forward
                 "^HTTP/[0-9]+\\(?:\\.[0-9]+\\)?[ \t]+\\([0-9]+\\)" nil t)
           (let ((response-status (string-to-number (match-string 1)))
@@ -429,12 +430,26 @@ being re-signaled to the caller."
                                    (line-beginning-position)))
                                (point-max))))
             (setq status response-status
-                  content-type nil)
+                  content-type nil
+                  request-id nil)
             (save-excursion
               (when (re-search-forward
                      "^content-type:[ \t]*\\([^\r\n]+\\)" block-end t)
-                (setq content-type (string-trim (match-string 1)))))))
-        (cons status content-type)))))
+                (setq content-type (string-trim (match-string 1)))))
+            (save-excursion
+              (when (re-search-forward
+                     "^x-request-id:[ \t]*\\([^\r\n]+\\)" block-end t)
+                (setq request-id (string-trim (match-string 1)))))))
+        (list status content-type request-id)))))
+
+(defun ende-curl-response-headers (file)
+  "Return final (STATUS . CONTENT-TYPE) from curl header FILE."
+  (when-let* ((headers (ende-curl--final-response-headers file)))
+    (cons (car headers) (cadr headers))))
+
+(defun ende-curl-response-request-id (file)
+  "Return the final response's x-request-id from curl header FILE, or nil."
+  (nth 2 (ende-curl--final-response-headers file)))
 
 (defun ende-curl-cleanup-resources (buffers files &optional processes)
   "Kill BUFFERS and delete FILES, ignoring cleanup failures."
