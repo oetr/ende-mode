@@ -3007,46 +3007,6 @@ COMPACT marks the completed response as a context fence."
             body
             "\n\n")))
 
-(defun ende-chat--json-display-text (object &rest options)
-  "Return OBJECT serialized as JSON and decoded as Emacs text.
-OPTIONS are passed to `json-serialize'."
-  (decode-coding-string
-   (apply #'json-serialize object options)
-   'utf-8-unix))
-
-(defun ende-chat--tool-argument-summary (arguments)
-  "Return a compact display summary for JSON object ARGUMENTS, or nil."
-  (condition-case nil
-      (let ((object (json-parse-string
-                     arguments :object-type 'alist :array-type 'array
-                     :null-object :null :false-object :false)))
-        (when (and (consp object)
-                   (cl-every (lambda (entry)
-                               (and (consp entry)
-                                    (symbolp (car entry))))
-                             object))
-          (mapconcat
-           (lambda (entry)
-             (let* ((key (symbol-name (car entry)))
-                    (display-key
-                     (if (string-match-p
-                          "\\`[[:alpha:]_][[:alnum:]_-]*\\'" key)
-                         key
-                       (ende-chat--json-display-text key)))
-                    (value (ende-chat--json-display-text
-                            (cdr entry) :null-object :null
-                            :false-object :false)))
-               (concat display-key "=" value)))
-           object ", ")))
-    (error nil)))
-
-(defun ende-chat--truncate-tool-heading (title level)
-  "Keep the complete heading TITLE at LEVEL within 180 display columns."
-  (let ((width (max 1 (- 180 (1+ level)))))
-    (if (> (string-width title) width)
-        (truncate-string-to-width title width 0 nil "…")
-      title)))
-
 (defun ende-chat--prepare-tool-call (call &optional store-file protocol-items)
   "Store CALL and its matching PROTOCOL-ITEMS entry in STORE-FILE."
   (let* ((store-file (or store-file (ende-tool-store--filename)))
@@ -3104,10 +3064,10 @@ OPTIONS are passed to `json-serialize'."
                  (stringp name) (not (string-empty-p name))
                  (stringp arguments))
       (error "Tool call has not been stored: %S" call))
-    (let* ((summary (ende-chat--tool-argument-summary arguments))
+    (let* ((summary (ende-org--tool-argument-summary arguments))
            (title (concat "--> " name (if summary (concat ": " summary) ""))))
       (concat (make-string level ?*) " "
-              (ende-chat--truncate-tool-heading title level) "\n"
+              (ende-org--truncate-heading title level) "\n"
               ":PROPERTIES:\n"
               (ende-chat--tool-section-properties
                request-id execution-id name "call")
@@ -3155,10 +3115,10 @@ OPTIONS are passed to `json-serialize'."
         (arguments (ende-tools-call-value call :arguments)))
     (unless (and (stringp execution-id) (stringp name) (stringp arguments))
       (error "Malformed generated tool result"))
-    (let* ((summary (ende-chat--tool-argument-summary arguments))
+    (let* ((summary (ende-org--tool-argument-summary arguments))
            (title (concat name (if summary (concat ": " summary) ""))))
       (concat (make-string level ?*) " "
-              (ende-chat--truncate-tool-heading title level) "\n"
+              (ende-org--truncate-heading title level) "\n"
               ":PROPERTIES:\n"
               (ende-chat--tool-section-properties
                request-id execution-id name "result")

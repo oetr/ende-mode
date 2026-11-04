@@ -29,6 +29,41 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
+
+(defun ende-org--json-display-text (object &rest options)
+  "Return OBJECT serialized as JSON text using OPTIONS."
+  (decode-coding-string (apply #'json-serialize object options) 'utf-8-unix))
+
+(defun ende-org--tool-argument-summary (arguments)
+  "Return a compact display summary for JSON object ARGUMENTS, or nil."
+  (condition-case nil
+      (let ((object (json-parse-string
+                     arguments :object-type 'alist :array-type 'array
+                     :null-object :null :false-object :false)))
+        (when (and (consp object)
+                   (cl-every (lambda (entry)
+                               (and (consp entry) (symbolp (car entry))))
+                             object))
+          (mapconcat
+           (lambda (entry)
+             (let* ((key (symbol-name (car entry)))
+                    (display-key
+                     (if (string-match-p "\\`[[:alpha:]_][[:alnum:]_-]*\\'" key)
+                         key
+                       (ende-org--json-display-text key)))
+                    (value (ende-org--json-display-text
+                            (cdr entry) :null-object :null :false-object :false)))
+               (concat display-key "=" value)))
+           object ", ")))
+    (error nil)))
+
+(defun ende-org--truncate-heading (title level)
+  "Keep the complete heading TITLE at LEVEL within 180 display columns."
+  (let ((width (max 1 (- 180 (1+ level)))))
+    (if (> (string-width title) width)
+        (truncate-string-to-width title width 0 nil "…")
+      title)))
 
 (defun ende-org--block-directive (line)
   "Return the indented, case-insensitive block directive in LINE, or nil."
