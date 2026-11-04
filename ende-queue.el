@@ -18,7 +18,7 @@
 (require 'ende-provider)
 (require 'ende-codex)
 (require 'ende-target)
-(require 'ende-work-buffer)
+(require 'ende-transcript)
 
 ;;;; Job records
 
@@ -43,11 +43,19 @@
   pending-guidance family parent children schedule-path next-child-index
   resume-function execution-generation access-policy active-spawn-batch
   scheduling-overrides owned-buffer owned-buffer-hook delegated-settlement
-  title work-buffer request-phase title-attempts title-generated-p)
+  title work-buffer request-phase title-attempts title-generated-p transcript)
 
 (cl-defstruct (ende-queue-fence (:constructor ende--make-fence))
   "An ordered queue barrier with an explicit set of unfinished predecessors."
   id provider jobs)
+
+(defun ende-job-ensure-transcript (job)
+  "Return JOB's independent transcript, creating it when necessary."
+  (or (ende-job-transcript job)
+      (setf (ende-job-transcript job)
+            (ende-transcript-create
+             :task (or (plist-get (ende-job-instruction job) :task)
+                       (ende-job-latest-user job) (ende-job-title job))))))
 
 (defun ende-job-latest-user-set (job text)
   "Retain a bounded inert latest-user excerpt TEXT on JOB."
@@ -445,6 +453,9 @@ Stale reports do nothing.  Transport status and scheduler state are untouched."
            ;; Retain only a bounded inert excerpt, never a duplicate transcript.
            (ende-job-latest-user-set job latest)))))
     (_ nil))
+  (when (and (ende-job-transcript job)
+             (not (eq (ende-job-request-phase job) 'title)))
+    (ende-transcript-event (ende-job-transcript job) event))
   (dolist (function ende-job-event-functions)
     (ende-ignore-errors function job event)))
 
@@ -1004,6 +1015,8 @@ scheduler callbacks are permitted to observe the child."
 
 (defun ende--job-terminal-event (job state result error)
   "Emit lifecycle events for JOB's terminal STATE."
+  (when (ende-job-transcript job)
+    (ende-transcript-finish (ende-job-transcript job) state error))
   (pcase state
     ('completed
      (ende-job-emit-event
