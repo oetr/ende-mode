@@ -1259,11 +1259,13 @@ If an edited drawer is malformed, fall back to the line after the heading."
           (progn
             (setq ende-chat--expired-history-in-request t)
             nil)
-        (list :id (plist-get execution :provider-call-id)
-              :name (plist-get execution :name)
-              :arguments (plist-get execution :arguments)
-              :protocol-provider (plist-get execution :protocol-provider)
-              :protocol-item (plist-get execution :protocol-item))))))
+        (append
+         (list :id (plist-get execution :provider-call-id)
+               :name (plist-get execution :name)
+               :arguments (plist-get execution :arguments))
+         (when (plist-get execution :protocol-item)
+           (list :protocol-provider (plist-get execution :protocol-provider)
+                 :protocol-item (plist-get execution :protocol-item))))))))
 
 (defun ende-chat--restore-response-parts (parts normalized)
   "Restore presentation in already split PARTS using NORMALIZED metadata.
