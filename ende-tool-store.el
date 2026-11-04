@@ -212,13 +212,26 @@ FILENAME defaults to the current buffer's effective store."
   (let ((object (make-hash-table :test #'equal)))
     (while fields
       (puthash (pop fields) (pop fields) object))
-    (decode-coding-string (json-serialize object) 'utf-8-unix)))
+    (decode-coding-string (json-serialize object :null-object nil) 'utf-8-unix)))
+
+(defun ende-tool-store--validate-call-item
+    (provider-call-id name arguments provider item)
+  "Validate optional provider ITEM against its normalized call fields."
+  (when (or provider item)
+    (unless (and (equal provider "openai-responses")
+                 (hash-table-p item)
+                 (equal (gethash "type" item) "function_call")
+                 (equal (gethash "call_id" item) provider-call-id)
+                 (equal (gethash "name" item) name)
+                 (equal (gethash "arguments" item) arguments))
+      (error "Provider tool call item disagrees with its normalized call"))))
 
 (defun ende-tool-store--decode-payload (payload execution-id kind)
   "Decode and validate PAYLOAD for EXECUTION-ID and KIND."
   (let* ((record
           (condition-case error-data
-              (json-parse-string payload :object-type 'hash-table)
+              (json-parse-string payload :object-type 'hash-table
+                                 :null-object nil :false-object :false)
             (error
              (error "Malformed stored %s payload for execution %s: %s"
                     kind execution-id (error-message-string error-data)))))
@@ -233,26 +246,39 @@ FILENAME defaults to the current buffer's effective store."
                      (not (string-empty-p (gethash "tool_name" record)))))
       (error "Malformed stored %s payload for execution %s"
              kind execution-id))
+    (when (eq kind 'request)
+      (ende-tool-store--validate-call-item
+       (gethash "provider_call_id" record) (gethash "tool_name" record)
+       (gethash "arguments" record) (gethash "protocol_provider" record)
+       (gethash "protocol_item" record)))
     record))
 
 (defun ende-tool-store-create-execution
-    (provider-call-id name arguments &optional filename)
-  "Store a new request execution in FILENAME and return its semantic value."
+    (provider-call-id name arguments &optional filename protocol-provider protocol-item)
+  "Store a new request execution in FILENAME and return its semantic value.
+Retain optional PROTOCOL-ITEM and its PROTOCOL-PROVIDER for exact replay."
   (unless (and (stringp provider-call-id) (not (string-empty-p provider-call-id))
                (stringp name) (not (string-empty-p name))
                (stringp arguments))
     (error "Malformed provider tool call"))
+  (ende-tool-store--validate-call-item
+   provider-call-id name arguments protocol-provider protocol-item)
   (let ((execution-id (ende-tool-store--new-execution-id)))
     (ende-tool-store-put
      execution-id 'request
-     (ende-tool-store--encode-payload
-      "provider_call_id" provider-call-id "tool_name" name
-      "arguments" arguments)
+     (apply #'ende-tool-store--encode-payload
+            (append (list "provider_call_id" provider-call-id "tool_name" name
+                          "arguments" arguments)
+                    (when protocol-item
+                      (list "protocol_provider" protocol-provider
+                            "protocol_item" protocol-item))))
      filename)
     (list :execution-id execution-id
           :provider-call-id provider-call-id
           :name name
           :arguments arguments
+          :protocol-provider protocol-provider
+          :protocol-item protocol-item
           :request-present-p t
           :result-present-p nil
           :content nil)))
@@ -308,6 +334,8 @@ returned plist, and provider call IDs are checked when both records exist."
           :provider-call-id (or request-call-id result-call-id)
           :name (and request (gethash "tool_name" request))
           :arguments (and request (gethash "arguments" request))
+          :protocol-provider (and request (gethash "protocol_provider" request))
+          :protocol-item (and request (gethash "protocol_item" request))
           :request-present-p (and request t)
           :result-present-p (and result t)
           :content (and result (gethash "content" result)))))

@@ -78,6 +78,32 @@
              (ende-tool-store-load-execution malformed-id))))
       (delete-directory directory t))))
 
+(ert-deftest ende-test/tool-store-preserves-provider-call-items ()
+  (let* ((directory (make-temp-file "ende-tool-store-call-" t))
+         (ende-tool-store-file (expand-file-name "store.sqlite3" directory))
+         (arguments "{ \"path\" : \"a.el\" }")
+         (item (json-parse-string
+                (json-encode
+                 `((type . "function_call") (id . "fc_item")
+                   (call_id . "call_result") (name . "read_file")
+                   (namespace . "ende") (status . "completed")
+                   (arguments . ,arguments) (extra . [nil ,json-false])))
+                :null-object nil :false-object :false)))
+    (unwind-protect
+        (let* ((execution (ende-tool-store-create-execution
+                           "call_result" "read_file" arguments nil
+                           "openai-responses" item))
+               (id (plist-get execution :execution-id))
+               (loaded (ende-tool-store-load-execution id)))
+          (should-not (member id '("fc_item" "call_result")))
+          (should (equal (plist-get loaded :protocol-provider) "openai-responses"))
+          (should (equal (json-encode (plist-get loaded :protocol-item))
+                         (json-encode item)))
+          (should-error (ende-tool-store-create-execution
+                         "different-call" "read_file" arguments nil
+                         "openai-responses" item)))
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/tool-store-rejects-unsupported-schema-version ()
   (let* ((directory (make-temp-file "ende-tool-store-version-" t))
          (file (expand-file-name "store.sqlite3" directory))
