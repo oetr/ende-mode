@@ -95,10 +95,14 @@
         (should (eq (leaf 'tool-call 2) (car previous-items)))
         (should-not (cl-intersection previous-items (plist-get (ende-transcript-entry-data synthetic) :items) :test #'eq)))
       (ende-transcript-begin-response transcript)
-      (observe '(:type :delta :channel :content :text "unfinished"))
+      (observe '(:type :delta :channel :content :text "unfinished full"))
       (let* ((text (leaf 'text :content))
-             (partial '(:content "unfinished full" :thinking "partial reasoning"
-                        :tool-calls ((:key 2 :id "unfinished" :name "inspect" :arguments "{")))))
+             (partial (list :content "unfinished full" :thinking "partial reasoning"
+                            :tool-calls '((:key 2 :id "unfinished" :name "inspect" :arguments "{"))
+                            :protocol-item-keys '(:content)
+                            :protocol-items
+                            (list 'openai-responses
+                                  (ende-protocol-json-read-string "{\"type\":\"message\",\"content\":[]}")))))
         (observe (list :type :partial-result :result partial))
         (should (eq text (leaf 'text :content)))
         (should (equal (ende-transcript-entry-content text) "unfinished full"))

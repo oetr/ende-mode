@@ -208,6 +208,12 @@ PARTIAL retains incomplete observations without preparing or executing calls."
         (when (or (not (eq kind 'tool-call)) call partial)
           (when call (push call seen))
           (when call (setq event (plist-put event :call call)))
+          (when (and partial (eq kind 'text))
+            (when-let* ((streamed (gethash (cons kind (plist-get event :key)) sources))
+                        (text (ende-transcript-entry-content streamed))
+                        (snapshot (or (plist-get event :text) ""))
+                        ((string-prefix-p snapshot text)))
+              (setq event (plist-put event :text text))))
           (when-let* ((entry (ende-transcript--upsert transcript sources response event nil status)))
             (push entry items)))))
     (ende-transcript--fallback-text
