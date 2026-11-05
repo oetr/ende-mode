@@ -178,6 +178,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (should (equal (lm-header "url") "https://github.com/oetr/ende-mode")))))
 
 (ert-deftest ende-header-test-legacy-metadata-and-commentary-are-preserved ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((first-line
             ";;; legacy.el --- Legacy utility -*- lexical-binding: nil; -*-")
@@ -211,6 +212,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                        (ende-header-test--forms result)))))))
 
 (ert-deftest ende-header-test-sparse-header-matrix ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let ((first-line
            ";;; sparse.el --- Small utility -*- lexical-binding: t; -*-")
@@ -254,6 +256,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                         (regexp-quote ";; Small utility.\n") result))))))))))
 
 (ert-deftest ende-header-test-unicode-crlf-and-opaque-form-spans ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((first-line
             ";;; opaque.el --- Unicode fixture -*- coding: utf-8; lexical-binding: t; -*-")
@@ -284,6 +287,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                    bytes)))))))
 
 (ert-deftest ende-header-test-retains-non-utf8-source-encoding ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((first-line
             ";;; latin.el --- Café -*- coding: iso-latin-1; lexical-binding: t; -*-")
@@ -299,6 +303,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                      (ende-header-test--forms (ende-header-test--text file)))))))
 
 (ert-deftest ende-header-test-removes-duplicate-speech-style-code-marker ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((text (concat ";;; speech.el --- Speech fixture -*- lexical-binding: t; -*-\n"
                          ";; Author: Peter\n\n;;; Commentary:\n\n"
@@ -314,6 +319,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                        (ende-header-test--forms result)))))))
 
 (ert-deftest ende-header-test-idempotence-keeps-modes-mtime-and-inode ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let ((file (ende-header-test--fixture root "stable.el")))
       (set-file-modes file #o751)
@@ -329,6 +335,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
         (should (equal before (ende-header-test--snapshot file)))))))
 
 (ert-deftest ende-header-test-check-statuses-and-no-writes ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let ((file (ende-header-test--fixture root "dirty.el")))
       (set-file-modes file #o640)
@@ -346,6 +353,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
         (should (equal before (ende-header-test--snapshot file)))))))
 
 (ert-deftest ende-header-test-default-recursion-is-relative-to-script ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((top (ende-header-test--fixture root "top.el"))
            (nested (ende-header-test--fixture root "nested directory/child.el"))
@@ -370,6 +378,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (ende-header-test--expect 0 script "--check"))))
 
 (ert-deftest ende-header-test-spaces-and-leading-dash-paths ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let ((spaced (ende-header-test--fixture root "with spaces.el"))
           (dashed (ende-header-test--fixture root "-dash.el"))
@@ -381,6 +390,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (ende-header-test--expect 0 script "--check" "--" "-dash.el"))))
 
 (ert-deftest ende-header-test-overlapping-paths-are-deduplicated ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((top (ende-header-test--fixture root "top.el"))
            (nested (ende-header-test--fixture root "nested/child.el"))
@@ -394,6 +404,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
                       (concat "Updated " file "\n") output)))))))
 
 (ert-deftest ende-header-test-recursion-skips-symlink-files-and-directories ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((external (expand-file-name "external" directory))
            (target (ende-header-test--fixture external "untouched.el"))
@@ -419,6 +430,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (ende-header-test--expect 0 script "--check" regular))))
 
 (ert-deftest ende-header-test-explicit-symlinks-are-refused-before-writes ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (external (expand-file-name "external" directory))
@@ -443,6 +455,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
         (should (file-symlink-p path))))))
 
 (ert-deftest ende-header-test-invalid-arguments-do-not-write-good-file ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (non-lisp (ende-header-test--write root "notes.txt" "not a target"))
@@ -457,6 +470,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (should (equal before (ende-header-test--snapshot good))))))
 
 (ert-deftest ende-header-test-invalid-source-preflight-leaves-all-files-unchanged ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (before (ende-header-test--snapshot good)))
@@ -488,6 +502,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
               (should (equal bad-before (ende-header-test--snapshot bad))))))))))
 
 (ert-deftest ende-header-test-foreign-author-continuation-is-not-silently-dropped ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (foreign (ende-header-test--fixture
@@ -501,6 +516,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
       (should (equal foreign-before (ende-header-test--snapshot foreign))))))
 
 (ert-deftest ende-header-test-conflicting-declarations-in-commentary-are-refused ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (before (ende-header-test--snapshot good)))
@@ -519,6 +535,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
           (should (equal foreign-before (ende-header-test--snapshot foreign))))))))
 
 (ert-deftest ende-header-test-explicit-git-internals-are-refused ()
+  :tags '(integration)
   (ende-header-test--with-root
     (let* ((good (ende-header-test--fixture root "a-good.el"))
            (internal (ende-header-test--fixture root ".git/hooks/internal.el"))
@@ -531,6 +548,7 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
         (should (equal internal-before (ende-header-test--snapshot internal)))))))
 
 (ert-deftest ende-header-test-recursion-skips-nonregular-files ()
+  :tags '(integration)
   (skip-unless (executable-find "mkfifo"))
   (ende-header-test--with-root
     (let ((fifo (expand-file-name "pipe.el" root))

@@ -567,6 +567,7 @@
                                      'personal (ende-codex-auth-test--credentials)) :host-id))))))
 
 (ert-deftest ende-codex-auth-storage-second-emacs-preserves-newer-records ()
+  :tags '(integration)
   (ende-codex-auth-test--with-store
    (let* ((credentials (ende-codex-auth-test--credentials))
           (old (ende-codex-auth--register 'chatgpt-plan-oauth 'personal credentials))

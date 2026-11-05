@@ -140,6 +140,7 @@
                                                  :content (ende-artifact-content text)))))))))
 
 (ert-deftest ende-artifact-worker-requests-preserve-wire-content ()
+  :tags '(integration)
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "request" ende-artifact-test-png "image/png"))

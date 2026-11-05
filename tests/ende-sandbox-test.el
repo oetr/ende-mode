@@ -345,6 +345,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-snapshot-uses-tool-scope-without-list-limit ()
+  :tags '(integration)
   (let* ((root nil)
          (owner (cl-incf ende-test--sandbox-owner))
          (sandbox nil))
@@ -1044,6 +1045,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-copy-back-rechecks-destination-and-symlinks ()
+  :tags '(integration)
   (let* ((root nil)
          (owner (cl-incf ende-test--sandbox-owner))
          (sandbox nil)
@@ -1107,6 +1109,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-cwd-rejects-absolute-escaping-and-symlink-paths ()
+  :tags '(integration)
   (let* ((root nil)
          (owner (cl-incf ende-test--sandbox-owner))
          (sandbox nil))
@@ -1133,6 +1136,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-persistent-podman-commands-and-job-cleanup ()
+  :tags '(integration)
   (let* ((image (ende-test--sandbox-image))
          (root nil)
          (owner-one (cl-incf ende-test--sandbox-owner))
@@ -1240,6 +1244,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-podman-host-edit-sync-preserves-artifacts ()
+  :tags '(integration)
   (let* ((image (ende-test--sandbox-image))
          (root nil)
          (owner (cl-incf ende-test--sandbox-owner)))
@@ -1289,6 +1294,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-start-failure-does-not-touch-project-files ()
+  :tags '(integration)
   (let* ((available (ende-test--sandbox-image))
          (root nil)
          (owner (cl-incf ende-test--sandbox-owner)))
@@ -1326,6 +1332,7 @@
         (delete-directory root t)))))
 
 (ert-deftest ende-test/sandbox-compiles-and-runs-across-command-calls ()
+  :tags '(integration)
   (let* ((image (ende-test--sandbox-image))
          (root nil)
          (owner (cl-incf ende-test--sandbox-owner)))

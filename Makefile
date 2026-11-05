@@ -50,7 +50,7 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check lint syntax compile test test-verbose test-compiled test-run format clean
+.PHONY: check lint syntax compile test test-fast test-verbose test-compiled test-run format clean
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
@@ -78,6 +78,9 @@ syntax:
 test:
 	@$(MAKE) --no-print-directory clean >/dev/null
 	@$(MAKE) --no-print-directory test-run
+
+test-fast:
+	@$(MAKE) --no-print-directory test TEST_SELECTOR='(not (tag integration))'
 
 test-verbose:
 	@$(MAKE) --no-print-directory clean >/dev/null

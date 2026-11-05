@@ -974,6 +974,7 @@
                               (plist-get result :error)))))))
 
 (ert-deftest ende-test/restricted-host-process-cancellation-and-timeout-stop-work ()
+  :tags '(integration)
   (let* ((root (make-temp-file "ende-host-direct-stop-" t))
          (configuration
           (ende-test--tool-access-config
@@ -1041,6 +1042,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/run-host-command-uses-host-cwd-and-captures-results ()
+  :tags '(integration)
   (let* ((root (make-temp-file "ende-host-command-" t))
          (cwd (expand-file-name "work" root))
          (configuration
@@ -1075,6 +1077,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/run-host-command-cancellation-and-timeout-kill-groups ()
+  :tags '(integration)
   (let* ((root (make-temp-file "ende-host-command-stop-" t))
          (configuration
           (ende-test--tool-access-config root '((tools run_host_command))))
@@ -1148,6 +1151,7 @@
       (delete-directory root t))))
 
 (ert-deftest ende-test/project-tools-run-in-the-background-after-reload ()
+  :tags '(integration)
   (let ((root (make-temp-file "ende-background-tools-" t)))
     (unwind-protect
         (progn

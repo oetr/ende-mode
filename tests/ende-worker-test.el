@@ -33,6 +33,7 @@
 (require 'ende-test-wait)
 
 (ert-deftest ende-worker/round-trip-keeps-the-event-loop-free ()
+  :tags '(integration)
   (let* ((tick nil)
          (done nil)
          (value nil)
@@ -60,6 +61,7 @@
       (cancel-timer timer))))
 
 (ert-deftest ende-worker/errors-and-cancellation-settle-once ()
+  :tags '(integration)
   (dolist (cancel-p '(nil t))
     (let ((done nil)
           (calls 0)
