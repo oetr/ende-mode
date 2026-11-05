@@ -93,16 +93,19 @@
 
 (defun ende-test--host-command-call (arguments configuration)
   "Run host command ARGUMENTS asynchronously and wait for its result."
-  (let ((done nil)
-        (result nil)
-        (deadline (+ (float-time) 15.0)))
-    (ende-tool-call-async "run_host_command" arguments nil configuration
-                          (lambda (value) (setq result value done t)))
-    (while (and (not done) (< (float-time) deadline))
-      (accept-process-output nil 0.05))
-    (unless done
-      (error "timed out waiting for run_host_command"))
-    result))
+  (let* ((done nil)
+         (result nil)
+         (cancel nil)
+         (ende-tools--register-cancellation-function
+          (lambda (function) (setq cancel function))))
+    (unwind-protect
+        (progn
+          (ende-tool-call-async "run_host_command" arguments nil configuration
+                               (lambda (value) (setq result value done t)))
+          (ende-test--wait-for (lambda () done) :timeout 15.0
+                               :description "host command result")
+          result)
+      (when cancel (funcall cancel)))))
 
 (ert-deftest ende-test/tool-registry-rebuild-removes-stale-registrations ()
   (let ((ende-tools--registry (copy-sequence ende-tools--registry))
@@ -141,22 +144,17 @@
 
 (defun ende-test--wait-for-host-command-file (path)
   "Wait for the host command to create PATH."
-  (let ((deadline (+ (float-time) 8.0)))
-    (while (and (not (file-exists-p path)) (< (float-time) deadline))
-      (accept-process-output nil 0.05))
-    (unless (file-exists-p path)
-      (error "host command did not create %s" path))))
+  (ende-test--wait-for (lambda () (file-exists-p path)) :timeout 8.0
+                       :description (format "host command file %s" path)))
 
 (defun ende-test--assert-host-process-stopped (pid)
   "Wait until host process PID is gone or only remains as a zombie."
-  (let ((deadline (+ (float-time) 8.0))
-        attributes)
-    (while (and (< (float-time) deadline)
-                (setq attributes (process-attributes pid))
-                (not (equal (cdr (assq 'state attributes)) "Z")))
-      (accept-process-output nil 0.05))
-    (should (or (null attributes)
-                (equal (cdr (assq 'state attributes)) "Z")))))
+  (ende-test--wait-for
+   (lambda ()
+     (let ((attributes (process-attributes pid)))
+       (or (null attributes)
+           (equal (cdr (assq 'state attributes)) "Z"))))
+   :timeout 8.0 :description (format "host process %s stopped" pid)))
 
 (ert-deftest ende-test/project-tools-expose-json-definitions ()
   (let ((definitions (ende-tool-definitions)))
@@ -1002,9 +1000,8 @@
             (ende-tool-call-async
              "run_host_command" (list (cons "command" command)) nil configuration
              (lambda (value) (setq result value)))
-            (let ((deadline (+ (float-time) 5)))
-              (while (and (not process) (< (float-time) deadline))
-                (accept-process-output nil 0.02)))
+            (ende-test--wait-for (lambda () process) :timeout 5
+                                 :description "host process started")
             (should (process-live-p process))
             (should (functionp cancel))
             (ende-test--wait-for-host-command-file cancel-file)
@@ -1029,9 +1026,8 @@
              "run_host_command"
              (list (cons "command" command) (cons "timeout" 1)) nil configuration
              (lambda (value) (setq result value done t)))
-            (let ((deadline (+ (float-time) 8)))
-              (while (and (not done) (< (float-time) deadline))
-                (accept-process-output nil 0.05)))
+            (ende-test--wait-for (lambda () done) :timeout 8
+                                 :description "host timeout result")
             (should done)
             (should (= (plist-get (plist-get result :result) :exit_code) 124))
             (ende-test--wait-for-host-command-file timeout-file)
@@ -1132,10 +1128,9 @@
             (let ((pid (string-to-number
                         (with-temp-buffer
                           (insert-file-contents timeout-file)
-                          (buffer-string))))
-                  (deadline (+ (float-time) 8.0)))
-              (while (and (not done) (< (float-time) deadline))
-                (accept-process-output nil 0.05))
+                          (buffer-string)))))
+              (ende-test--wait-for (lambda () done) :timeout 8.0
+                                   :description "host timeout callback")
               (should done)
               (should (= calls 1))
               (should (plist-get call-result :ok))

@@ -100,19 +100,21 @@
 
 (defun ende-test--sandbox-call (name arguments root configuration owner)
   "Call tool NAME and wait for its async or synchronous result."
-  (let ((done nil)
-        (result nil)
-        (deadline (+ (float-time) 150.0))
-        (ende-tools--execution-owner owner))
-    (ende-tool-call-async
-     name arguments root configuration
-     (lambda (value)
-       (setq result value done t)))
-    (while (and (not done) (< (float-time) deadline))
-      (accept-process-output nil 0.1))
-    (unless done
-      (error "timed out waiting for tool %s" name))
-    result))
+  (let* ((done nil)
+         (result nil)
+         (cancel nil)
+         (ende-tools--execution-owner owner)
+         (ende-tools--register-cancellation-function
+          (lambda (function) (setq cancel function))))
+    (unwind-protect
+        (progn
+          (ende-tool-call-async
+           name arguments root configuration
+           (lambda (value) (setq result value done t)))
+          (ende-test--wait-for (lambda () done) :timeout 150.0
+                               :description (format "sandbox tool %s" name))
+          result)
+      (when cancel (funcall cancel)))))
 
 (defun ende-test--sandbox-run (arguments root configuration owner)
   "Run command ARGUMENTS for OWNER and return its structured result."
@@ -200,10 +202,9 @@
 
 (defun ende-test--sandbox-wait-clean (owners)
   "Wait until OWNER sandboxes have completed asynchronous cleanup."
-  (let ((deadline (+ (float-time) 60.0)))
-    (while (and (< (float-time) deadline)
-                (cl-some #'ende-sandbox-for-owner owners))
-      (accept-process-output nil 0.1)))
+  (ende-test--wait-for
+   (lambda () (not (cl-some #'ende-sandbox-for-owner owners)))
+   :timeout 60.0 :description "sandbox owner cleanup")
   (should-not (cl-some #'ende-sandbox-for-owner owners)))
 
 (ert-deftest ende-test/sandbox-config-inherits-only-pinned-images ()

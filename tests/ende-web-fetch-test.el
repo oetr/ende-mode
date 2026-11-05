@@ -164,18 +164,27 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
              (and (>= last #xc2) (<= last #xf4))))))
 
 (defun ende-test--web-await (start &optional timeout)
-  (let ((done nil)
-        (result nil)
-        (failure nil)
-        (deadline (+ (float-time) (or timeout 5))))
-    (funcall start
-             (lambda (value error)
-               (setq result value failure error done t)))
-    (while (and (not done) (< (float-time) deadline))
-      (accept-process-output nil 0.02))
-    (unless done
-      (error "web_fetch test watchdog expired"))
-    (list result failure)))
+  (let* ((done nil)
+         (result nil)
+         (failure nil)
+         (transfer nil)
+         (cancel nil)
+         (ende-tools--register-cancellation-function
+          (lambda (function) (setq cancel function))))
+    (unwind-protect
+        (progn
+          (setq transfer
+                (funcall start
+                         (lambda (value error)
+                           (setq result value failure error done t))))
+          (ende-test--wait-for (lambda () done) :timeout (or timeout 5)
+                               :description "web fetch callback")
+          (list result failure))
+      (when cancel (funcall cancel))
+      (when (ende-web-fetch--transfer-p transfer)
+        (let ((cancel-transfer
+               (ende-web-fetch--transfer-cancel-function transfer)))
+          (when cancel-transfer (funcall cancel-transfer)))))))
 
 (defun ende-test--web-tool-call (arguments configuration &optional timeout)
   (car
@@ -828,8 +837,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
                (when function
                  (setq cancel function
                        timer (run-at-time 0.1 nil function))))))
-          (while (and (not cancelled) (timerp timer))
-            (accept-process-output nil 0.02))
+          (ende-test--wait-for (lambda () cancelled) :timeout 5
+                               :description "web fetch timer cancellation")
           (should cancelled)
           (should (functionp cancel))
           (when timer (cancel-timer timer))
@@ -837,6 +846,8 @@ connection open.  Each request is captured as (PATH . HEADERS-TEXT)."
            (cl-some (lambda (buffer)
                       (string-prefix-p " *ende-web-fetch-" (buffer-name buffer)))
                     (buffer-list))))
+      (when timer (cancel-timer timer))
+      (when cancel (funcall cancel))
       (funcall (plist-get fixture :stop)))))
 
 (ert-deftest ende-test/web-fetch-cancellation-during-redirect-stops-next-hop ()

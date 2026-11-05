@@ -490,10 +490,11 @@
                 (funcall (plist-get stage :filter)
                          (plist-get (plist-get stage :request) :process)
                          "{\"id\":\"batch_1\",\"status\":\"validating\"}")
-                (while (process-live-p
-                        (plist-get (plist-get stage :request) :process))
-                  (accept-process-output
-                   (plist-get (plist-get stage :request) :process) 0.01))
+                (ende-test--wait-for
+                 (lambda ()
+                   (not (process-live-p
+                         (plist-get (plist-get stage :request) :process))))
+                 :description "batch submit/poll fixture process exit")
                 (funcall (plist-get stage :sentinel)
                          (plist-get (plist-get stage :request) :process)
                          "finished"))
@@ -522,10 +523,11 @@
                           (ende-openrouter-batch--request-custom-id
                            (car (ende-openrouter-batch--group-requests
                                  group)))))
-                (while (process-live-p
-                        (plist-get (plist-get stage :request) :process))
-                  (accept-process-output
-                   (plist-get (plist-get stage :request) :process) 0.01))
+                (ende-test--wait-for
+                 (lambda ()
+                   (not (process-live-p
+                         (plist-get (plist-get stage :request) :process))))
+                 :description "batch submit/poll fixture process exit")
                 (funcall (plist-get stage :sentinel)
                          (plist-get (plist-get stage :request) :process)
                          "finished")))
@@ -572,8 +574,7 @@
       (cl-labels
           ((finish-request (process status body)
              (let ((sentinel (process-sentinel process))
-                   (sentinel-finished nil)
-                   (deadline (+ (float-time) 5.0)))
+                   (sentinel-finished nil))
                ;; Process exit can precede the sentinel's stage cleanup and
                ;; handoff/result callbacks.  Wait for its terminal return.
                (set-process-sentinel
@@ -589,9 +590,9 @@
                                "Content-Type: application/json\r\n\r\n"))
                      (funcall (process-filter process) process body)
                      (funcall real-send-eof process)
-                     (while (and (not sentinel-finished)
-                                 (< (float-time) deadline))
-                       (accept-process-output nil 0.01))
+                     (ende-test--wait-for
+                      (lambda () sentinel-finished) :timeout 5.0
+                      :description "batch sentinel callback completion")
                      (should sentinel-finished))
                  (set-process-sentinel process sentinel)))))
         (cl-letf (((symbol-function 'make-process)

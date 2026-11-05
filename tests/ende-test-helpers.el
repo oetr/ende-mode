@@ -38,6 +38,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'ende-test-wait)
 (require 'json)
 (require 'ende-provider)
 (require 'ende)
@@ -138,13 +139,6 @@ Operations in BODY must cancel their own workers before returning."
    (or (overlay-get overlay 'before-string)
        (overlay-get overlay 'after-string)
        "")))
-
-(defun ende-test--wait-for (predicate)
-  "Wait for asynchronous PREDICATE to become true."
-  (let ((deadline (+ (float-time) 10)))
-    (while (and (not (funcall predicate)) (< (float-time) deadline))
-      (accept-process-output nil 0.01))
-    (should (funcall predicate))))
 
 (defun ende-test--tool-call (name arguments root &optional configuration)
   "Wait for tool NAME's result under CONFIGURATION in ROOT."
@@ -280,11 +274,13 @@ non-nil, is signalled from the event callback."
          (ende-max-response-bytes response-limit)
          (real-make-process (symbol-function 'make-process))
          (real-process-send-string (symbol-function 'process-send-string))
+         (real-process-send-eof (symbol-function 'process-send-eof))
          (request-args nil)
          (request-count 0)
          (request-body nil)
          (config-text nil)
          (process nil)
+         (cancel-operation nil)
          (events nil)
          (order nil)
          (result nil)
@@ -293,6 +289,7 @@ non-nil, is signalled from the event callback."
          (callbacks
           (list :on-start
                 (lambda (cancel)
+                  (setq cancel-operation cancel)
                   (push :start order)
                   (when cancel-on-start (funcall cancel)))
                 :on-event
@@ -349,6 +346,8 @@ non-nil, is signalled from the event callback."
                                 :buffer nil :command '("cat")
                                 :connection-type 'pipe :noquery t
                                 :filter #'ignore :sentinel #'ignore))))
+              ;; Keep the fake transport alive until all chunks are delivered.
+              ((symbol-function 'process-send-eof) #'ignore)
               ((symbol-function 'process-send-string)
                (lambda (target body)
                  (setq request-body (concat (or request-body "") body))
@@ -383,9 +382,10 @@ non-nil, is signalled from the event callback."
                 (dolist (chunk chunks)
                   (funcall filter process chunk))
                 (when (process-live-p process)
-                  (process-send-eof process)
-                  (while (process-live-p process)
-                    (accept-process-output process 0.05)))
+                  (funcall real-process-send-eof process)
+                  (ende-test--wait-for
+                   (lambda () (not (process-live-p process)))
+                   :description "stream fixture process exit"))
                 (when (and (processp process)
                            (memq (process-status process)
                                  '(exit signal closed failed)))
@@ -417,6 +417,7 @@ non-nil, is signalled from the event callback."
                                    (file-exists-p headers-file)))
                          (not (and config-file
                                    (file-exists-p config-file)))))))
+        (when cancel-operation (funcall cancel-operation))
         (when (and (processp process) (process-live-p process))
           (delete-process process))))))
 

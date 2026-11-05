@@ -30,13 +30,7 @@
 
 (require 'ert)
 (require 'ende-worker)
-
-(defun ende-worker-test--wait (predicate)
-  "Wait briefly for PREDICATE to become non-nil."
-  (let ((deadline (+ (float-time) 10)))
-    (while (and (not (funcall predicate)) (< (float-time) deadline))
-      (accept-process-output nil 0.01))
-    (should (funcall predicate))))
+(require 'ende-test-wait)
 
 (ert-deftest ende-worker/round-trip-keeps-the-event-loop-free ()
   (let* ((tick nil)
@@ -56,7 +50,8 @@
                  (lambda (result error)
                    (setq value result failure error done t))))
           (should-not done)
-          (ende-worker-test--wait (lambda () done))
+          (ende-test--wait-for (lambda () done)
+                                 :description "worker result callback")
           (should tick)
           (should-not failure)
           (should-not (= (car value) (emacs-pid)))
@@ -82,7 +77,8 @@
                    (lambda (function) (setq registered function))))
             (should (functionp registered))
             (when cancel-p (funcall registered))
-            (ende-worker-test--wait (lambda () done))
+            (ende-test--wait-for (lambda () done)
+                                 :description "worker result callback")
             (should (stringp failure))
             (should-not registered)
             (funcall cancel)
