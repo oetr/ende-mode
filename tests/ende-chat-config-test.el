@@ -285,7 +285,8 @@
                     "#+begin_ende\n(spawn-agent-config worker)\n"
                     "#+end_ende\n** Question\n"
                     "#+begin_ende\n(agent-config worker (root %S))\n"
-                    "#+end_ende\n*** Child\n")
+                    "#+end_ende\n*** Child\n"
+                    "#+begin_ende\n(agent-config idle)\n#+end_ende\n")
             root-a root-b root-b))
           (org-mode)
           (let* ((document (ende-chat--build-document))
@@ -298,6 +299,12 @@
             (should (equal (plist-get (cdr (assq 'worker registry)) :root)
                            (file-name-as-directory
                             (ende-project-normalize-root root-b))))
+            (should (assq 'idle registry))
+            (should (equal
+                     (ende-chat-config-resolve
+                      (ende-chat--document-tree document)
+                      (ende-chat--document-parent document) child)
+                     (plist-get environment :access-policy)))
             (should-not (assq 'secret registry))))
       (delete-directory root-a t)
       (delete-directory root-b t))))
@@ -317,12 +324,118 @@
           (org-mode)
           (let* ((document (ende-chat--build-document))
                  (question (car (last (ende-chat--document-headlines document)))))
+            (let ((policy
+                   (ende-chat-config-resolve
+                    (ende-chat--document-tree document)
+                    (ende-chat--document-parent document) question)))
+              (should (memq 'read_file (plist-get policy :active-tools)))
+              (should (equal (plist-get policy :tool-resources)
+                             '((read_file project)))))
             (should-error
              (ende-chat-config-resolve-environment
               (ende-chat--document-tree document)
               (ende-chat--document-parent document) question)
              :type 'error)))
       (delete-directory root t))))
+
+(ert-deftest ende-test/agent-config-unknown-selection-is-environment-only ()
+  (with-temp-buffer
+    (org-mode)
+    (insert (ende-test--chat-config-block '((spawn-agent-config missing)))
+            "* Question\n")
+    (let* ((document (ende-chat--build-document))
+           (question (car (ende-chat--document-headlines document)))
+           (tree (ende-chat--document-tree document))
+           (parents (ende-chat--document-parent document)))
+      (should (eq (plist-get (ende-chat-config-resolve tree parents question)
+                             :spawn-agent-config)
+                  'missing))
+      (should-error (ende-chat-config-resolve-environment tree parents question)
+                    :type 'error))))
+
+(ert-deftest ende-test/agent-config-policy-only-rejects-invalid-structure ()
+  (dolist (form '((agent-config)
+                  (agent-config worker malformed)
+                  (agent-config worker (agent-config nested))))
+    (with-temp-buffer
+      (org-mode)
+      (insert (ende-test--chat-config-block (list form)) "* Question\n")
+      (let ((document (ende-chat--build-document)))
+        (should-error
+         (ende-chat-config-resolve
+          (ende-chat--document-tree document)
+          (ende-chat--document-parent document)
+          (car (ende-chat--document-headlines document)))
+         :type 'error)))))
+
+(ert-deftest ende-test/agent-config-body-matches-ordinary-policy ()
+  (let* ((ende-providers '(local remote))
+         (ende-custom-providers ende-test--custom-providers)
+         (body '((tools inspect)
+                 (set-tool-resources inspect :resources docs)
+                 (clear-tools)
+                 (tools inspect)
+                 (clear-tool-resources)
+                 (add-tool-resources inspect :resources docs)
+                 (provider local)
+                 (model "first")
+                 (provider remote)
+                 (model "final")
+                 (restrict-host-commands "git")
+                 (group inspect web_fetch)
+                 (resource docs :type url
+                           (include "https://docs.example.com/**")))))
+    (with-temp-buffer
+      (org-mode)
+      (insert
+       (ende-test--chat-config-block '((restrict-host-commands "emacs")))
+       "* Question\n"
+       (ende-test--chat-config-block
+        (append body `((agent-config worker ,@body)
+                       (agent-config observer ,@body)))))
+      (let* ((document (ende-chat--build-document))
+             (question (car (ende-chat--document-headlines document)))
+             (policy (ende-chat-config-resolve
+                      (ende-chat--document-tree document)
+                      (ende-chat--document-parent document) question))
+             (environment
+              (ende-chat-config-resolve-environment
+               (ende-chat--document-tree document)
+               (ende-chat--document-parent document) question)))
+        (should (equal policy (plist-get environment :access-policy)))
+        (dolist (name '(worker observer))
+          (should (equal policy (cdr (assq name (plist-get environment :registry))))))
+        (should (eq (plist-get policy :provider) 'remote))
+        (should (equal (plist-get policy :model) "final"))
+        (should (equal (plist-get policy :active-tools) '(web_fetch about_thinking)))
+        (should (equal (plist-get policy :tool-resources) '((web_fetch docs))))
+        (should (equal (plist-get policy :host-command-policy)
+                       '(:restricted t :open ("git") :fixed nil)))))))
+
+(ert-deftest ende-test/agent-config-singleton-duplicate-rejected-in-either-body ()
+  (let ((body '((restrict-host-commands "git")
+                (restrict-host-commands "emacs"))))
+    (with-temp-buffer
+      (org-mode)
+      (insert (ende-test--chat-config-block body) "* Question\n")
+      (let ((document (ende-chat--build-document)))
+        (should-error
+         (ende-chat-config-resolve
+          (ende-chat--document-tree document)
+          (ende-chat--document-parent document)
+          (car (ende-chat--document-headlines document)))
+         :type 'error)))
+    (with-temp-buffer
+      (org-mode)
+      (insert (ende-test--chat-config-block `((agent-config worker ,@body)))
+              "* Question\n")
+      (let ((document (ende-chat--build-document)))
+        (should-error
+         (ende-chat-config-resolve-environment
+          (ende-chat--document-tree document)
+          (ende-chat--document-parent document)
+          (car (ende-chat--document-headlines document)))
+         :type 'error)))))
 
 (ert-deftest ende-test/chat-tool-config-resolves-inheritance-and-rejects-code ()
   (let* ((root (make-temp-file "ende-chat-config-" t))
