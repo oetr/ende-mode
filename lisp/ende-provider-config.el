@@ -597,7 +597,7 @@ selects another explicitly available wire endpoint.  No network is started."
     (when connection
       (ende-provider-config--plist connection "Connection selection")
       (cl-loop for (key _value) on connection by #'cddr do
-               (unless (memq key '(:account :auth-method :api))
+               (unless (memq key '(:account :auth-method :api :transport))
                  (error "Unsupported connection field: %s" key)))
       (when (and (plist-member connection :auth-method)
                  (not (eq (plist-get connection :auth-method) auth)))
@@ -626,6 +626,8 @@ selects another explicitly available wire endpoint.  No network is started."
       (ende-provider-config-parameters (plist-get model-settings :parameters) protected))
     (setq profile (ende-provider-config--inherit profile configured 'profile)
           profile (ende-provider-config--inherit profile model-settings 'model))
+    (when (plist-member connection :transport)
+      (setq profile (plist-put profile :transport (plist-get connection :transport))))
     (setq profile (plist-put profile :name name)
           profile (plist-put profile :api api)
           profile (plist-put profile :account account)

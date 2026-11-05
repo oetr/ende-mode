@@ -98,6 +98,9 @@
       (let* ((ende-builtin-provider-settings (list settings))
              (profile (ende-provider-config-resolve (car settings) "test")))
         (should (eq (plist-get profile :transport) 'websocket))
+        (should (eq (plist-get (ende-provider-config-resolve
+                               (car settings) "test" nil '(:transport auto)) :transport)
+                    'auto))
         (should-error (ende-provider-config-validate-transport
                        (plist-put (copy-sequence profile) :url "https://other.test/responses")))
         (when (eq (car settings) 'openai)
@@ -107,7 +110,17 @@
       (let ((ende-builtin-provider-settings (list settings)))
         (should-error (ende-provider-config-validate))))
     (let ((ende-builtin-provider-settings '((openai :transport auto))))
-      (should (eq (plist-get (ende-provider-config-resolve 'openai) :transport) 'auto)))))
+      (should (eq (plist-get (ende-provider-config-resolve 'openai) :transport) 'auto))
+      (should (eq (plist-get (ende-provider-config-resolve
+                             'openai "test" nil '(:transport websocket)) :transport)
+                  'websocket))
+      (should-error (ende-provider-config-resolve
+                     'openai "test" 'openai-chat-completions '(:transport websocket)))
+      (should-error (ende-provider-config-resolve 'deepseek "test" nil '(:transport websocket))))
+    (let ((ende-builtin-provider-settings '((openrouter :transport openrouter-batch))))
+      (should (eq (plist-get (ende-provider-config-resolve
+                             'openrouter "test" nil '(:transport openrouter-batch)) :transport)
+                  'openrouter-batch)))))
 
 (ert-deftest ende-provider-config-json-values ()
   (let* ((base '(:top_p 0.9 :nested (:x 1) :keep nil))

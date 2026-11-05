@@ -72,7 +72,7 @@
   "Explicit wire API selection in this selector.")
 
 (defvar-local ende-selector--connection nil
-  "Provisional nonsecret Account/Auth/API selection.")
+  "Provisional nonsecret account, authentication, API and transport selection.")
 
 (defvar-local ende-selector--source-window nil
   "Window to restore when the selector closes.")
@@ -549,6 +549,24 @@ Report an unavailable model once for each catalog identity."
      (:thinking "t" "Thinking:")
      (:reasoning-effort "e" "Reasoning effort:")) ""))
 
+(defun ende-selector--transport-label (transport)
+  "Return the user-facing label for TRANSPORT."
+  (pcase transport
+    ('websocket "websocket")
+    ('openrouter-batch "OpenRouter batch")
+    (_ "HTTP/SSE")))
+
+(defun ende-selector--transport-choices (profile)
+  "Return labeled Responses transport choices validated for PROFILE."
+  (cl-loop for transport in '(websocket auto)
+           when (condition-case nil
+                    (progn
+                      (ende-provider-config-validate-transport
+                       (plist-put (copy-sequence profile) :transport transport))
+                      t)
+                  (error nil))
+           collect (cons (ende-selector--transport-label transport) transport)))
+
 (defun ende-selector--render ()
   "Render resolved selector state without changing it."
   (let ((profile (ende-selector--provider-profile))
@@ -561,6 +579,7 @@ Report an unavailable model once for each catalog identity."
      (ende-selector--row "A" "Account:" (or (plist-get profile :account) "none"))
      (ende-selector--row nil "Auth:" (plist-get profile :auth-method))
      (ende-selector--row nil "API:" (plist-get profile :api))
+     (ende-selector--row nil "Transport:" (ende-selector--transport-label (plist-get profile :transport)))
      (ende-selector--row "c/C" "Concurrency:" (ende-selector--provider-concurrency))
      (ende-selector--row "P" "Parallel:" (if (ende-selector--provider-parallel-p) "on" "off"))
      "\n"
@@ -881,6 +900,9 @@ PREFERRED is selected only when it is present in MODELS."
     (insert (ende-selector--row "a" "Account:" (or (plist-get profile :account) "none"))
             (ende-selector--row "h" "Auth:" (plist-get profile :auth-method))
             (ende-selector--row "p" "API:" (plist-get profile :api))
+            (ende-selector--row
+             (when (> (length (ende-selector--transport-choices profile)) 1) "t")
+             "Transport:" (ende-selector--transport-label (plist-get profile :transport)))
             (ende-selector--row "l" "OAuth:" status)
             "\nRET      - apply and return\nl        - connect/reconnect OAuth\nq/ESC    - cancel\n")
     (goto-char (point-min))))
@@ -904,12 +926,16 @@ PREFERRED is selected only when it is present in MODELS."
                                     (if (memq auth '(chatgpt-plan-oauth codex-oauth)) (intern alias) alias)))))
 
 (defun ende-selector-connection--choose (key prompt choices)
-  "Read a supported value for KEY using PROMPT and CHOICES."
-  (let* ((names (mapcar #'symbol-name choices))
+  "Read a supported value for KEY using PROMPT and CHOICES.
+CHOICES contains symbols or (LABEL . VALUE) pairs."
+  (let* ((choices (mapcar (lambda (choice)
+                            (if (consp choice) choice (cons (symbol-name choice) choice))) choices))
+         (names (mapcar #'car choices))
          (choice (completing-read prompt names nil t nil nil
-                                  (symbol-name (plist-get (ende-selector-connection--profile) key)))))
-    (unless (member choice names) (user-error "Unsupported connection choice"))
-    (ende-selector-connection--set key (intern choice))))
+                                  (car (rassq (plist-get (ende-selector-connection--profile) key) choices))))
+         (entry (assoc choice choices)))
+    (unless entry (user-error "Unsupported connection choice"))
+    (ende-selector-connection--set key (cdr entry))))
 
 (defun ende-selector-connection-auth ()
   "Choose an implemented authentication method."
@@ -924,6 +950,14 @@ PREFERRED is selected only when it is present in MODELS."
   (ende-selector-connection--choose
    :api "API: "
    (ende-provider-config-supported-apis (ende-selector-connection--profile))))
+
+(defun ende-selector-connection-transport ()
+  "Choose websocket or HTTP/SSE for a supported Responses connection."
+  (interactive)
+  (let ((choices (ende-selector--transport-choices (ende-selector-connection--profile))))
+    (unless (> (length choices) 1)
+      (user-error "This connection has no alternate Responses transport"))
+    (ende-selector-connection--choose :transport "Transport: " choices)))
 
 (defun ende-selector-connection-cancel ()
   "Discard the draft and return to the selector."
@@ -1044,6 +1078,7 @@ PREFERRED is selected only when it is present in MODELS."
   (dolist (binding '(("a" . ende-selector-connection-account)
                      ("h" . ende-selector-connection-auth)
                      ("p" . ende-selector-connection-api)
+                     ("t" . ende-selector-connection-transport)
                      ("l" . ende-selector-connection-login)
                      ("RET" . ende-selector-connection-apply)
                      ("q" . ende-selector-connection-cancel)))
@@ -1059,7 +1094,7 @@ PREFERRED is selected only when it is present in MODELS."
   (setq truncate-lines t))
 
 (defun ende-selector-configure-connection ()
-  "Open a provisional Account/Auth/API configuration window."
+  "Open a provisional account, authentication, API and transport editor."
   (interactive)
   (let* ((parent (current-buffer))
          (connection (ende-model-selection-connection (ende-selector--provider-profile)))

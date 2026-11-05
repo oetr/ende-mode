@@ -708,7 +708,7 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
 
 (defun ende-model-selection-connection (selection)
   "Return the nonsecret connection fields in SELECTION."
-  (cl-loop for key in '(:account :auth-method :api)
+  (cl-loop for key in '(:account :auth-method :api :transport)
            when (plist-member selection key)
            append (list key (plist-get selection key))))
 

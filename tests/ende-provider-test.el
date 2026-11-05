@@ -291,5 +291,26 @@
                        '(:reasoning-effort "high")))
         (should (eq (plist-get (ende-provider-profile 'openai) :account) 'default))))))
 
+(ert-deftest ende-test/connection-transports-survive-selection-and-snapshots ()
+  (let ((ende-providers '(openai))
+        (ende-builtin-provider-settings '((openai :models ("test") :transport websocket)))
+        (ende-custom-providers nil)
+        (ende-model-selection-scope 'global)
+        (ende-model-selection--last-used nil)
+        (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+        (ende-model-selection--provenance (make-hash-table :test #'equal))
+        (ende-model-selection--shared-control-preferences (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (ende-model-selection-save
+       '(:provider openai :model "test" :api openai-responses :transport auto))
+      (let ((snapshot (ende-provider-profile-for-buffer)))
+        (should (eq (plist-get snapshot :transport) 'auto))
+        (ende-model-selection-save
+         '(:provider openai :model "test" :api openai-responses :transport websocket))
+        (should (eq (plist-get (ende-provider-profile-for-buffer) :transport) 'websocket))
+        (should (eq (plist-get (ende-model-selection-provider-for-buffer 'openai) :transport)
+                    'websocket))
+        (should (eq (plist-get snapshot :transport) 'auto))))))
+
 (provide 'ende-provider-test)
 ;;; ende-provider-test.el ends here
