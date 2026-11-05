@@ -79,10 +79,11 @@ test:
 	status=0; \
 	ENDE_TEST_LOG="$$log" $(EMACS_BATCH) \
 		--eval '(setq auth-sources nil)' \
+		--eval '(setq ende-test-runner--load-start (current-time))' \
 		$(foreach file,$(TEST_FILES),-l $(file)) \
 		-l ./tests/ende-test-runner.el \
 		-f ende-test-runner >"$$log" 2>&1 || status=$$?; \
-	grep -E '^(Running |TEST-FAILED:|TEST-SUMMARY:|TEST-RUNNER-ERROR:)' "$$log" || true; \
+	grep -E '^(Running |TEST-FAILED:|TEST-SUMMARY:|TEST-RUNNER-ERROR:|TEST-LOAD:|TEST-SLOW:)' "$$log" || true; \
 	if [ "$$status" -eq 0 ]; then rm -f "$$log"; \
 	else printf 'Full test output: %s\n' "$$log"; fi; \
 	exit "$$status"

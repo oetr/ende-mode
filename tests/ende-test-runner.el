@@ -28,6 +28,20 @@
 
 ;;; Code:
 
+(defvar ende-test-runner--load-start nil
+  "Time immediately before loading test files, supplied by the Makefile.")
+
+(defvar ende-test-runner--load-duration
+  (and ende-test-runner--load-start
+       (float-time (time-subtract (current-time) ende-test-runner--load-start)))
+  "Elapsed test-file loading time captured on entry to this runner.")
+
+(defvar ende-test-runner--timing-count nil
+  "Number of slow tests to report for the current run, or nil.")
+
+(defvar ende-test-runner--durations nil
+  "Test names and durations collected for the current run.")
+
 (require 'ert)
 
 (defun ende-test-runner--condition (result)
@@ -43,6 +57,9 @@
      (message "Running %d tests" (ert-stats-total (car arguments))))
     ('test-ended
      (pcase-let ((`(_stats ,test ,result) arguments))
+       (when ende-test-runner--timing-count
+         (push (cons (ert-test-name test) (ert-test-result-duration result))
+               ende-test-runner--durations))
        (unless (ert-test-result-expected-p test result)
          (message "TEST-FAILED: %s%s: %s"
                   (ert-test-name test)
@@ -65,12 +82,27 @@
                 (ert--stats-passed-expected stats)
                 (ert-stats-completed-unexpected stats)
                 (ert-stats-skipped stats)
-                (if aborted " (aborted)" ""))))))
+                (if aborted " (aborted)" ""))
+       (when ende-test-runner--timing-count
+         (let ((durations (sort ende-test-runner--durations
+                                (lambda (a b) (> (cdr a) (cdr b))))))
+           (dotimes (_ (min ende-test-runner--timing-count (length durations)))
+             (let ((entry (pop durations)))
+               (message "TEST-SLOW: %.3fs %s" (cdr entry) (car entry))))))))))
 
 (defun ende-test-runner ()
   "Run ERT quietly and exit with a status reflecting its results."
   (let ((ert-quiet t)
+        (ende-test-runner--timing-count
+         (let ((value (getenv "ENDE_TEST_TIMINGS")))
+           (and value
+                (string-match-p "\\`[0-9]+\\'" value)
+                (> (string-to-number value) 0)
+                (string-to-number value))))
+        (ende-test-runner--durations nil)
         (status 2))
+    (when (and ende-test-runner--timing-count ende-test-runner--load-duration)
+      (message "TEST-LOAD: %.3fs" ende-test-runner--load-duration))
     (condition-case error-data
         (let ((stats (ert-run-tests t #'ende-test-runner--event)))
           (setq status
