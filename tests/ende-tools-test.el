@@ -923,9 +923,37 @@
                      :ok))))
       (delete-directory root t))))
 
+(ert-deftest ende-test/project-fixture-cleans-up-after-abnormal-exit ()
+  (let (owned-root owned-buffer unrelated-buffer unrelated-path)
+    (unwind-protect
+        (progn
+          (should-error
+           (ende-test--with-project (root)
+             (setq owned-root root
+                   unrelated-path (concat root "-unrelated"))
+             (with-temp-file unrelated-path (insert "outside"))
+             (setq unrelated-buffer (find-file-noselect unrelated-path)
+                   owned-buffer (find-file-noselect
+                                 (expand-file-name "owned.txt" root)))
+             (with-current-buffer unrelated-buffer (insert "changed"))
+             (with-current-buffer owned-buffer (insert "unsaved"))
+             (error "fixture failure")))
+          (should-not (file-exists-p owned-root))
+          (should-not (buffer-live-p owned-buffer))
+          (should (buffer-live-p unrelated-buffer))
+          (should (file-exists-p unrelated-path))
+          (with-current-buffer unrelated-buffer
+            (should (buffer-modified-p))
+            (should (equal (buffer-string) "changedoutside"))))
+      (when (buffer-live-p unrelated-buffer)
+        (with-current-buffer unrelated-buffer (set-buffer-modified-p nil))
+        (kill-buffer unrelated-buffer))
+      (when (and unrelated-path (file-exists-p unrelated-path))
+        (delete-file unrelated-path)))))
+
 (ert-deftest ende-test/restricted-host-command-policy-is-enforced-by-tool-dispatch ()
-  (let* ((root (make-temp-file "ende-host-deny-" t))
-         (configuration
+  (ende-test--with-project (root)
+    (let* ((configuration
           (ende-test--tool-access-config
            root '((tools run_host_command)
                   (restrict-host-commands
@@ -945,7 +973,7 @@
       (should-not started)
       (should-not (plist-get result :ok))
       (should (string-match-p "not allowed"
-                              (plist-get result :error))))))
+                              (plist-get result :error)))))))
 
 (ert-deftest ende-test/restricted-host-process-cancellation-and-timeout-stop-work ()
   (let* ((root (make-temp-file "ende-host-direct-stop-" t))
@@ -1356,10 +1384,9 @@
         (delete-directory root t)))))
 
 (ert-deftest ende-test/project-tools-separate-disk-and-buffer-sources ()
-  (let* ((root (make-temp-file "ende-tools-buffer-project-" t))
-         (path (expand-file-name "main.el" root))
-         (buffer nil))
-    (unwind-protect
+  (ende-test--with-project (root)
+    (let* ((path (expand-file-name "main.el" root))
+           (buffer nil))
         (progn
           (with-temp-file path
             (insert "DISK_TOKEN from disk\nsecond disk\n"))
@@ -1435,12 +1462,7 @@
                                 (elt (plist-get disk-search :files) 0)
                                 :matches))
                        1))
-            (should (= (length (plist-get buffer-search :files)) 0))))
-      (when (buffer-live-p buffer)
-        (set-buffer-modified-p nil)
-        (kill-buffer buffer))
-      (when (file-directory-p root)
-        (delete-directory root t)))))
+            (should (= (length (plist-get buffer-search :files)) 0)))))))
 
 (ert-deftest ende-test/project-tools-search-supports-literal-queries-and-patterns ()
   (let* ((root (make-temp-file "ende-tools-search-literals-" t))
@@ -1637,11 +1659,10 @@
           (delete-directory root t))))))
 
 (ert-deftest ende-test/project-tools-edit-file-ignores-and-preserves-reviews ()
-  (let* ((root (make-temp-file "ende-tools-review-project-" t))
-         (path (expand-file-name "main.el" root))
+  (ende-test--with-project (root)
+    (let* ((path (expand-file-name "main.el" root))
          (buffer nil)
          (review nil))
-    (unwind-protect
         (progn
           (with-temp-file path (insert "hello world\n"))
           (setq buffer (find-file-noselect path))
@@ -1673,12 +1694,7 @@
               (should (string= (buffer-string)
                                "unsaved buffer contents\n")))
             (should (string= (ende-test--disk-text path)
-                             "hello Emacs\n"))))
-      (when (buffer-live-p buffer)
-        (set-buffer-modified-p nil)
-        (kill-buffer buffer))
-      (when (file-directory-p root)
-        (delete-directory root t)))))
+                             "hello Emacs\n")))))))
 
 (ert-deftest ende-test/project-tools-edit-file-preserves-encoding-and-line-endings ()
   (let* ((root (make-temp-file "ende-tools-encoding-project-" t))

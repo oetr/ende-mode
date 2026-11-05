@@ -42,6 +42,25 @@
 (require 'ende-provider)
 (require 'ende)
 
+(cl-defmacro ende-test--with-project ((root) &body body)
+  "Run BODY with ROOT bound to an owned temporary project directory.
+Dispose its visiting buffers and directory even when setup or BODY fails.
+Operations in BODY must cancel their own workers before returning."
+  (declare (indent 1) (debug ((symbolp) body)))
+  `(let ((,root (make-temp-file "ende-test-project-" t)))
+     (unwind-protect
+         (progn ,@body)
+       (unwind-protect
+           (dolist (buffer (buffer-list))
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (when (and buffer-file-name
+                            (file-in-directory-p buffer-file-name ,root))
+                   (set-buffer-modified-p nil)
+                   (kill-buffer buffer)))))
+         (when (file-directory-p ,root)
+           (delete-directory ,root t))))))
+
 (defun ende-test--custom-profile (name &rest settings)
   "Return an explicit custom provider table for NAME with SETTINGS."
   (list (cons name (ende-plist-merge
