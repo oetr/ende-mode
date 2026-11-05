@@ -188,6 +188,42 @@
             (ende-transport-session-cleanup lifecycle))
           (should-not (file-exists-p file)))))))
 
+(ert-deftest ende-artifact-worker-finalizes-and-replays-wire-request ()
+  :tags '(integration)
+  (ende-artifact-test-with-files
+    (let* ((base (ende-artifact-base))
+           (name (ende-artifact-store base "finalize" ende-artifact-test-png "image/png"))
+           (image (ende-artifact-resolve base "finalize" name))
+           (messages (list (list :role "user" :content (list image))))
+           (profile '(:model "vision"))
+           (lifecycle (ende-transport-session-create nil #'ert-fail))
+           (finalization '(ende-controls--set-path ("type") "response.create"))
+           prepared replay done files)
+      (unwind-protect
+          (progn
+            (ende-request-prepare
+             lifecycle 'ende-codex #'ende-responses--request-body messages profile nil
+             (lambda (data body _record)
+               (should-not (assq :input body))
+               (setq prepared data done t)) finalization)
+            (ende-test--wait-for (lambda () done))
+            (setq done nil files (list (plist-get prepared :file) (plist-get prepared :full-file)))
+            (let ((wire (ende-protocol-json-read-string
+                         (ende-artifact--read-bytes (plist-get prepared :file))))
+                  (full (ende-request--retained-body prepared profile)))
+              (should (equal (gethash "type" wire) "response.create"))
+              (should (string-match-p "data:image/png;base64," (json-encode full)))
+              (should-not (assq :type full)))
+            (ende-request-reprepare
+             lifecycle 'ende-codex prepared profile nil
+             (lambda (data _body _record) (setq replay data done t)) finalization)
+            (ende-test--wait-for (lambda () done))
+            (setq files (append files (list (plist-get replay :file) (plist-get replay :full-file))))
+            (should (equal (ende-artifact--read-bytes (plist-get prepared :file))
+                           (ende-artifact--read-bytes (plist-get replay :file)))))
+        (ende-transport-session-cleanup lifecycle))
+      (dolist (file files) (should-not (file-exists-p file))))))
+
 (ert-deftest ende-artifact-round-trip-and-native-export ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))

@@ -1386,6 +1386,28 @@ When APPEND is non-nil, append the argument delta to the stored value."
    session (ende-error-create :kind 'protocol
                               :message (error-message-string error))))
 
+(defun ende-codex--completion-error (session)
+  "Return a transport-independent terminal validation error for SESSION."
+  (unless (and (ende-codex--session-terminal-event session)
+               (not (equal (ende-stream-session-finish-reason
+                            (ende-codex--session-stream session)) "incomplete"))
+               (or (not (ende-codex--session-strict-completion session))
+                   (equal (ende-protocol-json-get
+                           "type" (ende-codex--session-terminal-event session))
+                          "response.completed")))
+    (ende-error-create
+     :kind (if (equal (ende-stream-session-finish-reason
+                      (ende-codex--session-stream session)) "incomplete")
+               'incomplete 'protocol)
+     :message "Responses generation is incomplete or missing its completion event")))
+
+(defun ende-codex--complete (session)
+  "Validate and settle SESSION's terminal Responses event."
+  (unless (ende-codex--terminal-p session)
+    (if-let* ((failure (ende-codex--completion-error session)))
+        (ende-codex--fail session failure)
+      (ende-codex--settle session 'success (ende-codex--result session)))))
+
 (defun ende-codex--finish-response (session headers)
   "Validate response HEADERS and finalize Codex's terminal Responses event."
   (condition-case finish-error
@@ -1404,22 +1426,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
            (ende-protocol-sse-flush
             (ende-stream-session-parser (ende-codex--session-stream session)))
            (apply-partially #'ende-codex--handle-sse-events session))
-          (unless (ende-codex--terminal-p session)
-            (if (and (ende-codex--session-terminal-event session)
-                     (not (equal (ende-stream-session-finish-reason
-                                  (ende-codex--session-stream session)) "incomplete"))
-                     (or (not (ende-codex--session-strict-completion session))
-                         (equal (ende-protocol-json-get
-                                 "type" (ende-codex--session-terminal-event session))
-                                "response.completed")))
-                (ende-codex--settle
-                 session 'success (ende-codex--result session))
-              (ende-codex--fail
-               session
-               (ende-error-create
-                :kind (if (equal (ende-stream-session-finish-reason
-                                  (ende-codex--session-stream session)) "incomplete") 'incomplete 'protocol)
-                :message "Responses generation is incomplete or missing its completion event")))))))
+          (ende-codex--complete session))))
     ((error quit)
      (ende-codex--fail
       session
@@ -1537,8 +1544,22 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (let ((budget (plist-get profile :output-tokens)))
       (when budget
         (setq body (append body (list (cons :max_output_tokens budget))))))
-    (ende-provider-config-encode-parameters
-     (ende-controls-encode body (plist-get profile :controls) profile) profile)))
+    (ende-responses--include-reasoning
+     (ende-provider-config-encode-parameters
+      (ende-controls-encode body (plist-get profile :controls) profile) profile))))
+
+(defun ende-responses--include-reasoning (body)
+  "Include encrypted reasoning in BODY so completed output can be replayed."
+  (let ((include (cdr (cl-find "include" body
+                              :key (lambda (entry) (ende-controls--json-key-name (car entry)))
+                              :test #'equal))))
+    (unless (and (vectorp include) (not (stringp include))
+                 (cl-every #'stringp include))
+      (when include (error "Responses include must be an array of field names"))
+      (setq include []))
+    (ende-controls--set-path
+     body '("include")
+     (vconcat (delete-dups (append include '("reasoning.encrypted_content")))))))
 
 (defconst ende-codex--forbidden-body-fields
   '("background" "conversation" "previous_response_id" "max_output_tokens" "max_tool_calls" "metadata"
@@ -1597,15 +1618,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
           (ende-provider-config-encode-parameters
            (ende-controls-encode body (plist-get profile :controls) profile)
            profile))
-    (let ((include (cdr (cl-find "include" body
-                                :key (lambda (entry) (ende-controls--json-key-name (car entry)))
-                                :test #'equal))))
-      (unless (and (vectorp include) (not (stringp include))
-                   (cl-every #'stringp include))
-        (error "ChatGPT-plan include must be an array of field names"))
-      (setq body (ende-controls--set-path
-                  body '("include")
-                  (vconcat (delete-dups (append include '("reasoning.encrypted_content")))))))
+    (setq body (ende-responses--include-reasoning body))
     ;; Keep the cache key aligned with the session header by default.  Apply
     ;; this after parameter encoding so explicit keyword/string keys win.
     (when-let* ((session (plist-get profile :codex-session-id)))

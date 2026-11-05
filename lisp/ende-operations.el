@@ -280,10 +280,13 @@ result is applied."
   (unless no-begin
     (ende-job-emit-event job (list :type :begin :messages messages)))
   (ende--handle-llm-event job '(:type :status :status "Thinking"))
-  (funcall ende-llm-function
-           messages
-           (ende--llm-callbacks job on-done on-error)
-           (ende-job-profile job)))
+  (let ((profile (ende-provider-config-copy (ende-job-profile job))))
+    (setq profile (plist-put profile :request-phase
+                             (or (ende-job-request-phase job) 'work)))
+    (funcall ende-llm-function
+             messages
+             (ende--llm-callbacks job on-done on-error)
+             profile)))
 
 (defun ende--dispatch-llm
     (job messages &optional on-done on-error no-begin messages-prepared)

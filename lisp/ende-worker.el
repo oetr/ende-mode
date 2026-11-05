@@ -49,10 +49,10 @@
              (pcase-let ((`(,library ,function ,arguments ,bindings)
                           (read (read-string ""))))
                (let ((load-prefer-newer t))
-                 (require library))
-               (list :value
-                     (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
-                       (apply function arguments))))
+                 (require library)
+                 (list :value
+                       (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
+                         (apply function arguments)))))
            ((error quit) (list :error (error-message-string caught))))))
     (princ (ende-worker--print result))))
 

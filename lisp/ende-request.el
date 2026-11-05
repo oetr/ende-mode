@@ -37,33 +37,49 @@
 (require 'ende-debug)
 (require 'ende-worker)
 
-(defun ende-request--encode (builder messages profile debug preparation)
+(defun ende-request--encode (builder messages profile debug preparation &optional finalization)
   "Build MESSAGES for PROFILE with immutable debug PREPARATION.
 Return the outgoing bytes, encoded body, and optional capture record."
   (let* ((body (funcall builder messages profile))
          (prepared (when debug
+                     (if (eq builder #'ende-request--retained-body)
+                         (cons body preparation)
                      (condition-case nil (ende-debug-prepare-body body preparation)
-                       ((error quit) (cons body preparation)))))
+                       ((error quit) (cons body preparation))))))
          (body (if prepared (car prepared) body))
+         (full-body body)
+         (body (if finalization
+                   (apply (car finalization) body (cdr finalization))
+                 body))
          (data (encode-coding-string (json-encode body) 'utf-8))
          (record (when debug
                    (ende-debug-record-request data body messages profile
                                               (car debug) (cadr debug) (cdr prepared)))))
-    (list data body record)))
+    (list (if finalization (list :data data :full-body full-body) data)
+          body record)))
 
-(defun ende-request--write (library builder messages profile file debug preparation)
+(defun ende-request--write (library builder messages profile file debug preparation finalization)
   "Build and write a request to FILE; return payload-free diagnostics."
   (require library)
-  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation))
+  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization))
                (coding-system-for-write 'no-conversion))
+    (when finalization
+      (write-region (encode-coding-string (json-encode (plist-get data :full-body)) 'utf-8)
+                    nil (concat file ".full") nil 'silent)
+      (setq data (plist-get data :data)))
     (write-region data nil file nil 'silent)
     (list :body (list (assq :tools body))
           :debug-record record)))
 
-(defun ende-request-prepare (lifecycle library builder messages profile debug callback)
+(defun ende-request-prepare (lifecycle library builder messages profile debug callback
+                                     &optional finalization file-backed)
   "Prepare MESSAGES for PROFILE and call CALLBACK with data, body and record.
 Image-bearing requests use a worker and a file owned by LIFECYCLE.
-DEBUG contains transport, endpoint, and optional OAuth account continuity."
+DEBUG contains transport, endpoint, and optional OAuth account continuity.
+FINALIZATION is (FUNCTION . ARGUMENTS), containing only serializable data.
+It converts the complete logical body to the actual captured wire request.
+Finalized data retains :full-body or :full-file separately for recovery.
+FILE-BACKED forces worker preparation, including for a retained request."
   (let* ((debug (when (and ende-debugging-enabled ende-debug--session-directory) debug))
          (preparation (when debug
                         (ende-debug-prepare-request
@@ -74,30 +90,53 @@ DEBUG contains transport, endpoint, and optional OAuth account continuity."
                               (and (listp content)
                                    (cl-some (lambda (part) (eq (plist-get part :type) :image)) content))))
                           messages)))
-    (if (not images)
-        (apply callback (ende-request--encode builder messages profile debug preparation))
+    (if (not (or images file-backed))
+        (apply callback (ende-request--encode builder messages profile debug preparation finalization))
       (let* ((file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
              (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
                                '(ende-debugging-enabled
                                  ende-debug--session-directory ende-debug--sequence)))
              (failed (ende-transport-session-callback-error-handler lifecycle)))
         (ende-transport-session-add-canceller
-         lifecycle (lambda () (ende-ignore-errors #'delete-file file)))
+         lifecycle (lambda ()
+                     (ende-ignore-errors #'delete-file file)
+                     (ende-ignore-errors #'delete-file (concat file ".full"))))
         (ende-transport-session-add-canceller
          lifecycle
          (ende-worker-run
           'ende-request #'ende-request--write
-          (list library builder messages profile file debug preparation) bindings
+          (list library builder messages profile file debug preparation finalization) bindings
           (lambda (result error)
             (unless (ende-transport-session-terminal lifecycle)
               (condition-case failure
                   (if error
                       (funcall failed (ende-error-create :kind 'startup :message error))
-                    (funcall callback (list :file file) (plist-get result :body)
+                    (funcall callback (if finalization
+                                          (list :file file :full-file (concat file ".full"))
+                                        (list :file file))
+                             (plist-get result :body)
                              (plist-get result :debug-record)))
                 ((error quit)
                  (funcall failed (ende-error-create :kind 'startup
                                                    :message (error-message-string failure)))))))))))))
+
+(defun ende-request--retained-body (data _profile)
+  "Read the complete logical request retained in DATA."
+  (if-let* ((file (plist-get data :full-file)))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (let ((json-object-type 'alist) (json-key-type 'keyword)
+              (json-array-type 'vector))
+          (json-read-from-string (buffer-string))))
+    (plist-get data :full-body)))
+
+(defun ende-request-reprepare (lifecycle library data profile debug callback finalization)
+  "Finalize retained DATA again without rebuilding or changing logical input.
+LIFECYCLE owns any files; LIBRARY provides FINALIZATION.  PROFILE and DEBUG
+scope a fresh capture.  CALLBACK receives the prepared request."
+  (ende-request-prepare lifecycle library #'ende-request--retained-body
+                        data profile debug callback finalization
+                        (plist-get data :full-file)))
 
 (defun ende-request-send (process data)
   "Send prepared DATA to PROCESS, unless curl reads it from a file."

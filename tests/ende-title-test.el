@@ -125,10 +125,15 @@
               (should (member "generate_title"
                               (ende-test--tool-definition-names
                                (plist-get (cdr second) :tool-definitions))))
-              (should (equal (plist-get (cdr first) :tool-definitions)
-                             (plist-get (cdr second) :tool-definitions)))
-              (should (equal (plist-get (cdr first) :tool-definitions)
-                             (plist-get (cdr third) :tool-definitions))))
+              (should (equal (mapcar (lambda (request)
+                                       (plist-get (cdr request) :request-phase))
+                                     ordered)
+                             '(title work work)))
+              (should-not (eq (cdr first) (ende-job-profile job)))
+              (should (equal (json-encode (plist-get (cdr first) :tool-definitions))
+                             (json-encode (plist-get (cdr second) :tool-definitions))))
+              (should (equal (json-encode (plist-get (cdr first) :tool-definitions))
+                             (json-encode (plist-get (cdr third) :tool-definitions)))))
             (let* ((work-messages (car (caddr (reverse requests))))
                    (assistant
                     (cl-find-if
@@ -179,8 +184,7 @@
          (ende-llm-function
           (lambda (messages callbacks &optional profile)
             (push messages requests)
-            (let ((job (ende-queue-live-job-by-id (plist-get profile :job-id))))
-              (push (ende-job-request-phase job) phases))
+            (push (plist-get profile :request-phase) phases)
             (funcall (plist-get callbacks :on-done)
                      (if (< (length phases) 3)
                          '(:content "Do not use this as the answer")
