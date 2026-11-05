@@ -90,8 +90,8 @@
              (let ((entry (pop durations)))
                (message "TEST-SLOW: %.3fs %s" (cdr entry) (car entry))))))))))
 
-(defun ende-test-runner ()
-  "Run ERT quietly and exit with a status reflecting its results."
+(defun ende-test-runner (selector)
+  "Run ERT SELECTOR quietly and exit with a status reflecting its results."
   (let ((ert-quiet t)
         (ende-test-runner--timing-count
          (let ((value (getenv "ENDE_TEST_TIMINGS")))
@@ -104,7 +104,7 @@
     (when (and ende-test-runner--timing-count ende-test-runner--load-duration)
       (message "TEST-LOAD: %.3fs" ende-test-runner--load-duration))
     (condition-case error-data
-        (let ((stats (ert-run-tests t #'ende-test-runner--event)))
+        (let ((stats (ert-run-tests selector #'ende-test-runner--event)))
           (setq status
                 (cond
                  ((ert--stats-aborted-p stats) 2)

@@ -12,6 +12,8 @@ EL_FILES := $(sort $(shell find . -type d -name .git -prune -o \
 	-type f -name '*.el' -print))
 EL_DIRS := $(sort $(dir $(EL_FILES)))
 TEST_FILES := $(filter %-test.el %-tests.el,$(EL_FILES))
+TEST_SELECTOR ?= t
+TEST_VERBOSE ?= 0
 
 EMACS_BATCH = $(EMACS) -Q --batch \
 	$(foreach dir,$(EL_DIRS),-L "$(dir)") \
@@ -48,13 +50,13 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check lint syntax compile test test-verbose format clean
+.PHONY: check lint syntax compile test test-verbose test-compiled test-run format clean
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
 	$(MAKE) clean
 	$(MAKE) lint
-	$(MAKE) test
+	$(MAKE) test-run
 
 clean:
 	$(RM) $(EL_FILES:.el=.elc)
@@ -75,6 +77,18 @@ syntax:
 
 test:
 	@$(MAKE) --no-print-directory clean >/dev/null
+	@$(MAKE) --no-print-directory test-run
+
+test-verbose:
+	@$(MAKE) --no-print-directory clean >/dev/null
+	@$(MAKE) --no-print-directory test-run TEST_VERBOSE=1
+
+test-compiled:
+	$(MAKE) clean
+	$(MAKE) compile
+	$(MAKE) test-run
+
+test-run:
 	@log=$$(mktemp); \
 	status=0; \
 	ENDE_TEST_LOG="$$log" $(EMACS_BATCH) \
@@ -82,15 +96,9 @@ test:
 		--eval '(setq ende-test-runner--load-start (current-time))' \
 		$(foreach file,$(TEST_FILES),-l $(file)) \
 		-l ./tests/ende-test-runner.el \
-		-f ende-test-runner >"$$log" 2>&1 || status=$$?; \
-	grep -E '^(Running |TEST-FAILED:|TEST-SUMMARY:|TEST-RUNNER-ERROR:|TEST-LOAD:|TEST-SLOW:)' "$$log" || true; \
+		--eval '(if (= $(TEST_VERBOSE) 1) (ert-run-tests-batch-and-exit (quote $(TEST_SELECTOR))) (ende-test-runner (quote $(TEST_SELECTOR))))' >"$$log" 2>&1 || status=$$?; \
+	if [ "$(TEST_VERBOSE)" = 1 ]; then cat "$$log"; \
+	else grep -E '^(Running |TEST-FAILED:|TEST-SUMMARY:|TEST-RUNNER-ERROR:|TEST-LOAD:|TEST-SLOW:)' "$$log" || true; fi; \
 	if [ "$$status" -eq 0 ]; then rm -f "$$log"; \
 	else printf 'Full test output: %s\n' "$$log"; fi; \
 	exit "$$status"
-
-test-verbose:
-	@$(MAKE) --no-print-directory clean >/dev/null
-	$(EMACS_BATCH) \
-		--eval '(setq auth-sources nil)' \
-		$(foreach file,$(TEST_FILES),-l $(file)) \
-		-f ert-run-tests-batch-and-exit
