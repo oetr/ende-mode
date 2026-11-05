@@ -42,70 +42,11 @@
 
 
 
-(defun ende-test--run-default-transport (header response)
-  "Run the default transport with a mocked process and HEADER/RESPONSE.
-Return (RESULT ERROR COMMAND DONE-COUNT ERROR-COUNT CANCEL-FUNCTION EVENTS)."
-  (let ((captured nil)
-        (process nil)
-        (result nil)
-        (failure nil)
-        (done-count 0)
-        (error-count 0)
-        (cancel-function nil)
-        (events nil)
-        (ende-provider-discovery-enabled nil)
-        (real-make-process (symbol-function 'make-process))
-        (profile (list :name 'test :api 'openai-chat-completions :auth-method 'none
-                       :job-id 1
-                       :url "https://example.test/v1"
-                       :model "test-model"
-                       :temperature 0.2
-                       :controls '((:temperature :path ("temperature")))
-                       :require-sse t)))
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest args)
-                 (setq captured args)
-                 (setq process
-                       (funcall real-make-process
-				:name
-				(plist-get args :name)
-				:buffer
-				(plist-get args :buffer)
-				:command (list "cat")
-				:connection-type 'pipe)))))
-      (unwind-protect
-          (progn
-            (ende-llm-default
-             (list (cons "user" "body"))
-             (list :on-start (lambda (cancel)
-                               (setq cancel-function cancel))
-                   :on-event (lambda (event)
-                               (push event events))
-                   :on-done (lambda (value)
-                              (setq done-count (1+ done-count))
-                              (setq result value))
-                   :on-error (lambda (value)
-                               (setq error-count (1+ error-count))
-                               (setq failure value)))
-             profile)
-            (let* ((command (plist-get captured :command))
-                   (headers-file (nth (1+ (cl-position "--dump-header"
-                                                       command :test #'string=))
-                                      command))
-                   (filter (plist-get captured :filter))
-                   (sentinel (plist-get captured :sentinel)))
-              (with-temp-file headers-file
-                (insert header))
-              (funcall filter process response)
-              (when (process-live-p process)
-                (process-send-eof process))
-              (while (process-live-p process)
-                (accept-process-output process 0.05))
-              (funcall sentinel process "finished\n")
-              (list result failure command done-count error-count
-                    cancel-function events)))
-        (when (and (processp process) (process-live-p process))
-          (delete-process process))))))
+(defconst ende-test--transport-profile
+  '(:name test :api openai-chat-completions :auth-method none :job-id 1
+    :url "https://example.test/v1" :model "test-model" :temperature 0.2
+    :controls ((:temperature :path ("temperature"))) :require-sse t)
+  "Profile for default transport HTTP and settlement tests.")
 
 
 
@@ -306,41 +247,50 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/default-transport-completes-valid-sse ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-              "data: {\"model\":\"actual-model\",\"provider\":\"llama.cpp\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")))
-    (should-not (nth 1 out))
-    (should (string= (plist-get (nth 0 out) :content) "hello"))
-    (should (string= (plist-get (nth 0 out) :model) "actual-model"))
-    (should (string= (plist-get (nth 0 out) :provider) "llama.cpp"))
-    (should (= (nth 3 out) 1))
-    (should (= (nth 4 out) 0))
-    (should (functionp (nth 5 out)))
-    (should-not (member "hello" (nth 2 out)))
-    (should (member "Accept: text/event-stream" (nth 2 out)))
-    (should (equal (cadr (member "--user-agent" (nth 2 out)))
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list "data: {\"model\":\"actual-model\",\"provider\":\"llama.cpp\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes)))
+    (should-not (plist-get out :error))
+    (should (string= (plist-get (plist-get out :result) :content) "hello"))
+    (should (string= (plist-get (plist-get out :result) :model) "actual-model"))
+    (should (string= (plist-get (plist-get out :result) :provider) "llama.cpp"))
+    (should (= (plist-get out :done-count) 1))
+    (should (= (plist-get out :error-count) 0))
+    (should (functionp (plist-get out :cancel-function)))
+    (should-not (member "hello" (plist-get out :command)))
+    (should (member "Accept: text/event-stream" (plist-get out :command)))
+    (should (equal (cadr (member "--user-agent" (plist-get out :command)))
                    ende-client-name))
-    (should (member "@-" (nth 2 out)))))
+    (should (member "@-" (plist-get out :command)))))
 
 
 
 (ert-deftest ende-test/default-transport-accepts-text-completion-deltas ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-              "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")))
-    (should-not (nth 1 out))
-    (should (string= (plist-get (nth 0 out) :content) "legacy"))))
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list "data: {\"choices\":[{\"text\":\"legacy\"}]}\n\ndata: [DONE]\n\n")
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes)))
+    (should-not (plist-get out :error))
+    (should (string= (plist-get (plist-get out :result) :content) "legacy"))))
 
 
 
 (ert-deftest ende-test/default-transport-requires-done ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-              "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}]}\n\n")))
-    (should-not (nth 0 out))
-    (should (eq (ende-error-kind (nth 1 out)) 'protocol))
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}]}\n\n")
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes)))
+    (should-not (plist-get out :result))
+    (should (eq (ende-error-kind (plist-get out :error)) 'protocol))
     (should (string-match-p "without \\[DONE\\]"
-                            (ende-error-message (nth 1 out))))))
+                            (ende-error-message (plist-get out :error))))))
 
 
 
@@ -349,15 +299,18 @@ Use COMMAND for the process, or a silent sleep process by default."
           "data: {\"choices\":[{\"finish_reason\":null,\"delta\":{\"reasoning_content\":\"Sub\"}}]}\n\n")
          (second
           "data: {\"choices\":[{\"finish_reason\":\"length\",\"delta\":{\"reasoning_content\":\"headings\"}}]}\n\n")
-         (out (ende-test--run-default-transport
-               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-               (concat first second
+         (out (ende-test--run-stream-request
+               'chat
+               (list (concat first second
                        "data: {\"choices\":[],\"usage\":{\"completion_tokens\":4096}}\n\n"
-                       "data: [DONE]\n\n")))
+                       "data: [DONE]\n\n"))
+               :profile (copy-tree ende-test--transport-profile)
+               :messages '(("user" . "body"))
+               :response-limit ende-max-response-bytes))
          (partial (cl-find-if
                    (lambda (event)
                      (eq (plist-get event :type) :partial-result))
-                   (nth 6 out))))
+                   (plist-get out :events))))
     (should partial)
     (should (string= (plist-get (plist-get partial :result) :thinking)
                      "Subheadings"))
@@ -367,37 +320,47 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/default-transport-rejects-http-errors ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/event-stream\r\n\r\n"
-              "data: {\"error\":{\"message\":\"bad key\"}}\n\ndata: [DONE]\n\n")))
-    (should-not (nth 0 out))
-    (should (ende-error-p (nth 1 out)))
-    (should (eq (ende-error-kind (nth 1 out)) 'http))
-    (should (= (nth 3 out) 0))
-    (should (= (nth 4 out) 1))))
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list "data: {\"error\":{\"message\":\"bad key\"}}\n\ndata: [DONE]\n\n")
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes
+              :response-headers "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/event-stream\r\n\r\n")))
+    (should-not (plist-get out :result))
+    (should (ende-error-p (plist-get out :error)))
+    (should (eq (ende-error-kind (plist-get out :error)) 'http))
+    (should (= (plist-get out :done-count) 0))
+    (should (= (plist-get out :error-count) 1))))
 
 
 
 (ert-deftest ende-test/default-transport-settles-empty-provider-error ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-              "data: {\"error\":{}}\n\ndata: [DONE]\n\n")))
-    (should-not (nth 0 out))
-    (should (eq (ende-error-kind (nth 1 out)) 'provider))
-    (should (= (nth 4 out) 1))))
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list "data: {\"error\":{}}\n\ndata: [DONE]\n\n")
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes)))
+    (should-not (plist-get out :result))
+    (should (eq (ende-error-kind (plist-get out :error)) 'provider))
+    (should (= (plist-get out :error-count) 1))))
 
 
 
 (ert-deftest ende-test/default-transport-done-ignores-same-chunk-trailing-data ()
-  (let ((out (ende-test--run-default-transport
-              "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-              (concat
+  (let ((out (ende-test--run-stream-request
+              'chat
+              (list (concat
                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
                "data: [DONE]\n\n"
-               "data: malformed trailing bytes\n\n"))))
-    (should (string= (plist-get (nth 0 out) :content) "ok"))
-    (should-not (nth 1 out))
-    (should (= (nth 3 out) 1))))
+               "data: malformed trailing bytes\n\n"))
+              :profile (copy-tree ende-test--transport-profile)
+              :messages '(("user" . "body"))
+              :response-limit ende-max-response-bytes)))
+    (should (string= (plist-get (plist-get out :result) :content) "ok"))
+    (should-not (plist-get out :error))
+    (should (= (plist-get out :done-count) 1))))
 
 
 
@@ -978,12 +941,15 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 (ert-deftest ende-test/default-transport-enforces-response-byte-limit ()
   (let* ((ende-max-response-bytes 16)
-         (out (ende-test--run-default-transport
-               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-               (make-string 100 ?X))))
-    (should-not (nth 0 out))
-    (should (eq (ende-error-kind (nth 1 out)) 'resource))
-    (should (= (nth 4 out) 1))))
+         (out (ende-test--run-stream-request
+               'chat
+               (list (make-string 100 ?X))
+               :profile (copy-tree ende-test--transport-profile)
+               :messages '(("user" . "body"))
+               :response-limit ende-max-response-bytes)))
+    (should-not (plist-get out :result))
+    (should (eq (ende-error-kind (plist-get out :error)) 'resource))
+    (should (= (plist-get out :error-count) 1))))
 
 
 
@@ -991,15 +957,18 @@ Use COMMAND for the process, or a silent sleep process by default."
   (let* ((prefix
           "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"}}]}\n\n")
          (ende-max-response-bytes (string-bytes prefix))
-         (out (ende-test--run-default-transport
-               "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
-               (concat prefix (make-string 100 ?X))))
+         (out (ende-test--run-stream-request
+               'chat
+               (list (concat prefix (make-string 100 ?X)))
+               :profile (copy-tree ende-test--transport-profile)
+               :messages '(("user" . "body"))
+               :response-limit ende-max-response-bytes))
          (partial (cl-find-if
                    (lambda (event)
                      (eq (plist-get event :type) :partial-result))
-                   (nth 6 out))))
-    (should-not (nth 0 out))
-    (should (eq (ende-error-kind (nth 1 out)) 'resource))
+                   (plist-get out :events))))
+    (should-not (plist-get out :result))
+    (should (eq (ende-error-kind (plist-get out :error)) 'resource))
     (should partial)
     (should (string= (plist-get (plist-get partial :result) :content)
                      "kept"))))

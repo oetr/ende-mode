@@ -285,6 +285,8 @@ non-nil, is signalled from the event callback."
          (order nil)
          (result nil)
          (failure nil)
+         (done-count 0)
+         (error-count 0)
          (messages (or messages (list (cons "user" "question"))))
          (callbacks
           (list :on-start
@@ -301,10 +303,12 @@ non-nil, is signalled from the event callback."
                   (push (plist-get event :type) order))
                 :on-done
                 (lambda (value)
+                  (cl-incf done-count)
                   (setq result value)
                   (push :done order))
                 :on-error
                 (lambda (error)
+                  (cl-incf error-count)
                   (setq failure error)
                   (push :on-error order))))
          (profile
@@ -404,6 +408,8 @@ non-nil, is signalled from the event callback."
               (list :events (nreverse events)
                     :order (nreverse order)
                     :result result :error failure
+                    :done-count done-count :error-count error-count
+                    :cancel-function cancel-operation
                     :request-body request-body :request-count request-count :command command
                     :config-text config-text
                     :cleaned
