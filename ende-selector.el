@@ -1601,7 +1601,8 @@ performed locally so typing a search term never starts another network request."
             (ende-chat--ensure-draft-root buffer)
             (ende-selector-close)
             (pop-to-buffer buffer)
-            (message "ende: chat buffer ready; press C-c e a to ask")))
+            (message "%s" (substitute-command-keys
+                           "ende: chat buffer ready; use \\[ende-ask] to ask"))))
       (ende-selector-close)
       (with-current-buffer source
         (pcase type

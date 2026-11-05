@@ -28,8 +28,6 @@
 
 ;; ende is a minor mode that queues requests to an OpenAI-compatible LLM.
 ;;
-;;   C-c e   - ende-selector-open
-;;
 ;; Requirements: Emacs 30.1 or later, the `websocket' package, and the external
 ;; curl executable on the local `exec-path', with HTTPS support for remote
 ;; providers.  Install curl using your operating system's package manager;
@@ -75,13 +73,7 @@
 
 ;;;; Keymap and Minor Mode
 
-(defun ende--make-mode-map ()
-  "Build the keymap for `ende-mode'."
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c e") #'ende-selector-open)
-    map))
-
-(defvar ende-mode-map (ende--make-mode-map) "Keymap for `ende-mode'.")
+(defvar ende-mode-map (make-sparse-keymap) "Keymap for `ende-mode'.")
 
 (defvar-local ende--mode-line-string " ende[0]"
   "Mode-line lighter showing jobs and pending reviews for the current buffer.")
@@ -441,9 +433,9 @@
     (with-current-buffer selector (ende-selector-close)))
   (let ((dir (or (file-name-directory (locate-library "ende.el"))
                  (user-error "ende.el not found on load-path"))))
+    (setq ende-mode-map (make-sparse-keymap))
     (dolist (file (ende-reload--files dir))
       (load (expand-file-name file dir) nil t t t))
-    (setq ende-mode-map (ende--make-mode-map))
     (ende-artifact-clear-cache)
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer

@@ -198,9 +198,7 @@
     (cl-letf (((symbol-function 'display-buffer)
                (lambda (buffer &rest _) (setq displayed buffer))))
       (ende-history)
-      (should (eq displayed (get-buffer ende-history-buffer-name)))))
-  (should (eq (lookup-key ende-mode-map (kbd "C-c e"))
-              #'ende-selector-open)))
+      (should (eq displayed (get-buffer ende-history-buffer-name))))))
 
 (ert-deftest ende-test/history-terminal-cleanup-survives-disable-and-write-errors ()
   (ende-test--reset)
