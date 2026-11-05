@@ -25,7 +25,7 @@
 ;;; Commentary:
 
 ;; Run with:
-;;   emacs -Q --batch -L . -l ende-chat-benchmark.el \
+;;   emacs -Q --batch -L lisp -l ende-chat-benchmark \
 ;;     -f ende-chat-benchmark-run
 ;; The benchmark uses fresh Org buffers for each mutating operation.  Parser
 ;; counts distinguish the target transcript from response-sized temporary

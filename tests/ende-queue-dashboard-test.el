@@ -416,7 +416,8 @@
                 (should (buffer-local-value 'buffer-read-only recreated))
                 (should (string-match-p "Retained work" (with-current-buffer recreated (buffer-string))))))
             (should (member "ende-queue-source.el"
-                            (ende-reload--files default-directory))))
+                            (ende-reload--files
+                             (file-name-directory (locate-library "ende.el"))))))
         (ende-test--dashboard-reset)))))
 
 (ert-deftest ende-test/dashboard-forgets-evicted-ids-even-while-hidden ()

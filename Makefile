@@ -16,7 +16,7 @@ TEST_SELECTOR ?= t
 TEST_VERBOSE ?= 0
 
 # Libraries shipped by the MELPA recipe; do not lint test fixtures as packages.
-PACKAGE_FILES := $(sort $(wildcard ende*.el))
+PACKAGE_FILES := $(sort $(wildcard lisp/ende*.el))
 
 EMACS_BATCH = $(EMACS) -Q --batch \
 	$(foreach dir,$(EL_DIRS),-L "$(dir)") \
@@ -71,7 +71,7 @@ check-docs:
 check-package:
 	$(EMACS_BATCH) \
 		--eval '(unless (require (quote package-lint) nil t) (error "Install package-lint in PACKAGE_USER_DIR before running check-package"))' \
-		--eval '(setq package-lint-main-file (expand-file-name "ende.el") package-lint-batch-fail-on-warnings t)' \
+		--eval '(setq package-lint-main-file (expand-file-name "lisp/ende.el") package-lint-batch-fail-on-warnings t)' \
 		-f package-lint-batch-and-exit $(PACKAGE_FILES)
 
 # Keep the ordinary development checks usable without package-lint.
