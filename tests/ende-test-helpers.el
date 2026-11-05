@@ -262,8 +262,8 @@ process for cancellation tests."
       (setq start (match-end 0)))
     count))
 
-(defun ende-test--run-stream-request
-    (transport chunks &optional cancel-on-start response-limit profile
+(cl-defun ende-test--run-stream-request
+    (transport chunks &key cancel-on-start response-limit profile
                event-callback-error messages response-headers)
   "Run TRANSPORT with SSE CHUNKS and return its callback/resource state.
 When CANCEL-ON-START is non-nil, cancel from the start callback.

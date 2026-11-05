@@ -99,7 +99,7 @@
          (messages '(("user" . "hello")))
          (original (ende-codex--request-body messages profile)))
     (dotimes (_round 3)
-      (let ((result (ende-test--run-stream-request 'codex (list stream) nil nil profile nil messages)))
+      (let ((result (ende-test--run-stream-request 'codex (list stream) :profile profile :messages messages)))
         (should-not (plist-get result :error))
         (should (string-match-p "session-id: stable-test-session" (plist-get result :config-text)))
         (should (equal (ende-protocol-json-get
@@ -122,7 +122,7 @@
          (id (plist-get profile :codex-session-id))
          (stream "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"))
     (dotimes (_round 3)
-      (let* ((result (ende-test--run-stream-request 'codex (list stream) nil nil profile))
+      (let* ((result (ende-test--run-stream-request 'codex (list stream) :profile profile))
              (wire (plist-get result :request-body))
              (body (ende-protocol-json-read-string wire)))
         (should-not (plist-get result :error))
@@ -135,7 +135,7 @@
     (dolist (parameters '((:prompt_cache_key "keyword")
                           ("prompt_cache_key" "string")))
       (let* ((copy (plist-put (copy-tree profile) :parameters parameters))
-             (result (ende-test--run-stream-request 'codex (list stream) nil nil copy))
+             (result (ende-test--run-stream-request 'codex (list stream) :profile copy))
              (wire (plist-get result :request-body)))
         (should-not (plist-get result :error))
         (should (equal (ende-protocol-json-get "prompt_cache_key"
@@ -144,7 +144,7 @@
         (should (string-match-p (concat "session-id: " id) (plist-get result :config-text)))))
     (let* ((other (ende-codex--ensure-session-id
                    (plist-put (copy-tree profile) :account 'work)))
-           (result (ende-test--run-stream-request 'codex (list stream) nil nil other)))
+           (result (ende-test--run-stream-request 'codex (list stream) :profile other)))
       (should-not (equal id (plist-get other :codex-session-id)))
       (should-not (ende-protocol-json-get "prompt_cache_key"
                                           (ende-protocol-json-read-string
@@ -153,7 +153,7 @@
 (ert-deftest ende-codex-session-direct-and-public-provider-isolation ()
   (let* ((profile (ende-codex-auth-test--profile 'personal))
          (stream "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")
-         (result (ende-test--run-stream-request 'codex (list stream) nil nil profile))
+         (result (ende-test--run-stream-request 'codex (list stream) :profile profile))
          (body (ende-protocol-json-read-string
                 (plist-get result :request-body))))
     (should-not (ende-protocol-json-get "prompt_cache_key" body))
@@ -167,7 +167,7 @@
                                   (_ 'openai-chat-completions))
                            :auth-method 'none :url "https://example.test/v1/responses"
                            :output-tokens 100))
-             (request (ende-test--run-stream-request transport (list stream) nil nil public)))
+             (request (ende-test--run-stream-request transport (list stream) :profile public)))
         (should-not (string-match-p "session-id:" (or (plist-get request :config-text) "")))
         (should-not (string-match-p "prompt_cache_key" (or (plist-get request :request-body) "")))))))
 
@@ -210,7 +210,7 @@
               (dolist (job (list parent child))
                 (let ((profile (ende-job-profile job)) (messages '(("user" . "hello"))))
                   (dotimes (round 3)
-                    (let* ((result (ende-test--run-stream-request 'codex (list stream) nil nil profile nil messages))
+                    (let* ((result (ende-test--run-stream-request 'codex (list stream) :profile profile :messages messages))
                            (key (plist-get profile :codex-session-id)))
                       (should-not (plist-get result :error))
                       (should-not (ende-protocol-json-get
@@ -235,7 +235,7 @@
          (parameters (ende-provider-config-merge-parameters
                       '(:prompt_cache_key "old") '("prompt_cache_key" "override" :include ["message.output_text.logprobs"])))
          (request (plist-put (copy-tree profile) :parameters parameters))
-         (result (ende-test--run-stream-request 'codex (list stream) nil nil request))
+         (result (ende-test--run-stream-request 'codex (list stream) :profile request))
          (wire (plist-get result :request-body))
          (body (ende-protocol-json-read-string wire)))
     (should-not (plist-get result :error))

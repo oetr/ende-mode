@@ -111,11 +111,11 @@
                  (ende-debugging-enabled nil)
                  (unrecorded
                   (ende-test--run-stream-request
-                   transport chunks nil nil profile nil messages))
+                   transport chunks :profile profile :messages messages))
                  (ende-debugging-enabled t)
                  (recorded
                   (ende-test--run-stream-request
-                   transport chunks nil nil profile nil messages))
+                   transport chunks :profile profile :messages messages))
                  (recording-file (expand-file-name "0001-request.json" directory))
                  (completion
                   (ende-protocol-json-get
@@ -769,8 +769,8 @@
                                 :models-url (and codex (ende-codex--auth-property method :models-url))
                                 :parameters '(:prompt_cache_options (:mode "implicit" :prewarm :json-false))))
                  (original (prin1-to-string profile))
-                 (first (ende-test--run-stream-request transport completed nil nil profile))
-                 (second (ende-test--run-stream-request transport completed nil nil profile))
+                 (first (ende-test--run-stream-request transport completed :profile profile))
+                 (second (ende-test--run-stream-request transport completed :profile profile))
                  (first-body (ende-protocol-json-read-string (plist-get first :request-body)))
                  (second-body (ende-protocol-json-read-string (plist-get second :request-body)))
                  (meta (ende-debug-test--read-meta directory ende-debug--sequence)))
@@ -789,7 +789,7 @@
             (dolist (id '("resp-explicit" nil))
               (let* ((explicit (plist-put (copy-tree profile) :parameters
                                           (list :prompt_cache_options (list :mode "explicit" :comparison_response_id id))))
-                     (result (ende-test--run-stream-request transport completed nil nil explicit))
+                     (result (ende-test--run-stream-request transport completed :profile explicit))
                      (options (gethash "prompt_cache_options"
                                        (ende-protocol-json-read-string (plist-get result :request-body)))))
                 (should (ende-protocol-json-has-key-p "comparison_response_id" options))
@@ -797,7 +797,7 @@
                 (should (equal (gethash "comparison_source" (ende-debug-test--read-meta directory ende-debug--sequence))
                                "explicit"))))
             (let* ((ende-debug-provider-cache-comparisons nil)
-                   (passive (ende-test--run-stream-request transport completed nil nil profile)))
+                   (passive (ende-test--run-stream-request transport completed :profile profile)))
               (should (equal (plist-get first :request-body) (plist-get passive :request-body))))))
       (delete-directory directory t))))
 
@@ -814,7 +814,7 @@
         (progn
           (ende-test--run-stream-request
            'responses '("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-seed\",\"output\":[]}}\n\n")
-           nil nil profile)
+           :profile profile)
           (let ((baseline (copy-hash-table ende-debug--baselines)))
             (dolist (fixture '(("response.completed" nil nil)
                                ("response.completed" "unavailable" nil)
@@ -838,7 +838,7 @@
                                       ",\"response\":{\"id\":\"resp-fixture\",\"output\":[],\"prompt_cache_diagnostics\":"
                                       (if diagnostic
                                           (json-encode `((:type . ,diagnostic))) "null") "}}\n\n")))
-                     (state (ende-test--run-stream-request 'responses (list chunk) nil nil profile nil nil headers))
+                     (state (ende-test--run-stream-request 'responses (list chunk) :profile profile :response-headers headers))
                      (meta (ende-debug-test--read-meta directory ende-debug--sequence))
                      (capture (ende-debug--read-capture directory ende-debug--sequence)))
                 (should (= (plist-get state :request-count) 1))

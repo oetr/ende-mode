@@ -51,7 +51,7 @@
              (profile (plist-put profile :codex-session-id "stable-session"))
              (out (ende-test--run-stream-request
                    'codex '("data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n")
-                   nil nil profile)))
+                   :profile profile)))
         (should-not (plist-get out :error))
         (should (member (ende-codex--auth-property method :responses-url) (plist-get out :command)))
         (should (string-match-p "session-id: stable-session" (plist-get out :config-text)))

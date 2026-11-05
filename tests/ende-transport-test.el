@@ -452,7 +452,7 @@ Use COMMAND for the process, or a silent sleep process by default."
       (should (< (cl-position :partial-result failure-order)
                  (cl-position :on-error failure-order)))
       (should (plist-get failure :cleaned)))
-    (let* ((cancelled (ende-test--run-stream-request transport nil t)))
+    (let* ((cancelled (ende-test--run-stream-request transport nil :cancel-on-start t)))
       (should (eq (ende-error-kind (plist-get cancelled :error)) 'cancelled))
       (should (equal (plist-get cancelled :order)
                      '(:start :error :on-error)))
@@ -568,7 +568,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                                   "\"delta\":\"answer\"}\n\n")
                         (concat "data: {\"choices\":[{\"delta\":{"
                                 "\"content\":\"answer\"}}]}\n\n")))
-                nil nil nil (lambda () (error "active callback failed"))))))
+                :event-callback-error (lambda () (error "active callback failed"))))))
         (should (eq (ende-error-kind (plist-get out :error)) 'callback))
         (should (= cleanup-count 1))
         (should (= (cl-count :on-error (plist-get out :order)) 1))
@@ -587,7 +587,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                       "\"content\":\"é\"}}]}\n\n")))
            (out
             (ende-test--run-stream-request
-             transport (list prefix "世界") nil (string-bytes prefix)))
+             transport (list prefix "世界") :response-limit (string-bytes prefix)))
            (partial
             (cl-find-if (lambda (event)
                           (eq (plist-get event :type) :partial-result))
@@ -628,7 +628,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                  token)))
       (setq out
             (ende-test--run-stream-request
-             'openai-compatible chunks nil nil profile)))
+             'openai-compatible chunks :profile profile)))
     (let* ((result (plist-get out :result))
            (calls (plist-get result :tool-calls))
            (call (car calls))
@@ -1018,7 +1018,7 @@ Use COMMAND for the process, or a silent sleep process by default."
                             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n")))
     (let* ((profile (list :api (nth 1 case) :auth-method 'none :url "https://example.test/api"
                           :model "m" :output-tokens 50 :require-sse t))
-           (out (ende-test--run-stream-request (car case) (list (nth 2 case)) nil nil profile)))
+           (out (ende-test--run-stream-request (car case) (list (nth 2 case)) :profile profile)))
       (should-not (plist-get out :error))
       (should (equal (plist-get (plist-get out :result) :content) "answer"))
       (should (plist-get out :cleaned))
@@ -1057,7 +1057,7 @@ Use COMMAND for the process, or a silent sleep process by default."
            (profile (list :api (nth 1 case) :auth-method 'none
                           :url "https://example.test/api" :model "m" :output-tokens 50))
            (chunks (mapcar (lambda (json) (concat "data: " json "\n\n")) (nth 2 case)))
-           (out (ende-test--run-stream-request (car case) chunks nil nil profile))
+           (out (ende-test--run-stream-request (car case) chunks :profile profile))
            (result (plist-get out :result))
            (events (plist-get out :events))
            (items (cl-remove-if-not (lambda (event) (eq (plist-get event :type) :item)) events))
@@ -1083,7 +1083,7 @@ Use COMMAND for the process, or a silent sleep process by default."
         (should (equal (plist-get (car items) :provider) (symbol-name (nth 1 case))))
         (should-not (string-match-p "ende_\\|\"key\""
                                     (json-encode (vconcat (cdr (plist-get result :protocol-items))))))
-        (let* ((failed (ende-test--run-stream-request (car case) (list (car chunks)) nil nil profile))
+        (let* ((failed (ende-test--run-stream-request (car case) (list (car chunks)) :profile profile))
                (partial (plist-get
                          (cl-find-if (lambda (event) (eq (plist-get event :type) :partial-result))
                                      (plist-get failed :events)) :result)))
