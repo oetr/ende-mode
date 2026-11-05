@@ -213,7 +213,8 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
 (ert-deftest ende-header-test-sparse-header-matrix ()
   (ende-header-test--with-root
     (let ((first-line
-           ";;; sparse.el --- Small utility -*- lexical-binding: t; -*-"))
+           ";;; sparse.el --- Small utility -*- lexical-binding: t; -*-")
+          cases)
       (cl-loop
        for tail in
        '(""
@@ -226,11 +227,17 @@ ROOT and SCRIPT contain spaces; the current directory is outside ROOT."
          "\n;;; Code:\n\n(defvar sparse-value 5)\n;;; old.el ends here\n;;; sparse.el ends here\n;;; stale.el ends here\n")
        for index from 0
        do
-       (ert-info ((format "Sparse fixture %d" index))
-         (let* ((text (concat first-line "\n" tail))
-                (file (ende-header-test--write
-                       root (format "case-%d/sparse.el" index) text)))
-           (ende-header-test--expect 0 script file)
+       (let* ((text (concat first-line "\n" tail))
+              (file (ende-header-test--write
+                     root (format "case-%d/sparse.el" index) text)))
+         (push (list :index index :text text :file file) cases)))
+      (setq cases (nreverse cases))
+      (apply #'ende-header-test--expect 0 script
+             (mapcar (lambda (case) (plist-get case :file)) cases))
+      (dolist (case cases)
+        (ert-info ((format "Sparse fixture %d" (plist-get case :index)))
+          (let ((text (plist-get case :text))
+                (file (plist-get case :file)))
            (ende-header-test--assert-header file first-line)
            (let ((result (ende-header-test--text file)))
              (should (= 1 (ende-header-test--count ";;; Commentary:\n" result)))
