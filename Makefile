@@ -15,6 +15,9 @@ TEST_FILES := $(filter %-test.el %-tests.el,$(EL_FILES))
 TEST_SELECTOR ?= t
 TEST_VERBOSE ?= 0
 
+# Libraries shipped by the MELPA recipe; do not lint test fixtures as packages.
+PACKAGE_FILES := $(sort $(wildcard ende*.el))
+
 EMACS_BATCH = $(EMACS) -Q --batch \
 	$(foreach dir,$(EL_DIRS),-L "$(dir)") \
 	--eval '(require (quote package))' \
@@ -50,13 +53,33 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check lint syntax compile test test-fast test-verbose test-compiled test-run format clean
+.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
 	$(MAKE) clean
 	$(MAKE) lint
 	$(MAKE) test-run
+
+# Additional submission checks.  Checkdoc reports style warnings (advisory);
+# package-lint fails on diagnostics.  Install package-lint in PACKAGE_USER_DIR
+# before running check-package or check-melpa; never install dependencies here.
+check-docs:
+	$(EMACS_BATCH) --eval '(require (quote checkdoc))' \
+		--eval '(let ((files command-line-args-left)) (setq command-line-args-left nil) (dolist (file files) (checkdoc-file file)))' $(PACKAGE_FILES)
+
+check-package:
+	$(EMACS_BATCH) \
+		--eval '(unless (require (quote package-lint) nil t) (error "Install package-lint in PACKAGE_USER_DIR before running check-package"))' \
+		--eval '(setq package-lint-main-file (expand-file-name "ende.el") package-lint-batch-fail-on-warnings t)' \
+		-f package-lint-batch-and-exit $(PACKAGE_FILES)
+
+# Keep the ordinary development checks usable without package-lint.
+# This is the single entry point for local or CI submission checks.
+check-melpa:
+	$(MAKE) check
+	$(MAKE) check-docs
+	$(MAKE) check-package
 
 clean:
 	$(RM) $(EL_FILES:.el=.elc)
