@@ -636,6 +636,43 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
      (plist-put configuration :grants nil))
     (_ (ende-chat-config--error "unsupported form: %S" (car form)))))
 
+(defun ende-chat-config--apply-forms (forms configuration context)
+  "Apply ordinary FORMS to CONFIGURATION, identifying errors with CONTEXT.
+CONTEXT is \"block\" or \"agent-config NAME\".  Stage definitions, root and
+image first for forward references, then apply other forms in source order.
+Duplicate declarations are local to this evaluation, not inherited state."
+  (let ((ende-chat-config--block-state (list :host-policy-defined nil))
+        (definitions nil)
+        (singletons nil))
+    (condition-case failure
+        (progn
+          (dolist (form forms)
+            (unless (ende-chat-config--proper-list-p form)
+              (ende-chat-config--error
+               "configuration form must be a list: %S" form))
+            (let ((operation (car form)))
+              (when (memq operation '(group resource))
+                (let ((key (cons operation (nth 1 form))))
+                  (when (member key definitions)
+                    (ende-chat-config--error "%s is defined twice: %s"
+                                             operation (nth 1 form)))
+                  (push key definitions)))
+              (when (memq operation '(root podman-image spawn-agent-config))
+                (when (memq operation singletons)
+                  (ende-chat-config--error
+                   "only one %s form is allowed" operation))
+                (push operation singletons))
+              (when (memq operation '(group resource root podman-image))
+                (setq configuration
+                      (ende-chat-config--apply-form form configuration)))))
+          (dolist (form forms)
+            (unless (memq (car form) '(group resource root podman-image))
+              (setq configuration
+                    (ende-chat-config--apply-form form configuration)))))
+      (error
+       (error "%s (in %s)" (error-message-string failure) context)))
+    configuration))
+
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
   (list :root nil :podman-image nil :groups nil :resources nil
@@ -706,66 +743,25 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
             (line-number-at-pos (org-element-property :begin (car blocks)) t))
            (forms (or supplied-forms
                       (ende-chat-config--block-forms (car blocks))))
-           (root-count 0)
-           (image-count 0)
-           (spawn-config-count 0)
            (agent-config-names nil)
-           (ende-chat-config--block-state
-            (list :host-policy-defined nil))
-           group-names resource-names)
+           (ordinary-forms nil))
       (unless (string-empty-p
                (string-trim
                 (or (org-element-property :parameters (car blocks)) "")))
         (ende-chat-config--error "ende blocks do not accept parameters"))
-      ;; Allow forward references.
+      ;; Keep declaration collection separate from ordinary form evaluation.
       (dolist (form forms)
-        (unless (ende-chat-config--proper-list-p form)
-          (ende-chat-config--error "configuration form must be a list: %S" form))
-        (pcase (car form)
-          ('group
-           (when (memq (nth 1 form) group-names)
-             (ende-chat-config--error "group is defined twice in this block: %s"
-                                      (nth 1 form)))
-           (setq configuration
-                 (ende-chat-config--define-group form configuration))
-           (push (nth 1 form) group-names))
-          ('resource
-           (when (memq (nth 1 form) resource-names)
-             (ende-chat-config--error "resource is defined twice in this block: %s"
-                                      (nth 1 form)))
-           (setq configuration
-                 (ende-chat-config--define-resource form configuration))
-           (push (nth 1 form) resource-names))
-          ('root
-           (cl-incf root-count)
-           (when (> root-count 1)
-             (ende-chat-config--error "only one root form is allowed per block"))
-           (setq configuration
-                 (ende-chat-config--apply-form form configuration)))
-          ('podman-image
-           (cl-incf image-count)
-           (when (> image-count 1)
-             (ende-chat-config--error
-              "only one podman-image form is allowed per block"))
-           (setq configuration
-                 (ende-chat-config--apply-form form configuration)))
-          ('agent-config
-           (let ((definition (ende-chat-config--agent-definition form)))
-             (when (assq (car definition) agent-config-names)
-               (ende-chat-config--error
-                "agent-config is defined twice in this block: %s"
-                (car definition)))
-             (push definition agent-config-names)))))
-      (dolist (form forms)
-        (unless (memq (car-safe form)
-                      '(root podman-image group resource agent-config))
-          (when (eq (car-safe form) 'spawn-agent-config)
-            (cl-incf spawn-config-count)
-            (when (> spawn-config-count 1)
-              (ende-chat-config--error
-               "spawn-agent-config is repeated in this block")))
-          (setq configuration
-                (ende-chat-config--apply-form form configuration))))
+        (if (eq (car-safe form) 'agent-config)
+            (let ((definition (ende-chat-config--agent-definition form)))
+              (when (assq (car definition) agent-config-names)
+                (ende-chat-config--error
+                 "agent-config is defined twice in this block: %s"
+                 (car definition)))
+              (push definition agent-config-names))
+          (push form ordinary-forms)))
+      (setq configuration
+            (ende-chat-config--apply-forms
+             (nreverse ordinary-forms) configuration "block"))
       (setq configuration
             (plist-put configuration :agent-config-definitions
                        (append (plist-get configuration
@@ -777,65 +773,14 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
     (name body registry-names visible)
   "Normalize isolated named agent policy NAME with symbolic REGISTRY-NAMES.
 Copy only group and resource definitions from VISIBLE."
-  (let* ((configuration (ende-chat-config--empty))
-         (ende-chat-config--block-state
-          (list :host-policy-defined nil))
-         (group-names nil)
-         (resource-names nil)
-         (root-count 0)
-         (image-count 0)
-         (spawn-count 0))
+  (let ((configuration (ende-chat-config--empty)))
     (setf (plist-get configuration :groups)
           (copy-tree (plist-get visible :groups))
           (plist-get configuration :resources)
           (copy-tree (plist-get visible :resources)))
-    (dolist (form body)
-      (unless (ende-chat-config--proper-list-p form)
-        (ende-chat-config--error "malformed form in agent-config %s: %S"
-                                 name form))
-      (pcase (car form)
-        ('agent-config
-         (ende-chat-config--error "nested agent-config definitions are not allowed"))
-        ('group
-         (when (memq (nth 1 form) group-names)
-           (ende-chat-config--error "group is defined twice in agent-config %s: %s"
-                                    name (nth 1 form)))
-         (setq configuration
-               (ende-chat-config--define-group form configuration))
-         (push (nth 1 form) group-names))
-        ('resource
-         (when (memq (nth 1 form) resource-names)
-           (ende-chat-config--error "resource is defined twice in agent-config %s: %s"
-                                    name (nth 1 form)))
-         (setq configuration
-               (ende-chat-config--define-resource form configuration))
-         (push (nth 1 form) resource-names))
-        ('root
-         (cl-incf root-count)
-         (when (> root-count 1)
-           (ende-chat-config--error "root is repeated in agent-config %s" name))
-         (setq configuration
-               (ende-chat-config--apply-form form configuration)))
-        ('podman-image
-         (cl-incf image-count)
-         (when (> image-count 1)
-           (ende-chat-config--error "podman-image is repeated in agent-config %s"
-                                    name))
-         (setq configuration
-               (ende-chat-config--apply-form form configuration)))
-        ((or 'provider 'model)
-         (setq configuration
-               (ende-chat-config--apply-form form configuration)))))
-    (dolist (form body)
-      (unless (memq (car-safe form)
-                    '(group resource root podman-image provider model))
-        (when (eq (car-safe form) 'spawn-agent-config)
-          (cl-incf spawn-count)
-          (when (> spawn-count 1)
-            (ende-chat-config--error
-             "spawn-agent-config is repeated in agent-config %s" name)))
-        (setq configuration
-              (ende-chat-config--apply-form form configuration))))
+    (setq configuration
+          (ende-chat-config--apply-forms
+           body configuration (format "agent-config %s" name)))
     (setq configuration (ende-chat-config--validate-grant-types configuration))
     (let ((normalized (ende-chat-config--normalize configuration)))
       (ende-chat-config--validate-access normalized configuration)
