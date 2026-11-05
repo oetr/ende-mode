@@ -1450,15 +1450,14 @@
           (with-temp-file path
             (insert "foo and bar\nfoo|bar\na.b and x+y\naXb\n"))
           (let* ((ende-project-root-directory root)
-                 (literal (ende-test--tool-result
-                           "search_project" '(("query" . "a.b")) root))
-                 (either (ende-test--tool-result
-                          "search_project" '(("patterns" . ["foo" "bar"])) root))
-                 (metacharacters (ende-test--tool-result
-                                  "search_project"
+                 (literal (ende-tools--search-project
+                           '(("query" . "a.b")) root))
+                 (either (ende-tools--search-project
+                          '(("patterns" . ["foo" "bar"])) root))
+                 (metacharacters (ende-tools--search-project
                                   '(("patterns" . ["a.b" "x+y"])) root))
-                 (regexp (ende-test--tool-result
-                          "search_project" '(("regexp" . "foo\\|bar")) root)))
+                 (regexp (ende-tools--search-project
+                          '(("regexp" . "foo\\|bar")) root)))
             (should (= (length (plist-get
                                 (elt (plist-get literal :files) 0)
                                 :matches))
@@ -1500,23 +1499,21 @@
                                 (("query" . ""))
                                 (("patterns" . []))
                                 (("patterns" . ["ok" ""]))))
-              (let ((call (ende-test--tool-call "search_project" arguments root)))
-                (should-not (plist-get call :ok))))
-            (let ((none (ende-test--tool-call "search_project" nil root))
-                  (multiple (ende-test--tool-call
-                             "search_project"
-                             '(("query" . "one") ("patterns" . ["two"]))
-                             root)))
-              (should (string-match-p "exactly one" (plist-get none :error)))
+              (should-error (ende-tools--search-project arguments root)))
+            (let ((none (should-error (ende-tools--search-project nil root)))
+                  (multiple (should-error
+                             (ende-tools--search-project
+                              '(("query" . "one") ("patterns" . ["two"]))
+                              root))))
+              (should (string-match-p "exactly one" (error-message-string none)))
               (should (string-match-p "exactly one"
-                                      (plist-get multiple :error))))
-            (let ((above (ende-test--tool-call
-                          "search_project"
-                          '(("query" . "needle") ("context_before" . 21))
-                          root)))
-              (should-not (plist-get above :ok))
+                                      (error-message-string multiple))))
+            (let ((above (should-error
+                          (ende-tools--search-project
+                           '(("query" . "needle") ("context_before" . 21))
+                           root))))
               (should (string-match-p "integer from 0 to 20"
-                                      (plist-get above :error))))))
+                                      (error-message-string above))))))
       (when (file-directory-p root)
         (delete-directory root t)))))
 
@@ -1537,8 +1534,7 @@
                           ("start_line" . 2)
                           ("line_count" . 1))
                         root))
-                 (search (ende-test--tool-result
-                          "search_project"
+                 (search (ende-tools--search-project
                           '(("query" . "needle")
                             ("max_results" . 2)
                             ("context_before" . 1))
