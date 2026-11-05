@@ -1217,47 +1217,7 @@
                        (insert-file-contents
                         (expand-file-name "public/main.c" root))
                        (buffer-string))
-                     "int main(void) { return 23; }\n"))
-             (let* ((sandbox (ende-sandbox-for-owner owner-one))
-                    (container (ende-sandbox-container sandbox))
-                    (artifact
-                     (ende-test--sandbox-workspace sandbox "agent-only.log")))
-               (with-temp-file artifact (insert "keep through sync\n"))
-               (let* ((sandbox-edit
-                       (ende-test--sandbox-run
-                        '(("command" . "printf sandbox-only > public/main.c"))
-                        root configuration owner-one))
-                      (edited
-                       (ende-test--sandbox-call
-                        "edit_file"
-                        (list :path "public/main.c"
-                              :edits (list (ende-test--anchor-edit
-                                            "return 23" "replace" "return 42")))
-                        root configuration owner-one))
-                      (updated
-                       (ende-test--sandbox-run
-                        '(("command" . "cat public/main.c"))
-                        root configuration owner-one)))
-                 (should (= (plist-get sandbox-edit :exit_code) 0))
-                 (should (plist-get edited :ok))
-                 (unless (eq sandbox (ende-sandbox-for-owner owner-one))
-                   (ert-skip
-                    "this Podman runtime cannot pause containers for workspace synchronization"))
-                 (should (eq sandbox (ende-sandbox-for-owner owner-one)))
-                 (should (equal container (ende-sandbox-container sandbox)))
-                 (should (= (plist-get updated :exit_code) 0))
-                 (should (equal (plist-get updated :stdout)
-                                "int main(void) { return 42; }\n"))
-                 (should (equal (with-temp-buffer
-                                  (insert-file-contents artifact)
-                                  (buffer-string))
-                                "keep through sync\n"))
-                 (should (equal
-                          (with-temp-buffer
-                            (insert-file-contents
-                             (expand-file-name "public/main.c" root))
-                            (buffer-string))
-                          "int main(void) { return 42; }\n")))))
+                     "int main(void) { return 23; }\n")))
           (dolist (owner (list owner-one owner-two))
             (let ((sandbox (ende-sandbox-for-owner owner)))
               (should sandbox)
@@ -1277,6 +1237,55 @@
       (dolist (owner (list owner-one owner-two))
         (ende-sandbox-cleanup-owner owner))
       (ende-test--sandbox-wait-clean (list owner-one owner-two))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-podman-host-edit-sync-preserves-artifacts ()
+  (let* ((image (ende-test--sandbox-image))
+         (root nil)
+         (owner (cl-incf ende-test--sandbox-owner)))
+    (unless image
+      (ert-skip "rootless Podman and a local digest-pinned image are required"))
+    (setq root (make-temp-file "ende-sandbox-sync-" t))
+    (unwind-protect
+        (progn
+          (ende-test--sandbox-make-project root)
+          (let* ((configuration (ende-test--sandbox-config root image))
+                 (setup (ende-test--sandbox-run
+                         '(("command" . "printf sandbox-only > public/main.c; printf 'keep through sync\\n' > agent-only.log"))
+                         root configuration owner)))
+            (should (= (plist-get setup :exit_code) 0))
+            (let* ((sandbox (ende-sandbox-for-owner owner))
+                   (container (ende-sandbox-container sandbox))
+                   (artifact (ende-test--sandbox-workspace sandbox "agent-only.log"))
+                   (edited (ende-test--sandbox-call
+                            "edit_file"
+                            (list :path "public/main.c"
+                                  :edits (list (ende-test--anchor-edit
+                                                "return 23" "replace" "return 42")))
+                            root configuration owner)))
+              (should (plist-get edited :ok))
+              ;; Check survival before another command could start a replacement.
+              (unless (eq sandbox (ende-sandbox-for-owner owner))
+                (ert-skip
+                 "this Podman runtime cannot pause containers for workspace synchronization"))
+              (should (equal container (ende-sandbox-container sandbox)))
+              (let ((updated (ende-test--sandbox-run
+                              '(("command" . "cat public/main.c"))
+                              root configuration owner)))
+                (should (= (plist-get updated :exit_code) 0))
+                (should (equal (plist-get updated :stdout)
+                               "int main(void) { return 42; }\n")))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents artifact)
+                               (buffer-string))
+                             "keep through sync\n"))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents
+                                (expand-file-name "public/main.c" root))
+                               (buffer-string))
+                             "int main(void) { return 42; }\n")))))
+      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-wait-clean (list owner))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-start-failure-does-not-touch-project-files ()
