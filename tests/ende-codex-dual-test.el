@@ -55,6 +55,9 @@
         (should-not (plist-get out :error))
         (should (member (ende-codex--auth-property method :responses-url) (plist-get out :command)))
         (should (string-match-p "session-id: stable-session" (plist-get out :config-text)))
+        (should (equal (gethash "prompt_cache_key" (ende-protocol-json-read-string
+                                                  (plist-get out :request-body)))
+                       "stable-session"))
         (should (eq (not (null (string-match-p "ChatGPT-Account-Id:" (plist-get out :config-text))))
                     (eq method 'codex-oauth)))
         (push (plist-get out :request-body) bodies)))

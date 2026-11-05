@@ -1606,6 +1606,13 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (setq body (ende-controls--set-path
                   body '("include")
                   (vconcat (delete-dups (append include '("reasoning.encrypted_content")))))))
+    ;; Keep the cache key aligned with the session header by default.  Apply
+    ;; this after parameter encoding so explicit keyword/string keys win.
+    (when-let* ((session (plist-get profile :codex-session-id)))
+      (unless (cl-find "prompt_cache_key" body
+                       :key (lambda (entry) (ende-controls--json-key-name (car entry)))
+                       :test #'equal)
+        (push (cons :prompt_cache_key session) body)))
     (ende-codex--validate-body body)))
 
 (defun ende-responses--start-prepared (session body _request-body record)

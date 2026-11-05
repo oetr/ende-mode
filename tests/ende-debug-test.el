@@ -79,7 +79,7 @@
    (lambda (line) (string-prefix-p "Request #" line))
    (split-string (ende-debug--format-report "/synthetic" captures) "\n" t)))
 
-(ert-deftest ende-test/debug-captures-exact-transport-body-without-altering-it ()
+(ert-deftest ende-test/debug-captures-redacted-body-without-altering-transport ()
   (let ((directory (make-temp-file "ende-debug-fidelity-" t)))
     (unwind-protect
         (dolist (transport '(chat codex))
@@ -122,8 +122,16 @@
                    "completion" (ende-debug-test--read-meta directory 1)))
                  (request-body (plist-get recorded :request-body)))
             (should (equal (plist-get unrecorded :request-body) request-body))
-            (should (equal (ende-debug-test--read-bytes recording-file)
-                           request-body))
+            (let ((saved (ende-debug-test--read-bytes recording-file)))
+              (if codex
+                  (let ((expected (ende-protocol-json-read-string request-body)))
+                    (should (equal (gethash "prompt_cache_key" expected)
+                                   "debug-test-session"))
+                    (should-not (string-match-p "debug-test-session" saved))
+                    (puthash "prompt_cache_key" "[private provider value redacted]" expected)
+                    (should (ende-debug--json-equal-p
+                             expected (ende-protocol-json-read-string saved))))
+                (should (equal saved request-body))))
             (should (= (logand (file-modes recording-file) #o777) #o600))
             (should (= (logand
                         (file-modes (expand-file-name "0001-meta.json"

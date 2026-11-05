@@ -115,13 +115,16 @@
 
 (ert-deftest ende-responses-history-stateless-request ()
   (dolist (builder '(ende-codex--request-body ende-responses--request-body))
-    (let ((body (funcall builder '(("user" . "Hello")) '(:model "test"))))
+    (let ((body (funcall builder '(("user" . "Hello"))
+                         '(:model "test" :codex-session-id "history-session"))))
       (when (eq builder 'ende-codex--request-body)
         (should (equal (alist-get :include body) ["reasoning.encrypted_content"])))
       (should (eq (alist-get :store body) json-false))
       (should (eq (alist-get :stream body) t))
       (should-not (assq :previous_response_id body))
-      (should-not (assq :prompt_cache_key body)))))
+      (if (eq builder 'ende-codex--request-body)
+          (should (equal (alist-get :prompt_cache_key body) "history-session"))
+        (should-not (assq :prompt_cache_key body))))))
 
 (provide 'ende-responses-history-test)
 ;;; ende-responses-history-test.el ends here
