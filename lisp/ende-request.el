@@ -93,8 +93,7 @@ FILE-BACKED forces worker preparation, including for a retained request."
     (if (not (or images file-backed))
         (apply callback (ende-request--encode builder messages profile debug preparation finalization))
       (let* ((file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
-             (full-file (when finalization
-                          (make-temp-file (expand-file-name "ende-request-full-" (ende-curl-local-directory)))))
+             (full-file nil)
              (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
                                '(ende-debugging-enabled
                                  ende-debug--session-directory ende-debug--sequence)))
@@ -103,6 +102,8 @@ FILE-BACKED forces worker preparation, including for a retained request."
          lifecycle (lambda ()
                      (ende-ignore-errors #'delete-file file)
                      (when full-file (ende-ignore-errors #'delete-file full-file))))
+        (when finalization
+          (setq full-file (make-temp-file (expand-file-name "ende-request-full-" (ende-curl-local-directory)))))
         (ende-transport-session-add-canceller
          lifecycle
          (ende-worker-run

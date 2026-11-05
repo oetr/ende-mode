@@ -1001,7 +1001,14 @@ explicit efforts yields no choices instead of an error."
   "Settle SESSION once with OUTCOME and VALUE."
   (unless (ende-codex--terminal-p session)
     (when-let* ((request (ende-codex--session-ws-request session)))
-      (ende-responses-ws-finish request outcome)
+      (ende-responses-ws-finish
+       request outcome
+       (ende-protocol-json-get "id" (ende-protocol-json-get "response" (ende-codex--session-terminal-event session)))
+       (when (eq outcome 'success)
+         (when-let* ((items (ende-codex--protocol-items session)))
+           (ende-codex--request-messages
+            (list (list :role "assistant" :protocol-items items))
+            (ende-codex--session-profile session)))))
       (setf (ende-codex--session-ws-request session) nil))
     (let ((record (ende-codex--session-debug-record session)))
       (when record
@@ -1554,12 +1561,13 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-responses--include-reasoning (body)
   "Include encrypted reasoning in BODY so completed output can be replayed."
-  (let ((include (cdr (cl-find "include" body
-                              :key (lambda (entry) (ende-controls--json-key-name (car entry)))
-                              :test #'equal))))
+  (let* ((entry (cl-find "include" body
+                         :key (lambda (entry) (ende-controls--json-key-name (car entry)))
+                         :test #'equal))
+         (include (cdr entry)))
     (unless (and (vectorp include) (not (stringp include))
                  (cl-every #'stringp include))
-      (when include (error "Responses include must be an array of field names"))
+      (when entry (error "Responses include must be an array of field names"))
       (setq include []))
     (ende-controls--set-path
      body '("include")
@@ -1759,6 +1767,8 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
 
 (defun ende-codex--websocket-prepared (session body record)
   "Associate actual WebSocket BODY and capture RECORD with SESSION."
+  (when-let* ((previous (ende-codex--session-debug-record session)))
+    (ende-ignore-errors #'ende-debug-record-completion previous 'retry nil nil nil))
   (setf (ende-codex--session-debug-record session) record)
   (ende-codex--diagnose-request session body))
 
@@ -1772,21 +1782,22 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
                    (when auth
                      (append (ende-codex--inference-headers method auth profile)
                              (plist-get properties :headers)))))
+         (debug (list "openai-responses-websocket" (plist-get profile :url)
+                      (when auth
+                        (let ((print-length nil) (print-level nil))
+                          (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth)))))))
          (request (ende-responses-ws-create-request
                    profile headers properties (ende-codex--lifecycle session)
                    (apply-partially #'ende-codex--handle-event session)
                    (apply-partially #'ende-codex--complete session)
                    (apply-partially #'ende-codex--websocket-prepared session)
                    (when auth (ende-codex--account-binding-state auth)))))
-    (setf (ende-codex--session-ws-request session) request)
+    (setf (ende-codex--session-ws-request session) request
+          (ende-responses-ws-request-debug request) debug)
     (ende-request-prepare
      (ende-codex--lifecycle session) 'ende-codex
      (if auth #'ende-codex--request-body #'ende-responses--request-body)
-     messages profile
-     (list "openai-responses-websocket" (plist-get profile :url)
-           (when auth
-             (let ((print-length nil) (print-level nil))
-               (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth))))))
+     messages profile debug
      (apply-partially #'ende-responses-ws-send-prepared request)
      (ende-responses-ws-finalization request))))
 

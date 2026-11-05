@@ -75,13 +75,36 @@
             (ende-responses-ws-connection-chain connection) nil
             (ende-responses-ws-connection-headers connection) nil
             (ende-responses-ws-connection-identity connection) nil)
-      (when socket (ende-ignore-errors #'websocket-close socket)))))
+      (when socket
+        (ende-ignore-errors #'websocket-close socket)
+        (when (websocket-p socket)
+          (setf (websocket-on-open socket) #'ignore
+                (websocket-on-message socket) #'ignore
+                (websocket-on-close socket) #'ignore
+                (websocket-on-error socket) #'ignore
+                (websocket-client-data socket) nil
+                (websocket-inflight-input socket) nil)
+          (let ((process (websocket-conn socket)))
+            (when (processp process)
+              (set-process-filter process #'ignore)
+              (set-process-sentinel process #'ignore)
+              (process-put process :websocket nil))))))))
 
-(defun ende-responses-ws-finish (request outcome)
+(defun ende-responses-ws-finish (request outcome &optional response-id output)
   "Detach REQUEST before completion callbacks; retain a successful job socket.
-OUTCOME is the transport-independent settlement outcome."
+OUTCOME is the transport-independent settlement outcome.  RESPONSE-ID and
+replay-normalized OUTPUT commit a successful continuation before callbacks."
   (let ((connection (ende-responses-ws-request-connection request)))
     (when (and connection (eq request (ende-responses-ws-connection-active connection)))
+      (setf (ende-responses-ws-connection-chain connection)
+            (when (and (eq outcome 'success) (stringp response-id) (not (string-empty-p response-id)))
+              (let* ((retained (ende-request--retained-body
+                                (ende-responses-ws-request-full-body request) nil))
+                     (full (ende-protocol-json-read-string (json-encode retained))))
+                (make-ende-responses-ws-chain
+                 :response-id response-id :settings (ende-responses-ws--settings full)
+                 :input (vconcat (gethash "input" full)
+                                 (ende-protocol-json-read-string (json-encode (vconcat output))))))))
       (setf (ende-responses-ws-connection-active connection) nil)
       (unless (and (eq outcome 'success) (ende-responses-ws-connection-owner connection))
         (ende-responses-ws--discard connection)))
@@ -179,20 +202,48 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                            request 'timeout "Responses request deadline exceeded")))
       request)))
 
-(defun ende-responses-ws-finalize (body properties)
-  "Return the flat response.create envelope for logical BODY and PROPERTIES."
+(defun ende-responses-ws--settings (body)
+  "Copy parsed logical BODY's settings, excluding transport-owned fields."
+  (let ((settings (copy-hash-table body)))
+    (dolist (key '("type" "input" "previous_response_id" "stream" "background" "stream_options"))
+      (remhash key settings))
+    settings))
+
+(defun ende-responses-ws-finalize (body properties &optional snapshot)
+  "Select input from immutable SNAPSHOT and frame BODY using PROPERTIES."
   (let ((body (cl-remove-if
                (lambda (entry)
                  (member (ende-controls--json-key-name (car entry))
-                         '("type" "previous_response_id" "stream" "background"))) body)))
-    (append (list (cons :type "response.create")) body
-            (when (plist-get properties :stream) (list (cons :stream t))))))
+                         '("type" "previous_response_id" "stream" "background" "stream_options"))) body)))
+    (let* ((full (ende-protocol-json-read-string (json-encode body)))
+           (input (gethash "input" full))
+           (expected (plist-get snapshot :input))
+           (id (plist-get snapshot :response-id))
+           (continue
+            (and (stringp id) (not (string-empty-p id))
+                 (ende-protocol-json-equal-p (ende-responses-ws--settings full)
+                                             (plist-get snapshot :settings))
+                 (<= (length expected) (length input))
+                 (cl-loop for index below (length expected)
+                          always (ende-protocol-json-equal-p (aref expected index) (aref input index))))))
+      (setq body (cl-remove-if (lambda (entry) (equal (ende-controls--json-key-name (car entry)) "input")) body))
+      (append (list (cons :type "response.create")) body
+              (when continue (list (cons :previous_response_id id)))
+              (list (cons :input (ende-protocol-json-for-request
+                                 (if continue (substring input (length expected)) (vconcat input)))))
+              (when (plist-get properties :stream) (list (cons :stream t)))))))
 
 (defun ende-responses-ws-finalization (request)
   "Return serializable transport finalization arguments for REQUEST."
-  (list #'ende-responses-ws-finalize
-        (ende-responses-ws-connection-properties
-         (ende-responses-ws-request-connection request))))
+  (let* ((connection (ende-responses-ws-request-connection request))
+         (chain (ende-responses-ws-connection-chain connection)))
+    (list #'ende-responses-ws-finalize
+          (ende-responses-ws-connection-properties connection)
+          (when chain
+            (ende-provider-config-copy
+             (list :response-id (ende-responses-ws-chain-response-id chain)
+                   :input (ende-responses-ws-chain-input chain)
+                   :settings (ende-responses-ws-chain-settings chain)))))))
 
 (defun ende-responses-ws--idle (request)
   "Reset REQUEST's captured response-idle deadline."
@@ -216,7 +267,39 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       (setf (ende-responses-ws-request-sent request) t)
       (ende-responses-ws--idle request)
       (websocket-send-text
-       (ende-responses-ws-connection-socket (ende-responses-ws-request-connection request)) text))))
+       (ende-responses-ws-connection-socket (ende-responses-ws-request-connection request)) text)
+      (setf (ende-responses-ws-request-payload request) nil))))
+
+(defun ende-responses-ws--recover (request json)
+  "Intercept an explicitly recoverable JSON error for REQUEST at most once."
+  (let* ((type (ende-protocol-json-get "type" json))
+         (error (or (ende-protocol-json-get "error" json)
+                    (ende-protocol-json-get "error" (ende-protocol-json-get "response" json))))
+         (code (ende-protocol-json-get "code" error)))
+    (when (and (member type '("error" "response.failed"))
+               (member code '("previous_response_not_found" "websocket_connection_limit_reached"))
+               (not (ende-responses-ws-request-retried request))
+               (not (ende-responses-ws-request-observed-output request)))
+      (setf (ende-responses-ws-request-retried request) t
+            (ende-responses-ws-request-sent request) nil)
+      (when-let* ((timer (ende-responses-ws-request-idle-timer request)))
+        (cancel-timer timer)
+        (setf (ende-responses-ws-request-idle-timer request) nil))
+      (let ((connection (ende-responses-ws-request-connection request)))
+        (setf (ende-responses-ws-connection-chain connection) nil)
+        (when (equal code "websocket_connection_limit_reached")
+          (let ((replacement (copy-ende-responses-ws-connection connection)))
+            (setf (ende-responses-ws-connection-socket replacement) nil)
+            (ende-responses-ws--discard connection)
+            (puthash (ende-responses-ws-connection-key replacement) replacement ende-responses-ws--connections)
+            (setf (ende-responses-ws-request-connection request) replacement))))
+      (ende-request-reprepare
+       (ende-responses-ws-request-lifecycle request) 'ende-responses-ws
+       (ende-responses-ws-request-full-body request)
+       (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
+       (apply-partially #'ende-responses-ws-send-prepared request)
+       (ende-responses-ws-finalization request))
+      t)))
 
 (defun ende-responses-ws--open (connection socket)
   "Send the prepared request when CONNECTION's SOCKET opens."
@@ -266,12 +349,15 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                   (setf (ende-responses-ws-request-frame-parts request) nil
                         (ende-responses-ws-request-frame-bytes request) 0)
                   (unless (stringp type) (error "Missing Responses event type"))
-                  (when (string-match-p "\\`response\\.\\(?:output\\|reasoning\\|function_call\\)" type)
+                  (when (or (string-match-p "\\`response\\.\\(?:output\\|reasoning\\|function_call\\)" type)
+                            (let ((output (ende-protocol-json-get "output" (ende-protocol-json-get "response" json))))
+                              (and (vectorp output) (> (length output) 0))))
                     (setf (ende-responses-ws-request-observed-output request) t))
-                  (funcall (ende-responses-ws-request-on-json request) json)
-                  (when (and (ende-responses-ws--live-p request)
-                             (member type '("response.completed" "response.done" "response.incomplete")))
-                    (funcall (ende-responses-ws-request-on-complete request))))
+                  (unless (ende-responses-ws--recover request json)
+                    (funcall (ende-responses-ws-request-on-json request) json)
+                    (when (and (ende-responses-ws--live-p request)
+                               (member type '("response.completed" "response.done" "response.incomplete")))
+                      (funcall (ende-responses-ws-request-on-complete request)))))
               ((error quit)
                (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event")))))))))))
 
@@ -365,7 +451,9 @@ Route dependency parser failures through CONNECTION's request lifecycle."
     (condition-case nil
         (let* ((connection (ende-responses-ws-request-connection request))
                (socket (ende-responses-ws-connection-socket connection)))
-          (setf (ende-responses-ws-request-full-body request) data
+          (setf (ende-responses-ws-request-full-body request)
+                (if (plist-get data :full-file) (list :full-file (plist-get data :full-file))
+                  (list :full-body (plist-get data :full-body)))
                 (ende-responses-ws-request-payload request) data)
           (funcall (ende-responses-ws-request-on-prepared request) body record)
           (when (ende-responses-ws--live-p request)

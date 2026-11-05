@@ -280,6 +280,22 @@ Errors are signaled so the transport can turn them into protocol failures."
   (and (hash-table-p object)
        (gethash key object)))
 
+(defun ende-protocol-json-equal-p (left right)
+  "Compare parsed JSON LEFT and RIGHT, ignoring only object-key order.
+Arrays retain their order; false and null remain distinct."
+  (cond
+   ((hash-table-p left)
+    (and (hash-table-p right) (= (hash-table-count left) (hash-table-count right))
+         (cl-loop for key being the hash-keys of left using (hash-values value)
+                  always (and (ende-protocol-json-has-key-p key right)
+                              (ende-protocol-json-equal-p value (gethash key right))))))
+   ((and (vectorp left) (not (stringp left)))
+    (and (vectorp right) (not (stringp right)) (= (length left) (length right))
+         (cl-loop for a across left for b across right
+                  always (ende-protocol-json-equal-p a b))))
+   ((numberp left) (and (numberp right) (= left right)))
+   (t (equal left right))))
+
 (defun ende-protocol-json-for-request (value)
   "Copy parsed JSON VALUE using the request encoder's boolean representation."
   (cond

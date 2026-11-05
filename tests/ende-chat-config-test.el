@@ -1054,9 +1054,9 @@
                          (names (ende-test--tool-definition-names definitions)))
                     (should (equal (sort (copy-sequence names) #'string<)
                                    (sort (copy-sequence catalog-names) #'string<)))
-                    (should (equal definitions catalog))
+                    (should (equal (json-encode definitions) (json-encode catalog)))
                     (when previous-definitions
-                      (should (equal definitions previous-definitions)))
+                      (should (equal (json-encode definitions) (json-encode previous-definitions))))
                     (setq previous-definitions (copy-tree definitions))))))))
       (ende-test--reset)
       (delete-directory root t))))
@@ -1521,9 +1521,9 @@
               (should (equal (cdr (assq 'read_file
                                         (plist-get second :tool-resources)))
                              '(project)))
-              (should (equal first-definitions second-definitions))
-              (should (equal first-definitions
-                             (ende-tool-definitions)))
+              (should (equal (json-encode first-definitions) (json-encode second-definitions)))
+              (should (equal (json-encode first-definitions)
+                             (json-encode (ende-tool-definitions))))
               (should
                (cl-some
                 (lambda (message)

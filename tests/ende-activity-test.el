@@ -470,7 +470,8 @@
   (unwind-protect
       (let ((ende-reduced-motion t)
             (profile (ende-test--request-profile
-                      '(:name remote :model "fixture" :transport openrouter-batch)))
+                      '(:name remote :service openrouter :model "fixture" :transport openrouter-batch
+                        :url "https://openrouter.ai/api/v1/chat/completions")))
             (ende-llm-function (ende-test--fake-llm '("Retained context.") t)))
         (with-temp-buffer
           (org-mode)
