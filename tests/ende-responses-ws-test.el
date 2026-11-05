@@ -1,0 +1,259 @@
+;;; ende-responses-ws-test.el --- Responses socket tests -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 Peter Samarin
+;;
+;; Author: Peter Samarin <peter.samarin@gmail.com>
+;; Maintainer: Peter Samarin <peter.samarin@gmail.com>
+;; Keywords: convenience, tools
+;; URL: https://github.com/oetr/ende-mode
+;; SPDX-License-Identifier: AGPL-3.0-only
+
+;; This file is part of Ende.
+
+;; Ende is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU Affero General Public License as published
+;; by the Free Software Foundation, version 3 of the License.
+;;
+;; Ende is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU Affero General Public License for more details.
+;;
+;; You should have received a copy of the GNU Affero General Public License
+;; along with Ende.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Fake-socket conversation and ownership tests.
+
+;;; Code:
+
+(require 'ert)
+(require 'ende)
+(require 'ende-test-wait)
+
+(cl-defstruct ende-responses-ws-test--socket url options open sent)
+
+(defmacro ende-responses-ws-test--with-sockets (&rest body)
+  "Run BODY with local fake sockets and private fixture credentials."
+  (declare (indent 0) (debug t))
+  `(let ((ende-responses-ws--connections (make-hash-table :test #'equal))
+         (ende-provider-discovery-enabled nil)
+         (ende-debugging-enabled nil)
+         (sockets nil) (opening nil) (token "fixture-api-key"))
+     (cl-letf (((symbol-function 'ende-credentials-secret) (lambda (_profile) token))
+               ((symbol-function 'ende-codex--resolve-auth)
+                (lambda (callback profile)
+                  (funcall callback
+                           (list :auth-method (plist-get profile :auth-method)
+                                 :account (plist-get profile :account)
+                                 :registration-id "fixture-registration"
+                                 :access-token token :client-id ende-codex-native-client-id
+                                 :chatgpt-account-id "fixture-account"
+                                 :scope "offline_access chatgpt.tokens.use.direct"))
+                  nil))
+               ((symbol-function 'ende-curl-start-request)
+                (lambda (&rest _) (ert-fail "Selected WebSocket fell back to HTTP")))
+               ((symbol-function 'websocket-open)
+                (lambda (url &rest options)
+                  (should gnutls-verify-error)
+                  (should (plist-get options :nowait))
+                  (should-not (file-remote-p default-directory))
+                  (should-not url-cookie-storage)
+                  (should-not url-cookie-secure-storage)
+                  (let ((socket (make-ende-responses-ws-test--socket :url url :options options)))
+                    (push socket sockets)
+                    (when opening (funcall opening))
+                    socket)))
+               ((symbol-function 'websocket-openp) #'ende-responses-ws-test--socket-open)
+               ((symbol-function 'websocket-send-text)
+                (lambda (socket text)
+                  (should (ende-responses-ws-test--socket-open socket))
+                  (push (ende-protocol-json-read-string text)
+                        (ende-responses-ws-test--socket-sent socket))))
+               ((symbol-function 'websocket-close)
+                (lambda (socket)
+                  (setf (ende-responses-ws-test--socket-open socket) nil)
+                  (funcall (plist-get (ende-responses-ws-test--socket-options socket) :on-close) socket))))
+       (unwind-protect (progn ,@body)
+         (ende-responses-ws-close-all)))))
+
+(defun ende-responses-ws-test--profile (&optional owner phase method)
+  "Resolve a fixture connection for OWNER, PHASE and optional OAuth METHOD."
+  (let* ((ende-providers nil) (ende-builtin-provider-settings nil) (ende-custom-providers nil)
+         (profile (ende-provider-config-resolve
+                   (if method 'openai-codex 'openai) "test-model" nil
+                   (when method (list :auth-method method :account 'personal)))))
+    (ende-plist-merge profile
+                      (append (list :transport 'websocket :job-id owner :request-phase (or phase 'work))
+                              (when method '(:codex-auth-source ende :codex-session-id "fixture-session"))))))
+
+(defun ende-responses-ws-test--open (socket)
+  "Complete SOCKET's asynchronous handshake."
+  (setf (ende-responses-ws-test--socket-open socket) t)
+  (funcall (plist-get (ende-responses-ws-test--socket-options socket) :on-open) socket))
+
+(defun ende-responses-ws-test--event (socket text)
+  "Deliver JSON event TEXT even if SOCKET has already closed."
+  (funcall (plist-get (ende-responses-ws-test--socket-options socket) :on-message)
+           socket (make-websocket-frame :opcode 'text :payload (encode-coding-string text 'utf-8) :completep t)))
+
+(defun ende-responses-ws-test--complete (socket &optional id output)
+  "Complete SOCKET with response ID and JSON OUTPUT."
+  (ende-responses-ws-test--event
+   socket (format "{\"type\":\"response.completed\",\"response\":{\"id\":\"%s\",\"output\":%s}}"
+                  (or id "resp-fixture") (or output "[]"))))
+
+(ert-deftest ende-responses-ws-ownership-and-protocols ()
+  (ende-responses-ws-test--with-sockets
+    (let* ((default-directory "/ssh:fixture:/project/")
+           (profile (ende-responses-ws-test--profile 1 'title))
+           (done 0) (failed 0)
+           (callbacks (list :on-done (lambda (_) (cl-incf done))
+                            :on-error (lambda (_) (cl-incf failed)))))
+      (ende-llm-default '(("user" . "Hello λ")) callbacks profile)
+      (should (= (length sockets) 1))
+      (ende-responses-ws-test--open (car sockets))
+      (let ((wire (car (ende-responses-ws-test--socket-sent (car sockets)))))
+        (should (equal (gethash "type" wire) "response.create"))
+        (should (eq (gethash "store" wire) :false))
+        (should-not (gethash "stream" wire))
+        (should-not (gethash "background" wire))
+        (should (equal (gethash "include" wire) ["reasoning.encrypted_content"]))
+        (should (string-match-p "Hello λ" (json-encode wire))))
+      (ende-responses-ws-test--complete (car sockets))
+      (should (= done 1))
+      (ende-llm-default '(("user" . "Again")) callbacks profile)
+      (should (= (length sockets) 1))
+      (ende-responses-ws-test--complete (car sockets))
+      (setq profile (plist-put profile :request-phase 'work))
+      (let ((old (car sockets)))
+        (ende-llm-default '(("user" . "Work")) callbacks profile)
+        (should-not (ende-responses-ws-test--socket-open old)))
+      (ende-responses-ws-test--open (car sockets))
+      (ende-responses-ws-test--complete (car sockets))
+      (setq token "rotated-fixture-key")
+      (ende-llm-default '(("user" . "Fresh credentials")) callbacks profile)
+      (should (= (length sockets) 3))
+      (ende-responses-ws-test--open (car sockets))
+      (ende-responses-ws-test--complete (car sockets))
+      (ende-llm-default '(("user" . "Other job")) callbacks (ende-responses-ws-test--profile 2))
+      (should (= (length sockets) 4))
+      (ende-responses-ws-test--open (car sockets))
+      (ende-responses-ws-test--complete (car sockets))
+      (dolist (method '(chatgpt-plan-oauth codex-oauth))
+        (ende-llm-default '(("user" . "OAuth")) callbacks (ende-responses-ws-test--profile nil nil method))
+        (ende-responses-ws-test--open (car sockets))
+        (let* ((socket (car sockets))
+               (headers (plist-get (ende-responses-ws-test--socket-options socket) :custom-header-alist))
+               (wire (car (ende-responses-ws-test--socket-sent socket))))
+          (should (assoc "Authorization" headers))
+          (should (eq (gethash "stream" wire) (eq method 'codex-oauth)))
+          (if (eq method 'codex-oauth)
+              (progn
+                (should (equal (cdr (assoc "OpenAI-Beta" headers)) "responses_websockets=2026-02-06"))
+                (should (assoc "ChatGPT-Account-Id" headers)))
+            (should-not (assoc "OpenAI-Beta" headers)))
+          (ende-responses-ws-test--complete socket)
+          (should-not (ende-responses-ws-test--socket-open socket))))
+      (should (= done 7))
+      (should (= failed 0)))))
+
+(ert-deftest ende-responses-ws-failure-lifecycle ()
+  (ende-responses-ws-test--with-sockets
+    (let ((done 0) (errors nil) (events nil) cancel)
+      (let ((callbacks (list :on-start (lambda (function) (setq cancel function))
+                             :on-event (lambda (event) (push event events))
+                             :on-done (lambda (_) (cl-incf done))
+                             :on-error (lambda (error) (push error errors))))
+            (profile (ende-responses-ws-test--profile 1)))
+        (ende-llm-default '(("user" . "Hello")) callbacks profile)
+        (ende-responses-ws-test--open (car sockets))
+        (ende-responses-ws-test--event (car sockets) "{\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}")
+        (let ((old (car sockets)))
+          (funcall cancel)
+          (ende-responses-ws-test--complete old)
+          (should (= (length errors) 1))
+          (should (cl-find :partial-result events :key (lambda (event) (plist-get event :type))))
+          (ende-llm-default '(("user" . "Next")) callbacks profile)
+          (ende-responses-ws-test--open (car sockets))
+          (ende-responses-ws-test--event old "{\"type\":\"response.output_text.delta\",\"delta\":\"late\"}")
+          (let* ((bytes (encode-coding-string "{\"type\":\"response.output_text.delta\",\"delta\":\"λ\"}" 'utf-8))
+                 (split (1+ (string-match (encode-coding-string "λ" 'utf-8) bytes)))
+                 (socket (car sockets))
+                 (callback (plist-get (ende-responses-ws-test--socket-options socket) :on-message)))
+            (funcall callback socket (make-websocket-frame :opcode 'text :payload (substring bytes 0 split)))
+            (funcall callback socket (make-websocket-frame :opcode 'continuation :completep t
+                                                           :payload (substring bytes split)))
+            (should (cl-find "λ" events :key (lambda (event) (plist-get event :text)) :test #'equal)))
+          (ende-responses-ws-test--complete (car sockets))
+          (should (= done 1)))
+        (ende-llm-default '(("user" . "Closed")) callbacks profile)
+        (websocket-close (car sockets))
+        (should (= (length sockets) 2))
+        (should (= (length errors) 2))
+        (should (= (hash-table-count ende-responses-ws--connections) 0))
+        (let ((ende-max-response-bytes 1))
+          (ende-llm-default '(("user" . "Bounded")) callbacks profile)
+          (ende-responses-ws-test--open (car sockets))
+          (ende-responses-ws-test--complete (car sockets))
+          (should (eq (ende-error-kind (car errors)) 'resource)))
+        (let ((ende-connect-timeout 0.02))
+          (ende-llm-default '(("user" . "Timeout")) callbacks profile)
+          (ende-test--wait-for (lambda () (= (length errors) 4))))
+        (should (= done 1))
+        (setq opening (lambda () (funcall cancel)))
+        (ende-llm-default '(("user" . "Cancel during open")) callbacks profile)
+        (setq opening nil)
+        (should (= (length errors) 5))
+        (ende-responses-ws-test--open (car sockets))
+        (should-not (ende-responses-ws-test--socket-open (car sockets)))
+        (should (= (hash-table-count ende-responses-ws--connections) 0))
+        (ende-llm-default '(("user" . "Shutdown"))
+                          (list :on-error (lambda (_)
+                                            (ende-llm-default '(("user" . "Reentrant"))
+                                                              callbacks profile))) profile)
+        (ende-responses-ws-close-all)
+        (should (= (hash-table-count ende-responses-ws--connections) 0))
+        (let ((ende-max-response-header-bytes 32)
+              (ende-max-sse-event-bytes 32)
+              (process (make-pipe-process :name "ende-ws-input-fixture" :noquery t)))
+          (unwind-protect
+              (dolist (state '(connecting open))
+                (let ((before (length errors))
+                      (socket (websocket-inner-create :conn process :url "wss://api.openai.com/v1/responses" :ready-state state)))
+                  (set-process-filter process #'ignore)
+                  (set-process-sentinel process #'ignore)
+                  (cl-letf (((symbol-function 'websocket-open) (lambda (&rest _) socket)))
+                    (ende-llm-default '(("user" . "Raw input ceiling")) callbacks profile)
+                    (funcall (process-filter process) process
+                             (if (eq state 'connecting) (make-string 33 ?a)
+                               (unibyte-string #x81 126 1 0)))
+                    (should (= (length errors) (1+ before)))
+                    (should (eq (ende-error-kind (car errors)) 'resource)))))
+            (delete-process process)))))))
+
+(ert-deftest ende-responses-ws-reload-cleans-active-and-idle ()
+  (ende-responses-ws-test--with-sockets
+    (let ((callbacks (list :on-error #'ignore :on-done #'ignore)))
+      (ende-llm-default '(("user" . "Idle")) callbacks (ende-responses-ws-test--profile 1))
+      (ende-responses-ws-test--open (car sockets))
+      (ende-responses-ws-test--complete (car sockets))
+      (ende-llm-default '(("user" . "Active")) callbacks (ende-responses-ws-test--profile 2))
+      (ende-responses-ws-test--open (car sockets))
+      (dotimes (_ 2) (ende-reload))
+      (should (= (hash-table-count ende-responses-ws--connections) 0))
+      (should-not (cl-some #'ende-responses-ws-test--socket-open sockets))
+      (should (= (cl-count #'ende--responses-job-event ende-job-event-functions) 1))
+      (should (= (cl-count #'ende-responses-ws-close-all ende-queue-abort-functions) 1))
+      (cl-letf (((symbol-function 'ende-credentials-secret) (lambda (_) token)))
+        (let (done)
+          (ende-llm-default '(("user" . "After reload")) (list :on-done (lambda (_) (setq done t)))
+                            (ende-responses-ws-test--profile))
+          (ende-responses-ws-test--open (car sockets))
+          (ende-responses-ws-test--complete (car sockets))
+          (should done)
+          (should (= (hash-table-count ende-responses-ws--connections) 0)))))))
+
+(provide 'ende-responses-ws-test)
+;;; ende-responses-ws-test.el ends here

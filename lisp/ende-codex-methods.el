@@ -42,6 +42,7 @@
      :redirect-uri "http://localhost:1455/auth/callback"
      :callback-port 1455 :client-kind fixed
      :account-header "ChatGPT-Account-Id" :catalog-schema native
+     :websocket (:stream t :headers ("OpenAI-Beta: responses_websockets=2026-02-06"))
      :models-query ("client_version"))
     (chatgpt-plan-oauth
      :authorize-url "https://auth.openai.com/api/accounts/authorize"
@@ -50,7 +51,7 @@
      :models-url "https://api.openai.com/v1/models"
      :scopes "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
      :resource "https://api.openai.com/v1" :client-kind dynamic :nonce t
-     :catalog-schema public))
+     :catalog-schema public :websocket nil))
   "Single authority for the two trusted OAuth protocols.
 Native Codex authorization and backend access remain experimental until live
 verification; the public client registration does not imply approval for Ende.")

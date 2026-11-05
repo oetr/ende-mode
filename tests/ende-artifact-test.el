@@ -208,6 +208,7 @@
                (setq prepared data done t)) finalization)
             (ende-test--wait-for (lambda () done))
             (setq done nil files (list (plist-get prepared :file) (plist-get prepared :full-file)))
+            (dolist (file files) (should (= (logand (file-modes file) #o777) #o600)))
             (let ((wire (ende-protocol-json-read-string
                          (ende-artifact--read-bytes (plist-get prepared :file))))
                   (full (ende-request--retained-body prepared profile)))

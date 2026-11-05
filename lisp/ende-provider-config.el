@@ -172,8 +172,34 @@ manually entered model.  :model-settings refines shared model defaults."
       (unless (assq value ende-provider-config--services)
         (error ":provider: choose a canonical built-in service")))
      (:transport
-      (unless (memq value '(auto openrouter-batch))
-        (error ":transport: choose auto or openrouter-batch"))))))
+      (unless (memq value '(auto websocket openrouter-batch))
+        (error ":transport: choose auto, websocket, or openrouter-batch"))))))
+
+(defun ende-provider-config-validate-transport (profile)
+  "Validate PROFILE's transport against its API, authentication and endpoint."
+  (let ((transport (if (plist-member profile :transport)
+                       (plist-get profile :transport) 'auto))
+        (service (plist-get profile :service))
+        (api (plist-get profile :api))
+        (auth (plist-get profile :auth-method)))
+    (pcase transport
+      ('auto nil)
+      ('openrouter-batch
+       (unless (and (eq service 'openrouter) (eq api 'openai-chat-completions))
+         (error "openrouter-batch requires the OpenRouter Chat Completions connection")))
+      ('websocket
+       (unless (and (eq api 'openai-responses)
+                    (cond
+                     ((eq service 'openai)
+                      (and (eq auth 'auth-source)
+                           (memq (plist-get profile :auth-scheme) '(nil bearer))
+                           (equal (plist-get profile :url) "https://api.openai.com/v1/responses")))
+                     ((eq service 'openai-codex)
+                      (and (memq auth '(chatgpt-plan-oauth codex-oauth))
+                           (equal (plist-get profile :url)
+                                  (ende-codex--auth-property auth :responses-url))))))
+         (error "websocket requires a supported trusted OpenAI Responses connection")))
+      (_ (error "Unsupported provider transport")))))
 
 (defun ende-provider-config--headers (headers)
   "Validate nonsecret custom HEADERS."
@@ -272,8 +298,16 @@ manually entered model.  :model-settings refines shared model defaults."
             (error ":api: choose a verified API for %s" service))
           (when (eq service 'openai-codex)
             (ende-codex--auth-spec (or (plist-get settings :auth-method) 'codex-oauth)))
-          (when (and (plist-member settings :transport) (not (eq service 'openrouter)))
-            (error ":transport: only OpenRouter supports transport overrides")))
+          (ende-provider-config-validate-transport
+           (list :transport (or (plist-get settings :transport) 'auto)
+                 :service service :api api
+                 :auth-method (if (eq service 'openai-codex)
+                                  (or (plist-get settings :auth-method) 'codex-oauth)
+                                'auth-source)
+                 :url (if (eq service 'openai-codex)
+                          (ende-codex--auth-property
+                           (or (plist-get settings :auth-method) 'codex-oauth) :responses-url)
+                        (alist-get api (plist-get integration :endpoints))))))
         (when custom
           (dolist (url (append (when (plist-get settings :base-url)
                                  (list (plist-get settings :base-url)))
@@ -556,7 +590,7 @@ selects another explicitly available wire endpoint.  No network is started."
                 :account account :auth-method auth
                 :endpoints (ende-provider-config-copy endpoints)
                 :max-concurrency (or (plist-get integration :max-concurrency) 1)
-                :parallel nil :require-sse t :stream-usage t
+                :parallel nil :require-sse t :stream-usage t :transport 'auto
                 :request-timeout ende-request-timeout
                 :source-name-disclosure ende-source-name-disclosure
                 :output-tokens ende-default-output-tokens)))
@@ -645,6 +679,7 @@ selects another explicitly available wire endpoint.  No network is started."
     (when (plist-get profile :models-url)
       (setq profile (plist-put profile :models-url
                                (ende-curl--validated-url profile (plist-get profile :models-url)))))
+    (ende-provider-config-validate-transport profile)
     (ende-provider-config-copy profile)))
 
 (provide 'ende-provider-config)

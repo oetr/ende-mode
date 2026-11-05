@@ -41,6 +41,7 @@
 (require 'ende-stream)
 (require 'ende-debug)
 (require 'ende-request)
+(require 'ende-responses-ws)
 (require 'ende-provider-config)
 (require 'ende-codex-auth)
 (require 'ende-codex-login)
@@ -73,7 +74,7 @@
 
 (cl-defstruct (ende-codex--session
                (:constructor ende-codex--allocate-session))
-  profile stream tool-calls terminal-event debug-record strict-completion replay-items)
+  profile stream tool-calls terminal-event debug-record strict-completion replay-items ws-request)
 
 (defun ende-codex--make-session (&rest arguments)
   "Create a Codex protocol session from ARGUMENTS.
@@ -999,6 +1000,9 @@ explicit efforts yields no choices instead of an error."
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
   (unless (ende-codex--terminal-p session)
+    (when-let* ((request (ende-codex--session-ws-request session)))
+      (ende-responses-ws-finish request outcome)
+      (setf (ende-codex--session-ws-request session) nil))
     (let ((record (ende-codex--session-debug-record session)))
       (when record
         (condition-case nil
@@ -1185,7 +1189,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (ende-stream-record-image
        (ende-codex--session-stream session)
        (ende-content-generated-image (ende-protocol-json-get "result" item))))
-    (when (member type '("response.completed" "response.done" "response.incomplete"))
+    (when (member type '("response.completed" "response.done" "response.incomplete" "response.failed"))
       (cl-loop for entry in (ende-codex--output-items output) for index from 0
                do (ende-codex--observe-output
                    session entry (or (ende-protocol-json-get "output_index" entry) index))))
@@ -1650,14 +1654,17 @@ When APPEND is non-nil, append the argument delta to the stored value."
                   :tool-calls (make-hash-table :test #'eql))))
     (condition-case failure
         (progn
+          (ende-validate-resource-options)
           (ende-transport-session-invoke
            (ende-codex--lifecycle session) :on-start
            (apply-partially #'ende-codex--cancel session))
           (unless (ende-codex--terminal-p session)
-            (ende-request-prepare
-             (ende-codex--lifecycle session) 'ende-codex #'ende-responses--request-body
-             messages profile (list "openai-responses" (plist-get profile :url))
-             (apply-partially #'ende-responses--start-prepared session))))
+            (if (eq (plist-get profile :transport) 'websocket)
+                (ende-codex--start-websocket session messages nil)
+              (ende-request-prepare
+               (ende-codex--lifecycle session) 'ende-codex #'ende-responses--request-body
+               messages profile (list "openai-responses" (plist-get profile :url))
+               (apply-partially #'ende-responses--start-prepared session)))))
       ((error quit)
        (ende-codex--fail session (ende-error-create
                                   :kind 'startup :message (error-message-string failure)))))
@@ -1714,11 +1721,6 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
   "Start SESSION with AUTH, prepared DATA, BODY and debug RECORD."
   (let* ((default-directory (ende-curl-local-directory))
          (profile (ende-codex--session-profile session))
-         (_ (let ((case-fold-search t))
-              (when (cl-some (lambda (header)
-                              (string-match-p "\\`session-id:" header))
-                            (plist-get profile :request-headers))
-                (error "Codex session-id is transport-owned; remove the profile header"))))
          (url (ende-codex--validated-generation-url profile))
          (request
           (ende-curl-start-request
@@ -1743,7 +1745,9 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
 
 (defun ende-codex--start-generation (session messages auth)
   "Prepare the shared OAuth Responses generation for SESSION using AUTH."
-  (ende-request-prepare
+  (if (eq (plist-get (ende-codex--session-profile session) :transport) 'websocket)
+      (ende-codex--start-websocket session messages auth)
+    (ende-request-prepare
    (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
    messages (ende-codex--session-profile session)
    (list "openai-responses" (ende-codex--validated-generation-url (ende-codex--session-profile session))
@@ -1751,7 +1755,40 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
                     (ende-codex-auth--text-p (plist-get auth :registration-id)))
            (let ((print-length nil) (print-level nil))
              (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth))))))
-   (apply-partially #'ende-codex--start-prepared session auth)))
+     (apply-partially #'ende-codex--start-prepared session auth))))
+
+(defun ende-codex--websocket-prepared (session body record)
+  "Associate actual WebSocket BODY and capture RECORD with SESSION."
+  (setf (ende-codex--session-debug-record session) record)
+  (ende-codex--diagnose-request session body))
+
+(defun ende-codex--start-websocket (session messages auth)
+  "Prepare Responses SESSION over a persistent socket using optional AUTH."
+  (let* ((profile (ende-codex--session-profile session))
+         (method (plist-get profile :auth-method))
+         (properties (when auth (ende-codex--auth-property method :websocket)))
+         (headers (ende-curl-inference-headers
+                   profile
+                   (when auth
+                     (append (ende-codex--inference-headers method auth profile)
+                             (plist-get properties :headers)))))
+         (request (ende-responses-ws-create-request
+                   profile headers properties (ende-codex--lifecycle session)
+                   (apply-partially #'ende-codex--handle-event session)
+                   (apply-partially #'ende-codex--complete session)
+                   (apply-partially #'ende-codex--websocket-prepared session)
+                   (when auth (ende-codex--account-binding-state auth)))))
+    (setf (ende-codex--session-ws-request session) request)
+    (ende-request-prepare
+     (ende-codex--lifecycle session) 'ende-codex
+     (if auth #'ende-codex--request-body #'ende-responses--request-body)
+     messages profile
+     (list "openai-responses-websocket" (plist-get profile :url)
+           (when auth
+             (let ((print-length nil) (print-level nil))
+               (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth))))))
+     (apply-partially #'ende-responses-ws-send-prepared request)
+     (ende-responses-ws-finalization request))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."

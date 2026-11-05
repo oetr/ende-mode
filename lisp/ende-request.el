@@ -58,14 +58,14 @@ Return the outgoing bytes, encoded body, and optional capture record."
     (list (if finalization (list :data data :full-body full-body) data)
           body record)))
 
-(defun ende-request--write (library builder messages profile file debug preparation finalization)
+(defun ende-request--write (library builder messages profile file full-file debug preparation finalization)
   "Build and write a request to FILE; return payload-free diagnostics."
   (require library)
   (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization))
                (coding-system-for-write 'no-conversion))
     (when finalization
       (write-region (encode-coding-string (json-encode (plist-get data :full-body)) 'utf-8)
-                    nil (concat file ".full") nil 'silent)
+                    nil full-file nil 'silent)
       (setq data (plist-get data :data)))
     (write-region data nil file nil 'silent)
     (list :body (list (assq :tools body))
@@ -93,6 +93,8 @@ FILE-BACKED forces worker preparation, including for a retained request."
     (if (not (or images file-backed))
         (apply callback (ende-request--encode builder messages profile debug preparation finalization))
       (let* ((file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
+             (full-file (when finalization
+                          (make-temp-file (expand-file-name "ende-request-full-" (ende-curl-local-directory)))))
              (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
                                '(ende-debugging-enabled
                                  ende-debug--session-directory ende-debug--sequence)))
@@ -100,19 +102,19 @@ FILE-BACKED forces worker preparation, including for a retained request."
         (ende-transport-session-add-canceller
          lifecycle (lambda ()
                      (ende-ignore-errors #'delete-file file)
-                     (ende-ignore-errors #'delete-file (concat file ".full"))))
+                     (when full-file (ende-ignore-errors #'delete-file full-file))))
         (ende-transport-session-add-canceller
          lifecycle
          (ende-worker-run
           'ende-request #'ende-request--write
-          (list library builder messages profile file debug preparation finalization) bindings
+          (list library builder messages profile file full-file debug preparation finalization) bindings
           (lambda (result error)
             (unless (ende-transport-session-terminal lifecycle)
               (condition-case failure
                   (if error
                       (funcall failed (ende-error-create :kind 'startup :message error))
                     (funcall callback (if finalization
-                                          (list :file file :full-file (concat file ".full"))
+                                          (list :file file :full-file full-file)
                                         (list :file file))
                              (plist-get result :body)
                              (plist-get result :debug-record)))

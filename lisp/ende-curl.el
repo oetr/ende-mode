@@ -129,7 +129,9 @@ from remote buffers are supported, but their processes always run locally."
          (or (member downcased
                      '("host" "content-length" "transfer-encoding"
                        "content-type" "accept" "connection" "trailer"
-                       "upgrade" "expect" "proxy-connection" "chatgpt-account-id" "originator"))
+                       "upgrade" "expect" "proxy-connection" "chatgpt-account-id" "originator"
+                       "session-id"))
+             (string-prefix-p "sec-websocket-" downcased)
              (string-match-p
               "\\(?:auth\\|token\\|key\\|secret\\|cookie\\|credential\\)"
               downcased)))))

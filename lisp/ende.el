@@ -49,6 +49,7 @@
 (require 'ende-artifact)
 (require 'ende-tool-store)
 (require 'ende-openrouter-batch)
+(require 'ende-responses-ws)
 (require 'ende-operation)
 (require 'ende-provider)
 (require 'ende-review)
@@ -122,6 +123,13 @@
   "Refresh the mode-line count for reviews in BUFFER."
   (ende--update-mode-line buffer))
 
+(defun ende--responses-job-event (job event)
+  "Close JOB's Responses socket when EVENT settles its owner."
+  (when (eq (plist-get event :type) :settled)
+    (ende-responses-ws-close-owner (ende-job-id job))))
+
+(add-hook 'ende-job-event-functions #'ende--responses-job-event)
+(add-hook 'ende-queue-abort-functions #'ende-responses-ws-close-all)
 (add-hook 'ende-queue-abort-functions #'ende-provider-abort-discovery)
 (add-hook 'ende-queue-abort-functions #'ende-openrouter-batch-abort)
 (add-hook 'ende-queue-abort-functions #'ende-ui-clear-all)

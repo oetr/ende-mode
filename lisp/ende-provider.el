@@ -335,6 +335,7 @@ Present preference keys override PROFILE even when their value is nil."
 
 (defun ende-provider-validate-profile (profile)
   "Validate request configuration in PROFILE before network startup."
+  (ende-provider-config-validate-transport profile)
   (dolist (key '(:access :refresh :access-token :refresh-token :id-token))
     (when (plist-member profile key)
       (error "Provider profiles must not contain OAuth credentials")))

@@ -46,9 +46,10 @@
   "Execute one request from standard input in a batch Emacs."
   (let ((result
          (condition-case caught
-             (pcase-let ((`(,library ,function ,arguments ,bindings)
+             (pcase-let ((`(,library ,function ,arguments ,bindings ,paths)
                           (read (read-string ""))))
-               (let ((load-prefer-newer t))
+               (let ((load-prefer-newer t)
+                     (load-path paths))
                  (require library)
                  (list :value
                        (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
@@ -111,7 +112,7 @@ cancellation function on startup and nil when the worker finishes."
                                   "-f" "ende-worker--main")
                    :sentinel #'sentinel))
             (process-send-string
-             process (ende-worker--print (list library function arguments bindings)))
+             process (ende-worker--print (list library function arguments bindings load-path)))
             (process-send-eof process)
             (when register-cancellation
               (setq registered t)
