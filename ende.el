@@ -30,6 +30,11 @@
 ;;
 ;;   C-c e   - ende-selector-open
 ;;
+;; Requirements: Emacs 30.1 or later, the `websocket' package, and the external
+;; curl executable on the local `exec-path', with HTTPS support for remote
+;; providers.  Install curl using your operating system's package manager;
+;; `Package-Requires' describes Emacs Lisp dependencies only.
+;;
 ;; TRAMP source buffers are supported: constructed request bodies are sent to
 ;; local provider processes.  Generation, provider discovery, Codex model
 ;; probing, and OAuth refresh always run curl locally, never on the source
