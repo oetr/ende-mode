@@ -91,7 +91,6 @@
 (define-key ende-speech-configure-mode-map (kbd "p") #'ende-speech--configure-port)
 (define-key ende-speech-configure-mode-map (kbd "s") #'ende-speech--configure-server)
 (define-key ende-speech-configure-mode-map (kbd "q") #'ende-speech--configure-quit)
-(define-key ende-speech-configure-mode-map (kbd "<escape>") #'ende-speech--configure-quit)
 (define-key ende-speech-configure-mode-map (kbd "RET") #'ende-speech--configure-save)
 
 (define-derived-mode ende-speech-configure-mode special-mode "Ende-Speech-Configure"

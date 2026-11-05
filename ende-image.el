@@ -147,7 +147,6 @@
 (define-key ende-image-configure-mode-map (kbd "m") #'ende-image--configure-model)
 (define-key ende-image-configure-mode-map (kbd "RET") #'ende-image--configure-save)
 (define-key ende-image-configure-mode-map (kbd "q") #'ende-image--configure-quit)
-(define-key ende-image-configure-mode-map (kbd "<escape>") #'ende-image--configure-quit)
 
 (define-derived-mode ende-image-configure-mode special-mode "Ende-Image-Configure"
   "Read-only settings view for image generation."

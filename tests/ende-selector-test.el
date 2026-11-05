@@ -1297,7 +1297,7 @@
 
 
 
-(ert-deftest ende-test/selector-escape-discards-draft-settings ()
+(ert-deftest ende-test/selector-quit-discards-draft-settings ()
   (let* ((source (generate-new-buffer " *ende-selector-escape-source*"))
          (selector (generate-new-buffer " *ende-selector-escape*"))
          (ende-providers '(remote))
@@ -1326,8 +1326,9 @@
             (cl-letf (((symbol-function 'read-number)
                        (lambda (&rest _) 4)))
               (ende-selector-set-concurrency))
-            (should (eq (lookup-key ende-selector-mode-map (kbd "ESC"))
+            (should (eq (lookup-key ende-selector-mode-map (kbd "q"))
                         #'ende-selector-close))
+            (should-not (lookup-key ende-selector-mode-map (kbd "ESC")))
             (ende-selector-close)
             (should-not (buffer-live-p selector))
             (should (equal (ende-model-selection-control-preferences
@@ -1335,8 +1336,7 @@
                            '(:temperature 0.2)))
             (should (= (ende-provider-max-concurrency
                         (ende-provider-profile 'remote)) 2)))
-          (should (eq (lookup-key ende-selector-mode-map (kbd "<escape>"))
-                      #'ende-selector-close)))
+          (should-not (lookup-key ende-selector-mode-map (kbd "<escape>"))))
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
@@ -1857,7 +1857,7 @@
 				    (should (string-match-p "Previous material"
 							    (buffer-string))))))))))
 
-(ert-deftest ende-test/selector-connection-drafts-and-escape-dispatch ()
+(ert-deftest ende-test/selector-connection-drafts-and-quit-dispatch ()
   (save-window-excursion
     (let* ((source (generate-new-buffer " *ende-connection-source*"))
            (ende-providers '(openai))
@@ -1872,16 +1872,18 @@
       (unwind-protect
           (progn
             (switch-to-buffer source)
-            (dolist (escape (list (kbd "ESC") (kbd "<escape>")))
+            (dotimes (_ 2)
               (ende-selector-open)
               (let ((selector (current-buffer)))
                 (ende-selector-configure-connection)
+                (should-not (lookup-key ende-selector-connection-mode-map (kbd "ESC")))
+                (should-not (lookup-key ende-selector-connection-mode-map (kbd "<escape>")))
                 (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "personal")))
                   (ende-selector-connection-account))
                 (should (equal (plist-get ende-selector-connection--draft :account) "personal"))
                 (should-error (ende-selector-connection--set :account "") )
                 (should-error (ende-selector-connection--set :api 'anthropic-messages))
-                (execute-kbd-macro escape)
+                (execute-kbd-macro (kbd "q"))
                 (should (eq (current-buffer) selector))
                 (should (eq (plist-get (ende-selector--provider-profile) :account) 'default))
                 (ende-selector-configure-connection)
@@ -1901,7 +1903,7 @@
                                  "https://api.openai.com/v1/chat/completions"))
                   (should (equal (plist-get profile :model) "first")))
                 (setq ende-selector--probe-cancel (lambda () (cl-incf cancelled)))
-                (execute-kbd-macro escape)
+                (execute-kbd-macro (kbd "q"))
                 (should-not (buffer-live-p selector))
                 (should (eq (selected-window) source-window))
                 (should (eq (current-buffer) source))

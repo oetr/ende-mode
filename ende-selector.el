@@ -1046,9 +1046,7 @@ PREFERRED is selected only when it is present in MODELS."
                      ("p" . ende-selector-connection-api)
                      ("l" . ende-selector-connection-login)
                      ("RET" . ende-selector-connection-apply)
-                     ("q" . ende-selector-connection-cancel)
-                     ("ESC" . ende-selector-connection-cancel)
-                     ("<escape>" . ende-selector-connection-cancel)))
+                     ("q" . ende-selector-connection-cancel)))
     (define-key ende-selector-connection-mode-map (kbd (car binding)) (cdr binding)))
   (when (derived-mode-p 'ende-selector-connection-mode)
     (use-local-map ende-selector-connection-mode-map)))
@@ -1716,9 +1714,7 @@ performed locally so typing a search term never starts another network request."
               #'ende-selector-reject-source-output)
   (define-key ende-selector-mode-map (kbd "DEL") nil)
   (define-key ende-selector-mode-map (kbd "<backspace>") nil)
-  (define-key ende-selector-mode-map (kbd "q") #'ende-selector-close)
-  (define-key ende-selector-mode-map (kbd "ESC") #'ende-selector-close)
-  (define-key ende-selector-mode-map (kbd "<escape>") #'ende-selector-close))
+  (define-key ende-selector-mode-map (kbd "q") #'ende-selector-close))
 
 (ende-selector--install-keybindings)
 
