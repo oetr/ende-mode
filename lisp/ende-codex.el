@@ -85,6 +85,9 @@ The :callbacks argument initializes the composed transport lifecycle."
                  (cl-loop for (key value) on arguments by #'cddr
                           unless (eq key :callbacks)
                           append (list key value)))))
+    (when (eq (plist-get (ende-codex--session-profile session) :transport) 'websocket)
+      (setf (ende-codex--session-profile session)
+            (ende-provider-config-copy (ende-codex--session-profile session))))
     (let ((lifecycle
            (ende-transport-session-create
             callbacks (apply-partially #'ende-codex--fail session))))
@@ -1179,15 +1182,21 @@ When APPEND is non-nil, append the argument delta to the stored value."
            event-type
            (ende-codex--diagnostic-output-items (list item)))))
 
-(defun ende-codex--handle-event (session json)
+(cl-defun ende-codex--handle-event (session json)
   "Handle one parsed Responses API event JSON object."
-  (let* ((type (ende-protocol-json-get "type" json))
+  (let* ((stream (ende-codex--session-stream session))
+         (type (ende-protocol-json-get "type" json))
          (response (ende-protocol-json-get "response" json))
          (output (ende-protocol-json-get "output" response))
          (item (ende-protocol-json-get "item" json))
          (output-index (ende-protocol-json-get "output_index" json))
          (metadata (or response json))
-         (model (ende-protocol-json-get "model" metadata)))
+         (model (ende-protocol-json-get "model" metadata))
+         (check-current
+          (lambda ()
+            (unless (and (eq stream (ende-codex--session-stream session))
+                         (not (ende-codex--terminal-p session)))
+              (cl-return-from ende-codex--handle-event nil)))))
     (ende-ignore-errors
      #'ende-debug-record-response (ende-codex--session-debug-record session) response
      (member type '("response.completed" "response.done")))
@@ -1199,7 +1208,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
     (when (member type '("response.completed" "response.done" "response.incomplete" "response.failed"))
       (cl-loop for entry in (ende-codex--output-items output) for index from 0
                do (ende-codex--observe-output
-                   session entry (or (ende-protocol-json-get "output_index" entry) index))))
+                   session entry (or (ende-protocol-json-get "output_index" entry) index))
+               do (funcall check-current)))
     (when (member type '("response.completed" "response.done"))
       (when (cl-some (lambda (entry)
                        (equal (ende-protocol-json-get "type" entry) "image_generation_call"))
@@ -1218,12 +1228,15 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-codex--emit-diagnostic
          session
          (format "OpenAI Responses output items: %s"
-                 (ende-codex--diagnostic-output-items output)))))
+                 (ende-codex--diagnostic-output-items output))))
+      (funcall check-current))
     (when (and item
                (member type '("response.output_item.added"
                               "response.output_item.done")))
       (ende-codex--observe-output session item output-index)
-      (ende-codex--diagnose-output-item session type item))
+      (funcall check-current)
+      (ende-codex--diagnose-output-item session type item)
+      (funcall check-current))
     (when (member type '("response.function_call_arguments.delta"
                          "response.function_call_arguments.done"))
       (let ((arguments (ende-protocol-json-get
@@ -1237,11 +1250,13 @@ When APPEND is non-nil, append the argument delta to the stored value."
         (ende-codex--update-tool-call-arguments
          session output-index arguments
          (string-suffix-p ".delta" type)))
+      (funcall check-current)
       (when (string-suffix-p ".done" type)
         (ende-codex--emit-diagnostic
          session
          (format "OpenAI Responses %s at output index %s"
-                 type (or output-index "<unknown>")))))
+                 type (or output-index "<unknown>"))))
+      (funcall check-current))
     (when (stringp model)
       (setf (ende-stream-session-actual-model
              (ende-codex--session-stream session)) model))
@@ -1255,15 +1270,18 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                      (ende-codex--session-stream session))
                              :service-tier (ende-protocol-json-get "service_tier" metadata)
                              :provider "OpenAI"))))
+    (funcall check-current)
     (cond
      ((string= type "response.output_text.delta")
       (ende-codex--emit
        session '(:type :status :status "Generating"))
+      (funcall check-current)
       (ende-codex--emit-delta
        session :content (ende-protocol-json-get "delta" json) output-index))
      ((string= type "response.reasoning_summary_text.delta")
       (ende-codex--emit
        session '(:type :status :status "Thinking"))
+      (funcall check-current)
       (ende-codex--emit-reasoning-summary
        session (ende-codex--reasoning-summary-key json)
        (ende-protocol-json-get "delta" json) output-index))
@@ -1275,6 +1293,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
      ((member type '("response.completed" "response.done" "response.incomplete"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))
+      (funcall check-current)
       (setf (ende-stream-session-finish-reason
              (ende-codex--session-stream session))
             (if (equal type "response.incomplete") "incomplete" "stop"))
@@ -1772,21 +1791,82 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
 
 (defun ende-codex--websocket-prepared (session body record)
   "Associate actual WebSocket BODY and capture RECORD with SESSION."
-  (when-let* ((previous (ende-codex--session-debug-record session)))
-    (ende-ignore-errors #'ende-debug-record-completion previous 'retry nil nil nil))
   (setf (ende-codex--session-debug-record session) record)
   (ende-codex--diagnose-request session body))
+
+(defun ende-codex--reset-attempt (session)
+  "Reset SESSION's protocol accumulator, retaining its logical output budget."
+  (let* ((old (ende-codex--session-stream session))
+         (stream (ende-stream-create (ende-stream-lifecycle old) (ende-protocol-make-sse))))
+    (setf (ende-stream-session-output-offset stream)
+          (+ (ende-stream-session-output-offset old) (ende-stream-session-estimated-chars old))
+          (ende-codex--session-stream session) stream
+          (ende-codex--session-tool-calls session) (make-hash-table :test #'eql)
+          (ende-codex--session-terminal-event session) nil
+          (ende-codex--session-replay-items session) nil
+          (ende-codex--session-debug-record session) nil)))
+
+(defun ende-codex--websocket-headers (profile auth)
+  "Resolve validated handshake headers for the bound PROFILE and AUTH."
+  (let* ((method (plist-get profile :auth-method))
+         (properties (when auth (ende-codex--auth-property method :websocket))))
+    (ende-curl-inference-headers
+     profile (when auth
+               (append (ende-codex--inference-headers method auth profile)
+                       (plist-get properties :headers))))))
+
+(cl-defun ende-codex--retry-auth-ready (session identity attempt continuation auth)
+  "Revalidate AUTH and resume SESSION's current ATTEMPT through CONTINUATION."
+  (let ((request (ende-codex--session-ws-request session)))
+    (unless (and request (ende-responses-ws--preparation-live-p request attempt))
+      (cl-return-from ende-codex--retry-auth-ready nil))
+    (if (ende-error-p auth)
+        (ende-codex--fail session auth)
+      (condition-case nil
+          (let ((profile (ende-codex--session-profile session)))
+            (when identity
+              (unless (equal identity (ende-codex--account-binding-state auth))
+                (error "OAuth connection binding mismatch"))
+              (ende-codex--check-binding profile auth))
+            (let ((headers (ende-codex--websocket-headers profile auth)))
+              (when (ende-responses-ws--preparation-live-p request attempt)
+                (funcall continuation headers))))
+        ((error quit)
+         (when (ende-responses-ws--preparation-live-p request attempt)
+           (ende-codex--fail session
+                             (ende-error-create :kind 'startup
+                                                :message "Responses credentials could not be revalidated"))))))))
+
+(defun ende-codex--retry-websocket (session identity attempt limit continuation)
+  "Preserve SESSION's interrupted output, then authenticate replacement ATTEMPT."
+  (let* ((stream (ende-codex--session-stream session))
+         (partial (when (ende-stream-has-result-p stream (ende-codex--session-replay-items session))
+                    (ende-codex--result session))))
+    (ende-ignore-errors #'ende-debug-record-completion
+                        (ende-codex--session-debug-record session) 'interrupted
+                        (ende-stream-session-usage stream) nil partial)
+    (when partial
+      (ende-codex--emit session (list :type :partial-result :result partial)))
+    (unless (ende-codex--terminal-p session)
+      (ende-codex--reset-attempt session)
+      (ende-codex--emit
+       session (list :type :response-restarted :attempt attempt :limit limit
+                     :text (format "Connection interrupted; reconnecting automatically — attempt %d of %d."
+                                   attempt limit)))
+      (unless (ende-codex--terminal-p session)
+        (let ((ready (apply-partially #'ende-codex--retry-auth-ready session identity attempt continuation)))
+          (if identity
+              (ende-transport-session-add-canceller
+               (ende-codex--lifecycle session)
+               (ende-codex--resolve-auth ready (ende-codex--session-profile session)))
+            (funcall ready nil)))))))
 
 (defun ende-codex--start-websocket (session messages auth)
   "Prepare Responses SESSION over a persistent socket using optional AUTH."
   (let* ((profile (ende-codex--session-profile session))
          (method (plist-get profile :auth-method))
          (properties (when auth (ende-codex--auth-property method :websocket)))
-         (headers (ende-curl-inference-headers
-                   profile
-                   (when auth
-                     (append (ende-codex--inference-headers method auth profile)
-                             (plist-get properties :headers)))))
+         (headers (ende-codex--websocket-headers profile auth))
          (debug (list "openai-responses-websocket" (plist-get profile :url)
                       (when auth
                         (let ((print-length nil) (print-level nil))
@@ -1796,7 +1876,9 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
                    (apply-partially #'ende-codex--handle-event session)
                    (apply-partially #'ende-codex--complete session)
                    (apply-partially #'ende-codex--websocket-prepared session)
-                   (when auth (ende-codex--account-binding-state auth)))))
+                   (when auth (ende-codex--account-binding-state auth))
+                   (apply-partially #'ende-codex--retry-websocket session
+                                    (when auth (ende-codex--account-binding-state auth))))))
     (when (and request (not (ende-codex--terminal-p session)))
       (setf (ende-codex--session-ws-request session) request
             (ende-responses-ws-request-debug request) debug)

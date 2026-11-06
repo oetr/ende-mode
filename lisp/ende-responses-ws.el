@@ -35,6 +35,11 @@
 (require 'ende-request)
 (require 'ende-provider-config)
 
+(defcustom ende-responses-ws-max-retries 3
+  "Maximum automatic retries after an interrupted Responses attempt."
+  :type 'natnum
+  :group 'ende)
+
 (cl-defstruct ende-responses-ws-connection
   owner identity socket active chain closed closing key url headers properties
   byte-limit event-limit header-limit
@@ -47,11 +52,12 @@
   response-id logical-request output)
 
 (cl-defstruct ende-responses-ws-request
-  connection lifecycle logical-request on-json on-complete on-prepared
-  connect-timer deadline-timer idle-timer retried observed-output
+  connection lifecycle logical-request on-json on-complete on-prepared on-retry
+  connect-timer deadline-timer idle-timer retry-timer deadline
+  (retries 0) retry-limit
   payload (delivery 'unsent) (attempt 0) prepared-generation
   profile debug connect-timeout idle-timeout byte-limit event-limit
-  reused replaced last-event
+  reused last-event
   fragment-active frame-parts (frame-bytes 0) (received-bytes 0) (messages 0))
 
 (defvar ende-responses-ws--connections (make-hash-table :test #'equal)
@@ -160,11 +166,13 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
         (ende-responses-ws--discard connection)))
     (dolist (timer (list (ende-responses-ws-request-connect-timer request)
                          (ende-responses-ws-request-deadline-timer request)
-                         (ende-responses-ws-request-idle-timer request)))
+                         (ende-responses-ws-request-idle-timer request)
+                         (ende-responses-ws-request-retry-timer request)))
       (when timer (cancel-timer timer)))
     (setf (ende-responses-ws-request-connect-timer request) nil
           (ende-responses-ws-request-deadline-timer request) nil
           (ende-responses-ws-request-idle-timer request) nil
+          (ende-responses-ws-request-retry-timer request) nil
           (ende-responses-ws-request-logical-request request) nil
           (ende-responses-ws-request-frame-parts request) nil
           (ende-responses-ws-request-fragment-active request) nil
@@ -173,6 +181,7 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
           (ende-responses-ws-request-on-json request) nil
           (ende-responses-ws-request-on-complete request) nil
           (ende-responses-ws-request-on-prepared request) nil
+          (ende-responses-ws-request-on-retry request) nil
           (ende-responses-ws-request-profile request) nil
           (ende-responses-ws-request-debug request) nil
           (ende-responses-ws-request-lifecycle request) nil
@@ -192,6 +201,7 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
           :http-status (ende-responses-ws-connection-http-status connection)
           :close-code (ende-responses-ws-connection-close-code connection)
           :messages (ende-responses-ws-request-messages request)
+          :retries (ende-responses-ws-request-retries request)
           :bytes (ende-responses-ws-request-received-bytes request)
           :last-event (ende-responses-ws-request-last-event request))))
 
@@ -218,16 +228,19 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
 
 (cl-defun ende-responses-ws-create-request
     (profile headers properties lifecycle on-json on-complete on-prepared
-             &optional authentication-identity)
+             &optional authentication-identity on-retry)
   "Allocate a request on PROFILE's job-owned connection.
 HEADERS are the effective validated handshake headers; PROPERTIES describes
 the endpoint's WebSocket protocol.  LIFECYCLE owns per-request cleanup.
 ON-JSON interprets provider events, ON-COMPLETE validates a terminal event,
 and ON-PREPARED accepts the actual wire body and its debug capture.
-AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
+AUTHENTICATION-IDENTITY privately identifies an OAuth registration.
+ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   (when (ende-transport-session-terminal lifecycle)
     (cl-return-from ende-responses-ws-create-request nil))
   (when ende-responses-ws--closing (error "Responses connections are shutting down"))
+  (unless (natnump ende-responses-ws-max-retries)
+    (error "ende-responses-ws-max-retries must be a nonnegative integer"))
   (ende-provider-config-validate-transport profile)
   (let* ((url (ende-curl--validated-url profile))
          (owner (plist-get profile :job-id))
@@ -261,6 +274,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                     :connection connection :lifecycle lifecycle :profile profile
                     :reused (eq (ende-responses-ws-connection-phase connection) 'open)
                     :on-json on-json :on-complete on-complete :on-prepared on-prepared
+                    :on-retry on-retry :retry-limit ende-responses-ws-max-retries
                     :connect-timeout ende-connect-timeout
                     :idle-timeout ende-response-idle-timeout
                     :byte-limit ende-max-response-bytes
@@ -274,7 +288,8 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       (ende-transport-session-add-canceller
        lifecycle (lambda () (ende-responses-ws-finish request 'failure)))
       (when (and timeout (ende-responses-ws--live-p request))
-        (setf (ende-responses-ws-request-deadline-timer request)
+        (setf (ende-responses-ws-request-deadline request) (+ (float-time) timeout)
+              (ende-responses-ws-request-deadline-timer request)
               (run-at-time timeout nil #'ende-responses-ws--fail
                            request 'timeout "Responses request deadline exceeded")))
       (when (ende-responses-ws--live-p request) request))))
@@ -340,12 +355,23 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       (ende-request-prepare
        (ende-responses-ws-request-lifecycle request) 'ende-codex builder messages
        (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
-       (apply-partially #'ende-responses-ws-send-prepared request
+       (apply-partially #'ende-responses-ws--initial-prepared request
                         attempt
                         (ende-responses-ws-connection-generation connection))
        (ende-responses-ws-finalization request)
        (and baseline (plist-get (ende-request-retained-source baseline) :full-file))
-       nil baseline (apply-partially #'ende-responses-ws--preparation-live-p request attempt)))))
+       nil baseline (apply-partially #'ende-responses-ws--live-p request)))))
+
+(defun ende-responses-ws--initial-prepared (request attempt generation data body record)
+  "Publish immutable DATA even if initial wire preparation was superseded."
+  (if (ende-responses-ws--preparation-live-p request attempt)
+      (ende-responses-ws-send-prepared request attempt generation data body record)
+    (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+    (when (ende-responses-ws--live-p request)
+      (setf (ende-responses-ws-request-logical-request request) (plist-get data :retained))
+      (when (eq (ende-responses-ws-connection-phase
+                 (ende-responses-ws-request-connection request)) 'preparing)
+        (ende-responses-ws--refinalize request)))))
 
 (defun ende-responses-ws--preparation-live-p (request attempt)
   "Return whether preparation still belongs to REQUEST's ATTEMPT."
@@ -358,8 +384,17 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
     (cancel-timer timer))
   (setf (ende-responses-ws-request-idle-timer request)
         (run-at-time (ende-responses-ws-request-idle-timeout request) nil
-                     #'ende-responses-ws--fail request 'timeout
-                     "Responses response-idle deadline exceeded")))
+                     #'ende-responses-ws--attempt-timeout request
+                     (ende-responses-ws-request-attempt request) 'idle)))
+
+(defun ende-responses-ws--attempt-timeout (request attempt kind)
+  "Handle KIND's physical deadline only for REQUEST's current ATTEMPT."
+  (when (ende-responses-ws--preparation-live-p request attempt)
+    (if (eq kind 'connect)
+        (when (memq (ende-responses-ws-connection-phase
+                     (ende-responses-ws-request-connection request)) '(connecting upgrading))
+          (ende-responses-ws--retry request 'connect-timeout))
+      (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded"))))
 
 (defun ende-responses-ws--attempt-live-p (request attempt socket)
   "Return whether ATTEMPT still owns REQUEST's accepted SOCKET."
@@ -395,22 +430,22 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                   (setf (ende-responses-ws-request-payload request) nil
                         (ende-responses-ws-request-delivery request) 'sending)
                   (ende-responses-ws--idle request)
-                  (websocket-send-text socket text)
+                  (process-send-string
+                   (websocket-conn socket)
+                   (websocket-encode-frame
+                    (make-websocket-frame :opcode 'text :completep t
+                                          :payload (encode-coding-string text 'utf-8)) t))
                   (when (ende-responses-ws--attempt-live-p request attempt socket)
                     (setf (ende-responses-ws-request-delivery request) 'sent)))))
           ((error quit)
            (when (and (ende-responses-ws--live-p request)
                       (= attempt (ende-responses-ws-request-attempt request)))
-             (ende-responses-ws--fail request 'transport "Responses request submission failed"))))))))
+             (if (memq (process-status (websocket-conn socket)) '(closed failed exit signal))
+                 (ende-responses-ws--closed connection socket)
+               (ende-responses-ws--fail request 'transport "Responses request submission failed")))))))))
 
 (defun ende-responses-ws--refinalize (request)
   "Prepare a fresh wire attempt from REQUEST's unchanged logical source."
-  (cl-incf (ende-responses-ws-request-attempt request))
-  (setf (ende-responses-ws-request-delivery request) 'unsent
-        (ende-responses-ws-request-payload request) nil)
-  (when-let* ((timer (ende-responses-ws-request-idle-timer request)))
-    (cancel-timer timer)
-    (setf (ende-responses-ws-request-idle-timer request) nil))
   (let ((generation (ende-responses-ws-connection-generation
                      (ende-responses-ws-request-connection request)))
         (attempt (ende-responses-ws-request-attempt request)))
@@ -428,23 +463,92 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
          (ende-responses-ws--fail request 'transport "Responses request preparation failed"))))))
 
 (defun ende-responses-ws--recover (request json)
-  "Intercept an explicitly recoverable JSON error for REQUEST at most once."
+  "Route explicitly recoverable JSON errors through REQUEST's shared budget."
   (let* ((type (ende-protocol-json-get "type" json))
          (error (or (ende-protocol-json-get "error" json)
                     (ende-protocol-json-get "error" (ende-protocol-json-get "response" json))))
          (code (ende-protocol-json-get "code" error)))
     (when (and (member type '("error" "response.failed"))
-               (member code '("previous_response_not_found" "websocket_connection_limit_reached"))
-               (not (ende-responses-ws-request-retried request))
-               (not (ende-responses-ws-request-observed-output request)))
-      (setf (ende-responses-ws-request-retried request) t)
-      (let ((connection (ende-responses-ws-request-connection request)))
-        (ende-responses-ws--clear-chain connection)
-        (when (or (equal code "websocket_connection_limit_reached")
-                  (not (ende-responses-ws--eligible-p connection)))
-          (ende-responses-ws--drop-socket connection)))
-      (ende-responses-ws--refinalize request)
+               (member code '("previous_response_not_found" "websocket_connection_limit_reached")))
+      (ende-responses-ws--retry request (if (equal code "previous_response_not_found")
+                                          'missing-response 'connection-limit))
       t)))
+
+(defun ende-responses-ws--deadline-expired-p (request)
+  "Return non-nil after REQUEST's original logical deadline."
+  (when-let* ((deadline (ende-responses-ws-request-deadline request)))
+    (>= (float-time) deadline)))
+
+(defun ende-responses-ws--retry-delay (retry)
+  "Return bounded jittered exponential backoff for RETRY, starting at one."
+  (min 4 (* (expt 2 (min 2 (1- retry))) (+ 0.8 (/ (random 401) 1000.0)))))
+
+(defun ende-responses-ws--retry (request reason)
+  "Retire REQUEST's attempt and recover from structured transient REASON."
+  (when (ende-responses-ws--live-p request)
+    (cond
+     ((ende-responses-ws--deadline-expired-p request)
+      (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded"))
+     ((>= (ende-responses-ws-request-retries request)
+          (ende-responses-ws-request-retry-limit request))
+      (ende-responses-ws--fail
+       request 'transport
+       "Responses automatic reconnection exhausted; completed work was preserved"))
+     ((memq reason '(connection-loss connect-timeout missing-response connection-limit unsent-replacement))
+      (let ((connection (ende-responses-ws-request-connection request)))
+        (cl-incf (ende-responses-ws-request-retries request))
+        (cl-incf (ende-responses-ws-request-attempt request))
+        (dolist (timer (list (ende-responses-ws-request-connect-timer request)
+                            (ende-responses-ws-request-idle-timer request)))
+          (when timer (cancel-timer timer)))
+        (setf (ende-responses-ws-request-connect-timer request) nil
+              (ende-responses-ws-request-idle-timer request) nil
+              (ende-responses-ws-request-payload request) nil
+              (ende-responses-ws-request-delivery request) 'unsent
+              (ende-responses-ws-request-prepared-generation request) nil
+              (ende-responses-ws-request-fragment-active request) nil
+              (ende-responses-ws-request-frame-parts request) nil
+              (ende-responses-ws-request-frame-bytes request) 0)
+        (ende-responses-ws--drop-socket connection)
+        (setf (ende-responses-ws-connection-phase connection) 'authenticating)
+        (let ((attempt (ende-responses-ws-request-attempt request)))
+          (condition-case nil
+              (funcall (ende-responses-ws-request-on-retry request)
+                       attempt (ende-responses-ws-request-retry-limit request)
+                       (apply-partially #'ende-responses-ws--retry-ready request attempt))
+            ((error quit)
+             (when (ende-responses-ws--preparation-live-p request attempt)
+               (ende-responses-ws--fail request 'callback "Responses retry callback failed")))))))
+     (t (ende-responses-ws--fail request 'transport "Responses connection failed")))))
+
+(defun ende-responses-ws--retry-ready (request attempt headers)
+  "Accept validated HEADERS only for REQUEST's current authentication ATTEMPT."
+  (when (and (ende-responses-ws--preparation-live-p request attempt)
+             (eq (ende-responses-ws-connection-phase
+                  (ende-responses-ws-request-connection request)) 'authenticating))
+    (if (ende-responses-ws--deadline-expired-p request)
+        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded")
+      (let ((connection (ende-responses-ws-request-connection request)))
+        (dolist (header headers)
+          (unless (ende-curl--valid-header-p header) (error "Invalid WebSocket header")))
+        (setf (ende-responses-ws-connection-headers connection) headers
+              (ende-responses-ws-connection-phase connection) 'backoff
+              (ende-responses-ws-request-retry-timer request)
+              (run-at-time (ende-responses-ws--retry-delay (ende-responses-ws-request-retries request)) nil
+                           #'ende-responses-ws--begin-attempt request attempt))))))
+
+(defun ende-responses-ws--begin-attempt (request attempt)
+  "Prepare full retained input for REQUEST after ATTEMPT's backoff."
+  (when (and (ende-responses-ws--preparation-live-p request attempt)
+             (eq (ende-responses-ws-connection-phase
+                  (ende-responses-ws-request-connection request)) 'backoff))
+    (setf (ende-responses-ws-request-retry-timer request) nil)
+    (if (ende-responses-ws--deadline-expired-p request)
+        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded")
+      (setf (ende-responses-ws-connection-phase
+             (ende-responses-ws-request-connection request)) 'preparing)
+      (when (ende-responses-ws-request-logical-request request)
+        (ende-responses-ws--refinalize request)))))
 
 (defun ende-responses-ws--open (connection socket)
   "Send the prepared request when CONNECTION's SOCKET opens."
@@ -501,10 +605,6 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                                     response.reasoning_summary_text.delta response.function_call_arguments.delta
                                     response.function_call_arguments.done))
                         (setf (ende-responses-ws-request-last-event request) (intern-soft type)))
-                      (when (or (string-match-p "\\`response\\.\\(?:output\\|reasoning\\|function_call\\)" type)
-                                (let ((output (ende-protocol-json-get "output" (ende-protocol-json-get "response" json))))
-                                  (and (vectorp output) (> (length output) 0))))
-                        (setf (ende-responses-ws-request-observed-output request) t))
                       (unless (ende-responses-ws--recover request json)
                         (funcall (ende-responses-ws-request-on-json request) json)
                         (when (and (ende-responses-ws--attempt-live-p request attempt socket)
@@ -515,8 +615,31 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                         (= attempt (ende-responses-ws-request-attempt request)))
                (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event")))))))))
 
+(defun ende-responses-ws--dispatch-input (connection socket text)
+  "Decode TEXT frame by frame, never letting a retired SOCKET reconnect."
+  (let ((position 0) (size (length text)))
+    (while (and (< position size)
+                (eq socket (ende-responses-ws-connection-socket connection))
+                (not (ende-responses-ws-connection-closed connection)))
+      (let ((frame (websocket-read-frame (substring text position))))
+        (if (not frame)
+            (setf (websocket-inflight-input socket) (substring text position)
+                  position size)
+          (cl-incf position (websocket-frame-length frame))
+          (pcase (websocket-frame-opcode frame)
+            ((or 'text 'continuation)
+             (ende-responses-ws--message connection socket frame))
+            ('ping
+             (when (and (ende-responses-ws--eligible-p connection)
+                        (eq (process-status (websocket-conn socket)) 'open))
+               (process-send-string
+                (websocket-conn socket)
+                (websocket-encode-frame
+                 (make-websocket-frame :opcode 'pong :completep t
+                                       :payload (websocket-frame-payload frame)) t))))))))))
+
 (defun ende-responses-ws--accept-input (connection socket output)
-  "Bound OUTPUT once on receipt, then use dependency open-state framing."
+  "Bound OUTPUT once on receipt, then dispatch preflighted frames."
   (catch 'rejected
     (let* ((request (ende-responses-ws-connection-active connection))
            (text (concat (websocket-inflight-input socket) output))
@@ -587,36 +710,34 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
         (when (or close-position pending-close)
           (setf (ende-responses-ws-connection-closing connection) t
                 (ende-responses-ws-connection-close-code connection) close-code))
-        (websocket-process-input-on-open-ws
-         socket (if-let* ((end (or close-position pending-close))) (substring text 0 end) text))
+        (ende-responses-ws--dispatch-input
+         connection socket (if-let* ((end (or close-position pending-close))) (substring text 0 end) text))
         (when (and pending-close (eq socket (ende-responses-ws-connection-socket connection)))
           (setf (websocket-inflight-input socket) (substring text pending-close)))
         (when (and close-position (eq socket (ende-responses-ws-connection-socket connection)))
           (ende-responses-ws--closed connection socket))))))
 
 (defun ende-responses-ws--closed (connection socket)
-  "Handle socket loss without replaying an ambiguously submitted request."
+  "Retire idle sockets or recover a prematurely interrupted logical request."
   (when (and (not (ende-responses-ws-connection-closed connection))
              (eq socket (ende-responses-ws-connection-socket connection)))
-    (let ((request (ende-responses-ws-connection-active connection)))
+    (let ((request (ende-responses-ws-connection-active connection))
+          (code (ende-responses-ws-connection-close-code connection)))
       (cond
        ((not request) (ende-responses-ws--discard connection))
-       ((and (ende-responses-ws--live-p request)
-             (eq (ende-responses-ws-request-delivery request) 'unsent)
-             (ende-responses-ws-request-reused request)
-             (not (ende-responses-ws-request-replaced request))
-             (eq (ende-responses-ws-connection-phase connection) 'open))
-        (setf (ende-responses-ws-request-replaced request) t)
-        (ende-responses-ws--drop-socket connection)
-        (if (ende-responses-ws-request-logical-request request)
-            (ende-responses-ws--refinalize request)
-          (ende-responses-ws--connect connection)))
-       (t (ende-responses-ws--fail request 'transport "Responses connection closed before completion")
+       ((or (null code) (memq code '(1000 1001 1006 1011 1012 1013 1014)))
+        (ende-responses-ws--retry
+         request (if (eq (ende-responses-ws-request-delivery request) 'unsent)
+                     'unsent-replacement 'connection-loss)))
+       (t (ende-responses-ws--fail request 'transport "Responses connection rejected")
           (ende-responses-ws--discard connection))))))
 
 (defun ende-responses-ws--socket-error (connection socket _callback _error)
-  "Contain dependency failures without exposing their private error data."
-  (ende-responses-ws--closed connection socket))
+  "Contain unknown dependency failures without exposing their private data."
+  (when (eq socket (ende-responses-ws-connection-socket connection))
+    (when-let* ((request (ende-responses-ws-connection-active connection)))
+      (ende-responses-ws--fail request 'protocol "Responses socket callback failed"))
+    (ende-responses-ws--discard connection)))
 
 (defun ende-responses-ws--adopt (connection opening process)
   "Adopt PROCESS once for live OPENING, or delete a late process."
@@ -674,7 +795,13 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                  (ende-responses-ws-connection-phase connection) 'upgrading)
            (process-send-string process text))))
       ((or 'closed 'failed 'exit 'signal)
-       (ende-responses-ws--closed connection socket)))))
+       (if (or (eq (ende-responses-ws-connection-phase connection) 'connecting)
+               (plist-get (ende-ignore-errors #'gnutls-peer-status process) :warnings))
+           (progn
+             (when-let* ((request (ende-responses-ws-connection-active connection)))
+               (ende-responses-ws--fail request 'transport "Responses TLS or connection establishment failed"))
+             (ende-responses-ws--discard connection))
+         (ende-responses-ws--closed connection socket))))))
 
 (defun ende-responses-ws--input (connection opening process output)
   "Validate a bounded Upgrade before passing OUTPUT to open-state framing."
@@ -707,12 +834,13 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                (eq (ende-responses-ws-connection-phase connection) 'open))
       (ende-responses-ws--accept-input connection socket output))))
 
-(defun ende-responses-ws--opening-error (connection opening)
-  "Contain an error only while CONNECTION still owns OPENING."
+(defun ende-responses-ws--opening-error (connection opening failure)
+  "Classify structured FAILURE only while CONNECTION still owns OPENING."
   (when (eq opening (ende-responses-ws-connection-opening connection))
-    (if-let* ((socket (ende-responses-ws-connection-socket connection)))
-        (ende-responses-ws--socket-error connection socket nil nil)
-      (when-let* ((request (ende-responses-ws-connection-active connection)))
+    (when-let* ((request (ende-responses-ws-connection-active connection)))
+      (if (or (eq (car-safe failure) 'network-error)
+              (memq (ende-responses-ws-connection-http-status connection) '(408 500 502 503 504)))
+          (ende-responses-ws--retry request 'connection-loss)
         (ende-responses-ws--fail request 'transport "Responses connection opening failed")))))
 
 (defun ende-responses-ws--connect (connection)
@@ -729,24 +857,24 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
           (ende-responses-ws-connection-created connection) (float-time))
     (when-let* ((timeout (ende-responses-ws-request-connect-timeout request)))
       (setf (ende-responses-ws-request-connect-timer request)
-            (run-at-time timeout nil #'ende-responses-ws--fail request 'timeout
-                         "Responses connection deadline exceeded")))
+            (run-at-time timeout nil #'ende-responses-ws--attempt-timeout request
+                         (ende-responses-ws-request-attempt request) 'connect)))
     (ende-responses-ws--private
-      (condition-case nil
+      (condition-case failure
           (let ((default-directory (ende-curl-local-directory)))
             (unless (gnutls-available-p) (error "Verified built-in TLS required"))
             (let* ((filter (lambda (process output)
                              (ende-responses-ws--private
-                               (condition-case nil
+                               (condition-case failure
                                    (ende-responses-ws--input connection opening process output)
                                  ((error quit)
-                                  (ende-responses-ws--opening-error connection opening))))))
+                                  (ende-responses-ws--opening-error connection opening failure))))))
                    (sentinel (lambda (process _event)
                                (ende-responses-ws--private
-                                 (condition-case nil
+                                 (condition-case failure
                                      (ende-responses-ws--status connection opening process)
                                    ((error quit)
-                                    (ende-responses-ws--opening-error connection opening))))))
+                                    (ende-responses-ws--opening-error connection opening failure))))))
                    (process (make-network-process
                              :name "ende-responses" :buffer nil :host host :service port
                              :nowait t :noquery t :coding 'binary :filter-multibyte nil
@@ -756,7 +884,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                              :filter filter :sentinel sentinel)))
               (ende-responses-ws--status connection opening process)))
         ((error quit)
-         (ende-responses-ws--opening-error connection opening))))))
+         (ende-responses-ws--opening-error connection opening failure))))))
 
 (defun ende-responses-ws-send-prepared (request attempt generation data body record)
   "Open or reuse REQUEST's socket and send prepared DATA, BODY and RECORD."
@@ -774,7 +902,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
               (if (/= generation (ende-responses-ws-connection-generation connection))
                   (progn
                     (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
-                    (ende-responses-ws--refinalize request))
+                    (ende-responses-ws--retry request 'unsent-replacement))
                 (if (eq (ende-responses-ws-connection-phase connection) 'open)
                     (ende-responses-ws--send request)
                   (unless (ende-responses-ws-connection-opening connection)

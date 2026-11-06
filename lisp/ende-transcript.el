@@ -292,6 +292,10 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
 (defun ende-transcript-event (transcript event)
   "Record public streaming and activity EVENT in TRANSCRIPT."
   (pcase (plist-get event :type)
+    (:response-restarted
+     (ende-transcript-begin-response transcript)
+     (ende-transcript-append transcript 'progress (plist-get event :text)
+                             '(:title "Reconnecting")))
     (:metadata
      (let ((metadata (plist-get event :metadata)))
        (unless (and (eq (plist-get (ende-transcript-metadata transcript) :source) :response)

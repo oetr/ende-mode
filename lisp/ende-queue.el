@@ -433,6 +433,12 @@ Stale reports do nothing.  Transport status and scheduler state are untouched."
 (defun ende-job-emit-event (job event)
   "Send EVENT for JOB to lifecycle observers without propagating failures."
   (pcase (plist-get event :type)
+    (:response-restarted
+     (setf (ende-job-last-usage job) nil
+           (ende-job-metadata job) nil
+           (ende-job-metadata-rank job) nil
+           (ende-job-reasoning-summary-item job) nil
+           (ende-job-reasoning-summary-text job) nil))
     (:agent-activity
      (setf (ende-job-activity-title job) (plist-get event :title)
            (ende-job-activity-status job) (plist-get event :status)

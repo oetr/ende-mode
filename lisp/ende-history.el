@@ -150,6 +150,14 @@
               (condition-case caught
                   (when ende-history-enabled
                     (cond
+                     ((eq type :response-restarted)
+                      (setf (ende-history--entry-content-parts entry) nil
+                            (ende-history--entry-thinking-parts entry) nil
+                            (ende-history--entry-partial-result entry) nil
+                            (ende-history--entry-finish-reason entry) nil
+                            (ende-history--entry-usage entry) nil
+                            (ende-history--entry-metadata entry) nil)
+                      (push (plist-get event :text) (ende-history--entry-diagnostic-parts entry)))
                      ((eq type :status)
                       (setf (ende-history--entry-status entry)
                             (plist-get event :status)))

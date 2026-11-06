@@ -207,6 +207,10 @@ result is applied."
     (let ((type (plist-get event :type)))
       (unless (eq type :error)
         (pcase type
+          (:response-restarted
+           (when (ende-job-overlay job)
+             (ende-ui-update-overlay (ende-job-overlay job) :status (plist-get event :text)
+                                     :tokens nil :speed nil :estimated nil :usage nil)))
           (:status
            (when (ende-job-overlay job)
              (ende-ui-update-overlay

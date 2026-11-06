@@ -38,7 +38,7 @@
   "Protocol-independent state for one SSE response stream."
   lifecycle parser received-bytes preview-parts preview-bytes
   content-parts output-parts thinking-parts usage actual-model actual-provider
-  estimated-chars generation-start finish-reason reasoning-summaries)
+  estimated-chars (output-offset 0) generation-start finish-reason reasoning-summaries)
 
 (defun ende-stream-create (lifecycle parser)
   "Create a stream driver composed with LIFECYCLE and using PARSER."
@@ -84,7 +84,8 @@ Return non-nil when the delta was accepted and STREAM remains active."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (if (and (numberp ende-max-output-chars)
-             (> (+ (ende-stream-session-estimated-chars stream)
+             (> (+ (ende-stream-session-output-offset stream)
+                   (ende-stream-session-estimated-chars stream)
                    (length text))
                 ende-max-output-chars))
         (progn

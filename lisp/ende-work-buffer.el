@@ -356,7 +356,8 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
                           (eq entry (cl-find 'text (reverse (plist-get response-data :items))
                                              :key #'ende-transcript-entry-kind)))))
          (ende-work-buffer--put
-          id entry (if final "Agent: Final reply" "Agent: Reply")
+          id entry (cond ((eq (ende-transcript-entry-status entry) 'interrupted) "Agent: Interrupted reply")
+                         (final "Agent: Final reply") (t "Agent: Reply"))
           (ende-work-buffer--example
            (if (string-blank-p (or content ""))
                (or (plist-get (plist-get data :normalized) :content) content)
