@@ -265,7 +265,6 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                        (buffer-string))
                    (decode-coding-string (plist-get data :data) 'utf-8))))
       (setf (ende-responses-ws-request-sent request) t)
-      (ende-responses-ws--idle request)
       (websocket-send-text
        (ende-responses-ws-connection-socket (ende-responses-ws-request-connection request)) text)
       (setf (ende-responses-ws-request-payload request) nil))))
@@ -330,7 +329,6 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
           (when (ende-responses-ws--live-p request)
           (cl-incf (ende-responses-ws-request-received-bytes request) bytes)
           (cl-incf (ende-responses-ws-request-frame-bytes request) bytes)
-          (ende-responses-ws--idle request)
           (if (or (and (ende-responses-ws-request-byte-limit request)
                        (> (ende-responses-ws-request-received-bytes request)
                           (ende-responses-ws-request-byte-limit request)))
@@ -361,13 +359,14 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
               ((error quit)
                (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event")))))))))))
 
-(defun ende-responses-ws--bounded-input-p (connection socket output)
-  "Check upgrade headers and advertised frame sizes before buffering OUTPUT."
+(defun ende-responses-ws--accept-input (connection socket output)
+  "Validate OUTPUT before buffering it and record response-body activity."
   (catch 'rejected
     (let* ((request (ende-responses-ws-connection-active connection))
            (text (concat (websocket-inflight-input socket) output))
            (size (length text))
            (position 0)
+           (body-start 0)
            (total (if request (ende-responses-ws-request-received-bytes request) 0))
            (message-bytes (if request (ende-responses-ws-request-frame-bytes request) 0))
            (byte-limit (and request (ende-responses-ws-request-byte-limit request)))
@@ -383,6 +382,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
             (setq position (if end (+ end 4) size))
             (when (and ende-max-response-header-bytes (> position ende-max-response-header-bytes))
               (reject))))
+        (setq body-start position)
         (while (<= (+ position 2) size)
           (let* ((first (aref text position))
                  (opcode (logand first 15))
@@ -403,6 +403,9 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                     (reject))
                   (unless (zerop (logand first 128)) (setq message-bytes 0)))
                 (setq position (+ position frame-size)))))))
+      (when (and request (ende-responses-ws--live-p request)
+                 (> (length output) 0) (< body-start size))
+        (ende-responses-ws--idle request))
       t)))
 
 (defun ende-responses-ws--protect-socket (connection socket)
@@ -417,7 +420,8 @@ Route dependency parser failures through CONNECTION's request lifecycle."
                  (let ((url-cookie-storage nil) (url-cookie-secure-storage nil))
                    (condition-case nil
                        (when (and (not (ende-responses-ws-connection-closed connection))
-                                  (ende-responses-ws--bounded-input-p connection socket output))
+                                  (eq socket (ende-responses-ws-connection-socket connection))
+                                  (ende-responses-ws--accept-input connection socket output))
                          (funcall filter process output))
                      ((error quit)
                       (ende-responses-ws--socket-error connection socket nil nil))))))
@@ -457,6 +461,7 @@ Route dependency parser failures through CONNECTION's request lifecycle."
                 (ende-responses-ws-request-payload request) data)
           (funcall (ende-responses-ws-request-on-prepared request) body record)
           (when (ende-responses-ws--live-p request)
+            (ende-responses-ws--idle request)
             (if (and socket (websocket-openp socket))
                 (ende-responses-ws--send request)
               (let ((default-directory (ende-curl-local-directory))
