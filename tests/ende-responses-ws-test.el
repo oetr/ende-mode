@@ -865,6 +865,85 @@
               (should-not (ende-responses-ws-test--socket-open (car sockets)))))
         (ende-test--reset)))))
 
+(ert-deftest ende-responses-ws-family-recovery ()
+  (ende-test--reset)
+  (ende-responses-ws-test--with-sockets
+    (let* ((ende-llm-function #'ende-llm-default)
+           (ende--queue-suspended t)
+           (policy '(:root nil :active-tools (about_thinking spawn_agent)
+                     :tool-resources nil :spawn-agent-config worker))
+           (handler (alist-get 'agent ende--job-handlers))
+           (handlers 0) publications settlements root child
+           (ende--job-handlers
+            (cons (cons 'agent (lambda (job) (cl-incf handlers) (funcall handler job))) ende--job-handlers))
+           (ende-job-event-functions
+            (cons (lambda (job event)
+                    (pcase (plist-get event :type)
+                      (:queued (when (ende-job-parent job) (push job publications)))
+                      (:settled (push job settlements))))
+                  ende-job-event-functions)))
+      (unwind-protect
+          (ende-test--with-buffer "family source"
+            (setq root (ende--job-from-request
+                        (list 'agent :profile (ende-responses-ws-test--profile) :access-policy policy
+                              :instruction '(:task "Delegate, then finish")
+                              :prepare #'ende-agent-private-target)))
+            (let ((family (ende--make-job-family
+                           :root root :parallel t :max-concurrency 2 :policy-frozen-p t
+                           :origin (current-buffer) :inference-template (ende-job-inference-template root)
+                           :registry `((worker . ,policy)))))
+              (setf (ende-job-family root) family (ende-job-next-child-index root) 0)
+              (ende--job-register-origin root)
+              (ende--queue-push family)
+              (ende--queue-insert-family-member root))
+            (setq ende--queue-suspended nil)
+            (ende-process-next)
+            (ende-responses-ws-test--open (car sockets))
+            (let ((parent-socket (car sockets)))
+              (ende-responses-ws-test--complete
+               parent-socket "resp_spawn"
+               "[{\"type\":\"function_call\",\"call_id\":\"spawn\",\"name\":\"spawn_agent\",\"arguments\":\"{\\\"title\\\":\\\"Child\\\",\\\"task\\\":\\\"Finish child work\\\"}\"}]")
+              (ende-test--wait-for (lambda () (= (length sockets) 2)))
+              (setq child (car publications))
+              (should (eq (ende-job-state root) 'suspended))
+              (funcall (plist-get (ende-responses-ws-test--socket-options parent-socket) :on-close) parent-socket)
+              (should (eq (ende-job-state root) 'suspended)))
+            (ende-responses-ws-test--open (car sockets))
+            (ende-responses-ws-test--event (car sockets) "{\"type\":\"response.output_text.delta\",\"delta\":\"child partial\"}")
+            (funcall (plist-get (ende-responses-ws-test--socket-options (car sockets)) :on-close) (car sockets))
+            (should (eq (ende-job-state child) 'running))
+            (should (eq (ende-job-state root) 'suspended))
+            (should-not settlements)
+            (should (= (length sockets) 3))
+            (ende-responses-ws-test--open (car sockets))
+            (ende-responses-ws-test--event (car sockets) "{\"type\":\"response.output_text.delta\",\"delta\":\"child answer\"}")
+            (ende-responses-ws-test--complete (car sockets) "resp_child")
+            (ende-test--wait-for (lambda () (= (length sockets) 4)))
+            (should (eq (ende-job-state child) 'completed))
+            (ende-responses-ws-test--open (car sockets))
+            (let* ((wire (car (ende-responses-ws-test--socket-sent (car sockets))))
+                   (input (gethash "input" wire)))
+              (should-not (gethash "previous_response_id" wire))
+              (should (string-match-p "child answer" (json-encode input)))
+              (ende-responses-ws-test--event
+               (car sockets) "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"unaccepted_spawn\",\"name\":\"spawn_agent\",\"arguments\":\"{}\"}}")
+              (funcall (plist-get (ende-responses-ws-test--socket-options (car sockets)) :on-close) (car sockets))
+              (ende-responses-ws-test--open (car sockets))
+              (should (ende-protocol-json-equal-p
+                       input (gethash "input" (car (ende-responses-ws-test--socket-sent (car sockets)))))))
+            (ende-responses-ws-test--event (car sockets) "{\"type\":\"response.output_text.delta\",\"delta\":\"parent answer\"}")
+            (ende-responses-ws-test--complete (car sockets) "resp_parent")
+            (should (eq (ende-job-state root) 'completed))
+            (should (equal (ende-job-result root) "parent answer"))
+            (should (equal (ende-job-result child) "child answer"))
+            (should (equal publications (list child)))
+            (should (= handlers 2))
+            (should (= (cl-count root settlements) 1))
+            (should (= (cl-count child settlements) 1))
+            (should (= (ende-job-tool-call-count root) 1))
+            (should (zerop (hash-table-count ende-responses-ws--connections))))
+        (ende-test--reset)))))
+
 (ert-deftest ende-responses-ws-failure-lifecycle ()
   (ende-responses-ws-test--ownership-and-protocols)
   (ende-responses-ws-test--recoveries)
