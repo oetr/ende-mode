@@ -195,7 +195,9 @@
            (name (ende-artifact-store base "finalize" ende-artifact-test-png "image/png"))
            (image (ende-artifact-resolve base "finalize" name))
            (messages (list (list :role "user" :content (list image))))
-           (profile '(:model "vision"))
+           (profile (list :model "vision" :parameters
+                          (list :custom (vector (make-hash-table :test #'equal)
+                                                nil :json-false t [] "λ"))))
            (lifecycle (ende-transport-session-create nil #'ert-fail))
            (finalization '(ende-controls--set-path ("type") "response.create"))
            prepared replay done files)

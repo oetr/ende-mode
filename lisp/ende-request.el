@@ -64,7 +64,7 @@ Return the outgoing bytes, encoded body, and optional capture record."
   (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization))
                (coding-system-for-write 'no-conversion))
     (when finalization
-      (write-region (encode-coding-string (json-encode (plist-get data :full-body)) 'utf-8)
+      (write-region (encode-coding-string (ende-worker--print (plist-get data :full-body)) 'utf-8)
                     nil full-file nil 'silent)
       (setq data (plist-get data :data)))
     (write-region data nil file nil 'silent)
@@ -127,10 +127,10 @@ FILE-BACKED forces worker preparation, including for a retained request."
   "Read the complete logical request retained in DATA."
   (if-let* ((file (plist-get data :full-file)))
       (with-temp-buffer
-        (insert-file-contents file)
-        (let ((json-object-type 'alist) (json-key-type 'keyword)
-              (json-array-type 'vector))
-          (json-read-from-string (buffer-string))))
+        (let ((coding-system-for-read 'utf-8-unix))
+          (insert-file-contents file))
+        (goto-char (point-min))
+        (read (current-buffer)))
     (plist-get data :full-body)))
 
 (defun ende-request-reprepare (lifecycle library data profile debug callback finalization)
