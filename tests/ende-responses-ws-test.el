@@ -820,6 +820,35 @@
       (should-not sockets)
       (should (zerop (hash-table-count ende-responses-ws--connections)))))
   (ende-responses-ws-test--with-sockets
+    (let* ((ende-max-response-bytes nil)
+           (ende-max-sse-event-bytes nil)
+           (ende-max-response-header-bytes nil)
+           (profile (ende-responses-ws-test--profile 1))
+           (done 0) errors cancel
+           (callbacks (list :on-start (lambda (function) (setq cancel function))
+                            :on-done (lambda (_) (cl-incf done))
+                            :on-error (lambda (error) (push error errors)))))
+      (ende-llm-default '(("user" . "Unlimited")) callbacks profile)
+      (let ((process (car sockets)))
+        (process-put process :fixture-status 'open)
+        (funcall (process-sentinel process) process "open")
+        (let* ((header (websocket-get-server-response (process-get process :websocket) nil nil))
+               (end (string-match "\r\n\r\n" header)))
+          (funcall (process-filter process) process
+                   (concat (substring header 0 end) "\r\nX-Padding: "
+                           (make-string (1+ (* 1024 1024)) ?a) "\r\n\r\n")))
+        (ende-responses-ws-test--complete process)
+        (should (= done 1))
+        ;; An idle advertised message must not activate a fallback ceiling.
+        (funcall (process-filter process) process (unibyte-string #x81 127 0 0 0 0 32 0 0 0))
+        (ende-llm-default '(("user" . "Unlimited pending frame")) callbacks profile)
+        (funcall (process-filter process) process "x")
+        (funcall cancel)
+        (should (= (length errors) 1))
+        (should (eq (ende-error-kind (car errors)) 'cancelled))
+        (should-not (ende-responses-ws-test--socket-open process))
+        (should (zerop (hash-table-count ende-responses-ws--connections))))))
+  (ende-responses-ws-test--with-sockets
     (let* ((profile (ende-responses-ws-test--profile 1))
            (errors nil) (events nil)
            (callbacks (list :on-error (lambda (error) (push error errors))

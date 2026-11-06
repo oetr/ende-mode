@@ -37,6 +37,7 @@
 
 (cl-defstruct ende-responses-ws-connection
   owner identity socket active chain closed closing key url headers properties
+  byte-limit event-limit header-limit
   opening (generation 1) (phase 'disconnected) created http-status close-code)
 
 (cl-defstruct ende-responses-ws-opening
@@ -262,11 +263,14 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                     :on-json on-json :on-complete on-complete :on-prepared on-prepared
                     :connect-timeout ende-connect-timeout
                     :idle-timeout ende-response-idle-timeout
-                    :byte-limit (or ende-max-response-bytes (* 256 1024 1024))
-                    :event-limit (or ende-max-sse-event-bytes (* 16 1024 1024))))
+                    :byte-limit ende-max-response-bytes
+                    :event-limit ende-max-sse-event-bytes))
           (timeout (if (plist-member profile :request-timeout)
                        (plist-get profile :request-timeout) ende-request-timeout)))
-      (setf (ende-responses-ws-connection-active connection) request)
+      (setf (ende-responses-ws-connection-active connection) request
+            (ende-responses-ws-connection-byte-limit connection) ende-max-response-bytes
+            (ende-responses-ws-connection-event-limit connection) ende-max-sse-event-bytes
+            (ende-responses-ws-connection-header-limit connection) ende-max-response-header-bytes)
       (ende-transport-session-add-canceller
        lifecycle (lambda () (ende-responses-ws-finish request 'failure)))
       (when (and timeout (ende-responses-ws--live-p request))
@@ -472,8 +476,9 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                                  (ende-responses-ws-request-fragment-active request)))
                   (error "Invalid fragment sequence"))
                 (cl-incf (ende-responses-ws-request-frame-bytes request) (length payload))
-                (when (> (ende-responses-ws-request-frame-bytes request)
-                         (ende-responses-ws-request-event-limit request))
+                (when (and (ende-responses-ws-request-event-limit request)
+                           (> (ende-responses-ws-request-frame-bytes request)
+                              (ende-responses-ws-request-event-limit request)))
                   (ende-responses-ws--fail request 'resource "Responses message exceeds byte limit"))
                 (when (ende-responses-ws--live-p request)
                   (when (> (length payload) 0)
@@ -517,17 +522,20 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
            (text (concat (websocket-inflight-input socket) output))
            (size (length text)) (position 0) close-position close-code pending-close
            (message-bytes (if request (ende-responses-ws-request-frame-bytes request) 0))
-           (byte-limit (and request (ende-responses-ws-request-byte-limit request)))
+           (byte-limit (if request (ende-responses-ws-request-byte-limit request)
+                         (ende-responses-ws-connection-byte-limit connection)))
            (event-limit (if request (ende-responses-ws-request-event-limit request)
-                          (or ende-max-sse-event-bytes (* 16 1024 1024)))))
+                          (ende-responses-ws-connection-event-limit connection))))
       (cl-labels ((reject (kind message)
                     (when request (ende-responses-ws--fail request kind message))
                     (ende-responses-ws--discard connection)
                     (throw 'rejected nil)))
         (when request
           (cl-incf (ende-responses-ws-request-received-bytes request) (length output))
-          (when (> (ende-responses-ws-request-received-bytes request) byte-limit)
+          (when (and byte-limit (> (ende-responses-ws-request-received-bytes request) byte-limit))
             (reject 'resource "Responses wire input exceeds byte limit")))
+        (when (and (not request) byte-limit (> size byte-limit))
+          (reject 'resource "Responses idle input exceeds byte limit"))
         (while (<= (+ position 2) size)
           (let* ((first (aref text position))
                  (opcode (logand first 15))
@@ -546,12 +554,16 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                   (setq position size)
                 (let* ((bytes (car info))
                        (end (+ position 1 (cdr info) bytes)))
-                  (when (and request (> (+ (ende-responses-ws-request-received-bytes request)
-                                                           (max 0 (- end size))) byte-limit))
+                  (when (and byte-limit
+                             (> (if request
+                                    (+ (ende-responses-ws-request-received-bytes request)
+                                       (max 0 (- end size)))
+                                  end)
+                                byte-limit))
                     (reject 'resource "Responses advertised frame exceeds byte limit"))
                   (when (memq opcode '(0 1))
                     (cl-incf message-bytes bytes)
-                    (when (> message-bytes event-limit)
+                    (when (and event-limit (> message-bytes event-limit))
                       (reject 'resource "Responses advertised message exceeds byte limit"))
                     (unless (zerop (logand first #x80)) (setq message-bytes 0)))
                   (when (and (= opcode 8) (<= end size))
@@ -671,7 +683,8 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       (let* ((text (concat (ende-responses-ws-opening-header opening) output))
              (end (string-match "\r\n\r\n" text))
              (length (if end (+ end 4) (length text))))
-        (when (> length (or ende-max-response-header-bytes (* 1024 1024)))
+        (when (and (ende-responses-ws-connection-header-limit connection)
+                   (> length (ende-responses-ws-connection-header-limit connection)))
           (ende-responses-ws--fail (ende-responses-ws-connection-active connection)
                                    'resource "Responses handshake header exceeds byte limit")
           (error "Handshake header exceeds limit"))
