@@ -187,13 +187,25 @@
                 (ende-responses-ws-test--open (car sockets))
                 (ende-responses-ws-test--complete (car sockets) "resp_before_image")
                 (let ((socket (car sockets)))
-                  (setq messages (append messages (list (list :role "user" :content (list image)))))
+                  (setq messages
+                        (append messages
+                                (list (list :role "assistant"
+                                            :content (list '(:type :text :text "Already represented") image)
+                                            :protocol-items
+                                            (cons 'openai-responses
+                                                  (append (ende-protocol-json-read-string
+                                                           "[{\"type\":\"reasoning\",\"id\":\"rs_image\",\"encrypted_content\":\"opaque\",\"summary\":[],\"custom\":{\"flag\":false,\"none\":null}},{\"type\":\"message\",\"id\":\"msg_image\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Already represented\"}]},{\"type\":\"function_call\",\"id\":\"fc_image\",\"call_id\":\"image_call\",\"name\":\"read_file\",\"arguments\":\"{}\"}]") nil))
+                                            :tool-calls '((:id "image_call" :name "read_file" :arguments "{}")))
+                                      '(:tool-call-id "image_call" :content "result"))))
                   (ende-llm-default messages callbacks profile)
                   (ende-test--wait-for (lambda () (or errors (= (length (ende-responses-ws-test--socket-sent socket)) 2))))
                   (should-not errors)
                   (let ((wire (car (ende-responses-ws-test--socket-sent socket))))
                     (should (equal (gethash "previous_response_id" wire) "resp_before_image"))
-                    (should (= (length (gethash "input" wire)) 1))
+                    (should (= (length (gethash "input" wire)) 5))
+                    (should (equal (gethash "phase" (aref (gethash "input" wire) 1)) "commentary"))
+                    (should (eq (gethash "flag" (gethash "custom" (aref (gethash "input" wire) 0))) :false))
+                    (should (equal (gethash "call_id" (aref (gethash "input" wire) 4)) "image_call"))
                     (should (string-match-p "data:image/png;base64," (json-encode wire))))
                   (let* ((request (ende-responses-ws-connection-active (gethash 1 ende-responses-ws--connections)))
                          (retained (ende-responses-ws-request-logical-request request))
@@ -207,7 +219,10 @@
                   (should-not errors)
                   (let ((wire (car (ende-responses-ws-test--socket-sent socket))))
                     (should-not (gethash "previous_response_id" wire))
-                    (should (= (length (gethash "input" wire)) 2)))
+                    (should (= (length (gethash "input" wire)) 6))
+                    (should (equal (gethash "encrypted_content" (aref (gethash "input" wire) 1)) "opaque"))
+                    (should (= (cl-count "function_call" (append (gethash "input" wire) nil)
+                                         :key (lambda (item) (gethash "type" item)) :test #'equal) 1)))
                   (cl-letf (((symbol-function 'ende-request--retained-body)
                              (lambda (&rest _) (ert-fail "Completion reread logical image history"))))
                     (ende-responses-ws-test--complete socket "resp_after_image"))
@@ -226,7 +241,7 @@
                                    (ende-artifact--read-bytes (expand-file-name "0003-request.json" directory)))))
                     (should (equal (gethash "previous_response_id" incremental) "resp_before_image"))
                     (should-not (gethash "previous_response_id" recovery))
-                    (should (= (length (gethash "input" recovery)) 2))
+                    (should (= (length (gethash "input" recovery)) 6))
                     (should-not (string-match-p "base64\\|fixture-api-key" (json-encode incremental))))
                   ;; A file baseline forces a worker even after history compaction.
                   (let* ((connection (gethash 1 ende-responses-ws--connections))

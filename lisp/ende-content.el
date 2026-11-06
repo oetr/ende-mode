@@ -76,6 +76,17 @@
   (let ((data (ende-content-image-data part)))
     (concat "data:" (car data) ";base64," (base64-encode-string (cdr data) t))))
 
+(defun ende-content-assistant-images (content)
+  "Lower supplementary assistant images in CONTENT to labelled user inputs."
+  (let ((index 0))
+    (unless (stringp content)
+      (cl-loop for part in content
+               when (eq (plist-get part :type) :image)
+               collect (list :role "user" :content
+                             (list (list :type :text :text
+                                         (format "Image from the preceding assistant response (part %d):"
+                                                 (cl-incf index))) part))))))
+
 (defun ende-content-provider-messages (messages)
   "Place assistant images in explicitly identified, valid user input positions.
 The original role and order stay intact internally.  Tool calls remain after
@@ -89,13 +100,10 @@ all their assistant content and before the corresponding results."
                     (or (plist-get message :protocol-items)
                         (plist-get message :protocol-opaque))))
            (list message)
-         (let (result (index 0))
+         (let ((images (ende-content-assistant-images content)) result)
            (dolist (part content)
              (if (eq (plist-get part :type) :image)
-                 (push (list :role "user" :content
-                             (list (list :type :text :text
-                                         (format "Image from the preceding assistant response (part %d):"
-                                                 (cl-incf index))) part)) result)
+                 (push (pop images) result)
                (push (cons "assistant" (plist-get part :text)) result)))
            (when (plist-get message :tool-calls)
              (push (list :role "assistant" :content ""

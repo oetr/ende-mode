@@ -1492,6 +1492,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
          (cond
           ((eq (car-safe items) 'openai-responses)
            (append (mapcar #'ende-protocol-json-for-request (cdr items))
+                   (ende-codex--request-messages
+                    (ende-content-assistant-images content) profile)
                    (mapcar #'ende-codex--function-call-item
                            (cl-remove-if
                             (lambda (call)
@@ -1499,8 +1501,11 @@ When APPEND is non-nil, append the argument delta to the stored value."
                                          (equal (ende-protocol-json-get "call_id" item)
                                                 (plist-get call :id))) (cdr items))) calls))))
           ((and opaque (equal provider "openai-responses"))
-           (list (ende-protocol-json-for-request opaque)))
-          (opaque nil)
+           (cons (ende-protocol-json-for-request opaque)
+                 (ende-codex--request-messages
+                  (ende-content-assistant-images content) profile)))
+          (opaque (ende-codex--request-messages
+                   (ende-content-assistant-images content) profile))
           (calls
            (append
             (when (and (stringp content) (not (string-empty-p content)))
