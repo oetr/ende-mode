@@ -586,9 +586,6 @@ Pending application output is discarded.  Completion is asynchronous."
   (pcase opcode
     (8
      (let ((info (websocket--read-close payload)))
-       (when (and (eq (websocket--connection-role connection) 'client)
-                  (= (plist-get info :code) 1010))
-         (signal 'websocket-protocol-error nil))
        (setf (websocket--connection-message connection) nil)
        (websocket--cancel-deadline connection 'message)
        (setf (websocket--connection-peer-close connection) info
