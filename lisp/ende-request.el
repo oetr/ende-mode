@@ -112,7 +112,7 @@ Return the outgoing bytes, encoded body, and optional capture record."
           :debug-record record)))
 
 (defun ende-request-prepare (lifecycle library builder messages profile debug callback
-                                     &optional finalization file-backed retained baseline)
+                                     &optional finalization file-backed retained baseline current-p)
   "Prepare MESSAGES for PROFILE and call CALLBACK with data, body and record.
 Image-bearing requests use a worker and a file owned by LIFECYCLE.
 DEBUG contains transport, endpoint, and optional OAuth account continuity.
@@ -121,6 +121,7 @@ It converts the complete logical body to the actual captured wire request.
 Finalized data retains :full-body or :full-file separately for recovery.
 FILE-BACKED forces worker preparation.  RETAINED reuses a logical source;
 BASELINE protects the predecessor source while finalization reads it.
+CURRENT-P optionally checks that an asynchronous result still owns its attempt.
 Only source descriptors and serializable finalization data enter the worker."
   (let* ((replay (and retained t))
          (origin (and retained (ende-request-retained-debug-origin retained)))
@@ -151,7 +152,9 @@ Only source descriptors and serializable finalization data enter the worker."
                   (setf (ende-request-retained-debug-origin retained)
                         (list :debug debug :preparation (plist-get data :debug-preparation) :counter counter)))
                 (setq data (plist-put data :retained retained)))
-              (unless (ende-transport-session-terminal lifecycle)
+              (if (or (ende-transport-session-terminal lifecycle)
+                      (and current-p (not (funcall current-p))))
+                  (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
                 (funcall callback data body record))))
           (when release-baseline (funcall release-baseline)))
       (let* (file full-file release-source
@@ -167,7 +170,8 @@ Only source descriptors and serializable finalization data enter the worker."
                  (setq finished t)
                  (when release-source (funcall release-source))
                  (when release-baseline (funcall release-baseline))
-                 (if (ende-transport-session-terminal lifecycle)
+                 (if (or (ende-transport-session-terminal lifecycle)
+                         (and current-p (not (funcall current-p))))
                      (progn
                        (ende-ignore-errors #'delete-file file)
                        (ende-ignore-errors #'ende-debug-record-completion
@@ -221,14 +225,14 @@ Only source descriptors and serializable finalization data enter the worker."
         (read (current-buffer)))
     (plist-get data :full-body)))
 
-(defun ende-request-reprepare (lifecycle library retained profile debug callback finalization)
+(defun ende-request-reprepare (lifecycle library retained profile debug callback finalization &optional current-p)
   "Finalize RETAINED again without rebuilding or changing logical input.
 LIFECYCLE owns any files; LIBRARY provides FINALIZATION.  PROFILE and DEBUG
 scope a fresh capture.  CALLBACK receives the prepared request."
   (let ((source (ende-request-retained-source retained)))
     (ende-request-prepare lifecycle library #'ende-request--retained-body
                           source profile debug callback finalization
-                          (plist-get source :full-file) retained)))
+                          (plist-get source :full-file) retained nil current-p)))
 
 (defun ende-request-send (process data)
   "Send prepared DATA to PROCESS, unless curl reads it from a file."

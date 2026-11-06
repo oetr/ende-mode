@@ -108,6 +108,7 @@
                  (messages '(("user" . "Hello from 世界 — café")))
                  (ende-debug--session-directory directory)
                  (ende-debug--sequence 0)
+                 (ende-debug--sequence-context nil)
                  (ende-debugging-enabled nil)
                  (unrecorded
                   (ende-test--run-stream-request

@@ -320,17 +320,23 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
   "Prepare REQUEST's MESSAGES, protecting any retained continuation baseline."
   (when (ende-responses-ws--live-p request)
     (let* ((connection (ende-responses-ws-request-connection request))
+           (attempt (ende-responses-ws-request-attempt request))
            (chain (ende-responses-ws-connection-chain connection))
            (baseline (and chain (ende-responses-ws-chain-logical-request chain))))
       (ende-request-prepare
        (ende-responses-ws-request-lifecycle request) 'ende-codex builder messages
        (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
        (apply-partially #'ende-responses-ws-send-prepared request
-                        (ende-responses-ws-request-attempt request)
+                        attempt
                         (ende-responses-ws-connection-generation connection))
        (ende-responses-ws-finalization request)
        (and baseline (plist-get (ende-request-retained-source baseline) :full-file))
-       nil baseline))))
+       nil baseline (apply-partially #'ende-responses-ws--preparation-live-p request attempt)))))
+
+(defun ende-responses-ws--preparation-live-p (request attempt)
+  "Return whether preparation still belongs to REQUEST's ATTEMPT."
+  (and (ende-responses-ws--live-p request)
+       (= attempt (ende-responses-ws-request-attempt request))))
 
 (defun ende-responses-ws--idle (request)
   "Reset REQUEST's captured response-idle deadline."
@@ -399,7 +405,8 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
          (ende-responses-ws-request-logical-request request)
          (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
          (apply-partially #'ende-responses-ws-send-prepared request attempt generation)
-         (ende-responses-ws-finalization request))
+         (ende-responses-ws-finalization request)
+         (apply-partially #'ende-responses-ws--preparation-live-p request attempt))
       ((error quit)
        (when (and (ende-responses-ws--live-p request)
                   (= attempt (ende-responses-ws-request-attempt request)))
@@ -728,8 +735,8 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
 
 (defun ende-responses-ws-send-prepared (request attempt generation data body record)
   "Open or reuse REQUEST's socket and send prepared DATA, BODY and RECORD."
-  (when (and (ende-responses-ws--live-p request)
-             (= attempt (ende-responses-ws-request-attempt request)))
+  (if (not (ende-responses-ws--preparation-live-p request attempt))
+      (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
     (ende-responses-ws--private
       (condition-case nil
           (let* ((connection (ende-responses-ws-request-connection request)))
