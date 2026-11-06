@@ -1744,7 +1744,7 @@ Signal when the durable identifier is ambiguous."
 ;;;; Context and response protocol
 
 (defconst ende-chat--org-format
-  "Respond with org-mode syntax, DO NOT use Markdown to structure your response.
+  "Respond with org-mode syntax to structure your response.
 Here is how:
 - Headings: * Section or ** Subsection, or even *** Subsubsection.
 - Emphasis: *bold* and /italic/. Inline code: ~code~ or =literal=.
@@ -1817,7 +1817,8 @@ code, or other opaque data in edits; use deterministic, source-derived boundarie
 or a programmatic transformation. If an exact-match edit fails, change methods
 immediately instead of retrying larger patches.
 
-Ensure that you answer user's questions with Sardaukar-like efficiency, precision, and text scarcity.")
+Ensure that you answer user's questions with efficiency, precision, and an adequate
+level of text. Users hate AI-speak and in general prefer short but correct text.")
   "System prompt for Org-backed chat requests.")
 
 (defun ende-chat--system-prompt (document)

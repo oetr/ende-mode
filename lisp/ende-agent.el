@@ -139,14 +139,14 @@ CALLBACK receives the child's final answer and no transcript."
 
 (ende-tool-register
  'spawn_agent
- "Spawn an independent agent with fresh conversation context using the configured access policy. The child receives its own instructions, configured capabilities, and the supplied task, but not your conversation history, previous tool results, observations, decisions, or findings. Provide a self-contained task containing the objective, relevant background, findings, concrete starting points and file paths, constraints, user decisions, and expected output. Include only task-relevant information; do not copy entire conversations. The child can independently inspect resources permitted by its configuration."
+ "Spawn an independent agent with fresh conversation context using the configured access policy. The child receives its own instructions, configured capabilities, and the supplied task. It does not inherit the caller's conversation history, previous tool results, observations, decisions, or findings. Provide a self-contained task containing the objective, relevant background, findings, concrete starting points and file paths, constraints, user decisions, and expected output. Include only task-relevant information; do not copy entire conversations. The child can independently inspect resources permitted by its configuration. The user has configured the agent's permissions, but make sure they are aligned with the task."
  `((:type . "object")
    (:properties . ((:title . ((:type . "string")
                               (:description . "Concise, human-readable title for the delegated task.")
                               (:minLength . 1)
                               (:maxLength . ,ende-agent--spawn-title-max-length)))
                    (:task . ((:type . "string")
-                             (:description . "Self-contained work description: objective, relevant background and findings, file paths or symbols, constraints, user decisions, and expected output. The child has no parent conversation history; include only task-relevant information.")
+                             (:description . "Self-contained work description. Assume zero knowledge.")
                              (:minLength . 1)))))
    (:required . ["title" "task"])
    (:additionalProperties . :json-false))

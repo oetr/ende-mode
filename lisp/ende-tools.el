@@ -2741,11 +2741,10 @@ process-group cancellation function with the active Ende job."
 
 (ende-tool-register
  'about_thinking
- (concat "Update your user-visible progress report with a short title and "
-         "1-3 sentences. Use at the start of substantive work, before the "
-         "tools it describes, and when changing phases or encountering a "
-         "blocker. Report current actions and progress, not private reasoning; "
-         "avoid unchanged updates. Always available, without project permissions.")
+ (concat "Update your user-visible progress. Use at the start of substantive work, "
+	 " and when changing phases or encountering a blocker. "
+	 "Report current actions and progress. Avoid unchanged updates. "
+	 "Always available, without project permissions.")
  (list
   (cons :type "object")
   (cons :properties
