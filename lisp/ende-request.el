@@ -73,12 +73,14 @@
      lifecycle (lambda () (ende-request-retained-release retained lifecycle)))
     retained))
 
-(defun ende-request--encode (builder messages profile debug preparation &optional finalization)
+(defun ende-request--encode (builder messages profile debug preparation &optional finalization replay)
   "Build MESSAGES for PROFILE with immutable debug PREPARATION.
 Return the outgoing bytes, encoded body, and optional capture record."
-  (let* ((body (funcall builder messages profile))
+  (let* ((ende-debugging-enabled (and debug t))
+         (ende-debug--session-directory (or (plist-get preparation :directory) ende-debug--session-directory))
+         (body (funcall builder messages profile))
          (prepared (when debug
-                     (if (eq builder #'ende-request--retained-body)
+                     (if replay
                          (cons body preparation)
                      (condition-case nil (ende-debug-prepare-body body preparation)
                        ((error quit) (cons body preparation))))))
@@ -91,13 +93,14 @@ Return the outgoing bytes, encoded body, and optional capture record."
          (record (when debug
                    (ende-debug-record-request data body messages profile
                                               (car debug) (cadr debug) (cdr prepared)))))
-    (list (if finalization (list :data data :full-body full-body) data)
+    (list (if finalization (list :data data :full-body full-body :debug-preparation (cdr prepared)) data)
           body record)))
 
-(defun ende-request--write (library builder messages profile file full-file debug preparation finalization)
+(defun ende-request--write (library builder messages profile file full-file debug preparation finalization replay)
   "Build and write a request to FILE; return payload-free diagnostics."
   (require library)
-  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization))
+  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization replay))
+               (origin (and finalization (plist-get data :debug-preparation)))
                (coding-system-for-write 'no-conversion))
     (when (and finalization full-file)
       (write-region (encode-coding-string (ende-worker--print (plist-get data :full-body)) 'utf-8)
@@ -105,6 +108,7 @@ Return the outgoing bytes, encoded body, and optional capture record."
     (when finalization (setq data (plist-get data :data)))
     (write-region data nil file nil 'silent)
     (list :body (list (assq :tools body))
+          :debug-preparation origin
           :debug-record record)))
 
 (defun ende-request-prepare (lifecycle library builder messages profile debug callback
@@ -118,11 +122,16 @@ Finalized data retains :full-body or :full-file separately for recovery.
 FILE-BACKED forces worker preparation.  RETAINED reuses a logical source;
 BASELINE protects the predecessor source while finalization reads it.
 Only source descriptors and serializable finalization data enter the worker."
-  (let* ((debug (when (and ende-debugging-enabled ende-debug--session-directory) debug))
+  (let* ((replay (and retained t))
+         (origin (and retained (ende-request-retained-debug-origin retained)))
+         (debug (if replay (plist-get origin :debug)
+                  (when (and ende-debugging-enabled ende-debug--session-directory) debug)))
          (preparation (when debug
-                        (ende-debug-prepare-request
-                         profile (car debug) (cadr debug) (nth 2 debug)
-                         (memq builder '(ende-responses--request-body ende-codex--request-body)))))
+                        (if replay (ende-debug-prepare-retry origin)
+                          (ende-debug-prepare-request
+                           profile (car debug) (cadr debug) (nth 2 debug)
+                           (memq builder '(ende-responses--request-body ende-codex--request-body))))))
+         (counter (if replay (plist-get origin :counter) ende-debug--sequence-context))
          (images (and (not retained) (cl-some (lambda (message)
                             (let ((content (ende-content-body message)))
                               (and (listp content)
@@ -134,18 +143,21 @@ Only source descriptors and serializable finalization data enter the worker."
             (progn
               (setq release-baseline (ende-request-retained-read baseline))
               (pcase-let ((`(,data ,body ,record)
-                           (ende-request--encode builder messages profile debug preparation finalization)))
+                           (ende-request--encode builder messages profile debug preparation finalization replay)))
               (when finalization
                 (unless retained
                   (setq retained (ende-request--retain (list :full-body (plist-get data :full-body)) lifecycle)))
+                (when (and debug (not replay))
+                  (setf (ende-request-retained-debug-origin retained)
+                        (list :debug debug :preparation (plist-get data :debug-preparation) :counter counter)))
                 (setq data (plist-put data :retained retained)))
               (unless (ende-transport-session-terminal lifecycle)
                 (funcall callback data body record))))
           (when release-baseline (funcall release-baseline)))
       (let* (file full-file release-source
-             (bindings (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-                               '(ende-debugging-enabled
-                                 ende-debug--session-directory ende-debug--sequence)))
+             (bindings (list (cons 'ende-debugging-enabled (and debug t))
+                             (cons 'ende-debug--session-directory (plist-get preparation :directory))
+                             (cons 'ende-debug--sequence (or (plist-get preparation :sequence) 0))))
              (failed (ende-transport-session-callback-error-handler lifecycle))
              cancel finished)
         (cl-labels
@@ -163,12 +175,16 @@ Only source descriptors and serializable finalization data enter the worker."
                    (condition-case nil
                        (if error
                            (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed"))
-                         (funcall callback
+                         (progn
+                           (when (and retained debug (not replay))
+                             (setf (ende-request-retained-debug-origin retained)
+                                   (list :debug debug :preparation (plist-get result :debug-preparation) :counter counter)))
+                           (funcall callback
                                   (if finalization
                                       (append (list :file file :retained retained)
                                               (ende-request-retained-source retained))
                                     (list :file file))
-                                  (plist-get result :body) (plist-get result :debug-record)))
+                                  (plist-get result :body) (plist-get result :debug-record))))
                      ((error quit)
                       (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed"))))))))
           (ende-transport-session-add-canceller
@@ -185,7 +201,7 @@ Only source descriptors and serializable finalization data enter the worker."
                       release-baseline (ende-request-retained-read baseline))
                 (ende-worker-run
                  'ende-request #'ende-request--write
-                 (list library builder messages profile file full-file debug preparation finalization) bindings
+                 (list library builder messages profile file full-file debug preparation finalization replay) bindings
                  #'finish
                  (lambda (function)
                    (setq cancel function)

@@ -56,6 +56,20 @@ server-managed conversation."
 (defvar ende-debug--sequence 0
   "Next request sequence number in the active debugging session.")
 
+(defvar ende-debug--sequence-context nil
+  "Shared directory and sequence counter retained by pending logical requests.")
+
+(defun ende-debug--next-sequence (&optional context)
+  "Reserve a capture sequence in CONTEXT, or in the current debug session."
+  (unless context
+    (unless (equal (car ende-debug--sequence-context) ende-debug--session-directory)
+      (setq ende-debug--sequence-context (cons ende-debug--session-directory 0)))
+    (setq context ende-debug--sequence-context))
+  (let ((current (equal (car context) ende-debug--session-directory)))
+    (setcdr context (1+ (max (cdr context) (if current ende-debug--sequence 0))))
+    (when current (setq ende-debug--sequence (cdr context)))
+    (cdr context)))
+
 (defvar ende-debug--baselines (make-hash-table :test #'equal)
   "Completed provider responses keyed by job and connection in this capture.")
 
@@ -171,10 +185,16 @@ TRANSPORT, ENDPOINT, and ACCOUNT scope a baseline when ELIGIBLE is non-nil."
          (key (and connection
                    (or (integerp job) (and (stringp job) (not (string-empty-p job))))
                    (list job connection))))
-    (list :directory ende-debug--session-directory :sequence (cl-incf ende-debug--sequence)
+    (list :directory ende-debug--session-directory :sequence (ende-debug--next-sequence)
           :baseline-key key :connection connection
           :baseline (and key (copy-sequence (gethash key ende-debug--baselines)))
           :compare ende-debug-provider-cache-comparisons)))
+
+(defun ende-debug-prepare-retry (origin)
+  "Reserve a new attempt without changing logical debug ORIGIN."
+  (when origin
+    (plist-put (copy-sequence (plist-get origin :preparation)) :sequence
+               (ende-debug--next-sequence (plist-get origin :counter)))))
 
 (defun ende-debug-prepare-body (body preparation)
   "Return detached (BODY . PREPARATION) with the selected comparison applied.
@@ -440,7 +460,7 @@ record used to associate later completion metadata, or nil when debugging is
 disabled."
   (when (and ende-debugging-enabled ende-debug--session-directory)
     (condition-case failure
-        (let* ((sequence (or (plist-get preparation :sequence) (cl-incf ende-debug--sequence)))
+        (let* ((sequence (or (plist-get preparation :sequence) (ende-debug--next-sequence)))
                (stem (format "%04d" sequence))
                (directory (or (plist-get preparation :directory) ende-debug--session-directory))
                (started (float-time))
