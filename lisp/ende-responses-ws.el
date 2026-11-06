@@ -62,6 +62,11 @@
          (eq request (ende-responses-ws-connection-active connection))
          (not (ende-transport-session-terminal lifecycle)))))
 
+(defun ende-responses-ws--close-socket (socket)
+  "Close SOCKET without dependency logging or propagated errors."
+  (let ((websocket-debug nil))
+    (ende-ignore-errors #'websocket-close socket)))
+
 (defun ende-responses-ws--discard (connection)
   "Close CONNECTION and forget its private identity and lineage."
   (unless (ende-responses-ws-connection-closed connection)
@@ -76,7 +81,7 @@
             (ende-responses-ws-connection-headers connection) nil
             (ende-responses-ws-connection-identity connection) nil)
       (when socket
-        (ende-ignore-errors #'websocket-close socket)
+        (ende-responses-ws--close-socket socket)
         (when (websocket-p socket)
           (setf (websocket-on-open socket) #'ignore
                 (websocket-on-message socket) #'ignore
@@ -258,7 +263,8 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
   "Send REQUEST's captured payload on its open socket."
   (when (and (ende-responses-ws--live-p request)
              (not (ende-responses-ws-request-sent request)))
-    (let* ((data (ende-responses-ws-request-payload request))
+    (let* ((websocket-debug nil)
+           (data (ende-responses-ws-request-payload request))
            (text (if-let* ((file (plist-get data :file)))
                      (with-temp-buffer
                        (let ((coding-system-for-read 'utf-8-unix)) (insert-file-contents file))
@@ -303,7 +309,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
 (defun ende-responses-ws--open (connection socket)
   "Send the prepared request when CONNECTION's SOCKET opens."
   (if (ende-responses-ws-connection-closed connection)
-      (ende-ignore-errors #'websocket-close socket)
+      (ende-responses-ws--close-socket socket)
     (unless (and (ende-responses-ws-connection-socket connection)
                  (not (eq socket (ende-responses-ws-connection-socket connection))))
     (setf (ende-responses-ws-connection-socket connection) socket)
@@ -415,7 +421,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       t)))
 
 (defun ende-responses-ws--protect-socket (connection socket)
-  "Isolate asynchronous SOCKET callbacks from ambient browser cookies.
+  "Isolate asynchronous SOCKET callbacks from ambient cookies and logging.
 Route dependency parser failures through CONNECTION's request lifecycle."
   (when (and (websocket-p socket) (processp (websocket-conn socket)))
     (let* ((process (websocket-conn socket))
@@ -423,7 +429,8 @@ Route dependency parser failures through CONNECTION's request lifecycle."
            (sentinel (process-sentinel process)))
       (set-process-filter
        process (lambda (process output)
-                 (let ((url-cookie-storage nil) (url-cookie-secure-storage nil))
+                 (let ((websocket-debug nil)
+                       (url-cookie-storage nil) (url-cookie-secure-storage nil))
                    (condition-case nil
                        (when (and (not (ende-responses-ws-connection-closed connection))
                                   (eq socket (ende-responses-ws-connection-socket connection))
@@ -433,7 +440,8 @@ Route dependency parser failures through CONNECTION's request lifecycle."
                       (ende-responses-ws--socket-error connection socket nil nil))))))
       (set-process-sentinel
        process (lambda (process event)
-                 (let ((url-cookie-storage nil) (url-cookie-secure-storage nil))
+                 (let ((websocket-debug nil)
+                       (url-cookie-storage nil) (url-cookie-secure-storage nil))
                    (condition-case nil
                        (funcall sentinel process event)
                      ((error quit)
@@ -472,6 +480,7 @@ Route dependency parser failures through CONNECTION's request lifecycle."
                 (ende-responses-ws--send request)
               (let ((default-directory (ende-curl-local-directory))
                     (gnutls-verify-error t)
+                    (websocket-debug nil)
                     (url-cookie-storage nil) (url-cookie-secure-storage nil))
                 (unless (gnutls-available-p)
                   (error "Responses WebSockets require built-in verified TLS"))
@@ -492,7 +501,7 @@ Route dependency parser failures through CONNECTION's request lifecycle."
                        :on-close (apply-partially #'ende-responses-ws--closed connection)
                        :on-error (apply-partially #'ende-responses-ws--socket-error connection))))
                   (if (ende-responses-ws-connection-closed connection)
-                      (ende-ignore-errors #'websocket-close opened)
+                      (ende-responses-ws--close-socket opened)
                     (setf (ende-responses-ws-connection-socket connection) opened)
                     (ende-responses-ws--protect-socket connection opened)))))))
       ((error quit)
