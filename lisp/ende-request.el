@@ -36,6 +36,7 @@
 (require 'ende-curl)
 (require 'ende-debug)
 (require 'ende-worker)
+(require 'ende-provider-config)
 
 (cl-defstruct ende-request-retained
   source owner (readers 0) debug-origin)
@@ -85,7 +86,8 @@ Return the outgoing bytes, encoded body, and optional capture record."
                      (condition-case nil (ende-debug-prepare-body body preparation)
                        ((error quit) (cons body preparation))))))
          (body (if prepared (car prepared) body))
-         (full-body body)
+         (full-body (when finalization
+                      (if replay body (ende-provider-config-copy body))))
          (body (if finalization
                    (apply (car finalization) body (cdr finalization))
                  body))
