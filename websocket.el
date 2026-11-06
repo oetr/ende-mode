@@ -48,13 +48,20 @@
     (signal 'wrong-type-argument (list 'unibyte-string value)))
   value)
 
-(defun websocket--text (text)
+(defun websocket--text-size (text)
   (unless (stringp text) (signal 'wrong-type-argument (list 'stringp text)))
-  (dotimes (i (length text))
-    (let ((char (aref text i)))
-      (unless (and (<= char #x10ffff) (not (<= #xd800 char #xdfff))
-                   (or (multibyte-string-p text) (< char 128)))
-        (signal 'websocket-invalid-utf8 nil))))
+  (let ((size 0))
+    (dotimes (i (length text))
+      (let ((char (aref text i)))
+        (unless (and (<= char #x10ffff) (not (<= #xd800 char #xdfff))
+                     (or (multibyte-string-p text) (< char 128)))
+          (signal 'websocket-invalid-utf8 nil))
+        (cl-incf size (cond ((< char #x80) 1) ((< char #x800) 2)
+                           ((< char #x10000) 3) (t 4)))))
+    size))
+
+(defun websocket--text (text)
+  (websocket--text-size text)
   (encode-coding-string text 'utf-8-unix t))
 
 (defun websocket--os-random-bytes (count)
@@ -324,7 +331,7 @@
   (state 'connecting) (generation 0) callbacks
   input (cursor 1) http frame message
   output output-tail (output-bytes 0) (output-items 0)
-  controls (control-count 0) backpressured
+  controls control-tail (control-count 0) backpressured
   close-queued close-sent close-received peer-close failure eof
   timers work-timer busy work-pending events terminal)
 
@@ -429,6 +436,7 @@
             (websocket--connection-output-bytes connection) 0
             (websocket--connection-output-items connection) 0
             (websocket--connection-controls connection) nil
+            (websocket--connection-control-tail connection) nil
             (websocket--connection-control-count connection) 0
             (websocket--connection-events connection) nil
             (websocket--connection-terminal connection) (cons callback info))
@@ -459,8 +467,8 @@
 
 (defun websocket--close-payload (code reason)
   (unless (websocket--close-code-p code) (error "Invalid WebSocket Close code"))
-  (let ((bytes (websocket--text reason)))
-    (when (> (length bytes) 123) (error "WebSocket Close reason exceeds 123 bytes"))
+  (when (> (websocket--text-size reason) 123) (error "WebSocket Close reason exceeds 123 bytes"))
+  (let ((bytes (encode-coding-string reason 'utf-8-unix t)))
     (let ((payload (make-string 2 0)))
       (websocket--put-uint payload 0 2 code)
       (concat payload bytes))))
@@ -486,7 +494,9 @@
           (websocket--connection-controls connection)
           (list (websocket--output-create :opcode 8 :bytes payload))
           (websocket--connection-control-count connection) 1)
+    (setf (websocket--connection-control-tail connection) (websocket--connection-controls connection))
     (websocket--drop-output connection)
+    (websocket--cancel-deadline connection 'message)
     (websocket--deadline
      connection 'close (websocket--limit connection :closing-timeout)
      (lambda (c) (websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout))))
@@ -495,6 +505,8 @@
 (cl-defun websocket-close (connection &optional (code 1000) (reason ""))
   "Gracefully close CONNECTION with CODE and REASON, idempotently.
 Pending application output is discarded.  Completion is asynchronous."
+  (when (and (= code 1010) (eq (websocket--connection-role connection) 'server))
+    (error "Close code 1010 is client-only"))
   (let ((payload (websocket--close-payload code reason)))
     (pcase (websocket-state connection)
       ('connecting (websocket-abort connection))
@@ -517,6 +529,11 @@ Pending application output is discarded.  Completion is asynchronous."
   (pcase opcode
     (8
      (let ((info (websocket--read-close payload)))
+       (when (and (eq (websocket--connection-role connection) 'client)
+                  (= (plist-get info :code) 1010))
+         (signal 'websocket-protocol-error nil))
+       (setf (websocket--connection-message connection) nil)
+       (websocket--cancel-deadline connection 'message)
        (setf (websocket--connection-peer-close connection) info
              (websocket--connection-close-received connection) t
              (websocket--connection-events connection) nil)
@@ -527,9 +544,11 @@ Pending application output is discarded.  Completion is asynchronous."
        (when (>= (websocket--connection-control-count connection)
                  (websocket--limit connection :output-items))
          (signal 'websocket-too-large nil))
-       (setf (websocket--connection-controls connection)
-             (nconc (websocket--connection-controls connection)
-                    (list (websocket--output-create :opcode 10 :bytes payload))))
+       (let ((cell (list (websocket--output-create :opcode 10 :bytes payload))))
+         (if (websocket--connection-control-tail connection)
+             (setcdr (websocket--connection-control-tail connection) cell)
+           (setf (websocket--connection-controls connection) cell))
+         (setf (websocket--connection-control-tail connection) cell))
        (cl-incf (websocket--connection-control-count connection))))))
 
 (defun websocket--begin-frame (connection frame)
@@ -543,8 +562,9 @@ Pending application output is discarded.  Completion is asynchronous."
                        :type (if (= opcode 1) 'text 'binary)
                        :utf8 (and (= opcode 1) (websocket--utf8-create))))
         (setf (websocket--connection-message connection) message)
-        (websocket--deadline connection 'message (websocket--limit connection :message-timeout)
-                             (lambda (c) (websocket--fail c 'policy))))
+        (when (eq (websocket-state connection) 'open)
+          (websocket--deadline connection 'message (websocket--limit connection :message-timeout)
+                               (lambda (c) (websocket--fail c 'policy)))))
       (cl-incf (websocket--message-fragments message))
       (cl-incf (websocket--message-bytes message) (websocket--frame-length frame))
       (when (or (> (websocket--message-fragments message) (websocket--limit connection :fragment-count))
@@ -618,16 +638,20 @@ Pending application output is discarded.  Completion is asynchronous."
            (or deferred (>= bytes (websocket--limit connection :drain-bytes))
                (>= frames (websocket--limit connection :drain-frames)))))))
 
-(defun websocket--enqueue (connection opcode bytes)
+(defun websocket--capacity (connection size)
   (unless (eq (websocket-state connection) 'open) (error "WebSocket is not open"))
-  (when (> (length bytes) (websocket--limit connection :message-bytes))
+  (when (> size (websocket--limit connection :message-bytes))
     (signal 'websocket-too-large nil))
-  (when (or (> (+ (websocket--connection-output-bytes connection) (length bytes))
+  (when (or (> (+ (websocket--connection-output-bytes connection) size)
                (websocket--limit connection :output-bytes))
             (>= (websocket--connection-output-items connection) (websocket--limit connection :output-items)))
     (setf (websocket--connection-backpressured connection) t)
-    (signal 'websocket-backpressure nil))
-  (let ((cell (list (websocket--output-create :opcode opcode :bytes (copy-sequence bytes)))))
+    (signal 'websocket-backpressure nil)))
+
+(defun websocket--enqueue (connection opcode bytes &optional owned)
+  (websocket--capacity connection (length bytes))
+  (let ((cell (list (websocket--output-create :opcode opcode
+                                            :bytes (if owned bytes (copy-sequence bytes))))))
     (if (websocket--connection-output-tail connection)
         (setcdr (websocket--connection-output-tail connection) cell)
       (setf (websocket--connection-output connection) cell))
@@ -641,12 +665,14 @@ Pending application output is discarded.  Completion is asynchronous."
   "Queue a snapshot of Unicode scalar TEXT on CONNECTION.
 Return t when accepted, not delivered.  Signal `websocket-backpressure'
 without queue mutation if capacity is exhausted."
-  (websocket--enqueue connection 1 (websocket--text text)))
+  (websocket--capacity connection (websocket--text-size text))
+  (websocket--enqueue connection 1 (encode-coding-string text 'utf-8-unix) t))
 
 (defun websocket-send-text-bytes (connection bytes)
   "Queue validated unibyte UTF-8 BYTES without decoding and re-encoding.
 The acceptance and backpressure contract is that of `websocket-send-text'."
   (websocket--octets bytes)
+  (websocket--capacity connection (length bytes))
   (websocket--utf8-feed (websocket--utf8-create) bytes t)
   (websocket--enqueue connection 1 bytes))
 
@@ -668,7 +694,9 @@ Signal `websocket-backpressure' without queue mutation when full."
              (payload (websocket--output-bytes job))
              (offset (websocket--output-offset job))
              (end (if control (length payload)
-                    (min (length payload) (+ offset (websocket--limit connection :write-frame-bytes)))))
+                    (min (length payload)
+                         (+ offset (websocket--limit connection :write-frame-bytes))
+                         (+ offset (max 1 (- (websocket--limit connection :drain-bytes) bytes))))))
              (final (= end (length payload)))
              (opcode (if (websocket--output-started job) 0 (websocket--output-opcode job)))
              (wire (websocket--wire opcode final (substring payload offset end)
@@ -679,6 +707,8 @@ Signal `websocket-backpressure' without queue mutation when full."
             (progn
               (pop (websocket--connection-controls connection))
               (cl-decf (websocket--connection-control-count connection))
+              (unless (websocket--connection-controls connection)
+                (setf (websocket--connection-control-tail connection) nil))
               (when (= opcode 8) (setf (websocket--connection-close-sent connection) t)))
           (when final
             (pop (websocket--connection-output connection))
