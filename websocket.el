@@ -818,7 +818,9 @@ Signal `websocket-backpressure' without queue mutation when full."
       (when (or (> (+ (websocket--http-bytes http)
                        (- (point-max) (websocket--connection-cursor connection)))
                     (websocket--limit connection :header-bytes))
-                (> (- (point-max) (websocket--connection-cursor connection))
+                (> (- (point-max) (websocket--connection-cursor connection)
+                      (if (and (> (point-max) (websocket--connection-cursor connection))
+                               (= (char-before (point-max)) 13)) 1 0))
                    (websocket--limit connection :line-bytes)))
         (unless done (signal 'websocket-too-large nil)))
       (when done
@@ -852,15 +854,7 @@ Signal `websocket-backpressure' without queue mutation when full."
                 (when (memq (websocket-state connection) '(open closing))
                   (unless (websocket--connection-failure connection)
                     (setq more (websocket--parse-frames connection)))
-                  (websocket--write connection))
-                (when (and (websocket--connection-eof connection) (not more)
-                           (not (eq (websocket-state connection) 'closed)))
-                  (websocket--terminate
-                   connection
-                   (if (and (websocket--connection-close-sent connection)
-                            (websocket--connection-close-received connection))
-                       (append (websocket--connection-peer-close connection) '(:clean t :cause close))
-                     '(:code 1006 :reason "" :clean nil :cause transport)))))
+                  (websocket--write connection)))
             (websocket-invalid-utf8 (websocket--fail connection 'utf8))
             (websocket-too-large (websocket--fail connection 'size))
             (websocket-protocol-error (websocket--fail connection 'protocol))
@@ -869,6 +863,14 @@ Signal `websocket-backpressure' without queue mutation when full."
              (websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport))))
         (setf (websocket--connection-busy connection) nil))
       (websocket--dispatch connection)
+      (when (and (websocket--connection-eof connection) (not more)
+                 (not (eq (websocket-state connection) 'closed)))
+        (websocket--terminate
+         connection
+         (if (and (websocket--connection-close-sent connection)
+                  (websocket--connection-close-received connection))
+             (append (websocket--connection-peer-close connection) '(:clean t :cause close))
+           '(:code 1006 :reason "" :clean nil :cause transport))))
       (when (or more (websocket--connection-work-pending connection)
                 (websocket--connection-failure connection)
                 (websocket--connection-controls connection)

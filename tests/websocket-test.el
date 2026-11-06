@@ -50,6 +50,23 @@
 
 (ert-deftest websocket-opening-boundary ()
   (let* ((key "dGhlIHNhbXBsZSBub25jZQ==")
+         (wire (concat "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                       "Sec-WebSocket-Accept: " (websocket--accept key) "\r\n"
+                       "X: " (make-string 61 65) "\r\n\r\n" (unibyte-string #x82 1 42))))
+    (dotimes (split (1+ (length wire)))
+      (websocket-test--connection connection
+        (let (messages)
+          (setf (websocket--connection-state connection) 'connecting
+                (websocket--connection-key connection) key
+                (websocket--connection-limits connection) (websocket--limits '(:line-bytes 64))
+                (websocket--connection-callbacks connection)
+                (list :on-message (lambda (_ _type message) (push message messages))))
+          (dolist (chunk (list (substring wire 0 split) (substring wire split)))
+            (websocket--filter process chunk)
+            (websocket-test--drain connection))
+          (should (eq (websocket-state connection) 'open))
+          (should (equal messages '("*")))))))
+  (let* ((key "dGhlIHNhbXBsZSBub25jZQ==")
          (address (websocket--url "ws://[::1]:8080?x=%20"))
          (request (websocket--client-request address key '("chat") '(("Origin" . "null"))))
          (http (websocket-test--http request)))
@@ -118,6 +135,17 @@
     (should (eq (plist-get (websocket--connection-failure connection) :cause) 'utf8))))
 
 (ert-deftest websocket-lifecycle-and-bounds ()
+  (dolist (tail (list "" (unibyte-string #x81 5 65)))
+    (websocket-test--connection connection
+      (let (events)
+        (setf (websocket--connection-callbacks connection)
+              (list :on-message (lambda (_ type message) (push (list type message) events))
+                    :on-close (lambda (_ info) (push (plist-get info :cause) events))))
+        (websocket--filter process (concat (unibyte-string #x81 1 65) tail))
+        (setf (websocket--connection-eof connection) t)
+        (websocket-test--drain connection)
+        (websocket-test--drain connection)
+        (should (equal (nreverse events) '((text "A") transport))))))
   (websocket-test--connection connection
     (let (messages)
       (setf (websocket--connection-callbacks connection)
