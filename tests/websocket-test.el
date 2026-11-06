@@ -156,6 +156,15 @@
     (should (eq (plist-get (websocket--connection-failure connection) :cause) 'utf8))))
 
 (ert-deftest websocket-lifecycle-and-bounds ()
+  (dolist (wire (list (unibyte-string #x82 126 1 0)
+                       (unibyte-string 2 0 0 0 #x80 0)
+                       (make-string 65 0)))
+    (websocket-test--connection connection
+      (setf (websocket--connection-limits connection)
+            (websocket--limits '(:frame-bytes 64 :write-frame-bytes 64 :fragment-count 2 :input-bytes 64)))
+      (websocket--filter process wire)
+      (unless (websocket--connection-failure connection) (websocket-test--drain connection))
+      (should (eq (plist-get (websocket--connection-failure connection) :cause) 'size))))
   (dolist (tail (list "" (unibyte-string #x81 5 65)))
     (websocket-test--connection connection
       (let (events)
@@ -226,6 +235,25 @@
     (should (funcall predicate))))
 
 (ert-deftest websocket-transport-and-shutdown ()
+  (dolist (mode '(reject error))
+    (unwind-protect
+        (let* ((opened 0) server-info client-info
+               (listener
+                (websocket-listen
+                 :service t
+                 :admit (lambda (_ _request) (when (eq mode 'error) (error "Admission failed")))
+                 :on-open (lambda (_) (cl-incf opened))
+                 :on-close (lambda (_ info) (setq server-info info))))
+               (client
+                (websocket-connect
+                 (format "ws://127.0.0.1:%d" (websocket-listener-port listener))
+                 :on-open (lambda (_) (cl-incf opened))
+                 :on-close (lambda (_ info) (setq client-info info)))))
+          (websocket-test--wait (lambda () (and server-info client-info)))
+          (should (= opened 0))
+          (should (eq (plist-get server-info :cause) (if (eq mode 'error) 'application 'policy)))
+          (should (eq (websocket-state client) 'closed)))
+      (websocket-shutdown)))
   (unwind-protect
       (let* (received terminal client-returned server-open listener
              (_listener
