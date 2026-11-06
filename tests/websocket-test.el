@@ -160,4 +160,51 @@
     (websocket-test--drain connection)
     (should (= (with-current-buffer (websocket--connection-input connection) (buffer-size)) 0))))
 
+(defun websocket-test--wait (predicate)
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (should (funcall predicate))))
+
+(ert-deftest websocket-transport-and-shutdown ()
+  (unwind-protect
+      (let* (received terminal client-returned server-open listener
+             (_listener
+              (setq listener (websocket-listen
+               :service t
+               :admit (lambda (_ request)
+                        (should (equal (plist-get request :authority)
+                                       (format "127.0.0.1:%d" (websocket-listener-port listener))))
+                        (should-not (plist-get request :origin))
+                        '(:accept t :protocol "echo"))
+               :on-open (lambda (_) (setq server-open t))
+               :on-message (lambda (c type message)
+                             (if (eq type 'text) (websocket-send-text c message)
+                               (websocket-send-binary c message))))))
+             (client
+              (websocket-connect
+               (format "ws://127.0.0.1:%d" (websocket-listener-port listener))
+               :protocols '("echo")
+               :on-open (lambda (c)
+                          (should client-returned)
+                          (should (equal (websocket-protocol c) "echo"))
+                          (websocket-send-text c "\ufeffλ\r\n😀"))
+               :on-message (lambda (c type message)
+                             (push (list type message) received)
+                             (websocket-close c))
+               :on-close (lambda (_ info) (setq terminal info)))))
+        (setq client-returned t)
+        (websocket-test--wait (lambda () terminal))
+        (should server-open)
+        (should (equal received '((text "\ufeffλ\r\n😀"))))
+        (should (plist-get terminal :clean))
+        (should (eq (websocket-state client) 'closed))
+        (websocket-stop-listener listener))
+    (websocket-shutdown))
+  (should (= (hash-table-count websocket--connections) 0))
+  (should (= (hash-table-count websocket--listeners) 0))
+  (should-not websocket--opening-active)
+  (should-not websocket--opening-queue)
+  (websocket-shutdown))
+
 ;;; websocket-test.el ends here

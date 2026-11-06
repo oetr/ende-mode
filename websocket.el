@@ -924,7 +924,156 @@ Native writes and DNS/security operations can block despite bounded work."
       (websocket--schedule connection)
       connection)))
 
-(declare-function websocket--admit "websocket" (connection http))
+(defun websocket--admit (connection http)
+  (let* ((request (websocket--server-request http))
+         (key (copy-sequence (plist-get request :key)))
+         (offered (mapcar #'copy-sequence (plist-get request :protocols)))
+         (listener (websocket--connection-listener connection))
+         (decision
+          (condition-case nil
+              (funcall (websocket--listener-admit listener) connection
+                       (list :target (plist-get request :target)
+                             :authority (plist-get request :authority)
+                             :origin (plist-get request :origin)
+                             :protocols (plist-get request :protocols)
+                             :headers (plist-get request :headers)
+                             :peer (process-contact (websocket--connection-process connection) :remote)))
+            ((error quit)
+             (websocket--terminate connection '(:code 1011 :reason "" :clean nil :cause application))
+             nil))))
+    (when (eq (websocket-state connection) 'connecting)
+      (if (not (and (listp decision) (plist-get decision :accept)
+                    (not (websocket--listener-stopped listener))))
+          (websocket--terminate connection '(:code 1008 :reason "" :clean nil :cause policy))
+        (let ((protocol (plist-get decision :protocol)))
+          (if (and protocol (not (member protocol offered)))
+              (websocket--terminate connection '(:code 1011 :reason "" :clean nil :cause application))
+            (let ((response (concat "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                                    "Connection: Upgrade\r\nSec-WebSocket-Accept: "
+                                    (websocket--accept key) "\r\n"
+                                    (when protocol (concat "Sec-WebSocket-Protocol: " protocol "\r\n"))
+                                    "\r\n")))
+              (process-send-string (websocket--connection-process connection) response)
+              (when (eq (websocket-state connection) 'connecting)
+                (websocket--opened connection (and protocol (copy-sequence protocol)))))))))))
+
+(defun websocket--accepted (listener process)
+  (or (process-get process 'websocket--connection)
+      (if (or (websocket--listener-stopped listener)
+              (>= (hash-table-count (websocket--listener-connections listener))
+                  (plist-get (websocket--listener-limits listener) :connections)))
+          (progn
+            (set-process-filter process #'ignore)
+            (set-process-sentinel process #'ignore)
+            (set-process-plist process nil)
+            (ignore-errors (delete-process process))
+            nil)
+        (let ((connection (websocket--new 'server (websocket--listener-limits listener)
+                                          (websocket--listener-callbacks listener))))
+          (setf (websocket--connection-process connection) process
+                (websocket--connection-listener connection) listener)
+          (set-process-plist process (list 'websocket--connection connection 'websocket--generation 0))
+          (set-process-coding-system process 'binary 'binary)
+          (set-process-query-on-exit-flag process nil)
+          (puthash connection t (websocket--listener-connections listener))
+          connection))))
+
+(defun websocket--accept-log (server process _message)
+  (when-let* ((listener (process-get server 'websocket--listener)))
+    (websocket--accepted listener process)))
+
+(cl-defun websocket-listen (&key (host "127.0.0.1") service admit limits
+                                on-open on-message on-close on-writable)
+  "Listen for ws connections on HOST and SERVICE; return a listener handle.
+SERVICE is a TCP port or t for an OS-assigned port.  HOST defaults to
+loopback.  TLS listeners are not supported; use an external TLS terminator.
+ADMIT is required and receives connection and a request plist containing
+:target, :authority, :origin, :protocols, :headers, and :peer.  It must
+validate the target, authority, Origin policy, and authentication BEFORE
+returning (:accept t), optionally with :protocol selecting one offered
+token.  Every other result rejects admission.  Missing Origin is nil;
+literal null Origin is the string \"null\".  Origin is not authentication.
+Callbacks and LIMITS have the contracts of `websocket-connect'.
+No callbacks run before this constructor returns.  Stopping the listener
+disposes of all its accepted connections."
+  (when websocket--shutting-down (error "WebSocket shutdown in progress"))
+  (unless (and (stringp host) (not (string-empty-p host))
+               (or (eq service t) (and (integerp service) (<= 1 service 65535)))
+               (functionp admit))
+    (error "Invalid WebSocket listener arguments"))
+  (let* ((limits (websocket--limits limits))
+         (callbacks (websocket--callbacks on-open on-message on-close on-writable))
+         (listener (websocket--listener-create :limits limits :admit admit :callbacks callbacks
+                                               :connections (make-hash-table :test #'eq))))
+    (condition-case error
+        (let ((process
+               (make-network-process
+                :name "websocket-listener" :host host :service service :server t :stop t
+                :buffer nil :coding 'binary :filter-multibyte nil :noquery t
+                :filter #'websocket--filter :sentinel #'websocket--sentinel
+                :log #'websocket--accept-log :plist (list 'websocket--listener listener))))
+          (setf (websocket--listener-process listener) process)
+          (puthash listener t websocket--listeners)
+          (let ((generation (websocket--listener-generation listener)))
+            (setf (websocket--listener-timer listener)
+                  (run-at-time 0 nil
+                               (lambda ()
+                                 (when (and (= generation (websocket--listener-generation listener))
+                                            (not (websocket--listener-stopped listener)))
+                                   (setf (websocket--listener-timer listener) nil)
+                                   (continue-process process))))))
+          listener)
+      ((error quit)
+       (websocket-stop-listener listener)
+       (signal (car error) (cdr error))))))
+
+(defun websocket-listener-port (listener)
+  "Return LISTENER's bound TCP port, or nil after it has stopped."
+  (when-let* ((process (websocket--listener-process listener)))
+    (process-contact process :service)))
+
+(defun websocket-stop-listener (listener)
+  "Stop LISTENER and abort all its accepted connections, idempotently."
+  (unless (websocket--listener-stopped listener)
+    (setf (websocket--listener-stopped listener) t)
+    (cl-incf (websocket--listener-generation listener))
+    (when-let* ((timer (websocket--listener-timer listener))) (cancel-timer timer))
+    (let ((process (websocket--listener-process listener)) connections)
+      (setf (websocket--listener-process listener) nil
+            (websocket--listener-timer listener) nil
+            (websocket--listener-admit listener) nil
+            (websocket--listener-callbacks listener) nil)
+      (remhash listener websocket--listeners)
+      (when process
+        (set-process-plist process nil)
+        (ignore-errors (delete-process process)))
+      (maphash (lambda (connection _) (push connection connections))
+               (websocket--listener-connections listener))
+      (dolist (connection connections)
+        (websocket--terminate connection '(:code 1001 :reason "" :clean nil :cause listener))))))
+
+(defun websocket-shutdown ()
+  "Stop all listeners and dispose of all connections, work, and callbacks.
+Close callbacks run after resources are detached.  Safe to call repeatedly;
+new connections cannot be constructed during shutdown callbacks."
+  (unless websocket--shutting-down
+    (let ((websocket--shutting-down t) listeners connections)
+      (maphash (lambda (listener _) (push listener listeners)) websocket--listeners)
+      (dolist (listener listeners) (websocket-stop-listener listener))
+      (maphash (lambda (connection _) (push connection connections)) websocket--connections)
+      (dolist (connection connections)
+        (websocket--terminate connection '(:code 1001 :reason "" :clean nil :cause shutdown)))
+      (dolist (connection connections)
+        (when-let* ((timer (websocket--connection-work-timer connection))) (cancel-timer timer))
+        (setf (websocket--connection-work-timer connection) nil)
+        (websocket--dispatch connection))
+      (setq websocket--opening-queue nil websocket--opening-active nil)
+      (advice-remove 'nsm-verify-connection #'websocket--nsm-verify))))
+
+(defun websocket-unload-function ()
+  (websocket-shutdown)
+  nil)
+
 
 (provide 'websocket)
 ;;; websocket.el ends here
