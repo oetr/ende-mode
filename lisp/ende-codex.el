@@ -1798,7 +1798,10 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
      (ende-codex--lifecycle session) 'ende-codex
      (if auth #'ende-codex--request-body #'ende-responses--request-body)
      messages profile debug
-     (apply-partially #'ende-responses-ws-send-prepared request)
+     (apply-partially #'ende-responses-ws-send-prepared request
+                      (ende-responses-ws-request-attempt request)
+                      (ende-responses-ws-connection-generation
+                       (ende-responses-ws-request-connection request)))
      (ende-responses-ws-finalization request))))
 
 (defun ende-codex--auth-ready (session messages auth)

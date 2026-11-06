@@ -388,6 +388,7 @@ errors are reported but never propagated into transport completion."
                                    (ende-error-details value)))
                (state (cond
                        ((eq outcome 'success) "success")
+                       ((eq outcome 'discarded) "discarded")
                        ((eq error-kind 'cancelled) "cancelled")
                        (t "failure")))
                (completed (float-time))

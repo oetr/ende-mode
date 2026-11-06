@@ -31,6 +31,7 @@
 (require 'ert)
 (require 'ende)
 (require 'ende-test-wait)
+(require 'ende-test-helpers)
 
 (defmacro ende-responses-ws-test--with-sockets (&rest body)
   "Run BODY through the real connector, controlling native process completion."
@@ -377,8 +378,113 @@
           (should (= (length errors) 2))
           (should (cl-find :partial-result events :key (lambda (event) (plist-get event :type)))))))))
 
+(defun ende-responses-ws-test--delivery ()
+  "Exercise unsent replacement and reentrant submission through real framing."
+  (ende-responses-ws-test--with-sockets
+    (let* ((profile (ende-responses-ws-test--profile 1))
+           (errors nil) (done 0)
+           (callbacks (list :on-error (lambda (error) (push error errors))
+                            :on-done (lambda (_) (cl-incf done))))
+           (prepare (symbol-function 'ende-request-prepare)) pending)
+      (setq opening (lambda (process)
+                      (process-put process :fixture-status 'open)
+                      (funcall (process-sentinel process) process "immediate TLS completion")))
+      (ende-llm-default '(("user" . "First")) callbacks profile)
+      (setq opening nil)
+      (should (process-get (car sockets) :fixture-upgrade))
+      (ende-responses-ws-test--open (car sockets))
+      (ende-responses-ws-test--complete (car sockets) "resp_first")
+      (let ((old (car sockets)))
+        (cl-letf (((symbol-function 'ende-request-prepare)
+                   (lambda (&rest arguments) (setq pending arguments))))
+          (ende-llm-default '(("user" . "First") ("user" . "Next")) callbacks profile))
+        (funcall (plist-get (ende-responses-ws-test--socket-options old) :on-close) old)
+        (should-not errors)
+        (should (= (length sockets) 2))
+        (ende-responses-ws-test--open (car sockets))
+        (should-not (ende-responses-ws-test--socket-sent (car sockets)))
+        (apply prepare pending)
+        (let ((wire (car (ende-responses-ws-test--socket-sent (car sockets)))))
+          (should-not (gethash "previous_response_id" wire))
+          (should (= (length (gethash "input" wire)) 2)))
+        (ende-responses-ws-test--complete old)
+        (should (= done 1))
+        (ende-responses-ws-test--complete (car sockets) "resp_next"))
+      ;; A send can yield, receive a recovery error, then raise on returning.
+      (setq writing
+            (lambda (process)
+              (setq writing nil)
+              (ende-responses-ws-test--event
+               process "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
+              (error "private dependency failure fixture-api-key")))
+      (ende-llm-default '(("user" . "Recovery during send")) callbacks profile)
+      (should-not errors)
+      (ende-responses-ws-test--complete (car sockets))
+      (should (= done 3))
+      (setq writing
+            (lambda (process)
+              (setq writing nil)
+              (ende-responses-ws-test--event
+               process "{\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}")
+              (funcall (plist-get (ende-responses-ws-test--socket-options process) :on-close) process)))
+      (let ((count (length sockets)))
+        (ende-llm-default '(("user" . "Ambiguous delivery")) callbacks profile)
+        (should (= count (length sockets)))
+        (should (= (length errors) 1))
+        (should (eq (plist-get (ende-error-details (car errors)) :delivery) 'sending))
+        (should-not (plist-get (ende-error-details (car errors)) :close-code))
+        (should (zerop (hash-table-count ende-responses-ws--connections)))))))
+
+(defun ende-responses-ws-test--tool-wait ()
+  "Keep a real queue job alive across tool wait and an idle socket loss."
+  (ende-test--reset)
+  (ende-responses-ws-test--with-sockets
+    (let ((ende-llm-function #'ende-llm-default)
+          (ende-tools--registry (copy-sequence ende-tools--registry))
+          (executions 0) pending job)
+      (unwind-protect
+          (progn
+            (ende-tool-register
+             'ende_ws_wait "Wait fixture" ende-tools--empty-object-schema
+             (lambda (_arguments _root callback)
+               (cl-incf executions) (setq pending callback))
+             nil :no-resource '(:requires-root nil :async t))
+            (setq job (ende-enqueue
+                       (list 'agent :profile (ende-responses-ws-test--profile)
+                             :access-policy '(:active-tools (about_thinking ende_ws_wait))
+                             :instruction '(:task "Wait, then finish")
+                             :prepare #'ende-agent-private-target)))
+            (ende-responses-ws-test--open (car sockets))
+            (let ((old (car sockets)) (owner (ende-job-id job)))
+              (ende-responses-ws-test--complete
+               old "resp_tool"
+               "[{\"type\":\"function_call\",\"id\":\"fc_wait\",\"call_id\":\"call_wait\",\"name\":\"ende_ws_wait\",\"arguments\":\"{}\",\"status\":\"completed\"}]")
+              (ende-test--wait-for (lambda () pending))
+              (should (= executions 1))
+              (should-not (ende-responses-ws-connection-active (gethash owner ende-responses-ws--connections)))
+              (funcall (plist-get (ende-responses-ws-test--socket-options old) :on-close) old)
+              (should (eq (ende-job-state job) 'running))
+              (should-not (ende-job-error job))
+              (funcall pending '(:text "tool finished") nil)
+              (ende-test--wait-for (lambda () (= (length sockets) 2)))
+              (ende-responses-ws-test--open (car sockets))
+              (let* ((wire (car (ende-responses-ws-test--socket-sent (car sockets))))
+                     (input (gethash "input" wire)))
+                (should-not (gethash "previous_response_id" wire))
+                (should (equal (gethash "type" (aref input (- (length input) 2))) "function_call"))
+                (should (equal (gethash "type" (aref input (1- (length input)))) "function_call_output")))
+              (ende-responses-ws-test--complete (car sockets) "resp_final")
+              (should (eq (ende-job-state job) 'completed))
+              (should (= executions 1))
+              (should (= (ende-job-tool-call-count job) 1))
+              (should-not (gethash owner ende-responses-ws--connections))
+              (should-not (ende-responses-ws-test--socket-open (car sockets)))))
+        (ende-test--reset)))))
+
 (ert-deftest ende-responses-ws-failure-lifecycle ()
   (ende-responses-ws-test--recoveries)
+  (ende-responses-ws-test--delivery)
+  (ende-responses-ws-test--tool-wait)
   (ende-responses-ws-test--with-sockets
     (let ((done 0) (errors nil) (events nil) cancel)
       (let ((callbacks (list :on-start (lambda (function) (setq cancel function))
