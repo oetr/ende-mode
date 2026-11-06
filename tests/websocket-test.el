@@ -66,6 +66,25 @@
     http))
 
 (ert-deftest websocket-opening-boundary ()
+  (let ((request (websocket--client-request (websocket--url "ws://example.org/")
+                                            "dGhlIHNhbXBsZSBub25jZQ==" nil nil)))
+    (dolist (case (list (cons 426 (string-replace "Version: 13" "Version: 12" request))
+                       (cons 400 (concat "get" (substring request 3)))))
+      (websocket-test--connection connection
+        (let (response opened terminal)
+          (setf (websocket--connection-role connection) 'server
+                (websocket--connection-state connection) 'connecting
+                (websocket--connection-callbacks connection)
+                (list :on-open (lambda (_) (setq opened t))
+                      :on-close (lambda (_ info) (setq terminal info))))
+          (cl-letf (((symbol-function 'process-send-string)
+                     (lambda (_ bytes) (setq response bytes))))
+            (websocket--filter process (concat (cdr case) (unibyte-string #x81 0)))
+            (websocket-test--drain connection))
+          (should (string-prefix-p (format "HTTP/1.1 %d " (car case)) response))
+          (when (= (car case) 426) (should (string-search "Sec-WebSocket-Version: 13\r\n" response)))
+          (should-not opened)
+          (should (eq (plist-get terminal :cause) 'protocol))))))
   (let* ((key "dGhlIHNhbXBsZSBub25jZQ==")
          (wire (concat "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
                        "Sec-WebSocket-Accept: " (websocket--accept key) "\r\n"

@@ -7,6 +7,7 @@
 
 (define-error 'websocket-error "WebSocket failure")
 (define-error 'websocket-protocol-error "Invalid WebSocket protocol" 'websocket-error)
+(define-error 'websocket-version-error "Unsupported WebSocket version" 'websocket-protocol-error)
 (define-error 'websocket-invalid-utf8 "Invalid WebSocket UTF-8" 'websocket-error)
 (define-error 'websocket-too-large "WebSocket limit exceeded" 'websocket-error)
 (define-error 'websocket-backpressure "WebSocket output queue full" 'websocket-error)
@@ -340,8 +341,9 @@
           (protocols (websocket--tokens http "sec-websocket-protocol")))
       (condition-case nil (websocket--authority authority)
         (error (signal 'websocket-protocol-error nil)))
-      (unless (and (equal (websocket--single http "sec-websocket-version") "13")
-                   (string-match-p "\\`[A-Za-z0-9+/]\\{22\\}==\\'" key)
+      (unless (equal (websocket--single http "sec-websocket-version") "13")
+        (signal 'websocket-version-error nil))
+      (unless (and (string-match-p "\\`[A-Za-z0-9+/]\\{22\\}==\\'" key)
                    (condition-case nil
                        (let ((nonce (base64-decode-string key)))
                          (and (= (length nonce) 16)
@@ -553,13 +555,28 @@ Pending application output is discarded.  Completion is asynchronous."
       ('open (websocket--queue-close connection payload))))
   nil)
 
-(defun websocket--fail (connection cause)
+(defun websocket--reject (connection status info)
+  (let ((phrase (pcase status (403 "Forbidden") (426 "Upgrade Required")
+                       (431 "Request Header Fields Too Large") (500 "Internal Server Error")
+                       (_ "Bad Request"))))
+    (when-let* ((process (websocket--connection-process connection)))
+      (condition-case nil
+          (process-send-string
+           process (concat (format "HTTP/1.1 %d %s\r\n" status phrase)
+                           "Connection: close\r\nContent-Length: 0\r\n"
+                           (when (= status 426) "Sec-WebSocket-Version: 13\r\n") "\r\n"))
+        ((error quit) nil)))
+    (websocket--terminate connection info)))
+
+(defun websocket--fail (connection cause &optional status)
   (unless (or (eq (websocket-state connection) 'closed)
               (websocket--connection-failure connection))
     (let* ((code (pcase cause ('utf8 1007) ('size 1009) ('policy 1008) (_ 1002)))
            (info (list :code code :reason "" :clean nil :cause cause)))
       (if (eq (websocket-state connection) 'connecting)
-          (websocket--terminate connection info)
+          (if (eq (websocket--connection-role connection) 'server)
+              (websocket--reject connection (or status (if (eq cause 'size) 431 400)) info)
+            (websocket--terminate connection info))
         (setf (websocket--connection-failure connection) info
               (websocket--connection-events connection) nil)
         (websocket--queue-close connection (websocket--close-payload code ""))
@@ -966,6 +983,7 @@ Signal `websocket-backpressure' without queue mutation when full."
                   (websocket--write connection)))
             (websocket-invalid-utf8 (websocket--fail connection 'utf8))
             (websocket-too-large (websocket--fail connection 'size))
+            (websocket-version-error (websocket--fail connection 'protocol 426))
             (websocket-protocol-error (websocket--fail connection 'protocol))
             ((error quit)
              (ignore error)
@@ -1050,15 +1068,15 @@ Native writes and DNS/security operations can block despite bounded work."
                              :headers (plist-get request :headers)
                              :peer (process-contact (websocket--connection-process connection) :remote)))
             ((error quit)
-             (websocket--terminate connection '(:code 1011 :reason "" :clean nil :cause application))
+             (websocket--reject connection 500 '(:code 1011 :reason "" :clean nil :cause application))
              nil))))
     (when (eq (websocket-state connection) 'connecting)
       (if (not (and (listp decision) (plist-get decision :accept)
                     (not (websocket--listener-stopped listener))))
-          (websocket--terminate connection '(:code 1008 :reason "" :clean nil :cause policy))
+          (websocket--reject connection 403 '(:code 1008 :reason "" :clean nil :cause policy))
         (let ((protocol (plist-get decision :protocol)))
           (if (and protocol (not (member protocol offered)))
-              (websocket--terminate connection '(:code 1011 :reason "" :clean nil :cause application))
+              (websocket--reject connection 500 '(:code 1011 :reason "" :clean nil :cause application))
             (let ((response (concat "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                                     "Connection: Upgrade\r\nSec-WebSocket-Accept: "
                                     (websocket--accept key) "\r\n"
