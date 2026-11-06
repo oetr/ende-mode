@@ -4,6 +4,7 @@
 (require 'subr-x)
 (require 'url-parse)
 (require 'gnutls)
+(require 'nsm)
 
 (define-error 'websocket-error "WebSocket failure")
 (define-error 'websocket-protocol-error "Invalid WebSocket protocol" 'websocket-error)
@@ -310,6 +311,612 @@
           (when protocols (concat "Sec-WebSocket-Protocol: " (string-join protocols ", ") "\r\n"))
           (mapconcat (lambda (field) (concat (car field) ": " (cdr field) "\r\n")) headers "")
           "\r\n"))
+
+(cl-defstruct (websocket--message (:constructor websocket--message-create))
+  type utf8 chunks (bytes 0) (fragments 0))
+
+(cl-defstruct (websocket--output (:constructor websocket--output-create))
+  opcode bytes (offset 0) started)
+
+(cl-defstruct (websocket--connection (:constructor websocket--connection-create))
+  role process listener limits address headers protocols key protocol
+  (state 'connecting) (generation 0) callbacks
+  input (cursor 1) http frame message
+  output output-tail (output-bytes 0) (output-items 0)
+  controls (control-count 0) backpressured
+  close-queued close-sent close-received peer-close failure eof
+  timers work-timer busy events terminal)
+
+(cl-defstruct (websocket--listener (:constructor websocket--listener-create))
+  process limits admit callbacks connections timer (generation 0) stopped)
+
+(defvar websocket--connections (make-hash-table :test #'eq))
+(defvar websocket--listeners (make-hash-table :test #'eq))
+(defvar websocket--opening-queue nil)
+(defvar websocket--opening-active nil)
+(defvar websocket--shutting-down nil)
+
+(defun websocket-state (connection)
+  "Return CONNECTION's state: connecting, open, closing, or closed."
+  (websocket--connection-state connection))
+
+(defun websocket-protocol (connection)
+  "Return CONNECTION's selected subprotocol, or nil if none was selected."
+  (websocket--connection-protocol connection))
+
+(defun websocket--limit (connection key)
+  (plist-get (websocket--connection-limits connection) key))
+
+(defun websocket--cancel-deadline (connection kind)
+  (when-let* ((entry (assq kind (websocket--connection-timers connection))))
+    (cancel-timer (cdr entry))
+    (setf (websocket--connection-timers connection)
+          (delq entry (websocket--connection-timers connection)))))
+
+(defun websocket--deadline (connection kind seconds function)
+  (websocket--cancel-deadline connection kind)
+  (let* ((generation (websocket--connection-generation connection))
+         (timer
+          (run-at-time seconds nil
+                       (lambda ()
+                         (when (and (= generation (websocket--connection-generation connection))
+                                    (not (eq (websocket-state connection) 'closed)))
+                           (websocket--cancel-deadline connection kind)
+                           (funcall function connection))))))
+    (push (cons kind timer) (websocket--connection-timers connection))))
+
+(defun websocket--schedule (connection)
+  (unless (or (websocket--connection-work-timer connection)
+              (websocket--connection-busy connection))
+    (let ((generation (websocket--connection-generation connection)))
+      (setf (websocket--connection-work-timer connection)
+            (run-at-time 0 nil
+                         (lambda ()
+                           (when (= generation (websocket--connection-generation connection))
+                             (setf (websocket--connection-work-timer connection) nil)
+                             (websocket--run connection))))))))
+
+(defun websocket--emit (connection event &rest arguments)
+  (push (cons event arguments) (websocket--connection-events connection)))
+
+(defun websocket--dispatch (connection)
+  (let ((events (nreverse (websocket--connection-events connection))))
+    (setf (websocket--connection-events connection) nil)
+    (dolist (event events)
+      (when (and (not (eq (websocket-state connection) 'closed))
+                 (or (not (eq (car event) :on-message))
+                     (and (eq (websocket-state connection) 'open)
+                          (not (websocket--connection-close-received connection)))))
+        (when-let* ((callback (plist-get (websocket--connection-callbacks connection) (car event))))
+          (condition-case nil
+              (apply callback connection (cdr event))
+            ((error quit)
+             (websocket--terminate connection
+                                   '(:code 1011 :reason "" :clean nil :cause application))))))))
+  (when-let* ((terminal (websocket--connection-terminal connection)))
+    (setf (websocket--connection-terminal connection) nil)
+    (remhash connection websocket--connections)
+    (when (car terminal)
+      (condition-case nil (funcall (car terminal) connection (cdr terminal))
+        ((error quit) nil)))))
+
+(defun websocket--terminate (connection info)
+  (unless (eq (websocket-state connection) 'closed)
+    (setf (websocket--connection-state connection) 'closed)
+    (cl-incf (websocket--connection-generation connection))
+    (let ((process (websocket--connection-process connection))
+          (input (websocket--connection-input connection))
+          (callback (plist-get (websocket--connection-callbacks connection) :on-close)))
+      (dolist (entry (websocket--connection-timers connection)) (cancel-timer (cdr entry)))
+      (when (websocket--connection-work-timer connection)
+        (cancel-timer (websocket--connection-work-timer connection)))
+      (setf (websocket--connection-process connection) nil
+            (websocket--connection-input connection) nil
+            (websocket--connection-timers connection) nil
+            (websocket--connection-work-timer connection) nil
+            (websocket--connection-callbacks connection) nil
+            (websocket--connection-headers connection) nil
+            (websocket--connection-address connection) nil
+            (websocket--connection-key connection) nil
+            (websocket--connection-http connection) nil
+            (websocket--connection-frame connection) nil
+            (websocket--connection-message connection) nil
+            (websocket--connection-output connection) nil
+            (websocket--connection-output-tail connection) nil
+            (websocket--connection-output-bytes connection) 0
+            (websocket--connection-output-items connection) 0
+            (websocket--connection-controls connection) nil
+            (websocket--connection-control-count connection) 0
+            (websocket--connection-events connection) nil
+            (websocket--connection-terminal connection) (cons callback info))
+      (when process
+        (set-process-filter process #'ignore)
+        (set-process-sentinel process #'ignore)
+        (set-process-plist process nil)
+        (ignore-errors (delete-process process)))
+      (when (buffer-live-p input) (kill-buffer input))
+      (when-let* ((listener (websocket--connection-listener connection)))
+        (remhash connection (websocket--listener-connections listener))
+        (setf (websocket--connection-listener connection) nil))
+      (setq websocket--opening-queue (delq connection websocket--opening-queue))
+      (when (eq websocket--opening-active connection)
+        (setq websocket--opening-active nil))
+      (when (car websocket--opening-queue) (websocket--schedule (car websocket--opening-queue)))
+      (websocket--schedule connection))))
+
+(defun websocket-abort (connection)
+  "Immediately dispose of CONNECTION, idempotently; notify close asynchronously."
+  (websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause abort))
+  nil)
+
+(defun websocket--close-code-p (code)
+  (and (integerp code)
+       (or (memq code '(1000 1001 1002 1003 1007 1008 1009 1010 1011 1012 1013 1014))
+           (<= 3000 code 4999))))
+
+(defun websocket--close-payload (code reason)
+  (unless (websocket--close-code-p code) (error "Invalid WebSocket Close code"))
+  (let ((bytes (websocket--text reason)))
+    (when (> (length bytes) 123) (error "WebSocket Close reason exceeds 123 bytes"))
+    (let ((payload (make-string 2 0)))
+      (websocket--put-uint payload 0 2 code)
+      (concat payload bytes))))
+
+(defun websocket--read-close (payload)
+  (when (= (length payload) 1) (signal 'websocket-protocol-error nil))
+  (if (= (length payload) 0) '(:code 1005 :reason "")
+    (let ((code (websocket--uint payload 0 2)) (reason (substring payload 2)))
+      (unless (websocket--close-code-p code) (signal 'websocket-protocol-error nil))
+      (websocket--utf8-feed (websocket--utf8-create) reason t)
+      (list :code code :reason (decode-coding-string reason 'utf-8-unix)))))
+
+(defun websocket--drop-output (connection)
+  (setf (websocket--connection-output connection) nil
+        (websocket--connection-output-tail connection) nil
+        (websocket--connection-output-bytes connection) 0
+        (websocket--connection-output-items connection) 0))
+
+(defun websocket--queue-close (connection payload)
+  (unless (websocket--connection-close-queued connection)
+    (setf (websocket--connection-state connection) 'closing
+          (websocket--connection-close-queued connection) t
+          (websocket--connection-controls connection)
+          (list (websocket--output-create :opcode 8 :bytes payload))
+          (websocket--connection-control-count connection) 1)
+    (websocket--drop-output connection)
+    (websocket--deadline
+     connection 'close (websocket--limit connection :closing-timeout)
+     (lambda (c) (websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout))))
+    (websocket--schedule connection)))
+
+(cl-defun websocket-close (connection &optional (code 1000) (reason ""))
+  "Gracefully close CONNECTION with CODE and REASON, idempotently.
+Pending application output is discarded.  Completion is asynchronous."
+  (let ((payload (websocket--close-payload code reason)))
+    (pcase (websocket-state connection)
+      ('connecting (websocket-abort connection))
+      ('open (websocket--queue-close connection payload))))
+  nil)
+
+(defun websocket--fail (connection cause)
+  (unless (or (eq (websocket-state connection) 'closed)
+              (websocket--connection-failure connection))
+    (let* ((code (pcase cause ('utf8 1007) ('size 1009) ('policy 1008) (_ 1002)))
+           (info (list :code code :reason "" :clean nil :cause cause)))
+      (if (eq (websocket-state connection) 'connecting)
+          (websocket--terminate connection info)
+        (setf (websocket--connection-failure connection) info
+              (websocket--connection-events connection) nil)
+        (websocket--queue-close connection (websocket--close-payload code ""))
+        (websocket--schedule connection)))))
+
+(defun websocket--control (connection opcode payload)
+  (pcase opcode
+    (8
+     (let ((info (websocket--read-close payload)))
+       (setf (websocket--connection-peer-close connection) info
+             (websocket--connection-close-received connection) t
+             (websocket--connection-events connection) nil)
+       (websocket--queue-close connection payload)))
+    (9
+     (unless (or (websocket--connection-close-received connection)
+                 (websocket--connection-close-sent connection))
+       (when (>= (websocket--connection-control-count connection)
+                 (websocket--limit connection :output-items))
+         (signal 'websocket-too-large nil))
+       (setf (websocket--connection-controls connection)
+             (nconc (websocket--connection-controls connection)
+                    (list (websocket--output-create :opcode 10 :bytes payload))))
+       (cl-incf (websocket--connection-control-count connection))))))
+
+(defun websocket--begin-frame (connection frame)
+  (let ((opcode (websocket--frame-opcode frame))
+        (message (websocket--connection-message connection)))
+    (when (< opcode 8)
+      (unless (if (= opcode 0) message (not message))
+        (signal 'websocket-protocol-error nil))
+      (unless message
+        (setq message (websocket--message-create
+                       :type (if (= opcode 1) 'text 'binary)
+                       :utf8 (and (= opcode 1) (websocket--utf8-create))))
+        (setf (websocket--connection-message connection) message)
+        (websocket--deadline connection 'message (websocket--limit connection :message-timeout)
+                             (lambda (c) (websocket--fail c 'policy))))
+      (cl-incf (websocket--message-fragments message))
+      (cl-incf (websocket--message-bytes message) (websocket--frame-length frame))
+      (when (or (> (websocket--message-fragments message) (websocket--limit connection :fragment-count))
+                (> (websocket--message-bytes message) (websocket--limit connection :message-bytes)))
+        (signal 'websocket-too-large nil)))))
+
+(defun websocket--finish-frame (connection frame)
+  (setf (websocket--connection-frame connection) nil)
+  (if (>= (websocket--frame-opcode frame) 8)
+      (websocket--control connection (websocket--frame-opcode frame)
+                          (apply #'concat (nreverse (websocket--frame-chunks frame))))
+    (when (websocket--frame-final frame)
+      (let* ((message (websocket--connection-message connection))
+             (utf8 (websocket--message-utf8 message)))
+        (when utf8 (websocket--utf8-feed utf8 "" t))
+        (setf (websocket--connection-message connection) nil)
+        (websocket--cancel-deadline connection 'message)
+        (when (eq (websocket-state connection) 'open)
+          (let ((bytes (apply #'concat (nreverse (websocket--message-chunks message)))))
+            (websocket--emit connection :on-message (websocket--message-type message)
+                             (if utf8 (decode-coding-string bytes 'utf-8-unix) bytes))))))))
+
+(defun websocket--parse-frames (connection)
+  (let ((bytes 0) (frames 0) (progress t))
+    (with-current-buffer (websocket--connection-input connection)
+      (while (and progress
+                  (< bytes (websocket--limit connection :drain-bytes))
+                  (< frames (websocket--limit connection :drain-frames))
+                  (not (websocket--connection-close-received connection)))
+        (setq progress nil)
+        (let ((cursor (websocket--connection-cursor connection)))
+          (unless (websocket--connection-frame connection)
+            (when-let* ((header (websocket--frame-header
+                                (buffer-substring-no-properties cursor (min (point-max) (+ cursor 14)))
+                                (websocket--connection-role connection)
+                                (websocket--limit connection :frame-bytes))))
+              (websocket--begin-frame connection (cdr header))
+              (cl-incf bytes (car header))
+              (cl-incf cursor (car header))
+              (setf (websocket--connection-cursor connection) cursor
+                    (websocket--connection-frame connection) (cdr header))))
+          (when-let* ((frame (websocket--connection-frame connection)))
+            (let ((count (min (websocket--frame-remaining frame) (- (point-max) cursor)
+                              (max 0 (- (websocket--limit connection :drain-bytes) bytes)))))
+              (when (> count 0)
+                (let ((chunk (buffer-substring-no-properties cursor (+ cursor count))))
+                  (when (websocket--frame-mask frame)
+                    (websocket--mask! chunk (websocket--frame-mask frame) (websocket--frame-offset frame)))
+                  (if (>= (websocket--frame-opcode frame) 8)
+                      (push chunk (websocket--frame-chunks frame))
+                    (let ((message (websocket--connection-message connection)))
+                      (when (websocket--message-utf8 message)
+                        (websocket--utf8-feed (websocket--message-utf8 message) chunk))
+                      (push chunk (websocket--message-chunks message)))))
+                (cl-incf (websocket--frame-offset frame) count)
+                (cl-decf (websocket--frame-remaining frame) count)
+                (cl-incf (websocket--connection-cursor connection) count)
+                (cl-incf bytes count)
+                (setq progress t))
+              (when (= (websocket--frame-remaining frame) 0)
+                (cl-incf frames)
+                (websocket--finish-frame connection frame)
+                (setq progress t))))))
+      (delete-region (point-min) (websocket--connection-cursor connection))
+      (setf (websocket--connection-cursor connection) 1)
+      (and (not (websocket--connection-close-received connection))
+           (> (buffer-size) 0)
+           (or (>= bytes (websocket--limit connection :drain-bytes))
+               (>= frames (websocket--limit connection :drain-frames)))))))
+
+(defun websocket--enqueue (connection opcode bytes)
+  (unless (eq (websocket-state connection) 'open) (error "WebSocket is not open"))
+  (when (> (length bytes) (websocket--limit connection :message-bytes))
+    (signal 'websocket-too-large nil))
+  (when (or (> (+ (websocket--connection-output-bytes connection) (length bytes))
+               (websocket--limit connection :output-bytes))
+            (>= (websocket--connection-output-items connection) (websocket--limit connection :output-items)))
+    (setf (websocket--connection-backpressured connection) t)
+    (signal 'websocket-backpressure nil))
+  (let ((cell (list (websocket--output-create :opcode opcode :bytes (copy-sequence bytes)))))
+    (if (websocket--connection-output-tail connection)
+        (setcdr (websocket--connection-output-tail connection) cell)
+      (setf (websocket--connection-output connection) cell))
+    (setf (websocket--connection-output-tail connection) cell)
+    (cl-incf (websocket--connection-output-bytes connection) (length bytes))
+    (cl-incf (websocket--connection-output-items connection)))
+  (websocket--schedule connection)
+  t)
+
+(defun websocket-send-text (connection text)
+  "Queue a snapshot of Unicode scalar TEXT on CONNECTION.
+Return t when accepted, not delivered.  Signal `websocket-backpressure'
+without queue mutation if capacity is exhausted."
+  (websocket--enqueue connection 1 (websocket--text text)))
+
+(defun websocket-send-text-bytes (connection bytes)
+  "Queue validated unibyte UTF-8 BYTES without decoding and re-encoding.
+The acceptance and backpressure contract is that of `websocket-send-text'."
+  (websocket--octets bytes)
+  (websocket--utf8-feed (websocket--utf8-create) bytes t)
+  (websocket--enqueue connection 1 bytes))
+
+(defun websocket-send-binary (connection bytes)
+  "Queue a snapshot of unibyte BYTES; acceptance does not imply delivery.
+Signal `websocket-backpressure' without queue mutation when full."
+  (websocket--enqueue connection 2 (websocket--octets bytes)))
+
+(defun websocket--write (connection)
+  (let ((bytes 0) (frames 0))
+    (while (and (not (eq (websocket-state connection) 'closed))
+                (< bytes (websocket--limit connection :drain-bytes))
+                (< frames (websocket--limit connection :drain-frames))
+                (or (websocket--connection-controls connection)
+                    (and (not (websocket--connection-close-sent connection))
+                         (websocket--connection-output connection))))
+      (let* ((control (car (websocket--connection-controls connection)))
+             (job (or control (car (websocket--connection-output connection))))
+             (payload (websocket--output-bytes job))
+             (offset (websocket--output-offset job))
+             (end (if control (length payload)
+                    (min (length payload) (+ offset (websocket--limit connection :write-frame-bytes)))))
+             (final (= end (length payload)))
+             (opcode (if (websocket--output-started job) 0 (websocket--output-opcode job)))
+             (wire (websocket--wire opcode final (substring payload offset end)
+                                    (websocket--connection-role connection))))
+        (setf (websocket--output-started job) t
+              (websocket--output-offset job) end)
+        (if control
+            (progn
+              (pop (websocket--connection-controls connection))
+              (cl-decf (websocket--connection-control-count connection))
+              (when (= opcode 8) (setf (websocket--connection-close-sent connection) t)))
+          (when final
+            (pop (websocket--connection-output connection))
+            (cl-decf (websocket--connection-output-items connection))
+            (cl-decf (websocket--connection-output-bytes connection) (length payload))
+            (unless (websocket--connection-output connection)
+              (setf (websocket--connection-output-tail connection) nil))))
+        (cl-incf bytes (length wire))
+        (cl-incf frames)
+        (process-send-string (websocket--connection-process connection) wire)))
+    (when (and (websocket--connection-backpressured connection)
+               (< (websocket--connection-output-bytes connection) (/ (websocket--limit connection :output-bytes) 2))
+               (< (websocket--connection-output-items connection) (max 1 (/ (websocket--limit connection :output-items) 2))))
+      (setf (websocket--connection-backpressured connection) nil)
+      (websocket--emit connection :on-writable))
+    (cond
+     ((websocket--connection-failure connection)
+      (websocket--terminate connection (websocket--connection-failure connection)))
+     ((and (websocket--connection-close-sent connection)
+           (websocket--connection-close-received connection)
+           (eq (websocket--connection-role connection) 'server))
+      (websocket--terminate connection
+                            (append (websocket--connection-peer-close connection)
+                                    '(:clean t :cause close)))))))
+
+(defun websocket--nsm-verify (function process &rest arguments)
+  (if (process-get process 'websocket--connection)
+      (let ((nsm-noninteractive t) (inhibit-message t))
+        (apply function process arguments))
+    (apply function process arguments)))
+
+(defun websocket--transport-ready (connection)
+  (when (and (eq (websocket-state connection) 'connecting)
+             (websocket--connection-address connection)
+             (not (websocket--connection-key connection)))
+    (let* ((key (base64-encode-string (websocket--os-random-bytes 16) t))
+           (request (websocket--client-request
+                     (websocket--connection-address connection) key
+                     (websocket--connection-protocols connection)
+                     (websocket--connection-headers connection))))
+      (when (> (length request) (websocket--limit connection :header-bytes))
+        (signal 'websocket-too-large nil))
+      (setf (websocket--connection-key connection) key
+            (websocket--connection-headers connection) nil)
+      (process-send-string (websocket--connection-process connection) request))))
+
+(defun websocket--sentinel (process _event)
+  (when-let* ((connection (process-get process 'websocket--connection)))
+    (when (= (or (process-get process 'websocket--generation) -1)
+             (websocket--connection-generation connection))
+      (unless (websocket--connection-process connection)
+        (setf (websocket--connection-process connection) process))
+      (condition-case nil
+          (pcase (process-status process)
+            ('open (websocket--transport-ready connection))
+            ((or 'closed 'failed 'exit 'signal)
+             (setf (websocket--connection-eof connection) t)
+             (websocket--schedule connection)))
+        ((error quit)
+         (websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport)))))))
+
+(defun websocket--filter (process bytes)
+  (when-let* ((connection (process-get process 'websocket--connection)))
+    (when (and (= (or (process-get process 'websocket--generation) -1)
+                  (websocket--connection-generation connection))
+               (not (eq (websocket-state connection) 'closed))
+               (not (websocket--connection-failure connection))
+               (not (websocket--connection-close-received connection)))
+      (unless (websocket--connection-process connection)
+        (setf (websocket--connection-process connection) process))
+      (with-current-buffer (websocket--connection-input connection)
+        (if (> (+ (buffer-size) (length bytes)) (websocket--limit connection :input-bytes))
+            (websocket--fail connection 'size)
+          (goto-char (point-max))
+          (insert bytes)))
+      (websocket--schedule connection))))
+
+(defun websocket--start-client (connection)
+  (setq websocket--opening-active connection
+        websocket--opening-queue (delq connection websocket--opening-queue))
+  (unless (advice-member-p #'websocket--nsm-verify 'nsm-verify-connection)
+    (advice-add 'nsm-verify-connection :around #'websocket--nsm-verify))
+  (let* ((address (websocket--connection-address connection))
+         (tls (plist-get address :tls))
+         (parameters
+          (when tls
+            (unless (gnutls-available-p) (error "GnuTLS is unavailable"))
+            (cons 'gnutls-x509pki
+                  (gnutls-boot-parameters :type 'gnutls-x509pki
+                                          :hostname (plist-get address :host)
+                                          :verify-error t :verify-flags 0
+                                          :priority-string "NORMAL:-VERS-TLS1.0:-VERS-TLS1.1"))))
+         (process
+          (make-network-process
+           :name "websocket" :host (plist-get address :host) :service (plist-get address :port)
+           :buffer nil :coding 'binary :filter-multibyte nil :noquery t :nowait t
+           :filter #'websocket--filter :sentinel #'websocket--sentinel
+           :plist (list 'websocket--connection connection
+                        'websocket--generation (websocket--connection-generation connection))
+           :tls-parameters parameters)))
+    (if (eq (websocket-state connection) 'closed)
+        (ignore-errors (delete-process process))
+      (setf (websocket--connection-process connection) process)
+      (when (eq (process-status process) 'open) (websocket--transport-ready connection)))))
+
+(defun websocket--opened (connection protocol)
+  (setf (websocket--connection-state connection) 'open
+        (websocket--connection-protocol connection) protocol
+        (websocket--connection-http connection) nil
+        (websocket--connection-key connection) nil
+        (websocket--connection-address connection) nil)
+  (websocket--cancel-deadline connection 'handshake)
+  (when (eq websocket--opening-active connection)
+    (setq websocket--opening-active nil)
+    (when (car websocket--opening-queue) (websocket--schedule (car websocket--opening-queue))))
+  (websocket--emit connection :on-open))
+
+(defun websocket--read-http (connection)
+  (let ((http (websocket--connection-http connection)) done)
+    (with-current-buffer (websocket--connection-input connection)
+      (goto-char (websocket--http-scan http))
+      (while (and (not done) (search-forward "\r\n" nil t))
+        (let ((end (point)))
+          (setq done (websocket--http-line
+                      http (buffer-substring-no-properties (websocket--connection-cursor connection) (- end 2))
+                      (websocket--connection-limits connection)))
+          (setf (websocket--connection-cursor connection) end)
+          (when (and done (eq (websocket--connection-role connection) 'client)
+                     (string-match-p "\\`HTTP/1\\.1 1[0-9][0-9] [ -~]*\\'" (websocket--http-start http))
+                     (not (string-prefix-p "HTTP/1.1 101 " (websocket--http-start http))))
+            (when (or (websocket--values http "content-length")
+                      (websocket--values http "transfer-encoding"))
+              (signal 'websocket-protocol-error nil))
+            (setf (websocket--http-start http) nil (websocket--http-fields http) nil)
+            (setq done nil))))
+      (setf (websocket--http-scan http) (max (websocket--connection-cursor connection) (1- (point-max))))
+      (when (or (> (+ (websocket--http-bytes http)
+                       (- (point-max) (websocket--connection-cursor connection)))
+                    (websocket--limit connection :header-bytes))
+                (> (- (point-max) (websocket--connection-cursor connection))
+                   (websocket--limit connection :line-bytes)))
+        (unless done (signal 'websocket-too-large nil)))
+      (when done
+        (if (eq (websocket--connection-role connection) 'client)
+            (websocket--opened connection
+                               (websocket--client-response http (websocket--connection-key connection)
+                                                           (websocket--connection-protocols connection)))
+          (websocket--admit connection http))
+        (when (buffer-live-p (websocket--connection-input connection))
+          (delete-region (point-min) (websocket--connection-cursor connection))
+          (setf (websocket--connection-cursor connection) 1))))
+    done))
+
+(defun websocket--run (connection)
+  (unless (websocket--connection-busy connection)
+    (let (more)
+      (setf (websocket--connection-busy connection) t)
+      (unwind-protect
+          (condition-case error
+              (progn
+                (when (and (eq (websocket-state connection) 'connecting)
+                           (eq (websocket--connection-role connection) 'client)
+                           (not (websocket--connection-process connection))
+                           (not websocket--opening-active)
+                           (eq connection (car websocket--opening-queue)))
+                  (websocket--start-client connection))
+                (when (and (eq (websocket-state connection) 'connecting)
+                           (websocket--connection-process connection))
+                  (websocket--read-http connection))
+                (when (memq (websocket-state connection) '(open closing))
+                  (unless (websocket--connection-failure connection)
+                    (setq more (websocket--parse-frames connection)))
+                  (websocket--write connection))
+                (when (and (websocket--connection-eof connection) (not more)
+                           (not (eq (websocket-state connection) 'closed)))
+                  (websocket--terminate
+                   connection
+                   (if (and (websocket--connection-close-sent connection)
+                            (websocket--connection-close-received connection))
+                       (append (websocket--connection-peer-close connection) '(:clean t :cause close))
+                     '(:code 1006 :reason "" :clean nil :cause transport)))))
+            (websocket-invalid-utf8 (websocket--fail connection 'utf8))
+            (websocket-too-large (websocket--fail connection 'size))
+            (websocket-protocol-error (websocket--fail connection 'protocol))
+            ((error quit)
+             (ignore error)
+             (websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport))))
+        (setf (websocket--connection-busy connection) nil))
+      (websocket--dispatch connection)
+      (when (or more (websocket--connection-failure connection)
+                (websocket--connection-controls connection)
+                (websocket--connection-output connection)
+                (websocket--connection-terminal connection))
+        (unless (and (eq (websocket-state connection) 'closed)
+                     (not (websocket--connection-terminal connection)))
+          (websocket--schedule connection))))))
+
+(defun websocket--new (role limits callbacks)
+  (let ((connection (websocket--connection-create
+                     :role role :limits limits :callbacks callbacks
+                     :http (websocket--http-create)
+                     :input (generate-new-buffer " *websocket-input*"))))
+    (with-current-buffer (websocket--connection-input connection) (set-buffer-multibyte nil))
+    (puthash connection t websocket--connections)
+    (websocket--deadline
+     connection 'handshake (websocket--limit connection :handshake-timeout)
+     (lambda (c) (websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout))))
+    connection))
+
+(defun websocket--callbacks (on-open on-message on-close on-writable)
+  (dolist (callback (list on-open on-message on-close on-writable))
+    (unless (or (null callback) (functionp callback)) (error "Invalid WebSocket callback")))
+  (list :on-open on-open :on-message on-message :on-close on-close :on-writable on-writable))
+
+(cl-defun websocket-connect (url &key headers protocols limits on-open on-message on-close on-writable)
+  "Start an asynchronous ws or certificate-verified wss connection to URL.
+Return a handle immediately; callbacks never run before this call returns.
+HEADERS is an ASCII name/value alist; handshake-owned fields are forbidden.
+PROTOCOLS is an ordered list of unique, case-sensitive subprotocol tokens.
+LIMITS overrides positive integer keys in `websocket--default-limits'.
+ON-OPEN receives the connection.  ON-MESSAGE receives connection, type
+(text or binary), and a complete validated message: a decoded string for
+text, a unibyte string for binary.  ON-CLOSE receives connection and a plist
+with :code, :reason, :clean, :cause, exactly once.  ON-WRITABLE receives
+the connection once at low water after backpressure.  Callback errors
+terminate with cause application; close callback errors are contained.
+Synchronous argument errors signal; asynchronous failures notify ON-CLOSE.
+Native writes and DNS/security operations can block despite bounded work."
+  (when websocket--shutting-down (error "WebSocket shutdown in progress"))
+  (let ((address (websocket--url url)) (headers (websocket--headers headers))
+        (protocols (websocket--protocols protocols)) (limits (websocket--limits limits))
+        (callbacks (websocket--callbacks on-open on-message on-close on-writable)))
+    (when (>= (+ (length websocket--opening-queue) (if websocket--opening-active 1 0))
+              (plist-get limits :pending-openings))
+      (signal 'websocket-backpressure nil))
+    (let ((connection (websocket--new 'client limits callbacks)))
+      (setf (websocket--connection-address connection) address
+            (websocket--connection-headers connection) headers
+            (websocket--connection-protocols connection) protocols)
+      (setq websocket--opening-queue (nconc websocket--opening-queue (list connection)))
+      (websocket--schedule connection)
+      connection)))
+
+(declare-function websocket--admit "websocket" (connection http))
 
 (provide 'websocket)
 ;;; websocket.el ends here
