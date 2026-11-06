@@ -756,6 +756,14 @@ Signal `websocket-backpressure' without queue mutation when full."
           (insert bytes)))
       (websocket--schedule connection))))
 
+(defun websocket--check-opening (connection)
+  (when (eq (websocket-state connection) 'connecting)
+    (if (memq (process-status (websocket--connection-process connection)) '(closed failed exit signal))
+        (progn
+          (setf (websocket--connection-eof connection) t)
+          (websocket--schedule connection))
+      (websocket--deadline connection 'transport-watch 0.1 #'websocket--check-opening))))
+
 (defun websocket--start-client (connection)
   (setq websocket--opening-active connection
         websocket--opening-queue (delq connection websocket--opening-queue))
@@ -782,6 +790,7 @@ Signal `websocket-backpressure' without queue mutation when full."
     (if (eq (websocket-state connection) 'closed)
         (ignore-errors (delete-process process))
       (setf (websocket--connection-process connection) process)
+      (websocket--check-opening connection)
       (when (eq (process-status process) 'open) (websocket--transport-ready connection)))))
 
 (defun websocket--opened (connection protocol)
@@ -791,6 +800,7 @@ Signal `websocket-backpressure' without queue mutation when full."
         (websocket--connection-key connection) nil
         (websocket--connection-address connection) nil)
   (websocket--cancel-deadline connection 'handshake)
+  (websocket--cancel-deadline connection 'transport-watch)
   (when (eq websocket--opening-active connection)
     (setq websocket--opening-active nil)
     (when (car websocket--opening-queue) (websocket--schedule (car websocket--opening-queue))))
