@@ -374,7 +374,7 @@
   input (cursor 1) http frame message
   output output-tail (output-bytes 0) (output-items 0)
   controls control-tail (control-count 0) backpressured
-  close-queued close-sent close-received peer-close failure eof
+  close-queued draining-close close-sent close-received peer-close failure eof
   timers work-timer busy work-pending events terminal)
 
 (cl-defstruct (ende-websocket--listener (:constructor ende-websocket--listener-create))
@@ -480,6 +480,7 @@
             (ende-websocket--connection-controls connection) nil
             (ende-websocket--connection-control-tail connection) nil
             (ende-websocket--connection-control-count connection) 0
+            (ende-websocket--connection-draining-close connection) nil
             (ende-websocket--connection-events connection) nil
             (ende-websocket--connection-terminal connection) (cons callback info))
       (when process
@@ -529,30 +530,38 @@
         (ende-websocket--connection-output-bytes connection) 0
         (ende-websocket--connection-output-items connection) 0))
 
-(defun ende-websocket--queue-close (connection payload)
-  (unless (ende-websocket--connection-close-queued connection)
-    (setf (ende-websocket--connection-state connection) 'closing
-          (ende-websocket--connection-close-queued connection) t
-          (ende-websocket--connection-controls connection)
-          (list (ende-websocket--output-create :opcode 8 :bytes payload))
-          (ende-websocket--connection-control-count connection) 1)
-    (setf (ende-websocket--connection-control-tail connection) (ende-websocket--connection-controls connection))
-    (ende-websocket--drop-output connection)
-    (ende-websocket--cancel-deadline connection 'message)
-    (ende-websocket--deadline
-     connection 'close (ende-websocket--limit connection :closing-timeout)
-     (lambda (c) (ende-websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout))))
+(defun ende-websocket--queue-close (connection payload &optional drain)
+  (let ((first (not (ende-websocket--connection-close-queued connection)))
+        (pending (ende-websocket--connection-draining-close connection)))
+    (unless drain (ende-websocket--drop-output connection))
+    (when first
+      (setf (ende-websocket--connection-state connection) 'closing
+            (ende-websocket--connection-close-queued connection) t)
+      (ende-websocket--cancel-deadline connection 'message)
+      (ende-websocket--deadline
+       connection 'close (ende-websocket--limit connection :closing-timeout)
+       (lambda (c) (ende-websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout)))))
+    (when (or first pending)
+      (if (and drain (ende-websocket--connection-output connection))
+          (setf (ende-websocket--connection-draining-close connection) payload)
+        (setf (ende-websocket--connection-draining-close connection) nil
+              (ende-websocket--connection-controls connection)
+              (list (ende-websocket--output-create :opcode 8 :bytes (or pending payload)))
+              (ende-websocket--connection-control-count connection) 1
+              (ende-websocket--connection-control-tail connection)
+              (ende-websocket--connection-controls connection))))
     (ende-websocket--schedule connection)))
 
 (cl-defun ende-websocket-close (connection &optional (code 1000) (reason ""))
   "Gracefully close CONNECTION with CODE and REASON, idempotently.
-Pending application output is discarded.  Completion is asynchronous."
+Drain accepted application output before sending Close; reject new sends.
+Completion is asynchronous and bounded by the closing timeout."
   (when (and (= code 1010) (eq (ende-websocket--connection-role connection) 'server))
     (error "Close code 1010 is client-only"))
   (let ((payload (ende-websocket--close-payload code reason)))
     (pcase (ende-websocket-state connection)
       ('connecting (ende-websocket-abort connection))
-      ('open (ende-websocket--queue-close connection payload))))
+      ('open (ende-websocket--queue-close connection payload t))))
   nil)
 
 (defun ende-websocket--reject (connection status info)
@@ -767,9 +776,13 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
     (while (and (not (eq (ende-websocket-state connection) 'closed))
                 (< bytes (ende-websocket--limit connection :drain-bytes))
                 (< frames (ende-websocket--limit connection :drain-frames))
-                (or (ende-websocket--connection-controls connection)
+                (or (ende-websocket--connection-draining-close connection)
+                    (ende-websocket--connection-controls connection)
                     (and (not (ende-websocket--connection-close-sent connection))
                          (ende-websocket--connection-output connection))))
+      (when (and (ende-websocket--connection-draining-close connection)
+                 (not (ende-websocket--connection-output connection)))
+        (ende-websocket--queue-close connection (ende-websocket--connection-draining-close connection)))
       (let* ((control (car (ende-websocket--connection-controls connection)))
              (job (or control (car (ende-websocket--connection-output connection))))
              (payload (ende-websocket--output-bytes job))
@@ -997,6 +1010,7 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
            '(:code 1006 :reason "" :clean nil :cause transport))))
       (when (or more (ende-websocket--connection-work-pending connection)
                 (ende-websocket--connection-failure connection)
+                (ende-websocket--connection-draining-close connection)
                 (ende-websocket--connection-controls connection)
                 (ende-websocket--connection-output connection)
                 (ende-websocket--connection-terminal connection))

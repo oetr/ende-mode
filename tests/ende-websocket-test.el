@@ -2,9 +2,9 @@
 
 (require 'ert)
 (require 'cl-lib)
-(load (expand-file-name "../lisp/ende-websocket.el"
+(load (expand-file-name "../lisp/ende-websocket"
                         (file-name-directory (or load-file-name buffer-file-name)))
-      nil t t)
+      nil t)
 
 (defmacro ende-websocket-test--connection (binding &rest body)
   (declare (indent 1))
@@ -175,6 +175,42 @@
     (should (eq (plist-get (ende-websocket--connection-failure connection) :cause) 'utf8))))
 
 (ert-deftest ende-websocket-lifecycle-and-bounds ()
+  (ende-websocket-test--connection connection
+    (let (writes)
+      (setf (ende-websocket--connection-limits connection)
+            (ende-websocket--limits '(:drain-frames 1 :frame-bytes 64 :write-frame-bytes 2)))
+      (should (ende-websocket-send-text connection "clear"))
+      (should (ende-websocket-send-binary connection ""))
+      (ende-websocket-close connection)
+      (should (eq (ende-websocket-state connection) 'closing))
+      (dolist (send '(ende-websocket-send-text ende-websocket-send-text-bytes ende-websocket-send-binary))
+        (should-error (funcall send connection "late")))
+      (let ((deadline (assq 'close (ende-websocket--connection-timers connection))))
+        (should deadline)
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (_ bytes)
+                     (push bytes writes)
+                     (when (= (length writes) 1)
+                       (ende-websocket-close connection)
+                       (ende-websocket--filter process (unibyte-string #x89 1 42))))))
+          (while (ende-websocket--connection-work-timer connection)
+            (ende-websocket-test--drain connection)))
+        (should (eq deadline (assq 'close (ende-websocket--connection-timers connection)))))
+      (should (ende-websocket--connection-close-sent connection))
+      (should (= (ende-websocket--connection-output-items connection) 0))
+      (should (= (ende-websocket--connection-output-bytes connection) 0))
+      (should
+       (equal
+        (mapcar (lambda (wire)
+                  (let* ((header (ende-websocket--frame-header wire 'server 125))
+                         (frame (cdr header)))
+                    (list (ende-websocket--frame-opcode frame)
+                          (ende-websocket--frame-final frame)
+                          (ende-websocket--mask! (substring wire (car header))
+                                                (ende-websocket--frame-mask frame) 0))))
+                (nreverse writes))
+        (list '(1 nil "cl") '(10 t "*") '(0 nil "ea") '(0 t "r") '(2 t "")
+              (list 8 t (unibyte-string 3 #xe8)))))))
   (ende-websocket-test--connection connection
     (let (reply terminal)
       (setf (ende-websocket--connection-callbacks connection)
