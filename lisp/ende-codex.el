@@ -1792,12 +1792,13 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
                    (apply-partially #'ende-codex--complete session)
                    (apply-partially #'ende-codex--websocket-prepared session)
                    (when auth (ende-codex--account-binding-state auth)))))
-    (setf (ende-codex--session-ws-request session) request
-          (ende-responses-ws-request-debug request) debug)
-    (ende-responses-ws-prepare
-     request
-     (if auth #'ende-codex--request-body #'ende-responses--request-body)
-     messages)))
+    (when (and request (not (ende-codex--terminal-p session)))
+      (setf (ende-codex--session-ws-request session) request
+            (ende-responses-ws-request-debug request) debug)
+      (ende-responses-ws-prepare
+       request
+       (if auth #'ende-codex--request-body #'ende-responses--request-body)
+       messages))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
