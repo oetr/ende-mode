@@ -24,7 +24,8 @@
                        (unibyte-string #x83 0)))
     (should-error (websocket--frame-header bytes 'client 1024)
                   :type 'websocket-protocol-error))
-  (dolist (text '("" "Hello" "\ufeff\r\nλ😀"))
+  (should-error (websocket--text (unibyte-string 255)) :type 'websocket-invalid-utf8)
+  (dolist (text '("" "Hello" "ÿ" "\ufeff\r\nλ😀"))
     (let ((bytes (websocket--text text)))
       (dotimes (split (1+ (length bytes)))
         (let ((state (websocket--utf8-create)))
@@ -96,7 +97,7 @@
   (websocket--run connection))
 
 (ert-deftest websocket-message-semantics ()
-  (let ((wire (unibyte-string 1 1 #xe2 #x89 1 42 #x80 2 #x82 #xac #x82 3 0 255 13)))
+  (let ((wire (unibyte-string 1 1 #xe2 #x89 1 42 #x80 2 #x82 #xac #x82 3 0 255 13 #x88 2 3 #xe8)))
     (dotimes (split (1+ (length wire)))
       (websocket-test--connection connection
         (let (messages writes)
@@ -106,15 +107,28 @@
                      (lambda (_ bytes) (push bytes writes))))
             (dolist (chunk (list (substring wire 0 split) (substring wire split)))
               (websocket--filter process chunk)
+              (websocket-test--drain connection))
+            (while (websocket--connection-work-timer connection)
               (websocket-test--drain connection)))
           (should (equal (nreverse messages) (list '(text "€") (list 'binary (unibyte-string 0 255 13)))))
-          (should (= (length writes) 1))))))
+          (should (= (length writes) 2))))))
   (websocket-test--connection connection
     (websocket--filter process (unibyte-string 1 1 #xe2 #x80 1 #x41))
     (websocket-test--drain connection)
     (should (eq (plist-get (websocket--connection-failure connection) :cause) 'utf8))))
 
 (ert-deftest websocket-lifecycle-and-bounds ()
+  (websocket-test--connection connection
+    (let (messages)
+      (setf (websocket--connection-callbacks connection)
+            (list :on-message (lambda (_ _type message) (push message messages))))
+      (websocket-send-binary connection "out")
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_ _bytes) (websocket--filter process (unibyte-string #x82 1 42)))))
+        (websocket-test--drain connection))
+      (should (timerp (websocket--connection-work-timer connection)))
+      (websocket-test--drain connection)
+      (should (equal messages '("*")))))
   (websocket-test--connection connection
     (let ((closed 0) info)
       (setf (websocket--connection-callbacks connection)

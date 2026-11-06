@@ -52,7 +52,8 @@
   (unless (stringp text) (signal 'wrong-type-argument (list 'stringp text)))
   (dotimes (i (length text))
     (let ((char (aref text i)))
-      (unless (and (<= char #x10ffff) (not (<= #xd800 char #xdfff)))
+      (unless (and (<= char #x10ffff) (not (<= #xd800 char #xdfff))
+                   (or (multibyte-string-p text) (< char 128)))
         (signal 'websocket-invalid-utf8 nil))))
   (encode-coding-string text 'utf-8-unix t))
 
@@ -325,7 +326,7 @@
   output output-tail (output-bytes 0) (output-items 0)
   controls (control-count 0) backpressured
   close-queued close-sent close-received peer-close failure eof
-  timers work-timer busy events terminal)
+  timers work-timer busy work-pending events terminal)
 
 (cl-defstruct (websocket--listener (:constructor websocket--listener-create))
   process limits admit callbacks connections timer (generation 0) stopped)
@@ -366,6 +367,8 @@
     (push (cons kind timer) (websocket--connection-timers connection))))
 
 (defun websocket--schedule (connection)
+  (when (websocket--connection-busy connection)
+    (setf (websocket--connection-work-pending connection) t))
   (unless (or (websocket--connection-work-timer connection)
               (websocket--connection-busy connection))
     (let ((generation (websocket--connection-generation connection)))
@@ -565,7 +568,7 @@ Pending application output is discarded.  Completion is asynchronous."
                              (if utf8 (decode-coding-string bytes 'utf-8-unix) bytes))))))))
 
 (defun websocket--parse-frames (connection)
-  (let ((bytes 0) (frames 0) (progress t))
+  (let ((bytes 0) (frames 0) (progress t) deferred)
     (with-current-buffer (websocket--connection-input connection)
       (while (and progress
                   (< bytes (websocket--limit connection :drain-bytes))
@@ -578,11 +581,14 @@ Pending application output is discarded.  Completion is asynchronous."
                                 (buffer-substring-no-properties cursor (min (point-max) (+ cursor 14)))
                                 (websocket--connection-role connection)
                                 (websocket--limit connection :frame-bytes))))
-              (websocket--begin-frame connection (cdr header))
-              (cl-incf bytes (car header))
-              (cl-incf cursor (car header))
-              (setf (websocket--connection-cursor connection) cursor
-                    (websocket--connection-frame connection) (cdr header))))
+              (if (and (= (websocket--frame-opcode (cdr header)) 8)
+                       (websocket--connection-events connection))
+                  (setq deferred t)
+                (websocket--begin-frame connection (cdr header))
+                (cl-incf bytes (car header))
+                (cl-incf cursor (car header))
+                (setf (websocket--connection-cursor connection) cursor
+                      (websocket--connection-frame connection) (cdr header)))))
           (when-let* ((frame (websocket--connection-frame connection)))
             (let ((count (min (websocket--frame-remaining frame) (- (point-max) cursor)
                               (max 0 (- (websocket--limit connection :drain-bytes) bytes)))))
@@ -609,7 +615,7 @@ Pending application output is discarded.  Completion is asynchronous."
       (setf (websocket--connection-cursor connection) 1)
       (and (not (websocket--connection-close-received connection))
            (> (buffer-size) 0)
-           (or (>= bytes (websocket--limit connection :drain-bytes))
+           (or deferred (>= bytes (websocket--limit connection :drain-bytes))
                (>= frames (websocket--limit connection :drain-frames)))))))
 
 (defun websocket--enqueue (connection opcode bytes)
@@ -829,7 +835,8 @@ Signal `websocket-backpressure' without queue mutation when full."
 (defun websocket--run (connection)
   (unless (websocket--connection-busy connection)
     (let (more)
-      (setf (websocket--connection-busy connection) t)
+      (setf (websocket--connection-busy connection) t
+            (websocket--connection-work-pending connection) nil)
       (unwind-protect
           (condition-case error
               (progn
@@ -862,7 +869,8 @@ Signal `websocket-backpressure' without queue mutation when full."
              (websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport))))
         (setf (websocket--connection-busy connection) nil))
       (websocket--dispatch connection)
-      (when (or more (websocket--connection-failure connection)
+      (when (or more (websocket--connection-work-pending connection)
+                (websocket--connection-failure connection)
                 (websocket--connection-controls connection)
                 (websocket--connection-output connection)
                 (websocket--connection-terminal connection))
