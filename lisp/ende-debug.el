@@ -353,6 +353,27 @@ Never capture raw output or opaque reasoning.  Completion writes this record."
                 (ende-debug--record-field record "response_reasoning_tokens" tokens)))))
       ((error quit) nil))))
 
+(defun ende-debug--transport-details (details)
+  "Return only safe, typed transport diagnostics from DETAILS."
+  (let (result)
+    (dolist (key '(:transport-phase :delivery :reused :connection-age
+                   :messages :bytes :last-event :http-status :close-code))
+      (let ((value (plist-get details key)))
+        (when (pcase key
+                (:transport-phase (memq value '(connecting upgrading preparing sending generation)))
+                (:delivery (memq value '(unsent sending sent)))
+                (:reused (plist-member details key))
+                (:last-event (memq value '(response.created response.in_progress response.completed
+                                          response.done response.incomplete response.failed error
+                                          response.output_text.delta response.output_item.added
+                                          response.output_item.done response.reasoning_summary_text.delta
+                                          response.function_call_arguments.delta
+                                          response.function_call_arguments.done)))
+                (_ (and (numberp value) (>= value 0))))
+          (push (cons (replace-regexp-in-string "-" "_" (substring (symbol-name key) 1))
+                      (if (eq key :reused) (if value t json-false) value)) result))))
+    (nreverse result)))
+
 (defun ende-debug-record-completion (record outcome usage http-status value)
   "Write RECORD's terminal OUTCOME, normalized USAGE, and HTTP-STATUS.
 VALUE is the successful result or structured transport error.  Recording
@@ -378,6 +399,7 @@ errors are reported but never propagated into transport completion."
                                        (ende-debug--redact (plist-get error-details :code))))
                   ("error_param" . ,(when (stringp (plist-get error-details :param))
                                         (ende-debug--redact (plist-get error-details :param))))
+                  ("transport_details" . ,(ende-debug--transport-details error-details))
                   ("completed_timestamp" . ,(ende-debug--timestamp))
                   ("completion_time_epoch" . ,completed)
                   ("elapsed_seconds" . ,(- completed

@@ -5,7 +5,7 @@
 ;; Author: Peter Samarin <peter.samarin@gmail.com>
 ;; Maintainer: Peter Samarin <peter.samarin@gmail.com>
 ;; Version: 0.3
-;; Package-Requires: ((emacs "30.1") (websocket "1.12"))
+;; Package-Requires: ((emacs "30.1") (websocket "1.16"))
 ;; Keywords: convenience, tools
 ;; URL: https://github.com/oetr/ende-mode
 ;; SPDX-License-Identifier: AGPL-3.0-only
