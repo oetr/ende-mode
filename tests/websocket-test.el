@@ -41,4 +41,41 @@
          (websocket--utf8-feed state (substring bytes split) t))
        :type 'websocket-invalid-utf8))))
 
+(defun websocket-test--http (wire)
+  (let ((http (websocket--http-create)))
+    (dolist (line (butlast (split-string wire "\r\n")))
+      (websocket--http-line http line websocket--default-limits))
+    http))
+
+(ert-deftest websocket-opening-boundary ()
+  (let* ((key "dGhlIHNhbXBsZSBub25jZQ==")
+         (address (websocket--url "ws://[::1]:8080?x=%20"))
+         (request (websocket--client-request address key '("chat") '(("Origin" . "null"))))
+         (http (websocket-test--http request)))
+    (should (equal (plist-get address :target) "/?x=%20"))
+    (should (equal (plist-get (websocket--server-request http) :origin) "null"))
+    (push '("host" . "other") (websocket--http-fields http))
+    (should-error (websocket--server-request http) :type 'websocket-protocol-error)
+    (dolist (extra '("" "Sec-WebSocket-Protocol: chat\r\n"))
+      (should (member
+               (websocket--client-response
+                (websocket-test--http
+                 (concat "HTTP/1.1 101 Switching Protocols\r\nConnection: keep-alive, Upgrade\r\n"
+                         "Upgrade: WebSocket\r\nSec-WebSocket-Accept: " (websocket--accept key)
+                         "\r\n" extra "\r\n")) key '("chat")) '(nil "chat"))))
+    (dolist (extra '("Sec-WebSocket-Accept: bad\r\n" "Sec-WebSocket-Protocol: other\r\n"
+                     "Sec-WebSocket-Extensions: compress\r\n"))
+      (should-error
+       (websocket--client-response
+        (websocket-test--http
+         (concat "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                 "Sec-WebSocket-Accept: " (websocket--accept key) "\r\n" extra "\r\n")) key '("chat"))
+       :type 'websocket-protocol-error)))
+  (dolist (url '("http://host/" "ws://host/#fragment" "ws://user:secret@host/"
+                 "ws://host:0/" "ws://host/a b" "ws://host/%2" "ws://host/%gg"))
+    (should-error (websocket--url url)))
+  (dolist (line '(" Host: example" "Host : example" "Host: x\rInjected: yes"))
+    (should-error (websocket-test--http (concat "GET / HTTP/1.1\r\n" line "\r\n\r\n"))
+                  :type 'websocket-protocol-error)))
+
 ;;; websocket-test.el ends here
