@@ -43,10 +43,10 @@
   generation key process upgrade-sent header)
 
 (cl-defstruct ende-responses-ws-chain
-  response-id input settings)
+  response-id logical-request output)
 
 (cl-defstruct ende-responses-ws-request
-  connection lifecycle full-body on-json on-complete on-prepared
+  connection lifecycle logical-request on-json on-complete on-prepared
   connect-timer deadline-timer idle-timer retried observed-output
   payload (delivery 'unsent) (attempt 0) prepared-generation
   profile debug connect-timeout idle-timeout byte-limit event-limit
@@ -98,14 +98,20 @@
             (websocket-inflight-input socket) nil)
       (ende-responses-ws--delete-process (websocket-conn socket)))))
 
+(defun ende-responses-ws--clear-chain (connection)
+  "Detach CONNECTION's lineage and release its retained logical request."
+  (when-let* ((chain (ende-responses-ws-connection-chain connection)))
+    (setf (ende-responses-ws-connection-chain connection) nil)
+    (ende-request-retained-release (ende-responses-ws-chain-logical-request chain) chain)))
+
 (defun ende-responses-ws--drop-socket (connection)
   "Invalidate CONNECTION's socket and lineage before process deletion."
   (let ((socket (ende-responses-ws-connection-socket connection)))
     (cl-incf (ende-responses-ws-connection-generation connection))
+    (ende-responses-ws--clear-chain connection)
     (setf (ende-responses-ws-connection-socket connection) nil
           (ende-responses-ws-connection-opening connection) nil
           (ende-responses-ws-connection-phase connection) 'disconnected
-          (ende-responses-ws-connection-chain connection) nil
           (ende-responses-ws-connection-created connection) nil
           (ende-responses-ws-connection-http-status connection) nil
           (ende-responses-ws-connection-close-code connection) nil)
@@ -130,15 +136,15 @@ OUTCOME is the transport-independent settlement outcome.  RESPONSE-ID and
 replay-normalized OUTPUT commit a successful continuation before callbacks."
   (let ((connection (ende-responses-ws-request-connection request)))
     (when (and connection (eq request (ende-responses-ws-connection-active connection)))
-      (setf (ende-responses-ws-connection-chain connection)
-            (when (and (eq outcome 'success) (stringp response-id) (not (string-empty-p response-id)))
-              (let* ((retained (ende-request--retained-body
-                                (ende-responses-ws-request-full-body request) nil))
-                     (full (ende-protocol-json-read-string (json-encode retained))))
-                (make-ende-responses-ws-chain
-                 :response-id response-id :settings (ende-responses-ws--settings full)
-                 :input (vconcat (gethash "input" full)
-                                 (ende-protocol-json-read-string (json-encode (vconcat output))))))))
+      (ende-responses-ws--clear-chain connection)
+      (when (and (eq outcome 'success) (ende-responses-ws-connection-owner connection)
+                 (stringp response-id) (not (string-empty-p response-id)))
+        (let* ((retained (ende-responses-ws-request-logical-request request))
+               (chain (make-ende-responses-ws-chain
+                       :response-id response-id :logical-request retained
+                       :output (ende-protocol-json-read-string (json-encode (vconcat output))))))
+          (setf (ende-request-retained-owner retained) chain
+                (ende-responses-ws-connection-chain connection) chain)))
       (setf (ende-responses-ws-connection-active connection) nil)
       (unless (and (eq outcome 'success) (ende-responses-ws-connection-owner connection))
         (ende-responses-ws--discard connection)))
@@ -149,7 +155,7 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
     (setf (ende-responses-ws-request-connect-timer request) nil
           (ende-responses-ws-request-deadline-timer request) nil
           (ende-responses-ws-request-idle-timer request) nil
-          (ende-responses-ws-request-full-body request) nil
+          (ende-responses-ws-request-logical-request request) nil
           (ende-responses-ws-request-frame-parts request) nil
           (ende-responses-ws-request-fragment-active request) nil
           (ende-responses-ws-request-frame-bytes request) 0
@@ -272,20 +278,28 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                          '("type" "previous_response_id" "stream" "background" "stream_options"))) body)))
     (let* ((full (ende-protocol-json-read-string (json-encode body)))
            (input (gethash "input" full))
-           (expected (plist-get snapshot :input))
+           (previous (when snapshot
+                       (ende-protocol-json-read-string
+                        (json-encode (ende-request--retained-body (plist-get snapshot :source) nil)))))
+           (expected (and previous (gethash "input" previous)))
+           (output (plist-get snapshot :output))
+           (prefix (+ (length expected) (length output)))
            (id (plist-get snapshot :response-id))
            (continue
             (and (stringp id) (not (string-empty-p id))
                  (ende-protocol-json-equal-p (ende-responses-ws--settings full)
-                                             (plist-get snapshot :settings))
-                 (<= (length expected) (length input))
+                                            (ende-responses-ws--settings previous))
+                 (<= prefix (length input))
                  (cl-loop for index below (length expected)
-                          always (ende-protocol-json-equal-p (aref expected index) (aref input index))))))
+                          always (ende-protocol-json-equal-p (aref expected index) (aref input index)))
+                 (cl-loop for index below (length output)
+                          always (ende-protocol-json-equal-p
+                                  (aref output index) (aref input (+ (length expected) index)))))))
       (setq body (cl-remove-if (lambda (entry) (equal (ende-controls--json-key-name (car entry)) "input")) body))
       (append (list (cons :type "response.create")) body
               (when continue (list (cons :previous_response_id id)))
               (list (cons :input (ende-protocol-json-for-request
-                                 (if continue (substring input (length expected)) (vconcat input)))))
+                                 (if continue (substring input prefix) (vconcat input)))))
               (when (plist-get properties :stream) (list (cons :stream t)))))))
 
 (defun ende-responses-ws-finalization (request)
@@ -295,10 +309,25 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
     (list #'ende-responses-ws-finalize
           (ende-responses-ws-connection-properties connection)
           (when chain
-            (ende-provider-config-copy
-             (list :response-id (ende-responses-ws-chain-response-id chain)
-                   :input (ende-responses-ws-chain-input chain)
-                   :settings (ende-responses-ws-chain-settings chain)))))))
+            (list :response-id (ende-responses-ws-chain-response-id chain)
+                  :source (ende-request-retained-source (ende-responses-ws-chain-logical-request chain))
+                  :output (ende-responses-ws-chain-output chain))))))
+
+(defun ende-responses-ws-prepare (request builder messages)
+  "Prepare REQUEST's MESSAGES, protecting any retained continuation baseline."
+  (when (ende-responses-ws--live-p request)
+    (let* ((connection (ende-responses-ws-request-connection request))
+           (chain (ende-responses-ws-connection-chain connection))
+           (baseline (and chain (ende-responses-ws-chain-logical-request chain))))
+      (ende-request-prepare
+       (ende-responses-ws-request-lifecycle request) 'ende-codex builder messages
+       (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
+       (apply-partially #'ende-responses-ws-send-prepared request
+                        (ende-responses-ws-request-attempt request)
+                        (ende-responses-ws-connection-generation connection))
+       (ende-responses-ws-finalization request)
+       (and baseline (plist-get (ende-request-retained-source baseline) :full-file))
+       nil baseline))))
 
 (defun ende-responses-ws--idle (request)
   "Reset REQUEST's captured response-idle deadline."
@@ -360,7 +389,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                      (ende-responses-ws-request-connection request))))
     (ende-request-reprepare
      (ende-responses-ws-request-lifecycle request) 'ende-responses-ws
-     (ende-responses-ws-request-full-body request)
+     (ende-responses-ws-request-logical-request request)
      (ende-responses-ws-request-profile request) (ende-responses-ws-request-debug request)
      (apply-partially #'ende-responses-ws-send-prepared request
                       (ende-responses-ws-request-attempt request) generation)
@@ -378,7 +407,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
                (not (ende-responses-ws-request-observed-output request)))
       (setf (ende-responses-ws-request-retried request) t)
       (let ((connection (ende-responses-ws-request-connection request)))
-        (setf (ende-responses-ws-connection-chain connection) nil)
+        (ende-responses-ws--clear-chain connection)
         (when (equal code "websocket_connection_limit_reached")
           (ende-responses-ws--drop-socket connection)))
       (ende-responses-ws--refinalize request)
@@ -536,7 +565,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
              (eq (ende-responses-ws-connection-phase connection) 'open))
         (setf (ende-responses-ws-request-replaced request) t)
         (ende-responses-ws--drop-socket connection)
-        (if (ende-responses-ws-request-full-body request)
+        (if (ende-responses-ws-request-logical-request request)
             (ende-responses-ws--refinalize request)
           (ende-responses-ws--connect connection)))
        (t (ende-responses-ws--fail request 'transport "Responses connection closed before completion")
@@ -687,9 +716,7 @@ AUTHENTICATION-IDENTITY privately identifies an OAuth registration."
       (condition-case nil
           (let* ((connection (ende-responses-ws-request-connection request)))
             (setf (ende-responses-ws-request-prepared-generation request) generation
-                  (ende-responses-ws-request-full-body request)
-                  (if (plist-get data :full-file) (list :full-file (plist-get data :full-file))
-                    (list :full-body (plist-get data :full-body)))
+                  (ende-responses-ws-request-logical-request request) (plist-get data :retained)
                   (ende-responses-ws-request-payload request) data)
             (funcall (ende-responses-ws-request-on-prepared request) body record)
             (when (ende-responses-ws--live-p request)

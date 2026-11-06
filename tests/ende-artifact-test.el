@@ -200,7 +200,7 @@
                                                 nil :json-false t [] "λ"))))
            (lifecycle (ende-transport-session-create nil #'ert-fail))
            (finalization '(ende-controls--set-path ("type") "response.create"))
-           prepared replay done files)
+           prepared replay done files release)
       (unwind-protect
           (progn
             (ende-request-prepare
@@ -218,13 +218,19 @@
               (should (string-match-p "data:image/png;base64," (json-encode full)))
               (should-not (assq :type full)))
             (ende-request-reprepare
-             lifecycle 'ende-codex prepared profile nil
+             lifecycle 'ende-codex (plist-get prepared :retained) profile nil
              (lambda (data _body _record) (setq replay data done t)) finalization)
             (ende-test--wait-for (lambda () done))
+            (should (eq (plist-get prepared :retained) (plist-get replay :retained)))
+            (should (equal (plist-get prepared :full-file) (plist-get replay :full-file)))
             (setq files (append files (list (plist-get replay :file) (plist-get replay :full-file))))
             (should (equal (ende-artifact--read-bytes (plist-get prepared :file))
-                           (ende-artifact--read-bytes (plist-get replay :file)))))
+                           (ende-artifact--read-bytes (plist-get replay :file))))
+            (setq release (ende-request-retained-read (plist-get prepared :retained))))
         (ende-transport-session-cleanup lifecycle))
+      (should (file-exists-p (plist-get prepared :full-file)))
+      (funcall release)
+      (funcall release)
       (dolist (file files) (should-not (file-exists-p file))))))
 
 (ert-deftest ende-artifact-round-trip-and-native-export ()
