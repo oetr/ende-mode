@@ -454,13 +454,16 @@ have already been canonicalized by configuration resolution."
           :case-fold case-fold-search
           :ignore-case (file-name-case-insensitive-p root))))
 
-(defun ende-tools--resolved-scope (context canonical scope)
-  "Describe resolved CANONICAL's path through prepared SCOPE in CONTEXT."
-  (list :scope-id (plist-get scope :id) :root (plist-get scope :root)
-        :relative (file-relative-name canonical (plist-get scope :root))
-        :public-path (if (plist-get scope :fixed-root) canonical
-                       (file-relative-name canonical (plist-get context :root)))
-        :fixed-root (plist-get scope :fixed-root)))
+(defun ende-tools--resolved-scope (context canonical scope &optional relative)
+  "Describe authorized CANONICAL through prepared SCOPE in CONTEXT.
+RELATIVE, when supplied, is the known scope-relative name."
+  (let* ((root (plist-get scope :root))
+         (relative (or relative (ende-project--relative-name canonical root))))
+    (list :scope-id (plist-get scope :id) :root root :relative relative
+          :public-path (if (plist-get scope :fixed-root) canonical
+                         (if (equal root (plist-get context :root)) relative
+                           (ende-project--relative-name canonical (plist-get context :root))))
+          :fixed-root (plist-get scope :fixed-root))))
 
 (defun ende-tools--matching-path-scopes (context canonical &optional first-only)
   "Evaluate prepared CONTEXT for resolved CANONICAL.
@@ -473,12 +476,12 @@ Stop at the first matching scope when FIRST-ONLY is non-nil."
         (let ((root (plist-get scope :root)))
           (when (ende-project--contains-p
                  canonical root (plist-get scope :ignore-case))
-            (let ((relative (file-relative-name canonical root))
+            (let ((relative (ende-project--relative-name canonical root))
                   (resource (plist-get scope :resource)))
               (when (and (not (ende-project--excluded-p relative))
                          (or (null resource)
                              (ende-tools--resource-allows-p relative resource)))
-                (push (ende-tools--resolved-scope context canonical scope) scopes)
+                (push (ende-tools--resolved-scope context canonical scope relative) scopes)
                 (when first-only (throw 'matched nil))))))))
     (nreverse scopes)))
 
@@ -815,7 +818,7 @@ FUNCTION receives no arguments and may return any value."
                                 (condition-case nil (file-truename filename) (error nil)))))
             (if info
                 (when (and (ende-project--contains-p path root ignore-case)
-                           (not (ende-project--excluded-p (file-relative-name path root))))
+                           (not (ende-project--excluded-p (ende-project--relative-name path root))))
                   (cl-incf count))
               (let ((key (if ignore-case (downcase path) path)))
                 (when (and (gethash key requested) (not (gethash key visiting)))
@@ -844,7 +847,7 @@ FUNCTION receives no arguments and may return any value."
         (let* ((path (ende-tools--resolved-path literal root nil))
                (key (cons tool path))
                (id (gethash key allowed)))
-          (when id (push (cons (file-relative-name path root) id) entries)))
+          (when id (push (cons (ende-project--relative-name path root) id) entries)))
       (maphash
        (lambda (key id)
          (when (and (eq (car key) tool)
@@ -852,8 +855,8 @@ FUNCTION receives no arguments and may return any value."
                     (ende-project--contains-p
                      (cdr key) root (plist-get context :ignore-case))
                     (or (null regexp)
-                        (string-match-p regexp (file-relative-name (cdr key) root))))
-           (push (cons (file-relative-name (cdr key) root) id) entries)
+                        (string-match-p regexp (ende-project--relative-name (cdr key) root))))
+           (push (cons (ende-project--relative-name (cdr key) root) id) entries)
            (cl-incf count)))
        allowed))
     entries))
@@ -994,7 +997,7 @@ Return non-nil when selection was exhausted, nil when VISIT stopped it."
                          path root (plist-get context :ignore-case))
                    (file-regular-p path))
               (let ((source (ende-tools--project-source
-                             context path (file-relative-name path root)
+                             context path (ende-project--relative-name path root)
                              (file-attributes path))))
                 (or (null source) (funcall visit source)))
             t))

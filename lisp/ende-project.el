@@ -237,6 +237,11 @@ absolute and resolved; the trailing separator enforces component boundaries."
   (string-prefix-p (file-name-as-directory root)
                    (file-name-as-directory path) ignore-case))
 
+(defsubst ende-project--relative-name (path root)
+  "Return PATH relative to directory ROOT without filesystem work.
+PATH must already be known to be beneath absolute ROOT."
+  (substring path (length (file-name-as-directory root))))
+
 (defun ende-project--map-files (root visit &optional descend-p candidate-p)
   "Visit current regular files below canonical ROOT in directory order.
 Call VISIT with canonical path, project-relative name, and attributes.
@@ -250,7 +255,7 @@ names before resolution.  Symlinks to directories are never traversed."
           ((walk (directory)
              (dolist (entry (directory-files
                              directory t directory-files-no-dot-files-regexp))
-               (let* ((relative (file-relative-name entry root))
+               (let* ((relative (ende-project--relative-name entry root))
                       (attributes (file-attributes entry))
                       (type (file-attribute-type attributes)))
                  (cond
@@ -265,8 +270,9 @@ names before resolution.  Symlinks to directories are never traversed."
                         (or (stringp type) (null candidate-p)
                             (funcall candidate-p relative)))
                    (let* ((canonical (file-truename entry))
-                          (relative (file-relative-name canonical root)))
-                     (when (and (ende-project--contains-p canonical root ignore-case)
+                          (inside (ende-project--contains-p canonical root ignore-case))
+                          (relative (and inside (ende-project--relative-name canonical root))))
+                     (when (and inside
                                 (not (ende-project--excluded-p relative))
                                 (or (null candidate-p) (funcall candidate-p relative))
                                 (not (gethash canonical seen))
