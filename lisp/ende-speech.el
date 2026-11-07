@@ -67,7 +67,10 @@
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
   state marker buffer source-window transcript-window websocket recorder
-  recorder-stderr clear-pending needs-separator status)
+  recorder-stderr clear-pending needs-separator status cleanup-timer)
+
+(defconst ende-speech--cleanup-timeout 3
+  "Seconds to wait for capacity to queue the final audio clear.")
 
 (defvar-local ende-speech--command-point nil)
 (defvar-local ende-speech--command-tick nil)
@@ -510,20 +513,49 @@ Try JSON first, then older pactl's normal text listing."
         (kill-buffer stderr-buffer))
       (setf (ende-speech--session-recorder-stderr session) nil))))
 
-(defun ende-speech--close-websocket (session)
-  "Clear pending audio and close SESSION's WebSocket when usable."
+(defun ende-speech--release-websocket (session)
+  "Forget SESSION's WebSocket and cancel its pending cleanup timeout."
+  (when-let* ((timer (ende-speech--session-cleanup-timer session)))
+    (cancel-timer timer))
+  (setf (ende-speech--session-cleanup-timer session) nil
+        (ende-speech--session-websocket session) nil))
+
+(defun ende-speech--cleanup-failed (session reason)
+  "Abort SESSION's WebSocket and report final audio clear failure REASON."
   (let ((websocket (ende-speech--session-websocket session)))
+    (ende-speech--release-websocket session)
     (when websocket
-      (when (ende-speech--websocket-open-p websocket)
-        (condition-case nil
+      (ende-websocket-abort websocket)
+      (message "ende speech: final audio clear failed: %s" reason))))
+
+(defun ende-speech--close-websocket (session)
+  "Queue SESSION's final audio clear before gracefully closing.
+Backpressure defers cleanup until a writable callback, bounded by a timeout."
+  (when-let* ((websocket (ende-speech--session-websocket session)))
+    (condition-case err
+        (progn
+          (when (and (ende-speech--session-cleanup-timer session)
+                     (not (ende-speech--websocket-open-p websocket)))
+            (error "connection no longer open"))
+          (when (ende-speech--websocket-open-p websocket)
             (ende-speech--send-json
-             websocket '((type . "input_audio_buffer.clear")))
-          (error (message "ende speech: could not clear audio before closing"))))
-      ;; Graceful close drains accepted output, including the audio clear.
-      (condition-case nil
+             websocket '((type . "input_audio_buffer.clear"))))
           (ende-websocket-close websocket)
-        (error (ende-websocket-abort websocket))))
-    (setf (ende-speech--session-websocket session) nil)))
+          (ende-speech--release-websocket session))
+      (ende-websocket-backpressure
+       (unless (ende-speech--session-cleanup-timer session)
+         (setf (ende-speech--session-cleanup-timer session)
+               (run-at-time ende-speech--cleanup-timeout nil
+                            #'ende-speech--cleanup-failed session
+                            "timed out waiting for output capacity"))))
+      (error
+       (ende-speech--cleanup-failed session (error-message-string err))))))
+
+(defun ende-speech--websocket-writable (session websocket)
+  "Retry SESSION's deferred final clear when WEBSOCKET becomes writable."
+  (when (and (eq websocket (ende-speech--session-websocket session))
+             (ende-speech--session-cleanup-timer session))
+    (ende-speech--close-websocket session)))
 
 (defun ende-speech--clear-session (session kill-buffer)
   "Finish cleanup for SESSION; KILL-BUFFER controls transcript-buffer killing."
@@ -565,7 +597,7 @@ Try JSON first, then older pactl's normal text listing."
   "Terminate SESSION, accepting its transcript when ACCEPT is non-nil.
 REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing."
   (when (ende-speech--session-active-p session)
-    ;; Terminal state comes first so process and WebSocket callbacks are inert.
+    ;; Terminal state comes first so recording and transcript callbacks are inert.
     (setf (ende-speech--session-state session) 'terminal)
     (let ((text (and accept (ende-speech--transcript-text session)))
           inserted insertion-error)
@@ -710,15 +742,20 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
                :on-message
                (lambda (websocket type text)
                  (ende-speech--websocket-message session websocket type text))
+               :on-writable
+               (lambda (websocket)
+                 (ende-speech--websocket-writable session websocket))
                :on-close
                (lambda (websocket info)
-                 (when (and (ende-speech--session-active-p session)
-                            (eq websocket (ende-speech--session-websocket session)))
-                   (ende-speech--fail
-                    session (format "WebSocket closed (%s, code %s): %s"
-                                    (plist-get info :cause)
-                                    (plist-get info :code)
-                                    (plist-get info :reason)))))))
+                 (when (eq websocket (ende-speech--session-websocket session))
+                   (if (ende-speech--session-cleanup-timer session)
+                       (ende-speech--cleanup-failed
+                        session "connection closed before clear was queued")
+                     (ende-speech--fail
+                      session (format "WebSocket closed (%s, code %s): %s"
+                                      (plist-get info :cause)
+                                      (plist-get info :code)
+                                      (plist-get info :reason))))))))
       (error
        (ende-speech--terminate
         session nil (format "could not connect: %s" (error-message-string err)) t)

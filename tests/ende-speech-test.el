@@ -590,7 +590,7 @@
        (should (equal (with-current-buffer buffer (buffer-string)) "λ"))))))
 
 (ert-deftest ende-speech/close-delivers-audio-clear-before-close ()
-  (let (listener connection received closed)
+  (let (listener connection received closed session pending-timer)
     (unwind-protect
         (progn
           (setq listener
@@ -603,22 +603,88 @@
                 (ende-websocket-connect
                  (format "ws://127.0.0.1:%d"
                          (ende-websocket-listener-port listener))
+                 :limits '(:output-items 1)
                  :on-open
                  (lambda (websocket)
-                   (ende-speech--close-websocket
-                    (ende-speech--make-session :websocket websocket)))))
+                   (setq session (ende-speech--make-session
+                                  :state 'terminal :websocket websocket))
+                   (ende-websocket-send-binary websocket (unibyte-string 0 255))
+                   (ende-speech--close-websocket session)
+                   (setq pending-timer (ende-speech--session-cleanup-timer session))
+                   (should (timerp pending-timer))
+                   (should (eq websocket (ende-speech--session-websocket session)))
+                   (should (eq (ende-websocket-state websocket) 'open)))
+                 :on-writable
+                 (lambda (websocket)
+                   (ende-speech--websocket-writable session websocket))))
           (let ((deadline (+ (float-time) 5)))
             (while (and (not closed) (< (float-time) deadline))
               (accept-process-output nil 0.01)))
           (should (plist-get closed :clean))
-          (should (= (length received) 1))
+          (should (= (length received) 2))
+          (should (equal (cadr received) (list 'binary (unibyte-string 0 255))))
+          (should-not (ende-speech--session-websocket session))
+          (should-not (ende-speech--session-cleanup-timer session))
+          (should-not (memq pending-timer timer-list))
           (should (eq (caar received) 'text))
           (should (equal (alist-get 'type
                                     (json-parse-string (cadar received)
                                                        :object-type 'alist))
                          "input_audio_buffer.clear")))
+      (when session (ende-speech--release-websocket session))
       (when connection (ende-websocket-abort connection))
       (when listener (ende-websocket-stop-listener listener)))))
+
+(ert-deftest ende-speech/deferred-clear-timeout-and-peer-close ()
+  (dolist (finish '(timeout peer-close writable))
+    (ende-speech-test--with-session
+     (lambda (session _source _buffer)
+       (let ((websocket (ende-speech--session-websocket session))
+             timer report aborted blocked)
+         (unwind-protect
+             (cl-letf (((symbol-function 'ende-websocket-send-text)
+                        (lambda (&rest _)
+                          (when blocked
+                            (signal 'ende-websocket-backpressure nil))))
+                       ((symbol-function 'ende-websocket-abort)
+                        (lambda (connection) (setq aborted connection)))
+                       ((symbol-function 'message)
+                        (lambda (format-string &rest args)
+                          (setq report (apply #'format format-string args)))))
+               (setq blocked t)
+               (ende-speech--terminate session nil nil t)
+               (setq timer (ende-speech--session-cleanup-timer session))
+               (should (timerp timer))
+               (should-not ende-speech-test--closed)
+               (should-not ende-speech--active-session)
+               (let ((new-session (ende-speech--make-session :state 'listening)))
+                 (setq ende-speech--active-session new-session)
+                 (pcase finish
+                   ('timeout
+                    (timer-event-handler timer))
+                   ('peer-close
+                    (funcall (plist-get (cdr ende-speech-test--open-args) :on-close)
+                             websocket '(:cause eof :code 1006)))
+                   ('writable
+                    (setq blocked nil)
+                    (funcall (plist-get (cdr ende-speech-test--open-args) :on-writable)
+                             websocket)))
+                 (should (eq ende-speech--active-session new-session))
+                 (should (eq (ende-speech--session-state new-session) 'listening)))
+               (should-not (ende-speech--session-websocket session))
+               (should-not (ende-speech--session-cleanup-timer session))
+               (should-not (memq timer timer-list))
+               (if (eq finish 'writable)
+                   (progn
+                     (should ende-speech-test--closed)
+                     (should-not aborted)
+                     (should-not report))
+                 (should-not ende-speech-test--closed)
+                 (should (eq aborted websocket))
+                 (should (string-match-p
+                          (if (eq finish 'timeout) "timed out" "connection closed")
+                          report))))
+           (ende-speech--release-websocket session)))))))
 
 (ert-deftest ende-speech/recorder-starts-only-after-acknowledgement ()
   (ende-speech-test--with-session
