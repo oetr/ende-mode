@@ -485,15 +485,15 @@ Stop at the first matching scope when FIRST-ONLY is non-nil."
 (defun ende-tools--resolved-path (path root no-follow-final)
   "Resolve local PATH from ROOT, optionally without following its final link."
   (when (and (stringp path) (not (file-remote-p path)))
-               (condition-case nil
+    (condition-case nil
         (let ((expanded (expand-file-name path root)))
           (if no-follow-final
-                     (let ((parent (file-name-directory expanded)))
-                       (when (file-directory-p parent)
-                         (expand-file-name (file-name-nondirectory expanded)
+              (let ((parent (file-name-directory expanded)))
+                (when (file-directory-p parent)
+                  (expand-file-name (file-name-nondirectory expanded)
                                     (file-truename parent))))
             (file-truename expanded)))
-                 (error nil))))
+      (error nil))))
 
 (defun ende-tools--path-scopes-for
     (tool path project-root &optional no-follow-final project-only first-only)
@@ -795,23 +795,40 @@ FUNCTION receives no arguments and may return any value."
 ;;;; Read tools
 
 (defun ende-tools--project-result (tool result root excluded-path-patterns)
-  "Add live buffer state to TOOL's disk RESULT from ROOT."
-  (let* ((ende-project-excluded-path-patterns excluded-path-patterns)
-         (buffers (ende-project-buffers root)))
-    (if (eq tool 'project_info)
-        (plist-put result :buffer_count (length buffers))
-      (let ((visiting (make-hash-table :test #'equal)))
-        (dolist (buffer buffers)
-          (let ((path (ende-project-buffer-path buffer)))
-            (unless (gethash path visiting)
-              (puthash path buffer visiting))))
-        (seq-doseq (record (plist-get result :files))
-          (let ((buffer (gethash (expand-file-name (plist-get record :path) root)
-                                 visiting)))
-            (plist-put record :visiting_buffer (and buffer t))
-            (plist-put record :visiting_buffer_modified
-                       (and buffer (buffer-modified-p buffer)))))
-        result))))
+  "Add local live-buffer presentation metadata to TOOL's disk RESULT."
+  (let ((info (eq tool 'project_info))
+        (files (plist-get result :files)))
+    (if (and (not info) (zerop (length files)))
+        result
+      (let ((ende-project-excluded-path-patterns excluded-path-patterns)
+            (ignore-case (file-name-case-insensitive-p root))
+            (requested (make-hash-table :test #'equal))
+            (visiting (make-hash-table :test #'equal))
+            (count 0))
+        (seq-doseq (record files)
+          (let ((path (expand-file-name (plist-get record :path) root)))
+            (puthash (if ignore-case (downcase path) path) t requested)))
+        (dolist (buffer (buffer-list))
+          (when-let* ((filename (buffer-file-name buffer))
+                      (_ (not (file-remote-p filename)))
+                      (path (or (buffer-local-value 'buffer-file-truename buffer)
+                                (condition-case nil (file-truename filename) (error nil)))))
+            (if info
+                (when (and (ende-project--contains-p path root ignore-case)
+                           (not (ende-project--excluded-p (file-relative-name path root))))
+                  (cl-incf count))
+              (let ((key (if ignore-case (downcase path) path)))
+                (when (and (gethash key requested) (not (gethash key visiting)))
+                  (puthash key buffer visiting))))))
+        (if info
+            (plist-put result :buffer_count count)
+          (seq-doseq (record files)
+            (let* ((path (expand-file-name (plist-get record :path) root))
+                   (buffer (gethash (if ignore-case (downcase path) path) visiting)))
+              (plist-put record :visiting_buffer (and buffer t))
+              (plist-put record :visiting_buffer_modified
+                         (and buffer (buffer-modified-p buffer)))))
+          result)))))
 
 (defun ende-tools--project-cache-snapshot (cache context)
   "Return bounded CACHE decisions relevant to CONTEXT's tool and selector."
@@ -827,7 +844,7 @@ FUNCTION receives no arguments and may return any value."
         (let* ((path (ende-tools--resolved-path literal root nil))
                (key (cons tool path))
                (id (gethash key allowed)))
-          (when id (push (cons key id) entries)))
+          (when id (push (cons (file-relative-name path root) id) entries)))
       (maphash
        (lambda (key id)
          (when (and (eq (car key) tool)
@@ -836,10 +853,17 @@ FUNCTION receives no arguments and may return any value."
                      (cdr key) root (plist-get context :ignore-case))
                     (or (null regexp)
                         (string-match-p regexp (file-relative-name (cdr key) root))))
-           (push (cons key id) entries)
+           (push (cons (file-relative-name (cdr key) root) id) entries)
            (cl-incf count)))
        allowed))
     entries))
+
+(defun ende-tools--expand-project-memo (context entries)
+  "Expand compact root-relative ENTRIES into CONTEXT's internal cache keys."
+  (let ((tool (plist-get context :tool)) (root (plist-get context :root)))
+    (mapcar (lambda (entry)
+              (cons (cons tool (expand-file-name (car entry) root)) (cdr entry)))
+            entries)))
 
 (defun ende-tools--project-worker (function request)
   "Run project FUNCTION with a prepared policy and bounded positive memo."
@@ -852,7 +876,9 @@ FUNCTION receives no arguments and may return any value."
          (case-fold-search (plist-get ende-tools--project-context :case-fold))
          (ende-project-excluded-path-patterns
           (plist-get ende-tools--project-context :excluded)))
-    (ende-project-cache-merge ende-tools--project-cache (plist-get request :memo))
+    (ende-project-cache-merge
+     ende-tools--project-cache
+     (ende-tools--expand-project-memo ende-tools--project-context (plist-get request :memo)))
     (let ((result (funcall function (plist-get request :arguments)
                            (plist-get ende-tools--project-context :root))))
       (list :result result :context-key key
@@ -873,9 +899,13 @@ FUNCTION receives no arguments and may return any value."
       (ende-worker-run
        'ende-tools #'ende-tools--project-worker (list function request)
        (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-               '(ende-project-max-file-bytes ende-tools-max-listed-files
-                 ende-tools-max-search-files ende-tools-max-search-results
-                 ende-tools-max-search-output-bytes ende-tools-max-search-context-lines))
+               (pcase tool
+                 ('search_project
+                  '(ende-project-max-file-bytes ende-tools-max-search-files
+                    ende-tools-max-search-results ende-tools-max-search-output-bytes
+                    ende-tools-max-search-context-lines))
+                 ('list_project_files
+                  '(ende-project-max-file-bytes ende-tools-max-listed-files))))
        (lambda (value error)
          (if error
              (funcall callback nil error)
@@ -884,10 +914,12 @@ FUNCTION receives no arguments and may return any value."
                       (progn
                         (when commit
                           (funcall commit (plist-get value :context-key)
-                                   (plist-get value :cache-delta)))
-                        (list :value (ende-tools--project-result
-                                      tool (plist-get value :result)
-                                      root excluded-path-patterns)))
+                                   (ende-tools--expand-project-memo
+                                    context (plist-get value :cache-delta))))
+                        (let ((case-fold-search (plist-get context :case-fold)))
+                          (list :value (ende-tools--project-result
+                                        tool (plist-get value :result)
+                                        root excluded-path-patterns))))
                     ((error quit) (list :error (error-message-string caught))))))
              (funcall callback (plist-get reply :value) (plist-get reply :error)))))
        ende-tools--register-cancellation-function))))
@@ -895,16 +927,17 @@ FUNCTION receives no arguments and may return any value."
 (defun ende-tools--prepare-project-context (arguments root)
   "Prepare the current project read operation's policy and selector."
   (let* ((tool (or ende-tools--access-tool 'search_project))
-         (policies (mapcar (lambda (name)
-                             (cons name (ende-tools--prepare-path-context
-                                         name root (eq name 'list_project_files))))
-                           '(search_project list_project_files)))
+         (policies (unless (eq tool 'project_info)
+                     (mapcar (lambda (name)
+                               (cons name (ende-tools--prepare-path-context
+                                           name root (eq name 'list_project_files))))
+                             '(search_project list_project_files))))
          (context (or (cdr (assq tool policies))
                       (list :tool tool :root root
                             :ignore-case (file-name-case-insensitive-p root)
                             :excluded ende-project-excluded-path-patterns
                             :case-fold case-fold-search)))
-         (key (secure-hash 'sha256 (ende-worker--print policies)))
+         (key (secure-hash 'sha256 (ende-worker--print (or policies context))))
          (glob (ende-tools--argument arguments "glob"))
          (regexp (and glob (wildcard-to-regexp glob)))
          ;; Escapes and bracket expressions require wildcard interpretation.
@@ -928,14 +961,21 @@ FUNCTION receives no arguments and may return any value."
          (id (and allowed (gethash key allowed)))
          (prepared (and id (cl-find id (plist-get context :scopes)
                                     :key (lambda (scope) (plist-get scope :id)))))
-         (scope (if prepared (ende-tools--resolved-scope context path prepared)
-                  (car (ende-tools--matching-path-scopes context path t)))))
+         (scope
+          (if prepared
+              (ende-tools--resolved-scope context path prepared)
+            (let ((case-fold-search (plist-get context :case-fold))
+                  (ende-project-excluded-path-patterns (plist-get context :excluded)))
+              (when (and (ende-project--contains-p
+                          path (plist-get context :root) (plist-get context :ignore-case))
+                         (not (ende-project--excluded-p relative)))
+                (car (ende-tools--matching-path-scopes context path t)))))))
     (when scope
       (when (and allowed (not id) (> ende-tools--project-cache-room 0)
                  (< (hash-table-count allowed) ende-project-cache-limit))
         (setq id (plist-get scope :scope-id))
         (puthash key id allowed)
-        (push (cons key id) ende-tools--project-cache-delta)
+        (push (cons relative id) ende-tools--project-cache-delta)
         (cl-decf ende-tools--project-cache-room))
       (append (list :kind 'file :path path :attributes attributes)
               scope (list :project-relative relative)))))
@@ -975,15 +1015,15 @@ Return non-nil when selection was exhausted, nil when VISIT stopped it."
   (let ((count 0))
     (ende-project--map-files
      root (lambda (_path _relative _attributes) (cl-incf count) t))
-  (list :root root
-        :name (file-name-nondirectory (directory-file-name root))
+    (list :root root
+          :name (file-name-nondirectory (directory-file-name root))
           :file_count count :buffer_count 0)))
 
 (defun ende-tools--file-record (source include-metadata)
   "Return a compact disk record for authorized SOURCE."
   (ende-project-assert-readable-file (plist-get source :path))
-    (if include-metadata
-        (ende-tools--source-metadata source)
+  (if include-metadata
+      (ende-tools--source-metadata source)
     (append (list :path (plist-get source :project-relative) :source_kind "file"
                   :byte_count (file-attribute-size (file-attributes
                                                     (plist-get source :path))))
@@ -1208,56 +1248,56 @@ Multiline matches belong to their starting line; columns name its first match."
               (if (or (>= files-inspected ende-tools-max-search-files)
                       (>= matches-count maximum))
                   nil
-        (cl-incf files-inspected)
+                (cl-incf files-inspected)
                 (let* ((file-metadata
                         (append (list :path (plist-get source :project-relative)
                                       :source_kind "file")
-                        (ende-tools--source-buffer-metadata source)))
-               (file-base-bytes nil)
-               (file-match-count 0)
-               (file-bytes 0)
-               (search-result
-                (ende-tools--search-source
-                 source regexp context-before context-after
-                 (- maximum matches-count)
-                 (lambda (record)
-                   (if (null record)
-                       nil
-                     (let* ((record-bytes
-                             (ende-tools--search-json-bytes record))
-                            (first-match (= file-match-count 0))
-                            (base-delta
-                             (if first-match
-                                 (progn
-                                   (unless file-base-bytes
-                                     (setq file-base-bytes
-                                           (ende-tools--search-json-bytes
-                                            (append file-metadata
-                                                    (list :matches [])))))
-                                   (+ file-base-bytes record-bytes))
-                               (1+ record-bytes)))
-                            (candidate-file-bytes
-                             (+ file-bytes base-delta))
-                            (candidate-bytes
-                             (+ envelope-bytes files-array-bytes
-                                (if (and first-match
-                                         (> files-result-count 0))
-                                    1 0)
-                                candidate-file-bytes)))
-                       (when (<= candidate-bytes
-                                 ende-tools-max-search-output-bytes)
-                         (setq file-bytes candidate-file-bytes)
-                         (cl-incf file-match-count)
-                         t))))))
-               (file-matches (plist-get search-result :matches)))
-          (when file-matches
-            (push (append file-metadata
-                          (list :matches (vconcat file-matches)))
-                  files-result)
-            (cl-incf files-array-bytes
-                     (+ file-bytes (if (> files-result-count 0) 1 0)))
-            (cl-incf files-result-count)
-            (cl-incf matches-count (length file-matches)))
+                                (ende-tools--source-buffer-metadata source)))
+                       (file-base-bytes nil)
+                       (file-match-count 0)
+                       (file-bytes 0)
+                       (search-result
+                        (ende-tools--search-source
+                         source regexp context-before context-after
+                         (- maximum matches-count)
+                         (lambda (record)
+                           (if (null record)
+                               nil
+                             (let* ((record-bytes
+                                     (ende-tools--search-json-bytes record))
+                                    (first-match (= file-match-count 0))
+                                    (base-delta
+                                     (if first-match
+                                         (progn
+                                           (unless file-base-bytes
+                                             (setq file-base-bytes
+                                                   (ende-tools--search-json-bytes
+                                                    (append file-metadata
+                                                            (list :matches [])))))
+                                           (+ file-base-bytes record-bytes))
+                                       (1+ record-bytes)))
+                                    (candidate-file-bytes
+                                     (+ file-bytes base-delta))
+                                    (candidate-bytes
+                                     (+ envelope-bytes files-array-bytes
+                                        (if (and first-match
+                                                 (> files-result-count 0))
+                                            1 0)
+                                        candidate-file-bytes)))
+                               (when (<= candidate-bytes
+                                         ende-tools-max-search-output-bytes)
+                                 (setq file-bytes candidate-file-bytes)
+                                 (cl-incf file-match-count)
+                                 t))))))
+                       (file-matches (plist-get search-result :matches)))
+                  (when file-matches
+                    (push (append file-metadata
+                                  (list :matches (vconcat file-matches)))
+                          files-result)
+                    (cl-incf files-array-bytes
+                             (+ file-bytes (if (> files-result-count 0) 1 0)))
+                    (cl-incf files-result-count)
+                    (cl-incf matches-count (length file-matches)))
                   (and (not (plist-get search-result :budget_exhausted))
                        (or (< matches-count maximum)
                            (plist-get search-result :complete)))))))))

@@ -502,7 +502,7 @@ ordered result slots only through the parent's saved scheduler continuation."
          (settled nil)
          (generation (or (ende-job-execution-generation job) 0))
          (cache (when (member (ende-tools-call-value call :name)
-                              '("search_project" "list_project_files" "project_info"))
+                              '("search_project" "list_project_files"))
                   (ende-agent--project-cache job)))
          (ende-tools--project-cache cache)
          (ende-tools--commit-project-cache

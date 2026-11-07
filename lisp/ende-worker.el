@@ -46,10 +46,9 @@
   "Execute one request from standard input in a batch Emacs."
   (let ((result
          (condition-case caught
-             (pcase-let ((`(,library ,function ,arguments ,bindings ,paths)
+             (pcase-let ((`(,library ,function ,arguments ,bindings)
                           (read (read-string ""))))
-               (let ((load-prefer-newer t)
-                     (load-path paths))
+               (let ((load-prefer-newer t))
                  (require library)
                  (list :value
                        (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
@@ -62,8 +61,8 @@
   "Call FUNCTION with ARGUMENTS and BINDINGS in a clean Emacs loading LIBRARY.
 CALLBACK receives a value and an error.  REGISTER-CANCELLATION receives the
 cancellation function on startup and nil when the worker finishes."
-  (let ((output (generate-new-buffer " *ende-worker*"))
-        (errors (generate-new-buffer " *ende-worker-errors*"))
+  (let ((output (generate-new-buffer " *ende-worker*" t))
+        (errors (generate-new-buffer " *ende-worker-errors*" t))
         (process nil)
         (finished nil)
         (registered nil))
@@ -75,8 +74,13 @@ cancellation function on startup and nil when the worker finishes."
                (delete-process process))
              (when-let* ((stderr (get-buffer-process errors)))
                (delete-process stderr))
-             (kill-buffer output)
-             (kill-buffer errors)
+             (dolist (buffer (list output errors))
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (let ((kill-buffer-hook nil)
+                         (kill-buffer-query-functions nil)
+                         (buffer-list-update-hook nil))
+                     (kill-buffer buffer)))))
              (when registered
                (setq registered nil)
                (ignore-errors (funcall register-cancellation nil)))
@@ -112,7 +116,7 @@ cancellation function on startup and nil when the worker finishes."
                                   "-f" "ende-worker--main")
                    :sentinel #'sentinel))
             (process-send-string
-             process (ende-worker--print (list library function arguments bindings load-path)))
+             process (ende-worker--print (list library function arguments bindings)))
             (process-send-eof process)
             (when register-cancellation
               (setq registered t)

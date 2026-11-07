@@ -34,7 +34,8 @@
 
 (ert-deftest ende-worker/round-trip-keeps-the-event-loop-free ()
   :tags '(integration)
-  (let* ((tick nil)
+  (let* ((load-path (cons "/tmp/ende-parent-only-load-path" load-path))
+         (tick nil)
          (done nil)
          (value nil)
          (failure nil)
@@ -46,17 +47,18 @@
                 (ende-worker-run
                  'cl-lib 'eval
                  '((progn (sleep-for 0.05)
-                          (list (emacs-pid) case-fold-search "λ\nquoted \"text\"")))
+                          (list (emacs-pid) case-fold-search "λ\nquoted \"text\""
+                                (member "/tmp/ende-parent-only-load-path" load-path))))
                  '((case-fold-search . nil))
                  (lambda (result error)
                    (setq value result failure error done t))))
           (should-not done)
           (ende-test--wait-for (lambda () done)
-                                 :description "worker result callback")
+                               :description "worker result callback")
           (should tick)
           (should-not failure)
           (should-not (= (car value) (emacs-pid)))
-          (should (equal (cdr value) '(nil "λ\nquoted \"text\""))))
+          (should (equal (cdr value) '(nil "λ\nquoted \"text\"" nil))))
       (when cancel (funcall cancel))
       (cancel-timer timer))))
 
@@ -87,6 +89,17 @@
             (accept-process-output nil 0.05)
             (should (= calls 1)))
         (when cancel (funcall cancel))))))
+
+(ert-deftest ende-worker/project-loading-keeps-dependencies-small ()
+  :tags '(integration)
+  (let (done value failure)
+    (ende-worker-run
+     'ende-tools 'eval
+     '((mapcar #'featurep '(ende-tools ende-queue ende-provider ende-ui))) nil
+     (lambda (result error) (setq value result failure error done t)))
+    (ende-test--wait-for (lambda () done) :description "lean project worker")
+    (should-not failure)
+    (should (equal value '(t nil nil nil)))))
 
 (provide 'ende-worker-test)
 

@@ -246,37 +246,37 @@ names before resolution.  Symlinks to directories are never traversed."
   (let ((seen (make-hash-table :test #'equal))
         (ignore-case (file-name-case-insensitive-p root)))
     (catch 'stopped
-    (cl-labels
-        ((walk (directory)
-          (dolist (entry (directory-files
-                          directory t directory-files-no-dot-files-regexp))
-            (let* ((relative (file-relative-name entry root))
-                   (attributes (file-attributes entry))
-                   (type (file-attribute-type attributes)))
-                     (cond
-               ((eq type t)
-                (when (and (not (ende-project--excluded-p relative))
-                           (or (null descend-p) (funcall descend-p relative))
-                           (not (file-symlink-p entry))
-                           (ende-project--contains-p
-                            (file-truename entry) root ignore-case))
-                  (walk entry)))
-               ((and attributes
-                     (or (stringp type) (null candidate-p)
-                         (funcall candidate-p relative)))
-                (let* ((canonical (file-truename entry))
-                       (relative (file-relative-name canonical root)))
-                  (when (and (ende-project--contains-p canonical root ignore-case)
-                             (not (ende-project--excluded-p relative))
-                             (or (null candidate-p) (funcall candidate-p relative))
-                             (not (gethash canonical seen))
-                             (file-regular-p canonical))
-                    (puthash canonical t seen)
-                    (when (stringp type)
-                      (setq attributes (file-attributes canonical)))
-                    (unless (funcall visit canonical relative attributes)
-                      (throw 'stopped nil))))))))))
-      (walk root))
+      (cl-labels
+          ((walk (directory)
+             (dolist (entry (directory-files
+                             directory t directory-files-no-dot-files-regexp))
+               (let* ((relative (file-relative-name entry root))
+                      (attributes (file-attributes entry))
+                      (type (file-attribute-type attributes)))
+                 (cond
+                  ((eq type t)
+                   (when (and (not (ende-project--excluded-p relative))
+                              (or (null descend-p) (funcall descend-p relative))
+                              (not (file-symlink-p entry))
+                              (ende-project--contains-p
+                               (file-truename entry) root ignore-case))
+                     (walk entry)))
+                  ((and attributes
+                        (or (stringp type) (null candidate-p)
+                            (funcall candidate-p relative)))
+                   (let* ((canonical (file-truename entry))
+                          (relative (file-relative-name canonical root)))
+                     (when (and (ende-project--contains-p canonical root ignore-case)
+                                (not (ende-project--excluded-p relative))
+                                (or (null candidate-p) (funcall candidate-p relative))
+                                (not (gethash canonical seen))
+                                (file-regular-p canonical))
+                       (puthash canonical t seen)
+                       (when (stringp type)
+                         (setq attributes (file-attributes canonical)))
+                       (unless (funcall visit canonical relative attributes)
+                         (throw 'stopped nil))))))))))
+        (walk root))
       t)))
 
 (defun ende-project--walk-files (root)

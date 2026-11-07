@@ -31,7 +31,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ende-project)
-(require 'ende-queue)
+(declare-function ende-job-id "ende-queue" (job))
 
 (cl-defstruct (ende-sandbox (:constructor ende-sandbox--create))
   owner root base workspace hooks container image process started

@@ -1156,11 +1156,16 @@
 
 (ert-deftest ende-test/project-tools-run-in-the-background-after-reload ()
   :tags '(integration)
-  (let ((root (make-temp-file "ende-background-tools-" t)))
+  (let* ((root (make-temp-file "ende-background-tools-" t))
+         (retained (ende--make-job :state 'completed))
+         (cache (ende-agent--project-cache retained)))
     (unwind-protect
         (progn
           (with-temp-file (expand-file-name "source.txt" root) (insert "needle\n"))
+          (should (eq cache (gethash retained ende-agent--project-caches)))
           (ende-reload)
+          (should-not (gethash retained ende-agent--project-caches))
+          (should (ende-job-p retained))
           (dolist (case '(("project_info" nil)
                           ("list_project_files" nil)
                           ("search_project" (:query "needle"))))
@@ -1476,7 +1481,7 @@
            (outside (make-temp-file "ende-search-outside-" nil ".el" "needle outside\n"))
            (configuration (ende-test--tool-access-config
                            root '((resource project (include "*.el"))
-                                  (tools search_project list_project_files)
+                                  (tools project_info search_project list_project_files)
                                   (set-tool-resources search_project list_project_files
                                                       :resources project))))
            (denied (ende-test--tool-access-config
@@ -1489,7 +1494,7 @@
            (ende-agent--project-caches (make-hash-table :test #'eq :weakness 'key)))
       (unwind-protect
           (cl-labels
-              ((search (owner policy &optional glob)
+              ((search-files (owner policy &optional glob)
                  (let* ((arguments (append '(:query "needle" :max_results 20)
                                            (and glob (list :glob glob))))
                         (json (ende-test--tool-response
@@ -1499,38 +1504,42 @@
                    (should (eq (plist-get decoded :ok) t))
                    (plist-get decoded :result))))
             (with-temp-file first (insert "needle first\n"))
-            (should (= 1 (length (plist-get (search job configuration) :files))))
+            (should (= 1 (length (plist-get (search-files job configuration) :files))))
             (let* ((cache (gethash job ende-agent--project-caches))
                    (allowed (ende-project-cache-allowed cache)))
               (should (= 1 (hash-table-count allowed)))
               (ende-agent--release-project-cache job '(:type :suspended))
               (should (eq cache (gethash job ende-agent--project-caches)))
+              (ende-test--tool-response
+               '(:id "info" :name "project_info" :arguments "{}") configuration job)
+              (should (eq cache (gethash job ende-agent--project-caches)))
+              (should (= 1 (hash-table-count allowed)))
               ;; These writes do not go through Ende mutation notifications.
               (with-temp-file second (insert "needle second\n"))
               (with-temp-file first (insert "needle changed\n"))
-              (let ((files (plist-get (search job configuration) :files)))
+              (let ((files (plist-get (search-files job configuration) :files)))
                 (should (= 2 (length files)))
                 (should (equal "needle changed"
                                (plist-get (aref (plist-get (aref files 0) :matches) 0)
                                           :match))))
               (should (= 2 (hash-table-count allowed)))
-              (should (= 0 (length (plist-get (search job configuration "new.el") :files))))
+              (should (= 0 (length (plist-get (search-files job configuration "new.el") :files))))
               (with-temp-file (expand-file-name "new.el" root) (insert "needle new\n"))
-              (should (= 1 (length (plist-get (search job configuration "new.el") :files))))
+              (should (= 1 (length (plist-get (search-files job configuration "new.el") :files))))
               (make-symbolic-link first link)
-              (should (= 1 (length (plist-get (search job configuration "link.el") :files))))
+              (should (= 1 (length (plist-get (search-files job configuration "link.el") :files))))
               (delete-file link)
               (make-symbolic-link outside link)
-              (should (= 0 (length (plist-get (search job configuration "link.el") :files))))
+              (should (= 0 (length (plist-get (search-files job configuration "link.el") :files))))
               (should-not (gethash (cons 'search_project outside) allowed))
-              (should (= 0 (length (plist-get (search other denied) :files))))
+              (should (= 0 (length (plist-get (search-files other denied) :files))))
               (should-not (eq cache (gethash other ende-agent--project-caches)))
               (should (= 0 (hash-table-count
                             (ende-project-cache-allowed
                              (gethash other ende-agent--project-caches)))))
-              (should (= 0 (length (plist-get (search job denied) :files))))
+              (should (= 0 (length (plist-get (search-files job denied) :files))))
               (should (= 0 (hash-table-count allowed)))
-              (search job configuration "first.el")
+              (search-files job configuration "first.el")
               (dotimes (index ende-project-cache-limit)
                 (ende-project-cache-merge
                  cache (list (cons (cons 'list_project_files
@@ -1544,8 +1553,8 @@
                              (should (= 0 (plist-get (cadr arguments) :room)))
                              (funcall run library function arguments bindings callback register))))
                   (should (= 1 (length (plist-get
-                                        (search job configuration "first.el") :files))))))
-              (should (= 3 (length (plist-get (search job configuration) :files))))
+                                        (search-files job configuration "first.el") :files))))))
+              (should (= 3 (length (plist-get (search-files job configuration) :files))))
               (should (= ende-project-cache-limit (hash-table-count allowed)))))
         (delete-file outside)))))
 
@@ -1577,25 +1586,67 @@
                  (list :result '(:files [] :files_inspected 0 :truncated nil)
                        :context-key key
                        :cache-delta (list (cons (cons 'search_project
-                                                     (expand-file-name "source.el" root))
-                                               'project))) nil)
+                                                      (expand-file-name "source.el" root))
+                                                'project))) nil)
         (should (= 0 (hash-table-count (ende-project-cache-allowed cache))))))))
+
+(ert-deftest ende-test/project-tools-live-metadata-uses-known-local-filenames ()
+  (ende-test--with-project (root)
+    (let* ((path (expand-file-name "source.el" root))
+           (local (generate-new-buffer " *ende-local-source*" t))
+           (remote (generate-new-buffer " *ende-remote-source*" t)))
+      (unwind-protect
+          (progn
+            (with-current-buffer local
+              (setq buffer-file-name path buffer-file-truename path)
+              (set-buffer-modified-p t))
+            (with-current-buffer remote (setq buffer-file-name "/ssh:example:/source.el"))
+            (cl-letf (((symbol-function 'buffer-list) (lambda (&rest _) (list remote local)))
+                      ((symbol-function 'file-truename)
+                       (lambda (&rest _) (ert-fail "metadata resolved a known or remote path"))))
+              (let* ((record '(:path "source.el" :visiting_buffer nil
+                                     :visiting_buffer_modified nil))
+                     (result (list :files (vector record))))
+                (ende-tools--project-result 'search_project result root nil)
+                (should (plist-get record :visiting_buffer))
+                (should (plist-get record :visiting_buffer_modified)))
+              (should (= 1 (plist-get (ende-tools--project-result
+                                       'project_info '(:buffer_count 0) root nil)
+                                      :buffer_count))))
+            (cl-letf (((symbol-function 'buffer-list)
+                       (lambda (&rest _) (ert-fail "empty result inspected buffers"))))
+              (should (equal '(:files [])
+                             (ende-tools--project-result
+                              'search_project '(:files []) root nil)))))
+        (dolist (buffer (list local remote))
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
 
 (ert-deftest ende-test/project-tools-exact-selectors-avoid-enumeration ()
   (ende-test--with-project (root)
-			   (make-directory (expand-file-name "src" root))
-			   (with-temp-file (expand-file-name "src/main.el" root) (insert "needle\n"))
-			   (cl-letf (((symbol-function 'ende-project--map-files)
-				      (lambda (&rest _) (ert-fail "exact selection walked the project"))))
-			     (dolist (selector '("src/main.el" "src/missing.el"))
-			       (let ((expected (if (equal selector "src/main.el") 1 0)))
-				 (should (= expected (length (plist-get
-							      (ende-tools--search-project
-							       (list :glob selector :query "needle") root)
-							      :files))))
-				 (should (= expected (length (plist-get
-							      (ende-tools--list-project-files
-							       (list :glob selector) root) :files)))))))))
+    (make-directory (expand-file-name "src" root))
+    (with-temp-file (expand-file-name "src/main.el" root) (insert "needle\n"))
+    (cl-letf (((symbol-function 'ende-project--map-files)
+	       (lambda (&rest _) (ert-fail "exact selection walked the project"))))
+      (dolist (selector '("src/main.el" "src/missing.el"))
+	(let ((expected (if (equal selector "src/main.el") 1 0)))
+	  (should (= expected (length (plist-get
+				       (ende-tools--search-project
+					(list :glob selector :query "needle") root)
+				       :files))))
+	  (should (= expected (length (plist-get
+				       (ende-tools--list-project-files
+					(list :glob selector) root) :files))))))
+      (let ((ende-project-excluded-path-patterns '("^src/"))
+            (ende-tools--access-config
+             (list :tool-resources '((search_project fixed))
+                   :resources (list (list 'fixed :type 'file
+                                          :root (file-name-as-directory
+                                                 (expand-file-name "src" root))
+                                          :include-regexps '(".*"))))))
+        (should (= 0 (length (plist-get
+                              (ende-tools--search-project
+                               '(:glob "src/main.el" :query "needle") root) :files))))))))
 
 (ert-deftest ende-test/project-tools-search-supports-literal-queries-and-patterns ()
   (let* ((root (make-temp-file "ende-tools-search-literals-" t))
