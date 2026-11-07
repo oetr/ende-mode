@@ -381,7 +381,10 @@
 (defun ende-queue-ui-visit-agent-work ()
   "Open or recreate the selected retained job's disposable Work viewer."
   (interactive)
-  (pop-to-buffer (ende-work-buffer-open (ende-queue-ui--current-job))))
+  (let ((buffer (ende-work-buffer-open (ende-queue-ui--current-job))))
+    (pop-to-buffer buffer)
+    (with-current-buffer buffer (ende-work-buffer--schedule-refresh))
+    buffer))
 
 (defun ende-queue-ui-next-entry (&optional direction)
   "Move DIRECTION through visible job rows."

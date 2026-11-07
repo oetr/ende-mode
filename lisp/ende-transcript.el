@@ -41,14 +41,17 @@
   id kind round response-id content status data)
 
 (defvar ende-transcript-change-functions nil
-  "Presentation observers called with the changed transcript and entry.")
+  "Presentation observers called with TRANSCRIPT, ENTRY, and CHANGE.
+CHANGE is `append', `replace', or `metadata'.")
 
-(defun ende-transcript-notify (transcript entry)
-  "Notify presentation observers of ENTRY in TRANSCRIPT, isolating failures."
+(defun ende-transcript-notify (transcript entry change)
+  "Notify observers of ENTRY's CHANGE in TRANSCRIPT, isolating errors.
+`append' guarantees an unchanged raw content prefix; `replace' permits any
+content change; `metadata' changes only status, headings, or attribution."
   (dolist (function ende-transcript-change-functions)
     (condition-case failure
-        (funcall function transcript entry)
-      ((error quit) (display-warning 'ende (format "Work display: %s" (error-message-string failure)))))))
+        (funcall function transcript entry change)
+      (error (display-warning 'ende (format "Work display: %s" (error-message-string failure)))))))
 
 (defun ende-transcript-new-entry (transcript kind &optional content data status)
   "Allocate an unattached KIND entry in TRANSCRIPT."
@@ -68,7 +71,7 @@
         (setcdr (ende-transcript-tail transcript) cell)
       (setf (ende-transcript-entries transcript) cell))
     (setf (ende-transcript-tail transcript) cell)
-    (ende-transcript-notify transcript entry)
+    (ende-transcript-notify transcript entry 'replace)
     entry))
 
 (defun ende-transcript--interrupt-response (transcript)
@@ -79,9 +82,9 @@
       (maphash (lambda (_key entry)
                  (when (eq (ende-transcript-entry-status entry) 'streaming)
                    (setf (ende-transcript-entry-status entry) 'interrupted)
-                   (ende-transcript-notify transcript entry)))
+                   (ende-transcript-notify transcript entry 'metadata)))
                (ende-transcript-sources transcript))
-      (ende-transcript-notify transcript response))))
+      (ende-transcript-notify transcript response 'metadata))))
 
 (defun ende-transcript-begin-response (transcript)
   "Start a provider response boundary in TRANSCRIPT."
@@ -110,7 +113,7 @@
            (ende-transcript-entry-data entry)
            (list :response-metadata (ende-transcript-metadata transcript)
                  :usage (ende-transcript-usage transcript))))
-    (ende-transcript-notify transcript entry)))
+    (ende-transcript-notify transcript entry 'metadata)))
 
 (defun ende-transcript-item-text (item)
   "Return the visible text in a Responses ITEM."
@@ -169,7 +172,7 @@ replacing it; STATUS defaults to streaming."
         (setf (ende-transcript-entry-response-id entry) (ende-transcript-entry-id response)))
       (puthash key entry sources)
       (if new (ende-transcript--append-entry transcript entry)
-        (ende-transcript-notify transcript entry))
+        (ende-transcript-notify transcript entry (if append 'append 'replace)))
       ;; A thinking block has both readable reasoning and an opaque replay facet.
       (when (eq kind 'opaque)
         (when-let* ((thinking (ende-protocol-json-get "thinking" (plist-get event :item))))
@@ -265,14 +268,18 @@ one final reply; accepting the current response again does not duplicate it."
                 (ende-transcript-entry-status item) 'complete)
           (unless (memq item (ende-transcript-entries transcript))
             (ende-transcript--append-entry transcript item))
-          (ende-transcript-notify transcript item))
+          (ende-transcript-notify transcript item
+                                  (if (eq (ende-transcript-entry-kind item) 'tool-call)
+                                      'replace 'metadata)))
         (unless synthetic
           (maphash (lambda (_key item)
                      (when (eq (ende-transcript-entry-status item) 'streaming)
                        (setf (ende-transcript-entry-status item) 'complete)
-                       (ende-transcript-notify transcript item)))
+                       (ende-transcript-notify transcript item
+                                               (if (eq (ende-transcript-entry-kind item) 'tool-call)
+                                                   'replace 'metadata))))
                    (ende-transcript-sources transcript))))
-      (ende-transcript-notify transcript entry))
+      (ende-transcript-notify transcript entry 'metadata))
     entry))
 
 (defun ende-transcript-tool-call-entry (transcript call)
@@ -317,7 +324,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
               (ende-transcript-entry-data entry)
               (list :duration-ms (plist-get event :duration-ms)
                     :duration-kind (plist-get event :duration-kind))))
-       (ende-transcript-notify transcript entry)))
+       (ende-transcript-notify transcript entry 'metadata)))
     (:response-restarted
      (ende-transcript-begin-response transcript)
      (ende-transcript-append transcript 'progress (plist-get event :text)
@@ -346,7 +353,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
          (when (plist-member result :thinking)
            (setf (ende-transcript-entry-data entry)
                  (plist-put (ende-transcript-entry-data entry) :thinking (plist-get result :thinking))))
-         (ende-transcript-notify transcript entry))))
+         (ende-transcript-notify transcript entry 'metadata))))
     (:delta
      (when (memq (plist-get event :channel) '(:content :thinking))
        (let* ((entry (ende-transcript--response transcript))
@@ -361,8 +368,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
                      (plist-put (ende-transcript-entry-data entry) :thinking
                                 (concat (plist-get (ende-transcript-entry-data entry) :thinking) text)))
              (setf (ende-transcript-entry-content entry)
-                   (concat (ende-transcript-entry-content entry) text)))
-           (ende-transcript-notify transcript entry)))))
+                   (concat (ende-transcript-entry-content entry) text)))))))
     (:item
      (let ((response (ende-transcript--response transcript))
            (observation (plist-put (copy-sequence event) :type (plist-get event :kind))))
@@ -373,7 +379,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
                             (concat "opaque-" (or (ende-protocol-json-get
                                                    "type" (plist-get event :item)) "unknown")))))
          (ende-transcript--upsert transcript (ende-transcript-sources transcript)
-                                 response observation))))
+                                 response observation (plist-get event :append)))))
     (:reasoning-summary
      (let* ((round (ende-transcript-round transcript))
             (item (plist-get event :item))
@@ -393,7 +399,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
        (setf (ende-transcript-entry-content entry)
              (if (plist-get event :replace) (plist-get event :text)
                (concat (ende-transcript-entry-content entry) (plist-get event :text))))
-       (ende-transcript-notify transcript entry)))
+       (ende-transcript-notify transcript entry (if (plist-get event :replace) 'replace 'append))))
     (:agent-activity
      (ende-transcript-append transcript 'progress (plist-get event :status)
                              (list :title (plist-get event :title))))))
@@ -406,7 +412,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
                          (ende-transcript-append transcript 'status)))))
     (setf (ende-transcript-entry-status entry) state
           (ende-transcript-entry-data entry) (list :error error))
-    (ende-transcript-notify transcript entry)))
+    (ende-transcript-notify transcript entry 'replace)))
 
 (provide 'ende-transcript)
 ;;; ende-transcript.el ends here

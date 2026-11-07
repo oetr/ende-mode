@@ -440,6 +440,7 @@
 (defun ende-reload ()
   "Abort active jobs and reload every Ende source file in dependency order."
   (interactive)
+  (ende-work-buffer-shutdown)
   (ende-abort-queue)
   (ende-websocket-shutdown)
   (when-let* ((selector (get-buffer ende-selector-buffer-name)))

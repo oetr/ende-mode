@@ -42,7 +42,7 @@
 
 (cl-defstruct (ende-work-buffer--section
                (:constructor ende-work-buffer--make-section))
-  entry start body-start body-end heading body)
+  entry response start body-start body-end heading body)
 
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
@@ -52,8 +52,13 @@
 (defvar-local ende-work-buffer--responses nil)
 (defvar-local ende-work-buffer--rounds nil)
 (defvar-local ende-work-buffer--metadata nil)
-(defvar-local ende-work-buffer--dirty-start nil)
-(defvar-local ende-work-buffer--dirty-end nil)
+(defvar-local ende-work-buffer--dependents nil)
+(defvar-local ende-work-buffer--task nil)
+(defconst ende-work-buffer--refresh-delay 0.1)
+(defvar-local ende-work-buffer--refresh-timer nil)
+(defvar-local ende-work-buffer--pending nil)
+(defvar-local ende-work-buffer--pending-order nil)
+(defvar-local ende-work-buffer--rendering nil)
 
 (define-minor-mode ende-work-buffer-mode
   "Inspect a job transcript with ordinary, read-only Org navigation."
@@ -62,9 +67,7 @@
             (define-key map (kbd "q") #'ende-work-buffer-quit)
             (define-key map (kbd "r") #'ende-work-buffer-inspect-raw)
             map)
-  (when ende-work-buffer-mode
-    (font-lock-mode 1)
-    (font-lock-ensure))
+  (when ende-work-buffer-mode (font-lock-mode 1))
   (read-only-mode (if ende-work-buffer-mode 1 -1)))
 
 (defun ende-work-buffer--one-line (value)
@@ -162,16 +165,7 @@ Only actual newlines in decoded string values become display newlines."
         (save-restriction
           (widen)
           (funcall function)
-          (when ende-work-buffer--dirty-start
-            ;; `font-lock-mode' may remain nil in batch Emacs.  Explicitly
-            ;; fontify changed text, rather than merely requesting the mode.
-            (font-lock-flush ende-work-buffer--dirty-start ende-work-buffer--dirty-end)
-            (font-lock-ensure ende-work-buffer--dirty-start ende-work-buffer--dirty-end))
           (set-buffer-modified-p nil))
-      (when ende-work-buffer--dirty-start
-        (set-marker ende-work-buffer--dirty-start nil)
-        (set-marker ende-work-buffer--dirty-end nil)
-        (setq ende-work-buffer--dirty-start nil ende-work-buffer--dirty-end nil))
       (goto-char (ende-work-buffer--restore-position position))
       (dolist (state windows)
         (pcase-let ((`(,window ,saved-point ,saved-start) state))
@@ -182,18 +176,10 @@ Only actual newlines in decoded string values become display newlines."
               (set-window-point window point))))))))
 
 (defun ende-work-buffer--splice (begin end text)
-  "Replace BEGIN through END with TEXT and mark the changed region."
+  "Replace BEGIN through END with TEXT."
   (goto-char begin)
   (delete-region begin end)
-  (insert text)
-  (if ende-work-buffer--dirty-start
-      (progn
-        (set-marker ende-work-buffer--dirty-start
-                    (min begin ende-work-buffer--dirty-start))
-        (set-marker ende-work-buffer--dirty-end
-                    (max (point) ende-work-buffer--dirty-end)))
-    (setq ende-work-buffer--dirty-start (copy-marker begin)
-          ende-work-buffer--dirty-end (copy-marker (point) t))))
+  (insert text))
 
 (defun ende-work-buffer--replace (begin old new)
   "Update OLD at BEGIN to NEW, changing only their differing span."
@@ -261,6 +247,16 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
     (setf (ende-work-buffer--section-entry section) entry
           (ende-work-buffer--section-heading section) heading
           (ende-work-buffer--section-body section) body)
+    (when-let* ((response (and entry (ende-work-buffer--response-for entry))))
+      (unless (eq response (ende-work-buffer--section-response section))
+        (when-let* ((old (gethash (ende-work-buffer--section-response section)
+                                 ende-work-buffer--dependents)))
+          (remhash entry old))
+        (let ((entries (or (gethash response ende-work-buffer--dependents)
+                           (puthash response (make-hash-table :test #'eq)
+                                    ende-work-buffer--dependents))))
+          (puthash entry t entries))
+        (setf (ende-work-buffer--section-response section) response)))
     (with-silent-modifications
       (add-text-properties
        (ende-work-buffer--section-start section) (ende-work-buffer--section-body-end section)
@@ -339,74 +335,150 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
   (let ((text (string-trim (replace-regexp-in-string "\\*\\*" "*" (or text "")))))
     (concat "Agent: " (if (string-prefix-p "*" text) text (concat "*" text "*")))))
 
-(defun ende-work-buffer--entry (entry)
-  "Render changed ENTRY in its first-observation position."
-  (let ((id (ende-transcript-entry-id entry))
-        (data (ende-transcript-entry-data entry))
+(defun ende-work-buffer--title (entry)
+  "Return ENTRY's heading without formatting its body."
+  (let ((data (ende-transcript-entry-data entry))
         (content (ende-transcript-entry-content entry)))
     (pcase (ende-transcript-entry-kind entry)
-      ('response
-       (let ((changed (ende-work-buffer--record-response entry)))
-         (unless (plist-get data :synthetic)
-           (ende-work-buffer--put id entry (ende-org--provider-call-title data) ""))
-         (when (or changed (eq (ende-transcript-entry-status entry) 'complete))
-           (maphash
-            (lambda (_key section)
-              (when-let* ((item (ende-work-buffer--section-entry section)))
-                (when (and (not (eq item entry))
-                           (eq (ende-work-buffer--response-for item) entry))
-                  (ende-work-buffer--entry item))))
-            ende-work-buffer--sections))))
+      ('response (ende-org--provider-call-title data))
       ('text
        (let* ((response (ende-work-buffer--response-for entry))
               (response-data (and response (ende-transcript-entry-data response)))
               (final (and (plist-get response-data :final)
                           (eq entry (cl-find 'text (reverse (plist-get response-data :items))
-                                             :key #'ende-transcript-entry-kind)))))
-         (ende-work-buffer--put
-          id entry (cond ((eq (ende-transcript-entry-status entry) 'interrupted) "Agent: Interrupted reply")
-                         (final "Agent: Final reply") (t "Agent: Reply"))
-          (ende-work-buffer--example
-           (if (string-blank-p (or content ""))
-               (or (plist-get (plist-get data :normalized) :content) content)
-             content)))))
-      ((or 'tool-call 'tool-result)
-       (ende-work-buffer--put
-        id entry (ende-work-buffer--tool-title entry)
-        (ende-work-buffer--example
-         (ende-work-buffer--readable-json (ende-work-buffer--raw-payload entry))) t))
-      ('opaque
-       (ende-work-buffer--put
-        id entry "Agent: Opaque BS"
-        (ende-work-buffer--example
-         (ende-work-buffer--readable-json
-          (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry)))) t))
-      ('thinking
-       (ende-work-buffer--put id entry "Agent: Reasoning" (ende-work-buffer--example content) t))
-      ('summary
-       (ende-work-buffer--put id entry (ende-work-buffer--summary-title content)
-                              (ende-work-buffer--example content) t))
-      ('progress
-       (ende-work-buffer--put
-        id entry (ende-work-buffer--summary-title
-                  (concat (plist-get data :title) " — " content))
-        (ende-work-buffer--example content) t))
-      ('status
-       (ende-work-buffer--put
-        id entry (format "Status: %s" (ende-transcript-entry-status entry))
-        (ende-work-buffer--example (ende-work-buffer--payload-text (plist-get data :error))))))))
+                                            :key #'ende-transcript-entry-kind)))))
+         (cond ((eq (ende-transcript-entry-status entry) 'interrupted) "Agent: Interrupted reply")
+               (final "Agent: Final reply") (t "Agent: Reply"))))
+      ((or 'tool-call 'tool-result) (ende-work-buffer--tool-title entry))
+      ('opaque "Agent: Opaque BS")
+      ('thinking "Agent: Reasoning")
+      ('summary (ende-work-buffer--summary-title content))
+      ('progress (ende-work-buffer--summary-title
+                  (concat (plist-get data :title) " — " content)))
+      ('status (format "Status: %s" (ende-transcript-entry-status entry))))))
 
-(defun ende-work-buffer--transcript-change (transcript entry)
-  "Incrementally display changed ENTRY in TRANSCRIPT's existing viewer only."
+(defun ende-work-buffer--entry (entry change)
+  "Render ENTRY's CHANGE in its first-observation position."
+  (let* ((id (ende-transcript-entry-id entry))
+         (section (gethash id ende-work-buffer--sections))
+         (kind (ende-transcript-entry-kind entry))
+         (data (ende-transcript-entry-data entry))
+         (content (ende-transcript-entry-content entry)))
+    (unless (and (eq kind 'response) (plist-get data :synthetic))
+      (ende-work-buffer--put
+       id entry (ende-work-buffer--title entry)
+       (if (and section (eq change 'metadata))
+           (ende-work-buffer--section-body section)
+         (pcase kind
+           ('response "")
+           ((or 'tool-call 'tool-result 'opaque)
+            (ende-work-buffer--example
+             (ende-work-buffer--readable-json
+              (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry)))))
+           ('text
+            (ende-work-buffer--example
+             (if (string-blank-p (or content ""))
+                 (or (plist-get (plist-get data :normalized) :content) content)
+               content)))
+           ('status (ende-work-buffer--example (ende-work-buffer--payload-text (plist-get data :error))))
+           (_ (ende-work-buffer--example content))))
+       (memq kind '(tool-call tool-result opaque thinking summary progress))))))
+
+(defun ende-work-buffer--merge-change (old new)
+  "Merge pending OLD and NEW change kinds."
+  (cond ((or (eq old 'replace) (eq new 'replace)) 'replace)
+        ((or (eq old 'append) (eq new 'append)) 'append)
+        (t 'metadata)))
+
+(defun ende-work-buffer--queue-change (entry change)
+  "Retain one pending CHANGE for canonical ENTRY in observation order."
+  (let ((old (gethash entry ende-work-buffer--pending)))
+    (unless old (push entry ende-work-buffer--pending-order))
+    (puthash entry (ende-work-buffer--merge-change old change) ende-work-buffer--pending)))
+
+(defun ende-work-buffer--pending-p ()
+  "Return whether this viewer has runnable presentation work."
+  (or ende-work-buffer--pending-order
+      (not (eq ende-work-buffer--task (ende-transcript-task ende-work-buffer--transcript)))))
+
+(defun ende-work-buffer--viewer-p ()
+  "Return whether this buffer is still its job's registered viewer."
+  (and ende-work-buffer-mode ende-work-buffer--job
+       (eq (ende-job-work-buffer ende-work-buffer--job) (current-buffer))
+       (eq (gethash ende-work-buffer--transcript ende-work-buffer--viewers) (current-buffer))))
+
+(defun ende-work-buffer--schedule-refresh ()
+  "Schedule one visible refresh from the first pending change."
+  (when (and (ende-work-buffer--viewer-p)
+             (ende-work-buffer--pending-p)
+             (get-buffer-window (current-buffer) 'visible)
+             (not ende-work-buffer--rendering)
+             (not ende-work-buffer--refresh-timer))
+    (setq ende-work-buffer--refresh-timer
+          (run-at-time ende-work-buffer--refresh-delay nil
+                       #'ende-work-buffer--refresh (current-buffer)))))
+
+(defun ende-work-buffer--render-pending ()
+  "Consume a snapshot, leaving notifications during rendering pending."
+  (let ((pending ende-work-buffer--pending)
+        (order (nreverse ende-work-buffer--pending-order))
+        responses)
+    (setq ende-work-buffer--pending (make-hash-table :test #'eq)
+          ende-work-buffer--pending-order nil)
+    ;; Index response metadata before any dependent headings are constructed.
+    (dolist (entry order)
+      (when (eq (ende-transcript-entry-kind entry) 'response)
+        (ende-work-buffer--record-response entry)
+        (push entry responses)))
+    (ende-work-buffer--update
+     (lambda ()
+       (unless (and (gethash 'task ende-work-buffer--sections)
+                    (eq ende-work-buffer--task (ende-transcript-task ende-work-buffer--transcript)))
+         (setq ende-work-buffer--task (ende-transcript-task ende-work-buffer--transcript))
+         (ende-work-buffer--put 'task nil nil (ende-work-buffer--example ende-work-buffer--task)))
+       (dolist (entry order)
+         (ende-work-buffer--entry entry (gethash entry pending)))
+       (dolist (response responses)
+         (when-let* ((entries (gethash response ende-work-buffer--dependents)))
+           (maphash (lambda (entry _)
+                      (unless (or (eq entry response) (gethash entry pending))
+                        (ende-work-buffer--entry entry 'metadata)))
+                    entries)))))))
+
+(defun ende-work-buffer--refresh (buffer)
+  "Refresh BUFFER if it is still a displayed viewer; dispose on failure."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ende-work-buffer--refresh-timer nil)
+      (when (and (ende-work-buffer--viewer-p)
+                 (get-buffer-window buffer 'visible)
+                 (not ende-work-buffer--rendering))
+        (condition-case failure
+            (progn
+              (let ((ende-work-buffer--rendering t))
+                (ende-work-buffer--render-pending))
+              (ende-work-buffer--schedule-refresh))
+          (error
+           (kill-buffer buffer)
+           (display-warning 'ende (format "Work display: %s" (error-message-string failure))))
+          (quit
+           (kill-buffer buffer)
+           (signal (car failure) (cdr failure))))))))
+
+(defun ende-work-buffer--window-change (window)
+  "Catch up when WINDOW displays a Work buffer."
+  (when (window-live-p window)
+    (with-current-buffer (window-buffer window)
+      (when ende-work-buffer-mode (ende-work-buffer--schedule-refresh)))))
+
+(defun ende-work-buffer--transcript-change (transcript entry change)
+  "Invalidate ENTRY's CHANGE without rendering TRANSCRIPT's viewer."
   (when-let* ((buffer (gethash transcript ende-work-buffer--viewers))
               ((buffer-live-p buffer)))
     (with-current-buffer buffer
-      (when (eq transcript ende-work-buffer--transcript)
-        (ende-work-buffer--update
-         (lambda ()
-           (ende-work-buffer--put 'task nil nil
-                                  (ende-work-buffer--example (ende-transcript-task transcript)))
-           (ende-work-buffer--entry entry)))))))
+      (when (and ende-work-buffer-mode (eq transcript ende-work-buffer--transcript))
+        (ende-work-buffer--queue-change entry change)
+        (ende-work-buffer--schedule-refresh)))))
 
 (add-hook 'ende-transcript-change-functions #'ende-work-buffer--transcript-change)
 
@@ -416,7 +488,33 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
     (remhash ende-work-buffer--transcript ende-work-buffer--viewers))
   (when (and ende-work-buffer--job
              (eq (ende-job-work-buffer ende-work-buffer--job) (current-buffer)))
-    (setf (ende-job-work-buffer ende-work-buffer--job) nil)))
+    (setf (ende-job-work-buffer ende-work-buffer--job) nil))
+  (when (timerp ende-work-buffer--refresh-timer)
+    (cancel-timer ende-work-buffer--refresh-timer))
+  (when ende-work-buffer--sections
+    (maphash (lambda (_ section)
+               (dolist (marker (list (ende-work-buffer--section-start section)
+                                     (ende-work-buffer--section-body-start section)
+                                     (ende-work-buffer--section-body-end section)))
+                 (set-marker marker nil)))
+             ende-work-buffer--sections))
+  (with-silent-modifications
+    (remove-text-properties (point-min) (point-max)
+                            '(ende-work-buffer-section nil ende-work-buffer-entry nil)))
+  (setq ende-work-buffer-mode nil ende-work-buffer--refresh-timer nil
+        ende-work-buffer--pending nil ende-work-buffer--pending-order nil
+        ende-work-buffer--job nil ende-work-buffer--transcript nil
+        ende-work-buffer--sections nil ende-work-buffer--responses nil
+        ende-work-buffer--rounds nil ende-work-buffer--metadata nil
+        ende-work-buffer--dependents nil ende-work-buffer--task nil))
+
+(defun ende-work-buffer-shutdown ()
+  "Discard all disposable viewers without touching retained transcripts."
+  (let (buffers)
+    (maphash (lambda (_ buffer) (push buffer buffers)) ende-work-buffer--viewers)
+    (dolist (buffer buffers)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))
+    (clrhash ende-work-buffer--viewers)))
 
 (defun ende-work-buffer-open (job)
   "Return JOB's Work viewer, creating or recreating it lazily.
@@ -426,7 +524,9 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
          (existing (ende-job-work-buffer job)))
     (if (and (buffer-live-p existing)
              (eq transcript (buffer-local-value 'ende-work-buffer--transcript existing)))
-        existing
+        (progn
+          (with-current-buffer existing (ende-work-buffer--schedule-refresh))
+          existing)
       (let ((buffer (generate-new-buffer (format "*ende-work-%s*" (ende-job-id job))))
             ready)
         (unwind-protect
@@ -436,25 +536,22 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
                     ende-work-buffer--sections (make-hash-table :test #'eql)
                     ende-work-buffer--responses (make-hash-table :test #'eql)
                     ende-work-buffer--rounds (make-hash-table :test #'eql)
-                    ende-work-buffer--metadata (make-hash-table :test #'eql))
+                    ende-work-buffer--metadata (make-hash-table :test #'eql)
+                    ende-work-buffer--dependents (make-hash-table :test #'eq)
+                    ende-work-buffer--pending (make-hash-table :test #'eq)
+                    ende-work-buffer--task 'unrendered)
               (when-let* ((root (plist-get (ende-job-access-policy job) :root)))
                 (setq-local default-directory (file-name-as-directory root)))
               (buffer-disable-undo)
               (ende-work-buffer-mode 1)
               (add-hook 'kill-buffer-hook #'ende-work-buffer--detach nil t)
               (add-hook 'change-major-mode-hook #'ende-work-buffer--detach nil t)
-              (ende-work-buffer--update
-               (lambda ()
-                 (ende-work-buffer--splice
-                  (point-min) (point-min)
-                  (concat "#+COLUMNS: " ende-org-columns-format "\n\n"))
-                 (ende-work-buffer--put 'task nil nil
-                                       (ende-work-buffer--example (ende-transcript-task transcript)))
-                 (dolist (entry (ende-transcript-entries transcript))
-                   (when (eq (ende-transcript-entry-kind entry) 'response)
-                     (ende-work-buffer--record-response entry)))
-                 (dolist (entry (ende-transcript-entries transcript))
-                   (ende-work-buffer--entry entry))))
+              (add-hook 'window-buffer-change-functions #'ende-work-buffer--window-change nil t)
+              (let ((inhibit-read-only t))
+                (insert "#+COLUMNS: " ende-org-columns-format "\n\n")
+                (set-buffer-modified-p nil))
+              (dolist (entry (ende-transcript-entries transcript))
+                (ende-work-buffer--queue-change entry 'replace))
               (setf (ende-job-work-buffer job) buffer)
               (puthash transcript buffer ende-work-buffer--viewers)
               (setq ready t)

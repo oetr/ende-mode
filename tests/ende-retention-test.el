@@ -73,6 +73,9 @@
           (ende-job-finish root "root answer")
           (should (equal ende--finished-families (list old-family)))
           (setq child-work (ende-work-buffer-open child))
+          (save-window-excursion
+            (set-window-buffer (selected-window) child-work)
+            (ende-work-buffer--refresh child-work))
           (should (buffer-live-p child-work))
           (should (string-match-p "child answer" (with-current-buffer child-work (buffer-string))))
           (kill-buffer child-work)
@@ -80,6 +83,9 @@
           (should (eq child-transcript (ende-job-transcript child)))
           (should (eq child (ende-queue-retained-job-by-id (ende-job-id child))))
           (setq child-work (ende-work-buffer-open child))
+          (save-window-excursion
+            (set-window-buffer (selected-window) child-work)
+            (ende-work-buffer--refresh child-work))
           (should (string-match-p "child answer" (with-current-buffer child-work (buffer-string))))
           (setq active (ende-enqueue (ende-test--dashboard-request
                                      ende-test--dashboard-profile))

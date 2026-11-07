@@ -241,6 +241,11 @@
                      (should (= (length ende-test--calls) 3))
                      (should (equal (durations) '(5 5 100 200 300)))
                      (when inspect
+                       (set-window-buffer (selected-window) viewer)
+                       (with-current-buffer viewer
+                         (when (timerp ende-work-buffer--refresh-timer)
+                           (cancel-timer ende-work-buffer--refresh-timer)))
+                       (ende-work-buffer--refresh viewer)
                        (should (equal (durations) (with-current-buffer viewer (durations)))))
                      (let ((entries (ende-transcript-entries (ende-job-transcript job))))
                        (should (equal (mapcar #'ende-transcript-entry-content
@@ -264,7 +269,8 @@
              (when (buffer-live-p viewer) (kill-buffer viewer))
              (ende-test--reset)))))
     ;; Identities are deterministic at creation, not normalized after the fact.
-    (should (equal (run nil) (run t)))))
+    (save-window-excursion
+      (should (equal (run nil) (run t))))))
 
 (ert-deftest ende-transcript-history-preserves-mixed-turns-and-editable-final ()
   (ende-test--reset)

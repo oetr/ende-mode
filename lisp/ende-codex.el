@@ -1133,7 +1133,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (puthash output-index call table)
       (ende-stream-emit-item
        (ende-codex--session-stream session) output-index 'tool-call
-       "openai-responses" :call call))))
+       "openai-responses" :call call :append append))))
 
 (defun ende-codex--output-items (items)
   "Return ITEMS as a list from a Responses API JSON array."
