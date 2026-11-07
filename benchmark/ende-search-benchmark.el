@@ -252,7 +252,7 @@ Return an independent in-memory manifest of paths and block counts."
           :output_byte_limit ende-tools-max-search-output-bytes
           :layer (symbol-name layer) :cache (symbol-name state)
           :prewarmed_entries prewarmed-entries
-          :samples (vconcat (nreverse samples))
+          :samples (vconcat (reverse samples))
           :wall (ende-search-benchmark--summary samples :wall)
           :gc_count (ende-search-benchmark--summary samples :gc_count)
           :gc_seconds (ende-search-benchmark--summary samples :gc_seconds)
