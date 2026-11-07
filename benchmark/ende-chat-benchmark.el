@@ -36,7 +36,9 @@
 (require 'ende-chat)
 
 (defconst ende-chat-benchmark--profile
-  '(:name local :model "benchmark-model" :parallel t :max-concurrency 2)
+  '(:name local :model "benchmark-model" :parallel t :max-concurrency 2
+    :api openai-chat-completions :auth-method none
+    :url "http://127.0.0.1:8080/v1/chat/completions")
   "Profile used by the synthetic completion benchmark.")
 
 (defun ende-chat-benchmark--conversation-section (index)
@@ -155,9 +157,18 @@
          "full drawer hide" buffer #'ende-chat--hide-control-drawers))))
     ((or 'completion 'completion-with-reasoning)
      (let* ((ende-chat-benchmark--callbacks nil)
+            (title-pending t)
             (ende-llm-function
              (lambda (_messages callbacks _profile)
-               (setq ende-chat-benchmark--callbacks callbacks))))
+               (if title-pending
+                   (progn
+                     (setq title-pending nil)
+                     (funcall
+                      (plist-get callbacks :on-done)
+                      '(:tool-calls
+                        ((:id "benchmark-title" :name "generate_title"
+                          :arguments "{\"title\":\"Benchmark completion\"}")))))
+                 (setq ende-chat-benchmark--callbacks callbacks)))))
        (ende-chat-benchmark--with-transcript
         section-count
         (lambda (buffer)

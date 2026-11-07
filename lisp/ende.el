@@ -403,8 +403,7 @@
   (let* ((sources
           (cl-remove-if
            (lambda (file)
-             (or (string-match-p "-tests?\\.el\\'" file)
-                 (equal file "ende-chat-benchmark.el")))
+             (string-match-p "-tests?\\.el\\'" file))
            (directory-files directory nil "^ende-.*[.]el$")))
          (features
           (mapcar (lambda (file) (file-name-sans-extension file)) sources))
