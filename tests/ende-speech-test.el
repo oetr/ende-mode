@@ -178,7 +178,7 @@
     (unwind-protect
         (progn
           (dolist (file '("ende-speech.el" "ende-new-module.el"
-                          "ende-test.el" "ende-chat-benchmark.el" "ende.el"))
+                          "ende-test.el" "ende.el"))
             (with-temp-file (expand-file-name file directory)
               (insert (cond
                        ((equal file "ende-new-module.el")
@@ -187,6 +187,9 @@
                                 "(provide 'ende-new-module)\n"))
                        (t (format "(provide '%s)\n"
                                   (file-name-sans-extension file)))))))
+          (make-directory (expand-file-name "benchmark" directory))
+          (with-temp-file (expand-file-name "benchmark/ende-chat-benchmark.el" directory)
+            (insert "(error \"Benchmarks must not be loaded by reload\")\n"))
           (with-temp-file (expand-file-name "ende-speech.elc" directory)
             (insert "stale compiled file"))
           (cl-letf (((symbol-function 'ende-abort-queue) #'ignore)
