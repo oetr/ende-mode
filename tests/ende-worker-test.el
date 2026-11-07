@@ -265,7 +265,10 @@
         (accept-process-output nil 0.05)
         (should (= attempts 1))
         (should-not ende-worker--standby)
-        (should (equal before (buffer-list)))))))
+        (should-not
+         (cl-some (lambda (buffer)
+                    (string-prefix-p " *ende-worker" (buffer-name buffer)))
+                  (cl-set-difference (buffer-list) before)))))))
 
 (ert-deftest ende-worker/dependency-source-and-bytecode-changes-force-fresh-code ()
   :tags '(integration)

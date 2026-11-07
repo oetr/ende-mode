@@ -899,7 +899,7 @@ FUNCTION receives no arguments and may return any value."
                          :memo (ende-tools--project-cache-snapshot cache context)
                          :room (- ende-project-cache-limit
                                   (hash-table-count (ende-project-cache-allowed cache))))))
-      (ende-worker-run
+      (ende-worker-run-prewarmed
        'ende-tools #'ende-tools--project-worker (list function request)
        (mapcar (lambda (variable) (cons variable (symbol-value variable)))
                (pcase tool
