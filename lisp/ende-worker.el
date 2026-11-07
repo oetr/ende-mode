@@ -77,15 +77,18 @@
     (princ (ende-worker--print result))))
 
 (defun ende-worker--file-signature (files)
-  "Snapshot FILES' attributes, excluding access times changed by loading."
+  "Snapshot FILES and symlink targets, ignoring access times changed by loading."
   (mapcar
    (lambda (file)
-     (let ((attributes (file-attributes file 'integer)))
-       (list file (file-attribute-size attributes)
-             (file-attribute-modification-time attributes)
-             (file-attribute-status-change-time attributes)
-             (file-attribute-inode-number attributes)
-             (file-attribute-device-number attributes))))
+     (let* ((attributes (file-attributes file 'integer))
+            (link (file-attribute-type attributes))
+            (target (and (stringp link) (file-truename file)))
+            (resolved (if target (file-attributes target 'integer) attributes)))
+       (list file link target (file-attribute-size resolved)
+             (file-attribute-modification-time resolved)
+             (file-attribute-status-change-time resolved)
+             (file-attribute-inode-number resolved)
+             (file-attribute-device-number resolved))))
    files))
 
 (defun ende-worker--source-signature ()

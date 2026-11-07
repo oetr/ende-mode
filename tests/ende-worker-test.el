@@ -276,13 +276,17 @@
     (let* ((source (expand-file-name "ende-worker.el" ende-worker--directory))
            (directory (make-temp-file "ende-worker-libraries-" t))
            (ende-worker--directory directory)
-           (dependency (make-temp-file "ende-worker-dependency-" nil ".el")))
+           (dependency (make-temp-file "ende-worker-dependency-" nil ".el"))
+           (linked-dependency (expand-file-name "dependency.el" directory)))
       (unwind-protect
           (progn
             (copy-file source (expand-file-name "ende-worker.el" directory))
+            (make-symbolic-link dependency linked-dependency)
+            (make-symbolic-link (byte-compile-dest-file dependency)
+                                (byte-compile-dest-file linked-dependency))
             (with-temp-file (expand-file-name "ende-tools.el" directory)
               (insert (format "(require 'ende-worker-test-dependency %S)\n(provide 'ende-tools)\n"
-                              (file-name-sans-extension dependency))))
+                              (file-name-sans-extension linked-dependency))))
             (with-temp-file dependency
               (insert ";;; -*- lexical-binding: t; -*-\n"
                       "(defconst ende-worker-test-version 'old)\n"
