@@ -458,6 +458,71 @@
                            :final)))
       (should (buffer-live-p root-buffer)))))
 
+(ert-deftest ende-test/agent-guidance-follows-job-boundaries ()
+  (ende-test--reset)
+  (let* ((policy '(:active-tools (about_thinking spawn_agent)
+                   :spawn-agent-config worker))
+         (guidance '("First instruction.\nKeep this exact."
+                     "Second instruction." "During work." "Before finishing."))
+         (ende-llm-function
+          (ende-test--fake-llm
+           '((:tool-calls ((:id "child" :name "spawn_agent"
+                           :arguments "{\"title\":\"Child\",\"task\":\"Inspect\"}")))
+             (:tool-calls ((:id "progress" :name "about_thinking"
+                            :arguments "{\"title\":\"Inspecting\",\"status\":\"Checking the task.\"}")))
+             "Provisional answer" "Child answer" "Parent answer")
+           t))
+         (ende-queue-paused t))
+    (unwind-protect
+        (let* ((parent (ende-enqueue
+                        (list 'agent :profile ende-test--dashboard-profile
+                              :access-policy policy :instruction '(:task "Delegate")
+                              :prepare #'ende-agent-private-target)))
+               child)
+          (setf (ende-job-family-registry (ende-job-family parent))
+                (list (cons 'worker policy)))
+          (cl-labels
+              ((delivered ()
+                 (cl-remove-if-not
+                  (lambda (text) (member text (cons "After the child." guidance)))
+                  (mapcar #'ende-content-body
+                          (plist-get (car (last ende-test--calls)) :messages)))))
+            (ende-queue-resume)
+            (ende-queue-pause)
+            (ende-test--complete-call (car ende-test--calls))
+            (setq child (car (ende-job-children parent)))
+            (should (eq (ende-job-state child) 'queued))
+            (dolist (text (seq-take guidance 2))
+              (ende-queue-add-guidance child text))
+            (should (eq (ende-job-state parent) 'suspended))
+            (ende-queue-add-guidance parent "After the child.")
+            (ende-queue-resume)
+            (should (equal (delivered) (seq-take guidance 2)))
+            (ende-queue-add-guidance child (nth 2 guidance))
+            (ende-test--complete-call (car (last ende-test--calls)))
+            (should (equal (delivered) (seq-take guidance 3)))
+            (ende-queue-add-guidance child (nth 3 guidance))
+            (ende-test--complete-call (car (last ende-test--calls)))
+            (should (eq (ende-job-state child) 'running))
+            (should (equal (delivered) guidance))
+            (should (member "Provisional answer"
+                            (mapcar #'ende-content-body
+                                    (plist-get (car (last ende-test--calls)) :messages))))
+            (ende-test--complete-call (car (last ende-test--calls)))
+            (should (equal (ende-job-result child) "Child answer"))
+            (should (equal (delivered) '("After the child.")))
+            (should (= (ende-job-tool-call-count child) 1))
+            (should (equal
+                     (cl-remove-if-not
+                      (lambda (text) (member text guidance))
+                      (mapcar #'ende-transcript-entry-content
+                              (ende-transcript-entries (ende-job-transcript child))))
+                     guidance))
+            (should-error (ende-queue-add-guidance child "Too late") :type 'user-error)
+            (ende-test--complete-call (car (last ende-test--calls)))
+            (should (equal (ende-job-result parent) "Parent answer"))))
+      (ende-test--reset))))
+
 (ert-deftest ende-test/spawn-batch-releases-parent-and-resumes-through-dispatch ()
   (ende-test--reset)
   (let ((ende--queue-suspended t)

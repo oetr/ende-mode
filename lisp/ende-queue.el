@@ -271,19 +271,20 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
   cancel-function)
 
 (defun ende-job-can-accept-guidance-p (job)
-  "Return non-nil when live, started chat JOB can accept user guidance."
-  (and (eq (ende-job-type job) 'chat)
+  "Return non-nil when live JOB can accept user guidance."
+  (and (memq (ende-job-type job) '(chat agent))
        (or (ende-job-current-p job)
            (and (ende-job-live-p job)
-                (ende-job-started-at job)
+                (or (eq (ende-job-type job) 'agent)
+                    (ende-job-started-at job))
                 (memq (ende-job-state job) '(suspended queued))))))
 
 (defun ende-job-pending-guidance-p (job)
-  "Return non-nil when JOB has guidance awaiting a chat boundary."
+  "Return non-nil when JOB has guidance awaiting a safe boundary."
   (consp (ende-job-pending-guidance job)))
 
 (defun ende-queue-add-guidance (job text)
-  "Append exact TEXT to running chat JOB's pending guidance FIFO."
+  "Append exact TEXT to JOB's pending guidance FIFO."
   (unless (ende-job-can-accept-guidance-p job)
     (user-error "Selected job cannot accept guidance"))
   (unless (and (stringp text)

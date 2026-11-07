@@ -290,7 +290,7 @@ clarification; do not proceed with the disputed change.\n\n"
                                         environment)))
                          (cons "user" task))))
     (ende-agent-run
-     job messages configuration
+     job (append messages (ende-agent--consume-user-guidance job)) configuration
      (list :tool-calls #'ende-agent--tool-call-list
            :tool-name (lambda (call)
                         (ende-tools-call-value call :name))
@@ -299,27 +299,16 @@ clarification; do not proceed with the disputed change.\n\n"
            :execute-tool #'ende-tools-call-async
            :execute-spawn-batch #'ende-agent--spawn-batch
            :omit-source-metadata t
-           :assistant-message
-           (lambda (child result calls)
-             (let* ((transcript (ende-job-ensure-transcript child))
-                    (stored-calls (ende-agent--prepare-calls child calls result)))
-               (ende-transcript-accept
-                transcript result stored-calls
-                (list :metadata (ende-provider-response-metadata
-                                 (ende-job-profile child)
-                                 (ende-transcript-metadata transcript)
-                                 result (ende-transcript-usage transcript))))
-               (list :message
-                     (list :role "assistant" :content (or (plist-get result :content) "")
-                           :tool-calls calls
-                           :reasoning-content (plist-get result :reasoning-content)
-                           :protocol-items (plist-get result :protocol-items))
-                     :calls stored-calls)))
-           :tool-result-message
-           (lambda (child call content)
-             (ende-transcript-tool-result (ende-job-ensure-transcript child) call content)
-             (list :role "tool" :tool-call-id
-                   (ende-tools-call-value call :id) :content content))
+           :assistant-message #'ende-agent--assistant-message
+           :tool-result-message #'ende-agent--tool-result-message
+           :after-tool-round
+           (lambda (child messages)
+             (append messages (ende-agent--consume-user-guidance child)))
+           :before-final
+           (lambda (child result messages)
+             (if (ende-job-pending-guidance-p child)
+                 (append messages (ende-agent--consume-user-guidance child result))
+               :finish))
            :on-final
            (lambda (child result _messages)
              (let ((answer (or (plist-get result :content) ""))
@@ -352,6 +341,47 @@ clarification; do not proceed with the disputed change.\n\n"
                                      (cl-incf (ende-transcript-next-id transcript)))
                :protocol-provider (when item "openai-responses") :protocol-item item)))
      calls)))
+
+(defun ende-agent--assistant-message (job result calls &optional synthetic)
+  "Record JOB's RESULT and CALLS and return their continuation data.
+SYNTHETIC records a separate exchange without changing the provider response."
+  (let* ((transcript (ende-job-ensure-transcript job))
+         (stored-calls (ende-agent--prepare-calls job calls result)))
+    (ende-transcript-accept
+     transcript result stored-calls
+     (list :synthetic synthetic
+           :metadata (ende-provider-response-metadata
+                      (ende-job-profile job) (ende-transcript-metadata transcript)
+                      result (ende-transcript-usage transcript))))
+    (list :message
+          (list :role "assistant" :content (or (plist-get result :content) "")
+                :tool-calls calls
+                :reasoning-content (plist-get result :reasoning-content)
+                :protocol-items (plist-get result :protocol-items))
+          :calls stored-calls)))
+
+(defun ende-agent--tool-result-message (job call content)
+  "Record JOB's tool CONTENT for CALL and return its continuation message."
+  (ende-transcript-tool-result (ende-job-ensure-transcript job) call content)
+  (list :role "tool" :tool-call-id (ende-tools-call-value call :id) :content content))
+
+(defun ende-agent--consume-user-guidance (job &optional result)
+  "Consume JOB's pending guidance, preserving an optional assistant RESULT."
+  (when (ende-job-pending-guidance-p job)
+    (let* ((transcript (ende-job-ensure-transcript job))
+           (guidance (ende-job-take-pending-guidance job))
+           (calls
+            (mapcar (lambda (_text)
+                      (list :id (format "user-guidance-%s-%s" (ende-job-id job)
+                                        (cl-incf (ende-transcript-next-id transcript)))
+                            :name "user_guidance" :arguments "{}"))
+                    guidance))
+           (assistant (ende-agent--assistant-message
+                       job (or result '(:content "")) calls (null result))))
+      (cons (plist-get assistant :message)
+            (cl-mapcar (lambda (call text)
+                         (ende-agent--tool-result-message job call text))
+                       (plist-get assistant :calls) guidance)))))
 
 (cl-defstruct (ende-agent-spawn-batch
                (:constructor ende-agent--make-spawn-batch))
