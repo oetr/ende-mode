@@ -648,6 +648,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (progn
                   (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
                   (ende-responses-ws--retry request 'unsent-replacement))
+              (ende-transport-session-start (ende-responses-ws-request-lifecycle request))
               (if (eq (ende-responses-ws-connection-phase connection) 'open)
                   (ende-responses-ws--send request)
                 (unless (ende-responses-ws-connection-socket connection)

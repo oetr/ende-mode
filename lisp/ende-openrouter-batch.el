@@ -90,7 +90,7 @@
 (cl-defstruct (ende-openrouter-batch--request
                (:constructor ende-openrouter-batch--make-request))
   "One logical ende request waiting for or belonging to a batch."
-  custom-id messages callbacks profile cancelled settled)
+  custom-id messages callbacks profile cancelled settled started-at duration-ms)
 
 (cl-defstruct (ende-openrouter-batch--group
                (:constructor ende-openrouter-batch--make-group))
@@ -285,6 +285,13 @@
   (unless (or (ende-openrouter-batch--request-cancelled request)
               (ende-openrouter-batch--request-settled request))
     (setf (ende-openrouter-batch--request-settled request) outcome)
+    (when-let* ((duration (or (ende-openrouter-batch--request-duration-ms request)
+                             (ende-duration-ms (ende-openrouter-batch--request-started-at request)))))
+      (setf (ende-openrouter-batch--request-duration-ms request) duration)
+      (when result
+        (setq result (append (list :duration-ms duration :duration-kind 'batch) result)))
+      (ende-openrouter-batch--invoke
+       request :on-event (list :type :duration :duration-ms duration :duration-kind 'batch)))
     (if (eq outcome 'success)
         (ende-openrouter-batch--invoke request :on-done result)
       (ende-openrouter-batch--invoke
@@ -674,6 +681,9 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                 (ende-openrouter-batch--body group))
           (dolist (request (ende-openrouter-batch--active-requests group))
             (ende-openrouter-batch--diagnose-request request))
+          (let ((started-at (float-time)))
+            (dolist (request (ende-openrouter-batch--active-requests group))
+              (setf (ende-openrouter-batch--request-started-at request) started-at)))
           (ende-openrouter-batch--start-stage
            group "POST"
            (plist-get (ende-openrouter-batch--group-profile group)
@@ -827,6 +837,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   "Route completed PAYLOAD results to GROUP requests."
   (let* ((results (ende-protocol-json-get "results" payload))
          (usage (ende-protocol-json-get "usage" payload))
+         (finished-at (float-time))
          (by-id (make-hash-table :test #'equal))
          (valid (or (vectorp results) (listp results)))
          (failure nil))
@@ -866,6 +877,9 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
       (setf (ende-openrouter-batch--group-terminal group) t)
       (ende-openrouter-batch--group-cleanup group)
       (ende-openrouter-batch--unregister-group group)
+      (dolist (request (ende-openrouter-batch--active-requests group))
+        (setf (ende-openrouter-batch--request-duration-ms request)
+              (ende-duration-ms (ende-openrouter-batch--request-started-at request) finished-at)))
       (dolist (request (ende-openrouter-batch--group-requests group))
         (unless (ende-openrouter-batch--request-cancelled request)
           (let* ((result (gethash

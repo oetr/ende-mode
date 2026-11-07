@@ -177,6 +177,11 @@ Loopback requests always bypass proxies."
 
 ;;;; Errors and generic utilities
 
+(defun ende-duration-ms (started &optional finished)
+  "Return elapsed milliseconds from STARTED to FINISHED, or now."
+  (when started
+    (max 0 (round (* 1000 (- (or finished (float-time)) started))))))
+
 (defun ende-trim-trailing (text)
   "Remove trailing newlines from TEXT, preserving inline trailing spaces."
   (string-trim-right text "[\n\r]+"))

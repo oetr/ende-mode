@@ -1003,6 +1003,7 @@ explicit efforts yields no choices instead of an error."
 (defun ende-codex--settle (session outcome value)
   "Settle SESSION once with OUTCOME and VALUE."
   (unless (ende-codex--terminal-p session)
+    (ende-transport-session-duration (ende-codex--lifecycle session))
     (when-let* ((request (ende-codex--session-ws-request session)))
       (ende-responses-ws-finish
        request outcome
@@ -1840,8 +1841,13 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
 (defun ende-codex--retry-websocket (session identity attempt limit continuation)
   "Preserve SESSION's interrupted output, then authenticate replacement ATTEMPT."
   (let* ((stream (ende-codex--session-stream session))
+         (duration (ende-transport-session-duration (ende-codex--lifecycle session)))
          (partial (when (ende-stream-has-result-p stream (ende-codex--session-replay-items session))
                     (ende-codex--result session))))
+    (when duration
+      (ende-codex--emit session (list :type :duration :duration-ms duration))
+      (when partial
+        (setq partial (plist-put partial :duration-ms duration))))
     (ende-ignore-errors #'ende-debug-record-completion
                         (ende-codex--session-debug-record session) 'interrupted
                         (ende-stream-session-usage stream) nil partial)
@@ -1849,6 +1855,8 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
       (ende-codex--emit session (list :type :partial-result :result partial)))
     (unless (ende-codex--terminal-p session)
       (ende-codex--reset-attempt session)
+      (setf (ende-transport-session-started-at (ende-codex--lifecycle session)) nil
+            (ende-transport-session-duration-ms (ende-codex--lifecycle session)) nil)
       (ende-codex--emit
        session (list :type :response-restarted :attempt attempt :limit limit
                      :text (format "Connection interrupted; reconnecting automatically — attempt %d of %d."

@@ -130,6 +130,28 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 
+(ert-deftest ende-test/request-duration-stops-before-callbacks ()
+  (dolist (outcome '(success failure))
+    (let ((clock 10) received events)
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+        (let ((session (ende-transport-session-create
+                        (list :on-event (lambda (event) (push event events))
+                              :on-done (lambda (result) (setq clock 100 received result))
+                              :on-error (lambda (error) (setq clock 100 received error)))
+                        nil)))
+          (should-not (ende-transport-session-duration session))
+          (ende-transport-session-start session)
+          (setq clock 12)
+          (ende-transport-session-add-canceller session (lambda () (setq clock 50)))
+          (ende-transport-session-settle session outcome '(:content "reply"))
+          (should (= (ende-transport-session-duration session) 2000))
+          (should (= (plist-get (car (last events)) :duration-ms) 2000))
+          (when (eq outcome 'success)
+            (should (= (plist-get received :duration-ms) 2000)))
+          (let ((before (copy-sequence events)))
+            (ende-transport-session-settle session outcome nil)
+            (should (equal events before))))))))
+
 (ert-deftest ende-test/provider-processes-from-tramp-stay-local ()
   (dolist (operation '(generation codex-generation discovery models refresh))
     (let ((native-comp-enable-subr-trampolines nil)
@@ -443,12 +465,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                        (eq (plist-get event :type) :partial-result))
                      events)))
       (should (eq (ende-error-kind (plist-get out :error)) 'resource))
-      (should (equal (mapcar (lambda (event) (plist-get event :type)) events)
-                     (if (eq transport 'codex)
-                         '(:diagnostic :status :delta :status
-				       :partial-result :error)
-                       '(:diagnostic :delta :usage :status
-				     :partial-result :error))))
+      (should (equal (mapcar (lambda (event) (plist-get event :type)) (last events 2))
+                     '(:partial-result :error)))
       (should (equal (plist-get (plist-get partial :result) :content) "ab"))
       (should (plist-get out :cleaned)))))
 

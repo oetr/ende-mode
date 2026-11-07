@@ -94,6 +94,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--settle (session outcome value)
   "Settle SESSION exactly once with OUTCOME and VALUE."
+  (ende-transport-session-duration (ende-llm--lifecycle session))
   (let* ((record (ende-llm--session-debug-record session))
          (tool-calls (ende-llm--tool-call-list session))
         (extra-fields
@@ -409,6 +410,7 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--handoff-to-batch (session)
   "Retry SESSION through OpenRouter Batch after its exact Batch-only error."
+  (ende-transport-session-duration (ende-llm--lifecycle session))
   (let ((error
          (ende-openrouter-batch-handoff
           (ende-llm--session-messages session)
@@ -424,6 +426,9 @@ The :callbacks argument initializes the composed transport lifecycle."
          (ende-error-create :kind 'http
                             :message "streaming request handed off to Batch"))
         (setf (ende-llm--session-debug-record session) nil))
+      (when-let* ((duration (ende-transport-session-duration-ms (ende-llm--lifecycle session))))
+        (ende-llm--emit-event session (list :type :duration :duration-ms duration)))
+      (ende-llm--emit-event session '(:type :response-restarted :text "Switching to batch"))
       (ende-transport-session-transfer (ende-llm--lifecycle session))
       (ende-transport-session-cleanup (ende-llm--lifecycle session)))))
 

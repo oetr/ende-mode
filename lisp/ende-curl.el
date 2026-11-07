@@ -353,6 +353,7 @@ being re-signaled to the caller."
          (headers-file nil)
          (config-file nil)
          (process nil)
+         (started-at nil)
          (complete nil))
     (unwind-protect
         (progn
@@ -368,7 +369,8 @@ being re-signaled to the caller."
                  :filter (apply-partially #'ende-curl-stderr-filter
                                           stderr-buffer)
                  :noquery t))
-          (setq process
+          (setq started-at (float-time)
+                process
                 (make-process
                  :name name
                  :buffer response-buffer
@@ -388,6 +390,7 @@ being re-signaled to the caller."
           (ende-curl-watch-idle process)
           (setq complete t)
           (list :process process
+                :started-at started-at
                 :response-buffer response-buffer
                 :stderr-buffer stderr-buffer
                 :stderr-process stderr-process

@@ -36,13 +36,25 @@
                (:constructor ende-transport--make-session))
   "Shared lifecycle state for one asynchronous transport request."
   callbacks callback-error-handler process process-buffer stderr-buffer
-  stderr-process headers-file config-file terminal auxiliary-cancellers)
+  stderr-process headers-file config-file terminal auxiliary-cancellers
+  started-at duration-ms)
 
 (defun ende-transport-session-create (callbacks callback-error-handler)
   "Create a transport session for CALLBACKS and CALLBACK-ERROR-HANDLER."
   (ende-transport--make-session
    :callbacks callbacks
    :callback-error-handler callback-error-handler))
+
+(defun ende-transport-session-start (session &optional started-at)
+  "Start a fresh request interval for SESSION."
+  (setf (ende-transport-session-started-at session) (or started-at (float-time))
+        (ende-transport-session-duration-ms session) nil))
+
+(defun ende-transport-session-duration (session)
+  "Freeze and return SESSION's request duration in milliseconds."
+  (or (ende-transport-session-duration-ms session)
+      (setf (ende-transport-session-duration-ms session)
+            (ende-duration-ms (ende-transport-session-started-at session)))))
 
 (defun ende-transport-session-invoke (session name &rest arguments)
   "Invoke callback NAME for SESSION with ARGUMENTS, safely."
@@ -70,6 +82,8 @@
 
 (defun ende-transport-session-set-resources (session request)
   "Copy transport resource handles from REQUEST into SESSION."
+  (when-let* ((started-at (plist-get request :started-at)))
+    (ende-transport-session-start session started-at))
   (setf (ende-transport-session-process session)
         (plist-get request :process)
         (ende-transport-session-process-buffer session)
@@ -125,6 +139,11 @@
     (session outcome value &optional partial-result)
   "Settle SESSION once and dispatch VALUE with optional PARTIAL-RESULT."
   (unless (ende-transport-session-terminal session)
+    (when-let* ((duration (ende-transport-session-duration session)))
+      (when (and (eq outcome 'success) (listp value))
+        (setq value (plist-put (copy-sequence value) :duration-ms duration)))
+      (when partial-result
+        (setq partial-result (plist-put (copy-sequence partial-result) :duration-ms duration))))
     (setf (ende-transport-session-terminal session) outcome)
     (let ((process (ende-transport-session-process session)))
       (when (processp process)
@@ -134,6 +153,9 @@
     (ende-transport-session-cleanup session)
     (unwind-protect
         (progn
+          (when-let* ((duration (ende-transport-session-duration-ms session)))
+            (ende-transport-session-invoke
+             session :on-event (list :type :duration :duration-ms duration)))
           (when partial-result
             (ende-transport-session-invoke
              session :on-event

@@ -250,6 +250,10 @@ one final reply; accepting the current response again does not duplicate it."
                        (list :result result :calls calls :final final
                              :response-metadata (ende-transcript-metadata transcript)
                              :usage (or (plist-get result :usage) (ende-transcript-usage transcript))
+                             :duration-ms (or (plist-get result :duration-ms)
+                                              (plist-get (ende-transcript-entry-data entry) :duration-ms))
+                             :duration-kind (or (plist-get result :duration-kind)
+                                                (plist-get (ende-transcript-entry-data entry) :duration-kind))
                              :items items
                              :thinking (if (plist-member data :thinking) (plist-get data :thinking)
                                          (or (plist-get result :thinking)
@@ -292,6 +296,14 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
 (defun ende-transcript-event (transcript event)
   "Record public streaming and activity EVENT in TRANSCRIPT."
   (pcase (plist-get event :type)
+    (:duration
+     (let ((entry (ende-transcript--response transcript)))
+       (setf (ende-transcript-entry-data entry)
+             (ende-plist-merge
+              (ende-transcript-entry-data entry)
+              (list :duration-ms (plist-get event :duration-ms)
+                    :duration-kind (plist-get event :duration-kind))))
+       (ende-transcript-notify transcript entry)))
     (:response-restarted
      (ende-transcript-begin-response transcript)
      (ende-transcript-append transcript 'progress (plist-get event :text)

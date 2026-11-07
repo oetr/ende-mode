@@ -106,6 +106,7 @@
 
 (defun ende-messages--settle (session outcome value)
   "Settle SESSION with OUTCOME and VALUE, preserving partial output."
+  (ende-transport-session-duration (ende-stream-lifecycle (ende-messages--session-stream session)))
   (let* ((stream (ende-messages--session-stream session))
          (partial (ende-messages--result session)))
     (when (ende-messages--session-debug-record session)
