@@ -275,6 +275,13 @@ one final reply; accepting the current response again does not duplicate it."
       (ende-transcript-notify transcript entry))
     entry))
 
+(defun ende-transcript-tool-call-entry (transcript call)
+  "Return TRANSCRIPT's current entry for prepared CALL."
+  (let ((entry (gethash (cons 'tool-call (or (plist-get call :key) (plist-get call :id)))
+                        (ende-transcript-sources transcript))))
+    (when (and entry (eq call (plist-get (ende-transcript-entry-data entry) :call)))
+      entry)))
+
 (defun ende-transcript-tool-result (transcript call content)
   "Record exact tool CONTENT associated with prepared CALL.
 Only an explicit outer JSON boolean `ok' determines success or failure."
@@ -286,8 +293,11 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
                       (and entry (eq (ende-transcript-entry-kind entry) 'response)
                            (memq call (plist-get (ende-transcript-entry-data entry) :calls))))
                     (cons (ende-transcript-response transcript) (ende-transcript-entries transcript))))
+         (call-entry (ende-transcript-tool-call-entry transcript call))
          (entry (ende-transcript-new-entry
-                 transcript 'tool-result content (list :call call)
+                 transcript 'tool-result content
+                 (list :call call :duration-ms
+                       (and call-entry (plist-get (ende-transcript-entry-data call-entry) :duration-ms)))
                  (cond ((eq ok t) 'succeeded) ((eq ok :false) 'failed) (t 'returned)))))
     (when response
       (setf (ende-transcript-entry-response-id entry) (ende-transcript-entry-id response)))

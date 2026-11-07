@@ -479,6 +479,22 @@ ordered result slots only through the parent's saved scheduler continuation."
       (ende-process-next))
     batch))
 
+(defun ende-agent--execute-tool (job call configuration execute-tool callback)
+  "Execute CALL, retaining its duration before invoking CALLBACK."
+  (let* ((transcript (ende-job-transcript job))
+         (entry (and transcript (ende-transcript-tool-call-entry transcript call)))
+         (started (float-time))
+         (settled nil))
+    (funcall execute-tool call configuration
+             (lambda (content)
+               (unless settled
+                 (setq settled t)
+                 (when entry
+                   (setf (ende-transcript-entry-data entry)
+                         (plist-put (ende-transcript-entry-data entry)
+                                    :duration-ms (ende-duration-ms started))))
+                 (funcall callback content))))))
+
 (defun ende-agent--spawn-batch (job calls configuration execute-tool done)
   "Execute adjacent spawn CALLS for JOB using EXECUTE-TOOL.
 DONE receives ordered tool messages after JOB is admitted again by the
@@ -499,7 +515,7 @@ scheduler when asynchronous children have settled."
              (ende-tools--report-activity-function
               (lambda (title status)
                 (ende-job-report-activity job title status generation))))
-         (funcall execute-tool call configuration settle)))
+         (ende-agent--execute-tool job call configuration execute-tool settle)))
      done)))
 
 (defcustom ende-agent-max-tool-rounds 100000
@@ -741,8 +757,8 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                                  (unless synchronous (next))))))))
                      (if (ende-tools-phase-allows-p
                           name phase)
-                         (funcall (plist-get callbacks :execute-tool)
-                                  call configuration complete)
+                         (ende-agent--execute-tool
+                          job call configuration (plist-get callbacks :execute-tool) complete)
                        (funcall complete
                                 (ende-tools--json-encode-tool-result
                                  (list :ok nil :tool name

@@ -120,6 +120,34 @@
         (should (= (length entries)
                    (length (delete-dups (mapcar #'ende-transcript-entry-id entries)))))))))
 
+(ert-deftest ende-transcript-tools-retain-independent-completion-times ()
+  (let* ((transcript (ende-transcript-create))
+         (job (ende--make-job :transcript transcript))
+         (calls (list (list :id "one") (list :id "two")))
+         (clock 10)
+         pending)
+    (ende-transcript-begin-response transcript)
+    (ende-transcript-accept transcript nil calls)
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+      (dolist (call calls)
+        (ende-agent--execute-tool
+         job call nil
+         (lambda (_call _configuration callback) (push callback pending))
+         (lambda (content) (ende-transcript-tool-result transcript call content))))
+      (setq clock 12)
+      (funcall (car pending) "second")
+      (setq clock 15)
+      (funcall (cadr pending) "first")
+      (setq clock 100)
+      (funcall (car pending) "late")
+      (let ((results (cl-remove-if-not
+                      (lambda (entry) (eq (ende-transcript-entry-kind entry) 'tool-result))
+                      (ende-transcript-entries transcript))))
+        (should (equal (mapcar #'ende-transcript-entry-content results) '("second" "first")))
+        (should (equal (mapcar (lambda (entry) (plist-get (ende-transcript-entry-data entry) :duration-ms))
+                               results)
+                       '(2000 5000)))))))
+
 (ert-deftest ende-transcript-viewer-cannot-affect-execution-or-persistence ()
   (cl-labels
       ((response (round)
