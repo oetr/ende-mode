@@ -1061,6 +1061,8 @@ Use COMMAND for the process, or a silent sleep process by default."
                      (if chat '(:thinking (tool-call . 2) :content) '(4 2 7))))
       (should (equal (plist-get (car calls) :key) call-key))
       (should-not (plist-member (cadr calls) :item))
+      (should (eq (plist-get (cadr calls) :append) (eq (car case) 'responses)))
+      (should-not (plist-get (car (last calls)) :append))
       (should (equal (plist-get (plist-get (car (last calls)) :call) :arguments) "{}"))
       (should (equal (plist-get (car (plist-get result :tool-calls)) :key) call-key))
       (should (equal (plist-get result :protocol-item-keys) (unless chat '(2 4 7))))
