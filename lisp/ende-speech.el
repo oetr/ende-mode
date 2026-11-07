@@ -31,10 +31,9 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'gnutls)
 (require 'json)
 (require 'subr-x)
-(require 'websocket)
+(require 'ende-websocket)
 
 (defgroup ende-speech nil
   "Local realtime speech dictation."
@@ -439,14 +438,11 @@ Try JSON first, then older pactl's normal text listing."
 
 (defun ende-speech--websocket-open-p (websocket)
   "Return non-nil when WEBSOCKET can currently send data."
-  (and websocket
-       (condition-case nil
-           (websocket-openp websocket)
-         (error nil))))
+  (and websocket (eq (ende-websocket-state websocket) 'open)))
 
 (defun ende-speech--send-json (websocket object)
   "Send OBJECT as a JSON text frame over WEBSOCKET."
-  (websocket-send-text websocket (json-encode object)))
+  (ende-websocket-send-text websocket (json-encode object)))
 
 (defun ende-speech--start-recorder (session)
   "Start parec for SESSION after protocol configuration is acknowledged."
@@ -479,19 +475,14 @@ Try JSON first, then older pactl's normal text listing."
                               (not (ende-speech--session-clear-pending session)))
                      (let ((websocket
                             (ende-speech--session-websocket session)))
-                       (when (ende-speech--websocket-open-p websocket)
-                         (condition-case err
-                             (websocket-send
-                              websocket
-                              (make-websocket-frame
-                               :opcode 'binary
-                               :payload (encode-coding-string chunk 'binary)
-                               :completep t))
-                           (error
-                            (ende-speech--fail
-                             session
-                             (format "audio forwarding failed: %s"
-                                     (error-message-string err)))))))))
+                       (condition-case err
+                           (ende-websocket-send-binary
+                            websocket (encode-coding-string chunk 'binary))
+                         (error
+                          (ende-speech--fail
+                           session
+                           (format "audio forwarding failed: %s"
+                                   (error-message-string err))))))))
                  :sentinel
                  (lambda (_process event)
                    (when (and (ende-speech--session-active-p session)
@@ -527,10 +518,11 @@ Try JSON first, then older pactl's normal text listing."
         (condition-case nil
             (ende-speech--send-json
              websocket '((type . "input_audio_buffer.clear")))
-          (error nil)))
+          (error (message "ende speech: could not clear audio before closing"))))
+      ;; Graceful close drains accepted output, including the audio clear.
       (condition-case nil
-          (websocket-close websocket)
-        (error nil)))
+          (ende-websocket-close websocket)
+        (error (ende-websocket-abort websocket))))
     (setf (ende-speech--session-websocket session) nil)))
 
 (defun ende-speech--clear-session (session kill-buffer)
@@ -667,13 +659,13 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
                                  "speech server reported an error")))
           (ende-speech--fail session (format "%s" message-text))))))))
 
-(defun ende-speech--websocket-message (session websocket frame)
-  "Decode and dispatch FRAME for SESSION, if it is still active."
+(defun ende-speech--websocket-message (session websocket type text)
+  "Decode and dispatch TEXT for SESSION, ignoring non-text TYPE messages."
   (when (and (ende-speech--session-active-p session)
-             (eq websocket (ende-speech--session-websocket session)))
+             (eq websocket (ende-speech--session-websocket session))
+             (eq type 'text))
     (condition-case nil
-        (let* ((text (websocket-frame-text frame))
-               (json-object-type 'alist)
+        (let* ((json-object-type 'alist)
                (json-array-type 'list)
                (json-key-type 'symbol)
                (event (json-read-from-string text)))
@@ -697,8 +689,6 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
   (interactive)
   (when ende-speech--active-session
     (user-error "A speech session is already active"))
-  (when (and ende-speech-encryption (not (gnutls-available-p)))
-    (user-error "Speech encryption requires GnuTLS support"))
   (let ((default-directory temporary-file-directory))
     (unless (executable-find "parec")
       (user-error "parec is unavailable; cannot record audio")))
@@ -715,31 +705,20 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
       (add-hook 'kill-buffer-hook #'ende-speech--transcript-buffer-killed nil t))
     (condition-case err
         (setf (ende-speech--session-websocket session)
-              ;; Async TLS captures this setting in its GnuTLS boot parameters.
-              (let ((gnutls-verify-error t))
-                (websocket-open
-                 (ende-speech--server-url)
-                 :nowait t
-                 :on-open (lambda (_websocket) nil)
-                 :on-message
-                 (lambda (websocket frame)
-                   (ende-speech--websocket-message session websocket frame))
-                 :on-close
-                 (lambda (_websocket)
-                   (when (ende-speech--session-active-p session)
-                     (ende-speech--fail
-                      session (if (eq (ende-speech--session-state session) 'connecting)
-                                  "WebSocket connection failed"
-                                "WebSocket connection closed"))))
-                 :on-error
-                 (lambda (_websocket _type error)
-                   (when (ende-speech--session-active-p session)
-                     (ende-speech--fail
-                      session (format "WebSocket error: %s"
-                                      (if (and (consp error)
-                                               (symbolp (car error)))
-                                          (error-message-string error)
-                                        error))))))))
+              (ende-websocket-connect
+               (ende-speech--server-url)
+               :on-message
+               (lambda (websocket type text)
+                 (ende-speech--websocket-message session websocket type text))
+               :on-close
+               (lambda (websocket info)
+                 (when (and (ende-speech--session-active-p session)
+                            (eq websocket (ende-speech--session-websocket session)))
+                   (ende-speech--fail
+                    session (format "WebSocket closed (%s, code %s): %s"
+                                    (plist-get info :cause)
+                                    (plist-get info :code)
+                                    (plist-get info :reason)))))))
       (error
        (ende-speech--terminate
         session nil (format "could not connect: %s" (error-message-string err)) t)
