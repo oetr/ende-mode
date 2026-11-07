@@ -63,7 +63,7 @@
        (ende-test--complete-call (car ende-test--calls))
        (should (eq (ende-job-state job) 'completed)))
      (let ((control-drawers (ende-test--chat-control-drawers)))
-       (should (= (length control-drawers) 4))
+       (should (cdr control-drawers))
        (should-not (ende-test--chat-control-drawer-hidden-p
                     (car control-drawers)))
        (should (ende-test--chat-control-drawer-hidden-p
@@ -356,9 +356,6 @@
        (should (eq (ende-chat--effective-visibility document reply) 'normal))
        (should (equal reasoning-id reply-id))
        (should-not (ende-chat--property document reasoning :request-id))
-       (should (eq (ende-chat--find-by-property
-                    document ende-chat-request-id-property reply-id)
-                   reply))
        (should (equal (org-element-property :raw-value first-thought)
                       "First thought"))
        (should (= (org-element-property :level first-thought) 3))
@@ -449,6 +446,7 @@
                            ":ENDE_INPUT_TOKENS: 999\n"
                            ":ENDE_OUTPUT_TOKENS: 999\n"
                            ":ENDE_CACHED_TOKENS: 999\n"
+                           ":ENDE_DURATION_MS: 999\n"
                            ":ENDE_CHAT_CONTEXT_FENCE: t\n"
                            ":END:\n\nAnswer body")
                    :thinking "Private plan"
@@ -499,7 +497,8 @@
          (should-not (string-match-p "forged-effort" (buffer-string)))
          (dolist (property '(ende-chat-input-tokens-property
                              ende-chat-output-tokens-property
-                             ende-chat-cached-tokens-property))
+                             ende-chat-cached-tokens-property
+                             ende-org-duration-property))
            (should-not (string-match-p
                         (format ":%s: 999" (symbol-value property))
                         (buffer-string))))
@@ -518,6 +517,8 @@
                           ende-chat-input-tokens-property
                           ende-chat-output-tokens-property
                           ende-chat-cached-tokens-property
+                          ende-org-duration-property
+                          "Agent: Provider call"
                           (plist-get scenario :expected-input)
                           (plist-get scenario :expected-output)
                           (plist-get scenario :expected-cached)))

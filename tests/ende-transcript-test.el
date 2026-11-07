@@ -155,7 +155,7 @@
                 (text (format "Response %d" round))
                 (arguments (json-encode (list :title "Checking" :status text)))
                 (call (list :key 2 :id id :name "about_thinking" :arguments arguments)))
-           (list :content text :reported-model (format "model-%d" round)
+           (list :content text :duration-ms (* 100 round) :reported-model (format "model-%d" round)
                  :usage (list :input_tokens (* 10 round) :output_tokens round)
                  :tool-calls (list call) :protocol-item-keys '(0 1 2)
                  :protocol-items
@@ -171,6 +171,11 @@
                          (list :type "function_call" :id (concat "item-" id)
                                :call_id id :name "about_thinking" :arguments arguments
                                :status "completed" :extra '(:retained t))))))))
+       (durations ()
+         (sort (delq nil (org-map-entries
+                          (lambda ()
+                            (when-let* ((value (org-entry-get nil "ENDE_DURATION_MS")))
+                              (string-to-number value))))) #'<))
        (state (job)
          (list (prin1-to-string (ende-job-transcript job))
                ende-chat--next-id ende-tool-store--next-id
@@ -183,12 +188,13 @@
                (ende-llm-function
                 (ende-test--fake-llm
                  (list (response 1) (response 2)
-                       '(:content "Final answer" :reported-model "model-final")) t))
+                       '(:content "Final answer" :duration-ms 300 :reported-model "model-final")) t))
                viewer)
            (unwind-protect
                (cl-letf (((symbol-function 'ende-chat--new-id)
                           (lambda (prefix)
                             (format "%s-%d" prefix (cl-incf ende-chat--next-id))))
+                         ((symbol-function 'ende-duration-ms) (lambda (&rest _) 5))
                          ((symbol-function 'ende-tool-store--new-execution-id)
                           (lambda ()
                             (format "execution-%d" (cl-incf ende-tool-store--next-id)))))
@@ -226,6 +232,9 @@
                          (when (< round 2) (should (equal source (buffer-string))))))
                      (should (eq (ende-job-state job) 'completed))
                      (should (= (length ende-test--calls) 3))
+                     (should (equal (durations) '(5 5 100 200 300)))
+                     (when inspect
+                       (should (equal (durations) (with-current-buffer viewer (durations)))))
                      (let ((entries (ende-transcript-entries (ende-job-transcript job))))
                        (should (equal (mapcar #'ende-transcript-entry-content
                                               (cl-remove-if-not

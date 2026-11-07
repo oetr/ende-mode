@@ -1306,10 +1306,15 @@
                              :key (lambda (headline)
                                     (ende-chat--property document headline
                                                          :protocol-provider))
-                             :test #'equal)))
+                             :test #'equal))
+                   (following-item
+                    (cl-find "anthropic-messages" (ende-chat--document-headlines document)
+                             :key (lambda (headline) (ende-chat--property document headline :protocol-provider))
+                             :test #'equal))
+                   (siblings (ende-chat--children document (ende-chat--parent document response-item))))
               (goto-char (org-element-property :begin response-item))
               (org-back-to-heading t)
-              (org-move-subtree-down 1))
+              (org-move-subtree-down (- (cl-position following-item siblings) (cl-position response-item siblings))))
             (let* ((document (ende-chat--build-document))
                    (opaque (cl-remove-if-not
                             (lambda (headline)

@@ -225,6 +225,7 @@ discarding superseded details. Be concise but self-contained."
         (cons ende-chat-reply-to-property :reply-to)
         (cons ende-chat-request-id-property :request-id)
         (cons ende-chat-response-id-property :response-id)
+        (cons ende-org-duration-property :duration-ms)
         (cons ende-chat-reply-reference-property :reply-reference)
         (cons ende-chat-work-property :work)
         (cons ende-chat-tool-execution-id-property :tool-execution-id)
@@ -1103,6 +1104,28 @@ reflects Org history rather than the existence of a stored result payload."
       (error "Malformed generated final reply reference"))
     reply))
 
+(defun ende-chat--provider-call-p (document headline)
+  "Return non-nil for a provider timing row under generated Work."
+  (and (member (org-element-property :raw-value headline)
+               '("Agent: Provider call" "Agent: Batch turnaround"))
+       (when-let* ((parent (ende-chat--parent document headline)))
+         (ende-chat--work-section-p document parent))))
+
+(defun ende-chat--validate-provider-call (document work headline)
+  "Validate a provider timing HEADLINE under WORK."
+  (let ((duration (ende-chat--property document headline :duration-ms))
+        (response-id (ende-chat--property document headline :response-id)))
+    (unless (and (equal (ende-chat--property document headline :request-id)
+                        (ende-chat--property document work :request-id))
+                 (stringp response-id) (not (string-blank-p response-id))
+                 (or (null duration) (string-match-p "\\`[0-9]+\\'" duration))
+                 (equal (ende-chat--property document headline :visibility) "hidden")
+                 (not (ende-chat--property document headline :role))
+                 (= (org-element-property :level headline) (1+ (org-element-property :level work)))
+                 (null (ende-chat--children document headline))
+                 (string-blank-p (ende-chat--protocol-body-string headline)))
+      (error "Malformed generated provider timing row"))))
+
 (defun ende-chat--validate-work-contents (document work)
   "Validate the identities needed to read WORK's protocol contents."
   (let ((request-id (ende-chat--property document work :request-id)))
@@ -1110,6 +1133,8 @@ reflects Org history rather than the existence of a stored result payload."
       (error "Malformed generated Agent: Work: missing request ID"))
     (dolist (child (ende-chat--children document work))
       (cond
+       ((ende-chat--provider-call-p document child)
+        (ende-chat--validate-provider-call document work child))
        ((ende-chat--property document child :reply-reference)
         (ende-chat--reply-reference-target document work child))
        ((ende-chat--opaque-reference-p document child)
@@ -1173,7 +1198,8 @@ reflects Org history rather than the existence of a stored result payload."
         (push child replies))
        ((ende-chat--opaque-reference-p document child)
         (ende-chat--validate-opaque-reference document work child))
-       ((or (ende-chat--tool-call-protocol-p document child)
+       ((or (ende-chat--provider-call-p document child)
+            (ende-chat--tool-call-protocol-p document child)
             (ende-chat--tool-result-protocol-p document child)))
        (t
         (error "Malformed generated Agent: Work: unexpected child %s"
@@ -1195,6 +1221,7 @@ reflects Org history rather than the existence of a stored result payload."
                                    "Agent: Reply"))
                        (ende-chat--tool-call-protocol-p document headline)
                        (ende-chat--tool-result-protocol-p document headline)
+                       (ende-chat--provider-call-p document headline)
                        (ende-chat--opaque-reference-p document headline)
                        (ende-chat--property document headline :reply-reference)
                        (equal (ende-chat--property document headline :visibility)
@@ -3074,7 +3101,7 @@ COMPACT marks the completed response as a context fence."
             result-properties
             ":END:\n\n")))
 
-(defun ende-chat--tool-result-text (level request-id call)
+(defun ende-chat--tool-result-text (level request-id call &optional duration-ms)
   "Render CALL's already stored result as a compact sibling reference."
   (let ((execution-id (ende-tools-call-value call :execution-id))
         (name (ende-tools-call-value call :name))
@@ -3088,6 +3115,7 @@ COMPACT marks the completed response as a context fence."
               ":PROPERTIES:\n"
               (ende-chat--tool-section-properties
                request-id execution-id name "result")
+              (ende-org--duration-property duration-ms)
               ":END:\n\n"))))
 
 (defun ende-chat--other-compaction-pending-p (job question-id)
@@ -3242,6 +3270,21 @@ Keep it while another queued compaction still refers to its durable identity."
                        (ende-chat--reasoning-text
                         level question-id request-id properties (plist-get data :thinking))))))
 
+(defun ende-chat--provider-call-text (level request-id entry profile)
+  "Render ENTRY's provider timing row at LEVEL."
+  (let* ((data (ende-transcript-entry-data entry))
+         (metadata (or (plist-get data :metadata)
+                       (ende-provider-response-metadata
+                        profile (plist-get data :response-metadata)
+                        (plist-get data :partial-result) (plist-get data :usage)))))
+    (concat (make-string level ?*) " " (ende-org--provider-call-title data) "\n:PROPERTIES:\n"
+            (ende-chat--response-property ende-chat-request-id-property request-id)
+            (ende-chat--response-property ende-chat-response-id-property (ende-transcript-entry-id entry))
+            (ende-chat--response-property ende-chat-visibility-property "hidden")
+            (ende-org--metadata-properties metadata)
+            (ende-org--duration-property (plist-get data :duration-ms))
+            ":END:\n\n")))
+
 (defun ende-chat--render-transcript (job)
   "Serialize JOB's completed records without reading a viewer or storing data."
   (when-let* ((transcript (ende-job-transcript job)))
@@ -3263,8 +3306,11 @@ Keep it while another queued compaction still refers to its durable identity."
                                         (ende-transcript-entry-content entry)))
                                "\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n")) work)))
             ('tool-result
-             (push (ende-chat--tool-result-text (1+ level) request-id (plist-get data :call)) work))
+             (push (ende-chat--tool-result-text
+                    (1+ level) request-id (plist-get data :call) (plist-get data :duration-ms)) work))
             ('response
+             (unless (plist-get data :synthetic)
+               (push (ende-chat--provider-call-text (1+ level) request-id entry (ende-job-profile job)) work))
              (when (eq (ende-transcript-entry-status entry) 'complete)
                (let ((rendered (ende-chat--render-response-items job entry)))
                  (unless (string-empty-p (plist-get rendered :work))
@@ -3486,7 +3532,9 @@ FINAL includes retained tool images and trims compaction output."
                         normalized-thinking)))
                  (answer
                   (ende-chat--assistant-text
-                   level question-id request-id result-properties normalized t))
+                   level question-id request-id
+                   (concat result-properties (ende-org--duration-property (plist-get result :duration-ms)))
+                   normalized t))
                  (response (concat answer reasoning))
                  (buffer (ende-target-buffer (ende-job-target job)))
                  (question-pair (ende-chat--marked-question-document job))

@@ -46,6 +46,7 @@
 (require 'eldoc)
 (require 'org-element)
 (require 'ende-core)
+(require 'ende-org)
 (require 'ende-artifact)
 (require 'ende-tool-store)
 (require 'ende-openrouter-batch)
@@ -386,10 +387,13 @@
       t)))
 
 (defun ende--configure-org-template ()
-  "Configure Org template expansion for the current buffer."
+  "Configure Org template expansion and columns for the current buffer."
   (if (and ende-mode (derived-mode-p 'org-mode))
-      (add-hook 'org-tab-first-hook
-                #'ende--expand-config-template nil t)
+      (progn
+        (add-hook 'org-tab-first-hook #'ende--expand-config-template nil t)
+        (unless (string-match-p ende-org-duration-property org-columns-default-format)
+          (setq-local org-columns-default-format
+                      (concat org-columns-default-format " %12ENDE_DURATION_MS(Duration ms)"))))
     (remove-hook 'org-tab-first-hook
                  #'ende--expand-config-template t)))
 
