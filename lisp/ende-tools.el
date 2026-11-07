@@ -61,7 +61,7 @@
   :group 'ende)
 
 (defcustom ende-tools-max-search-results 100
-  "Maximum matches returned by one `search_project' call."
+  "Maximum distinct matching source lines returned by `search_project'."
   :type 'integer
   :group 'ende)
 
@@ -1084,75 +1084,61 @@ Return non-nil when selection was exhausted, nil when VISIT stopped it."
 
 (defun ende-tools--search-source
     (source regexp context-before context-after maximum accept-match)
-  "Search SOURCE for REGEXP, accepting at most MAXIMUM matches.
-
-ACCEPT-MATCH is called for each match record and must return non-nil to keep it.
-It is called with nil instead of a record when one source line or context block
-is already too large to consider within the configured output byte limit."
-  (let ((matches nil)
-        (match-count 0)
-        (finished nil)
-        (budget-exhausted nil))
+  "Return at most MAXIMUM distinct lines whose matches start in SOURCE.
+ACCEPT-MATCH accepts each line record, or nil for an oversized line or context.
+Multiline matches belong to their starting line; columns name its first match."
+  (let (matches finished budget-exhausted
+        (match-count 0))
     (ende-tools--with-source
      source
      (lambda ()
        (goto-char (point-min))
-       (while (and (not finished)
-                   (< match-count maximum)
-                   (re-search-forward regexp nil t))
-         (let* ((match-start (match-beginning 0))
-                (line (line-number-at-pos match-start))
-                (column (save-excursion
-                          (goto-char match-start)
-                          (current-column)))
-                (line-start (save-excursion
-                              (goto-char match-start)
-                              (line-beginning-position)))
-                (line-end (save-excursion
-                            (goto-char match-start)
-                            (line-end-position)))
-                (context-start
-                 (and (or (> context-before 0) (> context-after 0))
-                      (save-excursion
-                        (goto-char match-start)
-                        (beginning-of-line)
-                        (forward-line (- context-before))
-                        (point))))
-                (context-end
-                 (and context-start
-                      (save-excursion
-                        (goto-char match-start)
-                        (forward-line context-after)
-                        (line-end-position)))))
-           (if (or (> (- line-end line-start)
-                      ende-tools-max-search-output-bytes)
-                   (and context-start
-                        (> (- context-end context-start)
-                           ende-tools-max-search-output-bytes)))
-               (unless (funcall accept-match nil)
-                 (setq finished t
-                       budget-exhausted t))
-             (let ((record
-                    (append
-                     (list :line line :column column
-                           :match (buffer-substring-no-properties
-                                   line-start line-end))
+       (let ((line 1) (known-line-start (point-min)) match-start match-end)
+         (while (and (not finished) (< match-count maximum))
+           (if (not (re-search-forward regexp nil t))
+               (setq finished t)
+             (setq match-start (match-beginning 0)
+                   match-end (match-end 0))
+             (goto-char match-start)
+             (let* ((column (current-column))
+                    (line-start (line-beginning-position))
+                    (line-end (line-end-position))
+                    (context-start
+                     (and (or (> context-before 0) (> context-after 0))
+                          (save-excursion
+                            (beginning-of-line)
+                            (forward-line (- context-before))
+                            (point))))
+                    (context-end
                      (and context-start
-                          (list :context
-                                (buffer-substring-no-properties
-                                 context-start context-end))))))
-               (if (funcall accept-match record)
-                   (progn
-                     (push record matches)
-                     (cl-incf match-count))
-                 (setq finished t
-                       budget-exhausted t))))
-           ;; Ensure a zero-width regexp cannot keep the search at one point.
-           (when (and (not finished) (= (point) (match-beginning 0)))
-             (if (= (point) (point-max))
-                 (setq finished t)
-               (forward-char 1)))))))
-    (list :matches (nreverse matches) :budget_exhausted budget-exhausted)))
+                          (save-excursion
+                            (forward-line context-after)
+                            (line-end-position)))))
+               (cl-incf line (count-lines known-line-start line-start))
+               (setq known-line-start line-start)
+               (if (or (> (- line-end line-start) ende-tools-max-search-output-bytes)
+                       (and context-start
+                            (> (- context-end context-start)
+                               ende-tools-max-search-output-bytes)))
+                   (unless (funcall accept-match nil)
+                     (setq finished t budget-exhausted t))
+                 (let ((record
+                        (append (list :line line :column column
+                                      :match (buffer-substring-no-properties
+                                              line-start line-end))
+                                (and context-start
+                                     (list :context (buffer-substring-no-properties
+                                                     context-start context-end))))))
+                   (if (funcall accept-match record)
+                       (progn (push record matches) (cl-incf match-count))
+                     (setq finished t budget-exhausted t))))
+               ;; Advance past the returned line without rewinding a multiline
+               ;; match.  Saved boundaries also survive callbacks' match data.
+               (if (= line-end (point-max))
+                   (setq finished t)
+                 (goto-char (max (1+ line-end) match-end)))))))))
+    (list :matches (nreverse matches) :budget_exhausted budget-exhausted
+          :complete (and finished (not budget-exhausted)))))
 
 (defun ende-tools--search-json-bytes (value)
   "Return serialized byte length of search result VALUE."
@@ -1179,7 +1165,7 @@ is already too large to consider within the configured output byte limit."
                                        (not (string-empty-p pattern))))
                                 patterns))
            (error "patterns must be a non-empty array of non-empty strings"))
-         (mapconcat #'regexp-quote patterns "\\|")))
+         (regexp-opt patterns)))
       ("regexp"
        (ende-tools--required-string arguments "regexp")))))
 
@@ -1219,7 +1205,8 @@ is already too large to consider within the configured output byte limit."
            (ende-tools--map-project-sources
             ende-tools--project-context
             (lambda (source)
-              (if (>= files-inspected ende-tools-max-search-files)
+              (if (or (>= files-inspected ende-tools-max-search-files)
+                      (>= matches-count maximum))
                   nil
         (cl-incf files-inspected)
                 (let* ((file-metadata
@@ -1271,8 +1258,9 @@ is already too large to consider within the configured output byte limit."
                      (+ file-bytes (if (> files-result-count 0) 1 0)))
             (cl-incf files-result-count)
             (cl-incf matches-count (length file-matches)))
-                  (not (or (plist-get search-result :budget_exhausted)
-                           (>= matches-count maximum)))))))))
+                  (and (not (plist-get search-result :budget_exhausted))
+                       (or (< matches-count maximum)
+                           (plist-get search-result :complete)))))))))
       (setq truncated (not complete)))
     (let ((result (list :files (vconcat (nreverse files-result))
                         :files_inspected files-inspected
@@ -2981,7 +2969,7 @@ process-group cancellation function with the active Ende job."
 
 (ende-tool-register
  'search_project
- "Search allowed project files on disk. Exactly one search selector is required: query, patterns, or regexp (which uses Emacs regular-expression syntax, not PCRE). Results group matching lines by file; use context_before and context_after for extra context, or read_file for more source."
+ "Search allowed project files on disk. Exactly one search selector is required: query, patterns, or regexp (which uses Emacs regular-expression syntax, not PCRE). Each source line appears once, grouped by file; max_results counts lines and column identifies the first match. Multiline matches belong to their starting line. Use context_before and context_after for extra context, or read_file for more source."
  `((:type . "object")
    (:properties
     . ((:query . ((:type . "string") (:minLength . 1)
