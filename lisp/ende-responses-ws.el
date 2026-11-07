@@ -24,13 +24,12 @@
 
 ;;; Commentary:
 
-;; Connection ownership and framing for asynchronous Responses requests.
+;; Connection ownership and lifecycle for asynchronous Responses requests.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'websocket)
-(require 'gnutls)
+(require 'ende-websocket)
 (require 'ende-curl)
 (require 'ende-request)
 (require 'ende-provider-config)
@@ -42,11 +41,8 @@
 
 (cl-defstruct ende-responses-ws-connection
   owner identity socket active chain closed closing key url headers properties
-  byte-limit event-limit header-limit
-  opening (generation 1) (phase 'disconnected) created http-status close-code)
-
-(cl-defstruct ende-responses-ws-opening
-  generation key process upgrade-sent header)
+  header-limit message-limit
+  (generation 1) (phase 'disconnected) created close-code)
 
 (cl-defstruct ende-responses-ws-chain
   response-id logical-request output)
@@ -58,7 +54,7 @@
   payload (delivery 'unsent) (attempt 0) prepared-generation
   profile debug connect-timeout idle-timeout byte-limit event-limit
   reused last-event
-  fragment-active frame-parts (frame-bytes 0) (received-bytes 0) (messages 0))
+  (received-bytes 0) (messages 0))
 
 (defvar ende-responses-ws--connections (make-hash-table :test #'equal)
   "Private live connections, including ownerless ephemeral requests.")
@@ -70,7 +66,10 @@
   "Return whether CONNECTION is available for submission or reuse."
   (and connection
        (not (ende-responses-ws-connection-closed connection))
-       (not (ende-responses-ws-connection-closing connection))))
+       (not (ende-responses-ws-connection-closing connection))
+       (let ((socket (ende-responses-ws-connection-socket connection)))
+         (or (not socket)
+             (not (memq (ende-websocket-state socket) '(closing closed)))))))
 
 (defun ende-responses-ws--live-p (request)
   "Return non-nil while REQUEST is attached and unsettled."
@@ -81,36 +80,6 @@
          (eq request (ende-responses-ws-connection-active connection))
          (not (ende-transport-session-terminal lifecycle)))))
 
-(defmacro ende-responses-ws--private (&rest body)
-  "Run BODY without dependency debugging or ambient cookies."
-  (declare (indent 0) (debug t))
-  `(let ((websocket-debug nil)
-         (websocket-callback-debug-on-error nil)
-         (url-cookie-storage nil)
-         (url-cookie-secure-storage nil))
-     ,@body))
-
-(defun ende-responses-ws--delete-process (process)
-  "Detach PROCESS before deletion, which may invoke its sentinel."
-  (when (processp process)
-    (set-process-filter process #'ignore)
-    (set-process-sentinel process #'ignore)
-    (process-put process :websocket nil)
-    (ende-ignore-errors #'delete-process process)))
-
-(defun ende-responses-ws--close-socket (socket)
-  "Detach SOCKET before deleting its process, without writing a close frame."
-  (ende-responses-ws--private
-    (when socket
-      (setf (websocket-ready-state socket) 'closed
-            (websocket-on-open socket) #'ignore
-            (websocket-on-message socket) #'ignore
-            (websocket-on-close socket) #'ignore
-            (websocket-on-error socket) #'ignore
-            (websocket-client-data socket) nil
-            (websocket-inflight-input socket) nil)
-      (ende-responses-ws--delete-process (websocket-conn socket)))))
-
 (defun ende-responses-ws--clear-chain (connection)
   "Detach CONNECTION's lineage and release its retained logical request."
   (when-let* ((chain (ende-responses-ws-connection-chain connection)))
@@ -118,18 +87,17 @@
     (ende-request-retained-release (ende-responses-ws-chain-logical-request chain) chain)))
 
 (defun ende-responses-ws--drop-socket (connection)
-  "Invalidate CONNECTION's socket and lineage before process deletion."
+  "Invalidate CONNECTION's socket and lineage before immediate abort."
   (let ((socket (ende-responses-ws-connection-socket connection)))
     (cl-incf (ende-responses-ws-connection-generation connection))
     (ende-responses-ws--clear-chain connection)
     (setf (ende-responses-ws-connection-socket connection) nil
-          (ende-responses-ws-connection-opening connection) nil
           (ende-responses-ws-connection-phase connection) 'disconnected
           (ende-responses-ws-connection-closing connection) nil
           (ende-responses-ws-connection-created connection) nil
-          (ende-responses-ws-connection-http-status connection) nil
           (ende-responses-ws-connection-close-code connection) nil)
-    (ende-responses-ws--close-socket socket)))
+    ;; Cancellation and replacement must not drain an accepted request.
+    (when socket (ende-websocket-abort socket))))
 
 (defun ende-responses-ws--discard (connection)
   "Close CONNECTION and forget its private identity and lineage."
@@ -174,9 +142,6 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
           (ende-responses-ws-request-idle-timer request) nil
           (ende-responses-ws-request-retry-timer request) nil
           (ende-responses-ws-request-logical-request request) nil
-          (ende-responses-ws-request-frame-parts request) nil
-          (ende-responses-ws-request-fragment-active request) nil
-          (ende-responses-ws-request-frame-bytes request) 0
           (ende-responses-ws-request-payload request) nil
           (ende-responses-ws-request-on-json request) nil
           (ende-responses-ws-request-on-complete request) nil
@@ -191,14 +156,13 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
   "Return allowlisted diagnostics for REQUEST, never dependency error data."
   (let* ((connection (ende-responses-ws-request-connection request))
          (phase (ende-responses-ws-connection-phase connection)))
-    (list :transport-phase (if (memq phase '(connecting upgrading)) phase
+    (list :transport-phase (if (eq phase 'connecting) phase
                              (pcase (ende-responses-ws-request-delivery request)
-                               ('sending 'sending) ('sent 'generation) (_ 'preparing)))
+                               ('sending 'sending) ('accepted 'generation) (_ 'preparing)))
           :delivery (ende-responses-ws-request-delivery request)
           :reused (and (ende-responses-ws-request-reused request) t)
           :connection-age (when-let* ((created (ende-responses-ws-connection-created connection)))
                             (max 0 (- (float-time) created)))
-          :http-status (ende-responses-ws-connection-http-status connection)
           :close-code (ende-responses-ws-connection-close-code connection)
           :messages (ende-responses-ws-request-messages request)
           :retries (ende-responses-ws-request-retries request)
@@ -250,6 +214,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (plist-get profile :service) (plist-get profile :auth-method)
                 (plist-get profile :account) (plist-get profile :codex-binding)
                 (plist-get profile :credential-binding) authentication-identity
+                ende-max-sse-event-bytes ende-max-response-header-bytes
                 (let ((print-length nil) (print-level nil))
                   (secure-hash 'sha256 (prin1-to-string headers)))))
          (connection (gethash key ende-responses-ws--connections)))
@@ -282,8 +247,6 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
           (timeout (if (plist-member profile :request-timeout)
                        (plist-get profile :request-timeout) ende-request-timeout)))
       (setf (ende-responses-ws-connection-active connection) request
-            (ende-responses-ws-connection-byte-limit connection) ende-max-response-bytes
-            (ende-responses-ws-connection-event-limit connection) ende-max-sse-event-bytes
             (ende-responses-ws-connection-header-limit connection) ende-max-response-header-bytes)
       (ende-transport-session-add-canceller
        lifecycle (lambda () (ende-responses-ws-finish request 'failure)))
@@ -391,8 +354,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   "Handle KIND's physical deadline only for REQUEST's current ATTEMPT."
   (when (ende-responses-ws--preparation-live-p request attempt)
     (if (eq kind 'connect)
-        (when (memq (ende-responses-ws-connection-phase
-                     (ende-responses-ws-request-connection request)) '(connecting upgrading))
+        (when (eq (ende-responses-ws-connection-phase
+                   (ende-responses-ws-request-connection request)) 'connecting)
           (ende-responses-ws--retry request 'connect-timeout))
       (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded"))))
 
@@ -403,46 +366,46 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
        (let ((connection (ende-responses-ws-request-connection request)))
          (and (eq socket (ende-responses-ws-connection-socket connection))
               (eq (ende-responses-ws-connection-phase connection) 'open)
-              (eq (websocket-ready-state socket) 'open)
+              (eq (ende-websocket-state socket) 'open)
               (= (ende-responses-ws-request-prepared-generation request)
                  (ende-responses-ws-connection-generation connection))))))
 
 (defun ende-responses-ws--send (request)
-  "Materialize then submit REQUEST once; sending is an ambiguous boundary."
+  "Offer REQUEST once; queue acceptance is an ambiguous delivery boundary."
   (when (and (ende-responses-ws--live-p request)
              (eq (ende-responses-ws-request-delivery request) 'unsent)
              (ende-responses-ws-request-payload request))
     (let* ((attempt (ende-responses-ws-request-attempt request))
            (connection (ende-responses-ws-request-connection request))
            (socket (ende-responses-ws-connection-socket connection)))
-      (ende-responses-ws--private
-        (condition-case nil
-            (let* ((data (ende-responses-ws-request-payload request))
-                   (text (if-let* ((file (plist-get data :file)))
-                             (with-temp-buffer
-                               (let ((coding-system-for-read 'utf-8-unix)) (insert-file-contents file))
-                               (buffer-string))
-                           (decode-coding-string (plist-get data :data) 'utf-8))))
-              (when (ende-responses-ws--attempt-live-p request attempt socket)
-                (if (or (not (ende-responses-ws--eligible-p connection))
-                        (not (eq (process-status (websocket-conn socket)) 'open)))
-                    (ende-responses-ws--closed connection socket)
+      (condition-case nil
+          (let* ((data (ende-responses-ws-request-payload request))
+                 (bytes (if-let* ((file (plist-get data :file)))
+                            (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally file)
+                              (buffer-string))
+                          (plist-get data :data))))
+            (when (ende-responses-ws--attempt-live-p request attempt socket)
+              ;; A successful offer does not prove transmission.  Never replay
+              ;; after this boundary without an explicit provider rejection.
+              (if (> (length bytes) (ende-responses-ws-connection-message-limit connection))
+                  ;; A larger follow-up needs a fresh bounded transport and
+                  ;; full preparation, without a retired previous_response_id.
+                  (ende-responses-ws--retry request 'unsent-replacement)
+                (setf (ende-responses-ws-request-delivery request) 'sending)
+                (ende-websocket-send-text-bytes socket bytes)
+                (when (ende-responses-ws--attempt-live-p request attempt socket)
                   (setf (ende-responses-ws-request-payload request) nil
-                        (ende-responses-ws-request-delivery request) 'sending)
-                  (ende-responses-ws--idle request)
-                  (process-send-string
-                   (websocket-conn socket)
-                   (websocket-encode-frame
-                    (make-websocket-frame :opcode 'text :completep t
-                                          :payload (encode-coding-string text 'utf-8)) t))
-                  (when (ende-responses-ws--attempt-live-p request attempt socket)
-                    (setf (ende-responses-ws-request-delivery request) 'sent)))))
-          ((error quit)
-           (when (and (ende-responses-ws--live-p request)
-                      (= attempt (ende-responses-ws-request-attempt request)))
-             (if (memq (process-status (websocket-conn socket)) '(closed failed exit signal))
-                 (ende-responses-ws--closed connection socket)
-               (ende-responses-ws--fail request 'transport "Responses request submission failed")))))))))
+                        (ende-responses-ws-request-delivery request) 'accepted)
+                  (ende-responses-ws--idle request)))))
+        (ende-websocket-backpressure
+         ;; Rejected atomically: retain the offer until ON-WRITABLE.
+         (when (ende-responses-ws--preparation-live-p request attempt)
+           (setf (ende-responses-ws-request-delivery request) 'unsent)))
+        ((error quit)
+         (when (ende-responses-ws--preparation-live-p request attempt)
+           (ende-responses-ws--fail request 'transport "Responses request submission failed")))))))
 
 (defun ende-responses-ws--refinalize (request)
   "Prepare a fresh wire attempt from REQUEST's unchanged logical source."
@@ -494,7 +457,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
       (ende-responses-ws--fail
        request 'transport
        "Responses automatic reconnection exhausted; completed work was preserved"))
-     ((memq reason '(connection-loss connect-timeout missing-response connection-limit unsent-replacement))
+     ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement))
       (let ((connection (ende-responses-ws-request-connection request)))
         (cl-incf (ende-responses-ws-request-retries request))
         (cl-incf (ende-responses-ws-request-attempt request))
@@ -505,10 +468,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
               (ende-responses-ws-request-idle-timer request) nil
               (ende-responses-ws-request-payload request) nil
               (ende-responses-ws-request-delivery request) 'unsent
-              (ende-responses-ws-request-prepared-generation request) nil
-              (ende-responses-ws-request-fragment-active request) nil
-              (ende-responses-ws-request-frame-parts request) nil
-              (ende-responses-ws-request-frame-bytes request) 0)
+              (ende-responses-ws-request-prepared-generation request) nil)
         (ende-responses-ws--drop-socket connection)
         (setf (ende-responses-ws-connection-phase connection) 'authenticating)
         (let ((attempt (ende-responses-ws-request-attempt request)))
@@ -551,366 +511,153 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (ende-responses-ws--refinalize request)))))
 
 (defun ende-responses-ws--open (connection socket)
-  "Send the prepared request when CONNECTION's SOCKET opens."
-  (if (ende-responses-ws-connection-closed connection)
-      (ende-responses-ws--close-socket socket)
-    (unless (and (ende-responses-ws-connection-socket connection)
-                 (not (eq socket (ende-responses-ws-connection-socket connection))))
-    (setf (ende-responses-ws-connection-socket connection) socket)
+  "Send the prepared request when CONNECTION's current SOCKET opens."
+  (when (and (ende-responses-ws--eligible-p connection)
+             (eq socket (ende-responses-ws-connection-socket connection)))
+    (setf (ende-responses-ws-connection-phase connection) 'open)
     (when-let* ((request (ende-responses-ws-connection-active connection)))
       (when-let* ((timer (ende-responses-ws-request-connect-timer request)))
         (cancel-timer timer)
         (setf (ende-responses-ws-request-connect-timer request) nil))
-      (ende-responses-ws--send request)))))
+      (ende-responses-ws--send request))))
 
-(defun ende-responses-ws--message (connection socket frame)
-  "Consume one JSON FRAME from CONNECTION's current SOCKET."
-  (when (and (not (ende-responses-ws-connection-closed connection))
+(defun ende-responses-ws--message (connection socket message-type text)
+  "Consume a complete decoded event from CONNECTION's current SOCKET."
+  (when (and (ende-responses-ws--eligible-p connection)
              (eq socket (ende-responses-ws-connection-socket connection)))
     (when-let* ((request (ende-responses-ws-connection-active connection)))
       (when (and (ende-responses-ws--live-p request)
-                 (memq (ende-responses-ws-request-delivery request) '(sending sent)))
+                 (memq (ende-responses-ws-request-delivery request) '(sending accepted)))
         (let ((attempt (ende-responses-ws-request-attempt request))
-              (payload (websocket-frame-payload frame))
-              (opcode (websocket-frame-opcode frame)))
+              (bytes (string-bytes text)))
           (condition-case nil
               (progn
-                (unless (and (memq opcode '(text continuation))
-                             (eq (eq opcode 'continuation)
-                                 (ende-responses-ws-request-fragment-active request)))
-                  (error "Invalid fragment sequence"))
-                (cl-incf (ende-responses-ws-request-frame-bytes request) (length payload))
-                (when (and (ende-responses-ws-request-event-limit request)
-                           (> (ende-responses-ws-request-frame-bytes request)
-                              (ende-responses-ws-request-event-limit request)))
-                  (ende-responses-ws--fail request 'resource "Responses message exceeds byte limit"))
-                (when (ende-responses-ws--live-p request)
-                  (when (> (length payload) 0)
-                    (push payload (ende-responses-ws-request-frame-parts request)))
-                  (setf (ende-responses-ws-request-fragment-active request)
-                        (not (websocket-frame-completep frame)))
-                  (when (websocket-frame-completep frame)
-                    (let* ((text (decode-coding-string
-                                  (apply #'concat (nreverse (ende-responses-ws-request-frame-parts request))) 'utf-8))
-                           (json (ende-protocol-json-read-string text))
-                           (type (ende-protocol-json-get "type" json)))
-                      (setf (ende-responses-ws-request-frame-parts request) nil
-                            (ende-responses-ws-request-frame-bytes request) 0)
-                      (cl-incf (ende-responses-ws-request-messages request))
-                      (unless (stringp type) (error "Missing Responses event type"))
-                      (when (memq (intern-soft type)
-                                  '(response.created response.in_progress response.completed response.done
-                                    response.incomplete response.failed error response.output_text.delta
-                                    response.output_item.added response.output_item.done
-                                    response.reasoning_summary_text.delta response.function_call_arguments.delta
-                                    response.function_call_arguments.done))
-                        (setf (ende-responses-ws-request-last-event request) (intern-soft type)))
-                      (unless (ende-responses-ws--recover request json)
-                        (funcall (ende-responses-ws-request-on-json request) json)
-                        (when (and (ende-responses-ws--attempt-live-p request attempt socket)
-                                   (member type '("response.completed" "response.done" "response.incomplete")))
-                          (funcall (ende-responses-ws-request-on-complete request))))))))
+                (unless (eq message-type 'text) (error "Expected text event"))
+                ;; Transport framing/UTF-8 and partial-message bounds belong to
+                ;; ende-websocket.  These counters describe application input.
+                (cl-incf (ende-responses-ws-request-received-bytes request) bytes)
+                (if (or (and (ende-responses-ws-request-byte-limit request)
+                             (> (ende-responses-ws-request-received-bytes request)
+                                (ende-responses-ws-request-byte-limit request)))
+                        (and (ende-responses-ws-request-event-limit request)
+                             (> bytes (ende-responses-ws-request-event-limit request))))
+                    (ende-responses-ws--fail request 'resource "Responses input exceeds byte limit")
+                  (ende-responses-ws--idle request)
+                  (let* ((json (ende-protocol-json-read-string text))
+                         (type (ende-protocol-json-get "type" json)))
+                    (cl-incf (ende-responses-ws-request-messages request))
+                    (unless (stringp type) (error "Missing Responses event type"))
+                    (when (memq (intern-soft type)
+                                '(response.created response.in_progress response.completed response.done
+                                  response.incomplete response.failed error response.output_text.delta
+                                  response.output_item.added response.output_item.done
+                                  response.reasoning_summary_text.delta response.function_call_arguments.delta
+                                  response.function_call_arguments.done))
+                      (setf (ende-responses-ws-request-last-event request) (intern-soft type)))
+                    (unless (ende-responses-ws--recover request json)
+                      (funcall (ende-responses-ws-request-on-json request) json)
+                      (when (and (ende-responses-ws--attempt-live-p request attempt socket)
+                                 (member type '("response.completed" "response.done" "response.incomplete")))
+                        (funcall (ende-responses-ws-request-on-complete request)))))))
             ((error quit)
-             (when (and (ende-responses-ws--live-p request)
-                        (= attempt (ende-responses-ws-request-attempt request)))
+             (when (ende-responses-ws--preparation-live-p request attempt)
                (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event")))))))))
 
-(defun ende-responses-ws--dispatch-input (connection socket text)
-  "Decode TEXT frame by frame, never letting a retired SOCKET reconnect."
-  (let ((position 0) (size (length text)))
-    (while (and (< position size)
-                (eq socket (ende-responses-ws-connection-socket connection))
-                (not (ende-responses-ws-connection-closed connection)))
-      (let ((frame (websocket-read-frame (substring text position))))
-        (if (not frame)
-            (setf (websocket-inflight-input socket) (substring text position)
-                  position size)
-          (cl-incf position (websocket-frame-length frame))
-          (pcase (websocket-frame-opcode frame)
-            ((or 'text 'continuation)
-             (ende-responses-ws--message connection socket frame))
-            ('ping
-             (when (and (ende-responses-ws--eligible-p connection)
-                        (eq (process-status (websocket-conn socket)) 'open))
-               (process-send-string
-                (websocket-conn socket)
-                (websocket-encode-frame
-                 (make-websocket-frame :opcode 'pong :completep t
-                                       :payload (websocket-frame-payload frame)) t))))))))))
-
-(defun ende-responses-ws--accept-input (connection socket output)
-  "Bound OUTPUT once on receipt, then dispatch preflighted frames."
-  (catch 'rejected
-    (let* ((request (ende-responses-ws-connection-active connection))
-           (text (concat (websocket-inflight-input socket) output))
-           (size (length text)) (position 0) close-position close-code pending-close
-           (message-bytes (if request (ende-responses-ws-request-frame-bytes request) 0))
-           (byte-limit (if request (ende-responses-ws-request-byte-limit request)
-                         (ende-responses-ws-connection-byte-limit connection)))
-           (event-limit (if request (ende-responses-ws-request-event-limit request)
-                          (ende-responses-ws-connection-event-limit connection))))
-      (cl-labels ((reject (kind message)
-                    (when request (ende-responses-ws--fail request kind message))
-                    (ende-responses-ws--discard connection)
-                    (throw 'rejected nil)))
-        (when request
-          (cl-incf (ende-responses-ws-request-received-bytes request) (length output))
-          (when (and byte-limit (> (ende-responses-ws-request-received-bytes request) byte-limit))
-            (reject 'resource "Responses wire input exceeds byte limit")))
-        (when (and (not request) byte-limit (> size byte-limit))
-          (reject 'resource "Responses idle input exceeds byte limit"))
-        (while (<= (+ position 2) size)
-          (let* ((first (aref text position))
-                 (opcode (logand first 15))
-                 (length-byte (aref text (1+ position))))
-            (when (or (not (zerop (logand first #x70)))
-                      (not (zerop (logand length-byte #x80)))
-                      (not (memq opcode '(0 1 8 9 10)))
-                      (and (>= opcode 8)
-                           (or (zerop (logand first #x80)) (> length-byte 125)))
-                      (and (= opcode 8) (= length-byte 1)))
-              (reject 'protocol "Invalid Responses WebSocket frame"))
-            (let ((info (catch 'websocket-incomplete-frame
-                          (websocket-get-payload-len
-                           (substring text (1+ position) (min size (+ position 10)))))))
-              (if (not info)
-                  (setq position size)
-                (let* ((bytes (car info))
-                       (end (+ position 1 (cdr info) bytes)))
-                  (when (and byte-limit
-                             (> (if request
-                                    (+ (ende-responses-ws-request-received-bytes request)
-                                       (max 0 (- end size)))
-                                  end)
-                                byte-limit))
-                    (reject 'resource "Responses advertised frame exceeds byte limit"))
-                  (when (memq opcode '(0 1))
-                    (cl-incf message-bytes bytes)
-                    (when (and event-limit (> message-bytes event-limit))
-                      (reject 'resource "Responses advertised message exceeds byte limit"))
-                    (unless (zerop (logand first #x80)) (setq message-bytes 0)))
-                  (when (and (= opcode 8) (<= end size))
-                    (setq close-position position)
-                    (when (>= bytes 2)
-                      (setq close-code (websocket-get-bytes (substring text (+ position 2) end) 2))
-                      (unless (or (memq close-code '(1000 1001 1002 1003 1007 1008 1009 1010 1011 1012 1013 1014))
-                                  (<= 3000 close-code 4999))
-                        (reject 'protocol "Invalid Responses WebSocket close code")))
-                    (setq end size))
-                  (when (and (= opcode 8) (> end size))
-                    (setq pending-close position))
-                  (setq position end))))))
-        (when (and (= position (1- size)) (= (logand (aref text position) 15) 8))
-          (setq pending-close position))
-        (when (and request (ende-responses-ws--live-p request)
-                   (memq (ende-responses-ws-request-delivery request) '(sending sent))
-                   (> (length output) 0))
-          (ende-responses-ws--idle request))
-        (setf (websocket-inflight-input socket) nil)
-        (when (or close-position pending-close)
-          (setf (ende-responses-ws-connection-closing connection) t
-                (ende-responses-ws-connection-close-code connection) close-code))
-        (ende-responses-ws--dispatch-input
-         connection socket (if-let* ((end (or close-position pending-close))) (substring text 0 end) text))
-        (when (and pending-close (eq socket (ende-responses-ws-connection-socket connection)))
-          (setf (websocket-inflight-input socket) (substring text pending-close)))
-        (when (and close-position (eq socket (ende-responses-ws-connection-socket connection)))
-          (ende-responses-ws--closed connection socket))))))
-
-(defun ende-responses-ws--closed (connection socket)
-  "Retire idle sockets or recover a prematurely interrupted logical request."
+(defun ende-responses-ws--closed (connection socket info)
+  "Retire SOCKET using only public, structured close INFO."
   (when (and (not (ende-responses-ws-connection-closed connection))
              (eq socket (ende-responses-ws-connection-socket connection)))
+    (setf (ende-responses-ws-connection-closing connection) t
+          (ende-responses-ws-connection-close-code connection) (plist-get info :code))
     (let ((request (ende-responses-ws-connection-active connection))
-          (code (ende-responses-ws-connection-close-code connection)))
+          (cause (plist-get info :cause))
+          (code (plist-get info :code)))
       (cond
        ((not request) (ende-responses-ws--discard connection))
+       ((eq cause 'size)
+        (ende-responses-ws--fail request 'resource "Responses transport limit exceeded"))
+       ((memq cause '(protocol utf8 application))
+        (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event"))
+       ((not (eq (ende-responses-ws-request-delivery request) 'unsent))
+        (ende-responses-ws--fail
+         request 'transport "Responses delivery interrupted; request was not replayed"))
        ((or (null code) (memq code '(1000 1001 1006 1011 1012 1013 1014)))
-        (ende-responses-ws--retry
-         request (if (eq (ende-responses-ws-request-delivery request) 'unsent)
-                     'unsent-replacement 'connection-loss)))
-       (t (ende-responses-ws--fail request 'transport "Responses connection rejected")
-          (ende-responses-ws--discard connection))))))
-
-(defun ende-responses-ws--socket-error (connection socket _callback _error)
-  "Contain unknown dependency failures without exposing their private data."
-  (when (eq socket (ende-responses-ws-connection-socket connection))
-    (when-let* ((request (ende-responses-ws-connection-active connection)))
-      (ende-responses-ws--fail request 'protocol "Responses socket callback failed"))
-    (ende-responses-ws--discard connection)))
-
-(defun ende-responses-ws--adopt (connection opening process)
-  "Adopt PROCESS once for live OPENING, or delete a late process."
-  (if (or (ende-responses-ws-connection-closed connection)
-          (not (eq opening (ende-responses-ws-connection-opening connection)))
-          (/= (ende-responses-ws-opening-generation opening)
-              (ende-responses-ws-connection-generation connection))
-          (and (ende-responses-ws-opening-process opening)
-               (not (eq process (ende-responses-ws-opening-process opening)))))
-      (progn (ende-responses-ws--delete-process process) nil)
-    (unless (ende-responses-ws-connection-socket connection)
-      (let ((socket
-             (websocket-inner-create
-              :conn process :url (ende-responses-ws-connection-url connection)
-              :accept-string (websocket-calculate-accept (ende-responses-ws-opening-key opening))
-              :on-open #'ignore
-              :on-message (lambda (socket frame)
-                            (ende-responses-ws--callback connection socket
-                                                         #'ende-responses-ws--message frame))
-              :on-close (lambda (socket)
-                          (ende-responses-ws--callback connection socket #'ende-responses-ws--closed))
-              :on-error (lambda (socket &rest _)
-                          (ende-responses-ws--callback connection socket
-                                                       #'ende-responses-ws--socket-error nil nil)))))
-        (setf (ende-responses-ws-opening-process opening) process
-              (ende-responses-ws-connection-socket connection) socket)
-        (process-put process :websocket socket)))
-    (ende-responses-ws-connection-socket connection)))
-
-(defun ende-responses-ws--callback (connection socket function &rest arguments)
-  "Contain FUNCTION's callback failures without disclosing ARGUMENTS."
-  (ende-responses-ws--private
-    (condition-case nil
-        (apply function connection socket arguments)
-      ((error quit) (ende-responses-ws--socket-error connection socket nil nil)))))
-
-(defun ende-responses-ws--status (connection opening process)
-  "Dispatch native PROCESS status after adoption, including immediate completion."
-  (when-let* ((socket (ende-responses-ws--adopt connection opening process)))
-    (pcase (process-status process)
-      ('open
-       (unless (ende-responses-ws-opening-upgrade-sent opening)
-         (let* ((url (ende-responses-ws-connection-url connection))
-                (path (url-filename (url-generic-parse-url url)))
-                (headers (mapcar (lambda (header)
-                                   (string-match ": *" header)
-                                   (cons (substring header 0 (match-beginning 0))
-                                         (substring header (match-end 0))))
-                                 (ende-responses-ws-connection-headers connection)))
-                (text (format "GET %s HTTP/1.1\r\n%s"
-                              (if (string-empty-p path) "/" path)
-                              (websocket-create-headers url (ende-responses-ws-opening-key opening)
-                                                        nil nil headers))))
-           (setf (ende-responses-ws-opening-upgrade-sent opening) t
-                 (ende-responses-ws-connection-phase connection) 'upgrading)
-           (process-send-string process text))))
-      ((or 'closed 'failed 'exit 'signal)
-       (if (or (eq (ende-responses-ws-connection-phase connection) 'connecting)
-               (plist-get (ende-ignore-errors #'gnutls-peer-status process) :warnings))
-           (progn
-             (when-let* ((request (ende-responses-ws-connection-active connection)))
-               (ende-responses-ws--fail request 'transport "Responses TLS or connection establishment failed"))
-             (ende-responses-ws--discard connection))
-         (ende-responses-ws--closed connection socket))))))
-
-(defun ende-responses-ws--input (connection opening process output)
-  "Validate a bounded Upgrade before passing OUTPUT to open-state framing."
-  (when-let* ((socket (ende-responses-ws--adopt connection opening process)))
-    (when (eq (ende-responses-ws-connection-phase connection) 'upgrading)
-      (let* ((text (concat (ende-responses-ws-opening-header opening) output))
-             (end (string-match "\r\n\r\n" text))
-             (length (if end (+ end 4) (length text))))
-        (when (and (ende-responses-ws-connection-header-limit connection)
-                   (> length (ende-responses-ws-connection-header-limit connection)))
-          (ende-responses-ws--fail (ende-responses-ws-connection-active connection)
-                                   'resource "Responses handshake header exceeds byte limit")
-          (error "Handshake header exceeds limit"))
-        (setq output nil)
-        (if (not end)
-            (setf (ende-responses-ws-opening-header opening) text)
-          (let ((header (substring text 0 length)))
-            (when (string-match "\\`HTTP/1\\.1 \\([0-9][0-9][0-9]\\)" header)
-              (setf (ende-responses-ws-connection-http-status connection)
-                    (string-to-number (match-string 1 header))))
-            (websocket-verify-response-code header)
-            (websocket-verify-headers socket header))
-          (setf (ende-responses-ws-opening-header opening) nil
-                (ende-responses-ws-connection-phase connection) 'open
-                (websocket-ready-state socket) 'open)
-          (setq output (substring text length))
-          (ende-responses-ws--open connection socket))))
-    (when (and output (not (string-empty-p output))
-               (eq socket (ende-responses-ws-connection-socket connection))
-               (eq (ende-responses-ws-connection-phase connection) 'open))
-      (ende-responses-ws--accept-input connection socket output))))
-
-(defun ende-responses-ws--opening-error (connection opening failure)
-  "Classify structured FAILURE only while CONNECTION still owns OPENING."
-  (when (eq opening (ende-responses-ws-connection-opening connection))
-    (when-let* ((request (ende-responses-ws-connection-active connection)))
-      (if (or (eq (car-safe failure) 'network-error)
-              (memq (ende-responses-ws-connection-http-status connection) '(408 500 502 503 504)))
-          (ende-responses-ws--retry request 'connection-loss)
-        (ende-responses-ws--fail request 'transport "Responses connection opening failed")))))
+        (ende-responses-ws--retry request 'unsent-replacement))
+       (t (ende-responses-ws--fail request 'transport "Responses connection rejected"))))))
 
 (defun ende-responses-ws--connect (connection)
-  "Publish and start one owned asynchronous, verified TLS opening attempt."
-  (let* ((opening (make-ende-responses-ws-opening
-                   :generation (ende-responses-ws-connection-generation connection)
-                   :key (websocket-genkey)))
-         (url (url-generic-parse-url (ende-responses-ws-connection-url connection)))
-         (host (url-host url))
-         (port (if (zerop (url-port url)) 443 (url-port url)))
-         (request (ende-responses-ws-connection-active connection)))
-    (setf (ende-responses-ws-connection-opening connection) opening
+  "Start CONNECTION through the public asynchronous WebSocket API."
+  (let* ((request (ende-responses-ws-connection-active connection))
+         (data (ende-responses-ws-request-payload request))
+         (size (if-let* ((file (plist-get data :file)))
+                   (file-attribute-size (file-attributes file))
+                 (length (plist-get data :data))))
+         ;; The transport's message bound covers both directions.  Keep room
+         ;; for the prepared request, and enforce the event bound on receipt.
+         (message-limit (max 1 size (or (ende-responses-ws-request-event-limit request)
+                                        most-positive-fixnum)))
+         (header-limit (or (ende-responses-ws-connection-header-limit connection)
+                           most-positive-fixnum))
+         (limits (list :message-bytes message-limit
+                       :frame-bytes message-limit
+                       :write-frame-bytes (min 16384 message-limit)
+                       :output-bytes message-limit
+                       :input-bytes (max 14 (+ 14 message-limit) (or header-limit 0))
+                       :handshake-timeout (if (ende-responses-ws-request-connect-timeout request)
+                                              (max 1 (ceiling (ende-responses-ws-request-connect-timeout request)))
+                                            most-positive-fixnum)
+                       :message-timeout (max 1 (ceiling (ende-responses-ws-request-idle-timeout request))))))
+    (setq limits (append limits (list :header-bytes header-limit :line-bytes header-limit)))
+    (setf (ende-responses-ws-connection-message-limit connection) message-limit
           (ende-responses-ws-connection-phase connection) 'connecting
           (ende-responses-ws-connection-created connection) (float-time))
     (when-let* ((timeout (ende-responses-ws-request-connect-timeout request)))
       (setf (ende-responses-ws-request-connect-timer request)
             (run-at-time timeout nil #'ende-responses-ws--attempt-timeout request
                          (ende-responses-ws-request-attempt request) 'connect)))
-    (ende-responses-ws--private
-      (condition-case failure
-          (let ((default-directory (ende-curl-local-directory)))
-            (unless (gnutls-available-p) (error "Verified built-in TLS required"))
-            (let* ((filter (lambda (process output)
-                             (ende-responses-ws--private
-                               (condition-case failure
-                                   (ende-responses-ws--input connection opening process output)
-                                 ((error quit)
-                                  (ende-responses-ws--opening-error connection opening failure))))))
-                   (sentinel (lambda (process _event)
-                               (ende-responses-ws--private
-                                 (condition-case failure
-                                     (ende-responses-ws--status connection opening process)
-                                   ((error quit)
-                                    (ende-responses-ws--opening-error connection opening failure))))))
-                   (process (make-network-process
-                             :name "ende-responses" :buffer nil :host host :service port
-                             :nowait t :noquery t :coding 'binary :filter-multibyte nil
-                             :tls-parameters (cons 'gnutls-x509pki
-                                                   (gnutls-boot-parameters
-                                                    :type 'gnutls-x509pki :hostname host :verify-error t))
-                             :filter filter :sentinel sentinel)))
-              (ende-responses-ws--status connection opening process)))
-        ((error quit)
-         (ende-responses-ws--opening-error connection opening failure))))))
+    (let ((default-directory (ende-curl-local-directory)))
+      (setf (ende-responses-ws-connection-socket connection)
+            (ende-websocket-connect
+             (ende-responses-ws-connection-url connection)
+             :headers (mapcar (lambda (header)
+                                (string-match ": *" header)
+                                (cons (substring header 0 (match-beginning 0))
+                                      (substring header (match-end 0))))
+                              (ende-responses-ws-connection-headers connection))
+             :limits limits
+             :on-open (apply-partially #'ende-responses-ws--open connection)
+             :on-message (apply-partially #'ende-responses-ws--message connection)
+             :on-close (apply-partially #'ende-responses-ws--closed connection)
+             :on-writable (lambda (socket)
+                            (when (eq socket (ende-responses-ws-connection-socket connection))
+                              (when-let* ((active (ende-responses-ws-connection-active connection)))
+                                (ende-responses-ws--send active)))))))))
 
 (defun ende-responses-ws-send-prepared (request attempt generation data body record)
   "Open or reuse REQUEST's socket and send prepared DATA, BODY and RECORD."
   (if (not (ende-responses-ws--preparation-live-p request attempt))
       (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
-    (ende-responses-ws--private
-      (condition-case nil
-          (let* ((connection (ende-responses-ws-request-connection request)))
-            (setf (ende-responses-ws-request-prepared-generation request) generation
-                  (ende-responses-ws-request-logical-request request) (plist-get data :retained)
-                  (ende-responses-ws-request-payload request) data)
-            (funcall (ende-responses-ws-request-on-prepared request) body record)
-            (when (and (ende-responses-ws--live-p request)
-                       (= attempt (ende-responses-ws-request-attempt request)))
-              (if (/= generation (ende-responses-ws-connection-generation connection))
-                  (progn
-                    (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
-                    (ende-responses-ws--retry request 'unsent-replacement))
-                (if (eq (ende-responses-ws-connection-phase connection) 'open)
-                    (ende-responses-ws--send request)
-                  (unless (ende-responses-ws-connection-opening connection)
-                    (ende-responses-ws--connect connection))))))
-        ((error quit)
-         (when (and (ende-responses-ws--live-p request)
-                    (= attempt (ende-responses-ws-request-attempt request)))
-           (ende-responses-ws--fail request 'transport "Could not send Responses WebSocket request")))))))
+    (condition-case nil
+        (let ((connection (ende-responses-ws-request-connection request)))
+          (setf (ende-responses-ws-request-prepared-generation request) generation
+                (ende-responses-ws-request-logical-request request) (plist-get data :retained)
+                (ende-responses-ws-request-payload request) data)
+          (funcall (ende-responses-ws-request-on-prepared request) body record)
+          (when (ende-responses-ws--preparation-live-p request attempt)
+            (if (/= generation (ende-responses-ws-connection-generation connection))
+                (progn
+                  (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+                  (ende-responses-ws--retry request 'unsent-replacement))
+              (if (eq (ende-responses-ws-connection-phase connection) 'open)
+                  (ende-responses-ws--send request)
+                (unless (ende-responses-ws-connection-socket connection)
+                  (ende-responses-ws--connect connection))))))
+      (ende-websocket-backpressure
+       (when (ende-responses-ws--preparation-live-p request attempt)
+         (ende-responses-ws--retry request 'connection-limit)))
+      ((error quit)
+       (when (ende-responses-ws--preparation-live-p request attempt)
+         (ende-responses-ws--fail request 'transport "Could not send Responses WebSocket request"))))))
 
 (provide 'ende-responses-ws)
 ;;; ende-responses-ws.el ends here
