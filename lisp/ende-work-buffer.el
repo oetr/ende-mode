@@ -44,7 +44,7 @@
                (:constructor ende-work-buffer--make-section))
   entry response start body-start body-end heading
   payload-start payload-end rendered-length prefix-state prefix-marker
-  (revision 0) summary-source summary)
+  (revision 0) summary-source summary materialized stale)
 
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
@@ -322,7 +322,7 @@ so a directive completed by a later chunk can still be escaped in place."
             (org-fold-hide-drawer-toggle t t)))))))
 
 (defun ende-work-buffer--record-response (entry)
-  "Index ENTRY and return whether its displayed metadata changed."
+  "Index ENTRY's attribution and displayed metadata."
   (puthash (ende-transcript-entry-id entry) entry ende-work-buffer--responses)
   (unless (plist-get (ende-transcript-entry-data entry) :synthetic)
     (puthash (ende-transcript-entry-round entry) entry ende-work-buffer--rounds))
@@ -340,9 +340,7 @@ so a directive completed by a later chunk can still be escaped in place."
     (when (plist-get data :synthetic)
       (dolist (field '(:input-tokens :output-tokens :cached-tokens))
         (setq metadata (plist-put metadata field nil))))
-    (let ((properties (ende-org--metadata-properties metadata)))
-      (prog1 (not (equal properties (gethash id ende-work-buffer--metadata)))
-        (puthash id properties ende-work-buffer--metadata)))))
+    (puthash id (ende-org--metadata-properties metadata) ende-work-buffer--metadata)))
 
 (defun ende-work-buffer--response-for (entry)
   "Return the originating response for ENTRY."
@@ -423,7 +421,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
     (pcase kind
       ((or 'tool-call 'tool-result 'opaque)
        (let ((raw (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry))))
-         (if (and (eq kind 'tool-call) (eq (ende-transcript-entry-status entry) 'streaming))
+         (if (and (eq kind 'tool-call) (not (eq (ende-transcript-entry-status entry) 'complete)))
              raw
            (ende-work-buffer--readable-json raw))))
       ('text (if (and (plist-get data :normalized) (string-blank-p (or content "")))
@@ -440,16 +438,58 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
     (unless (and (eq kind 'response) (plist-get (ende-transcript-entry-data entry) :synthetic))
       (let ((section (ende-work-buffer--ensure-section id entry)))
         (ende-work-buffer--update-heading section entry)
-        (unless (or (eq kind 'response) (and (not new) (eq change 'metadata)))
-          (let ((text (ende-work-buffer--display-text entry)))
-            (if (and (not new) (eq change 'append))
-                (ende-work-buffer--append-example
-                 section (substring text (ende-work-buffer--section-rendered-length section)))
-              (ende-work-buffer--replace-example section text))))
+        (cond
+         ((ende-work-buffer--detail-p section)
+          (when new
+            (ende-work-buffer--replace-example section "Expand to read payload."))
+          (unless (and (not new) (eq change 'metadata))
+            (setf (ende-work-buffer--section-stale section)
+                  (ende-work-buffer--merge-change
+                   (ende-work-buffer--section-stale section) (if new 'replace change)))
+            (unless (or new (ende-work-buffer--folded-p section))
+              (ende-work-buffer--render-body
+               section entry (ende-work-buffer--section-stale section)))))
+         ((not (or (eq kind 'response) (and (not new) (eq change 'metadata))))
+          (ende-work-buffer--render-body section entry (if new 'replace change))))
         (when (and new (memq kind '(tool-call tool-result opaque thinking summary progress)))
           (save-excursion
             (goto-char (ende-work-buffer--section-start section))
             (org-fold-hide-subtree)))))))
+
+(defun ende-work-buffer--render-body (section entry change)
+  "Materialize ENTRY's CHANGE in SECTION, retaining just the displayed body."
+  (let ((text (ende-work-buffer--display-text entry)))
+    (if (and (ende-work-buffer--section-materialized section) (eq change 'append))
+        (ende-work-buffer--append-example
+         section (substring text (ende-work-buffer--section-rendered-length section)))
+      (ende-work-buffer--replace-example section text)))
+  (setf (ende-work-buffer--section-materialized section) t
+        (ende-work-buffer--section-stale section) nil))
+
+(defun ende-work-buffer--detail-p (section)
+  "Return whether SECTION owns an expensive, deferrable payload."
+  (when-let* ((entry (ende-work-buffer--section-entry section)))
+    (memq (ende-transcript-entry-kind entry) '(tool-call tool-result opaque))))
+
+(defun ende-work-buffer--queue-exposed (section)
+  "Queue SECTION's deferred body only if it is exposed and stale."
+  (when (and section (ende-work-buffer--detail-p section)
+             (not (ende-work-buffer--folded-p section))
+             (ende-work-buffer--section-stale section))
+    (ende-work-buffer--queue-change (ende-work-buffer--section-entry section)
+                                   (ende-work-buffer--section-stale section))))
+
+(defun ende-work-buffer--visibility-changed (state)
+  "Enqueue details exposed by ordinary Org cycling to STATE."
+  (pcase state
+    ((or 'children 'subtree)
+     (save-excursion
+       (org-back-to-heading t)
+       (ende-work-buffer--queue-exposed (get-text-property (point) 'ende-work-buffer-section))))
+    ('all
+     (maphash (lambda (_ section) (ende-work-buffer--queue-exposed section))
+              ende-work-buffer--sections)))
+  (ende-work-buffer--schedule-refresh))
 
 (defun ende-work-buffer--merge-change (old new)
   "Merge pending OLD and NEW change kinds."
@@ -573,6 +613,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
     (remove-text-properties (point-min) (point-max)
                             '(ende-work-buffer-section nil ende-work-buffer-entry nil)))
   (setq ende-work-buffer-mode nil ende-work-buffer--refresh-timer nil
+        ende-work-buffer--rendering nil
         ende-work-buffer--pending nil ende-work-buffer--pending-order nil
         ende-work-buffer--job nil ende-work-buffer--transcript nil
         ende-work-buffer--sections nil ende-work-buffer--responses nil
@@ -620,6 +661,7 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               (add-hook 'kill-buffer-hook #'ende-work-buffer--detach nil t)
               (add-hook 'change-major-mode-hook #'ende-work-buffer--detach nil t)
               (add-hook 'window-buffer-change-functions #'ende-work-buffer--window-change nil t)
+              (add-hook 'org-cycle-hook #'ende-work-buffer--visibility-changed nil t)
               (let ((inhibit-read-only t))
                 (insert "#+COLUMNS: " ende-org-columns-format "\n\n")
                 (set-buffer-modified-p nil))
