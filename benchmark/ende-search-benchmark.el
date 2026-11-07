@@ -11,7 +11,7 @@
 (defvar ende-search-benchmark-instrument nil
   "Also collect separate, untimed direct-call counters.")
 (defvar ende-search-benchmark-timeout 30
-  "Maximum seconds to wait for each worker callback.")
+  "Maximum seconds to wait for worker readiness or each callback.")
 (defvar ende-search-benchmark--counters nil)
 
 (defconst ende-search-benchmark--block
@@ -109,6 +109,19 @@ Return an independent in-memory manifest of paths and block counts."
     (unless (natnump (plist-get value :files_inspected))
       (error "Search benchmark invalid inspection count"))))
 
+(defun ende-search-benchmark--ready ()
+  "Wait outside timing for the runtime's ready project standby, or fail."
+  (ende-worker-prewarm)
+  (let ((deadline (+ (float-time) ende-search-benchmark-timeout)))
+    (while (and ende-worker--standby
+                (eq (ende-worker--worker-phase ende-worker--standby) 'starting)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (unless (and ende-worker--standby
+                 (eq (ende-worker--worker-phase ende-worker--standby) 'ready)
+                 (process-live-p (ende-worker--worker-process ende-worker--standby)))
+      (error "Search benchmark worker readiness failed or timed out"))))
+
 (defun ende-search-benchmark--invoke (layer arguments root configuration cache)
   "Invoke LAYER with ARGUMENTS under CONFIGURATION and shared CACHE."
   (let* ((ende-tools--access-config configuration)
@@ -130,12 +143,28 @@ Return an independent in-memory manifest of paths and block counts."
       (let* ((done nil) result cancel
              (deadline (+ (float-time) ende-search-benchmark-timeout))
              (ende-tools--register-cancellation-function
-              (lambda (function) (setq cancel function))))
+              (lambda (function) (setq cancel function)))
+             (dispatch
+              (lambda ()
+                (ende-tools-call-async
+                 (list :id "benchmark" :name "search_project" :arguments (json-encode arguments))
+                 configuration (lambda (json) (setq result json done t))))))
         (unwind-protect
             (progn
-              (ende-tools-call-async
-               (list :id "benchmark" :name "search_project" :arguments (json-encode arguments))
-               configuration (lambda (json) (setq result json done t)))
+              (if (eq layer 'worker-json)
+                  (cl-letf (((symbol-function 'ende-worker-run-prewarmed)
+                             (symbol-function 'ende-worker-run)))
+                    (funcall dispatch))
+                (let ((checkout (symbol-function 'ende-worker--checkout)) hit)
+                  (cl-letf (((symbol-function 'ende-worker--checkout)
+                             (lambda ()
+                               (let ((worker (funcall checkout)))
+                                 (unless (and worker (eq (ende-worker--worker-phase worker) 'ready))
+                                   (error "Search benchmark ready worker checkout missed"))
+                                 (setq hit t)
+                                 worker))))
+                    (funcall dispatch))
+                  (unless hit (error "Search benchmark ready worker checkout missed"))))
               (while (and (not done) (< (float-time) deadline))
                 (accept-process-output nil 0.01))
               (unless done (error "Search benchmark worker timed out"))
@@ -189,83 +218,91 @@ Return an independent in-memory manifest of paths and block counts."
 
 (defun ende-search-benchmark--case (root configuration manifest workload layer state)
   "Measure one WORKLOAD, LAYER and cache STATE in ROOT."
-  (let* ((arguments (if (assoc "max_results" (cdr workload)) (cdr workload)
-                      (append (cdr workload) '(("max_results" . 20000)))))
-         (expected (ende-search-benchmark--oracle manifest workload))
-         (cache (ende-project-cache-create))
-         (ende-tools-max-search-output-bytes (if (eq (car workload) 'byte-cap) 300 10000000))
-         (ende-tools--access-config configuration)
-         (ende-tools--access-tool 'search_project)
-         (ende-tools--project-context
-          (when (eq layer 'direct) (ende-tools--prepare-project-context arguments root)))
-         samples counters prewarmed-entries)
-    (when (eq state 'prewarmed)
-      (ende-search-benchmark--validate
-       (ende-search-benchmark--result
-        (ende-search-benchmark--invoke layer arguments root configuration cache) layer) expected))
-    (setq prewarmed-entries (hash-table-count (ende-project-cache-allowed cache)))
-    (dotimes (_ ende-search-benchmark-samples)
-      (when (eq state 'fresh) (setq cache (ende-project-cache-create)))
-      (garbage-collect)
-      (let* ((cache-entries (hash-table-count (ende-project-cache-allowed cache)))
-             (lag 0.0) (next (+ (float-time) 0.01))
-             (timer (when (eq layer 'worker-json)
-                      (run-at-time 0.01 0.01
-                                   (lambda ()
-                                     (let ((now (float-time)))
-                                       (setq lag (max lag (- now next))
-                                             next (+ now 0.01)))))))
-             raw sample)
-        (unwind-protect
-            (let ((gc-before gcs-done) (gc-time-before gc-elapsed)
-                  (start (float-time)))
-              (setq raw (ende-search-benchmark--invoke layer arguments root configuration cache))
-              (let ((ended (float-time)))
-                (when timer (setq lag (max lag (- ended next))))
-                (setq sample (list :wall (- ended start)
-                                   :gc_count (- gcs-done gc-before)
-                                   :gc_seconds (- gc-elapsed gc-time-before)
-                                   :cache_entries_before cache-entries
-                                   :parent_timer_max_lag lag))))
-          (when timer (cancel-timer timer)))
-        (let* ((result (ende-search-benchmark--result raw layer))
-               (encoded (json-encode result)))
-          (ende-search-benchmark--validate result expected)
-          (setq sample
-                (append sample
-                        (list :result_bytes (string-bytes encoded)
-                              :files_inspected (plist-get result :files_inspected)
-                              :matching_lines
-                              (cl-loop for file in (plist-get result :files)
-                                       sum (length (plist-get file :matches)))))))
-        (push sample samples)))
-    (when (and ende-search-benchmark-instrument (eq layer 'direct))
-      (when (eq state 'fresh) (setq cache (ende-project-cache-create)))
-      (setq counters
-            (ende-search-benchmark--instrument
-             (lambda ()
-               (ende-search-benchmark--validate
-                (ende-search-benchmark--result
-                 (ende-search-benchmark--invoke layer arguments root configuration cache) layer)
-                expected)))))
-    (list :workload (symbol-name (car workload)) :arguments arguments
-          :output_byte_limit ende-tools-max-search-output-bytes
-          :layer (symbol-name layer) :cache (symbol-name state)
-          :prewarmed_entries prewarmed-entries
-          :samples (vconcat (reverse samples))
-          :wall (ende-search-benchmark--summary samples :wall)
-          :gc_count (ende-search-benchmark--summary samples :gc_count)
-          :gc_seconds (ende-search-benchmark--summary samples :gc_seconds)
-          :parent_timer_max_lag (ende-search-benchmark--summary samples :parent_timer_max_lag)
-          :instrumentation counters)))
+  (unwind-protect
+      (progn
+        (ende-worker-shutdown)
+        (let* ((arguments (if (assoc "max_results" (cdr workload)) (cdr workload)
+                             (append (cdr workload) '(("max_results" . 20000)))))
+               (expected (ende-search-benchmark--oracle manifest workload))
+               (cache (ende-project-cache-create))
+               (ende-tools-max-search-output-bytes (if (eq (car workload) 'byte-cap) 300 10000000))
+               (ende-tools--access-config configuration)
+               (ende-tools--access-tool 'search_project)
+               (ende-tools--project-context
+                (when (eq layer 'direct) (ende-tools--prepare-project-context arguments root)))
+               samples counters prewarmed-entries)
+          (when (eq state 'prewarmed)
+            (when (eq layer 'worker-json-ready) (ende-search-benchmark--ready))
+            (ende-search-benchmark--validate
+             (ende-search-benchmark--result
+              (ende-search-benchmark--invoke layer arguments root configuration cache) layer) expected))
+          (setq prewarmed-entries (hash-table-count (ende-project-cache-allowed cache)))
+          (dotimes (_ ende-search-benchmark-samples)
+            (when (eq state 'fresh) (setq cache (ende-project-cache-create)))
+            (garbage-collect)
+            (when (eq layer 'worker-json-ready) (ende-search-benchmark--ready))
+            (let* ((cache-entries (hash-table-count (ende-project-cache-allowed cache)))
+                   (lag 0.0) (next (+ (float-time) 0.01))
+                   (timer (unless (eq layer 'direct)
+                            (run-at-time 0.01 0.01
+                                         (lambda ()
+                                           (let ((now (float-time)))
+                                             (setq lag (max lag (- now next))
+                                                   next (+ now 0.01)))))))
+                   raw sample)
+              (unwind-protect
+                  (let ((gc-before gcs-done) (gc-time-before gc-elapsed)
+                        (start (float-time)))
+                    (setq raw (ende-search-benchmark--invoke layer arguments root configuration cache))
+                    (let ((ended (float-time)))
+                      (when timer (setq lag (max lag (- ended next))))
+                      (setq sample (list :wall (- ended start)
+                                         :gc_count (- gcs-done gc-before)
+                                         :gc_seconds (- gc-elapsed gc-time-before)
+                                         :cache_entries_before cache-entries
+                                         :parent_timer_max_lag lag))))
+                (when timer (cancel-timer timer)))
+              (let* ((result (ende-search-benchmark--result raw layer))
+                     (encoded (json-encode result)))
+                (ende-search-benchmark--validate result expected)
+                (setq sample
+                      (append sample
+                              (list :result_bytes (string-bytes encoded)
+                                    :files_inspected (plist-get result :files_inspected)
+                                    :matching_lines
+                                    (cl-loop for file in (plist-get result :files)
+                                             sum (length (plist-get file :matches)))))))
+              (push sample samples)))
+          (when (and ende-search-benchmark-instrument (eq layer 'direct))
+            (when (eq state 'fresh) (setq cache (ende-project-cache-create)))
+            (setq counters
+                  (ende-search-benchmark--instrument
+                   (lambda ()
+                     (ende-search-benchmark--validate
+                      (ende-search-benchmark--result
+                       (ende-search-benchmark--invoke layer arguments root configuration cache) layer)
+                      expected)))))
+          (list :workload (symbol-name (car workload)) :arguments arguments
+                :output_byte_limit ende-tools-max-search-output-bytes
+                :layer (symbol-name layer) :cache (symbol-name state)
+                :prewarmed_entries prewarmed-entries
+                :samples (vconcat (reverse samples))
+                :wall (ende-search-benchmark--summary samples :wall)
+                :gc_count (ende-search-benchmark--summary samples :gc_count)
+                :gc_seconds (ende-search-benchmark--summary samples :gc_seconds)
+                :parent_timer_max_lag (ende-search-benchmark--summary samples :parent_timer_max_lag)
+                :instrumentation counters)))
+    (ende-worker-shutdown)))
 
 ;;;###autoload
 (defun ende-search-benchmark-run ()
   "Return a validated JSON-serializable search benchmark report.
 In batch mode also print JSON.  Configure `ende-search-benchmark-sizes',
 `ende-search-benchmark-samples' and `ende-search-benchmark-instrument' before
-calling.  Fresh refers to policy cache, never to a cold operating-system cache."
+calling.  Fresh refers to policy cache, never to a cold operating-system cache.
+Worker-json is cold; worker-json-ready excludes readiness waits."
   (interactive)
+  (ende-worker-shutdown)
   (unless (and (consp ende-search-benchmark-sizes)
                (cl-every (lambda (n) (and (integerp n) (> n 0))) ende-search-benchmark-sizes)
                (integerp ende-search-benchmark-samples) (> ende-search-benchmark-samples 0)
@@ -287,7 +324,7 @@ calling.  Fresh refers to policy cache, never to a cold operating-system cache."
               (let* ((manifest (ende-search-benchmark--fixture root size large))
                      (configuration (ende-search-benchmark--configuration root)) cases)
                 (dolist (workload (ende-search-benchmark--workloads))
-                  (dolist (layer '(direct worker-json))
+                  (dolist (layer '(direct worker-json worker-json-ready))
                     (dolist (state '(fresh prewarmed))
                       (push (ende-search-benchmark--case root configuration manifest workload layer state) cases))))
                 (push (list :blocks size :layout (if large "fewer-large" "many-small")
@@ -297,6 +334,7 @@ calling.  Fresh refers to policy cache, never to a cold operating-system cache."
                             :allowed_bytes (+ (* size (string-bytes ende-search-benchmark--block))
                                               (string-bytes "rare-final\n"))
                             :cases (vconcat (nreverse cases))) fixtures))
+            (ende-worker-shutdown)
             (delete-directory root t)))))
     (let ((report
            (list :environment
@@ -321,8 +359,10 @@ calling.  Fresh refers to policy cache, never to a cold operating-system cache."
                                  :policy "include .txt; deny hidden*.txt; exclude excluded/"
                                  :os_cache "uncontrolled, fixtures recently written; fresh means policy cache only"
                                  :gc_scope "parent process only; worker GC excluded"
-                                 :timing "direct: prepared policy; worker-json: dispatch through JSON callback"
-                                 :timer "worker-json only, 10ms repeating parent timer"
+                                 :timing (concat "direct: prepared policy; worker-json: cold dispatch through JSON callback; "
+                                                 "worker-json-ready: ready checkout through JSON callback, "
+                                                 "including async replenishment; readiness waits untimed")
+                                 :timer "both worker-json layers, 10ms repeating parent timer"
                                  :units "wall, gc_seconds, parent_timer_max_lag: seconds"
                                  :instrumentation "separate direct-only run; read-bytes counts decoded buffer bytes"
                                  :worker_timeout ende-search-benchmark-timeout)
