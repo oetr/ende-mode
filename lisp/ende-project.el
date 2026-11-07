@@ -238,9 +238,11 @@ absolute and resolved; the trailing separator enforces component boundaries."
                    (file-name-as-directory path) ignore-case))
 
 (defsubst ende-project--relative-name (path root)
-  "Return PATH relative to directory ROOT without filesystem work.
-PATH must already be known to be beneath absolute ROOT."
-  (substring path (length (file-name-as-directory root))))
+  "Return known-contained PATH relative to absolute directory ROOT."
+  (let ((prefix-length (length (file-name-as-directory root))))
+    (if (> (length path) prefix-length)
+        (substring path prefix-length)
+      (file-relative-name path root))))
 
 (defun ende-project--map-files (root visit &optional descend-p candidate-p)
   "Visit current regular files below canonical ROOT in directory order.

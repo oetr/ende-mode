@@ -1503,6 +1503,7 @@
                         (decoded (json-parse-string json :object-type 'plist)))
                    (should (eq (plist-get decoded :ok) t))
                    (plist-get decoded :result))))
+            (make-symbolic-link "." (expand-file-name "self" root))
             (with-temp-file first (insert "needle first\n"))
             (should (= 1 (length (plist-get (search-files job configuration) :files))))
             (let* ((cache (gethash job ende-agent--project-caches))
