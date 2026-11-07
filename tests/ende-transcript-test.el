@@ -127,7 +127,14 @@
          (clock 10)
          pending)
     (ende-transcript-begin-response transcript)
-    (ende-transcript-accept transcript nil calls)
+    (ende-transcript-accept
+     transcript
+     (list :protocol-items
+           (cons 'openai-responses
+                 (mapcar (lambda (call)
+                           (ende-protocol-json-read-string
+                            (json-encode (list :type "function_call" :call_id (plist-get call :id)))))
+                         calls))) calls)
     (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
       (dolist (call calls)
         (ende-agent--execute-tool

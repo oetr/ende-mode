@@ -279,8 +279,12 @@ one final reply; accepting the current response again does not duplicate it."
   "Return TRANSCRIPT's current entry for prepared CALL."
   (let ((entry (gethash (cons 'tool-call (or (plist-get call :key) (plist-get call :id)))
                         (ende-transcript-sources transcript))))
-    (when (and entry (eq call (plist-get (ende-transcript-entry-data entry) :call)))
-      entry)))
+    (if (and entry (eq call (plist-get (ende-transcript-entry-data entry) :call)))
+        entry
+      (when-let* ((response (ende-transcript-response transcript)))
+        (cl-find call (plist-get (ende-transcript-entry-data response) :items)
+                 :key (lambda (item) (plist-get (ende-transcript-entry-data item) :call))
+                 :test #'eq)))))
 
 (defun ende-transcript-tool-result (transcript call content)
   "Record exact tool CONTENT associated with prepared CALL.

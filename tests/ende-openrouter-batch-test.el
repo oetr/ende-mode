@@ -306,15 +306,21 @@
 
 (ert-deftest ende-test/openrouter-batch-expiry-settles-and-releases-group ()
   (let* ((failure nil)
-         (request (ende-openrouter-batch--make-request
-                   :callbacks (list :on-error (lambda (error) (setq failure error)))))
+         (clock 1)
+         (requests (cl-loop repeat 2 collect
+                            (ende-openrouter-batch--make-request
+                             :started-at 0
+                             :callbacks (list :on-error (lambda (error) (setq failure error clock 100))))))
          (group (ende-openrouter-batch--make-group
-                 :profile nil :requests (list request)
+                 :profile nil :requests requests
                  :submitted-at 0 :deadline 0))
          (ende-openrouter-batch--known-groups (list group)))
-    (ende-openrouter-batch--schedule-poll group)
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+      (ende-openrouter-batch--schedule-poll group))
     (should (eq (ende-error-kind failure) 'timeout))
-    (should (ende-openrouter-batch--request-settled request))
+    (should (cl-every (lambda (request)
+                        (and (ende-openrouter-batch--request-settled request)
+                             (= (ende-openrouter-batch--request-duration-ms request) 1000))) requests))
     (should (ende-openrouter-batch--group-terminal group))
     (should-not ende-openrouter-batch--known-groups)
     (should-not (ende-openrouter-batch--group-poll-timer group))))

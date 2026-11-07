@@ -328,9 +328,18 @@
    (ende-openrouter-batch--group-stage group))
   (setf (ende-openrouter-batch--group-stage group) nil))
 
+(defun ende-openrouter-batch--finish-timing (group &optional finished-at)
+  "Freeze GROUP's request durations before running callbacks."
+  (let ((finished-at (or finished-at (float-time))))
+    (dolist (request (ende-openrouter-batch--active-requests group))
+      (unless (ende-openrouter-batch--request-duration-ms request)
+        (setf (ende-openrouter-batch--request-duration-ms request)
+              (ende-duration-ms (ende-openrouter-batch--request-started-at request) finished-at))))))
+
 (defun ende-openrouter-batch--group-fail (group error)
   "Fail all live requests in GROUP with structured ERROR."
   (unless (ende-openrouter-batch--group-terminal group)
+    (ende-openrouter-batch--finish-timing group)
     (setf (ende-openrouter-batch--group-terminal group) t)
     (ende-openrouter-batch--group-cleanup group)
     (ende-openrouter-batch--unregister-group group)
@@ -872,14 +881,12 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                 (ende-error-create
                  :kind 'protocol
                  :message "Completed batch omitted a requested custom id")))))
+    (ende-openrouter-batch--finish-timing group finished-at)
     (if failure
         (ende-openrouter-batch--group-fail group failure)
       (setf (ende-openrouter-batch--group-terminal group) t)
       (ende-openrouter-batch--group-cleanup group)
       (ende-openrouter-batch--unregister-group group)
-      (dolist (request (ende-openrouter-batch--active-requests group))
-        (setf (ende-openrouter-batch--request-duration-ms request)
-              (ende-duration-ms (ende-openrouter-batch--request-started-at request) finished-at)))
       (dolist (request (ende-openrouter-batch--group-requests group))
         (unless (ende-openrouter-batch--request-cancelled request)
           (let* ((result (gethash
