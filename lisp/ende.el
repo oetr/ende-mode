@@ -5,7 +5,7 @@
 ;; Author: Peter Samarin <peter.samarin@gmail.com>
 ;; Maintainer: Peter Samarin <peter.samarin@gmail.com>
 ;; Version: 0.3
-;; Package-Requires: ((emacs "30.1") (websocket "1.16"))
+;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: convenience, tools
 ;; URL: https://github.com/oetr/ende-mode
 ;; SPDX-License-Identifier: AGPL-3.0-only
@@ -437,6 +437,7 @@
   "Abort active jobs and reload every Ende source file in dependency order."
   (interactive)
   (ende-abort-queue)
+  (ende-websocket-shutdown)
   (when-let* ((selector (get-buffer ende-selector-buffer-name)))
     (with-current-buffer selector (ende-selector-close)))
   (let ((dir (or (file-name-directory (locate-library "ende.el"))
