@@ -103,6 +103,9 @@
 (defvar ende-tools--access-config nil
   "Dynamically bound resolved chat access configuration for a tool call.")
 
+(defvar ende-tools--project-context nil
+  "Prepared read policy for the current project operation.")
+
 (defvar ende-tools--access-tool nil
   "Tool symbol currently being authorized by a handler.")
 
@@ -416,68 +419,84 @@ Pass its JSON-encoded result to CALLBACK, synchronously when possible."
   "Return RESOURCE's fixed root, or PROJECT-ROOT when it has none."
   (or (plist-get resource :root) project-root))
 
-(defun ende-tools--path-scopes-for
-    (tool path project-root &optional no-follow-final project-only)
-  "Return matching file scopes for TOOL and PATH under PROJECT-ROOT."
-  (let* ((project-root (ende-project-normalize-root project-root))
-         (expanded (and (stringp path) (not (file-remote-p path))
-                        (expand-file-name path project-root)))
-         (canonical
-          (and expanded
+(defun ende-tools--prepare-path-context (tool root &optional project-only)
+  "Prepare TOOL's policy once for canonical ROOT.
+PROJECT-ONLY excludes resources with fixed roots.  Configured resource roots
+have already been canonicalized by configuration resolution."
+  (let (scopes)
+    (if (null ende-tools--access-config)
+        (push (list :id 'project :root root
+                    :ignore-case (file-name-case-insensitive-p root)) scopes)
+      (dolist (name (cdr (assq tool (plist-get ende-tools--access-config
+                                               :tool-resources))))
+        (let* ((resource (cdr (assq name (plist-get ende-tools--access-config
+                                                    :resources))))
+               (fixed (plist-get resource :root))
+               (scope-root (file-name-as-directory (or fixed root))))
+          (when (and (eq (plist-get resource :type) 'file)
+                     (not (and project-only fixed)))
+            (push (list :id name :root scope-root :fixed-root fixed
+                        :ignore-case (file-name-case-insensitive-p scope-root)
+                        :resource resource) scopes)))))
+    (list :root root :tool tool :scopes (nreverse scopes)
+          :excluded ende-project-excluded-path-patterns
+          :case-fold case-fold-search
+          :ignore-case (file-name-case-insensitive-p root))))
+
+(defun ende-tools--matching-path-scopes (context canonical &optional first-only)
+  "Evaluate prepared CONTEXT for resolved CANONICAL.
+Stop at the first matching scope when FIRST-ONLY is non-nil."
+  (let ((case-fold-search (plist-get context :case-fold))
+        (ende-project-excluded-path-patterns (plist-get context :excluded))
+        scopes)
+    (catch 'matched
+      (dolist (scope (plist-get context :scopes))
+        (let ((root (plist-get scope :root)))
+          (when (ende-project--contains-p
+                 canonical root (plist-get scope :ignore-case))
+            (let ((relative (file-relative-name canonical root))
+                  (resource (plist-get scope :resource)))
+              (when (and (not (ende-project--excluded-p relative))
+                         (or (null resource)
+                             (ende-tools--resource-allows-p relative resource)))
+                (push (list :scope-id (plist-get scope :id)
+                            :root root :relative relative
+                            :public-path (if (plist-get scope :fixed-root)
+                                             canonical
+                                           (file-relative-name
+                                            canonical (plist-get context :root)))
+                            :fixed-root (plist-get scope :fixed-root)) scopes)
+                (when first-only (throw 'matched nil))))))))
+    (nreverse scopes)))
+
+(defun ende-tools--resolved-path (path root no-follow-final)
+  "Resolve local PATH from ROOT, optionally without following its final link."
+  (when (and (stringp path) (not (file-remote-p path)))
                (condition-case nil
-                   (cond
-                    (no-follow-final
+        (let ((expanded (expand-file-name path root)))
+          (if no-follow-final
                      (let ((parent (file-name-directory expanded)))
                        (when (file-directory-p parent)
                          (expand-file-name (file-name-nondirectory expanded)
-                                           (file-truename parent)))))
-                    ((file-exists-p expanded) (file-truename expanded))
-                    (t expanded))
+                                    (file-truename parent))))
+            (file-truename expanded)))
                  (error nil))))
-         scopes)
+
+(defun ende-tools--path-scopes-for
+    (tool path project-root &optional no-follow-final project-only first-only)
+  "Return matching file scopes for TOOL and PATH under PROJECT-ROOT."
+  (let* ((root (ende-project-normalize-root project-root))
+         (canonical (ende-tools--resolved-path path root no-follow-final)))
     (when canonical
-      (if (null ende-tools--access-config)
-          (when (file-in-directory-p canonical project-root)
-            (let ((relative (file-relative-name canonical project-root)))
-              (unless (ende-project--excluded-p relative)
-                (push (list :root project-root :relative relative
-                            :public-path relative :fixed-root nil)
-                      scopes))))
-        (let* ((assignments (plist-get ende-tools--access-config :tool-resources))
-               (names (cdr (assq tool assignments)))
-               (resources (plist-get ende-tools--access-config :resources)))
-          (dolist (name names)
-            (let* ((resource (cdr (assq name resources)))
-                   (fixed-root (and resource (plist-get resource :root)))
-                   (effective-root
-                    (and resource (not (and project-only fixed-root))
-                         (ende-tools--file-resource-root resource project-root)))
-                   (effective-root
-                    (and effective-root
-                         (condition-case nil
-                             (ende-project-normalize-root effective-root)
-                           (error nil)))))
-              (when (and resource
-                         (eq (plist-get resource :type) 'file)
-                         effective-root
-                         (file-in-directory-p canonical effective-root))
-                (let ((relative (file-relative-name canonical effective-root)))
-                  (when (and (not (ende-project--excluded-p relative))
-                             (ende-tools--resource-allows-p relative resource))
-                    (push (list :root effective-root :relative relative
-                                :public-path
-                                (if fixed-root
-                                    canonical
-                                  (file-relative-name canonical project-root))
-                                :fixed-root fixed-root)
-                          scopes)))))))))
-    (nreverse scopes)))
+      (ende-tools--matching-path-scopes
+       (ende-tools--prepare-path-context tool root project-only)
+       canonical first-only))))
 
 (defun ende-tools--path-scope-for
     (tool path root &optional no-follow-final project-only)
-  "Return one matching authorization scope for TOOL and PATH below ROOT."
+  "Return the first authorization scope for TOOL and PATH below ROOT."
   (car (ende-tools--path-scopes-for
-        tool path root no-follow-final project-only)))
+        tool path root no-follow-final project-only t)))
 
 (defun ende-tools--path-authorized-for-p
     (tool path root &optional no-follow-final)
@@ -674,7 +693,15 @@ exists.  Visiting-buffer state is retained only as separate metadata."
 
 SOURCE must be a disk source.  The temporary buffer does not visit the file or
 activate a major mode."
-  (let ((path (plist-get source :path)))
+  (let* ((path (plist-get source :path))
+         (current (and ende-tools--project-context (file-truename path))))
+    (when (and current (not (equal current path)))
+      (unless (ende-tools--project-source
+               ende-tools--project-context current
+               (file-relative-name current (plist-get ende-tools--project-context :root))
+               (file-attributes current))
+        (error "project source target is no longer authorized: %s" path))
+      (setq path current))
     (ende-project-assert-readable-file path)
     (with-temp-buffer
       (let ((coding-system-for-read 'undecided))
@@ -796,49 +823,100 @@ FUNCTION receives no arguments and may return any value."
            (funcall callback (plist-get reply :value) (plist-get reply :error)))))
      ende-tools--register-cancellation-function)))
 
+(defun ende-tools--prepare-project-context (arguments root)
+  "Prepare the current project read operation's policy and selector."
+  (let* ((tool (or ende-tools--access-tool 'search_project))
+         (context (ende-tools--prepare-path-context
+                   tool root (eq tool 'list_project_files)))
+         (glob (ende-tools--argument arguments "glob"))
+         (regexp (and glob (wildcard-to-regexp glob)))
+         ;; Escapes and bracket expressions require wildcard interpretation.
+         (literal (and glob (not (string-match-p "[][?*\\\\]" glob))
+                       (not (file-name-absolute-p glob))
+                       (not (file-remote-p glob))
+                       (not (string-prefix-p "~" glob))
+                       (not (cl-intersection '("." ".." "")
+                                             (split-string glob "/") :test #'equal))
+                       glob))
+         (prefix (and glob (file-name-directory
+                            (substring glob 0 (or (string-match "[][?*\\\\]" glob)
+                                                  (length glob)))))))
+    (append context (list :glob-regexp regexp :literal literal :prefix prefix))))
+
+(defun ende-tools--project-source (context path relative attributes)
+  "Authorize resolved PATH and carry its source record forward."
+  (when-let* ((scope (car (ende-tools--matching-path-scopes context path t))))
+    (append (list :kind 'file :path path :attributes attributes)
+            scope (list :project-relative relative))))
+
+(defun ende-tools--map-project-sources (context visit)
+  "Call VISIT for currently discovered, selected, authorized sources.
+Return non-nil when selection was exhausted, nil when VISIT stopped it."
+  (let* ((root (plist-get context :root))
+         (literal (plist-get context :literal))
+         (regexp (plist-get context :glob-regexp))
+         (prefix (plist-get context :prefix))
+         (case-fold-search (plist-get context :case-fold)))
+    (if literal
+        (let ((path (ende-tools--resolved-path literal root nil)))
+          (if (and path (ende-project--contains-p
+                         path root (plist-get context :ignore-case))
+                   (file-regular-p path))
+              (let ((source (ende-tools--project-source
+                             context path (file-relative-name path root)
+                             (file-attributes path))))
+                (or (null source) (funcall visit source)))
+            t))
+      (ende-project--map-files
+       root
+       (lambda (path relative attributes)
+         (let ((source (ende-tools--project-source context path relative attributes)))
+           (or (null source) (funcall visit source))))
+       (and prefix
+            (lambda (relative)
+              (let ((directory (file-name-as-directory relative)))
+                (or (string-prefix-p directory prefix case-fold-search)
+                    (string-prefix-p prefix directory case-fold-search)))))
+       (and regexp (lambda (relative) (string-match-p regexp relative)))))))
+
 (defun ende-tools--project-info (_arguments root)
-  "Return basic information about project ROOT."
+  "Count the current project scope without search authorization work."
+  (let ((count 0))
+    (ende-project--map-files
+     root (lambda (_path _relative _attributes) (cl-incf count) t))
   (list :root root
         :name (file-name-nondirectory (directory-file-name root))
-        :file_count (length (ende-project-files root))
-        :buffer_count (length (ende-project-buffers root))))
+          :file_count count :buffer_count 0)))
 
-(defun ende-tools--file-record (path root include-metadata)
-  "Return a compact project file record for PATH below ROOT."
-  (let* ((relative (file-relative-name path root))
-         (source (ende-tools--resolve-disk-source
-                  (list :path relative) root))
-         (attributes (file-attributes path))
-         (record (append (list :path relative :source_kind "file"
-                               :byte_count (file-attribute-size attributes))
-                         (ende-tools--source-buffer-metadata source))))
+(defun ende-tools--file-record (source include-metadata)
+  "Return a compact disk record for authorized SOURCE."
+  (ende-project-assert-readable-file (plist-get source :path))
     (if include-metadata
         (ende-tools--source-metadata source)
-      record)))
+    (append (list :path (plist-get source :project-relative) :source_kind "file"
+                  :byte_count (file-attribute-size (file-attributes
+                                                    (plist-get source :path))))
+            (ende-tools--source-buffer-metadata source))))
 
 (defun ende-tools--list-project-files (arguments root)
-  "List allowed files below ROOT, optionally filtered by a glob."
-  (let* ((glob (ende-tools--argument arguments "glob"))
-         (include-metadata (eq (ende-tools--argument
-                                arguments "include_metadata") t))
+  "List current allowed files below ROOT, optionally filtered by a glob."
+  (let* ((ende-tools--access-tool 'list_project_files)
+         (ende-tools--project-context
+          (or ende-tools--project-context
+              (ende-tools--prepare-project-context arguments root)))
+         (include-metadata (eq (ende-tools--argument arguments "include_metadata") t))
          (maximum (ende-tools--bounded-integer
                    arguments "max_results" ende-tools-max-listed-files
                    ende-tools-max-listed-files))
-         (glob-regexp (and glob (wildcard-to-regexp glob)))
-         (files
-          (cl-remove-if-not
-           (lambda (path)
-             (or (null glob-regexp)
-                 (string-match-p
-                  glob-regexp (file-relative-name path root))))
-           (ende-tools--authorized-project-files 'list_project_files root)))
-         (truncated (> (length files) maximum)))
-    (list :files
-          (vconcat
-           (mapcar (lambda (path)
-                     (ende-tools--file-record path root include-metadata))
-                   (cl-subseq files 0 (min maximum (length files)))))
-          :truncated truncated)))
+         files (count 0)
+         (complete
+          (ende-tools--map-project-sources
+           ende-tools--project-context
+           (lambda (source)
+             (when (< count maximum)
+               (push (ende-tools--file-record source include-metadata) files)
+               (cl-incf count))))))
+    (list :files (vconcat (nreverse files)) :truncated (not complete))))
 
 (defun ende-tools--file-info (arguments root)
   "Return disk-derived metadata and separate visiting-buffer state."
@@ -1017,7 +1095,9 @@ is already too large to consider within the configured output byte limit."
 (defun ende-tools--search-project (arguments root)
   "Search allowed project files on disk with an Emacs regexp."
   (let* ((regexp (ende-tools--search-regexp arguments))
-         (glob (ende-tools--argument arguments "glob"))
+         (ende-tools--project-context
+          (or ende-tools--project-context
+              (ende-tools--prepare-project-context arguments root)))
          (context-before
           (ende-tools--bounded-integer
            arguments "context_before" 0
@@ -1029,15 +1109,6 @@ is already too large to consider within the configured output byte limit."
          (maximum (ende-tools--bounded-integer
                    arguments "max_results" (min 30 ende-tools-max-search-results)
                    ende-tools-max-search-results))
-         (glob-regexp (and glob (wildcard-to-regexp glob)))
-         (files
-          (cl-remove-if-not
-           (lambda (path)
-             (and (ende-tools--path-authorized-p path root)
-                  (or (null glob-regexp)
-                      (string-match-p glob-regexp
-                                      (file-relative-name path root)))))
-           (ende-project-files root)))
          (files-result nil)
          (files-result-count 0)
          (files-array-bytes 2)
@@ -1045,7 +1116,7 @@ is already too large to consider within the configured output byte limit."
           (- (ende-tools--search-json-bytes
               (list :files []
                     :files_inspected
-                    (min ende-tools-max-search-files (length files))
+                    ende-tools-max-search-files
                     :truncated :json-false))
              2))
          (matches-count 0)
@@ -1053,18 +1124,16 @@ is already too large to consider within the configured output byte limit."
          (truncated nil))
     ;; Validate the regexp before opening project files.
     (string-match-p regexp "")
-    (catch 'finished
-      (dolist (path (cl-subseq
-                     files 0 (min ende-tools-max-search-files
-                                  (length files))))
+    (let ((complete
+           (ende-tools--map-project-sources
+            ende-tools--project-context
+            (lambda (source)
+              (if (>= files-inspected ende-tools-max-search-files)
+                  nil
         (cl-incf files-inspected)
-        (let* ((relative (file-relative-name path root))
-               (source (ende-tools--resolve-disk-source
-                        (list :path relative) root))
-               (file-metadata
-                (append (list :path relative
-                              :source_kind
-                              (ende-tools--source-kind-name source))
+                (let* ((file-metadata
+                        (append (list :path (plist-get source :project-relative)
+                                      :source_kind "file")
                         (ende-tools--source-buffer-metadata source)))
                (file-base-bytes nil)
                (file-match-count 0)
@@ -1111,14 +1180,9 @@ is already too large to consider within the configured output byte limit."
                      (+ file-bytes (if (> files-result-count 0) 1 0)))
             (cl-incf files-result-count)
             (cl-incf matches-count (length file-matches)))
-          (when (plist-get search-result :budget_exhausted)
-            (setq truncated t)
-            (throw 'finished nil))
-          (when (>= matches-count maximum)
-            (setq truncated t)
-            (throw 'finished nil))))
-      (when (> (length files) ende-tools-max-search-files)
-        (setq truncated t)))
+                  (not (or (plist-get search-result :budget_exhausted)
+                           (>= matches-count maximum)))))))))
+      (setq truncated (not complete)))
     (let ((result (list :files (vconcat (nreverse files-result))
                         :files_inspected files-inspected
                         :truncated truncated)))

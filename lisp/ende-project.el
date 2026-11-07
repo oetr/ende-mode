@@ -209,38 +209,64 @@ existing project directory."
       (error "project buffer does not exist or is not allowed: %s" id))
     buffer))
 
-(defun ende-project--walk-files (root)
-  "Return canonical regular files below ROOT, excluding configured paths."
-  (let ((files nil)
-        (visited-directories (make-hash-table :test #'equal)))
+(defun ende-project--contains-p (path root ignore-case)
+  "Test canonical PATH's membership in canonical directory ROOT.
+IGNORE-CASE describes the filesystem at ROOT.  Both names must already be
+absolute and resolved; the trailing separator enforces component boundaries."
+  (string-prefix-p (file-name-as-directory root)
+                   (file-name-as-directory path) ignore-case))
+
+(defun ende-project--map-files (root visit &optional descend-p candidate-p)
+  "Visit current regular files below canonical ROOT in directory order.
+Call VISIT with canonical path, project-relative name, and attributes.
+A nil return stops traversal.  Return non-nil only for a complete traversal.
+DESCEND-P filters relative directory names; CANDIDATE-P cheaply filters file
+names before resolution.  Symlinks to directories are never traversed."
+  (let ((seen (make-hash-table :test #'equal))
+        (ignore-case (file-name-case-insensitive-p root)))
+    (catch 'stopped
     (cl-labels
         ((walk (directory)
-           (let ((canonical-directory (file-truename directory)))
-             (unless (gethash canonical-directory visited-directories)
-               (puthash canonical-directory t visited-directories)
-               (dolist (entry
-                        (directory-files directory t
-                                         directory-files-no-dot-files-regexp))
-                 (let* ((canonical
-                         (condition-case nil
-                             (file-truename entry)
-                           (error nil)))
-                        (relative (and canonical
-                                       (file-relative-name canonical root))))
-                   (when (and canonical relative
-                              (file-in-directory-p canonical root)
-                              (not (ende-project--excluded-p relative)))
+          (dolist (entry (directory-files
+                          directory t directory-files-no-dot-files-regexp))
+            (let* ((relative (file-relative-name entry root))
+                   (attributes (file-attributes entry))
+                   (type (file-attribute-type attributes)))
                      (cond
-                      ((and (file-directory-p entry)
-                            (not (file-symlink-p entry)))
-                       (walk entry))
-                      ((file-regular-p entry)
-                       (push canonical files))))))))))
+               ((eq type t)
+                (when (and (not (ende-project--excluded-p relative))
+                           (or (null descend-p) (funcall descend-p relative))
+                           (not (file-symlink-p entry))
+                           (ende-project--contains-p
+                            (file-truename entry) root ignore-case))
+                  (walk entry)))
+               ((and attributes
+                     (or (stringp type) (null candidate-p)
+                         (funcall candidate-p relative)))
+                (let* ((canonical (file-truename entry))
+                       (relative (file-relative-name canonical root)))
+                  (when (and (ende-project--contains-p canonical root ignore-case)
+                             (not (ende-project--excluded-p relative))
+                             (or (null candidate-p) (funcall candidate-p relative))
+                             (not (gethash canonical seen))
+                             (file-regular-p canonical))
+                    (puthash canonical t seen)
+                    (when (stringp type)
+                      (setq attributes (file-attributes canonical)))
+                    (unless (funcall visit canonical relative attributes)
+                      (throw 'stopped nil))))))))))
       (walk root))
-    (sort (delete-dups files) #'string<)))
+      t)))
+
+(defun ende-project--walk-files (root)
+  "Return current canonical regular files below canonical ROOT."
+  (let (files)
+    (ende-project--map-files
+     root (lambda (path _relative _attributes) (push path files) t))
+    (nreverse files)))
 
 (defun ende-project-files (&optional root)
-  "Return all allowed regular project files below ROOT."
+  "Return all allowed regular project files below ROOT in directory order."
   (ende-project--walk-files
    (ende-project-normalize-root (or root (ende-project-root)))))
 

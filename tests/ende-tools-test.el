@@ -1463,6 +1463,22 @@
                        1))
             (should (= (length (plist-get buffer-search :files)) 0)))))))
 
+(ert-deftest ende-test/project-tools-exact-selectors-avoid-enumeration ()
+  (ende-test--with-project (root)
+			   (make-directory (expand-file-name "src" root))
+			   (with-temp-file (expand-file-name "src/main.el" root) (insert "needle\n"))
+			   (cl-letf (((symbol-function 'ende-project--map-files)
+				      (lambda (&rest _) (ert-fail "exact selection walked the project"))))
+			     (dolist (selector '("src/main.el" "src/missing.el"))
+			       (let ((expected (if (equal selector "src/main.el") 1 0)))
+				 (should (= expected (length (plist-get
+							      (ende-tools--search-project
+							       (list :glob selector :query "needle") root)
+							      :files))))
+				 (should (= expected (length (plist-get
+							      (ende-tools--list-project-files
+							       (list :glob selector) root) :files)))))))))
+
 (ert-deftest ende-test/project-tools-search-supports-literal-queries-and-patterns ()
   (let* ((root (make-temp-file "ende-tools-search-literals-" t))
          (path (expand-file-name "search.txt" root)))
