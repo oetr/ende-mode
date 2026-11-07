@@ -250,9 +250,11 @@
       (let ((inhibit-read-only t))
         (erase-buffer)
         (ende-queue-ui--line
-         (format "Queue [Jobs]  %s  %s  c: change  w: see agent's work  k: kill agent  q: quit"
+         (format "Queue [Jobs]  %s  %s  q: quit  ?: help"
                  (if ende-queue-paused "PAUSED" "ACTIVE")
                  (if ende-queue-paused "R: resume" "P: pause")) nil 'ende-queue-ui-heading-face)
+        (ende-queue-ui--line
+         "c: policy  w: agent work  i: inject user guidance  k: kill agent")
         (insert "\n")
         (ende-queue-ui--line (concat (ende-queue-ui--columns-text headers widths) "  Task"))
         (cl-labels
@@ -339,11 +341,11 @@
                                                          '("parallel" "sequential") nil t)))))
 
 (defun ende-queue-ui-inject-guidance ()
-  "Inject guidance into an eligible live chat."
+  "Queue user guidance for the selected live chat or agent."
   (interactive)
   (let ((job (ende-queue-ui--current-job t)))
     (unless (ende-job-can-accept-guidance-p job) (user-error "Selected job cannot accept guidance"))
-    (ende-queue-add-guidance job (read-string "Inject prompt: "))))
+    (ende-queue-add-guidance job (read-string "User guidance: "))))
 
 (defun ende-queue-ui-move-up ()
   "Move an eligible queued root earlier under existing scheduler semantics."
