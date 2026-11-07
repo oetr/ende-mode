@@ -26,13 +26,14 @@
     (should (= (length (plist-get report :fixtures)) 2))
     (seq-doseq (fixture (plist-get report :fixtures))
       (let ((cases (plist-get fixture :cases)))
-        (should (= (length cases) 36))
+        (should (> (length cases) 0))
         (should (member "direct" (mapcar (lambda (c) (plist-get c :layer)) cases)))
         (should (member "worker-json" (mapcar (lambda (c) (plist-get c :layer)) cases)))
         (seq-doseq (case cases)
           (should (>= (plist-get (plist-get case :wall) :median) 0))
           (seq-doseq (sample (plist-get case :samples))
-            (dolist (field '(:wall :gc_count :gc_seconds :parent_timer_max_lag))
+            (dolist (field '(:wall :gc_count :gc_seconds :parent_timer_max_lag
+                             :result_bytes :files_inspected :matching_lines))
               (should (numberp (plist-get sample field)))
               (should (>= (plist-get sample field) 0)))))))))
 

@@ -14,6 +14,9 @@
   "Maximum seconds to wait for each worker callback.")
 (defvar ende-search-benchmark--counters nil)
 
+(defconst ende-search-benchmark--block
+  (concat "préface\nα needle\nbridge\nomega\n" (make-string 1000 ?x) "\n"))
+
 (defun ende-search-benchmark--fixture (root size large)
   "Write deterministic ROOT fixture of SIZE blocks; group blocks when LARGE.
 Return an independent in-memory manifest of paths and block counts."
@@ -25,7 +28,7 @@ Return an independent in-memory manifest of paths and block counts."
              (last (= blocks remaining)))
         (with-temp-file (expand-file-name path root)
           (set-buffer-file-coding-system 'utf-8-unix)
-          (dotimes (_ blocks) (insert "préface\nα needle\nbridge\nomega\n"))
+          (dotimes (_ blocks) (insert ende-search-benchmark--block))
           (when last (insert "rare-final\n")))
         (push (list path blocks last) manifest)
         (cl-incf index)
@@ -68,14 +71,14 @@ Return an independent in-memory manifest of paths and block counts."
             (dotimes (block blocks)
               (when (and (not (memq kind '(absent rare byte-cap)))
                          (or (not (eq kind 'dense)) (< count 3)))
-                (push (append (list :line (+ 2 (* block 4)) :column 2 :match "α needle")
+                (push (append (list :line (+ 2 (* block 5)) :column 2 :match "α needle")
                               (when (eq kind 'context)
                                 (list :context "préface\nα needle\nbridge"))) matches)
                 (cl-incf count)
                 (when (eq kind 'multi)
-                  (push (list :line (+ 4 (* block 4)) :column 0 :match "omega") matches))))
+                  (push (list :line (+ 4 (* block 5)) :column 0 :match "omega") matches))))
             (when (and last (eq kind 'rare))
-              (push (list :line (1+ (* blocks 4)) :column 0 :match "rare-final") matches))
+              (push (list :line (1+ (* blocks 5)) :column 0 :match "rare-final") matches))
             (when matches (push (list :path path :matches (nreverse matches)) files))))))
     (list :files (nreverse files)
           :truncated (if (or (eq kind 'byte-cap)
@@ -216,7 +219,16 @@ Return an independent in-memory manifest of paths and block counts."
                                  :gc_seconds (- gc-elapsed gc-time-before)
                                  :parent_timer_max_lag lag)))
           (when timer (cancel-timer timer)))
-        (ende-search-benchmark--validate (ende-search-benchmark--result raw layer) expected)
+        (let* ((result (ende-search-benchmark--result raw layer))
+               (encoded (json-encode result)))
+          (ende-search-benchmark--validate result expected)
+          (setq sample
+                (append sample
+                        (list :result_bytes (string-bytes encoded)
+                              :files_inspected (plist-get result :files_inspected)
+                              :matching_lines
+                              (cl-loop for file in (plist-get result :files)
+                                       sum (length (plist-get file :matches)))))))
         (push sample samples)))
     (when (and ende-search-benchmark-instrument (eq layer 'direct))
       (when (eq state 'fresh) (setq cache (ende-project-cache-create)))
@@ -272,7 +284,7 @@ calling.  Fresh refers to policy cache, never to a cold operating-system cache."
                             :blocks_per_file (if large 100 1)
                             :disallowed_files (* 3 (max 1 (/ size 10)))
                             :allowed_files (length manifest)
-                            :allowed_bytes (+ (* size (string-bytes "préface\nα needle\nbridge\nomega\n"))
+                            :allowed_bytes (+ (* size (string-bytes ende-search-benchmark--block))
                                               (string-bytes "rare-final\n"))
                             :cases (vconcat (nreverse cases))) fixtures))
             (delete-directory root t)))))
