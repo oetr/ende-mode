@@ -14,6 +14,9 @@ EL_DIRS := $(sort $(dir $(EL_FILES)))
 TEST_FILES := $(filter %-test.el %-tests.el,$(EL_FILES))
 TEST_SELECTOR ?= t
 TEST_VERBOSE ?= 0
+BENCHMARK_SIZES ?= 100 1000 10000
+BENCHMARK_SAMPLES ?= 5
+BENCHMARK_INSTRUMENT ?= nil
 
 # Libraries shipped by the MELPA recipe; do not lint test fixtures as packages.
 PACKAGE_FILES := $(sort $(wildcard lisp/ende*.el))
@@ -53,7 +56,7 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean
+.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean benchmark-search benchmark-search-quick benchmark-chat
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
@@ -113,6 +116,20 @@ test-compiled:
 	$(MAKE) clean
 	$(MAKE) compile
 	$(MAKE) test-run
+
+benchmark-search:
+	@$(MAKE) --no-print-directory compile >/dev/null
+	@$(EMACS_BATCH) -l ende-search-benchmark \
+		--eval '(setq ende-search-benchmark-sizes (quote ($(BENCHMARK_SIZES))) ende-search-benchmark-samples $(BENCHMARK_SAMPLES) ende-search-benchmark-instrument $(BENCHMARK_INSTRUMENT))' \
+		-f ende-search-benchmark-run
+
+benchmark-search-quick: BENCHMARK_SIZES = 100
+benchmark-search-quick: BENCHMARK_SAMPLES = 1
+benchmark-search-quick: benchmark-search
+
+benchmark-chat:
+	@$(MAKE) --no-print-directory compile >/dev/null
+	@$(EMACS_BATCH) -l ende-chat-benchmark -f ende-chat-benchmark-run
 
 test-run:
 	@log=$$(mktemp); \
