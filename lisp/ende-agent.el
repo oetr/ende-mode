@@ -833,6 +833,9 @@ Chat persistence and guidance stay in those callbacks."
            (setq messages
                  (append base-messages
                          (list (cons "user" ende-agent--title-control)))))))
+      (when (cl-intersection '(project_info search_project list_project_files)
+                             (plist-get configuration :active-tools))
+        (ende-worker-prewarm))
       (ende-agent--send
        job messages configuration callbacks 0 base-messages))))
 

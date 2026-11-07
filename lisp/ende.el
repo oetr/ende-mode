@@ -133,6 +133,7 @@
 (add-hook 'ende-queue-abort-functions #'ende-responses-ws-close-all)
 (add-hook 'ende-queue-abort-functions #'ende-provider-abort-discovery)
 (add-hook 'ende-queue-abort-functions #'ende-openrouter-batch-abort)
+(add-hook 'ende-queue-abort-functions #'ende-worker-shutdown)
 (add-hook 'ende-queue-abort-functions #'ende-ui-clear-all)
 (add-hook 'ende-job-event-functions #'ende-ui-job-event)
 (add-hook 'ende-job-event-functions #'ende--mode-line-job-event)
@@ -439,6 +440,7 @@
 (defun ende-reload ()
   "Abort active jobs and reload every Ende source file in dependency order."
   (interactive)
+  (ende-worker-shutdown)
   (ende-work-buffer-shutdown)
   (ende-abort-queue)
   (clrhash ende-agent--project-caches)
