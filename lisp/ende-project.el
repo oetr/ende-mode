@@ -64,6 +64,27 @@ Nil permits files of any size."
                  (integer :tag "Maximum bytes"))
   :group 'ende)
 
+(defconst ende-project-cache-limit 4096
+  "Maximum successful file-policy decisions retained by one job.")
+
+(cl-defstruct (ende-project-cache (:constructor ende-project-cache-create))
+  "Disposable positive file-policy decisions for one policy context."
+  context-key
+  (allowed (make-hash-table :test #'equal)))
+
+(defun ende-project-cache-context (cache key)
+  "Establish KEY as CACHE's context, discarding decisions from other contexts."
+  (unless (equal key (ende-project-cache-context-key cache))
+    (clrhash (ende-project-cache-allowed cache))
+    (setf (ende-project-cache-context-key cache) key)))
+
+(defun ende-project-cache-merge (cache delta)
+  "Admit positive decisions in DELTA into CACHE up to its fixed capacity."
+  (let ((allowed (ende-project-cache-allowed cache)))
+    (dolist (entry delta)
+      (when (< (hash-table-count allowed) ende-project-cache-limit)
+        (puthash (car entry) (cdr entry) allowed)))))
+
 (defvar ende-project--next-buffer-id 0
   "Next numeric ID assigned to a project buffer.")
 

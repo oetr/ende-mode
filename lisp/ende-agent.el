@@ -40,6 +40,21 @@
 
 (declare-function ende-chat-config-capabilities "ende-chat-config" (environment))
 
+(defvar ende-agent--project-caches (make-hash-table :test #'eq :weakness 'key)
+  "Disposable project policy caches owned by actual job objects.")
+
+(defun ende-agent--project-cache (job)
+  "Return JOB's independent project policy cache, allocating it lazily."
+  (or (gethash job ende-agent--project-caches)
+      (puthash job (ende-project-cache-create) ende-agent--project-caches)))
+
+(defun ende-agent--release-project-cache (job event)
+  "Release JOB's project policy decisions when EVENT settles it."
+  (when (eq (plist-get event :type) :settled)
+    (remhash job ende-agent--project-caches)))
+
+(add-hook 'ende-job-event-functions #'ende-agent--release-project-cache)
+
 (defun ende-agent--tool-call-list (result)
   "Return normalized tool calls from LLM RESULT."
   (let ((calls (plist-get result :tool-calls)))
@@ -484,7 +499,19 @@ ordered result slots only through the parent's saved scheduler continuation."
   (let* ((transcript (ende-job-transcript job))
          (entry (and transcript (ende-transcript-tool-call-entry transcript call)))
          (started (float-time))
-         (settled nil))
+         (settled nil)
+         (generation (or (ende-job-execution-generation job) 0))
+         (cache (when (member (ende-tools-call-value call :name)
+                              '("search_project" "list_project_files" "project_info"))
+                  (ende-agent--project-cache job)))
+         (ende-tools--project-cache cache)
+         (ende-tools--commit-project-cache
+          (when cache
+            (lambda (context-key delta)
+              (when (and (ende-job-execution-current-p job generation)
+                         (eq cache (gethash job ende-agent--project-caches))
+                         (equal context-key (ende-project-cache-context-key cache)))
+                (ende-project-cache-merge cache delta))))))
     (funcall execute-tool call configuration
              (lambda (content)
                (unless settled

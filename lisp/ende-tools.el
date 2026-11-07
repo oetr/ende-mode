@@ -103,6 +103,15 @@
 (defvar ende-tools--access-config nil
   "Dynamically bound resolved chat access configuration for a tool call.")
 
+(defvar ende-tools--project-cache nil
+  "Job-owned policy cache supplied by the caller, or an operation-local cache.")
+
+(defvar ende-tools--commit-project-cache nil
+  "Callback accepting a context key and successful worker cache additions.")
+
+(defvar ende-tools--project-cache-delta nil)
+(defvar ende-tools--project-cache-room 0)
+
 (defvar ende-tools--project-context nil
   "Prepared read policy for the current project operation.")
 
@@ -437,11 +446,21 @@ have already been canonicalized by configuration resolution."
                      (not (and project-only fixed)))
             (push (list :id name :root scope-root :fixed-root fixed
                         :ignore-case (file-name-case-insensitive-p scope-root)
-                        :resource resource) scopes)))))
+                        :resource (list :include-regexps (plist-get resource :include-regexps)
+                                        :exclude-regexps (plist-get resource :exclude-regexps)))
+                  scopes)))))
     (list :root root :tool tool :scopes (nreverse scopes)
           :excluded ende-project-excluded-path-patterns
           :case-fold case-fold-search
           :ignore-case (file-name-case-insensitive-p root))))
+
+(defun ende-tools--resolved-scope (context canonical scope)
+  "Describe resolved CANONICAL's path through prepared SCOPE in CONTEXT."
+  (list :scope-id (plist-get scope :id) :root (plist-get scope :root)
+        :relative (file-relative-name canonical (plist-get scope :root))
+        :public-path (if (plist-get scope :fixed-root) canonical
+                       (file-relative-name canonical (plist-get context :root)))
+        :fixed-root (plist-get scope :fixed-root)))
 
 (defun ende-tools--matching-path-scopes (context canonical &optional first-only)
   "Evaluate prepared CONTEXT for resolved CANONICAL.
@@ -459,13 +478,7 @@ Stop at the first matching scope when FIRST-ONLY is non-nil."
               (when (and (not (ende-project--excluded-p relative))
                          (or (null resource)
                              (ende-tools--resource-allows-p relative resource)))
-                (push (list :scope-id (plist-get scope :id)
-                            :root root :relative relative
-                            :public-path (if (plist-get scope :fixed-root)
-                                             canonical
-                                           (file-relative-name
-                                            canonical (plist-get context :root)))
-                            :fixed-root (plist-get scope :fixed-root)) scopes)
+                (push (ende-tools--resolved-scope context canonical scope) scopes)
                 (when first-only (throw 'matched nil))))))))
     (nreverse scopes)))
 
@@ -800,34 +813,98 @@ FUNCTION receives no arguments and may return any value."
                        (and buffer (buffer-modified-p buffer)))))
         result))))
 
+(defun ende-tools--project-cache-snapshot (cache context)
+  "Return bounded CACHE decisions relevant to CONTEXT's tool and selector."
+  (let ((allowed (ende-project-cache-allowed cache))
+        (tool (plist-get context :tool))
+        (root (plist-get context :root))
+        (regexp (plist-get context :glob-regexp))
+        (literal (plist-get context :literal))
+        (case-fold-search (plist-get context :case-fold))
+        (count 0)
+        entries)
+    (if literal
+        (let* ((path (ende-tools--resolved-path literal root nil))
+               (key (cons tool path))
+               (id (gethash key allowed)))
+          (when id (push (cons key id) entries)))
+      (maphash
+       (lambda (key id)
+         (when (and (eq (car key) tool)
+                    (< count ende-project-cache-limit)
+                    (ende-project--contains-p
+                     (cdr key) root (plist-get context :ignore-case))
+                    (or (null regexp)
+                        (string-match-p regexp (file-relative-name (cdr key) root))))
+           (push (cons key id) entries)
+           (cl-incf count)))
+       allowed))
+    entries))
+
+(defun ende-tools--project-worker (function request)
+  "Run project FUNCTION with a prepared policy and bounded positive memo."
+  (let* ((ende-tools--project-context (plist-get request :context))
+         (key (plist-get ende-tools--project-context :key))
+         (ende-tools--project-cache (ende-project-cache-create :context-key key))
+         (ende-tools--project-cache-delta nil)
+         (ende-tools--project-cache-room
+          (min ende-project-cache-limit (plist-get request :room)))
+         (case-fold-search (plist-get ende-tools--project-context :case-fold))
+         (ende-project-excluded-path-patterns
+          (plist-get ende-tools--project-context :excluded)))
+    (ende-project-cache-merge ende-tools--project-cache (plist-get request :memo))
+    (let ((result (funcall function (plist-get request :arguments)
+                           (plist-get ende-tools--project-context :root))))
+      (list :result result :context-key key
+            :cache-delta ende-tools--project-cache-delta))))
+
 (defun ende-tools--run-project-tool (function arguments root callback)
   "Run disk FUNCTION in a worker, then return live metadata through CALLBACK."
-  (let ((tool ende-tools--access-tool)
-        (excluded-path-patterns ende-project-excluded-path-patterns))
-    (ende-worker-run
-     'ende-tools function (list arguments root)
-     (mapcar (lambda (variable) (cons variable (symbol-value variable)))
-             '(ende-tools--access-config ende-tools--access-tool
-               ende-project-excluded-path-patterns ende-project-max-file-bytes
-               ende-tools-max-listed-files ende-tools-max-search-files
-               ende-tools-max-search-results ende-tools-max-search-output-bytes
-               ende-tools-max-search-context-lines case-fold-search))
-     (lambda (result error)
-       (if error
-           (funcall callback nil error)
-         (let ((reply
-                (condition-case caught
-                    (list :value (ende-tools--project-result
-                                  tool result root excluded-path-patterns))
-                  ((error quit) (list :error (error-message-string caught))))))
-           (funcall callback (plist-get reply :value) (plist-get reply :error)))))
-     ende-tools--register-cancellation-function)))
+  (let* ((tool ende-tools--access-tool)
+         (excluded-path-patterns ende-project-excluded-path-patterns)
+         (context (ende-tools--prepare-project-context arguments root))
+         (cache (or ende-tools--project-cache (ende-project-cache-create)))
+         (commit ende-tools--commit-project-cache))
+    (ende-project-cache-context cache (plist-get context :key))
+    (let ((request (list :context context :arguments arguments
+                         :memo (ende-tools--project-cache-snapshot cache context)
+                         :room (- ende-project-cache-limit
+                                  (hash-table-count (ende-project-cache-allowed cache))))))
+      (ende-worker-run
+       'ende-tools #'ende-tools--project-worker (list function request)
+       (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+               '(ende-project-max-file-bytes ende-tools-max-listed-files
+                 ende-tools-max-search-files ende-tools-max-search-results
+                 ende-tools-max-search-output-bytes ende-tools-max-search-context-lines))
+       (lambda (value error)
+         (if error
+             (funcall callback nil error)
+           (let ((reply
+                  (condition-case caught
+                      (progn
+                        (when commit
+                          (funcall commit (plist-get value :context-key)
+                                   (plist-get value :cache-delta)))
+                        (list :value (ende-tools--project-result
+                                      tool (plist-get value :result)
+                                      root excluded-path-patterns)))
+                    ((error quit) (list :error (error-message-string caught))))))
+             (funcall callback (plist-get reply :value) (plist-get reply :error)))))
+       ende-tools--register-cancellation-function))))
 
 (defun ende-tools--prepare-project-context (arguments root)
   "Prepare the current project read operation's policy and selector."
   (let* ((tool (or ende-tools--access-tool 'search_project))
-         (context (ende-tools--prepare-path-context
-                   tool root (eq tool 'list_project_files)))
+         (policies (mapcar (lambda (name)
+                             (cons name (ende-tools--prepare-path-context
+                                         name root (eq name 'list_project_files))))
+                           '(search_project list_project_files)))
+         (context (or (cdr (assq tool policies))
+                      (list :tool tool :root root
+                            :ignore-case (file-name-case-insensitive-p root)
+                            :excluded ende-project-excluded-path-patterns
+                            :case-fold case-fold-search)))
+         (key (secure-hash 'sha256 (ende-worker--print policies)))
          (glob (ende-tools--argument arguments "glob"))
          (regexp (and glob (wildcard-to-regexp glob)))
          ;; Escapes and bracket expressions require wildcard interpretation.
@@ -841,13 +918,27 @@ FUNCTION receives no arguments and may return any value."
          (prefix (and glob (file-name-directory
                             (substring glob 0 (or (string-match "[][?*\\\\]" glob)
                                                   (length glob)))))))
-    (append context (list :glob-regexp regexp :literal literal :prefix prefix))))
+    (append context (list :key key :glob-regexp regexp :literal literal :prefix prefix))))
 
 (defun ende-tools--project-source (context path relative attributes)
-  "Authorize resolved PATH and carry its source record forward."
-  (when-let* ((scope (car (ende-tools--matching-path-scopes context path t))))
-    (append (list :kind 'file :path path :attributes attributes)
-            scope (list :project-relative relative))))
+  "Authorize resolved PATH, reusing only successful decisions for this context."
+  (let* ((key (cons (plist-get context :tool) path))
+         (allowed (and ende-tools--project-cache
+                       (ende-project-cache-allowed ende-tools--project-cache)))
+         (id (and allowed (gethash key allowed)))
+         (prepared (and id (cl-find id (plist-get context :scopes)
+                                    :key (lambda (scope) (plist-get scope :id)))))
+         (scope (if prepared (ende-tools--resolved-scope context path prepared)
+                  (car (ende-tools--matching-path-scopes context path t)))))
+    (when scope
+      (when (and allowed (not id) (> ende-tools--project-cache-room 0)
+                 (< (hash-table-count allowed) ende-project-cache-limit))
+        (setq id (plist-get scope :scope-id))
+        (puthash key id allowed)
+        (push (cons key id) ende-tools--project-cache-delta)
+        (cl-decf ende-tools--project-cache-room))
+      (append (list :kind 'file :path path :attributes attributes)
+              scope (list :project-relative relative)))))
 
 (defun ende-tools--map-project-sources (context visit)
   "Call VISIT for currently discovered, selected, authorized sources.

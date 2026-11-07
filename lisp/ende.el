@@ -442,6 +442,7 @@
   (interactive)
   (ende-work-buffer-shutdown)
   (ende-abort-queue)
+  (clrhash ende-agent--project-caches)
   (ende-websocket-shutdown)
   (when-let* ((selector (get-buffer ende-selector-buffer-name)))
     (with-current-buffer selector (ende-selector-close)))

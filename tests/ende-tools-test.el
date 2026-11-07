@@ -46,11 +46,15 @@
     (should (plist-get call :ok))
     (plist-get call :result)))
 
-(defun ende-test--tool-response (call configuration)
+(defun ende-test--tool-response (call configuration &optional job)
   "Wait for the JSON response to CALL under CONFIGURATION."
   (let (response)
-    (ende-tools-call-async
-     call configuration (lambda (value) (setq response value)))
+    (if job
+        (ende-agent--execute-tool
+         job call configuration #'ende-tools-call-async
+         (lambda (value) (setq response value)))
+      (ende-tools-call-async
+       call configuration (lambda (value) (setq response value))))
     (ende-test--wait-for (lambda () response))
     response))
 
@@ -1462,6 +1466,120 @@
                                 :matches))
                        1))
             (should (= (length (plist-get buffer-search :files)) 0)))))))
+
+(ert-deftest ende-test/project-tools-cache-policy-but-discover-and-read-current-files ()
+  :tags '(integration)
+  (ende-test--with-project (root)
+    (let* ((first (expand-file-name "first.el" root))
+           (second (expand-file-name "second.el" root))
+           (link (expand-file-name "link.el" root))
+           (outside (make-temp-file "ende-search-outside-" nil ".el" "needle outside\n"))
+           (configuration (ende-test--tool-access-config
+                           root '((resource project (include "*.el"))
+                                  (tools search_project list_project_files)
+                                  (set-tool-resources search_project list_project_files
+                                                      :resources project))))
+           (denied (ende-test--tool-access-config
+                    root '((resource other (include "other/**"))
+                           (tools search_project)
+                           (set-tool-resources search_project :resources other))))
+           (job (ende--make-job :state 'running :execution-generation 1))
+           (other (ende--make-job :state 'running :execution-generation 1))
+           (ende--active-jobs (list job other))
+           (ende-agent--project-caches (make-hash-table :test #'eq :weakness 'key)))
+      (unwind-protect
+          (cl-labels
+              ((search (owner policy &optional glob)
+                 (let* ((arguments (append '(:query "needle" :max_results 20)
+                                           (and glob (list :glob glob))))
+                        (json (ende-test--tool-response
+                               (list :id "search" :name "search_project"
+                                     :arguments (json-encode arguments)) policy owner))
+                        (decoded (json-parse-string json :object-type 'plist)))
+                   (should (eq (plist-get decoded :ok) t))
+                   (plist-get decoded :result))))
+            (with-temp-file first (insert "needle first\n"))
+            (should (= 1 (length (plist-get (search job configuration) :files))))
+            (let* ((cache (gethash job ende-agent--project-caches))
+                   (allowed (ende-project-cache-allowed cache)))
+              (should (= 1 (hash-table-count allowed)))
+              (ende-agent--release-project-cache job '(:type :suspended))
+              (should (eq cache (gethash job ende-agent--project-caches)))
+              ;; These writes do not go through Ende mutation notifications.
+              (with-temp-file second (insert "needle second\n"))
+              (with-temp-file first (insert "needle changed\n"))
+              (let ((files (plist-get (search job configuration) :files)))
+                (should (= 2 (length files)))
+                (should (equal "needle changed"
+                               (plist-get (aref (plist-get (aref files 0) :matches) 0)
+                                          :match))))
+              (should (= 2 (hash-table-count allowed)))
+              (should (= 0 (length (plist-get (search job configuration "new.el") :files))))
+              (with-temp-file (expand-file-name "new.el" root) (insert "needle new\n"))
+              (should (= 1 (length (plist-get (search job configuration "new.el") :files))))
+              (make-symbolic-link first link)
+              (should (= 1 (length (plist-get (search job configuration "link.el") :files))))
+              (delete-file link)
+              (make-symbolic-link outside link)
+              (should (= 0 (length (plist-get (search job configuration "link.el") :files))))
+              (should-not (gethash (cons 'search_project outside) allowed))
+              (should (= 0 (length (plist-get (search other denied) :files))))
+              (should-not (eq cache (gethash other ende-agent--project-caches)))
+              (should (= 0 (hash-table-count
+                            (ende-project-cache-allowed
+                             (gethash other ende-agent--project-caches)))))
+              (should (= 0 (length (plist-get (search job denied) :files))))
+              (should (= 0 (hash-table-count allowed)))
+              (search job configuration "first.el")
+              (dotimes (index ende-project-cache-limit)
+                (ende-project-cache-merge
+                 cache (list (cons (cons 'list_project_files
+                                         (expand-file-name (format "unused/%d" index) root))
+                                   'project))))
+              (should (= ende-project-cache-limit (hash-table-count allowed)))
+              (let ((run (symbol-function 'ende-worker-run)))
+                (cl-letf (((symbol-function 'ende-worker-run)
+                           (lambda (library function arguments bindings callback &optional register)
+                             (should (= 1 (length (plist-get (cadr arguments) :memo))))
+                             (should (= 0 (plist-get (cadr arguments) :room)))
+                             (funcall run library function arguments bindings callback register))))
+                  (should (= 1 (length (plist-get
+                                        (search job configuration "first.el") :files))))))
+              (should (= 3 (length (plist-get (search job configuration) :files))))
+              (should (= ende-project-cache-limit (hash-table-count allowed)))))
+        (delete-file outside)))))
+
+(ert-deftest ende-test/project-tools-obsolete-workers-cannot-commit-policy-decisions ()
+  (ende-test--with-project (root)
+    (dolist (change '(generation settled replaced policy))
+      (let* ((job (ende--make-job :state 'running :execution-generation 1))
+             (ende--active-jobs (list job))
+             (ende-agent--project-caches (make-hash-table :test #'eq :weakness 'key))
+             pending cache key)
+        (cl-letf (((symbol-function 'ende-worker-run)
+                   (lambda (_library _function _arguments _bindings callback &optional _register)
+                     (setq pending callback))))
+          (ende-agent--execute-tool
+           job (list :id "stale" :name "search_project"
+                     :arguments "{\"query\":\"needle\"}")
+           (list :root root :active-tools '(search_project)
+                 :tool-resources '((search_project project))
+                 :resources '((project :type file :include-regexps (".*"))))
+           #'ende-tools-call-async #'ignore))
+        (setq cache (gethash job ende-agent--project-caches)
+              key (ende-project-cache-context-key cache))
+        (pcase change
+          ('generation (cl-incf (ende-job-execution-generation job)))
+          ('settled (ende-job-emit-event job '(:type :settled)))
+          ('replaced (puthash job (ende-project-cache-create) ende-agent--project-caches))
+          ('policy (ende-project-cache-context cache "changed-policy")))
+        (funcall pending
+                 (list :result '(:files [] :files_inspected 0 :truncated nil)
+                       :context-key key
+                       :cache-delta (list (cons (cons 'search_project
+                                                     (expand-file-name "source.el" root))
+                                               'project))) nil)
+        (should (= 0 (hash-table-count (ende-project-cache-allowed cache))))))))
 
 (ert-deftest ende-test/project-tools-exact-selectors-avoid-enumeration ()
   (ende-test--with-project (root)
