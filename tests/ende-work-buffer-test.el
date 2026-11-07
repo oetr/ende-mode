@@ -51,8 +51,12 @@
     (ende-transcript-event transcript '(:type :usage :usage (:input_tokens 12 :output_tokens 4
                                                            :input_tokens_details (:cached_tokens 0))))
     (ende-transcript-accept transcript
-                            (list :content "A reply" :protocol-items (list 'openai-responses opaque tool message)
+                            (list :content "A reply" :duration-ms 1200
+                                  :protocol-items (list 'openai-responses opaque tool message)
                                   :protocol-item-keys '(4 2 7)) (list call))
+    (let ((entry (ende-transcript-tool-call-entry transcript call)))
+      (setf (ende-transcript-entry-data entry)
+            (plist-put (ende-transcript-entry-data entry) :duration-ms 0)))
     (ende-transcript-tool-result transcript call "{\"ok\":false,\"content\":\"one\\ntwo\"}")
     (ende-transcript-event transcript '(:type :agent-activity :title "Checking" :status "In progress"))
     (ende-transcript-finish transcript 'completed)))
@@ -107,6 +111,10 @@
                   (save-excursion
                     (forward-visible-line 0)
                     (should (= (point) (org-element-property :begin headline))))
+                  (let* ((entry (get-text-property (point) 'ende-work-buffer-entry))
+                         (duration (pcase (ende-transcript-entry-kind entry)
+                                     ('response "1200") ('tool-result "0"))))
+                    (should (equal (org-entry-get nil "ENDE_DURATION_MS") duration)))
                   (dolist (property '(("ENDE_MODEL" . "reported-model")
                                       ("ENDE_REASONING_EFFORT" . "high")
                                       ("ENDE_INPUT_TOKENS" . "12")
@@ -117,13 +125,13 @@
                          (mapcar (lambda (headline)
                                    (get-text-property (org-element-property :begin headline) 'ende-work-buffer-entry))
                                  headlines)
-                         (cl-remove 'response (ende-transcript-entries ende-work-buffer--transcript)
-                                    :key #'ende-transcript-entry-kind))))
+                         (ende-transcript-entries ende-work-buffer--transcript))))
               (goto-char (point-min))
               (org-columns)
               (should (equal (mapcar #'car org-columns-current-fmt-compiled)
                              '("ITEM" "ENDE_MODEL" "ENDE_REASONING_EFFORT"
-                               "ENDE_INPUT_TOKENS" "ENDE_CACHED_TOKENS" "ENDE_OUTPUT_TOKENS")))
+                               "ENDE_INPUT_TOKENS" "ENDE_CACHED_TOKENS" "ENDE_OUTPUT_TOKENS"
+                               "ENDE_DURATION_MS")))
               (org-columns-quit)
               (should (string-match-p (regexp-quote "#+begin_example\nTask text") (buffer-string)))
               (should (= 1 (how-many "^\\* --> inspect:" (point-min) (point-max))))

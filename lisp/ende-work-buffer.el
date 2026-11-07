@@ -302,7 +302,8 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
 
 (defun ende-work-buffer--response-for (entry)
   "Return the originating response for ENTRY."
-  (or (gethash (ende-transcript-entry-response-id entry) ende-work-buffer--responses)
+  (or (and (eq (ende-transcript-entry-kind entry) 'response) entry)
+      (gethash (ende-transcript-entry-response-id entry) ende-work-buffer--responses)
       (gethash (ende-transcript-entry-round entry) ende-work-buffer--rounds)))
 
 (defun ende-work-buffer--properties (entry)
@@ -314,6 +315,10 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
      (and response (gethash (ende-transcript-entry-id response) ende-work-buffer--metadata))
      (ende-org--property "ENDE_CHAT_REQUEST_ID"
                          (plist-get (ende-job-instruction ende-work-buffer--job) :request-id))
+     (when (eq kind 'response)
+       (ende-org--property "ENDE_CHAT_RESPONSE_ID" (ende-transcript-entry-id entry)))
+     (when (memq kind '(response tool-result))
+       (ende-org--duration-property (plist-get (ende-transcript-entry-data entry) :duration-ms)))
      (when (memq kind '(tool-call tool-result))
        (concat (ende-org--property "ENDE_TOOL_EXECUTION_ID" (plist-get call :execution-id))
                (ende-org--property "ENDE_TOOL_NAME" (plist-get call :name))
@@ -341,14 +346,17 @@ FOLDED hides a newly inserted section, never overriding a reader's choice."
         (content (ende-transcript-entry-content entry)))
     (pcase (ende-transcript-entry-kind entry)
       ('response
-       (when (or (ende-work-buffer--record-response entry)
-                 (eq (ende-transcript-entry-status entry) 'complete))
-         (maphash
-          (lambda (_key section)
-            (when-let* ((item (ende-work-buffer--section-entry section)))
-              (when (eq (ende-work-buffer--response-for item) entry)
-                (ende-work-buffer--entry item))))
-          ende-work-buffer--sections)))
+       (let ((changed (ende-work-buffer--record-response entry)))
+         (unless (plist-get data :synthetic)
+           (ende-work-buffer--put id entry (ende-org--provider-call-title data) ""))
+         (when (or changed (eq (ende-transcript-entry-status entry) 'complete))
+           (maphash
+            (lambda (_key section)
+              (when-let* ((item (ende-work-buffer--section-entry section)))
+                (when (and (not (eq item entry))
+                           (eq (ende-work-buffer--response-for item) entry))
+                  (ende-work-buffer--entry item))))
+            ende-work-buffer--sections))))
       ('text
        (let* ((response (ende-work-buffer--response-for entry))
               (response-data (and response (ende-transcript-entry-data response)))
@@ -439,17 +447,14 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
                (lambda ()
                  (ende-work-buffer--splice
                   (point-min) (point-min)
-                  (concat "#+COLUMNS: %45ITEM(Heading) %15ENDE_MODEL(Model)"
-                          " %7ENDE_REASONING_EFFORT(Effort) %10ENDE_INPUT_TOKENS(I tok)"
-                          " %6ENDE_CACHED_TOKENS(Cached) %10ENDE_OUTPUT_TOKENS(O tok)\n\n"))
+                  (concat "#+COLUMNS: " ende-org-columns-format "\n\n"))
                  (ende-work-buffer--put 'task nil nil
                                        (ende-work-buffer--example (ende-transcript-task transcript)))
                  (dolist (entry (ende-transcript-entries transcript))
                    (when (eq (ende-transcript-entry-kind entry) 'response)
                      (ende-work-buffer--record-response entry)))
                  (dolist (entry (ende-transcript-entries transcript))
-                   (unless (eq (ende-transcript-entry-kind entry) 'response)
-                     (ende-work-buffer--entry entry)))))
+                   (ende-work-buffer--entry entry))))
               (setf (ende-job-work-buffer job) buffer)
               (puthash transcript buffer ende-work-buffer--viewers)
               (setq ready t)

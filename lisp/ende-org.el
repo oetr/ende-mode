@@ -32,6 +32,25 @@
 (require 'json)
 (require 'subr-x)
 
+(defconst ende-org-duration-property "ENDE_DURATION_MS")
+
+(defconst ende-org-columns-format
+  (concat "%45ITEM(Heading) %15ENDE_MODEL(Model)"
+          " %7ENDE_REASONING_EFFORT(Effort) %10ENDE_INPUT_TOKENS(I tok)"
+          " %6ENDE_CACHED_TOKENS(Cached) %10ENDE_OUTPUT_TOKENS(O tok)"
+          " %12ENDE_DURATION_MS(Duration ms)"))
+
+(defun ende-org--duration-property (milliseconds)
+  "Render a measured duration in MILLISECONDS."
+  (when (natnump milliseconds)
+    (ende-org--property ende-org-duration-property milliseconds)))
+
+(defun ende-org--provider-call-title (data)
+  "Return the provider timing heading for response DATA."
+  (if (eq (plist-get data :duration-kind) 'batch)
+      "Agent: Batch turnaround"
+    "Agent: Provider call"))
+
 (defun ende-org--property (name value)
   "Return a sanitized, nonempty Org property for NAME and VALUE, or nil."
   (let ((value (cond ((stringp value) value)
