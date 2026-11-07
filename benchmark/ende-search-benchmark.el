@@ -192,13 +192,13 @@ Return an independent in-memory manifest of paths and block counts."
 (defun ende-search-benchmark--instrument (function)
   "Call FUNCTION with temporary direct-only filesystem counters."
   (let (wrappers (ende-search-benchmark--counters
-                  '((file-truename . 0) (file-attributes . 0)
+                  '((file-truename . 0) (file-symlink-p . 0) (file-attributes . 0)
                     (insert-file-contents . 0) (read-bytes . 0)
                     (ende-tools--matching-path-scopes . 0))))
     (setq ende-search-benchmark--counters (copy-tree ende-search-benchmark--counters))
     (unwind-protect
         (progn
-          (dolist (name '(file-truename file-attributes insert-file-contents
+          (dolist (name '(file-truename file-symlink-p file-attributes insert-file-contents
                          ende-tools--matching-path-scopes))
             (let ((wrapper (apply-partially #'ende-search-benchmark--count name)))
               (push (cons name wrapper) wrappers)
