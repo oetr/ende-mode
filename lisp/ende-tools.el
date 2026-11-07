@@ -710,7 +710,7 @@ exists.  Visiting-buffer state is retained only as separate metadata."
 SOURCE must be a disk source.  The temporary buffer does not visit the file or
 activate a major mode."
   (let* ((path (plist-get source :path))
-         (current (and ende-tools--project-context (file-truename path))))
+         (current (and ende-tools--project-context (ende-project--file-truename path))))
     (when (and current (not (equal current path)))
       (unless (ende-tools--project-source
                ende-tools--project-context current

@@ -244,6 +244,36 @@ absolute and resolved; the trailing separator enforces component boundaries."
         (substring path prefix-length)
       (file-relative-name path root))))
 
+(defun ende-project--file-truename (path)
+  "Resolve PATH freshly, shortcutting ordinary names only when compiled."
+  (if (and (eq system-type 'gnu/linux)
+           (let ((implementation (symbol-function 'ende-project--file-truename)))
+             (or (byte-code-function-p implementation) (subrp implementation)))
+           (stringp path) (> (length path) 1) (= (aref path 0) ?/)
+           (not (string-match-p
+                 "\\`/:\\|//\\|~\\|/\\.\\.?\\(?:/\\|\\'\\)\\|/\\'" path))
+           (let ((case-fold-search nil)
+                 (prefixes (list "/")) (start 1) (budget 100))
+             (while (and (> budget 0) (< start (length path)))
+               (let ((end (or (string-match "/" path start) (length path))))
+                 (push (substring path 0 end) prefixes)
+                 (setq start (1+ end) budget (1- budget))))
+             ;; Leave stock's recursion budget and handler semantics intact.
+             (and (> budget 0)
+                  (catch 'special
+                    (dolist (prefix (nreverse prefixes))
+                      (let ((directory (if (equal prefix "/") prefix (concat prefix "/"))))
+                        (dolist (entry file-name-handler-alist)
+                          (when (and (stringp (car-safe entry))
+                                     (or (string-match-p (car entry) prefix)
+                                         (string-match-p (car entry) directory)))
+                            (throw 'special nil))))
+                      (when (file-symlink-p prefix)
+                        (throw 'special nil)))
+                    t))))
+      path
+    (file-truename path)))
+
 (defun ende-project--map-files (root visit &optional descend-p candidate-p)
   "Visit current regular files below canonical ROOT in directory order.
 Call VISIT with canonical path, project-relative name, and attributes.
@@ -266,12 +296,12 @@ names before resolution.  Symlinks to directories are never traversed."
                               (or (null descend-p) (funcall descend-p relative))
                               (not (file-symlink-p entry))
                               (ende-project--contains-p
-                               (file-truename entry) root ignore-case))
+                               (ende-project--file-truename entry) root ignore-case))
                      (walk entry)))
                   ((and attributes
                         (or (stringp type) (null candidate-p)
                             (funcall candidate-p relative)))
-                   (let* ((canonical (file-truename entry))
+                   (let* ((canonical (ende-project--file-truename entry))
                           (inside (ende-project--contains-p canonical root ignore-case))
                           (relative (and inside (ende-project--relative-name canonical root))))
                      (when (and inside
