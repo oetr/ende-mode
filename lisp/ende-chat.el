@@ -264,7 +264,7 @@ discarding superseded details. Be concise but self-contained."
 
 (cl-defstruct (ende-chat--document (:constructor ende-chat--make-document))
   "Parsed Org document and its headline relationships."
-  tree headlines parent children properties exclusions)
+  tree headlines parent children properties requests exclusions)
 
 ;;;; Org document model
 
@@ -321,6 +321,7 @@ discarding superseded details. Be concise but self-contained."
         (parent (make-hash-table :test #'eq))
         (children (make-hash-table :test #'eq))
         (properties (make-hash-table :test #'eq))
+        (requests (make-hash-table :test #'equal))
         (stack nil))
     (dolist (headline headlines)
       (let ((level (org-element-property :level headline)))
@@ -358,15 +359,20 @@ discarding superseded details. Be concise but self-contained."
                     local-visibility headline))
                   values
                   (plist-put values :visibility-marked t)))
-          (puthash headline values properties))
+          (puthash headline values properties)
+          (push headline (gethash (plist-get values :request-id) requests)))
         (push headline stack)))
     (maphash (lambda (headline value)
                (puthash headline (nreverse value) children))
              children)
+    (maphash (lambda (request-id value)
+               (puthash request-id (nreverse value) requests))
+             requests)
     (let ((document
            (ende-chat--make-document
             :tree tree :headlines headlines :parent parent :children children
-            :properties properties :exclusions (make-hash-table :test #'eq))))
+            :properties properties :requests requests
+            :exclusions (make-hash-table :test #'eq))))
       (ende-chat--collect-section-exclusions document)
       document)))
 
@@ -415,6 +421,10 @@ discarding superseded details. Be concise but self-contained."
 (defun ende-chat--children (document headline)
   "Return HEADLINE's direct children in document order."
   (gethash headline (ende-chat--document-children document)))
+
+(defun ende-chat--request-headlines (document request-id)
+  "Return REQUEST-ID's headlines in DOCUMENT order."
+  (gethash request-id (ende-chat--document-requests document)))
 
 (defun ende-chat--headline-parent-position (position)
   "Return the enclosing heading position for the headline at POSITION."
@@ -1015,10 +1025,8 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
   (let ((matches
          (cl-remove-if-not
           (lambda (headline)
-            (and (ende-chat--work-section-p document headline)
-                 (equal (ende-chat--property document headline :request-id)
-                        request-id)))
-          (ende-chat--document-headlines document))))
+            (ende-chat--work-section-p document headline))
+          (ende-chat--request-headlines document request-id))))
     (when (> (length matches) 1)
       (error "Multiple generated Agent: Work sections for request %s"
              request-id))
@@ -1089,9 +1097,8 @@ reflects Org history rather than the existence of a stored result payload."
          (replies (cl-remove-if-not
                    (lambda (headline)
                      (and (equal (org-element-property :raw-value headline) "Agent: Reply")
-                          (equal (ende-chat--property document headline :request-id) request-id)
                           (not (ende-chat--work-ancestor document headline))))
-                   (ende-chat--document-headlines document)))
+                   (ende-chat--request-headlines document request-id)))
          (reply (car replies)))
     (unless (and (= (length references) 1) (= (length replies) 1)
                  (eq reference (car references))
@@ -1153,12 +1160,7 @@ reflects Org history rather than the existence of a stored result payload."
   (let* ((request-id (ende-chat--property document work :request-id))
          (state (ende-chat--property document work :state))
          (children (ende-chat--children document work))
-         (sections
-          (cl-remove-if-not
-           (lambda (headline)
-             (equal (ende-chat--property document headline :request-id)
-                    request-id))
-           (ende-chat--document-headlines document)))
+         (sections (ende-chat--request-headlines document request-id))
          (replies nil))
     (unless (eq work (ende-chat--request-work-section document request-id))
       (error "Malformed generated Agent: Work for request %s is not unique"
