@@ -278,7 +278,9 @@
                          (cl-loop for message in sent append (plist-get message :tool-calls))
                          (mapcar (lambda (node)
                                    (ende-chat--protocol-tool-call
-                                    document (ende-chat--parent document node) node))
+                                    document (ende-chat--parent document node) node
+                                    (ende-tool-store-load-execution
+                                     (ende-chat--property document node :tool-execution-id))))
                                  calls)))
                 (let ((sent-calls
                        (cl-loop for message in sent
@@ -296,7 +298,8 @@
                                            (lambda (call) (plist-get call :id))
                                            :test #'equal))
                             (stored (ende-chat--protocol-tool-result-message
-                                     document node)))
+                                     (ende-tool-store-load-execution
+                                      (ende-chat--property document node :tool-execution-id)))))
                        (should call)
                        (should (equal (plist-get stored :tool-call-id) id))
                        (should (equal (plist-get stored :content)

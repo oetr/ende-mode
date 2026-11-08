@@ -1342,27 +1342,20 @@ If an edited drawer is malformed, fall back to the line after the heading."
    (ende-chat--protocol-safe-body headline first-child)
    (ende-chat--protocol-transform headline)))
 
-(defun ende-chat--protocol-tool-call (document assistant call)
-  "Reconstruct generated CALL under ASSISTANT in DOCUMENT."
-  (let* ((request-id (ende-chat--property document call :request-id))
-         (execution-id
-          (ende-chat--property document call :tool-execution-id)))
+(defun ende-chat--protocol-tool-call (document assistant call execution)
+  "Reconstruct CALL under ASSISTANT in DOCUMENT from stored EXECUTION."
+  (let ((request-id (ende-chat--property document call :request-id)))
     (unless (equal request-id
                    (ende-chat--property document assistant :request-id))
       (error "Malformed generated tool call under %s: request ID mismatch"
              (org-element-property :raw-value assistant)))
-    (let ((execution (ende-tool-store-load-execution execution-id)))
-      (if (not (plist-get execution :request-present-p))
-          (progn
-            (setq ende-chat--expired-history-in-request t)
-            nil)
-        (append
-         (list :id (plist-get execution :provider-call-id)
-               :name (plist-get execution :name)
-               :arguments (plist-get execution :arguments))
-         (when (plist-get execution :protocol-item)
-           (list :protocol-provider (plist-get execution :protocol-provider)
-                 :protocol-item (plist-get execution :protocol-item))))))))
+    (append
+     (list :id (plist-get execution :provider-call-id)
+           :name (plist-get execution :name)
+           :arguments (plist-get execution :arguments))
+     (when (plist-get execution :protocol-item)
+       (list :protocol-provider (plist-get execution :protocol-provider)
+             :protocol-item (plist-get execution :protocol-item))))))
 
 (defun ende-chat--restore-response-parts (parts normalized)
   "Restore presentation in already split PARTS using NORMALIZED metadata.
@@ -1431,18 +1424,11 @@ COMPLETE means TEXT reaches the generated wrapper's end."
         (setq ende-chat--expired-history-in-request t)
         nil))))
 
-(defun ende-chat--protocol-tool-result-message (document headline)
-  "Reconstruct the tool-result message represented by HEADLINE."
-  (let* ((execution-id
-          (ende-chat--property document headline :tool-execution-id))
-         (execution (ende-tool-store-load-execution execution-id)))
-    (if (not (plist-get execution :result-present-p))
-        (progn
-          (setq ende-chat--expired-history-in-request t)
-          nil)
-      (list :role "tool"
-            :tool-call-id (plist-get execution :provider-call-id)
-            :content (plist-get execution :content)))))
+(defun ende-chat--protocol-tool-result-message (execution)
+  "Reconstruct the tool-result message from stored EXECUTION."
+  (list :role "tool"
+        :tool-call-id (plist-get execution :provider-call-id)
+        :content (plist-get execution :content)))
 
 (defun ende-chat--protocol-work-messages (document work)
   "Reconstruct WORK's current provider events in document order."
@@ -1457,7 +1443,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
          (assistant nil)
          (pending-calls nil)
          (response-id nil)
-         (complete-tools (make-hash-table :test #'equal)))
+         (executions (make-hash-table :test #'equal)))
     (dolist (child children)
       (when (ende-chat--eligible-p document child)
         (when-let* ((id (ende-chat--property document child :response-id)))
@@ -1483,7 +1469,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
               (let ((execution (ende-tool-store-load-execution execution-id)))
                 (if (and (plist-get execution :request-present-p)
                          (plist-get execution :result-present-p))
-                    (puthash execution-id t complete-tools)
+                    (puthash execution-id execution executions)
                   (setq ende-chat--expired-history-in-request t)))))))))
     (dolist (child children)
       (when (ende-chat--eligible-p document child)
@@ -1528,26 +1514,26 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                 (setq assistant nil))
               (push message messages))))
          ((ende-chat--tool-call-protocol-p document child)
-          (when (gethash (ende-chat--property
-                          document child :tool-execution-id) complete-tools)
-            (when-let* ((call (ende-chat--protocol-tool-call
-                               document work child)))
+          (when-let* ((execution
+                       (gethash (ende-chat--property
+                                 document child :tool-execution-id) executions)))
+            (let ((call (ende-chat--protocol-tool-call
+                         document work child execution)))
               (unless assistant
                 (setq assistant (list :role "assistant" :content "")))
               (setf (plist-get assistant :tool-calls)
                     (append (plist-get assistant :tool-calls) (list call))))))
          ((ende-chat--tool-result-protocol-p document child)
-          (when (gethash (ende-chat--property
-                          document child :tool-execution-id) complete-tools)
+          (when-let* ((execution
+                       (gethash (ende-chat--property
+                                 document child :tool-execution-id) executions)))
             (when assistant
               (push (if (plist-get assistant :tool-calls) assistant
                       (ende-chat--message 'assistant
                                           (plist-get assistant :content)))
                     messages)
               (setq assistant nil))
-            (when-let* ((result (ende-chat--protocol-tool-result-message
-                                 document child)))
-              (push result messages))))
+            (push (ende-chat--protocol-tool-result-message execution) messages)))
          (t
           (dolist (message
                    (ende-chat--section-messages
