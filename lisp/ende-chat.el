@@ -317,16 +317,12 @@ discarding superseded details. Be concise but self-contained."
 
 (defun ende-chat--build-document-from-tree (tree)
   "Build a chat document from Org element TREE."
-  (let* ((headlines (org-element-map tree 'headline #'identity))
-         (sorted (sort (copy-sequence headlines)
-                       (lambda (left right)
-                         (< (org-element-property :begin left)
-                            (org-element-property :begin right)))))
-         (parent (make-hash-table :test #'eq))
-         (children (make-hash-table :test #'eq))
-         (properties (make-hash-table :test #'eq))
-         (stack nil))
-    (dolist (headline sorted)
+  (let ((headlines (org-element-map tree 'headline #'identity))
+        (parent (make-hash-table :test #'eq))
+        (children (make-hash-table :test #'eq))
+        (properties (make-hash-table :test #'eq))
+        (stack nil))
+    (dolist (headline headlines)
       (let ((level (org-element-property :level headline)))
         (while (and stack
                     (>= (org-element-property :level (car stack)) level))
@@ -336,11 +332,16 @@ discarding superseded details. Be concise but self-contained."
           (puthash (car stack)
                    (cons headline (gethash (car stack) children))
                    children))
-        (let* ((values
+        (let* ((local-properties
+                (save-excursion
+                  (goto-char (org-element-property :begin headline))
+                  (org-entry-properties nil 'standard)))
+               (values
                 (cl-loop for descriptor in ende-chat--parsed-property-descriptors
                          append (list (cdr descriptor)
-                                      (ende-chat--local-property
-                                       headline (car descriptor)))))
+                                      (org-not-nil
+                                       (cdr (assoc (car descriptor)
+                                                   local-properties))))))
                (local-role (plist-get values :role))
                (local-visibility (plist-get values :visibility)))
           (when local-role
@@ -364,7 +365,7 @@ discarding superseded details. Be concise but self-contained."
              children)
     (let ((document
            (ende-chat--make-document
-            :tree tree :headlines sorted :parent parent :children children
+            :tree tree :headlines headlines :parent parent :children children
             :properties properties :exclusions (make-hash-table :test #'eq))))
       (ende-chat--collect-section-exclusions document)
       document)))

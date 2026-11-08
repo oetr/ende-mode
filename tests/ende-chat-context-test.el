@@ -34,6 +34,20 @@
 (require 'cl-lib)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-test/chat-document-properties-follow-org ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Root\n:PROPERTIES:\n:ENDE_ROLE: user\n:ENDE_CHAT_ID: root\n:END:\n"
+            "** Child\n:PROPERTIES:\n:ENDE_CHAT_ID: child\n:ENDE_CHAT_ID+: suffix\n:END:\n"
+            "*** Unset\n:PROPERTIES:\n:ENDE_CHAT_ID: nil\n:END:\n"
+            "*** Inherited\nBody.\n")
+    (let ((document (ende-chat--build-document)))
+      (dolist (headline (ende-chat--document-headlines document))
+        (goto-char (org-element-property :begin headline))
+        (dolist (descriptor ende-chat--parsed-property-descriptors)
+          (should (equal (ende-chat--property document headline (cdr descriptor))
+                         (org-entry-get nil (car descriptor)))))))))
+
 
 
 (defun ende-test--chat-unpartitioned-text (document question)
