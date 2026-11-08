@@ -17,6 +17,8 @@ TEST_VERBOSE ?= 0
 BENCHMARK_SIZES ?= 100 1000 10000
 BENCHMARK_SAMPLES ?= 5
 BENCHMARK_INSTRUMENT ?= nil
+CHAT_BENCHMARK_SIZES ?= 10 100
+CHAT_BENCHMARK_SCENARIOS ?= plain deep unrelated-roots folded-hidden context-fence tool-heavy
 
 # Libraries shipped by the MELPA recipe; do not lint test fixtures as packages.
 PACKAGE_FILES := $(sort $(wildcard lisp/ende*.el))
@@ -56,7 +58,7 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean benchmark-search benchmark-search-quick benchmark-chat
+.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean benchmark-search benchmark-search-quick benchmark-chat benchmark-chat-startup
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
@@ -130,6 +132,11 @@ benchmark-search-quick: benchmark-search
 benchmark-chat:
 	@$(MAKE) --no-print-directory compile >/dev/null
 	@$(EMACS_BATCH) -l ende-chat-benchmark -f ende-chat-benchmark-run
+
+benchmark-chat-startup:
+	@$(MAKE) --no-print-directory compile >/dev/null
+	@$(EMACS_BATCH) -l ende-chat-benchmark \
+		--eval '(ende-chat-benchmark-startup-run (quote ($(CHAT_BENCHMARK_SIZES))) $(BENCHMARK_SAMPLES) (quote ($(CHAT_BENCHMARK_SCENARIOS))))'
 
 test-run:
 	@log=$$(mktemp); \
