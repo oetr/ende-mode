@@ -1466,6 +1466,11 @@ COMPLETE means TEXT reaches the generated wrapper's end."
 
 (defun ende-chat--protocol-work-messages (document work)
   "Reconstruct WORK's current provider events in document order."
+  (ende-tool-store-call-with-replay
+   (lambda () (ende-chat--read-work-messages document work))))
+
+(defun ende-chat--read-work-messages (document work)
+  "Read WORK's provider events within the current replay scope."
   (ende-chat--validate-work-contents document work)
   (let* ((children (mapcar
                     (lambda (child)
@@ -1593,9 +1598,11 @@ ROOT overrides the section's enclosing root."
     (error "Invalid ende-chat-context-policy: %s" ende-chat-context-policy))
   (when (or (eq ende-chat-context-policy 'root-prefix)
             (ende-chat--reasoning-ancestors document section))
-    (ende-chat--prefix-messages
-     document (or root (ende-chat--root document section)) section
-     (eq ende-chat-context-policy 'current-section-only))))
+    (ende-tool-store-call-with-replay
+     (lambda ()
+       (ende-chat--prefix-messages
+        document (or root (ende-chat--root document section)) section
+        (eq ende-chat-context-policy 'current-section-only))))))
 
 (defun ende-chat--serialize (document question &optional current-text root)
   "Serialize QUESTION's active root into ordered role-tagged messages.
@@ -1620,6 +1627,11 @@ ROOT supplies the source scope when the destination is a new root sibling."
 
 (defun ende-chat--context-messages (document headline)
   "Read context through HEADLINE's selected section in its stored roles."
+  (ende-tool-store-call-with-replay
+   (lambda () (ende-chat--read-context-messages document headline))))
+
+(defun ende-chat--read-context-messages (document headline)
+  "Read HEADLINE's stored roles within the current replay scope."
   (let* ((ende-chat--expired-history-in-request nil)
          (owner (ende-chat--generated-section-owner document headline))
          (section (or owner headline))

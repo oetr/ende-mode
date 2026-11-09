@@ -43,6 +43,8 @@
 
 (defconst ende-tool-store--schema-version 1)
 (defvar ende-tool-store--next-id 0)
+(defvar ende-tool-store--replay nil
+  "Dynamically owned replay database scope: (FILENAME OPENED DATABASE).")
 
 (defvar-local ende-tool-store--local-file nil
   "Absolute tool store filename configured by the current Org document.")
@@ -166,10 +168,26 @@ Ende directory has its existing permissions changed."
             (progn
               (ende-tool-store--initialize database filename)
               database)
-          (error
+          ((error quit)
            (sqlite-close database)
-           (error "Cannot initialize or validate tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
-                  filename (error-message-string error-data))))))))
+           (if (eq (car error-data) 'quit)
+               (signal (car error-data) (cdr error-data))
+             (error "Cannot initialize or validate tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
+                    filename (error-message-string error-data)))))))))
+
+(defun ende-tool-store-call-with-replay (function)
+  "Call FUNCTION with a lazily opened database owned only by this replay."
+  (let ((filename (expand-file-name (ende-tool-store--filename))))
+    (if (equal filename (car ende-tool-store--replay))
+        (funcall function)
+      (let ((ende-tool-store--replay (list filename nil nil)))
+        (with-file-modes #o700
+          (unwind-protect
+              (funcall function)
+            (when-let* ((database (nth 2 ende-tool-store--replay)))
+              (unwind-protect
+                  (sqlite-close database)
+                (ende-tool-store--protect-files filename)))))))))
 
 (defun ende-tool-store--call-with-database (create function &optional filename)
   "Call FUNCTION with database FILENAME, creating it when CREATE.
@@ -177,7 +195,17 @@ FILENAME defaults to the current buffer's effective store."
   ;; SQLite can create sidecars during SQL execution and connection closing.
   (with-file-modes #o700
     (let* ((filename (expand-file-name (or filename (ende-tool-store--filename))))
-           (database (ende-tool-store--open filename create)))
+           (replay (and (not create)
+                        (equal filename (car ende-tool-store--replay))
+                        ende-tool-store--replay))
+           (database
+            (if replay
+                (progn
+                  (unless (nth 1 replay)
+                    (setf (nth 2 replay) (ende-tool-store--open filename nil)
+                          (nth 1 replay) t))
+                  (nth 2 replay))
+              (ende-tool-store--open filename create))))
       (when database
         (unwind-protect
             (condition-case error-data
@@ -185,9 +213,10 @@ FILENAME defaults to the current buffer's effective store."
               (error
                (error "Tool payload database %s failed: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                       filename (error-message-string error-data))))
-          (unwind-protect
-              (sqlite-close database)
-            (ende-tool-store--protect-files filename)))))))
+          (unless replay
+            (unwind-protect
+                (sqlite-close database)
+              (ende-tool-store--protect-files filename))))))))
 
 (defun ende-tool-store-put (execution-id kind payload &optional filename)
   "Store immutable JSON PAYLOAD for EXECUTION-ID and KIND in FILENAME."

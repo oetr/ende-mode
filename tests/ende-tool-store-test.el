@@ -32,6 +32,53 @@
 (require 'sqlite)
 (require 'ende-tool-store)
 
+(ert-deftest ende-test/tool-store-replay-owns-one-lazy-connection ()
+  (let* ((directory (make-temp-file "ende-tool-store-replay-" t))
+         (ende-tool-store-file (expand-file-name "store.sqlite3" directory))
+         (other (expand-file-name "other.sqlite3" directory)))
+    (unwind-protect
+        (progn
+          (ende-tool-store-put "execution" 'request "exact")
+          (ende-tool-store-put "execution" 'request "other" other)
+          (dolist (exit '(done error quit))
+            (let ((open (symbol-function 'ende-tool-store--open))
+                  (close (symbol-function 'sqlite-close))
+                  (opens 0) (closes 0) database)
+              (cl-letf (((symbol-function 'ende-tool-store--open)
+                         (lambda (&rest arguments)
+                           (cl-incf opens)
+                           (setq database (apply open arguments))))
+                        ((symbol-function 'sqlite-close)
+                         (lambda (connection)
+                           (cl-incf closes)
+                           (funcall close connection))))
+                (ende-tool-store-call-with-replay #'ignore)
+                (should (= opens 0))
+                (should
+                 (eq (condition-case nil
+                         (ende-tool-store-call-with-replay
+                          (lambda ()
+                            (should (equal (ende-tool-store-get "execution" 'request) "exact"))
+                            (should (equal (ende-tool-store-get "execution" 'request other) "other"))
+                            (ende-tool-store-call-with-replay
+                             (lambda ()
+                               (should (equal (ende-tool-store-get "execution" 'request) "exact"))))
+                            (unless (eq exit 'done) (signal exit '("Replay stopped")))
+                            'done))
+                       (error 'error) (quit 'quit))
+                     exit))
+                (should (= opens 2))
+                (should (= closes 2))
+                (should-not ende-tool-store--replay)
+                (should-error (sqlite-select database "SELECT 1")))))
+          (delete-file ende-tool-store-file)
+          (ende-tool-store-call-with-replay
+           (lambda ()
+             (dotimes (_ 2)
+               (should-not (ende-tool-store-get "execution" 'request)))))
+          (should-not (file-exists-p ende-tool-store-file)))
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/tool-store-roundtrips-immutable-records-and-switches-files ()
   (let* ((directory (make-temp-file "ende-tool-store-" t))
          (first (expand-file-name "first.sqlite3" directory))
