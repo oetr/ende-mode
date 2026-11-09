@@ -41,6 +41,9 @@
 (cl-defstruct (ende-transcript-entry (:constructor ende-transcript--entry))
   id kind round response-id text status data thinking)
 
+;; The former struct accessor's inliner survives a live source reload.
+(put 'ende-transcript-entry-content 'compiler-macro nil)
+
 (defun ende-transcript-entry-content (entry)
   "Return ENTRY's detached full text snapshot."
   (let ((text (ende-transcript-entry-text entry)))
