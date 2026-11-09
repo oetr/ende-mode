@@ -3999,8 +3999,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                        (plist-get environment :access-policy))
                       (messages
                        (let ((ende-chat--defer-attachments
-                              (and (eq ende-llm-function #'ende-llm-default)
-                                   ende-request--worker-threshold)))
+                              (and (eq ende-llm-function #'ende-llm-default) 0)))
                          (if compact
                              (ende-chat--compact-messages
                               document question
