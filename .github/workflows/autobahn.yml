@@ -27,7 +27,6 @@ jobs:
         shell: bash
     env:
       AUTOBAHN_GROUP: ${{ matrix.group }}
-      AUTOBAHN_DIRECTORY: ${{ runner.temp }}/ende-autobahn-${{ matrix.group }}
       AUTOBAHN_CONTAINER: ende-autobahn-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}
       AUTOBAHN_IMAGE: crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074
     steps:
@@ -50,6 +49,8 @@ jobs:
 
       - name: Run Autobahn
         timeout-minutes: 25
+        env:
+          AUTOBAHN_DIRECTORY: ${{ runner.temp }}/ende-autobahn-${{ matrix.group }}
         run: |
           mkdir -p "$AUTOBAHN_DIRECTORY"
           make test-autobahn 2>&1 | tee "$AUTOBAHN_DIRECTORY/driver.log"
@@ -63,6 +64,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: autobahn-${{ matrix.group }}
-          path: ${{ env.AUTOBAHN_DIRECTORY }}/
+          path: ${{ runner.temp }}/ende-autobahn-${{ matrix.group }}/
           if-no-files-found: warn
           retention-days: 14
