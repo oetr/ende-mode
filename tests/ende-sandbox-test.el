@@ -465,7 +465,7 @@
                        (buffer-string))
                      "version A\n"))
             (let ((edited
-                   (ende-tool-call
+                   (ende-test--tool-call
                     'edit_file
                     (list :path "src/foo.el"
                           :edits (list (ende-test--anchor-edit
@@ -487,7 +487,7 @@
                        (buffer-string))
                      "version B\n"))
             (let ((created-call
-                   (ende-tool-call
+                   (ende-test--tool-call
                     'create_file
                     (list :path "src/generated/deeper/new.el"
                           :content "created\n")
@@ -501,7 +501,7 @@
                        (buffer-string))
                      "created\n"))
             (let ((deleted
-                   (ende-tool-call 'delete_file '(:path "src/foo.el")
+                   (ende-test--tool-call 'delete_file '(:path "src/foo.el")
                                    root configuration)))
               (should (plist-get deleted :ok)))
             (should-not
@@ -514,7 +514,7 @@
               (delete-file sandbox-file)
               (make-symbolic-link "/etc/passwd" sandbox-file)
               (let ((edited
-                     (ende-tool-call
+                     (ende-test--tool-call
                       'edit_file
                       (list :path "src/generated/deeper/new.el"
                             :edits (list (ende-test--anchor-edit
@@ -566,7 +566,7 @@
                              (error "injected later commit failure")
                            (funcall commit change-set)))))
               (let ((failure
-                     (ende-tool-call
+                     (ende-test--tool-call
                       "apply_patch" (list (cons "patch" patch))
                       root configuration)))
                 (should-not (plist-get failure :ok))
@@ -635,14 +635,17 @@
                        (lambda (&rest _arguments)
                          (error "injected sandbox sync failure"))))
               (let ((edited
-                     (ende-tool-call
+                     (ende-test--tool-call
                       "edit_file"
                       (list (cons "path" "src/main.el")
                             (cons "edits"
                                   (list (ende-test--anchor-edit
                                          "before" "replace" "committed"))))
                       root configuration)))
-                (should (plist-get edited :ok)))
+                (should (plist-get edited :ok))
+                (should (string-match-p
+                         "Host changes were committed"
+                         (plist-get (plist-get edited :result) :sandbox_warning))))
             (should (equal (with-temp-buffer
                              (insert-file-contents source)
                              (buffer-string))
@@ -717,11 +720,15 @@
                 (ende-sandbox-started sandbox) t)
           (let ((ende-tools--execution-owner owner))
             (cl-letf (((symbol-function 'ende-sandbox--container-running-p)
-                       (lambda (_sandbox) t))
+                       (lambda (_sandbox callback)
+                         (run-at-time 0 nil callback t nil)))
                       ((symbol-function 'ende-sandbox--podman-action)
-                       (lambda (_sandbox action)
+                       (lambda (_sandbox action callback)
                          (push action actions)
-                         (setq paused (equal action "pause"))))
+                         (run-at-time
+                          0 nil (lambda ()
+                                  (setq paused (equal action "pause"))
+                                  (funcall callback "" nil)))))
                       ((symbol-function 'ende-sandbox-sync-file)
                        (lambda (&rest arguments)
                          (should paused)
@@ -731,7 +738,7 @@
                          (should paused)
                          (apply workspace-path arguments))))
               (let ((edited
-                     (ende-tool-call
+                     (ende-test--tool-call
                       "apply_patch" (list (cons "patch" patch))
                       root configuration)))
                 (should (plist-get edited :ok)))
@@ -759,17 +766,24 @@
                                (insert-file-contents output)
                                (buffer-string))
                               "built by sandbox\n"))
-              (let ((accessed nil))
+              (let ((accessed nil)
+                    (failure nil))
                 (cl-letf (((symbol-function 'ende-sandbox--podman-action)
-                           (lambda (_sandbox action)
-                             (when (equal action "unpause")
-                               (error "injected unpause failure"))))
+                           (lambda (_sandbox action callback)
+                             (funcall callback ""
+                                      (and (equal action "unpause")
+                                           "injected unpause failure"))))
                           ((symbol-function 'ende-sandbox--remove-container)
                            (lambda (_sandbox callback)
                              (funcall callback nil))))
-                  (should-error
-                   (ende-sandbox-with-quiesced-workspace
-                    sandbox (lambda () (setq accessed t)))))
+                  (ende-sandbox-with-quiesced-workspace
+                   sandbox
+                   (lambda (_operation done)
+                     (setq accessed t)
+                     (funcall done t nil))
+                   (lambda (_value error) (setq failure error)))
+                  (ende-test--wait-for (lambda () failure)))
+                (should (equal failure "injected unpause failure"))
                 (should accessed)
                 (should-not (ende-sandbox-for-owner owner))))))
       (when sandbox
@@ -806,13 +820,15 @@
                 (ende-sandbox-started sandbox) t)
           (let ((ende-tools--execution-owner owner))
             (cl-letf (((symbol-function 'ende-sandbox--container-running-p)
-                       (lambda (_sandbox) t))
+                       (lambda (_sandbox callback)
+                         (run-at-time 0 nil callback t nil)))
                       ((symbol-function 'ende-sandbox--podman-action)
-                       (lambda (&rest _arguments) nil))
+                       (lambda (_sandbox _action callback)
+                         (funcall callback "" nil)))
                       ((symbol-function 'ende-sandbox--remove-container)
                        (lambda (_sandbox callback) (funcall callback nil))))
               (let ((deleted
-                     (ende-tool-call 'delete_file '(:path "src/main.el")
+                     (ende-test--tool-call 'delete_file '(:path "src/main.el")
                                      root configuration)))
                 (should (plist-get deleted :ok))))
           (should-not (file-exists-p source))
@@ -880,11 +896,14 @@
            sandbox "true" "." 30 (lambda (&rest _) (cl-incf calls))
            (lambda (function) (setq cancel function)))
           (should (functionp cancel))
+          (should-error
+           (ende-sandbox-run-command sandbox "true" "." 30 #'ignore nil))
           (funcall cancel)
+          (should (= calls 1))
           (should (ende-sandbox-closing sandbox))
           (should (file-directory-p (ende-sandbox-base sandbox)))
           (funcall startup 0 "" "" nil nil nil)
-          (should (<= calls 1))
+          (should (= calls 1))
           (setf (ende-sandbox-container sandbox) nil)
           (funcall remove t)
           (ende-test--wait-for
@@ -1031,7 +1050,7 @@
             (setq sandbox
                   (ende-test--sandbox-fixture owner root (list source)))
             (let ((edited
-                   (ende-tool-call
+                   (ende-test--tool-call
                     'edit_file
                     (list :path "private/secret.el"
                           :edits (list (ende-test--anchor-edit
@@ -1069,7 +1088,7 @@
                  (ende-tools--execution-owner owner))
             (setq sandbox (ende-test--sandbox-fixture owner root nil))
             (let ((edited
-                   (ende-tool-call
+                   (ende-test--tool-call
                     'edit_file
                     (list :path "src/main.el"
                           :edits (list (ende-test--anchor-edit
@@ -1105,12 +1124,12 @@
              (ende-test--sandbox-workspace sandbox "generated.bin")
              (unibyte-string 0 1 127 128 255))
             (let* ((ende-tools--execution-owner owner)
-                   (copied (ende-tool-call
+                   (copied (ende-test--tool-call
                             "copy_from_sandbox"
                             '(("source" . "generated.bin")
                               ("destination" . "out/generated.bin"))
                             root configuration))
-                   (denied (ende-tool-call
+                   (denied (ende-test--tool-call
                             "copy_from_sandbox"
                             '(("source" . "generated.bin")
                               ("destination" . "public/main.c"))
@@ -1132,7 +1151,7 @@
             (make-symbolic-link "/etc/passwd"
                                 (ende-test--sandbox-workspace sandbox "leak"))
             (let* ((ende-tools--execution-owner owner)
-                   (denied (ende-tool-call
+                   (denied (ende-test--tool-call
                             "copy_from_sandbox"
                             '(("source" . "leak")
                               ("destination" . "out/leak"))
