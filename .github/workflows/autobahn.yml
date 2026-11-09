@@ -1,0 +1,68 @@
+name: Autobahn
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autobahn-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  websocket-server:
+    name: WebSocket server (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, perf]
+    defaults:
+      run:
+        shell: bash
+    env:
+      AUTOBAHN_GROUP: ${{ matrix.group }}
+      AUTOBAHN_DIRECTORY: ${{ runner.temp }}/ende-autobahn-${{ matrix.group }}
+      AUTOBAHN_CONTAINER: ende-autobahn-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}
+      AUTOBAHN_IMAGE: crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Emacs
+        uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
+        with:
+          version: '30.1'
+
+      - name: Install Autobahn
+        timeout-minutes: 5
+        run: |
+          docker pull "$AUTOBAHN_IMAGE"
+          emacs --version
+          docker --version
+
+      - name: Run Autobahn
+        timeout-minutes: 25
+        run: |
+          mkdir -p "$AUTOBAHN_DIRECTORY"
+          make test-autobahn 2>&1 | tee "$AUTOBAHN_DIRECTORY/driver.log"
+
+      - name: Remove any remaining test container
+        if: always()
+        run: timeout 20s docker rm --force "$AUTOBAHN_CONTAINER" >/dev/null 2>&1 || true
+
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: autobahn-${{ matrix.group }}
+          path: ${{ env.AUTOBAHN_DIRECTORY }}/
+          if-no-files-found: warn
+          retention-days: 14
