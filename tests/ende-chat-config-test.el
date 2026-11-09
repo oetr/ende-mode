@@ -34,6 +34,80 @@
 (require 'cl-lib)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-test/chat-config-imports-compose-like-inline-forms ()
+  (let* ((root (make-temp-file "ende-config-imports-" t))
+         (default-directory (file-name-as-directory root))
+         (shared '((root ".")
+                   (group inspect read_file)
+                   (resource project :root "." (include "*.el"))
+                   (tools inspect)
+                   (set-tool-resources inspect :resources project)))
+         policies)
+    (unwind-protect
+        (progn
+          (make-directory ".ende")
+          (with-temp-file ".ende/policy.el"
+            (insert (ende-test--chat-config-block shared)))
+          (with-temp-file ".ende/base.el"
+            (insert "(config \"policy.el\")\n(model \"first\")\n"))
+          (with-temp-file ".ende/agents.el"
+            (insert "(agent-config worker (config \"policy.el\"))\n"
+                    "(model \"second\")\n"))
+          (dolist (forms
+                   (list (append shared
+                                 `((model "first")
+                                   (agent-config worker ,@shared)
+                                   (model "second")
+                                   (clear-tools)))
+                         '((clear-tools)
+                           (config ".ende/base.el" ".ende/agents.el"))))
+            (with-temp-buffer
+              (org-mode)
+              (insert (ende-test--chat-config-block forms)
+                      "* Sibling\n"
+                      (ende-test--chat-config-block '((config "absent.el")))
+                      "* Question\n")
+              (let ((document (ende-chat--build-document)))
+                (push (ende-chat-config-resolve-environment
+                       (ende-chat--document-tree document)
+                       (ende-chat--document-parent document)
+                       (car (last (ende-chat--document-headlines document))))
+                      policies))))
+          (should (equal (car policies) (cadr policies))))
+      (delete-directory root t))))
+
+(ert-deftest ende-test/chat-config-imports-fail-closed-with-source-context ()
+  (let* ((root (make-temp-file "ende-config-import-errors-" t))
+         (default-directory (file-name-as-directory root)))
+    (unwind-protect
+        (progn
+          (with-temp-file "entry.el" (insert "(config \"leaf.el\")\n"))
+          (dolist (source '("(" "(unknown)" "#.(error \"must not execute\")"
+                            "(config)" "(config \"absent.el\")" "(config \".\")"
+                            "(config \"/ssh:nowhere:/config.el\")"
+                            "(config \"entry.el\")"
+                            "(root \".\") (root \".\")"
+                            "(tools read_file)"
+                            "(agent-config worker (unknown))"
+                            "Content-Type: text/enriched\n\n(model \"x\")\n"
+                            "#+begin_ende\n(model \"x\")\n#+end_ende\n(model \"y\")"))
+            (ert-info ((format "Imported source: %s" source))
+              (with-temp-file "leaf.el" (insert source))
+              (with-temp-buffer
+                (org-mode)
+                (insert (ende-test--chat-config-block '((config "entry.el")))
+                        "* Question\n")
+                (let* ((document (ende-chat--build-document))
+                       (failure
+                        (should-error
+                         (ende-chat-config-resolve-environment
+                          (ende-chat--document-tree document)
+                          (ende-chat--document-parent document)
+                          (car (ende-chat--document-headlines document))))))
+                  (should (string-match-p "leaf\\.el"
+                                          (error-message-string failure))))))))
+      (delete-directory root t))))
+
 (ert-deftest ende-test/agent-config-rejects-duplicate-same-block-forms ()
   (dolist (forms '(("(agent-config worker (clear-tools))"
                    "(agent-config worker (clear-tools))")

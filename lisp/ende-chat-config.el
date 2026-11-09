@@ -43,6 +43,15 @@
 (defvar ende-chat-config--current-form nil
   "Source form being read or applied.")
 
+(defconst ende-chat-config--max-import-depth 32
+  "Maximum number of files on an active import chain.")
+
+(defconst ende-chat-config--max-import-bytes (* 4 1024 1024)
+  "Maximum cumulative source size per configuration resolution.")
+
+(defvar ende-chat-config--import-bytes-left 0
+  "Remaining source budget for the current resolution.")
+
 (defun ende-chat-config--location (form)
   "Describe FORM's source and inclusion chain."
   (mapconcat
@@ -255,6 +264,95 @@ PARENT identifies the importing form, if any."
         (when (eq (car body-form) 'agent-config)
           (ende-chat-config--error "nested agent-config definitions are not allowed"))))
     (cons name body)))
+
+(defun ende-chat-config--read-config-file (file)
+  "Read UTF-8 configuration or a single whole-file Ende block from FILE."
+  (let ((parent ende-chat-config--current-form))
+    (with-temp-buffer
+      (let ((ende-chat-config--current-form
+             (ende-chat-config--make-form :file file :line 1 :parent parent))
+            (case-fold-search t))
+        (insert-file-contents-literally
+         file nil 0 (1+ ende-chat-config--import-bytes-left))
+        (cl-decf ende-chat-config--import-bytes-left (buffer-size))
+        (when (< ende-chat-config--import-bytes-left 0)
+          (ende-chat-config--error "config imports exceed the %d-byte limit"
+                                   ende-chat-config--max-import-bytes))
+        (decode-coding-region (point-min) (point-max) 'utf-8)
+        (goto-char (point-min))
+        (skip-chars-forward " \t\r\n")
+        (if (looking-at-p "#\\+begin_ende\\(?:[ \t\r\n]\\|\\'\\)")
+            (let* ((tree (org-element-parse-buffer 'element))
+                   (blocks (gethash tree (ende-chat-config--local-blocks tree)))
+                   (block (car blocks)))
+              (unless (and block (null (cdr blocks))
+                           (string-blank-p
+                            (buffer-substring-no-properties
+                             (point-min) (org-element-property :begin block)))
+                           (string-blank-p
+                            (buffer-substring-no-properties
+                             (org-element-property :end block) (point-max))))
+                (ende-chat-config--error
+                 "config file must contain only one complete Ende block"))
+              (ende-chat-config--block-forms block file parent))
+          (ende-chat-config--read-forms (buffer-string) file 1 parent))))))
+
+(defun ende-chat-config--expand-file (path directory stack)
+  "Expand PATH relative to DIRECTORY, checking the active import STACK."
+  (let ((file (expand-file-name path directory)))
+    (when (file-remote-p file)
+      (ende-chat-config--error "config files must be local: %s" file))
+    (condition-case failure
+        (progn
+          (setq file (file-truename file))
+          (unless (and (not (file-remote-p file))
+                       (file-regular-p file) (file-readable-p file))
+            (ende-chat-config--error
+             "config requires a readable regular file: %s" file))
+          (when (member file stack)
+            (ende-chat-config--error "config import cycle: %s" file))
+          (when (>= (length stack) ende-chat-config--max-import-depth)
+            (ende-chat-config--error "config import depth exceeds %d"
+                                     ende-chat-config--max-import-depth))
+          (ende-chat-config--expand-body
+           (ende-chat-config--read-config-file file)
+           (file-name-directory file) (cons file stack)))
+      (file-error
+       (ende-chat-config--error "cannot read config %s: %s"
+                                file (error-message-string failure))))))
+
+(defun ende-chat-config--expand-body (forms directory &optional stack)
+  "Prepend imports to located FORMS, resolving paths against DIRECTORY.
+STACK contains the canonical filenames currently being expanded."
+  (let (imports local)
+    (dolist (source forms)
+      (let ((ende-chat-config--current-form source)
+            (form (ende-chat-config--form-value source)))
+        (unless (ende-chat-config--proper-list-p form)
+          (ende-chat-config--error "configuration form must be a list: %S" form))
+        (pcase (car form)
+          ('config
+           (unless (and (cdr form)
+                        (cl-every (lambda (path)
+                                    (and (stringp path)
+                                         (not (string-blank-p path))))
+                                  (cdr form)))
+             (ende-chat-config--error "config expects one or more path strings"))
+           (dolist (path (cdr form))
+             (dolist (import (ende-chat-config--expand-file path directory stack))
+               (push import imports))))
+          ('agent-config
+           (let* ((definition (ende-chat-config--agent-definition form))
+                  (expanded
+                   (cons 'agent-config
+                         (cons (car definition)
+                               (ende-chat-config--expand-body
+                                (cdr definition) directory stack)))))
+             (ende-chat-config--agent-definition expanded)
+             (setf (ende-chat-config--form-value source) expanded)
+             (push source local)))
+          (_ (push source local)))))
+    (nconc (nreverse imports) (nreverse local))))
 
 (defun ende-chat-config--copy (configuration)
   "Return an independent copy of CONFIGURATION."
@@ -962,6 +1060,7 @@ Copy only group and resource definitions from VISIBLE."
   "Return (CONFIGURATION . DEFINITIONS) visible at HEADLINE in TREE.
 PARENT-TABLE supplies ancestry.  Parse each relevant block exactly once."
   (let ((blocks-by-node (ende-chat-config--local-blocks tree))
+        (ende-chat-config--import-bytes-left ende-chat-config--max-import-bytes)
         (configuration (ende-chat-config--empty))
         (definitions nil))
     (dolist (node (ende-chat-config--ancestry tree parent-table headline))
@@ -978,7 +1077,9 @@ PARENT-TABLE supplies ancestry.  Parse each relevant block exactly once."
             (when (cdr blocks)
               (ende-chat-config--error
                "only one config block is allowed per Org node"))
-            (dolist (source (ende-chat-config--block-forms (car blocks)))
+            (dolist (source (ende-chat-config--expand-body
+                            (ende-chat-config--block-forms (car blocks))
+                            default-directory))
               (let ((ende-chat-config--current-form source)
                     (form (ende-chat-config--form-value source)))
                 (if (eq (car-safe form) 'agent-config)
