@@ -790,6 +790,8 @@ Completion is asynchronous and bounded by the closing timeout."
   "Queue a snapshot of Unicode scalar TEXT on CONNECTION.
 Return t when accepted, not delivered.  Signal `ende-websocket-backpressure'
 without queue mutation if capacity is exhausted."
+  (unless (stringp text) (signal 'wrong-type-argument (list 'stringp text)))
+  (ende-websocket--capacity connection (length text))
   (ende-websocket--capacity connection (ende-websocket--text-size text))
   (ende-websocket--enqueue connection 1 (encode-coding-string text 'utf-8-unix) t))
 

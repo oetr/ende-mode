@@ -289,6 +289,18 @@
       (should (= closed 1))
       (should (eq (plist-get info :cause) 'abort))
       (should-not (ende-websocket--connection-input connection))))
+  (ende-websocket-test--connection connection
+    (setf (ende-websocket--connection-limits connection)
+          (ende-websocket--limits '(:write-frame-bytes 4 :write-message-bytes 4)))
+    (cl-letf (((symbol-function 'ende-websocket--text-size)
+               (lambda (_) (ert-fail "Oversized text was scanned"))))
+      (should-error (ende-websocket-send-text connection "12345")
+                    :type 'ende-websocket-too-large))
+    (should-error (ende-websocket-send-text connection "€€")
+                  :type 'ende-websocket-too-large)
+    (should-not (ende-websocket--connection-output connection))
+    (should (ende-websocket-send-text connection "😀"))
+    (should (= (ende-websocket--connection-output-bytes connection) 4)))
   (dolist (capacity '(1 3 4))
     (dolist (send '(ende-websocket-send-binary ende-websocket-send-text-bytes ende-websocket-send-text))
       (ende-websocket-test--connection connection
