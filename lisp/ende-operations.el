@@ -596,26 +596,26 @@ Return pass data without settling JOB."
     (with-current-buffer buffer
       (let ((apply-edits
              (lambda ()
-               (ende-target-with-restriction target
-					     (barf-if-buffer-read-only)
-					     (dolist (edit
-						      (sort (copy-sequence edits)
-							    (lambda (left right)
-							      (ende--structured-edit-descending-p
-							       left right key))))
-					       (condition-case caught
-						   (ende--apply-anchor-edit
-						    target buffer source-start edit display)
-						 (error
-						  (push (list :index (plist-get edit :index)
-							      :message (error-message-string caught)
-							      :raw (plist-get edit :raw))
-							application-failures))))))))
-        (ende-review-with-batched-changes
-          (if ende-structured-edit-move-point
-              (funcall apply-edits)
-            (save-excursion
-              (funcall apply-edits))))))
+               (ende-review-with-batched-changes
+                 (ende-target-with-restriction target
+                   (barf-if-buffer-read-only)
+                   (dolist (edit
+                            (sort (copy-sequence edits)
+                                  (lambda (left right)
+                                    (ende--structured-edit-descending-p
+                                     left right key))))
+                     (condition-case caught
+                         (ende--apply-anchor-edit
+                          target buffer source-start edit display)
+                       (error
+                        (push (list :index (plist-get edit :index)
+                                    :message (error-message-string caught)
+                                    :raw (plist-get edit :raw))
+                              application-failures)))))))))
+        (if ende-structured-edit-move-point
+            (funcall apply-edits)
+          (save-excursion
+            (funcall apply-edits)))))
     (setq failures (append failures (nreverse application-failures)))
     (list :source source
           :requested (+ (length edits) (length failures))

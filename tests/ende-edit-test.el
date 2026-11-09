@@ -382,6 +382,10 @@
               (format (concat "{\"version\":1,\"edits\":[{\"anchor\":\"middle\","
                               "\"position\":\"%s\",\"text\":\"%s\"}]}")
                       position text))
+             (ende-review-change-functions
+              (cons (lambda (buffer)
+                      (with-current-buffer buffer (goto-char (point-max))))
+                    ende-review-change-functions))
              (ende-llm-function
               (ende-test--fake-llm (list (list :content response)) t)))
         (ende-test--with-buffer "left middle right"
