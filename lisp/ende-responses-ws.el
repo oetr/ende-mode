@@ -217,7 +217,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (plist-get profile :service) (plist-get profile :auth-method)
                 (plist-get profile :account) (plist-get profile :codex-binding)
                 (plist-get profile :credential-binding) authentication-identity
-                ende-max-sse-event-bytes ende-max-response-bytes ende-max-response-header-bytes))
+                ende-max-sse-event-bytes ende-max-response-bytes ende-max-response-header-bytes
+                ende-response-idle-timeout))
          (connection (gethash key ende-responses-ws--connections)))
     (unless (string-prefix-p "https://" url)
       (error "Responses WebSockets require a trusted HTTPS endpoint"))
