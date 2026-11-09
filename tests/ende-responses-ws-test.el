@@ -426,7 +426,7 @@
       (should (eq (ende-error-kind (car errors)) 'resource))))
   (ende-responses-ws-test--with-server
     (let ((ende-max-sse-event-bytes 64) errors)
-      (ende-llm-default '(("user" . "Event bound"))
+      (ende-llm-default (list (cons "user" (make-string 1024 ?x)))
                         (list :on-error (lambda (error) (push error errors)))
                         (ende-responses-ws-test--profile 1))
       (ende-test--wait-for (lambda () wires))

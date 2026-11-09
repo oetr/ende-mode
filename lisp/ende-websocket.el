@@ -111,7 +111,8 @@
           (unless (and (or (/= short 126) (>= length 126))
                        (or (/= short 127) (<= 65536 length #x7fffffffffffffff)))
             (signal 'ende-websocket-protocol-error nil))
-          (when (> length maximum) (signal 'ende-websocket-too-large nil))
+          (when (and (< opcode 8) (> length maximum))
+            (signal 'ende-websocket-too-large nil))
           (cons size (ende-websocket--frame-create
                       :opcode opcode :final final :length length :remaining length
                       :mask (and masked (substring bytes (+ 2 extended) size)))))))))
@@ -142,7 +143,7 @@
     :handshake-timeout 10 :frame-bytes 8388608 :message-bytes 8388608
     :input-bytes 16777216 :output-bytes 16777216 :output-items 256
     :fragment-count 4096 :message-timeout 30 :drain-bytes 65536
-    :drain-frames 64 :write-frame-bytes 16384 :pending-openings 64
+    :drain-frames 64 :write-frame-bytes 16384 :write-message-bytes 8388608 :pending-openings 64
     :connections 128 :closing-timeout 3))
 
 (defun ende-websocket--limits (overrides)
@@ -157,7 +158,7 @@
         (push key seen)
         (setq limits (plist-put limits key value))))
     (unless (and (<= (plist-get limits :line-bytes) (plist-get limits :header-bytes))
-                 (<= (plist-get limits :write-frame-bytes) (plist-get limits :frame-bytes))
+                 (<= (plist-get limits :write-frame-bytes) (plist-get limits :write-message-bytes))
                  (<= (plist-get limits :frame-bytes) (plist-get limits :message-bytes))
                  (>= (plist-get limits :input-bytes) 14))
       (error "Inconsistent WebSocket limits"))
@@ -371,7 +372,7 @@
 (cl-defstruct (ende-websocket--connection (:constructor ende-websocket--connection-create))
   role process listener limits address headers protocols key protocol
   (state 'connecting) (generation 0) callbacks
-  input (cursor 1) http frame message
+  input (cursor 1) http frame message receive-budget
   output output-tail (output-bytes 0) (output-items 0)
   controls control-tail (control-count 0) backpressured
   close-queued draining-close close-sent close-received peer-close failure eof
@@ -395,6 +396,11 @@
 
 (defun ende-websocket--limit (connection key)
   (plist-get (ende-websocket--connection-limits connection) key))
+
+(defun ende-websocket-set-receive-budget (connection bytes)
+  "Set CONNECTION's remaining incoming payload budget to BYTES, or nil."
+  (unless (or (null bytes) (natnump bytes)) (error "Invalid WebSocket receive budget"))
+  (setf (ende-websocket--connection-receive-budget connection) bytes))
 
 (defun ende-websocket--cancel-deadline (connection kind)
   (when-let* ((entry (assq kind (ende-websocket--connection-timers connection))))
@@ -641,7 +647,12 @@ Completion is asynchronous and bounded by the closing timeout."
       (cl-incf (ende-websocket--message-bytes message) (ende-websocket--frame-length frame))
       (when (or (> (ende-websocket--message-fragments message) (ende-websocket--limit connection :fragment-count))
                 (> (ende-websocket--message-bytes message) (ende-websocket--limit connection :message-bytes)))
-        (signal 'ende-websocket-too-large nil)))))
+        (signal 'ende-websocket-too-large nil))
+      (when-let* ((budget (ende-websocket--connection-receive-budget connection)))
+        (when (> (ende-websocket--frame-length frame) budget)
+          (signal 'ende-websocket-too-large nil))
+        (cl-decf (ende-websocket--connection-receive-budget connection)
+                 (ende-websocket--frame-length frame))))))
 
 (defun ende-websocket--collect (message bytes)
   (let ((offset 0) (length (length bytes)))
@@ -739,7 +750,7 @@ Completion is asynchronous and bounded by the closing timeout."
 
 (defun ende-websocket--capacity (connection size)
   (unless (eq (ende-websocket-state connection) 'open) (error "WebSocket is not open"))
-  (when (> size (ende-websocket--limit connection :message-bytes))
+  (when (> size (ende-websocket--limit connection :write-message-bytes))
     (signal 'ende-websocket-too-large nil))
   (when (or (> (+ (ende-websocket--connection-output-bytes connection) size)
                (ende-websocket--limit connection :output-bytes))
@@ -1044,7 +1055,8 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
                     (ende-websocket--start-client connection))
                   (when (and (eq (ende-websocket-state connection) 'connecting)
                              (ende-websocket--connection-process connection))
-                    (ende-websocket--read-http connection))
+                    (ende-websocket--read-http connection)
+                    (ende-websocket--dispatch connection))
                   (when (memq (ende-websocket-state connection) '(open closing))
                     (unless (ende-websocket--connection-failure connection)
                       (setq more (ende-websocket--parse-frames connection)))

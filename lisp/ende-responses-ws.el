@@ -41,7 +41,7 @@
 
 (cl-defstruct ende-responses-ws-connection
   owner identity socket active chain closed closing key url headers properties
-  header-limit message-limit
+  header-limit output-limit
   (generation 1) (phase 'disconnected) created close-code)
 
 (cl-defstruct ende-responses-ws-chain
@@ -217,7 +217,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (plist-get profile :service) (plist-get profile :auth-method)
                 (plist-get profile :account) (plist-get profile :codex-binding)
                 (plist-get profile :credential-binding) authentication-identity
-                ende-max-sse-event-bytes ende-max-response-header-bytes
+                ende-max-sse-event-bytes ende-max-response-bytes ende-max-response-header-bytes
                 (let ((print-length nil) (print-level nil))
                   (secure-hash 'sha256 (prin1-to-string headers)))))
          (connection (gethash key ende-responses-ws--connections)))
@@ -390,11 +390,14 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
             (when (ende-responses-ws--attempt-live-p request attempt socket)
               ;; A successful offer does not prove transmission.  Never replay
               ;; after this boundary without an explicit provider rejection.
-              (if (> size (ende-responses-ws-connection-message-limit connection))
+              (if (> size (ende-responses-ws-connection-output-limit connection))
                   ;; A larger follow-up needs a fresh bounded transport and
                   ;; full preparation, without a retired previous_response_id.
                   (ende-responses-ws--retry request 'unsent-replacement)
                 (setf (ende-responses-ws-request-delivery request) 'sending)
+                (ende-websocket-set-receive-budget
+                 socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
+                          (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
                 (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
                   (let* ((source (plist-get data :wire-source))
                          (release (ende-request-retained-read source)))
@@ -690,23 +693,23 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   (let* ((request (ende-responses-ws-connection-active connection))
          (data (ende-responses-ws-request-payload request))
          (size (ende-responses-ws--payload-size data))
-         ;; The transport's message bound covers both directions.  Keep room
-         ;; for the prepared request, and enforce the event bound on receipt.
-         (message-limit (max 1 size (or (ende-responses-ws-request-event-limit request)
-                                        most-positive-fixnum)))
+         (message-limit (min (or (ende-responses-ws-request-event-limit request) most-positive-fixnum)
+                             (or (ende-responses-ws-request-byte-limit request) most-positive-fixnum)))
+         (output-limit (max 1 size message-limit))
          (header-limit (or (ende-responses-ws-connection-header-limit connection)
                            most-positive-fixnum))
          (limits (list :message-bytes message-limit
                        :frame-bytes message-limit
-                       :write-frame-bytes (min 16384 message-limit)
-                       :output-bytes message-limit
+                       :write-frame-bytes (min 16384 output-limit)
+                       :write-message-bytes output-limit
+                       :output-bytes output-limit
                        :input-bytes (max 14 (+ 14 message-limit) (or header-limit 0))
                        :handshake-timeout (if (ende-responses-ws-request-connect-timeout request)
                                               (max 1 (ceiling (ende-responses-ws-request-connect-timeout request)))
                                             most-positive-fixnum)
                        :message-timeout (max 1 (ceiling (ende-responses-ws-request-idle-timeout request))))))
     (setq limits (append limits (list :header-bytes header-limit :line-bytes header-limit)))
-    (setf (ende-responses-ws-connection-message-limit connection) message-limit
+    (setf (ende-responses-ws-connection-output-limit connection) output-limit
           (ende-responses-ws-connection-phase connection) 'connecting
           (ende-responses-ws-connection-created connection) (float-time))
     (when-let* ((timeout (ende-responses-ws-request-connect-timeout request)))

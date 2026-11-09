@@ -306,6 +306,40 @@
     (should (= (with-current-buffer (ende-websocket--connection-input connection)
                  (- (point-max) (ende-websocket--connection-cursor connection))) 0))))
 
+(ert-deftest ende-websocket-receive-limits-are-independent ()
+  (dolist (bound '(message budget))
+    (ende-websocket-test--connection connection
+      (setf (ende-websocket--connection-limits connection)
+            (ende-websocket--limits '(:frame-bytes 8 :message-bytes 8
+                                      :write-frame-bytes 16 :write-message-bytes 32)))
+      (should (ende-websocket-send-binary connection (make-string 16 ?x)))
+      (ende-websocket-set-receive-budget connection (and (eq bound 'budget) 5))
+      (cl-letf (((symbol-function 'process-send-string) #'ignore))
+        (ende-websocket--filter process
+                                (concat (unibyte-string (if (eq bound 'message) 2 #x82) 4) "abcd"))
+        (ende-websocket-test--drain connection)
+        (should (eq (ende-websocket-state connection) 'open))
+        (ende-websocket--filter process (concat (unibyte-string #x89 9) "heartbeat"))
+        (ende-websocket-test--drain connection)
+        (should (eq (ende-websocket-state connection) 'open))
+        (ende-websocket--filter process (if (eq bound 'message)
+                                           (unibyte-string #x80 5)
+                                         (unibyte-string #x82 4)))
+        (ende-websocket-test--drain connection)
+        (should (eq (plist-get (ende-websocket--connection-failure connection) :cause) 'size)))))
+  (ende-websocket-test--connection connection
+    (let ((key "dGhlIHNhbXBsZSBub25jZQ=="))
+      (setf (ende-websocket--connection-state connection) 'connecting
+            (ende-websocket--connection-key connection) key
+            (ende-websocket--connection-callbacks connection)
+            (list :on-open (lambda (socket) (ende-websocket-set-receive-budget socket 1))))
+      (ende-websocket--filter
+       process (concat "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"
+                       "Sec-WebSocket-Accept: " (ende-websocket--accept key) "\r\n\r\n"
+                       (unibyte-string #x82 1 ?a #x82 1 ?b)))
+      (ende-websocket-test--drain connection)
+      (should (eq (plist-get (ende-websocket--connection-failure connection) :cause) 'size)))))
+
 (ert-deftest ende-websocket-callbacks-are-serialized ()
   (dolist (action '(receive abort shutdown))
     (ende-websocket-test--connection connection
