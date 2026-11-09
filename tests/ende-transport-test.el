@@ -130,6 +130,20 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 
+(ert-deftest ende-test/request-worker-selection-covers-payload-representations ()
+  (dolist (text (list "small" (make-string ende-request--worker-threshold ?λ)))
+    (let ((item (make-hash-table :test #'equal)))
+      (puthash "encrypted_content" text item)
+      (dolist (payload (list `(("user" . ,text))
+                             `((:role "user" :content ((:type :text :text ,text))))
+                             `((:role "assistant" :content ""
+                                      :tool-calls ((:arguments ((code . ,text))))))
+                             `((:role "assistant" :reasoning-content ,text))
+                             `((:role "assistant" :protocol-items (responses ,item)))
+                             `(:full-body ((:input . [,item])))))
+        (should (eq (ende-request--worker-p payload)
+                    (> (string-bytes text) ende-request--worker-threshold)))))))
+
 (ert-deftest ende-test/request-duration-stops-before-callbacks ()
   (dolist (outcome '(success failure))
     (let ((clock 10) received events)

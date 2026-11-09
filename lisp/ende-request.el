@@ -123,18 +123,34 @@ Return the outgoing bytes, encoded body, and optional capture record."
 
 (defconst ende-request--worker-threshold (* 64 1024))
 
-(defun ende-request--worker-p (messages)
-  "Return non-nil when MESSAGES warrant asynchronous preparation."
-  (let ((bytes 0))
-    (cl-some
-     (lambda (message)
-       (let ((content (ende-content-body message)))
-         (if (stringp content)
-             (> (cl-incf bytes (string-bytes content)) ende-request--worker-threshold)
-           (cl-some (lambda (part)
-                      (or (memq (plist-get part :type) '(:image :source))
-                          (> (cl-incf bytes (string-bytes (or (plist-get part :text) "")))
-                             ende-request--worker-threshold))) content)))) messages)))
+(defun ende-request--worker-p (payload)
+  "Return non-nil when PAYLOAD warrants asynchronous preparation.
+Bound the estimate by charging for string bytes and traversed structure."
+  (let ((pending (list payload))
+        (budget ende-request--worker-threshold))
+    (catch 'worker
+      (while pending
+        (let ((value (pop pending)))
+          (cl-decf budget
+                   (cond ((stringp value) (1+ (string-bytes value)))
+                         ((vectorp value) (1+ (length value)))
+                         ((hash-table-p value) (1+ (* 2 (hash-table-count value))))
+                         (t 1)))
+          (when (< budget 0) (throw 'worker t))
+          (cond
+           ((consp value)
+            (when (and (eq (car value) :type)
+                       (memq (car-safe (cdr value)) '(:image :source)))
+              (throw 'worker t))
+            (push (cdr value) pending)
+            (push (car value) pending))
+           ((vectorp value)
+            (mapc (lambda (item) (push item pending)) value))
+           ((hash-table-p value)
+            (maphash (lambda (key item)
+                       (push key pending)
+                       (push item pending)) value)))))
+      nil)))
 
 (defun ende-request-prepare (lifecycle library builder messages profile debug callback
                                      &optional finalization file-backed retained baseline current-p)
@@ -158,9 +174,9 @@ Only source descriptors and serializable finalization data enter the worker."
                            profile (car debug) (cadr debug) (nth 2 debug)
                            (memq builder '(ende-responses--request-body ende-codex--request-body))))))
          (counter (if replay (plist-get origin :counter) ende-debug--sequence-context))
-         (worker (and (not retained) (ende-request--worker-p messages)))
+         (worker (or file-backed (ende-request--worker-p (list messages finalization))))
          release-baseline)
-    (if (not (or worker file-backed))
+    (if (not worker)
         (unwind-protect
             (progn
               (setq release-baseline (ende-request-retained-read baseline))
