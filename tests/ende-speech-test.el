@@ -342,7 +342,7 @@
                   '(:code 1006 :reason "" :clean nil :cause transport)))
        (should (eq (ende-speech--session-state session) 'terminal))
        (should-not ende-speech--active-session)
-       (should-not (buffer-live-p buffer))
+       (should (buffer-live-p buffer))
        (should-not (ende-speech--session-websocket session))
        (should-not (marker-buffer (ende-speech--session-marker session)))
        (ende-speech-test--event session "session.created")
@@ -563,9 +563,13 @@
 
 (ert-deftest ende-speech/audio-backpressure-terminates-instead-of-dropping ()
   (ende-speech-test--with-session
-   (lambda (session _source buffer)
+   (lambda (session source buffer)
      (ende-speech-test--event session "session.created")
      (ende-speech-test--event session "session.updated")
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "dictated"))
+     (with-current-buffer buffer (insert " and edited"))
      (let (report)
        (cl-letf (((symbol-function 'ende-websocket-send-binary)
                   (lambda (&rest _) (signal 'ende-websocket-backpressure nil)))
@@ -576,9 +580,23 @@
                   'mock-recorder (unibyte-string 0 255)))
        (should (string-match-p "audio forwarding failed.*queue full" report)))
      (should-not ende-speech--active-session)
-     (should-not (buffer-live-p buffer))
+     (should (buffer-live-p buffer))
+     (ende-speech-test--event
+      session "conversation.item.input_audio_transcription.delta"
+      '(delta . "late"))
+     (should (equal (with-current-buffer buffer (buffer-string)) "dictated and edited"))
+     (should (equal (with-current-buffer source (buffer-string)) "abcd"))
      (should ende-speech-test--killed-recorder)
      (should ende-speech-test--closed))))
+
+(ert-deftest ende-speech/ignored-events-do-not-intern-keys ()
+  (ende-speech-test--with-session
+   (lambda (session _source buffer)
+     (let ((key (format "ende-speech-remote-key-%d" (random most-positive-fixnum))))
+       (should-not (intern-soft key))
+       (ende-speech-test--event session "unknown" (cons key t))
+       (should-not (intern-soft key))
+       (should (equal (with-current-buffer buffer (buffer-string)) ""))))))
 
 (ert-deftest ende-speech/message-type-and-connection-identity ()
   (ende-speech-test--with-session
@@ -916,6 +934,7 @@
      (should (equal (with-current-buffer source (buffer-string)) "abcd"))
      (should ende-speech-test--killed-recorder)
      (should ende-speech-test--closed)
+     (should-not (buffer-live-p buffer))
      (should-not ende-speech--active-session))))
 
 (ert-deftest ende-speech/killing-transcript-buffer-cancels-recording ()

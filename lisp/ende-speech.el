@@ -621,9 +621,9 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
        (report (message "ende speech: %s" report))))))
 
 (defun ende-speech--fail (session reason)
-  "Stop SESSION after reporting REASON."
+  "Stop SESSION, preserving its transcript and reporting REASON."
   (when (ende-speech--session-active-p session)
-    (ende-speech--terminate session nil reason t)))
+    (ende-speech--terminate session nil reason)))
 
 (defun ende-speech--transcript-buffer-killed ()
   "Cancel the active session if its transcript buffer is killed."
@@ -699,7 +699,7 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
     (condition-case nil
         (let* ((json-object-type 'alist)
                (json-array-type 'list)
-               (json-key-type 'symbol)
+               (json-key-type 'string)
                (event (json-read-from-string text)))
           (ende-speech--handle-event session event))
       (error nil))))
