@@ -42,6 +42,7 @@
           (insert "user-owned source")
           (setq root (ende-enqueue (ende-test--dashboard-request
                                    ende-test--dashboard-profile)))
+          (should (eq root (ende-queue-live-job-by-id (ende-job-id root))))
           (setq old-family (ende-job-family root))
           (let ((ende--queue-suspended nil)) (ende-process-next))
           (setq child
@@ -50,6 +51,7 @@
                             :instruction '(:task "Retained child")
                             :prepare #'ende-agent-private-target)
                  (ende-job-next-child-path root)))
+          (should (eq child (ende-queue-live-job-by-id (ende-job-id child))))
           (should-not (ende-job-work-buffer child))
           (setq child-buffer (ende-job-owned-buffer child)
                 child-target (ende-job-target child)
@@ -69,9 +71,11 @@
           (should-not (ende-job-children root))
           (should (= (length (ende-job-family-members old-family)) 2))
           (should (eq child (ende-queue-retained-job-by-id (ende-job-id child))))
+          (should-not (ende-queue-live-job-by-id (ende-job-id child)))
           (should-not ende--finished-families)
           (ende-job-finish root "root answer")
           (should (equal ende--finished-families (list old-family)))
+          (should-not (ende-queue-live-job-by-id (ende-job-id root)))
           (setq child-work (ende-work-buffer-open child))
           (save-window-excursion
             (set-window-buffer (selected-window) child-work)
@@ -94,6 +98,7 @@
           (ende--job-settle second 'completed "newest")
           (should-not (gethash (ende-job-id child) ende--retained-jobs))
           (should-not (gethash (ende-job-id root) ende--retained-jobs))
+          (should-not (ende-queue-live-job-by-id (ende-job-id child)))
           (should-not (buffer-live-p child-work))
           (should-not (ende-job-work-buffer child))
           (should-not (ende-job-transcript child))
@@ -129,6 +134,7 @@
                        (lambda (_) (error "publication failed"))))
               (should-error (ende-enqueue request)))
             (should-not (gethash (ende-job-id job) ende--retained-jobs))
+            (should-not (ende-queue-live-job-by-id (ende-job-id job)))
             (should-not (buffer-live-p work))
             (should-not (ende-job-transcript job))
             (should-not (buffer-live-p buffer))

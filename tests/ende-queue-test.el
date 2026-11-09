@@ -907,6 +907,7 @@
         (ende--job-register-origin root)
         (ende--queue-push family)
         (ende--queue-insert-family-member root)
+        (ende--retain-published-job root)
         (setq ende--queue-suspended nil)
         (ende-process-next)
         (should (= (length ende-test--calls) 1))

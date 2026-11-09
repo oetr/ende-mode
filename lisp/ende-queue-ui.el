@@ -299,14 +299,14 @@
              (goto-char (point-min)) (forward-line (1- (cdr entry))) (point)) t))))))
 
 (defun ende-queue-ui--current-job (&optional live)
-  "Resolve the current row through the retained index, or scheduler if LIVE."
+  "Resolve the current row through the retained index, requiring live if LIVE."
   (let* ((id (get-text-property (line-beginning-position) 'ende-queue-ui-job-id))
          (job (and id (if live (ende-queue-live-job-by-id id)
                         (ende-queue-retained-job-by-id id)))))
     (or job (user-error (if live "Select an eligible live job" "No retained job at point")))))
 
 (defun ende-queue-ui--selected-jobs ()
-  "Resolve marked IDs through the live scheduler, or select the current live job."
+  "Resolve marked live IDs, or select the current live job."
   (if (= (hash-table-count ende-queue-ui--marked-ids) 0)
       (list (ende-queue-ui--current-job t))
     (mapcar (lambda (id) (or (ende-queue-live-job-by-id id)

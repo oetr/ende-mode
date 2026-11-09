@@ -1337,8 +1337,9 @@ When called interactively, prompt for one of the configured providers."
   ende-queue-paused)
 
 (defun ende-queue-live-job-by-id (id)
-  "Return the live job with stable ID, or nil."
-  (cl-find id (ende-all-live-jobs) :key #'ende-job-id :test #'eql))
+  "Return the published live job with stable ID, or nil."
+  (let ((job (ende-queue-retained-job-by-id id)))
+    (and (ende-job-live-p job) job)))
 
 (defun ende-queue-change-policy (ids policy)
   "Set queued jobs named by IDS to POLICY, then dispatch once if allowed.
