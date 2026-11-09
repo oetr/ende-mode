@@ -54,6 +54,7 @@
     (org-mode)
     (insert "Ordinary prose: tools inspect and resource outside.\n"
             "#+begin_ende\n"
+            "(config \"settings.el\")\n"
             "(resource docs (:type file) (include \"file;url\") (exclude \"tmp\") ; note\n"
             "(tools inspect)\n"
             "#+end_ende\n")
@@ -75,6 +76,8 @@
                   'font-lock-preprocessor-face))
       (should (eq (ende-test--presentation-face-at "resource" block-start)
                   'font-lock-keyword-face))
+      (should (eq (ende-test--presentation-face-at "config" block-start)
+                  'font-lock-keyword-face))
       (should (eq (ende-test--presentation-face-at "include" block-start)
                   'font-lock-builtin-face))
       (should (eq (ende-test--presentation-face-at "exclude" block-start)
@@ -93,8 +96,9 @@
 (ert-deftest ende-test/config-presentation-eldoc-and-disable-are-buffer-local ()
   (with-temp-buffer
     (org-mode)
-    (insert "resource outside\ninclude outside\n:type outside\n"
+    (insert "config outside\nresource outside\ninclude outside\n:type outside\n"
             "set-tool-resources outside\n#+begin_ende\n"
+            "(config \"settings.el\")\n"
             "(resource docs (:type file) (include \"*.el\"))\n"
             "(set-tool-resources inspect :resources docs)\n"
             "#+end_ende\n")
@@ -107,11 +111,11 @@
                            (goto-char (point-min))
                            (search-forward "#+begin_ende")
                            (line-beginning-position))))
-        (dolist (token '("resource" "include" ":type"
+        (dolist (token '("config" "resource" "include" ":type"
                          "set-tool-resources" "#+begin_ende"))
           (should (> (length (ende-test--presentation-doc-at token block-start))
                      0))))
-      (dolist (token '("resource" "include" ":type" "set-tool-resources"))
+      (dolist (token '("config" "resource" "include" ":type" "set-tool-resources"))
         (should-not (ende-test--presentation-doc-at token (point-min))))
       (should (memq #'ende--eldoc-documentation
                     eldoc-documentation-functions))

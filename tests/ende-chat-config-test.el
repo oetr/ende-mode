@@ -1424,13 +1424,16 @@
 
 
 (ert-deftest ende-test/chat-config-dispatch-uses-live-scopes-and-freezes-tool-access ()
-  (let ((root (make-temp-file "ende-config-dispatch-" t)))
+  (let* ((root (make-temp-file "ende-config-dispatch-" t))
+         (config-file (expand-file-name "scope.el" root)))
     (ende-test--reset)
     (unwind-protect
         (progn
           (dolist (path '("public.el" "private.el"))
             (with-temp-file (expand-file-name path root)
               (insert path "\n")))
+          (with-temp-file config-file
+            (insert "(resource project (include \"private.el\"))\n"))
           (let ((ende-llm-function
                  (ende-test--fake-llm
                   (list
@@ -1452,8 +1455,7 @@
                   (set-tool-resources inspect :resources project)))
                "* Conversation\n** Question\n"
                (ende-test--chat-config-block
-                '((group inspect read_file)
-                  (resource project (include "public.el"))))
+                `((group inspect read_file) (config ,config-file)))
                "Read the files.\n** Next\nContinue.\n")
               (ende-test--chat-goto "** Question")
               (setq ende--queue-suspended t)
@@ -1463,13 +1465,14 @@
                 (beginning-of-line)
                 (insert "(tools inspect)\n"
                         "(set-tool-resources inspect :resources project)\n")
+                (with-temp-file config-file
+                  (insert "(resource project (include \"public.el\"))\n"))
                 (setq ende--queue-suspended nil)
                 (ende-process-next)
                 (should (eq (ende-job-state job) 'running))
                 (should (= (length ende-test--calls) 1))
-                (ende-test--chat-goto "** Question")
-                (search-forward "(include \"public.el\")")
-                (replace-match "(include \"private.el\")" t t)
+                (with-temp-file config-file
+                  (insert "(resource project (include \"private.el\"))\n"))
                 (ende-test--complete-call (car ende-test--calls))
                 (should (= (length ende-test--calls) 2))
                 (let* ((messages (plist-get (cadr ende-test--calls) :messages))

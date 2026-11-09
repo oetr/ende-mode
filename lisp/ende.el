@@ -140,7 +140,9 @@
 (add-hook 'ende-review-change-functions #'ende--mode-line-review-event)
 
 (defconst ende--config-vocabulary
-  '(("root" top-level "root PATH — Set the configuration root directory.")
+  '(("config" top-level
+     "config FILE... — Prepend configuration files to this body. Paths are relative to the buffer directory, or the importing file's directory for nested imports. Duplicate declarations are errors.")
+    ("root" top-level "root PATH — Set the configuration root directory.")
     ("podman-image" top-level
      "podman-image IMAGE — Select a digest-pinned Podman image.")
     ("group" top-level "group NAME TOOL... — Define a named tool group.")
