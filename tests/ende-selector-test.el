@@ -1180,6 +1180,67 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest ende-test/selector-rollback-preserves-unwritten-history ()
+  (dolist (existing '(nil t))
+    (ende-test--with-selector-tables
+        ((ende-providers '(remote))
+         (ende-custom-providers
+          (ende-test--custom-profile 'remote :models '("first" "second")))
+         (ende-model-selection-scope 'buffer)
+         (ende-model-selection--last-used nil)
+         (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+         (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
+         (ende-model-selection--provenance (make-hash-table :test #'equal))
+         (ende-provider--runtime-settings (make-hash-table :test #'eq))
+         (setter (symbol-function 'ende-provider-set-runtime-setting)))
+      (with-temp-buffer
+        (let ((source (current-buffer)))
+          (when existing
+            (setq-local ende-model-selection--buffer-selection nil)
+            (puthash 'remote nil ende-provider--runtime-settings)
+            (ende-model-selection-save-control-preferences 'remote "first" nil nil source))
+          (let* ((controls (ende-model-selection--buffer-preference-table source))
+                 (tables (list ende-provider--runtime-settings
+                               ende-model-selection--buffer-selections
+                               ende-model-selection--provider-selections
+                               ende-model-selection--buffer-provider-selections
+                               ende-model-selection--shared-control-preferences
+                               ende-model-selection--buffer-control-preferences
+                               ende-model-selection--provenance))
+                 (before (mapcar #'copy-hash-table tables)))
+            (with-temp-buffer
+              (ende-selector-mode)
+              (ende-test--selector-ready-state source 'remote '("first" "second"))
+              (ende-selector--set-control-context)
+              (ende-selector--set-control-preference :temperature 0.4)
+              (ende-selector--set-draft-runtime :max-concurrency 4)
+              (cl-letf (((symbol-function 'ende-provider-set-runtime-setting)
+                         (lambda (&rest args)
+                           (apply setter args)
+                           (dolist (table tables) (puthash 'unrelated :kept table))
+                           (signal (if existing 'quit 'error) nil))))
+                (let ((failure (condition-case err
+                                   (progn (ende-selector--commit) nil)
+                                 ((error quit) err))))
+                  (should (eq (car failure) (if existing 'quit 'error)))))
+              (should (plist-get (ende-selector--draft-runtime-state) :changed)))
+            (cl-mapc (lambda (table snapshot)
+                       (should (eq (gethash 'unrelated table) :kept))
+                       (should (= (hash-table-count table)
+                                  (1+ (hash-table-count snapshot))))
+                       (maphash (lambda (key value)
+                                  (should (equal (gethash key table :missing) value)))
+                                snapshot))
+                     tables before)
+            (should (eq controls (ende-model-selection--buffer-preference-table source)))
+            (should (equal (ende-model-selection--control-preference-entry
+                            'remote "first" nil source)
+                           (and existing '(t))))
+            (should (eq (local-variable-p 'ende-model-selection--buffer-selection source)
+                        existing))
+            (should-not ende-model-selection--buffer-selection)
+            (should-not ende-model-selection--last-used)))))))
+
 (ert-deftest ende-test/selector-validates-dirty-connections-before-commit ()
   (ende-test--with-selector-tables
       ((ende-providers '(remote))

@@ -97,6 +97,52 @@ When nil, use only the response inactivity timeout."
 (defvar ende-provider--runtime-settings (make-hash-table :test #'eq)
   "Session-level provider settings changed from the selector.")
 
+(defvar ende-provider--selection-undo nil
+  "Undo journal of the current selection transaction, or nil.")
+
+(defun ende-provider--call-with-selection-transaction (function)
+  "Call FUNCTION, undoing its selection writes if it exits abnormally."
+  (let ((ende-provider--selection-undo (list nil))
+        completed)
+    (unwind-protect
+        (prog1 (funcall function)
+          (setq completed t))
+      (unless completed
+        (mapc #'funcall (cdr ende-provider--selection-undo))))))
+
+(defun ende-provider--selection-puthash (key value table)
+  "Store VALUE under KEY in TABLE, journaling only this entry."
+  (when ende-provider--selection-undo
+    (let* ((missing (make-symbol "missing"))
+           (previous (gethash key table missing)))
+      (push (lambda ()
+              (if (eq previous missing)
+                  (remhash key table)
+                (puthash key previous table)))
+            (cdr ende-provider--selection-undo))))
+  (puthash key value table))
+
+(defun ende-provider--selection-set (variable value &optional buffer)
+  "Set VARIABLE to VALUE, preserving BUFFER's local status on rollback."
+  (if buffer
+      (with-current-buffer buffer
+        (when ende-provider--selection-undo
+          (let ((previous (symbol-value variable))
+                (local (local-variable-p variable)))
+            (push (lambda ()
+                    (when (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        (if local
+                            (set variable previous)
+                          (kill-local-variable variable)))))
+                  (cdr ende-provider--selection-undo))))
+        (set variable value))
+    (when ende-provider--selection-undo
+      (let ((previous (symbol-value variable)))
+        (push (lambda () (set variable previous))
+              (cdr ende-provider--selection-undo))))
+    (set variable value)))
+
 (defvar ende-model-selection--last-used nil
   "Most recently used provider, model, and optional control-preferences plist.")
 
@@ -207,8 +253,8 @@ Supported settings are `:max-concurrency' and `:parallel'."
     (_ (error "Unsupported provider runtime setting: %s" key)))
   (let ((settings (copy-sequence
                    (gethash name ende-provider--runtime-settings))))
-    (puthash name (plist-put settings key value)
-             ende-provider--runtime-settings))
+    (ende-provider--selection-puthash
+     name (plist-put settings key value) ende-provider--runtime-settings))
   value)
 
 (defun ende-provider-clear-runtime-settings ()
@@ -459,7 +505,8 @@ kept lexical so recording a preference never initiates a TRAMP connection."
       (or (gethash identity ende-model-selection--buffer-provider-selections)
           (when create
             (let ((table (make-hash-table :test #'eq)))
-              (puthash identity table ende-model-selection--buffer-provider-selections)
+              (ende-provider--selection-puthash
+               identity table ende-model-selection--buffer-provider-selections)
               table))))))
 
 (defun ende-model-selection-provider-for-buffer (provider &optional buffer)
@@ -477,10 +524,12 @@ kept lexical so recording a preference never initiates a TRAMP connection."
          (buffer (or buffer (current-buffer))))
     (unless selection
       (error "A model selection requires a provider and model"))
-    (puthash provider (copy-tree selection) ende-model-selection--provider-selections)
+    (ende-provider--selection-puthash
+     provider (copy-tree selection) ende-model-selection--provider-selections)
     (when (and (eq ende-model-selection-scope 'buffer) (buffer-live-p buffer))
-      (puthash provider (copy-tree selection)
-               (ende-model-selection-provider-table buffer t)))
+      (ende-provider--selection-puthash
+       provider (copy-tree selection)
+       (ende-model-selection-provider-table buffer t)))
     (copy-tree selection)))
 
 (defun ende-model-selection--normalize (selection)
@@ -529,8 +578,8 @@ Nil API resolves to PROVIDER's configured default API."
       (or (gethash identity ende-model-selection--buffer-control-preferences)
           (when create
             (let ((table (make-hash-table :test #'equal)))
-              (puthash identity table
-                       ende-model-selection--buffer-control-preferences)
+              (ende-provider--selection-puthash
+               identity table ende-model-selection--buffer-control-preferences)
               table))))))
 
 (defun ende-model-selection--control-preference-entry
@@ -589,12 +638,13 @@ In global scope update only shared history."
     (unless (memq ende-model-selection-scope '(buffer global))
       (error "Invalid `ende-model-selection-scope': %s"
              ende-model-selection-scope))
-    (puthash pair (copy-tree preferences)
-             ende-model-selection--shared-control-preferences)
+    (ende-provider--selection-puthash
+     pair (copy-tree preferences) ende-model-selection--shared-control-preferences)
     (when (and (eq ende-model-selection-scope 'buffer)
                (buffer-live-p buffer))
-      (puthash pair (copy-tree preferences)
-               (ende-model-selection--buffer-preference-table buffer t)))
+      (ende-provider--selection-puthash
+       pair (copy-tree preferences)
+       (ende-model-selection--buffer-preference-table buffer t)))
     (copy-tree preferences)))
 
 (defun ende-model-selection-remember-pair (provider model api &optional buffer connection)
@@ -630,11 +680,12 @@ defaults remain authoritative."
                 (or ende-model-selection--buffer-selection
                     (gethash key ende-model-selection--buffer-selections)
                     ende-model-selection--last-used)))
-          (when (setq ende-model-selection--buffer-selection
-                      (ende-model-selection--normalize selection))
-            (puthash key
-                     (copy-tree ende-model-selection--buffer-selection)
-                     ende-model-selection--buffer-selections)))))
+          (when (ende-provider--selection-set
+                 'ende-model-selection--buffer-selection
+                 (ende-model-selection--normalize selection) buffer)
+            (ende-provider--selection-puthash
+             key (copy-tree ende-model-selection--buffer-selection)
+             ende-model-selection--buffer-selections)))))
     (ende-model-selection-for-buffer buffer)))
 
 (defun ende-model-selection-for-buffer (&optional buffer)
@@ -689,19 +740,20 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
                         (ende-model-selection-connection selection))
                      (error nil))))
       (when profile
-        (puthash (ende-model-selection--provenance-key selection)
-                 (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
-    (setq ende-model-selection--last-used (copy-tree selection))
+        (ende-provider--selection-puthash
+         (ende-model-selection--provenance-key selection)
+         (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
+    (ende-provider--selection-set 'ende-model-selection--last-used (copy-tree selection))
     (pcase ende-model-selection-scope
       ('global nil)
       ('buffer
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
-           (setq ende-model-selection--buffer-selection
-                 (copy-tree selection))
-           (puthash (ende-model-selection--buffer-key buffer)
-                    (copy-tree selection)
-                    ende-model-selection--buffer-selections))))
+           (ende-provider--selection-set
+            'ende-model-selection--buffer-selection (copy-tree selection) buffer)
+           (ende-provider--selection-puthash
+            (ende-model-selection--buffer-key buffer) (copy-tree selection)
+            ende-model-selection--buffer-selections))))
       (_ (error "Invalid `ende-model-selection-scope': %s"
                 ende-model-selection-scope)))
     (copy-tree selection)))

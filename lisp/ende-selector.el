@@ -1437,78 +1437,6 @@ performed locally so typing a search term never starts another network request."
        ende-selector--draft-runtime)
       changed)))
 
-(defun ende-selector--copy-hash-table (table)
-  "Copy TABLE's contents, including nested hash tables."
-  (let ((copy (make-hash-table :test (hash-table-test table))))
-    (maphash (lambda (key value)
-               (puthash key (if (hash-table-p value)
-                                (ende-selector--copy-hash-table value)
-                              (copy-tree value))
-                        copy))
-             table)
-    copy))
-
-(defun ende-selector--restore-hash-table (table snapshot)
-  "Restore TABLE from SNAPSHOT."
-  (clrhash table)
-  (maphash (lambda (key value) (puthash key value table)) snapshot))
-
-(defun ende-selector--commit-snapshot ()
-  "Capture committed selector state for rollback if a write fails."
-  (let ((source (or ende-selector--source-buffer (current-buffer))))
-    (list :runtime (ende-selector--copy-hash-table ende-provider--runtime-settings)
-          :last-used (copy-tree ende-model-selection--last-used)
-          :selections (ende-selector--copy-hash-table
-                       ende-model-selection--buffer-selections)
-          :provider-selections
-          (ende-selector--copy-hash-table
-           ende-model-selection--provider-selections)
-          :buffer-provider-selections
-          (ende-selector--copy-hash-table
-           ende-model-selection--buffer-provider-selections)
-          :shared-controls (ende-selector--copy-hash-table
-                            ende-model-selection--shared-control-preferences)
-          :buffer-controls (ende-selector--copy-hash-table
-                            ende-model-selection--buffer-control-preferences)
-          :provenance (ende-selector--copy-hash-table
-                       ende-model-selection--provenance)
-          :source source
-          :source-selection-local
-          (and (buffer-live-p source)
-               (buffer-local-value 'ende-model-selection--buffer-selection source))
-          :source-selection-local-p
-          (and (buffer-live-p source)
-               (local-variable-p 'ende-model-selection--buffer-selection source)))))
-
-(defun ende-selector--restore-commit-snapshot (snapshot)
-  "Restore committed selector state from SNAPSHOT."
-  (ende-selector--restore-hash-table
-   ende-provider--runtime-settings (plist-get snapshot :runtime))
-  (setq ende-model-selection--last-used (plist-get snapshot :last-used))
-  (ende-selector--restore-hash-table
-   ende-model-selection--buffer-selections (plist-get snapshot :selections))
-  (ende-selector--restore-hash-table
-   ende-model-selection--provider-selections
-   (plist-get snapshot :provider-selections))
-  (ende-selector--restore-hash-table
-   ende-model-selection--buffer-provider-selections
-   (plist-get snapshot :buffer-provider-selections))
-  (ende-selector--restore-hash-table
-   ende-model-selection--shared-control-preferences
-   (plist-get snapshot :shared-controls))
-  (ende-selector--restore-hash-table
-   ende-model-selection--buffer-control-preferences
-   (plist-get snapshot :buffer-controls))
-  (ende-selector--restore-hash-table
-   ende-model-selection--provenance (plist-get snapshot :provenance))
-  (let ((source (plist-get snapshot :source)))
-    (when (buffer-live-p source)
-      (with-current-buffer source
-        (if (plist-get snapshot :source-selection-local-p)
-            (setq-local ende-model-selection--buffer-selection
-                        (plist-get snapshot :source-selection-local))
-          (kill-local-variable 'ende-model-selection--buffer-selection))))))
-
 (defun ende-selector--finish-draft-commit ()
   "Mark successfully committed drafts as their new initial values."
   (when (hash-table-p ende-selector--draft-controls)
@@ -1533,35 +1461,31 @@ performed locally so typing a search term never starts another network request."
 (defun ende-selector--commit ()
   "Commit validated provisional settings and the current model selection."
   (ende-selector--validate-draft)
-  (let ((snapshot (ende-selector--commit-snapshot))
-        runtime-changed
+  (let (runtime-changed
         selection)
-    (condition-case error-data
-        (progn
-          (when (hash-table-p ende-selector--draft-controls)
-            (maphash
-             (lambda (key state)
-               (when (and (plist-get state :dirty)
-                          (not (equal key (ende-selector--control-key))))
-                 (ende-model-selection-save-control-preferences
-                  (plist-get state :provider) (plist-get state :model)
-                  (plist-get state :api) (plist-get state :preferences)
-                  (or ende-selector--source-buffer (current-buffer))
-                  (plist-get state :connection))))
-             ende-selector--draft-controls))
-          (when (hash-table-p ende-selector--draft-selections)
-            (maphash
-             (lambda (_provider saved)
-               (ende-model-selection-save-provider
-                saved (or ende-selector--source-buffer (current-buffer))))
-             ende-selector--draft-selections))
-          (setq selection (ende-selector--save-selection))
-          (unless selection (user-error "No ready model available"))
-          (setq runtime-changed (ende-selector--commit-runtime-settings))
-          (ende-selector--finish-draft-commit))
-      ((error quit)
-       (ende-selector--restore-commit-snapshot snapshot)
-       (signal (car error-data) (cdr error-data))))
+    (ende-provider--call-with-selection-transaction
+     (lambda ()
+       (when (hash-table-p ende-selector--draft-controls)
+         (maphash
+          (lambda (key state)
+            (when (and (plist-get state :dirty)
+                       (not (equal key (ende-selector--control-key))))
+              (ende-model-selection-save-control-preferences
+               (plist-get state :provider) (plist-get state :model)
+               (plist-get state :api) (plist-get state :preferences)
+               (or ende-selector--source-buffer (current-buffer))
+               (plist-get state :connection))))
+          ende-selector--draft-controls))
+       (when (hash-table-p ende-selector--draft-selections)
+         (maphash
+          (lambda (_provider saved)
+            (ende-model-selection-save-provider
+             saved (or ende-selector--source-buffer (current-buffer))))
+          ende-selector--draft-selections))
+       (setq selection (ende-selector--save-selection))
+       (unless selection (user-error "No ready model available"))
+       (setq runtime-changed (ende-selector--commit-runtime-settings))
+       (ende-selector--finish-draft-commit)))
     (when runtime-changed
       (ende-ignore-errors #'ende-process-next))
     selection))
