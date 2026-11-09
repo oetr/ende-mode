@@ -1226,6 +1226,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
        (ende-codex--session-stream session)
        (ende-content-generated-image (ende-protocol-json-get "result" item))))
     (when (member type '("response.completed" "response.done" "response.incomplete" "response.failed"))
+      (when (vectorp output)
+        (setf (ende-codex--session-tool-calls session) nil))
       (cl-loop for entry in (ende-codex--output-items output) for index from 0
                do (ende-codex--observe-output
                    session entry (or (ende-protocol-json-get "output_index" entry) index))

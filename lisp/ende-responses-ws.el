@@ -549,21 +549,39 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (setf (ende-responses-ws-request-connect-timer request) nil))
       (ende-responses-ws--send request))))
 
-(defun ende-responses-ws--validate-item (request index id &optional introduce)
-  "Validate REQUEST's association of INDEX with ID, optionally INTRODUCE it."
+(defun ende-responses-ws--validate-item (request index id &optional introduce item)
+  "Validate INDEX and ID for REQUEST, optionally INTRODUCE ITEM's identity."
   (unless (and (natnump index) (stringp id) (not (string-empty-p id)))
     (error "Missing Responses item identity"))
   (let* ((items (ende-responses-ws-request-items-by-index request))
          (indices (ende-responses-ws-request-item-indices request))
-         (known-id (gethash index items))
+         (known (gethash index items))
+         (known-id (car known))
+         (identity
+          (when item
+            (let* ((type (ende-protocol-json-get "type" item))
+                   (identity (list id type)))
+              (when (equal type "function_call")
+                (setq identity
+                      (append identity
+                              (list (ende-protocol-json-get "call_id" item)
+                                    (ende-protocol-json-get "name" item))))
+                (unless (stringp (ende-protocol-json-get "arguments" item))
+                  (error "Missing Responses function arguments")))
+              (unless (cl-every (lambda (value) (and (stringp value) (not (string-empty-p value))))
+                                identity)
+                (error "Missing Responses item identity"))
+              (append identity (list (ende-protocol-json-get "namespace" item))))))
          (known-index (gethash id indices)))
+    (when (and identity known (not (equal identity known)))
+      (error "Responses item identity changed"))
     (unless (if introduce
                 (and (or (null known-id) (equal known-id id))
                      (or (null known-index) (eql known-index index)))
               (and (equal known-id id) (eql known-index index)))
       (error "Responses item does not belong to this output index"))
     (when introduce
-      (puthash index id items)
+      (puthash index identity items)
       (puthash id index indices))))
 
 (defun ende-responses-ws--validate-event (request json)
@@ -597,11 +615,12 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                                   "response.reasoning_summary_text.delta" "response.reasoning_summary_text.done"
                                   "response.function_call_arguments.delta" "response.function_call_arguments.done"))))
       (when (member type '("response.output_item.added" "response.output_item.done"))
-        (let ((id (ende-protocol-json-get "id" (ende-protocol-json-get "item" json)))
+        (let ((item (ende-protocol-json-get "item" json))
               (added (equal type "response.output_item.added")))
           (when (and added (gethash index (ende-responses-ws-request-items-by-index request)))
             (error "Duplicate Responses output item"))
-          (ende-responses-ws--validate-item request index id added)))
+          (ende-responses-ws--validate-item
+           request index (ende-protocol-json-get "id" item) added item)))
       (when (or indexed (ende-protocol-json-has-key-p "item_id" json)
                 (ende-protocol-json-has-key-p "output_index" json))
         (ende-responses-ws--validate-item
@@ -609,8 +628,10 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
          (if (or indexed (ende-protocol-json-has-key-p "output_index" json)) index
            (gethash item-id (ende-responses-ws-request-item-indices request)))
          (if (or indexed (ende-protocol-json-has-key-p "item_id" json)) item-id
-           (gethash index (ende-responses-ws-request-items-by-index request))))))
-    (when (and terminal (ende-protocol-json-has-key-p "output" response))
+           (car (gethash index (ende-responses-ws-request-items-by-index request)))))))
+    (when (and terminal
+               (or (member type '("response.completed" "response.done"))
+                   (ende-protocol-json-has-key-p "output" response)))
       (let ((output (ende-protocol-json-get "output" response)))
         (unless (vectorp output) (error "Invalid Responses output snapshot"))
         (cl-loop for item across output for index from 0 do
@@ -618,7 +639,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                             (not (eql (ende-protocol-json-get "output_index" item) index)))
                    (error "Responses snapshot reorders output items"))
                  (ende-responses-ws--validate-item
-                  request index (ende-protocol-json-get "id" item) t))
+                  request index (ende-protocol-json-get "id" item) t item))
         (unless (= (length output) (hash-table-count (ende-responses-ws-request-items-by-index request)))
           (error "Responses snapshot omits known output items"))))))
 
