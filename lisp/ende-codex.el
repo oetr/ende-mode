@@ -1357,16 +1357,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
      ((member type '("response.failed" "error"))
       (let ((error (or (ende-protocol-json-get "error" response)
                        (ende-protocol-json-get "error" json) json)))
-        (ende-codex--fail
-         session
-         (ende-error-create
-          :kind 'provider
-          :message (ende-transport-safe-error-text
-                    (format "%s" (ende-codex--error-message error)))
-          :details (ende-content-redact error))))))))
+        (ende-codex--fail session (ende-codex--provider-error 'provider error)))))))
 
 (defconst ende-codex--error-hints
-  '(("subscription_sharing_user_not_eligible" .
+  '(("invalid_api_key" . "API key is invalid; check the selected connection's credentials")
+    ("unsupported_parameter" . "A request parameter is not supported")
+    ("subscription_sharing_user_not_eligible" .
      "ChatGPT-plan use is unavailable for this account")
     ("subscription_sharing_usage_limit_exceeded" .
      "ChatGPT-plan usage limit reached")
@@ -1380,29 +1376,25 @@ When APPEND is non-nil, append the argument delta to the stored value."
      "ChatGPT-plan permission is insufficient; connect through the connection selector")
     ("chatpass_v2_invalid_authorization_context" .
      "ChatGPT authorization context is invalid; connect through the connection selector"))
-  "Known ChatGPT-plan error codes and their safe descriptions.")
+  "Known Responses error codes and their safe descriptions.")
 
-(defun ende-codex--error-message (error)
-  "Return a safe human-readable message for provider ERROR metadata."
-  (let ((code (ende-protocol-json-get "code" error)))
-    (or (cdr (assoc code ende-codex--error-hints))
-        (ende-protocol-json-get "message" error)
-        code
-        "ChatGPT request failed")))
-
-(defun ende-codex--error-payload (session)
-  "Return safe provider error metadata parsed from SESSION's response."
-  (condition-case nil
-      (let* ((preview (ende-stream-preview-text
-                       (ende-codex--session-stream session)))
-             (payload (ende-protocol-json-read-string
-                       (ende-transport-safe-error-text preview)))
-             (error (or (ende-protocol-json-get "error" payload) payload)))
-        (when (hash-table-p error)
-          (list :code (ende-protocol-json-get "code" error)
-                :param (ende-protocol-json-get "param" error)
-                :request-id (ende-protocol-json-get "request_id" payload))))
-    (error nil)))
+(defun ende-codex--provider-error (kind error &optional status)
+  "Build a public error of KIND from untrusted ERROR and HTTP STATUS."
+  (let* ((hint (assoc (ende-protocol-json-get "code" error) ende-codex--error-hints))
+         (message (or (cdr hint) "OpenAI Responses request failed"))
+         (param (car (member (ende-protocol-json-get "param" error)
+                             '("model" "input" "instructions" "tools" "tool_choice"
+                               "max_output_tokens" "reasoning" "text"
+                               "prompt_cache_options" "prompt_cache_options.comparison_response_id"))))
+         (status (and (integerp status) (<= 100 status 599) status)))
+    (ende-error-create
+     :kind kind
+     :message (if (eq kind 'http)
+                  (format "HTTP status %s: %s" (or status "unknown") message)
+                message)
+     :details (append (when hint (list :code (car hint)))
+                      (when param (list :param param))
+                      (when status (list :status status))))))
 
 (defun ende-codex--http-error (session &optional response-status)
   "Return a structured, token-free HTTP error for SESSION."
@@ -1411,28 +1403,12 @@ When APPEND is non-nil, append the argument delta to the stored value."
                          (car (ende-stream-response-headers
                                (ende-codex--session-stream session)))
                        (error nil))))
-         (payload (ende-codex--error-payload session))
-         (code (plist-get payload :code))
-         (preview (ende-stream-preview-text
-                   (ende-codex--session-stream session)))
-         (detail (ende-transport-error-detail preview)))
-    (ende-error-create
-     :kind 'http
-     :message
-     (ende-transport-safe-error-text
-      (format "HTTP status %s%s: %s"
-              (or status "unknown")
-              (if (and (stringp code) (not (string-empty-p code)))
-                  (format " %s" code) "")
-              (or (and (stringp code)
-                       (cdr (assoc code ende-codex--error-hints)))
-                  detail
-                  (and (not (string-empty-p (string-trim preview)))
-                       (string-trim preview))
-                  "ChatGPT request failed")))
-     :details (list :status status :code code
-                    :param (plist-get payload :param)
-                    :request-id (plist-get payload :request-id)))))
+         (payload (condition-case nil
+                      (ende-protocol-json-read-string
+                       (ende-stream-preview-text (ende-codex--session-stream session)))
+                    (error nil))))
+    (ende-codex--provider-error
+     'http (or (ende-protocol-json-get "error" payload) payload) status)))
 
 (defun ende-codex--handle-sse-events (session events)
   "Decode Codex JSON EVENTS for SESSION, ignoring Chat Completions markers."
