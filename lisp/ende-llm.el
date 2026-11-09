@@ -106,6 +106,11 @@ The :callbacks argument initializes the composed transport lifecycle."
                       (ende-llm--session-reasoning-content-parts session))
                      ""))
                :tool-calls tool-calls)))
+    (when (eq outcome 'success)
+      (dolist (call tool-calls)
+        (ende-stream-emit-item
+         (ende-llm--session-stream session) (plist-get call :key) 'tool-call
+         "openai-chat-completions" :call (ende-provider-config-copy call))))
     (when record
       (ende-debug-record-completion
        record outcome
@@ -324,20 +329,32 @@ The :callbacks argument initializes the composed transport lifecycle."
                 (list :key key :id id
                       :name (concat (or (plist-get previous :name) "")
                                     (or name ""))
-                      :arguments
-                      (concat (or (plist-get previous :arguments) "")
-                              (or arguments "")))))
+                      :argument-text
+                      (ende-stream-text-append
+                       (or (plist-get previous :argument-text)
+                           (ende-stream-text-create)) arguments))))
           (puthash index collected table)
           (ende-stream-emit-item
            (ende-llm--session-stream session) key 'tool-call
-           "openai-chat-completions" :call collected))))))
+           "openai-chat-completions"
+           :call (ende-llm--tool-call-snapshot collected t)
+           :arguments-delta (or arguments "")))))))
+
+(defun ende-llm--tool-call-snapshot (call &optional metadata-only)
+  "Return detached CALL, consuming argument fragments unless METADATA-ONLY."
+  (ende-provider-config-copy
+   (append
+    (cl-loop for (key value) on call by #'cddr
+             unless (eq key :argument-text) append (list key value))
+    (unless metadata-only
+      (list :arguments (ende-stream-text-string (plist-get call :argument-text)))))))
 
 (defun ende-llm--tool-call-list (session)
   "Return collected calls from SESSION in provider index order."
   (let (calls)
     (when (hash-table-p (ende-llm--session-tool-calls session))
       (maphash (lambda (index call)
-                 (push (cons index call) calls))
+                 (push (cons index (ende-llm--tool-call-snapshot call)) calls))
                (ende-llm--session-tool-calls session)))
     (mapcar #'cdr
             (sort calls (lambda (left right) (< (car left) (car right)))))))
