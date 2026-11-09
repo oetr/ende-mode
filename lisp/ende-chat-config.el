@@ -36,18 +36,30 @@
 (require 'ende-url)
 (require 'ende-tools)
 
-(defvar ende-chat-config--block-line nil
-  "Line of the configuration block currently being applied, if any.")
+(cl-defstruct (ende-chat-config--form
+               (:constructor ende-chat-config--make-form))
+  value file line parent)
 
-(defvar ende-chat-config--block-state nil
-  "State used to detect duplicate host policy declarations in a block.")
+(defvar ende-chat-config--current-form nil
+  "Source form being read or applied.")
+
+(defun ende-chat-config--location (form)
+  "Describe FORM's source and inclusion chain."
+  (mapconcat
+   #'identity
+   (cl-loop for source = form then (ende-chat-config--form-parent source)
+            while source
+            collect (format "%s:%d" (ende-chat-config--form-file source)
+                            (ende-chat-config--form-line source)))
+   " <- "))
 
 (defun ende-chat-config--error (format-string &rest arguments)
   "Signal a configuration error formatted with FORMAT-STRING and ARGUMENTS."
   (error "ende chat config: %s%s"
          (apply #'format format-string arguments)
-         (if ende-chat-config--block-line
-             (format " (block at line %d)" ende-chat-config--block-line)
+         (if ende-chat-config--current-form
+             (format " (at %s)"
+                     (ende-chat-config--location ende-chat-config--current-form))
            "")))
 
 (defun ende-chat-config--reject-reader-dispatch (source)
@@ -89,25 +101,48 @@
        (t (setq done t))))
     position))
 
-(defun ende-chat-config--read-forms (source)
-  "Read data forms from SOURCE without Emacs reader dispatch syntax."
-  (ende-chat-config--reject-reader-dispatch source)
-  (let ((position 0)
-        forms)
-    (setq position (ende-chat-config--skip-space source position))
+(defun ende-chat-config--locate-form (value source)
+  "Attach SOURCE to VALUE and its agent configuration body, if any."
+  (let ((form (copy-ende-chat-config--form source)))
+    (setf (ende-chat-config--form-value form)
+          (if (and (ende-chat-config--proper-list-p value)
+                   (eq (car value) 'agent-config)
+                   (>= (length value) 2))
+              (cons 'agent-config
+                    (cons (cadr value)
+                          (mapcar (lambda (body-form)
+                                    (ende-chat-config--locate-form body-form source))
+                                  (cddr value))))
+            value))
+    form))
+
+(defun ende-chat-config--read-forms (source &optional file line parent)
+  "Read located data forms from SOURCE, starting at FILE and LINE.
+PARENT identifies the importing form, if any."
+  (let* ((file (or file buffer-file-name (buffer-name)))
+         (line (or line 1))
+         (ende-chat-config--current-form
+          (ende-chat-config--make-form :file file :line line :parent parent))
+         (position 0)
+         forms)
+    (ende-chat-config--reject-reader-dispatch source)
     (while (< position (length source))
-      (condition-case caught
-          (let* ((parsed (read-from-string source position))
-                 (form (car parsed))
-                 (end (cdr parsed)))
-            (unless (> end position)
-              (ende-chat-config--error "could not read configuration"))
-            (push form forms)
-            (setq position (ende-chat-config--skip-space source end)))
-        (end-of-file
-         (signal (car caught) (cdr caught)))
-        (error
-         (ende-chat-config--error "%s" (error-message-string caught)))))
+      (let ((start (ende-chat-config--skip-space source position)))
+        (cl-incf line (cl-count ?\n source :start position :end start))
+        (setq position start))
+      (when (< position (length source))
+        (let ((ende-chat-config--current-form
+               (ende-chat-config--make-form :file file :line line :parent parent)))
+          (condition-case caught
+              (let* ((parsed (read-from-string source position))
+                     (end (cdr parsed)))
+                (push (ende-chat-config--locate-form
+                       (car parsed) ende-chat-config--current-form)
+                      forms)
+                (cl-incf line (cl-count ?\n source :start position :end end))
+                (setq position end))
+            (error
+             (ende-chat-config--error "%s" (error-message-string caught)))))))
     (nreverse forms)))
 
 (defun ende-chat-config--proper-list-p (value)
@@ -187,13 +222,23 @@
          (org-element-property :begin block)
          end)))))
 
-(defun ende-chat-config--block-forms (block)
-  "Read the forms in configuration BLOCK."
-  (let ((parameters (string-trim
-                     (or (org-element-property :parameters block) ""))))
+(defun ende-chat-config--block-forms (block &optional file parent)
+  "Read configuration BLOCK in FILE, imported by PARENT if non-nil."
+  (let* ((file (or file buffer-file-name (buffer-name)))
+         (ende-chat-config--current-form
+          (ende-chat-config--make-form
+           :file file :line (line-number-at-pos
+                            (org-element-property :begin block) t)
+           :parent parent))
+         (parameters (string-trim
+                      (or (org-element-property :parameters block) ""))))
     (unless (string-empty-p parameters)
       (ende-chat-config--error "ende blocks do not accept parameters"))
-    (ende-chat-config--read-forms (ende-chat-config--block-source block))))
+    (ende-chat-config--read-forms
+     (ende-chat-config--block-source block) file
+     (line-number-at-pos (or (org-element-property :contents-begin block)
+                            (org-element-property :begin block)) t)
+     parent)))
 
 (defun ende-chat-config--agent-definition (form)
   "Validate and return the (NAME . BODY) definition in FORM."
@@ -201,12 +246,14 @@
     (ende-chat-config--error "malformed agent-config definition: %S" form))
   (let ((name (ende-chat-config--name (nth 1 form) "agent config"))
         (body (cddr form)))
-    (dolist (body-form body)
-      (unless (ende-chat-config--proper-list-p body-form)
-        (ende-chat-config--error "malformed form in agent-config %s: %S"
-                                 name body-form))
-      (when (eq (car body-form) 'agent-config)
-        (ende-chat-config--error "nested agent-config definitions are not allowed")))
+    (dolist (source body)
+      (let ((ende-chat-config--current-form source)
+            (body-form (ende-chat-config--form-value source)))
+        (unless (ende-chat-config--proper-list-p body-form)
+          (ende-chat-config--error "malformed form in agent-config %s: %S"
+                                   name body-form))
+        (when (eq (car body-form) 'agent-config)
+          (ende-chat-config--error "nested agent-config definitions are not allowed"))))
     (cons name body)))
 
 (defun ende-chat-config--copy (configuration)
@@ -619,13 +666,8 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
                                    tools))))
          configuration)))
     ('restrict-host-commands
-     (when (plist-get ende-chat-config--block-state :host-policy-defined)
-       (ende-chat-config--error
-        "only one restrict-host-commands form is allowed per block"))
-     (let ((policy (ende-chat-config--host-command-rules (cdr form))))
-       (setq ende-chat-config--block-state
-             (plist-put ende-chat-config--block-state :host-policy-defined t))
-       (plist-put configuration :host-command-policy policy)))
+     (plist-put configuration :host-command-policy
+                (ende-chat-config--host-command-rules (cdr form))))
     ('set-tool-resources
      (ende-chat-config--assign-resources form configuration nil))
     ('add-tool-resources
@@ -636,42 +678,55 @@ When ADDITIVE is non-nil, union with each tool's current assignment."
      (plist-put configuration :grants nil))
     (_ (ende-chat-config--error "unsupported form: %S" (car form)))))
 
+(defun ende-chat-config--declare (source declarations)
+  "Record SOURCE in DECLARATIONS, rejecting duplicate declarations."
+  (let* ((form (ende-chat-config--form-value source))
+         (operation (car form))
+         (key (pcase operation
+                ((or 'group 'resource 'agent-config)
+                 (cons operation (cadr form)))
+                ((or 'root 'podman-image 'spawn-agent-config
+                     'restrict-host-commands)
+                 operation))))
+    (when key
+      (when-let* ((previous (gethash key declarations)))
+        (ende-chat-config--error
+         "%s is defined twice (first at %s)"
+         (if (consp key) (format "%s %s" (car key) (cdr key)) key)
+         (ende-chat-config--location previous)))
+      (puthash key source declarations))))
+
 (defun ende-chat-config--apply-forms (forms configuration context)
   "Apply ordinary FORMS to CONFIGURATION, identifying errors with CONTEXT.
 CONTEXT is \"block\" or \"agent-config NAME\".  Stage definitions, root and
 image first for forward references, then apply other forms in source order.
 Duplicate declarations are local to this evaluation, not inherited state."
-  (let ((ende-chat-config--block-state (list :host-policy-defined nil))
-        (definitions nil)
-        (singletons nil))
+  (let ((declarations (make-hash-table :test #'equal))
+        (sources (plist-get configuration :sources)))
     (condition-case failure
         (progn
-          (dolist (form forms)
-            (unless (ende-chat-config--proper-list-p form)
-              (ende-chat-config--error
-               "configuration form must be a list: %S" form))
-            (let ((operation (car form)))
-              (when (memq operation '(group resource))
-                (let ((key (cons operation (nth 1 form))))
-                  (when (member key definitions)
-                    (ende-chat-config--error "%s is defined twice: %s"
-                                             operation (nth 1 form)))
-                  (push key definitions)))
-              (when (memq operation '(root podman-image spawn-agent-config))
-                (when (memq operation singletons)
-                  (ende-chat-config--error
-                   "only one %s form is allowed" operation))
-                (push operation singletons))
-              (when (memq operation '(group resource root podman-image))
+          (dolist (source forms)
+            (let ((ende-chat-config--current-form source)
+                  (form (ende-chat-config--form-value source)))
+              (unless (ende-chat-config--proper-list-p form)
+                (ende-chat-config--error
+                 "configuration form must be a list: %S" form))
+              (ende-chat-config--declare source declarations)
+              (unless (assoc (ende-chat-config--form-file source) sources)
+                (push (cons (ende-chat-config--form-file source)
+                            (ende-chat-config--form-line source)) sources))
+              (when (memq (car form) '(group resource root podman-image))
                 (setq configuration
                       (ende-chat-config--apply-form form configuration)))))
-          (dolist (form forms)
-            (unless (memq (car form) '(group resource root podman-image))
-              (setq configuration
-                    (ende-chat-config--apply-form form configuration)))))
+          (dolist (source forms)
+            (let ((ende-chat-config--current-form source)
+                  (form (ende-chat-config--form-value source)))
+              (unless (memq (car form) '(group resource root podman-image))
+                (setq configuration
+                      (ende-chat-config--apply-form form configuration))))))
       (error
        (error "%s (in %s)" (error-message-string failure) context)))
-    configuration))
+    (plist-put configuration :sources sources)))
 
 (defun ende-chat-config--empty ()
   "Return fresh resolver state, including activation and grant provenance."
@@ -734,10 +789,20 @@ Duplicate declarations are local to this evaluation, not inherited state."
 
 (defun ende-chat-config--finalize-policy (configuration)
   "Validate CONFIGURATION and return its normalized access policy."
-  (setq configuration (ende-chat-config--validate-grant-types configuration))
-  (let ((policy (ende-chat-config--normalize configuration)))
-    (ende-chat-config--validate-access policy configuration)
-    policy))
+  (condition-case failure
+      (progn
+        (setq configuration (ende-chat-config--validate-grant-types configuration))
+        (let ((policy (ende-chat-config--normalize configuration)))
+          (ende-chat-config--validate-access policy configuration)
+          policy))
+    (error
+     (error "%s%s" (error-message-string failure)
+            (if-let* ((sources (plist-get configuration :sources)))
+                (format " (sources: %s)"
+                        (mapconcat (lambda (source)
+                                     (format "%s:%d" (car source) (cdr source)))
+                                   sources ", "))
+              "")))))
 
 (defun ende-chat-config--normalize-named-policy
     (name body registry-names visible)
@@ -902,27 +967,25 @@ PARENT-TABLE supplies ancestry.  Parse each relevant block exactly once."
     (dolist (node (ende-chat-config--ancestry tree parent-table headline))
       (let ((blocks (gethash node blocks-by-node)))
         (when blocks
-          (let ((ende-chat-config--block-line
-                 (line-number-at-pos
-                  (org-element-property :begin (car blocks)) t))
+          (let ((ende-chat-config--current-form
+                 (ende-chat-config--make-form
+                  :file (or buffer-file-name (buffer-name))
+                  :line (line-number-at-pos
+                         (org-element-property :begin (car blocks)) t)))
+                (declarations (make-hash-table :test #'equal))
                 (ordinary-forms nil)
                 (local-definitions nil))
             (when (cdr blocks)
               (ende-chat-config--error
                "only one config block is allowed per Org node"))
-            (dolist (form (condition-case failure
-                             (ende-chat-config--block-forms (car blocks))
-                           (end-of-file
-                            (ende-chat-config--error
-                             "%s" (error-message-string failure)))))
-              (if (eq (car-safe form) 'agent-config)
-                  (let ((definition (ende-chat-config--agent-definition form)))
-                    (when (assq (car definition) local-definitions)
-                      (ende-chat-config--error
-                       "agent-config is defined twice in this block: %s"
-                       (car definition)))
-                    (push definition local-definitions))
-                (push form ordinary-forms)))
+            (dolist (source (ende-chat-config--block-forms (car blocks)))
+              (let ((ende-chat-config--current-form source)
+                    (form (ende-chat-config--form-value source)))
+                (if (eq (car-safe form) 'agent-config)
+                    (let ((definition (ende-chat-config--agent-definition form)))
+                      (ende-chat-config--declare source declarations)
+                      (push definition local-definitions))
+                  (push source ordinary-forms))))
             (setq configuration
                   (ende-chat-config--apply-forms
                    (nreverse ordinary-forms)
