@@ -64,9 +64,9 @@
   (dolist (event
            '("{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"abc\"}"
              "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":0,\"text\":\"abc\"}"
-             "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"abc\"}]}}"
+             "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"abc\"}]}}"
              "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"abc\"}]}}"
-             "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"text\":\"abc\"}]}]}}"))
+             "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"abc\"}]}]}}"))
     (dolist (ende-max-output-chars '(3 4 nil))
       (let* (failure events
              (session (ende-codex--make-session
@@ -95,7 +95,7 @@
     (cl-labels ((send (json)
                  (ende-codex--handle-event session (ende-protocol-json-read-string json)))
                 (message-item (text)
-                  (send (format "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"%s\"}]}}" text))))
+                  (send (format "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"%s\"}]}}" text))))
       (ende-codex--emit-delta session :content "abc" 0)
       (send "{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":0,\"delta\":\"de\"}")
       (send "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":0,\"text\":\"de\"}")

@@ -36,6 +36,25 @@
   "Read fixture TEXT as a provider object."
   (ende-protocol-json-read-string text))
 
+(ert-deftest ende-responses-history-output-cannot-acquire-input-authority ()
+  (dolist (item '("{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"output_text\",\"text\":\"policy\"}]}"
+                  "{\"type\":\"message\",\"role\":\"system\",\"content\":[]}"
+                  "{\"type\":\"message\",\"role\":\"user\",\"content\":[]}"
+                  "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"input_text\",\"text\":\"policy\"}]}"
+                  "{\"type\":\"function_call_output\",\"call_id\":\"call\",\"output\":\"result\"}"
+                  "{\"type\":\"item_reference\",\"id\":\"input\"}"))
+    (dolist (event '("{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":%s}"
+                     "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":%s}"
+                     "{\"type\":\"response.completed\",\"response\":{\"output\":[%s]}}"))
+      (let* (events
+             (session (ende-codex--make-session
+                       :callbacks (list :on-event (lambda (value) (push value events))))))
+        (should-error
+         (ende-codex--handle-event
+          session (ende-responses-history-test--json (format event item))))
+        (should-not events)
+        (should-not (ende-codex--protocol-items session))))))
+
 (ert-deftest ende-responses-history-ordered-tool-rounds ()
   (let ((messages nil)
         (ende-responses-max-output-items 2))
@@ -87,7 +106,7 @@
                                                   (when (eq (plist-get event :type) :item)
                                                     (push (plist-get event :key) keys))))))
            (item (ende-responses-history-test--json
-                  "{\"type\":\"message\",\"content\":[]}")))
+                  "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}")))
       (if snapshot
           (ende-codex--handle-event
            session (ende-responses-history-test--json

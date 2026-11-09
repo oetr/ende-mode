@@ -987,8 +987,28 @@ explicit efforts yields no choices instead of an error."
   (let ((items (ende-codex--ordered-output session)))
     (when items (cons 'openai-responses (mapcar #'cdr items)))))
 
+(defun ende-codex--validate-output-item (item)
+  "Reject ITEM unless it has Responses output authority and direction."
+  (let ((type (ende-protocol-json-get "type" item)))
+    (unless
+        (if (equal type "message")
+            (and (equal (ende-protocol-json-get "role" item) "assistant")
+                 (vectorp (ende-protocol-json-get "content" item))
+                 (cl-every (lambda (part)
+                             (member (ende-protocol-json-get "type" part)
+                                     '("output_text" "refusal")))
+                           (ende-protocol-json-get "content" item)))
+          (and (member type '("reasoning" "function_call" "file_search_call"
+                              "web_search_call" "computer_call" "code_interpreter_call"
+                              "image_generation_call" "local_shell_call" "shell_call"
+                              "apply_patch_call" "custom_tool_call" "mcp_call"
+                              "mcp_list_tools" "mcp_approval_request" "compaction"))
+               (not (ende-protocol-json-has-key-p "role" item))))
+      (error "Invalid Responses output item"))))
+
 (defun ende-codex--remember-output (session item index)
   "Capture replay ITEM at output INDEX for SESSION, returning the accepted copy."
+  (ende-codex--validate-output-item item)
   (when (and (integerp index) (>= index 0) (hash-table-p item)
              (not (equal (ende-protocol-json-get "type" item)
                          "image_generation_call")))
