@@ -312,6 +312,55 @@
       (accept-process-output nil 0.01))
     (should (funcall predicate))))
 
+(ert-deftest ende-websocket-file-output ()
+  (dolist (mode '(drain abort invalid replaced))
+    (let* ((file (make-temp-file "ende-ws-output-"))
+           (payload (if (eq mode 'invalid) (unibyte-string #xe0 #x80 #x80)
+                      (encode-coding-string "a€😀z" 'utf-8)))
+           (coding-system-for-write 'no-conversion)
+           (read-file (symbol-function 'insert-file-contents-literally))
+           (released 0) writes reads)
+      (unwind-protect
+          (ende-websocket-test--connection connection
+            (write-region payload nil file nil 'silent)
+            (setf (ende-websocket--connection-limits connection)
+                  (ende-websocket--limits '(:write-frame-bytes 2 :drain-frames 1 :output-items 1)))
+            (cl-letf (((symbol-function 'insert-file-contents-literally)
+                       (lambda (&rest _) (ert-fail "Send read its file synchronously"))))
+              (should (ende-websocket-send-text-file
+                       connection file (lambda () (cl-incf released) (delete-file file))))
+              (should-error (ende-websocket-send-text-file connection file)
+                            :type 'ende-websocket-backpressure))
+            (should (= released 0))
+            (when (eq mode 'replaced) (write-region "different" nil file nil 'silent))
+            (cl-letf (((symbol-function 'insert-file-contents-literally)
+                       (lambda (path visit begin end &rest args)
+                         (when (equal path file) (push (- end begin) reads))
+                         (apply read-file path visit begin end args)))
+                      ((symbol-function 'process-send-string)
+                       (lambda (_ wire) (push wire writes))))
+              (ende-websocket-test--drain connection)
+              (when (eq mode 'abort) (ende-websocket-abort connection))
+              (while (ende-websocket--connection-work-timer connection)
+                (ende-websocket-test--drain connection)))
+            (should (= released 1))
+            (should-not (file-exists-p file))
+            (should (cl-every (lambda (size) (<= size 2)) reads))
+            (when (eq mode 'drain)
+              (should (eq (ende-websocket-state connection) 'open))
+              (should (equal
+                       payload
+                       (apply #'concat
+                              (mapcar (lambda (wire)
+                                        (let ((header (ende-websocket--frame-header wire 'server 2)))
+                                          (ende-websocket--mask!
+                                           (substring wire (car header))
+                                           (ende-websocket--frame-mask (cdr header)) 0)))
+                                      (nreverse writes))))))
+            (when (eq mode 'invalid)
+              (should (eq (plist-get (ende-websocket--connection-failure connection) :cause) 'utf8))))
+        (when (file-exists-p file) (delete-file file))))))
+
 (ert-deftest ende-websocket-transport-and-shutdown ()
   (dolist (mode '(reject error))
     (unwind-protect

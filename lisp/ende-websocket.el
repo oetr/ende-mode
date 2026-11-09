@@ -366,7 +366,7 @@
   type utf8 chunks chunk (used 0) (bytes 0) (fragments 0))
 
 (cl-defstruct (ende-websocket--output (:constructor ende-websocket--output-create))
-  opcode bytes (offset 0) started)
+  opcode bytes file signature size utf8 cleanup (offset 0) started)
 
 (cl-defstruct (ende-websocket--connection (:constructor ende-websocket--connection-create))
   role process listener limits address headers protocols key protocol
@@ -456,6 +456,7 @@
   (unless (eq (ende-websocket-state connection) 'closed)
     (setf (ende-websocket--connection-state connection) 'closed)
     (cl-incf (ende-websocket--connection-generation connection))
+    (ende-websocket--drop-output connection)
     (let ((process (ende-websocket--connection-process connection))
           (input (ende-websocket--connection-input connection))
           (callback (plist-get (ende-websocket--connection-callbacks connection) :on-close)))
@@ -524,11 +525,18 @@
       (ende-websocket--utf8-feed (ende-websocket--utf8-create) reason t)
       (list :code code :reason (decode-coding-string reason 'utf-8-unix)))))
 
+(defun ende-websocket--release-output (job)
+  (let ((cleanup (ende-websocket--output-cleanup job)))
+    (setf (ende-websocket--output-cleanup job) nil)
+    (when cleanup (ignore-errors (funcall cleanup)))))
+
 (defun ende-websocket--drop-output (connection)
-  (setf (ende-websocket--connection-output connection) nil
-        (ende-websocket--connection-output-tail connection) nil
-        (ende-websocket--connection-output-bytes connection) 0
-        (ende-websocket--connection-output-items connection) 0))
+  (let ((jobs (ende-websocket--connection-output connection)))
+    (setf (ende-websocket--connection-output connection) nil
+          (ende-websocket--connection-output-tail connection) nil
+          (ende-websocket--connection-output-bytes connection) 0
+          (ende-websocket--connection-output-items connection) 0)
+    (dolist (job jobs) (ende-websocket--release-output job))))
 
 (defun ende-websocket--queue-close (connection payload &optional drain)
   (let ((first (not (ende-websocket--connection-close-queued connection)))
@@ -738,18 +746,27 @@ Completion is asynchronous and bounded by the closing timeout."
     (setf (ende-websocket--connection-backpressured connection) t)
     (signal 'ende-websocket-backpressure nil)))
 
-(defun ende-websocket--enqueue (connection opcode bytes &optional owned)
-  (ende-websocket--capacity connection (length bytes))
-  (let ((cell (list (ende-websocket--output-create :opcode opcode
-                                            :bytes (if owned bytes (copy-sequence bytes))))))
+(defun ende-websocket--output-length (job)
+  (or (ende-websocket--output-size job) (length (ende-websocket--output-bytes job))))
+
+(defun ende-websocket--queue-output (connection job)
+  (let ((size (ende-websocket--output-length job))
+        (cell (list job)))
+    (ende-websocket--capacity connection size)
     (if (ende-websocket--connection-output-tail connection)
         (setcdr (ende-websocket--connection-output-tail connection) cell)
       (setf (ende-websocket--connection-output connection) cell))
     (setf (ende-websocket--connection-output-tail connection) cell)
-    (cl-incf (ende-websocket--connection-output-bytes connection) (length bytes))
+    (cl-incf (ende-websocket--connection-output-bytes connection) size)
     (cl-incf (ende-websocket--connection-output-items connection)))
   (ende-websocket--schedule connection)
   t)
+
+(defun ende-websocket--enqueue (connection opcode bytes &optional owned)
+  (ende-websocket--capacity connection (length bytes))
+  (ende-websocket--queue-output
+   connection (ende-websocket--output-create :opcode opcode
+                                            :bytes (if owned bytes (copy-sequence bytes)))))
 
 (defun ende-websocket-send-text (connection text)
   "Queue a snapshot of Unicode scalar TEXT on CONNECTION.
@@ -765,6 +782,49 @@ The acceptance and backpressure contract is that of `ende-websocket-send-text'."
   (ende-websocket--capacity connection (length bytes))
   (ende-websocket--utf8-feed (ende-websocket--utf8-create) bytes t)
   (ende-websocket--enqueue connection 1 bytes))
+
+(defun ende-websocket--file-signature (file)
+  (unless (and (stringp file) (file-name-absolute-p file) (not (file-remote-p file)))
+    (error "WebSocket output requires a local absolute file"))
+  (let ((attributes (file-attributes file 'integer)))
+    (unless (and attributes (null (file-attribute-type attributes)) (file-readable-p file))
+      (error "WebSocket output requires a readable regular file"))
+    (list (file-attribute-file-identifier attributes)
+          (file-attribute-size attributes)
+          (file-attribute-modification-time attributes)
+          (file-attribute-status-change-time attributes))))
+
+(defun ende-websocket-send-text-file (connection file &optional cleanup)
+  "Queue immutable local FILE as UTF-8 text, reading only bounded chunks.
+Acceptance and backpressure follow `ende-websocket-send-text'.  The caller
+must keep FILE unchanged until CLEANUP, called exactly once after accepted
+output is sent or discarded.  Rejection does not take ownership.  Invalid
+UTF-8 or file changes fail asynchronously through the connection lifecycle."
+  (unless (or (null cleanup) (functionp cleanup)) (error "Invalid output cleanup"))
+  (let ((signature (ende-websocket--file-signature file)))
+    (ende-websocket--queue-output
+     connection (ende-websocket--output-create
+                 :opcode 1 :file (copy-sequence file) :signature signature
+                 :size (nth 1 signature) :utf8 (ende-websocket--utf8-create)
+                 :cleanup cleanup))))
+
+(defun ende-websocket--output-chunk (job end)
+  (let ((offset (ende-websocket--output-offset job))
+        (file (ende-websocket--output-file job)))
+    (if (not file) (substring (ende-websocket--output-bytes job) offset end)
+      (let ((signature (ende-websocket--output-signature job)))
+        (unless (equal signature (ende-websocket--file-signature file))
+          (error "WebSocket output file changed"))
+        (let ((chunk (with-temp-buffer
+                       (set-buffer-multibyte nil)
+                       (insert-file-contents-literally file nil offset end)
+                       (buffer-string))))
+          (unless (and (= (length chunk) (- end offset))
+                       (equal signature (ende-websocket--file-signature file)))
+            (error "WebSocket output file changed"))
+          (ende-websocket--utf8-feed (ende-websocket--output-utf8 job) chunk
+                                     (= end (ende-websocket--output-length job)))
+          chunk)))))
 
 (defun ende-websocket-send-binary (connection bytes)
   "Queue a snapshot of unibyte BYTES; acceptance does not imply delivery.
@@ -785,15 +845,15 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
         (ende-websocket--queue-close connection (ende-websocket--connection-draining-close connection)))
       (let* ((control (car (ende-websocket--connection-controls connection)))
              (job (or control (car (ende-websocket--connection-output connection))))
-             (payload (ende-websocket--output-bytes job))
+             (size (ende-websocket--output-length job))
              (offset (ende-websocket--output-offset job))
-             (end (if control (length payload)
-                    (min (length payload)
+             (end (if control size
+                    (min size
                          (+ offset (ende-websocket--limit connection :write-frame-bytes))
                          (+ offset (max 1 (- (ende-websocket--limit connection :drain-bytes) bytes))))))
-             (final (= end (length payload)))
+             (final (= end size))
              (opcode (if (ende-websocket--output-started job) 0 (ende-websocket--output-opcode job)))
-             (wire (ende-websocket--wire opcode final (substring payload offset end)
+             (wire (ende-websocket--wire opcode final (ende-websocket--output-chunk job end)
                                     (ende-websocket--connection-role connection))))
         (setf (ende-websocket--output-started job) t
               (ende-websocket--output-offset job) end)
@@ -807,12 +867,14 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
           (when final
             (pop (ende-websocket--connection-output connection))
             (cl-decf (ende-websocket--connection-output-items connection))
-            (cl-decf (ende-websocket--connection-output-bytes connection) (length payload))
+            (cl-decf (ende-websocket--connection-output-bytes connection) size)
             (unless (ende-websocket--connection-output connection)
               (setf (ende-websocket--connection-output-tail connection) nil))))
         (cl-incf bytes (length wire))
         (cl-incf frames)
-        (process-send-string (ende-websocket--connection-process connection) wire)))
+        (unwind-protect
+            (process-send-string (ende-websocket--connection-process connection) wire)
+          (when final (ende-websocket--release-output job)))))
     (when (and (ende-websocket--connection-backpressured connection)
                (< (ende-websocket--connection-output-bytes connection)
                   (max 1 (/ (ende-websocket--limit connection :output-bytes) 2)))
