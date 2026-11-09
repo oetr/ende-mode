@@ -986,12 +986,23 @@ explicit efforts yields no choices instead of an error."
     (when items (cons 'openai-responses (mapcar #'cdr items)))))
 
 (defun ende-codex--remember-output (session item index)
-  "Capture replay ITEM at output INDEX for SESSION."
+  "Capture replay ITEM at output INDEX for SESSION, returning the accepted copy."
   (when (and (integerp index) (>= index 0) (hash-table-p item)
              (not (equal (ende-protocol-json-get "type" item)
                          "image_generation_call")))
-    (setf (alist-get index (ende-codex--session-replay-items session))
-          (ende-provider-config-copy item))))
+    (let* ((type (ende-protocol-json-get "type" item))
+           (field (pcase type ("message" "content") ("reasoning" "summary"))))
+      (when (and (not (ende-codex--terminal-p session))
+                 (or (null field)
+                     (ende-stream-account-output
+                      (ende-codex--session-stream session)
+                      (cons (if (equal type "message") :content :reasoning-summary) index)
+                      (cl-loop for part in (ende-codex--output-items
+                                           (ende-protocol-json-get field item))
+                               sum (length (ende-protocol-json-get "text" part)))
+                      (apply-partially #'ende-codex--fail session) t)))
+        (setf (alist-get index (ende-codex--session-replay-items session))
+              (ende-provider-config-copy item))))))
 
 (defun ende-codex--result (session)
   "Build a normalized result plist for SESSION."
@@ -1068,7 +1079,8 @@ explicit efforts yields no choices instead of an error."
 (defun ende-codex--emit-reasoning-summary (session item text &optional item-key)
   "Record and emit summary TEXT for provider ITEM."
   (ende-stream-record-reasoning-summary
-   (ende-codex--session-stream session) item text item-key))
+   (ende-codex--session-stream session) item text
+   (apply-partially #'ende-codex--fail session) item-key))
 
 (defun ende-codex--handle-usage (session usage)
   "Record and emit Responses API USAGE."
@@ -1106,10 +1118,7 @@ explicit efforts yields no choices instead of an error."
 
 (defun ende-codex--observe-output (session item index)
   "Record and emit provider ITEM at output INDEX for SESSION."
-  (when (and (integerp index) (>= index 0) (hash-table-p item)
-             (not (equal (ende-protocol-json-get "type" item)
-                         "image_generation_call")))
-    (ende-codex--remember-output session item index)
+  (when (ende-codex--remember-output session item index)
     (let* ((type (ende-protocol-json-get "type" item))
            (call (ende-codex--collect-tool-call-item session item index))
            (text (when (equal type "message")
@@ -1300,7 +1309,8 @@ When APPEND is non-nil, append the argument delta to the stored value."
       (ende-stream-complete-reasoning-summary
        (ende-codex--session-stream session)
        (ende-codex--reasoning-summary-key json)
-       (ende-protocol-json-get "text" json) output-index))
+       (ende-protocol-json-get "text" json)
+       (apply-partially #'ende-codex--fail session) output-index))
      ((member type '("response.completed" "response.done" "response.incomplete"))
       (ende-codex--handle-usage
        session (ende-protocol-json-get "usage" response))

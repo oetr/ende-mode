@@ -54,10 +54,76 @@
       (aset (plist-get call :arguments) 0 ?x)
       (should (equal (plist-get (car (ende-codex--tool-call-list session)) :arguments)
                      "{\"a\":1}")))
-    (ende-stream-complete-reasoning-summary stream "s" "replaced")
+    (ende-stream-complete-reasoning-summary
+     stream "s" "replaced" (apply-partially #'ende-codex--fail session))
     (ende-codex--update-tool-call-arguments session 0 "{}")
     (should (equal (plist-get (car (ende-codex--tool-call-list session)) :arguments) "{}"))
     (ende-codex--cancel session)))
+
+(ert-deftest ende-codex-output-budget-covers-text-representations ()
+  (dolist (event
+           '("{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"abc\"}"
+             "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":0,\"text\":\"abc\"}"
+             "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"abc\"}]}}"
+             "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"abc\"}]}}"
+             "{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"text\":\"abc\"}]}]}}"))
+    (dolist (ende-max-output-chars '(3 4 nil))
+      (let* (failure events
+             (session (ende-codex--make-session
+                       :callbacks (list :on-error (lambda (error) (setq failure error))
+                                        :on-event (lambda (event) (push event events)))))
+             (stream (ende-codex--session-stream session)))
+        (ende-codex--emit-delta session :content "x" 1)
+        (ende-codex--handle-event session (ende-protocol-json-read-string event))
+        (if (equal ende-max-output-chars 3)
+            (progn
+              (should (eq (ende-error-kind failure) 'resource))
+              (should (= (ende-stream-session-estimated-chars stream) 1))
+              (should-not (ende-codex--session-replay-items session))
+              (should-not (ende-codex--session-terminal-event session))
+              (should (= (hash-table-count (ende-stream-session-reasoning-summaries stream)) 0))
+              (should-not (string-match-p "abc" (prin1-to-string events))))
+          (should-not failure)
+          (should (= (ende-stream-session-estimated-chars stream) 4)))))))
+
+(ert-deftest ende-codex-output-budget-deduplicates-and-replaces ()
+  (let* ((ende-max-output-chars 8)
+         failure
+         (session (ende-codex--make-session
+                   :callbacks (list :on-error (lambda (error) (setq failure error)))))
+         (stream (ende-codex--session-stream session)))
+    (cl-labels ((send (json)
+                 (ende-codex--handle-event session (ende-protocol-json-read-string json)))
+                (message-item (text)
+                  (send (format "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"content\":[{\"text\":\"%s\"}]}}" text))))
+      (ende-codex--emit-delta session :content "abc" 0)
+      (send "{\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":0,\"delta\":\"de\"}")
+      (send "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":0,\"text\":\"de\"}")
+      (send "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":1,\"text\":\"fgh\"}")
+      (dotimes (_ 2)
+        (message-item "abc")
+        (send "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"text\":\"de\"},{\"text\":\"fgh\"}]}}"))
+      (should-not failure)
+      (should (= (ende-stream-session-estimated-chars stream) 8))
+      (send "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"summary\":[]}}")
+      (send "{\"type\":\"response.reasoning_summary_text.done\",\"output_index\":1,\"item_id\":\"r\",\"summary_index\":1,\"text\":\"f\"}")
+      (should (= (ende-stream-session-estimated-chars stream) 6))
+      (message-item "abcde")
+      (should (= (ende-stream-session-estimated-chars stream) 8))
+      (message-item "a")
+      (should (= (ende-stream-session-estimated-chars stream) 6))
+      (ende-codex--reset-attempt session)
+      (setq stream (ende-codex--session-stream session))
+      (should (= (ende-stream-session-output-offset stream) 6))
+      (message-item "ab")
+      (should-not failure)
+      (message-item "abc")
+      (should (eq (ende-error-kind failure) 'resource))
+      (should (= (ende-stream-session-estimated-chars stream) 2))
+      (should (equal (ende-protocol-json-get
+                      "text" (aref (ende-protocol-json-get
+                                    "content" (alist-get 0 (ende-codex--session-replay-items session))) 0))
+                     "ab")))))
 
 (ert-deftest ende-codex-account-isolation-and-refresh ()
   (ende-codex-auth-test--with-store

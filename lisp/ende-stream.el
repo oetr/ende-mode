@@ -78,7 +78,8 @@
   "Protocol-independent state for one SSE response stream."
   lifecycle parser received-bytes preview-parts preview-bytes
   content-parts output-parts thinking-parts usage actual-model actual-provider
-  estimated-chars (output-offset 0) generation-start finish-reason reasoning-summaries
+  estimated-chars output-counts (output-offset 0)
+  generation-start finish-reason reasoning-summaries
   input-head input-tail (input-offset 0) input-closed drain-timer draining
   event-callback error-callback filter-error-callback pending-terminal)
 
@@ -88,6 +89,7 @@
    :lifecycle lifecycle :parser parser :received-bytes 0
    :preview-parts nil :preview-bytes 0
    :content-parts nil :thinking-parts nil :estimated-chars 0
+   :output-counts (make-hash-table :test #'equal)
    :reasoning-summaries (make-hash-table :test #'equal)))
 
 (defun ende-stream-lifecycle (stream)
@@ -118,38 +120,51 @@
                (numberp elapsed) (>= elapsed 0.1))
       (/ (float tokens) elapsed))))
 
+(defun ende-stream-account-output (stream key chars limit-callback &optional snapshot)
+  "Account for CHARS of output KEY in STREAM before retaining it.
+CHARS changes the streamed length, or replaces the snapshot length when
+SNAPSHOT is non-nil.  Charge the larger representation, not both copies.
+Return non-nil if accepted.  Call LIMIT-CALLBACK if the limit is exceeded."
+  (unless (ende-stream-terminal-p stream)
+    (let* ((counts (ende-stream-session-output-counts stream))
+           (old (gethash key counts '(0 . 0)))
+           (new (if snapshot (cons (car old) chars)
+                  (cons (+ (car old) chars) (cdr old))))
+           (total (+ (ende-stream-session-estimated-chars stream)
+                     (- (max (car new) (cdr new))
+                        (max (car old) (cdr old))))))
+      (if (and (numberp ende-max-output-chars)
+               (> (+ (ende-stream-session-output-offset stream) total)
+                  ende-max-output-chars))
+          (progn
+            (funcall limit-callback
+                     (ende-error-create
+                      :kind 'resource
+                      :message "generated output exceeds ende-max-output-chars"))
+            nil)
+        (puthash key new counts)
+        (setf (ende-stream-session-estimated-chars stream) total)
+        t))))
+
 (defun ende-stream-record-delta (stream channel text limit-callback &optional item-key)
   "Accumulate and emit TEXT on CHANNEL for STREAM.
 Call LIMIT-CALLBACK with a resource error if the output limit is exceeded.
 ITEM-KEY identifies the response item supplying the delta.
 Return non-nil when the delta was accepted and STREAM remains active."
-  (when (and (not (ende-stream-terminal-p stream))
-             (stringp text) (> (length text) 0))
-    (if (and (numberp ende-max-output-chars)
-             (> (+ (ende-stream-session-output-offset stream)
-                   (ende-stream-session-estimated-chars stream)
-                   (length text))
-                ende-max-output-chars))
+  (when (and (stringp text) (> (length text) 0)
+             (ende-stream-account-output
+              stream (cons channel item-key) (length text) limit-callback))
+    (if (eq channel :content)
         (progn
-          (funcall
-           limit-callback
-           (ende-error-create
-            :kind 'resource
-            :message "generated output exceeds ende-max-output-chars"))
-          nil)
-      (progn
-        (if (eq channel :content)
-            (progn
-              (push text (ende-stream-session-content-parts stream))
-              (push (list :type :text :text text)
-                    (ende-stream-session-output-parts stream)))
-          (push text (ende-stream-session-thinking-parts stream)))
-        (cl-incf (ende-stream-session-estimated-chars stream) (length text))
-        (ende-stream-note-generation-start stream)
-        (ende-stream-emit
-         stream (append (list :type :delta :channel channel :text text)
-                        (when item-key (list :item-key item-key))))
-        (not (ende-stream-terminal-p stream))))))
+          (push text (ende-stream-session-content-parts stream))
+          (push (list :type :text :text text)
+                (ende-stream-session-output-parts stream)))
+      (push text (ende-stream-session-thinking-parts stream)))
+    (ende-stream-note-generation-start stream)
+    (ende-stream-emit
+     stream (append (list :type :delta :channel channel :text text)
+                    (when item-key (list :item-key item-key))))
+    (not (ende-stream-terminal-p stream))))
 
 (defun ende-stream-emit-item (stream key kind provider &rest fields)
   "Emit an observation of STREAM's item KEY of KIND from PROVIDER.
@@ -177,10 +192,14 @@ TOKEN-KEY names the provider-specific output-token field."
                           now)
                   :usage usage))))
 
-(defun ende-stream-record-reasoning-summary (stream item text &optional item-key)
-  "Emit summary TEXT for provider ITEM in STREAM, with source ITEM-KEY."
-  (when (and (not (ende-stream-terminal-p stream))
-             (stringp text) (> (length text) 0))
+(defun ende-stream-record-reasoning-summary
+    (stream item text limit-callback &optional item-key)
+  "Emit summary TEXT for provider ITEM in STREAM, with source ITEM-KEY.
+Call LIMIT-CALLBACK if the output limit is exceeded."
+  (when (and (stringp text) (> (length text) 0)
+             (ende-stream-account-output
+              stream (cons :reasoning-summary (or item-key item))
+              (length text) limit-callback))
     (let ((summaries (ende-stream-session-reasoning-summaries stream)))
       (ende-stream-text-append
        (or (gethash item summaries)
@@ -191,18 +210,24 @@ TOKEN-KEY names the provider-specific output-token field."
                       (when item-key (list :item-key item-key))))
       (not (ende-stream-terminal-p stream)))))
 
-(defun ende-stream-complete-reasoning-summary (stream item text &optional item-key)
-  "Emit completed TEXT for ITEM with source ITEM-KEY unless already emitted."
+(defun ende-stream-complete-reasoning-summary
+    (stream item text limit-callback &optional item-key)
+  "Emit completed TEXT for ITEM with source ITEM-KEY unless already emitted.
+Call LIMIT-CALLBACK if STREAM's output limit is exceeded."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (let* ((summaries (ende-stream-session-reasoning-summaries stream))
            (existing (gethash item summaries)))
       (unless (and existing (equal (ende-stream-text-string existing) text))
-        (ende-stream-emit
-         stream (append (list :type :reasoning-summary :item item :text text
-                              :replace t)
-                        (when item-key (list :item-key item-key))))
-        (puthash item (ende-stream-text-append (ende-stream-text-create) text) summaries)))))
+        (when (ende-stream-account-output
+               stream (cons :reasoning-summary (or item-key item))
+               (- (length text) (if existing (ende-stream-text-length existing) 0))
+               limit-callback)
+          (puthash item (ende-stream-text-append (ende-stream-text-create) text) summaries)
+          (ende-stream-emit
+           stream (append (list :type :reasoning-summary :item item :text text
+                                :replace t)
+                          (when item-key (list :item-key item-key)))))))))
 
 (defun ende-stream-emit-estimated-usage (stream)
   "Emit a character-based usage estimate for STREAM."
