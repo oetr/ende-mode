@@ -977,6 +977,23 @@
       (should (string-match-p "not allowed"
                               (plist-get result :error)))))))
 
+(ert-deftest ende-test/async-tool-dispatch-delivers-one-terminal-result ()
+  (let ((ende-tools--registry (copy-sequence ende-tools--registry))
+        (calls 0))
+    (ende-tool-register
+     'ende_test_async "Async test" ende-tools--empty-object-schema
+     (lambda (_arguments _root callback)
+       (funcall callback '(:accepted t) nil)
+       (funcall callback nil "late failure")
+       (error "failure after completion"))
+     nil :no-resource '(:requires-root nil :async t))
+    (ende-tool-call-async
+     'ende_test_async nil nil nil
+     (lambda (value)
+       (cl-incf calls)
+       (should (plist-get value :ok))))
+    (should (= calls 1))))
+
 (ert-deftest ende-test/restricted-host-process-cancellation-and-timeout-stop-work ()
   :tags '(integration)
   (let* ((root (make-temp-file "ende-host-direct-stop-" t))
