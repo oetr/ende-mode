@@ -113,7 +113,7 @@
                    "A.*\na.*\nxa.*\n"
                    '((:lines ((remove . "a.*") (add . "literal")))))
                  "A.*\nliteral\nxa.*\n"))
-  (let ((hunk '(:lines ((remove . "a") (remove . "a") (add . "b")))))
+  (let ((hunk (list :lines '((remove . "a") (remove . "a") (add . "b")))))
     (should-error (ende-patch-apply-update "a\na\na\n" (list hunk)))
     (should (equal (ende-patch-apply-update
                      "a\na\na" (list (plist-put hunk :end-of-file t)))
