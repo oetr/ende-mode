@@ -469,13 +469,17 @@
       (delete-file file))))
 
 (ert-deftest ende-websocket-transport-and-shutdown ()
-  (dolist (mode '(reject error))
+  (dolist (decision '((:accept t) nil t (:accept nil) (:accept :false) (:accept :json-false)
+                     (:accept "false") (:accept t :protocol) (:accept t . invalid) error))
     (unwind-protect
-        (let* ((opened 0) server-info client-info
+        (let* ((accepted (equal decision '(:accept t)))
+               (opened 0) server-info client-info
                (listener
                 (ende-websocket-listen
                  :service t
-                 :admit (lambda (_ _request) (when (eq mode 'error) (error "Admission failed")))
+                 :admit (lambda (_ _request)
+                          (when (eq decision 'error) (error "Admission failed"))
+                          decision)
                  :on-open (lambda (_) (cl-incf opened))
                  :on-close (lambda (_ info) (setq server-info info))))
                (client
@@ -483,10 +487,12 @@
                  (format "ws://127.0.0.1:%d" (ende-websocket-listener-port listener))
                  :on-open (lambda (_) (cl-incf opened))
                  :on-close (lambda (_ info) (setq client-info info)))))
-          (ende-websocket-test--wait (lambda () (and server-info client-info)))
-          (should (= opened 0))
-          (should (eq (plist-get server-info :cause) (if (eq mode 'error) 'application 'policy)))
-          (should (eq (ende-websocket-state client) 'closed)))
+          (ende-websocket-test--wait (lambda () (or (= opened 2) (and server-info client-info))))
+          (should (= opened (if accepted 2 0)))
+          (should (eq (ende-websocket-state client) (if accepted 'open 'closed)))
+          (unless accepted
+            (should (eq (plist-get server-info :cause)
+                        (if (eq decision 'error) 'application 'policy)))))
       (ende-websocket-shutdown)))
   (unwind-protect
       (let* (received terminal client-returned server-open listener
