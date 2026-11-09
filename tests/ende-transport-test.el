@@ -250,6 +250,7 @@ Use COMMAND for the process, or a silent sleep process by default."
 
 
 (ert-deftest ende-test/provider-rejects-unsafe-temporary-directory ()
+  (require 'tramp-sh)
   (dolist (directory '("/ssh:ende-test.invalid:/tmp/" "relative-temp/"))
     (let ((native-comp-enable-subr-trampolines nil)
           (temporary-file-directory directory))
