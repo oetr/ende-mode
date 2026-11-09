@@ -53,7 +53,7 @@
   (retries 0) retry-limit
   payload (delivery 'unsent) (attempt 0) prepared-generation
   profile debug connect-timeout idle-timeout byte-limit event-limit
-  reused last-event
+  reused last-event response-id items-by-index item-indices
   (received-bytes 0) (messages 0))
 
 (defvar ende-responses-ws--connections (make-hash-table :test #'equal)
@@ -149,6 +149,9 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
           (ende-responses-ws-request-on-retry request) nil
           (ende-responses-ws-request-profile request) nil
           (ende-responses-ws-request-debug request) nil
+          (ende-responses-ws-request-response-id request) nil
+          (ende-responses-ws-request-items-by-index request) nil
+          (ende-responses-ws-request-item-indices request) nil
           (ende-responses-ws-request-lifecycle request) nil
           (ende-responses-ws-request-connection request) nil)))
 
@@ -488,6 +491,9 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
               (ende-responses-ws-request-idle-timer request) nil
               (ende-responses-ws-request-payload request) nil
               (ende-responses-ws-request-delivery request) 'unsent
+              (ende-responses-ws-request-response-id request) nil
+              (ende-responses-ws-request-items-by-index request) nil
+              (ende-responses-ws-request-item-indices request) nil
               (ende-responses-ws-request-prepared-generation request) nil)
         (ende-responses-ws--drop-socket connection)
         (setf (ende-responses-ws-connection-phase connection) 'authenticating)
@@ -541,6 +547,79 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (setf (ende-responses-ws-request-connect-timer request) nil))
       (ende-responses-ws--send request))))
 
+(defun ende-responses-ws--validate-item (request index id &optional introduce)
+  "Validate REQUEST's association of INDEX with ID, optionally INTRODUCE it."
+  (unless (and (natnump index) (stringp id) (not (string-empty-p id)))
+    (error "Missing Responses item identity"))
+  (let* ((items (ende-responses-ws-request-items-by-index request))
+         (indices (ende-responses-ws-request-item-indices request))
+         (known-id (gethash index items))
+         (known-index (gethash id indices)))
+    (unless (if introduce
+                (and (or (null known-id) (equal known-id id))
+                     (or (null known-index) (eql known-index index)))
+              (and (equal known-id id) (eql known-index index)))
+      (error "Responses item does not belong to this output index"))
+    (when introduce
+      (puthash index id items)
+      (puthash id index indices))))
+
+(defun ende-responses-ws--validate-event (request json)
+  "Validate JSON's response and item ownership for REQUEST's current attempt."
+  (let* ((type (ende-protocol-json-get "type" json))
+         (response (ende-protocol-json-get "response" json))
+         (id (ende-protocol-json-get "id" response))
+         (current (ende-responses-ws-request-response-id request))
+         (terminal (member type '("response.completed" "response.done"
+                                  "response.incomplete" "response.failed"))))
+    (if (equal type "response.created")
+        (progn
+          (unless (and (not current) (stringp id) (not (string-empty-p id)))
+            (error "Invalid Responses creation event"))
+          (setq current id)
+          (setf (ende-responses-ws-request-response-id request) id
+                (ende-responses-ws-request-items-by-index request) (make-hash-table :test #'eql)
+                (ende-responses-ws-request-item-indices request) (make-hash-table :test #'equal)))
+      (when (and (string-prefix-p "response." type) (not current))
+        (error "Responses event precedes creation")))
+    (when (or terminal (member type '("response.created" "response.in_progress"))
+              (ende-protocol-json-has-key-p "response" json))
+      (unless (and current (equal id current))
+        (error "Responses snapshot belongs to another response")))
+    (when (ende-protocol-json-has-key-p "response_id" json)
+      (unless (and current (equal (ende-protocol-json-get "response_id" json) current))
+        (error "Responses event belongs to another response")))
+    (let ((index (ende-protocol-json-get "output_index" json))
+          (item-id (ende-protocol-json-get "item_id" json))
+          (indexed (member type '("response.output_text.delta" "response.output_text.done"
+                                  "response.reasoning_summary_text.delta" "response.reasoning_summary_text.done"
+                                  "response.function_call_arguments.delta" "response.function_call_arguments.done"))))
+      (when (member type '("response.output_item.added" "response.output_item.done"))
+        (let ((id (ende-protocol-json-get "id" (ende-protocol-json-get "item" json)))
+              (added (equal type "response.output_item.added")))
+          (when (and added (gethash index (ende-responses-ws-request-items-by-index request)))
+            (error "Duplicate Responses output item"))
+          (ende-responses-ws--validate-item request index id added)))
+      (when (or indexed (ende-protocol-json-has-key-p "item_id" json)
+                (ende-protocol-json-has-key-p "output_index" json))
+        (ende-responses-ws--validate-item
+         request
+         (if (or indexed (ende-protocol-json-has-key-p "output_index" json)) index
+           (gethash item-id (ende-responses-ws-request-item-indices request)))
+         (if (or indexed (ende-protocol-json-has-key-p "item_id" json)) item-id
+           (gethash index (ende-responses-ws-request-items-by-index request))))))
+    (when (and terminal (ende-protocol-json-has-key-p "output" response))
+      (let ((output (ende-protocol-json-get "output" response)))
+        (unless (vectorp output) (error "Invalid Responses output snapshot"))
+        (cl-loop for item across output for index from 0 do
+                 (when (and (ende-protocol-json-has-key-p "output_index" item)
+                            (not (eql (ende-protocol-json-get "output_index" item) index)))
+                   (error "Responses snapshot reorders output items"))
+                 (ende-responses-ws--validate-item
+                  request index (ende-protocol-json-get "id" item) t))
+        (unless (= (length output) (hash-table-count (ende-responses-ws-request-items-by-index request)))
+          (error "Responses snapshot omits known output items"))))))
+
 (defun ende-responses-ws--message (connection socket message-type text)
   "Consume a complete decoded event from CONNECTION's current SOCKET."
   (when (and (ende-responses-ws--eligible-p connection)
@@ -574,6 +653,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                                   response.reasoning_summary_text.delta response.function_call_arguments.delta
                                   response.function_call_arguments.done))
                       (setf (ende-responses-ws-request-last-event request) (intern-soft type)))
+                    (ende-responses-ws--validate-event request json)
                     (unless (ende-responses-ws--recover request json)
                       (funcall (ende-responses-ws-request-on-json request) json)
                       (when (and (ende-responses-ws--attempt-live-p request attempt socket)

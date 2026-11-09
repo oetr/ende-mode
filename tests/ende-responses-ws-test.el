@@ -78,18 +78,54 @@
 (defun ende-responses-ws-test--complete (socket &optional id output)
   "Complete SOCKET with response ID and JSON OUTPUT."
   (ende-responses-ws-test--event
+   socket (format "{\"type\":\"response.created\",\"response\":{\"id\":\"%s\"}}"
+                  (or id "resp-fixture")))
+  (ende-responses-ws-test--event
    socket (format "{\"type\":\"response.completed\",\"response\":{\"id\":\"%s\",\"output\":%s}}"
                   (or id "resp-fixture") (or output "[]"))))
+
+(ert-deftest ende-responses-ws-response-event-ownership ()
+  (let ((request (make-ende-responses-ws-request)))
+    (cl-flet ((event (text)
+                (ende-responses-ws--validate-event request (ende-protocol-json-read-string text))))
+      (event "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
+      (should-error (event "{\"type\":\"response.completed\",\"response\":{\"id\":\"new\",\"output\":[]}}"))
+      (should-error (event "{\"type\":\"response.created\",\"response\":{\"id\":\"\"}}"))
+      (event "{\"type\":\"response.created\",\"response\":{\"id\":\"new\"}}")
+      (event "{\"type\":\"response.in_progress\",\"response\":{\"id\":\"new\"},\"response_id\":\"new\"}")
+      (should-error (event "{\"type\":\"response.created\",\"response\":{\"id\":\"new\"}}"))
+      (should-error (event "{\"type\":\"response.output_text.delta\",\"response_id\":\"old\",\"delta\":\"stale\"}"))
+      (should-error (event "{\"type\":\"response.failed\",\"response\":{\"id\":\"old\",\"error\":{\"code\":\"previous_response_not_found\"}}}"))
+      (event "{\"type\":\"response.completed\",\"response\":{\"id\":\"new\",\"output\":[]}}"))))
+
+(ert-deftest ende-responses-ws-item-event-ownership ()
+  (let ((request (make-ende-responses-ws-request)))
+    (cl-flet ((event (text)
+                (ende-responses-ws--validate-event request (ende-protocol-json-read-string text))))
+      (event "{\"type\":\"response.created\",\"response\":{\"id\":\"new\"}}")
+      (event "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item-new\"}}")
+      (event "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"item-new\",\"delta\":\"ok\"}")
+      (dolist (fields '("" "\"output_index\":0," "\"item_id\":\"item-new\","))
+        (should-error
+         (event (concat "{\"type\":\"response.function_call_arguments.delta\","
+                        fields "\"delta\":\"unowned\"}"))))
+      (should-error (event "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"item-old\",\"delta\":\"stale\"}"))
+      (should-error (event "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"item-new\"}}"))
+      (should-error (event "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"item-old\"}}"))
+      (should-error (event "{\"type\":\"response.completed\",\"response\":{\"id\":\"new\",\"output\":[]}}"))
+      (event "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"item-new\"}}")
+      (event "{\"type\":\"response.completed\",\"response\":{\"id\":\"new\",\"output\":[{\"id\":\"item-new\"}]}}"))))
 
 (ert-deftest ende-responses-ws-conversation-continuity ()
   :tags '(integration)
   (ende-responses-ws-test--with-server
     (let ((profile (ende-responses-ws-test--profile 1))
           (messages '(("user" . "Hello λ")))
-          (done 0) errors result)
+          (done 0) errors result events)
       (cl-labels ((submit ()
                     (ende-llm-default
                      messages (list :on-error (lambda (error) (push error errors))
+                                    :on-event (lambda (event) (push event events))
                                     :on-done (lambda (value) (setq result value) (cl-incf done)))
                      profile)))
         (submit)
@@ -124,7 +160,20 @@
         (should (= (length sockets) 1))
         (ende-responses-ws-test--complete (car sockets) "resp_3")
         (ende-test--wait-for (lambda () (= done 3)))
-        (should-not errors)))))
+        (should-not errors)
+        (setq events nil)
+        (submit)
+        (ende-test--wait-for (lambda () (= (length wires) 4)))
+        (ende-responses-ws-test--event
+         (car sockets) "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-new\"}}")
+        (ende-responses-ws-test--event
+         (car sockets)
+         "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_old\",\"call_id\":\"call_old\",\"name\":\"read_file\",\"arguments\":\"{}\"}]}}")
+        (ende-test--wait-for (lambda () errors))
+        (should (eq (ende-error-kind (car errors)) 'protocol))
+        (should (= done 3))
+        (should-not (cl-some (lambda (event) (eq (plist-get event :type) :item)) events))
+        (should-not (gethash 1 ende-responses-ws--connections))))))
 
 (ert-deftest ende-responses-ws-recovery-and-delivery ()
   :tags '(integration)
@@ -143,6 +192,10 @@
       (ende-test--wait-for (lambda () (= (length wires) 2)))
       (should (gethash "previous_response_id" (cdar wires)))
       (let ((retired (car sockets)))
+        (ende-responses-ws-test--event
+         retired "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-retired\"}}")
+        (ende-responses-ws-test--event
+         retired "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item-retired\",\"type\":\"message\",\"content\":[]}}")
         (ende-responses-ws-test--event
          retired "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
         (ende-test--wait-for (lambda () (= (length wires) 3)))
@@ -368,7 +421,7 @@
                         (ende-responses-ws-test--profile 1))
       (ende-test--wait-for (lambda () wires))
       (dotimes (_ 3)
-        (ende-responses-ws-test--event (car sockets) "{\"type\":\"response.in_progress\"}"))
+        (ende-responses-ws-test--event (car sockets) "{\"type\":\"fixture.keepalive\"}"))
       (ende-test--wait-for (lambda () errors))
       (should (eq (ende-error-kind (car errors)) 'resource))))
   (ende-responses-ws-test--with-server
