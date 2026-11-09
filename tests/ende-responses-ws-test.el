@@ -327,6 +327,32 @@
                                              (gethash 1 ende-responses-ws--connections)))))
         (should-not errors)))))
 
+(ert-deftest ende-responses-ws-request-growth-is-not-recovery ()
+  (ende-responses-ws-test--with-server
+    (let* ((ende-responses-ws-max-retries 0)
+           (ende-max-sse-event-bytes 1024)
+           (profile (ende-responses-ws-test--profile 1))
+           (messages '(("user" . "First")))
+           (done 0) failure events
+           (callbacks (list :on-done (lambda (_) (cl-incf done))
+                            :on-error (lambda (value) (setq failure value))
+                            :on-event (lambda (event) (push event events)))))
+      (ende-llm-default messages callbacks profile)
+      (ende-test--wait-for (lambda () wires))
+      (ende-responses-ws-test--complete (car sockets))
+      (ende-test--wait-for (lambda () (= done 1)))
+      (setq messages (append messages (list (cons "user" (make-string 8192 ?x)))))
+      (ende-llm-default messages callbacks profile)
+      (ende-test--wait-for (lambda () (or failure (= (length wires) 2))))
+      (should-not failure)
+      (should (= (length sockets) 2))
+      (should-not (gethash "previous_response_id" (cdar wires)))
+      (should (= (length (gethash "input" (cdar wires))) 2))
+      (ende-responses-ws-test--complete (car sockets))
+      (ende-test--wait-for (lambda () (= done 2)))
+      (should-not (cl-find :response-restarted events
+                          :key (lambda (event) (plist-get event :type)))))))
+
 (ert-deftest ende-responses-ws-ownership-and-lifecycle ()
   :tags '(integration)
   (ende-responses-ws-test--with-server

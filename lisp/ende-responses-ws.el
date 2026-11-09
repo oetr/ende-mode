@@ -384,32 +384,27 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
            (socket (ende-responses-ws-connection-socket connection)))
       (condition-case nil
           (let* ((data (ende-responses-ws-request-payload request))
-                 (file (plist-get data :file))
-                 (size (ende-responses-ws--payload-size data)))
+                 (file (plist-get data :file)))
             (when (ende-responses-ws--attempt-live-p request attempt socket)
               ;; A successful offer does not prove transmission.  Never replay
               ;; after this boundary without an explicit provider rejection.
-              (if (> size (ende-responses-ws-connection-output-limit connection))
-                  ;; A larger follow-up needs a fresh bounded transport and
-                  ;; full preparation, without a retired previous_response_id.
-                  (ende-responses-ws--retry request 'unsent-replacement)
-                (setf (ende-responses-ws-request-delivery request) 'sending)
-                (ende-websocket-set-receive-budget
-                 socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
-                          (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
-                (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
-                  (let* ((source (plist-get data :wire-source))
-                         (release (ende-request-retained-read source)))
-                    (unwind-protect
-                        (progn
-                          (ende-websocket-send-text-file socket file release)
-                          (setq release nil)
-                          (ende-request-retained-release source (ende-responses-ws-request-lifecycle request)))
-                      (when release (funcall release)))))
-                (when (ende-responses-ws--attempt-live-p request attempt socket)
-                  (setf (ende-responses-ws-request-payload request) nil
-                        (ende-responses-ws-request-delivery request) 'accepted)
-                  (ende-responses-ws--idle request)))))
+              (setf (ende-responses-ws-request-delivery request) 'sending)
+              (ende-websocket-set-receive-budget
+               socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
+                        (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
+              (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
+                (let* ((source (plist-get data :wire-source))
+                       (release (ende-request-retained-read source)))
+                  (unwind-protect
+                      (progn
+                        (ende-websocket-send-text-file socket file release)
+                        (setq release nil)
+                        (ende-request-retained-release source (ende-responses-ws-request-lifecycle request)))
+                    (when release (funcall release)))))
+              (when (ende-responses-ws--attempt-live-p request attempt socket)
+                (setf (ende-responses-ws-request-payload request) nil
+                      (ende-responses-ws-request-delivery request) 'accepted)
+                (ende-responses-ws--idle request))))
         (ende-websocket-backpressure
          ;; Rejected atomically: retain the offer until ON-WRITABLE.
          (when (ende-responses-ws--preparation-live-p request attempt)
@@ -767,17 +762,28 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
           (setf (ende-responses-ws-request-prepared-generation request) generation
                 (ende-responses-ws-request-logical-request request) (plist-get data :retained)
                 (ende-responses-ws-request-payload request) data)
-          (funcall (ende-responses-ws-request-on-prepared request) body record)
-          (when (ende-responses-ws--preparation-live-p request attempt)
-            (if (/= generation (ende-responses-ws-connection-generation connection))
-                (progn
-                  (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
-                  (ende-responses-ws--retry request 'unsent-replacement))
+          (cond
+           ((/= generation (ende-responses-ws-connection-generation connection))
+            (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+            (ende-responses-ws--retry request 'unsent-replacement))
+           ((and (eq (ende-responses-ws-connection-phase connection) 'open)
+                 (> (ende-responses-ws--payload-size data)
+                    (ende-responses-ws-connection-output-limit connection)))
+            (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+            (ende-responses-ws--release-payload request)
+            (setf (ende-responses-ws-request-payload request) nil
+                  (ende-responses-ws-request-prepared-generation request) nil)
+            (ende-responses-ws--drop-socket connection)
+            (setf (ende-responses-ws-connection-phase connection) 'preparing)
+            (ende-responses-ws--refinalize request))
+           (t
+            (funcall (ende-responses-ws-request-on-prepared request) body record)
+            (when (ende-responses-ws--preparation-live-p request attempt)
               (ende-transport-session-start (ende-responses-ws-request-lifecycle request))
               (if (eq (ende-responses-ws-connection-phase connection) 'open)
                   (ende-responses-ws--send request)
                 (unless (ende-responses-ws-connection-socket connection)
-                  (ende-responses-ws--connect connection))))))
+                  (ende-responses-ws--connect connection)))))))
       (ende-websocket-backpressure
        (when (ende-responses-ws--preparation-live-p request attempt)
          (ende-responses-ws--retry request 'connection-limit)))
