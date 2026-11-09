@@ -36,11 +36,11 @@
 
 (cl-defstruct (ende-sandbox (:constructor ende-sandbox--create))
   owner root base workspace hooks container image process started
-  restart-required closing cleanup-pending operation worker-cancel)
+  restart-required closing cleanup-pending)
 
 (cl-defstruct (ende-sandbox--operation
                (:constructor ende-sandbox--operation-create))
-  sandbox callback register-cancellation finished)
+  sandbox callback register-cancellation finished worker-cancel)
 
 (defconst ende-sandbox--root "/dev/shm")
 (defconst ende-sandbox--output-limit 65536)
@@ -49,6 +49,7 @@
 
 (defvar ende-sandbox--by-owner (make-hash-table :test #'eql))
 (defvar ende-sandbox--retired nil)
+(defvar ende-sandbox--operations (make-hash-table :test #'eq))
 
 (defun ende-sandbox--join-component (directory component)
   "Append validated literal COMPONENT to DIRECTORY without path expansion."
@@ -218,7 +219,7 @@
   (let ((sandbox (ende-sandbox--operation-sandbox operation)))
     (and (not (ende-sandbox--operation-finished operation))
          (not (ende-sandbox-closing sandbox))
-         (eq operation (ende-sandbox-operation sandbox))
+         (eq operation (gethash sandbox ende-sandbox--operations))
          (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox))))))
 
 (defun ende-sandbox--finish-operation (operation value error)
@@ -230,8 +231,9 @@
       (setf (ende-sandbox--operation-finished operation) t
             (ende-sandbox--operation-callback operation) nil
             (ende-sandbox--operation-register-cancellation operation) nil)
-      (when (eq operation (ende-sandbox-operation sandbox))
-        (setf (ende-sandbox-operation sandbox) nil))
+      (when (and (not (ende-sandbox--operation-worker-cancel operation))
+                 (eq operation (gethash sandbox ende-sandbox--operations)))
+        (remhash sandbox ende-sandbox--operations))
       (when register (ignore-errors (funcall register nil)))
       (funcall callback value error))))
 
@@ -251,12 +253,12 @@ calling FUNCTION, which must eventually finish its operation."
     (error "the current job's sandbox is closing"))
   (unless (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
     (error "the current job's sandbox was replaced"))
-  (when (ende-sandbox-operation sandbox)
+  (when (gethash sandbox ende-sandbox--operations)
     (error "another operation already owns the current job's sandbox"))
   (let ((operation (ende-sandbox--operation-create
                     :sandbox sandbox :callback callback
                     :register-cancellation register-cancellation)))
-    (setf (ende-sandbox-operation sandbox) operation)
+    (puthash sandbox operation ende-sandbox--operations)
     (condition-case caught
         (progn
           (when register-cancellation
@@ -274,22 +276,25 @@ calling FUNCTION, which must eventually finish its operation."
     (operation library function arguments bindings callback)
   "Run workspace FUNCTION in a worker owned by OPERATION."
   (when (ende-sandbox--operation-current-p operation)
-    (let ((sandbox (ende-sandbox--operation-sandbox operation)))
-      (ende-worker-run-prewarmed
-       library function arguments bindings
-       (lambda (value error)
-         (when (ende-sandbox--operation-current-p operation)
-           (funcall callback value error)))
-       (lambda (cancel)
-         (if (and cancel (not (ende-sandbox--operation-current-p operation)))
-             (funcall cancel)
-           (setf (ende-sandbox-worker-cancel sandbox) cancel)))))))
+    (ende-worker-run-prewarmed
+     library function arguments bindings
+     (lambda (value error)
+       (when (ende-sandbox--operation-current-p operation)
+         (funcall callback value error)))
+     (lambda (cancel)
+       (if (and cancel (not (ende-sandbox--operation-current-p operation)))
+           (funcall cancel)
+         (setf (ende-sandbox--operation-worker-cancel operation) cancel))))))
 
 (defun ende-sandbox--cancel-worker (sandbox)
   "Stop SANDBOX's workspace writer before container and file disposal."
-  (when-let* ((cancel (ende-sandbox-worker-cancel sandbox)))
-    (funcall cancel)
-    (setf (ende-sandbox-worker-cancel sandbox) nil)))
+  (when-let* ((operation (gethash sandbox ende-sandbox--operations)))
+    (when-let* ((cancel (ende-sandbox--operation-worker-cancel operation)))
+      (funcall cancel)
+      (setf (ende-sandbox--operation-worker-cancel operation) nil))
+    (when (and (ende-sandbox--operation-finished operation)
+               (eq operation (gethash sandbox ende-sandbox--operations)))
+      (remhash sandbox ende-sandbox--operations))))
 
 (defun ende-sandbox--quiesce (operation function callback)
   "Run async FUNCTION under OPERATION while its container is paused.
@@ -519,7 +524,7 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
         (setf (ende-sandbox-cleanup-pending sandbox) nil)
         (message "Ende sandbox cleanup failed: %s" failure))
       (unwind-protect
-          (when-let* ((operation (ende-sandbox-operation sandbox)))
+          (when-let* ((operation (gethash sandbox ende-sandbox--operations)))
             (ende-sandbox--finish-operation
              operation nil (or error failure "sandbox operation cancelled")))
         (unless failure
