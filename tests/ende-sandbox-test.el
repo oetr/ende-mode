@@ -1222,19 +1222,32 @@
                    ende-test--sandbox-pin))
                  (ende-tools--execution-owner owner))
             (setq sandbox (ende-test--sandbox-fixture owner root nil))
-            (let ((edited
-                   (ende-test--tool-call
-                    'edit_file
-                    (list :path "src/main.el"
-                          :edits (list (ende-test--anchor-edit
-                                        "before" "replace" "after")))
-                    root configuration)))
-              (should (plist-get edited :ok)))
+            (let (edited nested)
+              (ende-tool-call-async
+               'edit_file
+               (list :path "src/main.el"
+                     :edits (list (ende-test--anchor-edit
+                                   "before" "replace" "after")))
+               root configuration
+               (lambda (result)
+                 (setq edited result)
+                 (let ((ende-tools--execution-owner nil))
+                   (setq nested
+                         (ende-tool-call
+                          'edit_file
+                          (list :path "src/main.el"
+                                :edits (list (ende-test--anchor-edit
+                                              "after" "replace" "final")))
+                          root configuration)))))
+              (should (plist-get edited :ok))
+              (should (plist-get nested :ok))
+              (should-not (gethash (ende-project-normalize-root root)
+                                   ende-tools--mutation-locks)))
             (should (equal
                      (with-temp-buffer
                        (insert-file-contents source)
                        (buffer-string))
-                     "after\n"))
+                     "final\n"))
             (should-not
              (file-exists-p
               (ende-test--sandbox-workspace sandbox "src/main.el")))))

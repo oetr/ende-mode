@@ -2012,15 +2012,17 @@ Return canonical target and root-relative/public path details."
                   (ende-tool--failure-result tool (list 'error error)))))
      ende-tools--register-cancellation-function
      (lambda (operation)
-       (let ((ende-tools--defer-sandbox-sync t)
-             (ende-tools--mutation-reservation reservation)
-             (ende-tools--sandbox-change-sets nil))
-         (setq host-result
-               (ende-tool-call (ende-tool-name tool) arguments root access-config))
+       (let ((change-sets
+              (let ((ende-tools--defer-sandbox-sync t)
+                    (ende-tools--mutation-reservation reservation)
+                    (ende-tools--sandbox-change-sets nil))
+                (setq host-result
+                      (ende-tool-call (ende-tool-name tool) arguments root access-config))
+                ende-tools--sandbox-change-sets)))
          (if (not (plist-get host-result :ok))
              (ende-sandbox--finish-operation operation nil nil)
            (ende-tools--sync-change-sets-to-sandbox
-            operation ende-tools--sandbox-change-sets
+            operation change-sets
             (lambda (value error)
               (ende-sandbox--complete-operation operation value error)))))))))
 
@@ -2829,15 +2831,17 @@ process-group cancellation function with the active Ende job."
                 (ende-sandbox--complete-operation operation nil error)
               (condition-case caught
                   (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
-                    (let ((ende-tools--access-tool 'copy_from_sandbox)
-                          (ende-tools--defer-sandbox-sync t)
-                          (ende-tools--mutation-reservation reservation)
-                          (ende-tools--sandbox-change-sets nil))
-                      (setf (ende-change-set-content change-set) bytes)
-                      (ende-tools--commit-change-sets (list change-set))
-                      (setq host-result (ende-tools--change-set-result change-set))
+                    (let ((change-sets
+                           (let ((ende-tools--access-tool 'copy_from_sandbox)
+                                 (ende-tools--defer-sandbox-sync t)
+                                 (ende-tools--mutation-reservation reservation)
+                                 (ende-tools--sandbox-change-sets nil))
+                             (setf (ende-change-set-content change-set) bytes)
+                             (ende-tools--commit-change-sets (list change-set))
+                             (setq host-result (ende-tools--change-set-result change-set))
+                             ende-tools--sandbox-change-sets)))
                       (ende-tools--sync-change-sets-to-sandbox
-                       operation ende-tools--sandbox-change-sets
+                       operation change-sets
                        (lambda (value sync-error)
                          (ende-sandbox--complete-operation operation value sync-error)))))
                 ((error quit)
