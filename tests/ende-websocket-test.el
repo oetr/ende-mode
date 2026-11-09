@@ -335,6 +335,28 @@
       (accept-process-output nil 0.01))
     (should (funcall predicate))))
 
+(ert-deftest ende-websocket-openings-are-independent-and-bounded ()
+  (let (started)
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-network-process)
+                   (lambda (&rest options)
+                     (push (plist-get options :host) started)
+                     (make-pipe-process :name "websocket-opening-test" :noquery t
+                                        :coding 'binary :plist (plist-get options :plist))))
+                  ((symbol-function 'process-send-string) #'ignore))
+          (let ((first (ende-websocket-connect "ws://first.invalid/" :limits '(:pending-openings 2)))
+                (second (ende-websocket-connect "ws://second.invalid/" :limits '(:pending-openings 2))))
+            (should-error (ende-websocket-connect "ws://third.invalid/" :limits '(:pending-openings 2))
+                          :type 'ende-websocket-backpressure)
+            (ende-websocket-test--drain first)
+            (ende-websocket-test--drain second)
+            (should (= (length started) 2))
+            (should (eq (ende-websocket-state first) 'connecting))
+            (should (eq (ende-websocket-state second) 'connecting))
+            (ende-websocket-abort first)
+            (should (ende-websocket-connect "ws://third.invalid/" :limits '(:pending-openings 2)))))
+      (ende-websocket-shutdown))))
+
 (ert-deftest ende-websocket-file-output ()
   (dolist (mode '(drain abort invalid replaced))
     (let* ((file (make-temp-file "ende-ws-output-"))
@@ -440,8 +462,7 @@
     (ende-websocket-shutdown))
   (should (= (hash-table-count ende-websocket--connections) 0))
   (should (= (hash-table-count ende-websocket--listeners) 0))
-  (should-not ende-websocket--opening-active)
-  (should-not ende-websocket--opening-queue)
+  (should (= (hash-table-count ende-websocket--openings) 0))
   (ende-websocket-shutdown))
 
 ;;; ende-websocket-test.el ends here

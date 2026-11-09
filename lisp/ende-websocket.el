@@ -382,8 +382,7 @@
 
 (defvar ende-websocket--connections (make-hash-table :test #'eq))
 (defvar ende-websocket--listeners (make-hash-table :test #'eq))
-(defvar ende-websocket--opening-queue nil)
-(defvar ende-websocket--opening-active nil)
+(defvar ende-websocket--openings (make-hash-table :test #'eq))
 (defvar ende-websocket--shutting-down nil)
 
 (defun ende-websocket-state (connection)
@@ -498,10 +497,7 @@
       (when-let* ((listener (ende-websocket--connection-listener connection)))
         (remhash connection (ende-websocket--listener-connections listener))
         (setf (ende-websocket--connection-listener connection) nil))
-      (setq ende-websocket--opening-queue (delq connection ende-websocket--opening-queue))
-      (when (eq ende-websocket--opening-active connection)
-        (setq ende-websocket--opening-active nil))
-      (when (car ende-websocket--opening-queue) (ende-websocket--schedule (car ende-websocket--opening-queue)))
+      (remhash connection ende-websocket--openings)
       (ende-websocket--schedule connection))))
 
 (defun ende-websocket-abort (connection)
@@ -958,8 +954,6 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
       (ende-websocket--deadline connection 'transport-watch 0.1 #'ende-websocket--check-opening))))
 
 (defun ende-websocket--start-client (connection)
-  (setq ende-websocket--opening-active connection
-        ende-websocket--opening-queue (delq connection ende-websocket--opening-queue))
   (unless (advice-member-p #'ende-websocket--nsm-verify 'nsm-verify-connection)
     (advice-add 'nsm-verify-connection :around #'ende-websocket--nsm-verify))
   (let* ((address (ende-websocket--connection-address connection))
@@ -994,9 +988,7 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
         (ende-websocket--connection-address connection) nil)
   (ende-websocket--cancel-deadline connection 'handshake)
   (ende-websocket--cancel-deadline connection 'transport-watch)
-  (when (eq ende-websocket--opening-active connection)
-    (setq ende-websocket--opening-active nil)
-    (when (car ende-websocket--opening-queue) (ende-websocket--schedule (car ende-websocket--opening-queue))))
+  (remhash connection ende-websocket--openings)
   (ende-websocket--emit connection :on-open))
 
 (defun ende-websocket--read-http (connection)
@@ -1048,9 +1040,7 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
                 (progn
                   (when (and (eq (ende-websocket-state connection) 'connecting)
                              (eq (ende-websocket--connection-role connection) 'client)
-                             (not (ende-websocket--connection-process connection))
-                             (not ende-websocket--opening-active)
-                             (eq connection (car ende-websocket--opening-queue)))
+                             (not (ende-websocket--connection-process connection)))
                     (ende-websocket--start-client connection))
                   (when (and (eq (ende-websocket-state connection) 'connecting)
                              (ende-websocket--connection-process connection))
@@ -1121,14 +1111,14 @@ Native writes and DNS/security operations can block despite bounded work."
   (let ((address (ende-websocket--url url)) (headers (ende-websocket--headers headers))
         (protocols (ende-websocket--protocols protocols)) (limits (ende-websocket--limits limits))
         (callbacks (ende-websocket--callbacks on-open on-message on-close on-writable)))
-    (when (>= (+ (length ende-websocket--opening-queue) (if ende-websocket--opening-active 1 0))
+    (when (>= (hash-table-count ende-websocket--openings)
               (plist-get limits :pending-openings))
       (signal 'ende-websocket-backpressure nil))
     (let ((connection (ende-websocket--new 'client limits callbacks)))
       (setf (ende-websocket--connection-address connection) address
             (ende-websocket--connection-headers connection) headers
             (ende-websocket--connection-protocols connection) protocols)
-      (setq ende-websocket--opening-queue (nconc ende-websocket--opening-queue (list connection)))
+      (puthash connection t ende-websocket--openings)
       (ende-websocket--schedule connection)
       connection)))
 
@@ -1275,7 +1265,7 @@ new connections cannot be constructed during shutdown callbacks."
         (when-let* ((timer (ende-websocket--connection-work-timer connection))) (cancel-timer timer))
         (setf (ende-websocket--connection-work-timer connection) nil)
         (ende-websocket--dispatch connection))
-      (setq ende-websocket--opening-queue nil ende-websocket--opening-active nil)
+      (clrhash ende-websocket--openings)
       (advice-remove 'nsm-verify-connection #'ende-websocket--nsm-verify))))
 
 (defun ende-websocket-unload-function ()
