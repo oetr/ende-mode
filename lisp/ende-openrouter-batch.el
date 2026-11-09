@@ -41,6 +41,7 @@
 (require 'ende-curl)
 (require 'ende-protocol)
 (require 'ende-provider)
+(require 'ende-request)
 
 ;;;; User options
 
@@ -95,7 +96,7 @@
 (cl-defstruct (ende-openrouter-batch--group
                (:constructor ende-openrouter-batch--make-group))
   "A group of compatible logical requests submitted as one remote batch."
-  key profile requests timer stage body batch-id status poll-attempt
+  key profile requests timer preparation stage body batch-id status poll-attempt
   not-found-attempt batch-visible-p poll-timer submitted-at deadline terminal)
 
 (defvar ende-openrouter-batch--groups (make-hash-table :test #'equal)
@@ -341,8 +342,18 @@
         (ende-openrouter-batch--group-poll-timer group) nil)
   (ende-openrouter-batch--cleanup-stage
    (ende-openrouter-batch--group-stage group))
-  (setf (ende-openrouter-batch--group-stage group) nil
-        (ende-openrouter-batch--group-body group) nil))
+  (setf (ende-openrouter-batch--group-stage group) nil)
+  (ende-openrouter-batch--release-preparation group))
+
+(defun ende-openrouter-batch--release-preparation (group)
+  "Stop preparation and release its payload file for GROUP."
+  (let ((lifecycle (ende-openrouter-batch--group-preparation group)))
+    (setf (ende-openrouter-batch--group-preparation group) nil
+          (ende-openrouter-batch--group-body group) nil)
+    (when lifecycle
+      (setf (ende-transport-session-terminal lifecycle) t
+            (ende-transport-session-callback-error-handler lifecycle) nil)
+      (ende-transport-session-cleanup lifecycle))))
 
 (defun ende-openrouter-batch--stop (group)
   "Stop GROUP's local work without cancelling its remote batch."
@@ -406,27 +417,42 @@
     (list (cons :custom_id custom-id)
           (cons :body body))))
 
-(defun ende-openrouter-batch--body (group)
-  "Build the ordered JSON object submitted for GROUP."
-  (let* ((profile (ende-openrouter-batch--group-profile group))
-         (requests
-          (mapcar
-           (lambda (request)
-             (ende-openrouter-batch--request-body
-              (ende-openrouter-batch--request-messages request)
-              profile
-              (ende-openrouter-batch--request-custom-id request)))
-           (ende-openrouter-batch--active-requests group)))
-         (body `((:endpoint . ,(plist-get profile :batch-endpoint))
-                 (:model . ,(plist-get profile :model))
-                 (:requests . ,requests)))
-         (encoded (encode-coding-string (json-encode body) 'utf-8))
-         (limit (ende-openrouter-batch--profile-value
-                 profile :batch-max-request-bytes
-                 ende-openrouter-batch-max-request-bytes)))
-    (when (and limit (> (string-bytes encoded) limit))
+(defun ende-openrouter-batch--check-size (bytes profile)
+  "Reject BYTES above PROFILE's aggregate request limit."
+  (let ((limit (ende-openrouter-batch--profile-value
+                profile :batch-max-request-bytes
+                ende-openrouter-batch-max-request-bytes)))
+    (when (and limit (> bytes limit))
       (error "Batch request exceeds ende-openrouter-batch-max-request-bytes"))
-    encoded))
+    limit))
+
+(defun ende-openrouter-batch--members (group)
+  "Return serializable preparation input for GROUP's live requests."
+  (mapcar (lambda (request)
+            (list :custom-id (ende-openrouter-batch--request-custom-id request)
+                  :messages (ende-openrouter-batch--request-messages request)))
+          (ende-openrouter-batch--active-requests group)))
+
+(defun ende-openrouter-batch--body (members profile)
+  "Build the ordered batch object for MEMBERS under PROFILE."
+  (let* ((body `((:endpoint . ,(plist-get profile :batch-endpoint))
+                 (:model . ,(plist-get profile :model))
+                 (:requests . [])))
+         (bytes (string-bytes (encode-coding-string (json-encode body) 'utf-8)))
+         (limit (ende-openrouter-batch--check-size bytes profile))
+         requests)
+    (dolist (member members)
+      (let ((request (ende-openrouter-batch--request-body
+                      (plist-get member :messages) profile
+                      (plist-get member :custom-id))))
+        (when limit
+          (cl-incf bytes (+ (if requests 1 0)
+                           (string-bytes (encode-coding-string
+                                          (json-encode request) 'utf-8))))
+          (ende-openrouter-batch--check-size bytes profile))
+        (push request requests)))
+    (setf (alist-get :requests body) (nreverse requests))
+    body))
 
 (defun ende-openrouter-batch--append-response (process chunk)
   "Append CHUNK to PROCESS's bounded JSON response buffer."
@@ -497,6 +523,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   (when (ende-openrouter-batch--group-stage group)
     (error "Batch group already has an active HTTP stage"))
   (let* ((stage nil)
+         (send-body (not (null body)))
+         (input-file (and (listp body) (plist-get body :file)))
          (request
           (ende-curl-start-request
            :profile (ende-openrouter-batch--group-profile group)
@@ -511,19 +539,18 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
              (ende-curl-json-command
               (ende-openrouter-batch--group-profile group)
               headers-file config-file method "application/json"
-              (not (null body)) url))
+              send-body url input-file))
            :filter #'ende-openrouter-batch--append-response
            :sentinel
            (lambda (process event)
              (ende-openrouter-batch--stage-sentinel
               group stage process event)))))
     (setq stage (list :request request :callback callback))
-    (setf (ende-openrouter-batch--group-stage group) stage)
-    (when (and body
-               (not (ende-openrouter-batch--group-terminal group)))
-      (process-send-string (plist-get request :process) body))
-    (unless (ende-openrouter-batch--group-terminal group)
-      (process-send-eof (plist-get request :process)))
+    (if (ende-openrouter-batch--group-terminal group)
+        (ende-openrouter-batch--cleanup-stage stage)
+      (setf (ende-openrouter-batch--group-stage group) stage)
+      (ende-request-send (plist-get request :process) body))
+    (setq body nil)
     request))
 
 (defun ende-openrouter-batch--batch-url (group)
@@ -663,6 +690,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
   "Handle the response to GROUP's batch submission."
   (when (ende-openrouter-batch--group-terminal group)
     (cl-return-from ende-openrouter-batch--submit-finished nil))
+  (ende-openrouter-batch--release-preparation group)
   (cond
    (stage-error
     (ende-openrouter-batch--group-fail
@@ -710,31 +738,68 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
           :batch-poll-initial-delay
           ende-openrouter-batch-poll-initial-delay))))))))
 
-(cl-defun ende-openrouter-batch--submit (group)
-  "Submit GROUP to OpenRouter."
-  (unless (ende-openrouter-batch--group-terminal group)
+(defun ende-openrouter-batch--preparation-current-p (group lifecycle)
+  "Return non-nil while LIFECYCLE owns GROUP's preparation."
+  (and (not (ende-openrouter-batch--group-terminal group))
+       (eq lifecycle (ende-openrouter-batch--group-preparation group))))
+
+(defun ende-openrouter-batch--prepared (group lifecycle data _body _record)
+  "Submit prepared DATA while LIFECYCLE still owns GROUP."
+  (when (ende-openrouter-batch--preparation-current-p group lifecycle)
     (condition-case caught
         (progn
-          (ende-openrouter-batch--status group "Submitting batch")
-          (when (ende-openrouter-batch--group-terminal group)
-            (cl-return-from ende-openrouter-batch--submit nil))
-          (setf (ende-openrouter-batch--group-body group)
-                (ende-openrouter-batch--body group))
+          (ende-openrouter-batch--check-size
+           (if (stringp data) (string-bytes data)
+             (file-attribute-size (file-attributes (plist-get data :file))))
+           (ende-openrouter-batch--group-profile group))
           (dolist (request (ende-openrouter-batch--active-requests group))
             (ende-openrouter-batch--diagnose-request request))
-          (let ((started-at (float-time)))
-            (dolist (request (ende-openrouter-batch--active-requests group))
-              (setf (ende-openrouter-batch--request-started-at request) started-at)))
-          (ende-openrouter-batch--start-stage
-           group "POST"
-           (plist-get (ende-openrouter-batch--group-profile group)
-                      :batch-url)
-           (ende-openrouter-batch--group-body group)
-           (apply-partially #'ende-openrouter-batch--submit-finished group)))
+          (when (ende-openrouter-batch--preparation-current-p group lifecycle)
+            (setf (ende-openrouter-batch--group-body group) data)
+            (let ((started-at (float-time)))
+              (dolist (request (ende-openrouter-batch--active-requests group))
+                (setf (ende-openrouter-batch--request-started-at request) started-at
+                      (ende-openrouter-batch--request-messages request) nil)))
+            (ende-openrouter-batch--start-stage
+             group "POST"
+             (plist-get (ende-openrouter-batch--group-profile group) :batch-url)
+             data (apply-partially #'ende-openrouter-batch--submit-finished group))))
       ((error quit)
        (ende-openrouter-batch--group-fail
         group (ende-error-create
                :kind 'startup :message (error-message-string caught)))))))
+
+(defun ende-openrouter-batch--submit (group)
+  "Prepare GROUP off the main thread, then submit it to OpenRouter."
+  (unless (or (ende-openrouter-batch--group-terminal group)
+              (ende-openrouter-batch--group-preparation group)
+              (ende-openrouter-batch--group-stage group)
+              (ende-openrouter-batch--group-batch-id group))
+    (ende-openrouter-batch--cancel-timer (ende-openrouter-batch--group-timer group))
+    (setf (ende-openrouter-batch--group-timer group) nil)
+    (ende-openrouter-batch--status group "Submitting batch")
+    (unless (ende-openrouter-batch--group-terminal group)
+      (let* ((profile (ende-openrouter-batch--group-profile group))
+             (lifecycle (ende-transport-session-create
+                         nil (apply-partially #'ende-openrouter-batch--group-fail group))))
+        (setf (ende-openrouter-batch--group-profile group)
+              (plist-put profile :batch-max-request-bytes
+                         (ende-openrouter-batch--profile-value
+                          profile :batch-max-request-bytes
+                          ende-openrouter-batch-max-request-bytes))
+              (ende-openrouter-batch--group-preparation group) lifecycle)
+        (condition-case caught
+            (ende-request-prepare
+             lifecycle 'ende-openrouter-batch #'ende-openrouter-batch--body
+             (ende-openrouter-batch--members group)
+             (ende-openrouter-batch--group-profile group) nil
+             (apply-partially #'ende-openrouter-batch--prepared group lifecycle)
+             nil t nil nil
+             (apply-partially #'ende-openrouter-batch--preparation-current-p group lifecycle))
+          ((error quit)
+           (ende-openrouter-batch--group-fail
+            group (ende-error-create
+                   :kind 'startup :message (error-message-string caught)))))))))
 
 (defun ende-openrouter-batch--flush (group)
   "Submit pending requests in GROUP."
@@ -743,6 +808,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                                 ende-openrouter-batch--groups)))
     (remhash (ende-openrouter-batch--group-key group)
              ende-openrouter-batch--groups)
+    (ende-openrouter-batch--cancel-timer (ende-openrouter-batch--group-timer group))
     (setf (ende-openrouter-batch--group-timer group) nil)
     (if (ende-openrouter-batch--active-requests group)
         (ende-openrouter-batch--submit group)
@@ -974,9 +1040,15 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                   (lambda (group)
                     (memq request (ende-openrouter-batch--group-requests group)))
                   ende-openrouter-batch--known-groups)))
-      (when (and group
-                 (null (ende-openrouter-batch--active-requests group)))
-        (ende-openrouter-batch--stop group))))
+      (when group
+        (cond
+         ((null (ende-openrouter-batch--active-requests group))
+          (ende-openrouter-batch--stop group))
+         ((and (ende-openrouter-batch--group-preparation group)
+               (not (ende-openrouter-batch--group-body group)))
+          (ende-openrouter-batch--release-preparation group)
+          (setf (ende-openrouter-batch--group-timer group)
+                (run-at-time 0 nil #'ende-openrouter-batch--submit group)))))))
   nil)
 
 (defun ende-openrouter-batch-auto-fallback-p (profile status detail)

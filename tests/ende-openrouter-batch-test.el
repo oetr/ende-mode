@@ -244,7 +244,9 @@
            :messages '( ("system" . "rules") ("user" . "question"))
            :profile profile)))
     (setf (ende-openrouter-batch--group-requests group) (list request))
-    (let* ((encoded (ende-openrouter-batch--body group))
+    (let* ((encoded (car (ende-request--encode
+                         #'ende-openrouter-batch--body
+                         (ende-openrouter-batch--members group) profile nil nil)))
            (text (decode-coding-string encoded 'utf-8))
            (body (ende-protocol-json-read-string text))
            (request-body
@@ -268,7 +270,22 @@
       (should (string=
                (ende-protocol-json-get
                 "effort" (ende-protocol-json-get "reasoning" request-body))
-               "medium")))))
+               "medium"))
+      (should-error
+       (ende-openrouter-batch--body
+        (ende-openrouter-batch--members group)
+        (plist-put (copy-sequence profile) :batch-max-request-bytes
+                   (1- (string-bytes encoded)))))
+      (let ((lifecycle (ende-transport-session-create nil nil))
+            failure)
+        (setf (ende-openrouter-batch--request-callbacks request)
+              (list :on-error (lambda (error) (setq failure error)))
+              (ende-openrouter-batch--group-profile group)
+              (plist-put (copy-sequence profile) :batch-max-request-bytes 1)
+              (ende-openrouter-batch--group-preparation group) lifecycle)
+        (ende-openrouter-batch--prepared group lifecycle encoded nil nil)
+        (should (eq (ende-error-kind failure) 'startup))
+        (should (string-match-p "max-request-bytes" (ende-error-message failure)))))))
 
 
 
@@ -299,7 +316,9 @@
                  :profile profile :requests requests)))
     (ende-openrouter-batch--cancel-request (car requests))
     (let* ((body (ende-protocol-json-read-string
-                  (ende-openrouter-batch--body group)))
+                  (car (ende-request--encode
+                        #'ende-openrouter-batch--body
+                        (ende-openrouter-batch--members group) profile nil nil))))
            (submitted (ende-protocol-json-get "requests" body)))
       (should (= 1 (length submitted)))
       (should (equal "active" (ende-protocol-json-get "custom_id" (aref submitted 0)))))))
@@ -483,6 +502,46 @@
       (when (process-live-p process) (delete-process process))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest ende-test/openrouter-batch-preparation-follows-live-members ()
+  (let* ((ende-openrouter-batch--known-groups nil)
+         (ende-openrouter-batch--groups (make-hash-table :test #'equal))
+         (profile (plist-put (ende-provider-profile 'router-batch) :batch-window 60))
+         (failure nil)
+         (callbacks (list :on-error (lambda (error) (setq failure error))))
+         (first (ende-openrouter-batch-default '(("user" . "first")) callbacks profile))
+         (second (ende-openrouter-batch-default '(("user" . "second")) callbacks profile))
+         (group (car ende-openrouter-batch--known-groups))
+         file payload)
+    (cl-letf (((symbol-function 'ende-openrouter-batch--start-stage)
+               (lambda (_group _method _url data _callback)
+                 (setq file (plist-get data :file)
+                       payload (ende-protocol-json-read-string
+                                (with-temp-buffer
+                                  (insert-file-contents file)
+                                  (buffer-string)))))))
+      (unwind-protect
+          (progn
+            (ende-openrouter-batch--flush group)
+            (should-not payload)
+            (let ((old (ende-openrouter-batch--group-preparation group)))
+              (ende-openrouter-batch--cancel-request first)
+              (should (ende-transport-session-terminal old))
+              (should-not (ende-transport-session-auxiliary-cancellers old))
+              (ende-openrouter-batch--prepared group old "late" nil nil))
+            (should-not (ende-openrouter-batch--group-terminal group))
+            (ende-test--wait-for (lambda () (or payload failure))
+                                 :description "live batch preparation")
+            (should-not failure)
+            (let ((members (ende-protocol-json-get "requests" payload)))
+              (should (= (length members) 1))
+              (should (equal (ende-protocol-json-get "custom_id" (aref members 0))
+                             (ende-openrouter-batch--request-custom-id second))))
+            (should (file-exists-p file))
+            (ende-openrouter-batch--cancel-request second)
+            (should-not (file-exists-p file))
+            (should-not ende-openrouter-batch--known-groups))
+        (ende-openrouter-batch-abort)))))
+
 
 
 (ert-deftest ende-test/openrouter-batch-submits-polls-and-settles ()
@@ -539,6 +598,9 @@
              profile)
             (let ((group (car ende-openrouter-batch--known-groups)))
               (ende-openrouter-batch--flush group)
+              (ende-test--wait-for
+               (lambda () (ende-openrouter-batch--group-stage group))
+               :description "batch preparation")
               (let ((stage (nth 0 stages)))
                 (with-temp-file (plist-get (plist-get stage :request)
                                            :headers-file)
@@ -627,6 +689,7 @@
            (done-count 0)
            (error-count 0)
            (real-make-process (symbol-function 'make-process))
+           (real-send-string (symbol-function 'process-send-string))
            (real-send-eof (symbol-function 'process-send-eof)))
       (cl-labels
           ((finish-request (process status body)
@@ -654,22 +717,30 @@
                  (set-process-sentinel process sentinel)))))
         (cl-letf (((symbol-function 'make-process)
                    (lambda (&rest args)
-                     (let ((process
-                            (funcall real-make-process
-                                     :name (plist-get args :name)
-                                     :buffer (plist-get args :buffer)
-                                     :stderr (plist-get args :stderr)
-                                     :command '("cat")
-                                     :connection-type 'pipe :noquery t
-                                     :filter (plist-get args :filter)
-                                     :sentinel (plist-get args :sentinel))))
-                       (process-put process :ende-test-args args)
-                       (push process processes)
-                       (unless stream-args
-                         (setq stream-args args))
-                       process)))
-                  ((symbol-function 'process-send-string) #'ignore)
-                  ((symbol-function 'process-send-eof) #'ignore)
+                     (if (equal (plist-get args :name) "ende-worker")
+                         (apply real-make-process args)
+                       (let ((process
+                              (funcall real-make-process
+                                       :name (plist-get args :name)
+                                       :buffer (plist-get args :buffer)
+                                       :stderr (plist-get args :stderr)
+                                       :command '("cat")
+                                       :connection-type 'pipe :noquery t
+                                       :filter (plist-get args :filter)
+                                       :sentinel (plist-get args :sentinel))))
+                         (process-put process :ende-test-args args)
+                         (push process processes)
+                         (unless stream-args
+                           (setq stream-args args))
+                         process))))
+                  ((symbol-function 'process-send-string)
+                   (lambda (process string)
+                     (when (string-prefix-p "ende-worker" (process-name process))
+                       (funcall real-send-string process string))))
+                  ((symbol-function 'process-send-eof)
+                   (lambda (process)
+                     (when (string-prefix-p "ende-worker" (process-name process))
+                       (funcall real-send-eof process))))
                   ((symbol-function 'ende-credentials-secret)
                    (lambda (_) "openrouter-test-token")))
           (unwind-protect
@@ -727,6 +798,9 @@
                           (should (= done-count 0))
                           (should (= error-count 0)))
                       (ende-openrouter-batch--flush group)
+                      (ende-test--wait-for
+                       (lambda () (ende-openrouter-batch--group-stage group))
+                       :description "batch handoff preparation")
                       (let ((submit-process (car processes)))
                         (finish-request
                          submit-process 202
