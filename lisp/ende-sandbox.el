@@ -473,39 +473,59 @@ flags.  A nil TIMEOUT preserves an indefinite management wait."
          (funcall callback nil))))))
 
 (defun ende-sandbox--dispose (sandbox)
-  "Forget SANDBOX and remove its tmpfs files."
-  (ende-sandbox--cancel-process sandbox)
-  (ende-sandbox--delete-tree (ende-sandbox-base sandbox))
-  (when (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
-    (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
-  (setq ende-sandbox--retired (delq sandbox ende-sandbox--retired)))
+  "Forget stopped SANDBOX and remove its tmpfs files in a worker."
+  (unless (ende-sandbox-cleanup-pending sandbox)
+    (when (ende-sandbox-container sandbox)
+      (error "cannot dispose a sandbox before its container is removed"))
+    (setf (ende-sandbox-closing sandbox) t)
+    (ende-sandbox--cancel-worker sandbox)
+    (ende-sandbox--cancel-process sandbox)
+    (setf (ende-sandbox-cleanup-pending sandbox) t)
+    (cl-pushnew sandbox ende-sandbox--retired :test #'eq)
+    (when (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
+      (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
+    (ende-worker-run
+     'ende-sandbox #'ende-sandbox--delete-tree
+     (list (ende-sandbox-base sandbox)) nil
+     (lambda (_value error)
+       (setf (ende-sandbox-cleanup-pending sandbox) nil)
+       (if error
+           (message "Ende sandbox cleanup failed: %s" error)
+         (setq ende-sandbox--retired (delq sandbox ende-sandbox--retired)))))))
 
 (defun ende-sandbox--close (sandbox invalidate &optional error)
   "Stop SANDBOX before deleting its tmpfs workspace.
 When INVALIDATE is non-nil, make it unavailable to its owner immediately."
+  (when (and sandbox invalidate
+             (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox))))
+    (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
   (when (and sandbox (not (ende-sandbox-cleanup-pending sandbox)))
     (cl-pushnew sandbox ende-sandbox--retired :test #'eq)
-    (when (and invalidate
-               (eq sandbox (ende-sandbox-for-owner
-                            (ende-sandbox-owner sandbox))))
-      (remhash (ende-sandbox-owner sandbox) ende-sandbox--by-owner))
     (setf (ende-sandbox-closing sandbox) t
           (ende-sandbox-cleanup-pending sandbox) t)
-    (unwind-protect
-        (when-let* ((operation (ende-sandbox-operation sandbox)))
-          (ende-sandbox--finish-operation
-           operation nil (or error "sandbox operation cancelled")))
-      (ende-sandbox--cancel-worker sandbox)
-      (ende-sandbox--cancel-process sandbox)
-      (if (ende-sandbox-container sandbox)
-          (ende-sandbox--remove-container
-           sandbox
-           (lambda (success)
-             (setf (ende-sandbox-cleanup-pending sandbox) nil)
-             (when success
-               (ende-sandbox--dispose sandbox))))
-        (setf (ende-sandbox-cleanup-pending sandbox) nil)
-        (ende-sandbox--dispose sandbox)))))
+    (condition-case caught
+        (progn
+          (ende-sandbox--cancel-worker sandbox)
+          (ende-sandbox--cancel-process sandbox)
+          (unwind-protect
+              (when-let* ((operation (ende-sandbox-operation sandbox)))
+                (ende-sandbox--finish-operation
+                 operation nil (or error "sandbox operation cancelled")))
+            (if (ende-sandbox-container sandbox)
+                (ende-sandbox--remove-container
+                 sandbox
+                 (lambda (success)
+                   (setf (ende-sandbox-cleanup-pending sandbox) nil)
+                   (when success
+                     (ende-sandbox--dispose sandbox))))
+              (setf (ende-sandbox-cleanup-pending sandbox) nil)
+              (ende-sandbox--dispose sandbox))))
+      ((error quit)
+       (setf (ende-sandbox-cleanup-pending sandbox) nil)
+       (when-let* ((operation (ende-sandbox-operation sandbox)))
+         (ende-sandbox--finish-operation
+          operation nil (or error (error-message-string caught))))
+       (message "Ende sandbox cleanup failed: %s" (error-message-string caught))))))
 
 (defun ende-sandbox-cleanup-owner (owner)
   "Stop OWNER's container before deleting its tmpfs workspace."

@@ -219,9 +219,18 @@
 (defun ende-test--sandbox-wait-clean (owners)
   "Wait until OWNER sandboxes have completed asynchronous cleanup."
   (ende-test--wait-for
-   (lambda () (not (cl-some #'ende-sandbox-for-owner owners)))
+   (lambda ()
+     (and (not (cl-some #'ende-sandbox-for-owner owners))
+          (not (cl-some (lambda (sandbox)
+                          (memq (ende-sandbox-owner sandbox) owners))
+                        ende-sandbox--retired))))
    :timeout 60.0 :description "sandbox owner cleanup")
   (should-not (cl-some #'ende-sandbox-for-owner owners)))
+
+(defun ende-test--sandbox-cleanup-owner (owner)
+  "Clean OWNER's sandbox and await all retired workspace deletion."
+  (ende-sandbox-cleanup-owner owner)
+  (ende-test--sandbox-wait-clean (list owner)))
 
 (ert-deftest ende-test/sandbox-config-inherits-only-pinned-images ()
   (let* ((root (make-temp-file "ende-sandbox-config-" t))
@@ -302,7 +311,7 @@
           (should sandbox)
           (should-not (directory-files
                        (ende-sandbox-workspace sandbox) nil "[^.]")))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/tool-runner-binds-its-job-id-for-dispatch ()
@@ -405,7 +414,7 @@
                        (buffer-string))
                      "int main(void) { return 23; }\n"))))
       (when sandbox
-        (ende-sandbox-cleanup-owner owner))
+        (ende-test--sandbox-cleanup-owner owner))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-treats-tilde-path-components-literally ()
@@ -443,7 +452,7 @@
                              (insert-file-contents sandbox-file)
                              (buffer-string))
                            "synchronized\n"))))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-mirrors-committed-source-changes ()
@@ -542,9 +551,10 @@
                          (buffer-string))
                        "modified\n"))
               (should-not (ende-sandbox-for-owner owner))
+              (ende-test--sandbox-wait-clean (list owner))
               (should-not (file-exists-p base))
                (setq sandbox nil))))
-       (ende-sandbox-cleanup-owner owner)
+       (ende-test--sandbox-cleanup-owner owner)
        (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-is-untouched-when-host-batch-rolls-back ()
@@ -599,7 +609,7 @@
                              (buffer-string))
                            "old\n")))
           (should (eq sandbox (ende-sandbox-for-owner owner))))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-cleanup-can-retry-and-traverse-private-trees ()
@@ -614,16 +624,18 @@
           (make-directory locked)
           (make-symbolic-link outside (expand-file-name "link" locked))
           (set-file-modes locked 0)
-          (cl-letf (((symbol-function 'ende-sandbox--delete-tree)
-                     (lambda (_) (error "Deletion failed"))))
-            (should-error (ende-sandbox-invalidate sandbox)))
+          (cl-letf (((symbol-function 'ende-worker-run)
+                     (lambda (_library _function _arguments _bindings callback
+                                       &optional _register)
+                       (funcall callback nil "Deletion failed"))))
+            (ende-sandbox-invalidate sandbox))
           (should-not (ende-sandbox-for-owner owner))
           (should (memq sandbox ende-sandbox--retired))
-          (ende-sandbox-cleanup-owner owner)
+          (ende-test--sandbox-cleanup-owner owner)
           (should-not (file-exists-p base))
           (should-not (memq sandbox ende-sandbox--retired))
           (should (file-directory-p outside)))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory outside t))))
 
 (ert-deftest ende-test/sandbox-sync-failure-keeps-host-edit-and-recreates-sandbox ()
@@ -666,6 +678,7 @@
                              (buffer-string))
                            "committed\n"))
             (should-not (ende-sandbox-for-owner owner))
+            (ende-test--sandbox-wait-clean (list owner))
             (should-not (file-exists-p old-base))))
           (cl-letf (((symbol-function 'ende-sandbox-create)
                      (lambda (new-owner new-root _image)
@@ -694,7 +707,7 @@
              (should fresh)
              (should-not (eq sandbox fresh))
              (should (eq fresh (ende-sandbox-for-owner owner)))))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-quiesces-source-batches-and-copy-back ()
@@ -822,7 +835,7 @@
         (setf (ende-sandbox-container sandbox) nil
               (ende-sandbox-started sandbox) nil)
         (ende-sandbox--dispose sandbox))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-preparation-is-owned-and-cancellable ()
@@ -859,7 +872,7 @@
               (funcall prepared t nil))
             (should (= calls 1))
             (should-not (ende-sandbox-for-owner owner)))
-        (ende-sandbox-cleanup-owner owner)
+        (ende-test--sandbox-cleanup-owner owner)
         (delete-directory root t)))))
 
 (ert-deftest ende-test/sandbox-deletion-collision-invalidates-without-recursion ()
@@ -914,6 +927,7 @@
         (setf (ende-sandbox-container sandbox) nil
               (ende-sandbox-started sandbox) nil)
         (ende-sandbox--dispose sandbox))
+      (ende-test--sandbox-wait-clean (list owner))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-startup-error-describes-status-and-output ()
@@ -979,7 +993,7 @@
            (lambda () (not (file-exists-p (ende-sandbox-base sandbox)))))
           (should-not (ende-sandbox-for-owner owner)))
       (setf (ende-sandbox-container sandbox) nil)
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-startup-failure-preserves-diagnostics-in-json ()
@@ -1014,7 +1028,9 @@
                      125 "" "Error: original Podman failure\n" nil nil nil)
             (should (functionp cleanup-callback))
             (should-not response)
+            (when removed (setf (ende-sandbox-container sandbox) nil))
             (funcall cleanup-callback removed)
+            (when removed (ende-test--sandbox-wait-clean (list owner)))
             (let ((decoded (ende-protocol-json-read-string response)))
               (should (eq (ende-protocol-json-get "ok" decoded) :false))
               (should
@@ -1030,6 +1046,7 @@
               (should (ende-sandbox-restart-required sandbox))))
         (setf (ende-sandbox-container sandbox) nil)
         (ende-sandbox--dispose sandbox)
+        (ende-test--sandbox-wait-clean (list owner))
         (delete-directory root t)))))
 
 (ert-deftest ende-test/sandbox-startup-preserves-immediate-launch-error ()
@@ -1090,7 +1107,7 @@
             (should (eq (ende-protocol-json-get "ok" decoded) t))
             (should (eq (ende-protocol-json-get "process_ok" result) :false))))
       (remhash owner ende-sandbox--by-owner)
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory workspace t)
       (delete-directory root t))))
 
@@ -1135,7 +1152,7 @@
                         (insert-file-contents secret)
                         (buffer-string))
                      "secret B\n"))))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/unresourced-sandbox-does-not-sync-project-mutations ()
@@ -1172,7 +1189,7 @@
             (should-not
              (file-exists-p
               (ende-test--sandbox-workspace sandbox "src/main.el")))))
-      (ende-sandbox-cleanup-owner owner)
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-copy-back-rechecks-destination-and-symlinks ()
@@ -1232,11 +1249,12 @@
           (let ((base (ende-sandbox-base sandbox)))
             (ende-sandbox--job-event
              (ende--make-job :id owner) '(:type :settled))
+            (ende-test--sandbox-wait-clean (list owner))
             (should-not (ende-sandbox-for-owner owner))
             (should-not (file-exists-p base)))
           (setq sandbox nil))
       (when sandbox
-        (ende-sandbox-cleanup-owner owner))
+        (ende-test--sandbox-cleanup-owner owner))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-cwd-rejects-absolute-escaping-and-symlink-paths ()
@@ -1263,7 +1281,7 @@
                               (ende-test--sandbox-workspace sandbox "escape"))
           (should-error (ende-sandbox--cwd sandbox "escape")))
       (when sandbox
-        (ende-sandbox-cleanup-owner owner))
+        (ende-test--sandbox-cleanup-owner owner))
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-persistent-podman-commands-and-job-cleanup ()
@@ -1361,7 +1379,7 @@
                     containers)
               (ende-sandbox--job-event
                (ende--make-job :id owner) '(:type :settled)))
-            (ende-sandbox-cleanup-owner owner))
+            (ende-test--sandbox-cleanup-owner owner))
           (ende-test--sandbox-wait-clean (list owner-one owner-two))
           (dolist (entry containers)
             (should-not (file-exists-p (cdr entry)))
@@ -1370,7 +1388,7 @@
                (zerop (call-process "podman" nil t nil "container" "exists"
                                     (car entry)))))))
       (dolist (owner (list owner-one owner-two))
-        (ende-sandbox-cleanup-owner owner))
+        (ende-test--sandbox-cleanup-owner owner))
       (ende-test--sandbox-wait-clean (list owner-one owner-two))
       (delete-directory root t))))
 
@@ -1420,8 +1438,7 @@
                                 (expand-file-name "public/main.c" root))
                                (buffer-string))
                              "int main(void) { return 42; }\n")))))
-      (ende-sandbox-cleanup-owner owner)
-      (ende-test--sandbox-wait-clean (list owner))
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (ert-deftest ende-test/sandbox-start-failure-does-not-touch-project-files ()
@@ -1457,8 +1474,7 @@
                         (expand-file-name "public/main.c" root))
                        (buffer-string))
                      "int main(void) { return 23; }\n"))))
-      (ende-sandbox-cleanup-owner owner)
-      (ende-test--sandbox-wait-clean (list owner))
+      (ende-test--sandbox-cleanup-owner owner)
       (when root
         (delete-directory root t)))))
 
@@ -1490,8 +1506,7 @@
                     '(("command" . "./public/program"))
                     root configuration owner)))
               (should (= (plist-get executed :exit_code) 23)))))
-      (ende-sandbox-cleanup-owner owner)
-      (ende-test--sandbox-wait-clean (list owner))
+      (ende-test--sandbox-cleanup-owner owner)
       (delete-directory root t))))
 
 (provide 'ende-sandbox-test)
