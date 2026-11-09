@@ -78,6 +78,11 @@
 (defun ende-request--encode (builder messages profile debug preparation &optional finalization replay)
   "Build MESSAGES for PROFILE with immutable debug PREPARATION.
 Return the outgoing bytes, encoded body, and optional capture record."
+  (unless replay
+    (let ((resolved (ende-content-resolve-messages messages)))
+      (unless (eq resolved messages)
+        (require 'ende-operations)
+        (setq messages (ende--validate-messages resolved)))))
   (let* ((ende-debugging-enabled (and debug t))
          (ende-debug--session-directory (or (plist-get preparation :directory) ende-debug--session-directory))
          (body (funcall builder messages profile))
@@ -125,7 +130,7 @@ Return the outgoing bytes, encoded body, and optional capture record."
          (if (stringp content)
              (> (cl-incf bytes (string-bytes content)) ende-request--worker-threshold)
            (cl-some (lambda (part)
-                      (or (eq (plist-get part :type) :image)
+                      (or (memq (plist-get part :type) '(:image :source))
                           (> (cl-incf bytes (string-bytes (or (plist-get part :text) "")))
                              ende-request--worker-threshold))) content)))) messages)))
 
@@ -173,6 +178,7 @@ Only source descriptors and serializable finalization data enter the worker."
           (when release-baseline (funcall release-baseline)))
       (let* (file wire full-file release-wire release-source
              (bindings (list (cons 'ende-debugging-enabled (and debug t))
+                             (cons 'ende-max-request-chars ende-max-request-chars)
                              (cons 'ende-debug--session-directory (plist-get preparation :directory))
                              (cons 'ende-debug--sequence (or (plist-get preparation :sequence) 0))))
              (failed (ende-transport-session-callback-error-handler lifecycle))

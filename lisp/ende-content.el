@@ -59,7 +59,41 @@
                          (file-name-nondirectory (plist-get part :path))
                          (plist-get part :width) (plist-get part :height)
                          (/ (or (plist-get part :bytes) 0) 1024.0)))
+         (:source
+          (if (eq (plist-get part :kind) :image)
+              (format "\n[%s: %s, ?×?, %.1f KB]\n"
+                      (plist-get part :media-type)
+                      (file-name-nondirectory (plist-get part :path))
+                      (/ (nth 1 (plist-get part :signature)) 1024.0))
+            "\n[Attached text]\n"))
          (_ (error "Unsupported message content part")))) content "")))
+
+(defun ende-content-resolve (content)
+  "Resolve any captured attachment sources in ordered CONTENT."
+  (if (or (stringp content)
+          (not (cl-some (lambda (part) (eq (plist-get part :type) :source)) content)))
+      content
+    (let ((parts (mapcar (lambda (part)
+                          (if (eq (plist-get part :type) :source)
+                              (ende-artifact-resolve-source part) part)) content)))
+      (if (cl-every (lambda (part) (eq (plist-get part :type) :text)) parts)
+          (mapconcat (lambda (part) (plist-get part :text)) parts "")
+        parts))))
+
+(defun ende-content-resolve-messages (messages)
+  "Resolve attachment sources in MESSAGES without changing protocol data.
+Return MESSAGES itself when no sources need resolution."
+  (let (changed)
+    (let ((resolved
+           (mapcar
+            (lambda (message)
+              (let* ((content (ende-content-body message))
+                     (resolved (ende-content-resolve content)))
+                (if (eq content resolved) message
+                  (setq changed t)
+                  (if (stringp (car-safe message)) (cons (car message) resolved)
+                    (plist-put (copy-sequence message) :content resolved))))) messages)))
+      (if changed resolved messages))))
 
 (defun ende-content-empty-p (content)
   "Return non-nil if CONTENT has neither images nor nonblank text."
@@ -69,7 +103,11 @@
 
 (defun ende-content-image-data (part)
   "Return validated PART as raster bytes and its actual media type."
-  (ende-artifact--image-data (plist-get part :path) (plist-get part :media-type)))
+  (let ((path (plist-get part :path))
+        (signature (plist-get part :signature)))
+    (when signature (ende-artifact--check-signature path signature))
+    (prog1 (ende-artifact--image-data path (plist-get part :media-type))
+      (when signature (ende-artifact--check-signature path signature)))))
 
 (defun ende-content-data-url (part)
   "Encode PART only at the provider boundary."
@@ -95,6 +133,9 @@ all their assistant content and before the corresponding results."
    (lambda (message)
      (let ((role (ende-content-role message))
            (content (ende-content-body message)))
+       (when (and (not (stringp content))
+                  (cl-some (lambda (part) (eq (plist-get part :type) :source)) content))
+         (error "Attachment sources must be resolved before provider encoding"))
        (if (or (not (equal role "assistant")) (null content) (stringp content)
                (and (not (stringp (car-safe message)))
                     (or (plist-get message :protocol-items)

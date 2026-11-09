@@ -354,17 +354,30 @@ Check containment even when intermediate directories are symlinks."
           :width (car dimensions) :height (cdr dimensions)
           :bytes (length bytes))))
 
-(defun ende-artifact--image-entry (path &optional expected)
-  "Return the current validated entry for PATH, checking EXPECTED even on hits."
+(defun ende-artifact--image-source (path &optional expected)
+  "Capture PATH's identity and image preconditions, optionally checking EXPECTED."
   (setq path (ende-artifact--local-path path))
   (let* ((media (ende-artifact--image-media path))
-         (signature (ende-artifact--file-signature path))
-         (entry (gethash path ende-artifact--cache)))
+         (signature (ende-artifact--file-signature path)))
     (when (and expected (not (equal expected media)))
       (error "Image %s has mismatched media type; expected %s" path expected))
     (when (and (equal media "image/svg+xml")
                (> (nth 1 signature) ende-artifact--svg-byte-limit))
       (signal 'ende-artifact-validation-error '("SVG exceeds the size limit")))
+    (list :type :source :kind :image :path path :media-type media
+          :signature signature)))
+
+(defun ende-artifact--check-signature (path signature)
+  "Require PATH to retain its captured SIGNATURE."
+  (unless (equal signature (ende-artifact--file-signature path))
+    (error "Attachment changed while being read: %s" path)))
+
+(defun ende-artifact--image-entry (path &optional expected)
+  "Return the current validated entry for PATH, checking EXPECTED even on hits."
+  (let* ((source (ende-artifact--image-source path expected))
+         (path (plist-get source :path))
+         (signature (plist-get source :signature))
+         (entry (gethash path ende-artifact--cache)))
     (unless (equal signature (plist-get entry :signature))
       (remhash path ende-artifact--cache)
       (let* ((bytes (ende-artifact--read-bytes path))
@@ -680,9 +693,36 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
         (mapconcat (lambda (part) (plist-get part :text)) parts "")
       parts)))
 
-(defun ende-artifact-content (text &optional resolve-file)
+(defun ende-artifact--text-part (path target &optional expected)
+  "Read and validate text attachment PATH named TARGET, checking EXPECTED."
+  (let* ((path (ende-artifact--local-path path))
+         (signature (ende-artifact--file-signature path)))
+    (when expected (ende-artifact--check-signature path expected))
+    (let ((bytes (ende-artifact--read-bytes path)))
+      (when (or (image-type-from-data bytes) (string-match-p (string 0) bytes))
+        (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
+      (ende-artifact--check-signature path signature)
+      (list :type :text :text
+            (concat "\nAttached file contents:\n"
+                    (decode-coding-string bytes 'utf-8) "\n")))))
+
+(defun ende-artifact-resolve-source (source)
+  "Resolve captured SOURCE, rejecting changed or unsupported content."
+  (let ((path (plist-get source :path))
+        (signature (plist-get source :signature)))
+    (ende-artifact--check-signature path signature)
+    (pcase (plist-get source :kind)
+      (:image
+       (let ((part (ende-artifact--load-image path (plist-get source :media-type))))
+         (ende-artifact--check-signature path signature)
+         (plist-put part :signature signature)))
+      (:text (ende-artifact--text-part path (plist-get source :target) signature))
+      (_ (error "Unsupported attachment source")))))
+
+(defun ende-artifact-content (text &optional resolve-file defer-threshold)
   "Read safe TEXT into ordered parts without altering its source.
-Explicit references use their file link; RESOLVE-FILE enables user attachments."
+Explicit references use their file link; RESOLVE-FILE enables user attachments.
+DEFER-THRESHOLD captures images and larger text files for worker validation."
   (let ((references (ende-artifact--references text nil resolve-file)))
     (dolist (reference references)
       (let* ((target (plist-get reference :path))
@@ -694,20 +734,17 @@ Explicit references use their file link; RESOLVE-FILE enables user attachments."
         (setf (plist-get reference :part)
               (if (or (not (plist-get reference :attachment))
                       (member extension '("png" "jpg" "jpeg" "svg")))
-                  (ende-artifact--load-image path)
+                  (if defer-threshold (ende-artifact--image-source path)
+                    (ende-artifact--load-image path))
                 (progn
                   (when (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
                     (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
                   (let* ((path (ende-artifact--local-path path))
-                         (signature (ende-artifact--file-signature path))
-                         (bytes (ende-artifact--read-bytes path)))
-                    (when (or (image-type-from-data bytes) (string-match-p (string 0) bytes))
-                      (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
-                    (unless (equal signature (ende-artifact--file-signature path))
-                      (error "Attachment changed while being read: %s" target))
-                    (list :type :text :text
-                          (concat "\nAttached file contents:\n"
-                                  (decode-coding-string bytes 'utf-8) "\n"))))))))
+                         (signature (ende-artifact--file-signature path)))
+                    (if (and defer-threshold (> (nth 1 signature) defer-threshold))
+                        (list :type :source :kind :text :path path :target target
+                              :signature signature)
+                      (ende-artifact--text-part path target signature))))))))
     (ende-artifact--parts text references)))
 
 (defun ende-artifact-prepare-text (text storage org-file &optional artifacts)

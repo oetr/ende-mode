@@ -807,6 +807,8 @@ around rendered chat sections, not arbitrary text slices."
                 (if newline (substring text newline) ""))
       text)))
 
+(defvar ende-chat--defer-attachments nil)
+
 (defun ende-chat--content (document headline text &optional origin)
   "Reconstruct image content in TEXT belonging to HEADLINE."
   (let ((userp (eq (or origin (ende-chat--effective-role document headline)) 'user))
@@ -821,7 +823,8 @@ around rendered chat sections, not arbitrary text slices."
          (when userp
            (lambda (target)
              (with-current-buffer source-buffer
-               (ende-artifact--local-path target)))))))))
+               (ende-artifact--local-path target))))
+         ende-chat--defer-attachments)))))
 
 (defun ende-chat--section-messages
     (document root start end &optional include-p selected-headlines)
@@ -3995,14 +3998,17 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                       (tool-configuration
                        (plist-get environment :access-policy))
                       (messages
-                       (if compact
-                           (ende-chat--compact-messages
-                            document question
-                            (ende-chat--find-by-property
-                             document ende-chat-request-id-property
-                             (plist-get instruction :request-id))
-                            (plist-get instruction :source-fence))
-                         (ende-chat--serialize document question)))
+                       (let ((ende-chat--defer-attachments
+                              (and (eq ende-llm-function #'ende-llm-default)
+                                   ende-request--worker-threshold)))
+                         (if compact
+                             (ende-chat--compact-messages
+                              document question
+                              (ende-chat--find-by-property
+                               document ende-chat-request-id-property
+                               (plist-get instruction :request-id))
+                              (plist-get instruction :source-fence))
+                           (ende-chat--serialize document question))))
                       (system-prompt
                        (if compact
                            ende-chat--compact-system
