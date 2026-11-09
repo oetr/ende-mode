@@ -606,31 +606,40 @@ ATTACHMENTS includes ordinary user file links.  No files are read or written."
               (excluded (org-element-map tree '(fixed-width code verbatim)
                           (lambda (element)
                             (cons (org-element-property :begin element)
-                                  (org-element-property :end element))))))
-          (while (re-search-forward "^[ \t]*<svg[ \t\n>]" nil t)
-            (let ((begin (match-beginning 0)))
-              (while (and excluded (<= (cdar excluded) (point)))
-                (pop excluded))
-              (unless (and excluded (<= (caar excluded) (point)))
-                (let ((end (with-temp-buffer
-                             (insert (substring text (1- begin)))
-                             (let ((nxml-auto-insert-xml-declaration-flag nil)
-                                   (inhibit-message t))
-                               (nxml-mode))
-                             (goto-char (point-min))
-                             (skip-chars-forward " \t")
-                             (condition-case nil
-                                 (progn (nxml-forward-element) (+ begin (1- (point))))
-                               (error
-                                (signal 'ende-artifact-validation-error
-                                        '("Incomplete generated SVG fragment")))))))
-                  (goto-char end)
-                  (when (looking-at "[ \t]*$")
-                    (let ((finish (min (point-max) (1+ (line-end-position)))))
-                      (push (list :part nil :begin begin :end finish
-                                  :svg (string-trim (substring text (1- begin) (1- end))))
-                            references))
-                    (forward-line 1))))))))
+                                  (org-element-property :end element)))))
+              xml-buffer)
+          (unwind-protect
+              (while (re-search-forward "^[ \t]*<svg[ \t\n>]" nil t)
+                (let ((begin (match-beginning 0)))
+                  (while (and excluded (<= (cdar excluded) (point)))
+                    (pop excluded))
+                  (unless (and excluded (<= (caar excluded) (point)))
+                    (unless xml-buffer
+                      (setq xml-buffer (generate-new-buffer " *ende-svg*"))
+                      (with-current-buffer xml-buffer
+                        (insert text)
+                        (let ((nxml-auto-insert-xml-declaration-flag nil)
+                              (inhibit-message t))
+                          (nxml-mode))))
+                    (let ((end (with-current-buffer xml-buffer
+                                 (save-restriction
+                                   (goto-char begin)
+                                   (skip-chars-forward " \t")
+                                   ;; Start at the root, independent of preceding prose.
+                                   (narrow-to-region (point) (point-max))
+                                   (condition-case nil
+                                       (progn (nxml-forward-element) (point))
+                                     (error
+                                      (signal 'ende-artifact-validation-error
+                                              '("Incomplete generated SVG fragment"))))))))
+                      (goto-char end)
+                      (when (looking-at "[ \t]*$")
+                        (let ((finish (min (point-max) (1+ (line-end-position)))))
+                          (push (list :part nil :begin begin :end finish
+                                      :svg (string-trim (substring text (1- begin) (1- end))))
+                                references))
+                        (forward-line 1))))))
+            (when xml-buffer (kill-buffer xml-buffer)))))
       (let ((end 0) active)
         (dolist (reference (sort references (lambda (a b) (< (plist-get a :begin) (plist-get b :begin)))))
           ;; SVG text is part of the enclosing image, not an Org directive.

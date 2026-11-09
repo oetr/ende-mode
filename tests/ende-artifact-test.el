@@ -461,6 +461,27 @@
                    (list (list :part nil :begin (1+ (length literal))
                                :end (1+ (length text)) :svg ende-artifact-test-svg))))))
 
+(ert-deftest ende-artifact-generated-svg-boundaries ()
+  (let* ((svg (concat "<svg xmlns=\"http://www.w3.org/2000/svg\">\n"
+                      "<g><svg><rect width=\"1\" height=\"1\"/></svg></g>\n"
+                      "<!-- </svg>\n#+ENDE_ARTIFACT: comment.png\n-->\n"
+                      "<text><![CDATA[</svg>\n<svg >\n"
+                      "#+ENDE_ARTIFACT: cdata.png\n]]></text>\n"
+                      "<text>\n#+ENDE_ARTIFACT: text.png\nfile:./text.png\n</text>\n</svg>"))
+         (before "Before λ <!-- not an XML document\n")
+         (first (concat " \t" svg " \t\n"))
+         (between (concat "Middle\n" ende-artifact-test-svg " trailing prose\n"))
+         (text (concat before first between ende-artifact-test-svg)))
+    (should (equal (ende-artifact--references text t t)
+                   (list (list :part nil :begin (1+ (length before))
+                               :end (1+ (+ (length before) (length first))) :svg svg)
+                         (list :part nil :begin (1+ (+ (length before) (length first)
+                                                       (length between)))
+                               :end (1+ (length text)) :svg ende-artifact-test-svg))))
+    (should-error (ende-artifact--references
+                   (concat text "\n<svg xmlns=\"http://www.w3.org/2000/svg\"><g>\n") t)
+                  :type 'ende-artifact-validation-error)))
+
 (ert-deftest ende-artifact-cache-reuse-and-invalidation ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
