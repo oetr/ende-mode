@@ -39,9 +39,13 @@
   :type 'natnum
   :group 'ende)
 
+(defconst ende-responses-ws--response-history-limit 256
+  "Maximum completed response identities retained before retiring a socket.")
+
 (cl-defstruct ende-responses-ws-connection
   owner identity socket active chain closed closing key url headers properties
   header-limit output-limit
+  (completed-ids (make-hash-table :test #'equal))
   (generation 1) (phase 'disconnected) created close-code)
 
 (cl-defstruct ende-responses-ws-chain
@@ -91,6 +95,7 @@
   (let ((socket (ende-responses-ws-connection-socket connection)))
     (cl-incf (ende-responses-ws-connection-generation connection))
     (ende-responses-ws--clear-chain connection)
+    (clrhash (ende-responses-ws-connection-completed-ids connection))
     (setf (ende-responses-ws-connection-socket connection) nil
           (ende-responses-ws-connection-phase connection) 'disconnected
           (ende-responses-ws-connection-closing connection) nil
@@ -119,6 +124,13 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
   (let ((connection (ende-responses-ws-request-connection request)))
     (when (and connection (eq request (ende-responses-ws-connection-active connection)))
       (ende-responses-ws--clear-chain connection)
+      (when (and (eq outcome 'success) (stringp response-id))
+        (let ((history (ende-responses-ws-connection-completed-ids connection))
+              (socket (ende-responses-ws-connection-socket connection)))
+          (puthash response-id t history)
+          (when (or (>= (hash-table-count history) ende-responses-ws--response-history-limit)
+                    (and socket (ende-websocket-receive-pending-p socket)))
+            (ende-responses-ws--discard connection))))
       (when (and (eq outcome 'success) (ende-responses-ws-connection-owner connection)
                  (ende-responses-ws--eligible-p connection)
                  (stringp response-id) (not (string-empty-p response-id)))
@@ -399,25 +411,27 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
           (let* ((data (ende-responses-ws-request-payload request))
                  (file (plist-get data :file)))
             (when (ende-responses-ws--attempt-live-p request attempt socket)
-              ;; A successful offer does not prove transmission.  Never replay
-              ;; after this boundary without an explicit provider rejection.
-              (setf (ende-responses-ws-request-delivery request) 'sending)
-              (ende-websocket-set-receive-budget
-               socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
-                        (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
-              (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
-                (let* ((source (plist-get data :wire-source))
-                       (release (ende-request-retained-read source)))
-                  (unwind-protect
-                      (progn
-                        (ende-websocket-send-text-file socket file release)
-                        (setq release nil)
-                        (ende-request-retained-release source (ende-responses-ws-request-lifecycle request)))
-                    (when release (funcall release)))))
-              (when (ende-responses-ws--attempt-live-p request attempt socket)
-                (setf (ende-responses-ws-request-payload request) nil
-                      (ende-responses-ws-request-delivery request) 'accepted)
-                (ende-responses-ws--idle request))))
+              (if (ende-websocket-receive-pending-p socket)
+                  (ende-responses-ws--retry request 'unsent-replacement)
+                ;; A successful offer does not prove transmission.  Never replay
+                ;; after this boundary without an explicit provider rejection.
+                (setf (ende-responses-ws-request-delivery request) 'sending)
+                (ende-websocket-set-receive-budget
+                 socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
+                          (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
+                (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
+                  (let* ((source (plist-get data :wire-source))
+                         (release (ende-request-retained-read source)))
+                    (unwind-protect
+                        (progn
+                          (ende-websocket-send-text-file socket file release)
+                          (setq release nil)
+                          (ende-request-retained-release source (ende-responses-ws-request-lifecycle request)))
+                      (when release (funcall release)))))
+                (when (ende-responses-ws--attempt-live-p request attempt socket)
+                  (setf (ende-responses-ws-request-payload request) nil
+                        (ende-responses-ws-request-delivery request) 'accepted)
+                  (ende-responses-ws--idle request)))))
         (ende-websocket-backpressure
          ;; Rejected atomically: retain the offer until ON-WRITABLE.
          (when (ende-responses-ws--preparation-live-p request attempt)
@@ -603,7 +617,9 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                                   "response.incomplete" "response.failed"))))
     (if (equal type "response.created")
         (progn
-          (unless (and (not current) (stringp id) (not (string-empty-p id)))
+          (unless (and (not current) (stringp id) (not (string-empty-p id))
+                       (not (gethash id (ende-responses-ws-connection-completed-ids
+                                         (ende-responses-ws-request-connection request)))))
             (error "Invalid Responses creation event"))
           (setq current id)
           (setf (ende-responses-ws-request-response-id request) id

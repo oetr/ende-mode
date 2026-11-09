@@ -143,7 +143,7 @@
       (should (eq (ende-error-kind failure) 'resource)))))
 
 (ert-deftest ende-responses-ws-response-event-ownership ()
-  (let ((request (make-ende-responses-ws-request)))
+  (let ((request (make-ende-responses-ws-request :connection (make-ende-responses-ws-connection))))
     (cl-flet ((event (text)
                 (ende-responses-ws--validate-event request (ende-protocol-json-read-string text))))
       (event "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
@@ -157,7 +157,7 @@
       (event "{\"type\":\"response.completed\",\"response\":{\"id\":\"new\",\"output\":[]}}"))))
 
 (ert-deftest ende-responses-ws-item-event-ownership ()
-  (let ((request (make-ende-responses-ws-request)))
+  (let ((request (make-ende-responses-ws-request :connection (make-ende-responses-ws-connection))))
     (cl-flet ((event (text)
                 (ende-responses-ws--validate-event request (ende-protocol-json-read-string text))))
       (event "{\"type\":\"response.created\",\"response\":{\"id\":\"new\"}}")
@@ -283,6 +283,57 @@
         (should (= done 3))
         (should-not (cl-some (lambda (event) (eq (plist-get event :type) :item)) events))
         (should-not (gethash 1 ende-responses-ws--connections))))))
+
+(ert-deftest ende-responses-ws-request-isolation ()
+  (dolist (boundary '(buffered unread replay history-limit))
+    (ende-responses-ws-test--with-server
+      (let ((profile (ende-responses-ws-test--profile 1))
+            (ende-responses-ws--response-history-limit
+             (if (eq boundary 'history-limit) 1 256))
+            (done 0) errors)
+        (cl-labels ((submit ()
+                      (ende-llm-default
+                       '(("user" . "Next"))
+                       (list :on-error (lambda (error) (push error errors))
+                             :on-done (lambda (_)
+                                        (cl-incf done)
+                                        (when (= done 1) (submit))))
+                       profile)))
+          (submit)
+          (ende-test--wait-for (lambda () wires))
+          (if (memq boundary '(buffered unread))
+              (let ((client (car clients)))
+                (when (eq boundary 'unread)
+                  (setf (plist-get (ende-websocket--connection-limits client) :drain-frames) 2))
+                ;; One ingress batch, independent of local TCP packetization.
+                (ende-websocket--filter
+                 (ende-websocket--connection-process client)
+                 (mapconcat
+                  (lambda (text) (ende-websocket--wire 1 t text 'server))
+                  '("{\"type\":\"response.created\",\"response\":{\"id\":\"old\"}}"
+                    "{\"type\":\"response.completed\",\"response\":{\"id\":\"old\",\"output\":[]}}"
+                    "{\"type\":\"response.created\",\"response\":{\"id\":\"unsolicited\"}}"
+                    "{\"type\":\"response.completed\",\"response\":{\"id\":\"unsolicited\",\"output\":[]}}")
+                  ""))
+                (ende-websocket--run client))
+            (ende-responses-ws-test--complete (car sockets) "old"))
+          (ende-test--wait-for (lambda () (or (= done 2) (= (length wires) 2) errors)))
+          (should (= done 1))
+          (should-not errors)
+          (should (= (length wires) 2))
+          (if (eq boundary 'replay)
+              (progn
+                (should (= (length sockets) 1))
+                (ende-responses-ws-test--complete (car sockets) "old")
+                (ende-test--wait-for (lambda () (or errors (= done 2))))
+                (should (= done 1))
+                (should (eq (ende-error-kind (car errors)) 'protocol)))
+            (should (= (length sockets) 2))
+            (should-not (gethash "previous_response_id" (cdar wires)))
+            (ende-responses-ws-test--complete (car sockets) "new")
+            (ende-test--wait-for (lambda () (or errors (= done 2))))
+            (should-not errors)
+            (should (= done 2))))))))
 
 (ert-deftest ende-responses-ws-recovery-and-delivery ()
   :tags '(integration)

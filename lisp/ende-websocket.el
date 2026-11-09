@@ -376,7 +376,7 @@
   output output-tail (output-bytes 0) (output-items 0)
   controls control-tail (control-count 0) backpressured
   close-queued draining-close close-sent close-received peer-close failure eof
-  timers work-timer busy dispatching work-pending events terminal)
+  timers work-timer busy dispatching dispatch-events work-pending events terminal)
 
 (cl-defstruct (ende-websocket--listener (:constructor ende-websocket--listener-create))
   process limits admit callbacks connections timer (generation 0) stopped)
@@ -406,6 +406,17 @@ Partial messages count; frame headers and control frames do not."
   "Set CONNECTION's remaining incoming payload budget to BYTES, or nil."
   (unless (or (null bytes) (natnump bytes)) (error "Invalid WebSocket receive budget"))
   (setf (ende-websocket--connection-receive-budget connection) bytes))
+
+(defun ende-websocket-receive-pending-p (connection)
+  "Return non-nil if CONNECTION has undispatched messages or partial input.
+The message whose callback is currently running is not included."
+  (or (assq :on-message (ende-websocket--connection-dispatch-events connection))
+      (assq :on-message (ende-websocket--connection-events connection))
+      (ende-websocket--connection-frame connection)
+      (ende-websocket--connection-message connection)
+      (when-let* ((input (ende-websocket--connection-input connection)))
+        (with-current-buffer input
+          (< (ende-websocket--connection-cursor connection) (point-max))))))
 
 (defun ende-websocket--cancel-deadline (connection kind)
   (when-let* ((entry (assq kind (ende-websocket--connection-timers connection))))
@@ -446,9 +457,11 @@ Partial messages count; frame headers and control frames do not."
     (setf (ende-websocket--connection-dispatching connection) t)
     (unwind-protect
         (progn
-          (let ((events (nreverse (ende-websocket--connection-events connection))))
-            (setf (ende-websocket--connection-events connection) nil)
-            (dolist (event events)
+          (setf (ende-websocket--connection-dispatch-events connection)
+                (nreverse (ende-websocket--connection-events connection))
+                (ende-websocket--connection-events connection) nil)
+          (while (ende-websocket--connection-dispatch-events connection)
+            (let ((event (pop (ende-websocket--connection-dispatch-events connection))))
               (when (and (not (eq (ende-websocket-state connection) 'closed))
                          (or (not (eq (car event) :on-message))
                              (and (eq (ende-websocket-state connection) 'open)
@@ -465,7 +478,8 @@ Partial messages count; frame headers and control frames do not."
             (when (car terminal)
               (condition-case nil (funcall (car terminal) connection (cdr terminal))
                 ((error quit) nil)))))
-      (setf (ende-websocket--connection-dispatching connection) nil))))
+      (setf (ende-websocket--connection-dispatching connection) nil
+            (ende-websocket--connection-dispatch-events connection) nil))))
 
 (defun ende-websocket--terminate (connection info)
   (unless (eq (ende-websocket-state connection) 'closed)
