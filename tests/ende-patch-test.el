@@ -108,6 +108,17 @@
          (hunks (plist-get (car insertion) :hunks)))
     (should-error (ende-patch-apply-update "nonempty\n" hunks))))
 
+(ert-deftest ende-test/patch-matches-literal-whole-lines-including-overlaps ()
+  (should (equal (ende-patch-apply-update
+                   "A.*\na.*\nxa.*\n"
+                   '((:lines ((remove . "a.*") (add . "literal")))))
+                 "A.*\nliteral\nxa.*\n"))
+  (let ((hunk '(:lines ((remove . "a") (remove . "a") (add . "b")))))
+    (should-error (ende-patch-apply-update "a\na\na\n" (list hunk)))
+    (should (equal (ende-patch-apply-update
+                     "a\na\na" (list (plist-put hunk :end-of-file t)))
+                   "a\nb"))))
+
 (ert-deftest ende-test/patch-updates-long-sources-with-or-without-eof-constraint ()
   (let ((prefix (apply #'concat (make-list 20000 "line\n"))))
     (dolist (eof '(nil t))

@@ -203,16 +203,6 @@ context, removal, addition, and End of File.  Unsupported constructs signal."
       (error "patch contains no file operations"))
     (nreverse operations)))
 
-(defun ende-patch--split-source (source)
-  "Return (LINES FINAL-NEWLINE-P) for decoded SOURCE text."
-  (if (string-empty-p source)
-      (list nil nil)
-    (let ((lines (split-string source "\n" nil))
-          (final-newline (string-suffix-p "\n" source)))
-      (when final-newline
-        (setq lines (butlast lines)))
-      (list lines final-newline))))
-
 (defun ende-patch--hunk-sides (hunk)
   "Return the (OLD-LINES . NEW-LINES) represented by HUNK."
   (let (old new)
@@ -223,66 +213,63 @@ context, removal, addition, and End of File.  Unsupported constructs signal."
         ('add (push (cdr line) new))))
     (cons (nreverse old) (nreverse new))))
 
-(defun ende-patch--line-prefix-p (lines expected)
-  "Return non-nil when LINES begins with all EXPECTED lines."
-  (while (and expected lines (string= (car expected) (car lines)))
-    (setq expected (cdr expected)
-          lines (cdr lines)))
-  (null expected))
-
-(defun ende-patch--hunk-matches (lines old end-of-file)
-  "Return all exact positions of OLD in LINES, respecting EOF constraint."
-  (let ((count (length old))
-        (last-start (- (length lines) (length old)))
-        (matches nil))
-    (if (zerop count)
-        (when (null lines)
-          (setq matches '(0)))
-      (if end-of-file
-          (when (and (>= last-start 0)
-                     (ende-patch--line-prefix-p (nthcdr last-start lines) old))
-            (setq matches (list last-start)))
-        (cl-loop for tail on lines
-                 for start from 0 to last-start
-                 when (ende-patch--line-prefix-p tail old)
-                 do (push start matches))))
-    (nreverse matches)))
+(defun ende-patch--hunk-matches (old end-of-file)
+  "Return up to two exact line-aligned buffer positions of OLD text.
+OLD and the current buffer use newline-terminated logical lines.
+Respect END-OF-FILE and stop as soon as the hunk is ambiguous."
+  (let ((case-fold-search nil)
+        matches)
+    (cond
+     ((null old)
+      (when (= (point-min) (point-max)) (list (point-min))))
+     (end-of-file
+      (let ((start (- (point-max) (length old))))
+        (when (>= start (point-min))
+          (goto-char start)
+          (when (and (bolp) (search-forward old nil t)) (list start)))))
+     (t
+      (goto-char (point-min))
+      (while (and (< (length matches) 2) (search-forward old nil t))
+        (let ((start (- (point) (length old))))
+          (goto-char start)
+          (when (bolp) (push start matches))
+          (forward-char 1)))
+      (nreverse matches)))))
 
 (defun ende-patch-apply-update (source hunks)
   "Apply exact HUNKS to decoded logical-line SOURCE and return new text.
 The original final-newline style is retained."
-  (let* ((split (ende-patch--split-source source))
-         (lines (car split))
-         (final-newline (cadr split))
-         (original-empty (null lines))
-         (cursor 0))
-    (dolist (hunk hunks)
-      (let* ((sides (ende-patch--hunk-sides hunk))
-             (old (car sides))
-             (new (cdr sides))
-             (insertion-only
-              (not (cl-some (lambda (line) (eq (car line) 'remove))
-                            (plist-get hunk :lines))))
-             (matches (ende-patch--hunk-matches
-                       lines old (plist-get hunk :end-of-file))))
-        (when (and insertion-only (null old) (not original-empty))
-          (error "insertion-only hunk requires context lines"))
-        (unless (= (length matches) 1)
-          (error (if matches
-                     "patch hunk is ambiguous: context matches more than once"
-                   "patch hunk context was not found")))
-        (let ((start (car matches)))
-          (when (< start cursor)
-            (error "patch hunks are out of order or overlap"))
-          (setq lines
-                (append (cl-subseq lines 0 start)
-                        new
-                        (nthcdr (+ start (length old)) lines))
-                cursor (+ start (length new))))))
-    (let ((result (mapconcat #'identity lines "\n")))
-      (if (and final-newline lines)
-          (concat result "\n")
-        result))))
+  (let ((final-newline (string-suffix-p "\n" source))
+        (original-empty (string-empty-p source)))
+    (with-temp-buffer
+      (insert source)
+      (unless (or original-empty final-newline) (insert "\n"))
+      (let ((cursor (point-min)))
+        (dolist (hunk hunks)
+          (let* ((sides (ende-patch--hunk-sides hunk))
+                 (old (and (car sides)
+                           (concat (mapconcat #'identity (car sides) "\n") "\n")))
+                 (new (if (cdr sides)
+                          (concat (mapconcat #'identity (cdr sides) "\n") "\n")
+                        ""))
+                 (matches (ende-patch--hunk-matches
+                           old (plist-get hunk :end-of-file))))
+            (when (and (null old) (not original-empty))
+              (error "insertion-only hunk requires context lines"))
+            (unless (= (length matches) 1)
+              (error (if matches
+                         "patch hunk is ambiguous: context matches more than once"
+                       "patch hunk context was not found")))
+            (let ((start (car matches)))
+              (when (< start cursor)
+                (error "patch hunks are out of order or overlap"))
+              (goto-char start)
+              (delete-region start (+ start (length old)))
+              (insert new)
+              (setq cursor (point))))))
+      (unless (or final-newline (= (point-min) (point-max)))
+        (delete-region (1- (point-max)) (point-max)))
+      (buffer-string))))
 
 (provide 'ende-patch)
 
