@@ -658,10 +658,23 @@
           (with-temp-file source (insert "before\n"))
           (setq sandbox (ende-test--sandbox-fixture owner root (list source)))
           (let ((old-base (ende-sandbox-base sandbox))
-                (ende-tools--execution-owner owner))
+                (ende-tools--execution-owner owner)
+                (actions nil))
+            (setf (ende-sandbox-started sandbox) t
+                  (ende-sandbox-container sandbox) "container")
             (cl-letf (((symbol-function 'ende-sandbox--run-worker)
                        (lambda (_operation _library _function _arguments _bindings callback)
-                         (funcall callback nil "injected sandbox sync failure"))))
+                         (funcall callback nil "injected sandbox sync failure")))
+                      ((symbol-function 'ende-sandbox--container-running-p)
+                       (lambda (_sandbox callback) (funcall callback t nil)))
+                      ((symbol-function 'ende-sandbox--podman-action)
+                       (lambda (_sandbox action callback)
+                         (push action actions)
+                         (funcall callback "" nil)))
+                      ((symbol-function 'ende-sandbox--remove-container)
+                       (lambda (sandbox callback)
+                         (setf (ende-sandbox-container sandbox) nil)
+                         (funcall callback t))))
               (let ((edited
                      (ende-test--tool-call
                       "edit_file"
@@ -674,6 +687,7 @@
                 (should (string-match-p
                          "Host changes were committed"
                          (plist-get (plist-get edited :result) :sandbox_warning))))
+            (should (equal actions '("pause")))
             (should (equal (with-temp-buffer
                              (insert-file-contents source)
                              (buffer-string))

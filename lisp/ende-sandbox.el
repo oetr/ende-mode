@@ -314,12 +314,14 @@ only after resuming, or reports a management or workspace error."
            (when (and (not accessed)
                       (ende-sandbox--operation-current-p operation))
              (setq accessed t)
-             (if paused
-                 (ende-sandbox--podman-action
-                  sandbox "unpause"
-                  (lambda (_output resume-error)
-                    (finish value (or error resume-error))))
-               (finish value error))))
+             (cond
+              (error (finish value error))
+              (paused
+               (ende-sandbox--podman-action
+                sandbox "unpause"
+                (lambda (_output resume-error)
+                  (finish value resume-error))))
+              (t (finish value nil)))))
          (access ()
            (when (ende-sandbox--operation-current-p operation)
              (condition-case caught
@@ -533,8 +535,9 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
                sandbox
                (lambda (success)
                  (setf (ende-sandbox-cleanup-pending sandbox) nil)
-                 (when success
-                   (ende-sandbox--dispose sandbox))))
+                 (if success
+                     (ende-sandbox--dispose sandbox)
+                   (message "Ende sandbox cleanup failed: container could not be removed"))))
             (setf (ende-sandbox-cleanup-pending sandbox) nil)
             (ende-sandbox--dispose sandbox)))))))
 
