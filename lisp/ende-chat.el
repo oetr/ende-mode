@@ -3051,6 +3051,7 @@ COMPACT marks the completed response as a context fence."
           :id (plist-get execution :provider-call-id)
           :name (plist-get execution :name)
           :arguments (plist-get execution :arguments)
+          :argument-summary (cons arguments (ende-org--tool-argument-summary arguments))
           :protocol-provider (plist-get execution :protocol-provider)
           :protocol-item (plist-get execution :protocol-item)
           :execution-id (plist-get execution :execution-id)
@@ -3081,6 +3082,14 @@ COMPACT marks the completed response as a context fence."
    (ende-chat--response-property ende-chat-tool-name-property tool-name)
    (ende-chat--response-property ende-chat-tool-kind-property kind)))
 
+(defun ende-chat--tool-argument-summary (call)
+  "Reuse prepared CALL's summary while its immutable arguments are unchanged."
+  (let ((arguments (ende-tools-call-value call :arguments))
+        (summary (ende-tools-call-value call :argument-summary)))
+    (if (and summary (eq (car summary) arguments))
+        (cdr summary)
+      (ende-org--tool-argument-summary arguments))))
+
 (defun ende-chat--tool-call-text (level request-id call &optional result-properties)
   "Render normalized tool CALL at LEVEL with optional RESULT-PROPERTIES."
   (let ((execution-id (ende-tools-call-value call :execution-id))
@@ -3090,7 +3099,7 @@ COMPACT marks the completed response as a context fence."
                  (stringp name) (not (string-empty-p name))
                  (stringp arguments))
       (error "Tool call has not been stored: %S" call))
-    (let* ((summary (ende-org--tool-argument-summary arguments))
+    (let* ((summary (ende-chat--tool-argument-summary call))
            (title (concat "--> " name (if summary (concat ": " summary) ""))))
       (concat (make-string level ?*) " "
               (ende-org--truncate-heading title level) "\n"
@@ -3141,7 +3150,7 @@ COMPACT marks the completed response as a context fence."
         (arguments (ende-tools-call-value call :arguments)))
     (unless (and (stringp execution-id) (stringp name) (stringp arguments))
       (error "Malformed generated tool result"))
-    (let* ((summary (ende-org--tool-argument-summary arguments))
+    (let* ((summary (ende-chat--tool-argument-summary call))
            (title (concat name (if summary (concat ": " summary) ""))))
       (concat (make-string level ?*) " "
               (ende-org--truncate-heading title level) "\n"
@@ -3318,6 +3327,65 @@ Keep it while another queued compaction still refers to its durable identity."
             (ende-org--duration-property (plist-get data :duration-ms))
             ":END:\n\n")))
 
+(defun ende-chat--invalidate-rendering (transcript entry _change)
+  "Invalidate ENTRY's rendering and its completed response owner."
+  (when (plist-get (ende-transcript-entry-data entry) :chat-render)
+    (setf (plist-get (ende-transcript-entry-data entry) :chat-render) nil))
+  (when (and (eq (ende-transcript-entry-status entry) 'complete)
+             (ende-transcript-entry-response-id entry))
+    (let* ((id (ende-transcript-entry-response-id entry))
+           (current (ende-transcript-response transcript))
+           (owner (if (and current (= (ende-transcript-entry-id current) id))
+                      current
+                    (cl-find id (ende-transcript-entries transcript)
+                             :key #'ende-transcript-entry-id))))
+      (when (and owner (plist-get (ende-transcript-entry-data owner) :chat-render))
+        (setf (plist-get (ende-transcript-entry-data owner) :chat-render) nil)))))
+
+(add-hook 'ende-transcript-change-functions #'ende-chat--invalidate-rendering)
+
+(defun ende-chat--render-entry (job entry)
+  "Render ENTRY, retaining immutable output on its owner for JOB's parameters."
+  (let* ((instruction (ende-job-instruction job))
+         (level (plist-get instruction :response-level))
+         (question-id (plist-get instruction :question-id))
+         (request-id (plist-get instruction :request-id))
+         (profile (ende-job-profile job))
+         (key (list level question-id request-id profile))
+         (data (ende-transcript-entry-data entry))
+         (cached (plist-get data :chat-render)))
+    (if (equal key (car cached))
+        (cdr cached)
+      (let ((rendered
+             (pcase (ende-transcript-entry-kind entry)
+               ((or 'summary 'progress)
+                (unless (string-blank-p (or (ende-transcript-entry-content entry) ""))
+                  (list :work
+                        (if (eq (ende-transcript-entry-kind entry) 'summary)
+                            (ende-chat--reasoning-summary-text entry (1+ level))
+                          (concat (make-string (1+ level) ?*) " "
+                                  (ende-chat--reasoning-summary-heading
+                                   (concat (plist-get data :title) " — "
+                                           (ende-transcript-entry-content entry)))
+                                  "\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n")))))
+               ('tool-result
+                (list :work (ende-chat--tool-result-text
+                             (1+ level) request-id (plist-get data :call)
+                             (plist-get data :duration-ms))))
+               ('response
+                (let ((parts (when (eq (ende-transcript-entry-status entry) 'complete)
+                               (ende-chat--render-response-items job entry))))
+                  (plist-put parts :work
+                             (concat (unless (plist-get data :synthetic)
+                                       (ende-chat--provider-call-text
+                                        (1+ level) request-id entry profile))
+                                     (plist-get parts :work))))))))
+        (when (or (not (eq (ende-transcript-entry-kind entry) 'response))
+                  (eq (ende-transcript-entry-status entry) 'complete))
+          (setf (plist-get (ende-transcript-entry-data entry) :chat-render)
+                (cons key rendered)))
+        rendered))))
+
 (defun ende-chat--render-transcript (job)
   "Serialize JOB's completed records without reading a viewer or storing data."
   (when-let* ((transcript (ende-job-transcript job)))
@@ -3327,30 +3395,13 @@ Keep it while another queued compaction still refers to its durable identity."
            (request-id (plist-get instruction :request-id))
            work reply reasoning)
       (dolist (entry (ende-transcript-entries transcript))
-        (let ((data (ende-transcript-entry-data entry)))
-          (pcase (ende-transcript-entry-kind entry)
-            ((or 'summary 'progress)
-             (unless (string-blank-p (or (ende-transcript-entry-content entry) ""))
-               (push (if (eq (ende-transcript-entry-kind entry) 'summary)
-                         (ende-chat--reasoning-summary-text entry (1+ level))
-                       (concat (make-string (1+ level) ?*) " "
-                               (ende-chat--reasoning-summary-heading
-                                (concat (plist-get data :title) " — "
-                                        (ende-transcript-entry-content entry)))
-                               "\n:PROPERTIES:\n:ENDE_ROLE: assistant\n:ENDE_VISIBILITY: reasoning_summary\n:END:\n")) work)))
-            ('tool-result
-             (push (ende-chat--tool-result-text
-                    (1+ level) request-id (plist-get data :call) (plist-get data :duration-ms)) work))
-            ('response
-             (unless (plist-get data :synthetic)
-               (push (ende-chat--provider-call-text (1+ level) request-id entry (ende-job-profile job)) work))
-             (when (eq (ende-transcript-entry-status entry) 'complete)
-               (let ((rendered (ende-chat--render-response-items job entry)))
-                 (unless (string-empty-p (plist-get rendered :work))
-                   (push (plist-get rendered :work) work))
-                 (when (plist-get rendered :reply)
-                   (setq reply (plist-get rendered :reply)
-                         reasoning (plist-get rendered :reasoning)))))))))
+        (when (memq (ende-transcript-entry-kind entry) '(summary progress tool-result response))
+          (let ((rendered (ende-chat--render-entry job entry)))
+            (when-let* ((text (plist-get rendered :work)))
+              (unless (string-empty-p text) (push text work)))
+            (when (plist-get rendered :reply)
+              (setq reply (plist-get rendered :reply)
+                    reasoning (plist-get rendered :reasoning))))))
       (when (or work reply)
         (concat (when work (ende-chat--work-text level question-id request-id))
                 (apply #'concat (nreverse work)) reasoning reply)))))
