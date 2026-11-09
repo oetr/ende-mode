@@ -96,7 +96,7 @@
 (cl-defstruct (ende-openrouter-batch--group
                (:constructor ende-openrouter-batch--make-group))
   "A group of compatible logical requests submitted as one remote batch."
-  key profile requests timer preparation stage body batch-id status poll-attempt
+  key profile requests timer preparation stage body delivery batch-id status poll-attempt
   not-found-attempt batch-visible-p poll-timer submitted-at deadline terminal)
 
 (defvar ende-openrouter-batch--groups (make-hash-table :test #'equal)
@@ -343,6 +343,12 @@
   (ende-openrouter-batch--cleanup-stage
    (ende-openrouter-batch--group-stage group))
   (setf (ende-openrouter-batch--group-stage group) nil)
+  (when-let* ((delivery (ende-openrouter-batch--group-delivery group)))
+    (setf (plist-get delivery :requests) nil
+          (plist-get delivery :results) nil
+          (plist-get delivery :usage) nil
+          (plist-get delivery :error) nil
+          (ende-openrouter-batch--group-delivery group) nil))
   (ende-openrouter-batch--release-preparation group))
 
 (defun ende-openrouter-batch--release-preparation (group)
@@ -643,7 +649,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                    profile :batch-max-age ende-openrouter-batch-max-age))
          (deadline (ende-openrouter-batch--group-deadline group))
          (now (float-time)))
-    (unless (ende-openrouter-batch--group-terminal group)
+    (unless (or (ende-openrouter-batch--group-terminal group)
+                (ende-openrouter-batch--group-delivery group))
       (if (or (>= now deadline)
               (> (- now (ende-openrouter-batch--group-submitted-at group))
                  max-age))
@@ -688,7 +695,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
 (cl-defun ende-openrouter-batch--submit-finished
     (group status body stage-error)
   "Handle the response to GROUP's batch submission."
-  (when (ende-openrouter-batch--group-terminal group)
+  (when (or (ende-openrouter-batch--group-terminal group)
+            (ende-openrouter-batch--group-delivery group))
     (cl-return-from ende-openrouter-batch--submit-finished nil))
   (ende-openrouter-batch--release-preparation group)
   (cond
@@ -772,6 +780,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
 (defun ende-openrouter-batch--submit (group)
   "Prepare GROUP off the main thread, then submit it to OpenRouter."
   (unless (or (ende-openrouter-batch--group-terminal group)
+              (ende-openrouter-batch--group-delivery group)
               (ende-openrouter-batch--group-preparation group)
               (ende-openrouter-batch--group-stage group)
               (ende-openrouter-batch--group-batch-id group))
@@ -817,7 +826,8 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
 (cl-defun ende-openrouter-batch--poll-finished
     (group status body stage-error)
   "Handle one status response for GROUP."
-  (when (ende-openrouter-batch--group-terminal group)
+  (when (or (ende-openrouter-batch--group-terminal group)
+            (ende-openrouter-batch--group-delivery group))
     (cl-return-from ende-openrouter-batch--poll-finished nil))
   (cond
    (stage-error
@@ -872,6 +882,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
 (defun ende-openrouter-batch--poll (group)
   "Poll GROUP's remote batch."
   (when (and (not (ende-openrouter-batch--group-terminal group))
+             (not (ende-openrouter-batch--group-delivery group))
              (null (ende-openrouter-batch--group-stage group)))
     (if (>= (float-time) (ende-openrouter-batch--group-deadline group))
         (ende-openrouter-batch--group-fail
@@ -941,16 +952,79 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                         (ende-protocol-json-get "status_code" response))
        :details response)))))
 
+(defun ende-openrouter-batch--deliver-result (request result usage)
+  "Normalize and settle one live REQUEST's RESULT with batch USAGE."
+  (condition-case caught
+      (let* ((error (ende-openrouter-batch--result-error result))
+             (response (ende-protocol-json-get "response" result))
+             (body (and response (ende-protocol-json-get "body" response))))
+        (if error
+            (ende-openrouter-batch--settle-request request 'failure nil error)
+          (ende-openrouter-batch--diagnose-result request body)
+          (unless (or (ende-openrouter-batch--request-cancelled request)
+                      (ende-openrouter-batch--request-settled request))
+            (let ((normalized (ende-openrouter-batch--normalize-result
+                               body (ende-openrouter-batch--request-profile request) usage)))
+              (ende-openrouter-batch--emit
+               request (list :type :metadata
+                             :metadata (list :source :response
+                                             :model (plist-get normalized :model)
+                                             :provider (plist-get normalized :provider))))
+              (ende-openrouter-batch--emit
+               request (list :type :usage :tokens (plist-get normalized :tokens)
+                             :speed 0.0 :estimated nil :usage (plist-get normalized :usage)))
+              (ende-openrouter-batch--settle-request request 'success normalized nil)))))
+    ((error quit)
+     (ende-openrouter-batch--settle-request
+      request 'failure nil
+      (ende-error-create :kind 'protocol :message (error-message-string caught))))))
+
+(defun ende-openrouter-batch--schedule-delivery (group delivery)
+  "Schedule GROUP's sole continuation while it still owns DELIVERY."
+  (when (and delivery (not (ende-openrouter-batch--group-terminal group))
+             (eq delivery (ende-openrouter-batch--group-delivery group)))
+    (ende-openrouter-batch--cancel-timer (ende-openrouter-batch--group-timer group))
+    (setf (ende-openrouter-batch--group-timer group)
+          (run-at-time 0.01 nil #'ende-openrouter-batch--deliver group delivery))))
+
+(defun ende-openrouter-batch--deliver (group delivery)
+  "Deliver at most one result while GROUP still owns DELIVERY."
+  (when (and delivery (not (ende-openrouter-batch--group-terminal group))
+             (eq delivery (ende-openrouter-batch--group-delivery group)))
+    (ende-openrouter-batch--cancel-timer (ende-openrouter-batch--group-timer group))
+    (setf (ende-openrouter-batch--group-timer group) nil)
+    (let* ((request (pop (plist-get delivery :requests)))
+           (by-id (plist-get delivery :results))
+           (result (and by-id request
+                        (gethash (ende-openrouter-batch--request-custom-id request) by-id))))
+      (when (and by-id request)
+        (remhash (ende-openrouter-batch--request-custom-id request) by-id))
+      (when (and request
+                 (not (ende-openrouter-batch--request-cancelled request))
+                 (not (ende-openrouter-batch--request-settled request)))
+        (if-let* ((error (plist-get delivery :error)))
+            (ende-openrouter-batch--settle-request request 'failure nil error)
+          (ende-openrouter-batch--deliver-result request result (plist-get delivery :usage)))))
+    (when (and (not (ende-openrouter-batch--group-terminal group))
+               (eq delivery (ende-openrouter-batch--group-delivery group)))
+      (if (plist-get delivery :requests)
+          (ende-openrouter-batch--schedule-delivery group delivery)
+        (ende-openrouter-batch--stop group)))))
+
 (cl-defun ende-openrouter-batch--finish-completed (group payload)
-  "Route completed PAYLOAD results to GROUP requests."
-  (when (ende-openrouter-batch--group-terminal group)
+  "Validate all completed PAYLOAD ids before delivering GROUP's results."
+  (when (or (ende-openrouter-batch--group-terminal group)
+            (ende-openrouter-batch--group-delivery group))
     (cl-return-from ende-openrouter-batch--finish-completed nil))
   (let* ((results (ende-protocol-json-get "results" payload))
          (usage (ende-protocol-json-get "usage" payload))
          (finished-at (float-time))
+         (expected (make-hash-table :test #'equal))
          (by-id (make-hash-table :test #'equal))
          (valid (or (vectorp results) (listp results)))
          (failure nil))
+    (dolist (request (ende-openrouter-batch--group-requests group))
+      (puthash (ende-openrouter-batch--request-custom-id request) request expected))
     (unless valid
       (setq failure
             (ende-error-create
@@ -961,12 +1035,7 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
         (let ((custom-id (ende-protocol-json-get "custom_id" result)))
           (if (or (not (stringp custom-id))
                   (gethash custom-id by-id)
-                  (not (cl-some
-                        (lambda (request)
-                          (equal custom-id
-                                 (ende-openrouter-batch--request-custom-id
-                                  request)))
-                        (ende-openrouter-batch--group-requests group))))
+                  (not (gethash custom-id expected)))
               (setq failure
                     (ende-error-create
                      :kind 'protocol
@@ -983,52 +1052,15 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                  :kind 'protocol
                  :message "Completed batch omitted a requested custom id")))))
     (ende-openrouter-batch--finish-timing group finished-at)
-    (if failure
-        (ende-openrouter-batch--group-fail group failure)
-      (setf (ende-openrouter-batch--group-terminal group) t)
-      (ende-openrouter-batch--group-cleanup group)
-      (ende-openrouter-batch--unregister-group group)
-      (dolist (request (ende-openrouter-batch--group-requests group))
-        (unless (ende-openrouter-batch--request-cancelled request)
-          (let* ((result (gethash
-                          (ende-openrouter-batch--request-custom-id request)
-                          by-id))
-                 (error (ende-openrouter-batch--result-error result))
-                 (response (ende-protocol-json-get "response" result))
-                 (body (and response
-                            (ende-protocol-json-get "body" response))))
-            (if error
-                (ende-openrouter-batch--settle-request
-                 request 'failure nil error)
-              (ende-openrouter-batch--diagnose-result request body)
-              (condition-case caught
-                  (let ((normalized
-                         (ende-openrouter-batch--normalize-result
-                          body
-                          (ende-openrouter-batch--request-profile request)
-                          usage)))
-                    (ende-openrouter-batch--emit
-                     request
-                     (list :type :metadata
-                           :metadata
-                           (list :source :response
-                                 :model (plist-get normalized :model)
-                                 :provider (plist-get normalized :provider))))
-                    (ende-openrouter-batch--emit
-                     request
-                     (list :type :usage
-                           :tokens (plist-get normalized :tokens)
-                           :speed 0.0
-                           :estimated nil
-                           :usage (plist-get normalized :usage)))
-                    (ende-openrouter-batch--settle-request
-                     request 'success normalized nil))
-                ((error quit)
-                 (ende-openrouter-batch--settle-request
-                  request 'failure nil
-                  (ende-error-create
-                   :kind 'protocol
-                   :message (error-message-string caught))))))))))))
+    (ende-openrouter-batch--group-cleanup group)
+    (dolist (request (ende-openrouter-batch--group-requests group))
+      (when (or (ende-openrouter-batch--request-cancelled request)
+                (ende-openrouter-batch--request-settled request))
+        (remhash (ende-openrouter-batch--request-custom-id request) by-id)))
+    (let ((delivery (list :requests (ende-openrouter-batch--active-requests group)
+                          :results (unless failure by-id) :usage usage :error failure)))
+      (setf (ende-openrouter-batch--group-delivery group) delivery)
+      (ende-openrouter-batch--schedule-delivery group delivery))))
 
 (defun ende-openrouter-batch--cancel-request (request)
   "Cancel REQUEST locally, stopping shared work only when no member needs it."
@@ -1041,6 +1073,11 @@ CALLBACK receives STATUS, BODY, and a structured transport error or nil."
                     (memq request (ende-openrouter-batch--group-requests group)))
                   ende-openrouter-batch--known-groups)))
       (when group
+        (when-let* ((delivery (ende-openrouter-batch--group-delivery group)))
+          (setf (plist-get delivery :requests)
+                (delq request (plist-get delivery :requests)))
+          (when-let* ((results (plist-get delivery :results)))
+            (remhash (ende-openrouter-batch--request-custom-id request) results)))
         (cond
          ((null (ende-openrouter-batch--active-requests group))
           (ende-openrouter-batch--stop group))

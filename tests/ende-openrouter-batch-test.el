@@ -145,6 +145,8 @@
          )
         (ende-openrouter-batch--request-custom-id request))
        nil))
+    (ende-test--wait-for (lambda () (ende-openrouter-batch--group-terminal group))
+                         :description "retried batch delivery")
     (should-not failure)
     (should (string= (plist-get result :content) "done"))
     (should (ende-openrouter-batch--group-terminal group))))
@@ -377,6 +379,8 @@
             "\"choices\":[{\"message\":{\"content\":\"answer\","
             "\"reasoning_content\":\"thought\"},\"finish_reason\":\"stop\"}]}}}]}"))))
     (ende-openrouter-batch--finish-completed group payload)
+    (ende-test--wait-for (lambda () (ende-openrouter-batch--group-terminal group))
+                         :description "batch result delivery")
     (should-not failure)
     (should (string= (plist-get result :content) "answer"))
     (should (string= (plist-get result :thinking) "thought"))
@@ -404,12 +408,86 @@
           (ende-protocol-json-read-string
            "{\"status\":\"completed\",\"results\":[{\"custom_id\":\"ende-job-3\",\"error\":{\"message\":\"provider failed\"}}]}")))
     (ende-openrouter-batch--finish-completed group payload)
+    (ende-test--wait-for (lambda () (ende-openrouter-batch--group-terminal group))
+                         :description "batch failure delivery")
     (should (ende-error-p failure))
     (should (eq (ende-error-kind failure) 'provider))
     (should-not (ende-openrouter-batch--group-stage group))
     (should (ende-openrouter-batch--group-terminal group))))
 
 
+
+(ert-deftest ende-test/openrouter-batch-validates-the-whole-group ()
+  (dolist (ids '(("a" "b" "a") ("a" "unknown") ("a")))
+    (let* ((successes 0)
+           failures
+           (requests (mapcar
+                      (lambda (id)
+                        (ende-openrouter-batch--make-request
+                         :custom-id id
+                         :callbacks (list :on-done (lambda (_) (cl-incf successes))
+                                          :on-error (lambda (error)
+                                                      (push (ende-error-kind error) failures)))))
+                      '("a" "b")))
+           (group (ende-openrouter-batch--make-group :requests requests)))
+      (ende-openrouter-batch--finish-completed
+       group (ende-protocol-json-read-string
+              (format "{\"results\":[%s]}"
+                      (mapconcat (lambda (id) (format "{\"custom_id\":%S}" id)) ids ","))))
+      (let ((delivery (ende-openrouter-batch--group-delivery group)))
+        (should-not failures)
+        (ende-openrouter-batch--deliver group delivery)
+        (should (equal failures '(protocol)))
+        (ende-openrouter-batch--deliver group delivery)
+        (ende-openrouter-batch--deliver group delivery)
+        (should (equal failures '(protocol protocol)))
+        (should (zerop successes))
+        (should (ende-openrouter-batch--group-terminal group))))))
+
+(ert-deftest ende-test/openrouter-batch-delivery-is-ordered-and-cancellable ()
+  (dolist (cancel-last '(nil t))
+    (let* ((ende-openrouter-batch--known-groups nil)
+           (profile (ende-provider-profile 'router-batch))
+           requests done)
+      (setq requests
+            (mapcar (lambda (id)
+                      (ende-openrouter-batch--make-request
+                       :custom-id id :profile profile
+                       :callbacks (list :on-done
+                                        (lambda (_)
+                                          (push id done)
+                                          (when (equal id "a")
+                                            (ende-openrouter-batch--cancel-request (nth 1 requests)))))))
+                    '("a" "b" "c")))
+      (let* ((group (ende-openrouter-batch--make-group :requests requests))
+             (payload (ende-protocol-json-read-string
+                       (concat "{\"results\":["
+                               (mapconcat (lambda (id)
+                                            (format (concat "{\"custom_id\":%S,\"response\":{\"status_code\":200,"
+                                                            "\"body\":{\"choices\":[{\"message\":{\"content\":\"done\"}}]}}}") id))
+                                          '("c" "b" "a") ",") "]}"))))
+        (ende-openrouter-batch--register-group group)
+        (unwind-protect
+            (progn
+              (ende-openrouter-batch--finish-completed group payload)
+              (should-not done)
+              (let ((delivery (ende-openrouter-batch--group-delivery group)))
+                (ende-openrouter-batch--deliver group delivery)
+                (should (equal done '("a")))
+                (should (ende-openrouter-batch--group-timer group))
+                (should (memq group ende-openrouter-batch--known-groups))
+                (ende-openrouter-batch--finish-completed group payload)
+                (if cancel-last
+                    (ende-openrouter-batch--cancel-request (nth 2 requests))
+                  (ende-openrouter-batch--deliver group delivery))
+                (ende-openrouter-batch--deliver group delivery)
+                (should (equal (reverse done) (if cancel-last '("a") '("a" "c"))))
+                (should-not (plist-get delivery :results))
+                (should-not (ende-openrouter-batch--group-timer group))
+                (should-not ende-openrouter-batch--known-groups)
+                (should (cl-every (lambda (request)
+                                    (not (ende-openrouter-batch--request-callbacks request))) requests))))
+          (ende-openrouter-batch-abort))))))
 
 (ert-deftest ende-test/openrouter-batch-request-cancellation-cleans-pending-group ()
   (ende-test--reset)
@@ -650,6 +728,8 @@
                 (funcall (plist-get stage :sentinel)
                          (plist-get (plist-get stage :request) :process)
                          "finished")))
+            (ende-test--wait-for (lambda () (or result failure))
+                                 :description "submitted batch delivery")
             (should-not failure)
             (should (string= (plist-get result :content) "done"))
             (should (= (plist-get result :tokens) 2))
@@ -824,7 +904,9 @@
                                 "\"content\":\"done\"}}]}}}]}")
                                (ende-openrouter-batch--request-custom-id
                                 request))))
-                        (finish-request poll-process 200 result-body))
+                        (finish-request poll-process 200 result-body)
+                        (ende-test--wait-for (lambda () (> (+ done-count error-count) 0))
+                                             :description "batch handoff delivery"))
                       (funcall cancel-owner)
                       (funcall stream-filter stream-process "data: late\n\n")
                       (funcall stream-sentinel stream-process "finished\n")
