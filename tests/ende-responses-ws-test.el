@@ -253,6 +253,16 @@
         (ende-responses-ws-test--complete (car sockets))
         (ende-test--wait-for (lambda () (not (ende-responses-ws-connection-active
                                              (gethash 1 ende-responses-ws--connections)))))
+        (let ((refreshed (car clients)))
+          (ende-llm-default '(("user" . "Follow-up"))
+                            (list :on-error (lambda (error) (push error errors)))
+                            (ende-responses-ws-test--profile 1))
+          (ende-test--wait-for (lambda () (= (length wires) 2)))
+          (should (eq (car clients) refreshed))
+          (should (= (length clients) 2))
+          (ende-responses-ws-test--complete (car sockets) "resp-followup")
+          (ende-test--wait-for (lambda () (not (ende-responses-ws-connection-active
+                                               (gethash 1 ende-responses-ws--connections))))))
         (should-not errors))))
   ;; Queue rejection is not delivery.  A writable callback may offer it once.
   (ende-responses-ws-test--with-server

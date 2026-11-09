@@ -217,9 +217,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (plist-get profile :service) (plist-get profile :auth-method)
                 (plist-get profile :account) (plist-get profile :codex-binding)
                 (plist-get profile :credential-binding) authentication-identity
-                ende-max-sse-event-bytes ende-max-response-bytes ende-max-response-header-bytes
-                (let ((print-length nil) (print-level nil))
-                  (secure-hash 'sha256 (prin1-to-string headers)))))
+                ende-max-sse-event-bytes ende-max-response-bytes ende-max-response-header-bytes))
          (connection (gethash key ende-responses-ws--connections)))
     (unless (string-prefix-p "https://" url)
       (error "Responses WebSockets require a trusted HTTPS endpoint"))
@@ -229,14 +227,15 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
       (error "A Responses connection already has an active request"))
     (when (and connection
                (or (not (ende-responses-ws--eligible-p connection))
-                   (not (equal identity (ende-responses-ws-connection-identity connection)))))
+                   (not (equal identity (ende-responses-ws-connection-identity connection)))
+                   (not (equal headers (ende-responses-ws-connection-headers connection)))))
       (ende-responses-ws--discard connection)
       (setq connection nil))
     (unless connection
       (setq connection (make-ende-responses-ws-connection
                         :owner owner :key key :identity identity
                         :url (concat "wss://" (substring url 8))
-                        :headers headers :properties properties))
+                        :headers (mapcar #'copy-sequence headers) :properties properties))
       (puthash key connection ende-responses-ws--connections))
     (let ((request (make-ende-responses-ws-request
                     :connection connection :lifecycle lifecycle :profile profile
@@ -520,7 +519,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
       (let ((connection (ende-responses-ws-request-connection request)))
         (dolist (header headers)
           (unless (ende-curl--valid-header-p header) (error "Invalid WebSocket header")))
-        (setf (ende-responses-ws-connection-headers connection) headers
+        (setf (ende-responses-ws-connection-headers connection) (mapcar #'copy-sequence headers)
               (ende-responses-ws-connection-phase connection) 'backoff
               (ende-responses-ws-request-retry-timer request)
               (run-at-time (ende-responses-ws--retry-delay (ende-responses-ws-request-retries request)) nil
