@@ -370,10 +370,14 @@ so a directive completed by a later chunk can still be escaped in place."
   "Return a bounded tool heading for ENTRY, caching SECTION's summary.
 Incomplete arguments need no parsing; completed arguments use a raw excerpt."
   (let* ((call (plist-get (ende-transcript-entry-data entry) :call))
-         (arguments (plist-get call :arguments))
-         (streaming (eq (ende-transcript-entry-status entry) 'streaming)))
+         (streaming (eq (ende-transcript-entry-status entry) 'streaming))
+         (arguments (unless streaming
+                      (if (and (eq (ende-transcript-entry-kind entry) 'tool-call)
+                               (> (ende-transcript-entry-length entry) 0))
+                          (ende-transcript-entry-prefix entry 180)
+                        (ende-work-buffer--bounded (plist-get call :arguments))))))
     (when (and (not streaming)
-               (not (eq arguments (ende-work-buffer--section-summary-source section))))
+               (not (equal arguments (ende-work-buffer--section-summary-source section))))
       (setf (ende-work-buffer--section-summary-source section) arguments
             (ende-work-buffer--section-summary section)
             (string-trim (ende-work-buffer--one-line arguments))))
@@ -392,8 +396,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
 
 (defun ende-work-buffer--title (entry section)
   "Return ENTRY's heading without formatting its body."
-  (let ((data (ende-transcript-entry-data entry))
-        (content (ende-transcript-entry-content entry)))
+  (let ((data (ende-transcript-entry-data entry)))
     (pcase (ende-transcript-entry-kind entry)
       ('response (ende-org--provider-call-title data))
       ('text
@@ -407,16 +410,15 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
       ((or 'tool-call 'tool-result) (ende-work-buffer--tool-title entry section))
       ('opaque "Agent: Opaque BS")
       ('thinking "Agent: Reasoning")
-      ('summary (ende-work-buffer--summary-title content))
+      ('summary (ende-work-buffer--summary-title (ende-transcript-entry-prefix entry 180)))
       ('progress (ende-work-buffer--summary-title
                   (concat (ende-work-buffer--bounded (plist-get data :title))
-                          " — " (ende-work-buffer--bounded content))))
+                          " — " (ende-transcript-entry-prefix entry 180))))
       ('status (format "Status: %s" (ende-transcript-entry-status entry))))))
 
 (defun ende-work-buffer--display-text (entry)
   "Return ENTRY's current readable body, only when it will be rendered."
   (let ((kind (ende-transcript-entry-kind entry))
-        (content (ende-transcript-entry-content entry))
         (data (ende-transcript-entry-data entry)))
     (pcase kind
       ((or 'tool-call 'tool-result 'opaque)
@@ -424,11 +426,12 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
          (if (and (eq kind 'tool-call) (not (eq (ende-transcript-entry-status entry) 'complete)))
              raw
            (ende-work-buffer--readable-json raw))))
-      ('text (if (and (plist-get data :normalized) (string-blank-p (or content "")))
-                 (or (plist-get (plist-get data :normalized) :content) content "")
-               content))
+      ('text (let ((content (ende-transcript-entry-content entry)))
+               (if (and (plist-get data :normalized) (string-blank-p (or content "")))
+                   (or (plist-get (plist-get data :normalized) :content) content "")
+                 content)))
       ('status (ende-work-buffer--payload-text (plist-get data :error)))
-      (_ (or content "")))))
+      (_ (or (ende-transcript-entry-content entry) "")))))
 
 (defun ende-work-buffer--entry (entry change)
   "Render ENTRY's CHANGE in its first-observation position."
@@ -458,11 +461,15 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
 
 (defun ende-work-buffer--render-body (section entry change)
   "Materialize ENTRY's CHANGE in SECTION, retaining just the displayed body."
-  (let ((text (ende-work-buffer--display-text entry)))
-    (if (and (ende-work-buffer--section-materialized section) (eq change 'append))
-        (ende-work-buffer--append-example
-         section (substring text (ende-work-buffer--section-rendered-length section)))
-      (ende-work-buffer--replace-example section text)))
+  (if (and (ende-work-buffer--section-materialized section) (eq change 'append))
+      (ende-work-buffer--append-example
+       section
+       (let ((start (ende-work-buffer--section-rendered-length section)))
+         (if (and (memq (ende-transcript-entry-kind entry) '(text thinking summary progress))
+                  (not (plist-get (ende-transcript-entry-data entry) :normalized)))
+             (ende-transcript-entry-substring entry start)
+           (substring (ende-work-buffer--display-text entry) start))))
+    (ende-work-buffer--replace-example section (ende-work-buffer--display-text entry)))
   (setf (ende-work-buffer--section-materialized section) t
         (ende-work-buffer--section-stale section) nil))
 
@@ -681,7 +688,7 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
          (execution-id (plist-get call :execution-id)))
     (pcase (ende-transcript-entry-kind entry)
       ('tool-call
-       (or (plist-get call :arguments)
+       (or (ende-transcript-entry-arguments entry)
            (and file execution-id
                 (plist-get (ende-tool-store-load-execution execution-id file) :arguments))))
       ('tool-result
