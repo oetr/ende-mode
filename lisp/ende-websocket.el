@@ -372,7 +372,7 @@
 (cl-defstruct (ende-websocket--connection (:constructor ende-websocket--connection-create))
   role process listener limits address headers protocols key protocol
   (state 'connecting) (generation 0) callbacks
-  input (cursor 1) http frame message receive-budget
+  input (cursor 1) http frame message receive-budget last-data-time
   output output-tail (output-bytes 0) (output-items 0)
   controls control-tail (control-count 0) backpressured
   close-queued draining-close close-sent close-received peer-close failure eof
@@ -393,6 +393,11 @@
 (defun ende-websocket-protocol (connection)
   "Return CONNECTION's selected subprotocol, or nil if none was selected."
   (ende-websocket--connection-protocol connection))
+
+(defun ende-websocket-last-data-time (connection)
+  "Return the float time of CONNECTION's last nonempty data payload, or nil.
+Partial messages count; frame headers and control frames do not."
+  (ende-websocket--connection-last-data-time connection))
 
 (defun ende-websocket--limit (connection key)
   (plist-get (ende-websocket--connection-limits connection) key))
@@ -737,7 +742,8 @@ Completion is asynchronous and bounded by the closing timeout."
                     (let ((message (ende-websocket--connection-message connection)))
                       (when (ende-websocket--message-utf8 message)
                         (ende-websocket--utf8-feed (ende-websocket--message-utf8 message) chunk))
-                      (ende-websocket--collect message chunk))))
+                      (ende-websocket--collect message chunk)
+                      (setf (ende-websocket--connection-last-data-time connection) (float-time)))))
                 (cl-incf (ende-websocket--frame-offset frame) count)
                 (cl-decf (ende-websocket--frame-remaining frame) count)
                 (cl-incf (ende-websocket--connection-cursor connection) count)

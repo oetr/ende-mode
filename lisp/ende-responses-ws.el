@@ -49,7 +49,7 @@
 
 (cl-defstruct ende-responses-ws-request
   connection lifecycle logical-request on-json on-complete on-prepared on-retry
-  connect-timer deadline-timer idle-timer retry-timer deadline
+  connect-timer deadline-timer idle-timer retry-timer deadline idle-start
   (retries 0) retry-limit
   payload (delivery 'unsent) (attempt 0) prepared-generation
   profile debug connect-timeout idle-timeout byte-limit event-limit
@@ -347,10 +347,11 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
        (= attempt (ende-responses-ws-request-attempt request))))
 
 (defun ende-responses-ws--idle (request)
-  "Reset REQUEST's captured response-idle deadline."
+  "Start REQUEST's captured response-idle deadline."
   (when-let* ((timer (ende-responses-ws-request-idle-timer request)))
     (cancel-timer timer))
-  (setf (ende-responses-ws-request-idle-timer request)
+  (setf (ende-responses-ws-request-idle-start request) (float-time)
+        (ende-responses-ws-request-idle-timer request)
         (run-at-time (ende-responses-ws-request-idle-timeout request) nil
                      #'ende-responses-ws--attempt-timeout request
                      (ende-responses-ws-request-attempt request) 'idle)))
@@ -362,7 +363,18 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (when (eq (ende-responses-ws-connection-phase
                    (ende-responses-ws-request-connection request)) 'connecting)
           (ende-responses-ws--retry request 'connect-timeout))
-      (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded"))))
+      (let* ((socket (ende-responses-ws-connection-socket
+                      (ende-responses-ws-request-connection request)))
+             (last-data (max (ende-responses-ws-request-idle-start request)
+                             (or (ende-websocket-last-data-time socket) 0)))
+             (remaining (- (ende-responses-ws-request-idle-timeout request)
+                           (- (float-time) last-data))))
+        (setf (ende-responses-ws-request-idle-timer request) nil)
+        (if (> remaining 0)
+            (setf (ende-responses-ws-request-idle-timer request)
+                  (run-at-time remaining nil #'ende-responses-ws--attempt-timeout
+                               request attempt 'idle))
+          (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded"))))))
 
 (defun ende-responses-ws--attempt-live-p (request attempt socket)
   "Return whether ATTEMPT still owns REQUEST's accepted SOCKET."
@@ -661,7 +673,6 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                         (and (ende-responses-ws-request-event-limit request)
                              (> bytes (ende-responses-ws-request-event-limit request))))
                     (ende-responses-ws--fail request 'resource "Responses input exceeds byte limit")
-                  (ende-responses-ws--idle request)
                   (let* ((json (ende-protocol-json-read-string text))
                          (type (ende-protocol-json-get "type" json)))
                     (cl-incf (ende-responses-ws-request-messages request))
@@ -723,8 +734,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                        :input-bytes (max 14 (+ 14 message-limit) (or header-limit 0))
                        :handshake-timeout (if (ende-responses-ws-request-connect-timeout request)
                                               (max 1 (ceiling (ende-responses-ws-request-connect-timeout request)))
-                                            most-positive-fixnum)
-                       :message-timeout (max 1 (ceiling (ende-responses-ws-request-idle-timeout request))))))
+                                            most-positive-fixnum))))
     (setq limits (append limits (list :header-bytes header-limit :line-bytes header-limit)))
     (setf (ende-responses-ws-connection-output-limit connection) output-limit
           (ende-responses-ws-connection-phase connection) 'connecting
