@@ -115,6 +115,12 @@
 (defvar ende-tools--project-context nil
   "Prepared read policy for the current project operation.")
 
+(defvar-local ende-tools--content-metadata nil
+  "Disposable content summary and its buffer modification/interpretation key.")
+
+(defvar ende-tools--disk-attributes nil
+  "Attributes belonging to the current operation's captured disk contents.")
+
 (defvar ende-tools--access-tool nil
   "Tool symbol currently being authorized by a handler.")
 
@@ -735,10 +741,16 @@ activate a major mode."
         (error "project source target is no longer authorized: %s" path))
       (setq path current))
     (ende-project-assert-readable-file path)
-    (with-temp-buffer
-      (let ((coding-system-for-read 'undecided))
-        (insert-file-contents path))
-      (funcall function (or last-coding-system-used 'utf-8-unix)))))
+    (let ((before (file-attributes path)))
+      (with-temp-buffer
+        (let ((coding-system-for-read 'undecided))
+          (insert-file-contents path))
+        (let ((ende-tools--disk-attributes (file-attributes path)))
+          (unless (and ende-tools--disk-attributes
+                       (equal (ende-tools--file-identity before)
+                              (ende-tools--file-identity ende-tools--disk-attributes)))
+            (error "source changed while reading: %s" path))
+          (funcall function (or last-coding-system-used 'utf-8-unix)))))))
 
 (defun ende-tools--with-source (source function)
   "Call FUNCTION with current source buffer selected for SOURCE.
@@ -757,38 +769,58 @@ FUNCTION receives no arguments and may return any value."
 				  (lambda (_coding-system)
 				    (funcall function)))))
 
+(defun ende-tools--source-content-metadata ()
+  "Return a cached summary of the complete current source buffer's contents."
+  (save-restriction
+    (widen)
+    (let ((key (list (buffer-chars-modified-tick) buffer-file-coding-system
+                     coding-system-for-write enable-multibyte-characters
+                     selective-display
+                     (unless (or coding-system-for-write buffer-file-coding-system)
+                       (list buffer-file-name (copy-tree file-coding-system-alist)
+                             (default-value 'buffer-file-coding-system))))))
+      (unless (equal key (car ende-tools--content-metadata))
+        (setq ende-tools--content-metadata
+              (cons key
+                    (list :line_count (count-lines (point-min) (point-max))
+                          :byte_count (- (position-bytes (point-max))
+                                         (position-bytes (point-min)))
+                          :digest (secure-hash 'sha256 (current-buffer)
+                                               (point-min) (point-max))))))
+      (cdr ende-tools--content-metadata))))
+
 (defun ende-tools--source-digest ()
   "Return a SHA-256 digest of the complete current source buffer."
-  (secure-hash 'sha256 (current-buffer) (point-min) (point-max)))
+  (plist-get (ende-tools--source-content-metadata) :digest))
 
 (defun ende-tools--source-line-count ()
   "Return the number of lines in the complete current source buffer."
-  (count-lines (point-min) (point-max)))
+  (plist-get (ende-tools--source-content-metadata) :line_count))
 
 (defun ende-tools--source-metadata (source)
   "Return metadata for SOURCE using its current contents."
-  (let* ((path (plist-get source :path))
-         (disk-source (eq (plist-get source :kind) 'file))
-         (attributes (and disk-source (file-attributes path)))
+  (let* ((disk-source (eq (plist-get source :kind) 'file))
          (buffer-metadata (ende-tools--source-buffer-metadata source)))
     (ende-tools--with-source
      source
      (lambda ()
-       (append
-        (list :path (or (plist-get source :public-path)
-                        (plist-get source :relative))
-              :source_kind (ende-tools--source-kind-name source)
-              :line_count (ende-tools--source-line-count)
-              :byte_count (if disk-source
-                              (file-attribute-size attributes)
-                            (string-bytes (buffer-string)))
-              :digest (ende-tools--source-digest)
-              :disk_mtime
-              (and attributes
-                   (format-time-string
-                    "%Y-%m-%dT%H:%M:%S%z"
-                    (file-attribute-modification-time attributes))))
-        buffer-metadata)))))
+       (let ((attributes (and disk-source ende-tools--disk-attributes)))
+         (append
+          (list :path (or (plist-get source :public-path)
+                          (plist-get source :relative))
+                :source_kind (ende-tools--source-kind-name source)
+                :line_count (ende-tools--source-line-count)
+                :byte_count (if disk-source
+                                (file-attribute-size attributes)
+                              (plist-get (ende-tools--source-content-metadata)
+                                         :byte_count))
+                :digest (ende-tools--source-digest)
+                :disk_mtime
+                (and attributes
+                     (format-time-string
+                      "%Y-%m-%dT%H:%M:%S%z"
+                      (file-attribute-modification-time attributes))))
+          buffer-metadata))))))
 
 (defun ende-tools--line-slice (start-line line-count)
   "Return a bounded line slice from the current source buffer."
@@ -1073,9 +1105,8 @@ Return non-nil when selection was exhausted, nil when VISIT stopped it."
   (let* ((path-value (ende-tools--required-string arguments "path"))
          (source (ende-tools--resolve-disk-source
                   (list :path path-value) root))
-         (attributes (file-attributes (plist-get source :path)))
          (metadata (ende-tools--source-metadata source)))
-    (plist-put metadata :disk_byte_count (file-attribute-size attributes))))
+    (plist-put metadata :disk_byte_count (plist-get metadata :byte_count))))
 
 (defun ende-tools--read-file (arguments root)
   "Read a bounded range from disk, regardless of visiting-buffer contents."
@@ -1379,18 +1410,18 @@ Multiline matches belong to their starting line; columns name its first match."
     (insert-file-contents-literally path)
     (buffer-string)))
 
-(defun ende-tools--decoded-file (path)
-  "Return decoded disk contents and their coding system for PATH."
-  (with-temp-buffer
-    (let ((coding-system-for-read 'undecided))
-      (insert-file-contents path))
-    (list :content (buffer-substring-no-properties (point-min) (point-max))
+(defun ende-tools--decode-file-bytes (bytes)
+  "Return decoded file BYTES and their detected coding system."
+  (let* ((last-coding-system-used nil)
+         (content (decode-coding-string bytes 'undecided)))
+    (list :content (substring-no-properties content)
           :coding-system (or last-coding-system-used 'utf-8-unix))))
 
-(defun ende-tools--public-content-digest (content)
-  "Return CONTENT's digest in the same representation as read_file."
+(defun ende-tools--public-content-digest (content &optional coding-system)
+  "Return CONTENT's read_file digest using its captured CODING-SYSTEM."
   (with-temp-buffer
     (insert content)
+    (when coding-system (setq buffer-file-coding-system coding-system))
     (ende-tools--source-digest)))
 
 (defun ende-tools--capture-file (path)
@@ -1406,19 +1437,19 @@ Multiline matches belong to their starting line; columns name its first match."
   (let* ((before (file-attributes path))
          (before-identity (ende-tools--file-identity before))
          (bytes (ende-tools--literal-file-bytes path))
-         (decoded (ende-tools--decoded-file path))
+         (decoded (ende-tools--decode-file-bytes bytes))
          (after (file-attributes path))
-         (after-bytes (ende-tools--literal-file-bytes path)))
+         (after-bytes (ende-tools--literal-file-bytes path))
+         (raw-digest (secure-hash 'sha256 bytes)))
     (unless (and after
                  (equal before-identity (ende-tools--file-identity after))
-                 (string= (secure-hash 'sha256 bytes)
-                          (secure-hash 'sha256 after-bytes)))
+                 (string= raw-digest (secure-hash 'sha256 after-bytes)))
       (error "source changed while preparing mutation: %s" path))
     (list :content (plist-get decoded :content)
           :bytes bytes
-          :raw-digest (secure-hash 'sha256 bytes)
+          :raw-digest raw-digest
           :digest (ende-tools--public-content-digest
-                   (plist-get decoded :content))
+                   (plist-get decoded :content) (plist-get decoded :coding-system))
           :coding-system (plist-get decoded :coding-system)
           :file-mode (file-modes path)
           :identity before-identity)))
