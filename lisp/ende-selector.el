@@ -168,67 +168,64 @@
   "Apply QUOTA or ERROR to BUFFER if GENERATION and PROFILE still match."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (and (= ende-selector--usage-generation generation)
-                 (equal (ende-provider-selection-provenance profile)
-                        (ende-provider-selection-provenance
-                         (ende-selector--provider-profile))))
-        (setq ende-selector--usage-cancel nil
-              ende-selector--usage
-              (list :quota quota
-                    :error (and (ende-error-p error)
-                                (ende-error-message error))))
-        (ende-selector--render)))))
+      (when (= ende-selector--usage-generation generation)
+        (let ((current (ende-selector--provider-profile)))
+          (when (equal (ende-provider-selection-provenance profile)
+                       (ende-provider-selection-provenance current))
+            (setq ende-selector--usage-cancel nil
+                  ende-selector--usage
+                  (list :quota quota
+                        :error (and (ende-error-p error)
+                                    (ende-error-message error))))
+            (ende-selector--render current)))))))
 
-(defun ende-selector--usage-refresh (buffer generation)
+(defun ende-selector--usage-refresh (buffer generation &optional profile)
   "Refresh the Codex OAuth quota displayed by BUFFER for GENERATION."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (and (= ende-selector--usage-generation generation)
-                 (eq (plist-get (ende-selector--provider-profile) :service)
-                     'openai-codex)
-                 (eq (plist-get (ende-selector--provider-profile) :auth-method)
-                     'codex-oauth)
-                 (not ende-selector--usage-cancel))
-        (let ((profile (ende-selector--provider-profile))
+      (when (= ende-selector--usage-generation generation)
+        (let ((profile (or profile (ende-selector--provider-profile)))
               (completed nil))
-          (let ((cancel
-                 (ende-codex-probe-usage
-                  profile
-                  (lambda (quota error)
-                    (setq completed t)
-                    (ende-selector--usage-result
-                     buffer generation profile quota error)))))
-            (unless completed
-              (setq ende-selector--usage-cancel cancel))))))))
+          (when (and (eq (plist-get profile :service) 'openai-codex)
+                     (eq (plist-get profile :auth-method) 'codex-oauth)
+                     (not ende-selector--usage-cancel))
+            (let ((cancel
+                   (ende-codex-probe-usage
+                    profile
+                    (lambda (quota error)
+                      (setq completed t)
+                      (ende-selector--usage-result
+                       buffer generation profile quota error)))))
+              (unless completed
+                (setq ende-selector--usage-cancel cancel)))))))))
 
-(defun ende-selector--start-usage-refresh ()
+(defun ende-selector--start-usage-refresh (&optional profile)
   "Start periodic quota refresh only for the Codex OAuth connection."
   (ende-selector--cancel-usage)
   (setq ende-selector--usage nil)
-  (when (and (not ende-selector--usage-suspended)
-             (eq (plist-get (ende-selector--provider-profile) :service) 'openai-codex)
-             (eq (plist-get (ende-selector--provider-profile) :auth-method) 'codex-oauth))
-    (let ((generation (cl-incf ende-selector--next-usage-generation))
-          (buffer (current-buffer)))
-      (setq ende-selector--usage-generation generation)
-      (ende-selector--usage-refresh buffer generation)
-      (setq ende-selector--usage-timer
-            (run-at-time 60 60 #'ende-selector--usage-refresh buffer generation)))))
+  (unless ende-selector--usage-suspended
+    (let ((profile (or profile (ende-selector--provider-profile))))
+      (when (and (eq (plist-get profile :service) 'openai-codex)
+                 (eq (plist-get profile :auth-method) 'codex-oauth))
+        (let ((generation (cl-incf ende-selector--next-usage-generation))
+              (buffer (current-buffer)))
+          (setq ende-selector--usage-generation generation)
+          (ende-selector--usage-refresh buffer generation profile)
+          (setq ende-selector--usage-timer
+                (run-at-time 60 60 #'ende-selector--usage-refresh buffer generation)))))))
 
 (defun ende-selector--provider-name ()
   "Return the selected provider name."
   (nth ende-selector--provider-index ende-selector--providers))
 
-(defun ende-selector--provider-profile ()
-  "Return the selected provider profile with provisional runtime settings."
+(defun ende-selector--provider-profile (&optional profile)
+  "Return the selected provider PROFILE with provisional runtime settings."
   (let* ((model (ende-selector--model-name))
          (provider (ende-selector--provider-name))
          (profile
-          (if model
+          (or profile
               (ende-provider-profile-for-model provider model ende-selector--api
-                                               ende-selector--connection)
-            (ende-provider--compose-profile provider nil ende-selector--api
-                                            ende-selector--connection)))
+                                               ende-selector--connection)))
          (runtime (ende-selector--draft-runtime-state profile)))
     (when runtime
       (setq profile (plist-put profile :max-concurrency
@@ -352,7 +349,7 @@
             (if ende-selector--effort :remembered :none)))
     (ende-selector--render profile)))
 
-(defun ende-selector--remembered-model (provider)
+(defun ende-selector--remembered-model (provider &optional profile)
   "Return the remembered model for PROVIDER, or nil."
   (let ((selection
          (ende-model-selection-provider-for-buffer
@@ -361,27 +358,34 @@
          (condition-case nil
              (equal
               (ende-provider-selection-provenance
-               (ende-provider--compose-profile
-                provider nil (plist-get selection :api)
-                (ende-model-selection-connection selection)))
+               (if (and profile
+                        (equal (plist-get selection :api) ende-selector--api)
+                        (equal (ende-model-selection-connection selection)
+                               ende-selector--connection))
+                   profile
+                 (ende-provider--compose-profile
+                  provider nil (plist-get selection :api)
+                  (ende-model-selection-connection selection))))
               (ende-provider-selection-provenance
-               (ende-provider--compose-profile
-                provider nil ende-selector--api ende-selector--connection)))
+               (or profile
+                   (ende-provider--compose-profile
+                    provider nil ende-selector--api ende-selector--connection))))
            (error nil))
          (plist-get selection :model))))
 
-(defun ende-selector--binding-current-p (profile)
+(defun ende-selector--binding-current-p (profile &optional current)
   "Return non-nil if PROFILE still belongs to the configured selector binding."
   (condition-case nil
       (equal (ende-provider-selection-provenance profile)
              (ende-provider-selection-provenance
-              (ende-provider--compose-profile
-               (ende-selector--provider-name) nil ende-selector--api ende-selector--connection)))
+              (or current
+                  (ende-provider--compose-profile
+                   (ende-selector--provider-name) nil ende-selector--api ende-selector--connection))))
     (error nil)))
 
 (defun ende-selector--preferred-model (provider profile)
   "Return the saved or explicitly configured model for PROVIDER PROFILE."
-  (or (ende-selector--remembered-model provider)
+  (or (ende-selector--remembered-model provider profile)
       (ende-provider-configured-model profile)))
 
 (defun ende-selector--valid-model-p (provider profile models generation model)
@@ -656,7 +660,7 @@ Report an unavailable model once for each catalog identity."
       (ende-error-message error)
     (format "%s" error)))
 
-(defun ende-selector--probe-efforts (callback)
+(defun ende-selector--probe-efforts (callback &optional profile)
   "Resolve the current model's effort choices and call CALLBACK.
 CALLBACK receives (EFFORTS DEFAULT ERROR).  Stale or cancelled callbacks are
 ignored.  Return a cancellation function."
@@ -665,17 +669,18 @@ ignored.  Return a cancellation function."
       (user-error "ende has no ready model for reasoning-effort discovery"))
     (ende-selector--cancel-effort-probe)
     (let* ((provider (ende-selector--provider-name))
-           (profile (ende-selector--resolved-profile))
+           (profile (or profile (ende-selector--provider-profile)))
+           (resolved (ende-selector--resolved-profile profile))
            (selector-buffer (current-buffer))
            (generation (cl-incf ende-selector--next-effort-probe-generation))
            (selection-generation ende-selector--model-selection-generation)
            (completed nil))
       (setq ende-selector--effort-probe-generation generation
             ende-selector--effort-state :loading)
-      (ende-selector--render)
+      (ende-selector--render profile)
       (let ((cancel
              (ende-provider-probe-reasoning-efforts
-              profile model
+              resolved model
               (lambda (efforts default error)
                 (setq completed t)
                 (when (and (buffer-live-p selector-buffer)
@@ -693,8 +698,8 @@ ignored.  Return a cancellation function."
                    (= ende-selector--effort-probe-generation generation))
           (setq ende-selector--effort-cancel cancel))))))
 
-(defun ende-selector--set-models (models &optional preferred)
-  "Set the current provider's MODELS and select PREFERRED when available."
+(defun ende-selector--set-models (models &optional preferred profile)
+  "Set MODELS, select PREFERRED when available, and return its PROFILE."
   (let ((models (cl-remove-if-not #'stringp models))
         (previous-model (ende-selector--model-name)))
     (setq ende-selector--models models
@@ -702,8 +707,15 @@ ignored.  Return a cancellation function."
           (or (and (stringp preferred)
                    (ende-selector--index-of preferred models))
               0))
-    (unless (equal previous-model (ende-selector--model-name))
-      (ende-selector--set-control-context))))
+    (let* ((model (ende-selector--model-name))
+           (profile (if (and profile
+                             (or (equal model (plist-get profile :model))
+                                 (and (null previous-model) (null model))))
+                        profile
+                      (ende-selector--provider-profile))))
+      (unless (equal previous-model model)
+        (ende-selector--set-control-context profile))
+      profile)))
 
 (defun ende-selector--set-provisional-models (profile preferred)
   "Show PROFILE's provisional models while discovery validates PREFERRED."
@@ -714,11 +726,11 @@ ignored.  Return a cancellation function."
        (if (member preferred configured)
            configured
          (cons preferred configured))
-       preferred))
+       preferred profile))
      ((ende-provider-configured-models-explicit-p profile)
-      (ende-selector--set-models configured))
+      (ende-selector--set-models configured nil profile))
      (t
-      (ende-selector--set-models nil)))))
+      (ende-selector--set-models nil nil profile)))))
 
 (defun ende-selector--apply-model-probe-error (profile preferred &optional error)
   "Keep explicit PROFILE models usable and retain the discovery ERROR."
@@ -736,14 +748,17 @@ ignored.  Return a cancellation function."
           (when (and (stringp configured-model)
                      (not (member configured-model models)))
             (setq models (cons configured-model models)))
-          (ende-selector--set-models
-           models
-           (or (and (stringp preferred) (member preferred models) preferred)
-               configured-model))
-          (setq ende-selector--model-state :ready))
+          (prog1 (ende-selector--set-models
+                  models
+                  (or (and (stringp preferred) (member preferred models) preferred)
+                      configured-model)
+                  profile)
+            (setq ende-selector--model-state :ready)))
       (let ((stale (ende-provider-stale-models profile)))
-        (when stale (ende-selector--set-models (plist-get stale :models) preferred))
-        (setq ende-selector--model-state :error)))))
+        (prog1 (if stale
+                   (ende-selector--set-models (plist-get stale :models) preferred profile)
+                 profile)
+          (setq ende-selector--model-state :error))))))
 
 (defun ende-selector--apply-model-catalog
     (profile models _details generation preferred &optional error)
@@ -763,51 +778,58 @@ PREFERRED is selected only when it is present in MODELS."
         (unless selected
           (let ((configured (ende-provider-configured-model profile)))
             (when (member configured models) (setq selected configured))))
-        (ende-selector--set-models models selected)
-        (setq ende-selector--model-state
-              (if models :ready :error))))))
+        (prog1 (ende-selector--set-models models selected profile)
+          (setq ende-selector--model-state
+                (if models :ready :error)))))))
 
-(defun ende-selector--probe-current-provider (&optional preferred)
-  "Probe the selected provider when it has dynamic model discovery."
+(defun ende-selector--probe-current-provider (&optional preferred profile)
+  "Probe the selected provider and return its current PROFILE."
   (let* ((provider (ende-selector--provider-name))
-         (profile (ende-selector--provider-profile))
+         (profile (or profile (ende-selector--provider-profile)))
          (selector-buffer (current-buffer))
          (generation (cl-incf ende-selector--next-probe-generation))
          (selection-generation ende-selector--model-selection-generation)
          (completed nil))
-    (setq ende-selector--probe-generation generation)
-    (setq ende-selector--model-state :validating
+    (setq ende-selector--probe-generation generation
+          ende-selector--model-state :validating
           ende-selector--model-error nil)
-    (let ((callback
-           (lambda (models error)
-             (when (and (buffer-live-p selector-buffer)
-                        (with-current-buffer selector-buffer
-                          (= ende-selector--probe-generation generation)))
-               (setq completed t)
-               (with-current-buffer selector-buffer
-                 (when (and (eq (ende-selector--provider-name) provider)
-                            (ende-selector--binding-current-p profile))
-                   (setq ende-selector--probe-cancel nil)
-                   (let* ((live-profile profile)
-                          (live-preferred
-                           (if (= selection-generation
-                                  ende-selector--model-selection-generation)
-                               (or preferred (ende-selector--preferred-model
-                                              provider live-profile))
-                             (ende-selector--model-name))))
-                     (if error
-                         (ende-selector--apply-model-probe-error
-                          live-profile live-preferred error)
-                       (ende-selector--apply-model-catalog
-                        live-profile models
-                        (ende-provider-model-details live-profile)
-                        (ende-provider-models-generation live-profile)
-                        live-preferred)))
-                   (ende-selector--render)))))))
-      (let ((cancel (ende-provider-probe-models profile callback)))
-        (when (and (not completed)
-                   (= ende-selector--probe-generation generation))
-          (setq ende-selector--probe-cancel cancel))))))
+    (let* ((callback
+            (lambda (models error)
+              (when (and (buffer-live-p selector-buffer)
+                         (with-current-buffer selector-buffer
+                           (= ende-selector--probe-generation generation)))
+                (setq completed t)
+                (with-current-buffer selector-buffer
+                  (when-let* ((current
+                               (and (eq (ende-selector--provider-name) provider)
+                                    (condition-case nil
+                                        (ende-provider--compose-profile
+                                         provider nil ende-selector--api ende-selector--connection)
+                                      (error nil))))
+                              (_ (ende-selector--binding-current-p profile current)))
+                    (setq ende-selector--probe-cancel nil)
+                    (let* ((live-profile (ende-selector--provider-profile current))
+                           (live-preferred
+                            (if (= selection-generation
+                                   ende-selector--model-selection-generation)
+                                (or preferred (ende-selector--preferred-model
+                                               provider live-profile))
+                              (ende-selector--model-name))))
+                      (setq profile
+                            (if error
+                                (ende-selector--apply-model-probe-error
+                                 live-profile live-preferred error)
+                              (ende-selector--apply-model-catalog
+                               live-profile models
+                               (ende-provider-model-details live-profile)
+                               (ende-provider-models-generation live-profile)
+                               live-preferred))))
+                    (ende-selector--render profile))))))
+           (cancel (ende-provider-probe-models profile callback)))
+      (when (and (not completed)
+                 (= ende-selector--probe-generation generation))
+        (setq ende-selector--probe-cancel cancel)))
+    profile))
 
 (defun ende-selector--set-provider (index &optional preferred-model)
   "Select provider at INDEX and start dynamic model discovery if needed."
@@ -826,7 +848,7 @@ PREFERRED is selected only when it is present in MODELS."
       (let ((connection-state (ende-selector--connection-state target-provider)))
         (setq ende-selector--api (plist-get connection-state :api)
               ende-selector--connection
-              (copy-tree (plist-get connection-state :connection)))))
+              (copy-tree (plist-get connection-state :connection))))))
   (cl-incf ende-selector--model-selection-generation)
   (setq ende-selector--models nil
         ende-selector--model-error nil
@@ -839,30 +861,32 @@ PREFERRED is selected only when it is present in MODELS."
                                       ende-selector--draft-models))
                         (ende-selector--preferred-model provider profile)))
          (catalog (ende-provider-cached-models profile)))
-    (cond
-     ((ende-provider-configured-models-explicit-p profile)
-      (ende-selector--apply-model-catalog
-       profile (ende-provider-models profile) nil 0 preferred))
-     (catalog
-      (if (plist-get catalog :error)
-          (ende-selector--apply-model-probe-error profile preferred (plist-get catalog :error))
-        (ende-selector--apply-model-catalog
-         profile
-         (plist-get catalog :models)
-         (plist-get catalog :details)
-         (plist-get catalog :generation)
-         preferred)))
-     ((ende-provider-model-discovery-available-p profile)
-      (ende-selector--set-provisional-models profile preferred)
-      (setq ende-selector--model-state :validating)
-      (ende-selector--probe-current-provider preferred-model))
-     (t
-      (ende-selector--apply-model-catalog
-       profile (ende-provider-models profile) nil 0 preferred)))
-    (ende-selector--set-control-context)
-    (ende-selector--remember-model)
-    (ende-selector--start-usage-refresh)
-    (ende-selector--render))))
+    (setq profile
+          (cond
+           ((ende-provider-configured-models-explicit-p profile)
+            (ende-selector--apply-model-catalog
+             profile (ende-provider-models profile) nil 0 preferred))
+           (catalog
+            (if (plist-get catalog :error)
+                (ende-selector--apply-model-probe-error profile preferred (plist-get catalog :error))
+              (ende-selector--apply-model-catalog
+               profile
+               (plist-get catalog :models)
+               (plist-get catalog :details)
+               (plist-get catalog :generation)
+               preferred)))
+           ((ende-provider-model-discovery-available-p profile)
+            (setq profile (ende-selector--set-provisional-models profile preferred))
+            (setq ende-selector--model-state :validating)
+            (ende-selector--probe-current-provider preferred-model profile))
+           (t
+            (ende-selector--apply-model-catalog
+             profile (ende-provider-models profile) nil 0 preferred))))
+    (ende-selector--set-control-context profile)
+    (ende-selector--remember-model profile)
+    (ende-selector--start-usage-refresh profile)
+    (ende-selector--render profile)
+    profile))
 
 (defvar-local ende-selector--connection-buffer nil
   "Connection configuration buffer owned by this selector.")
@@ -1153,53 +1177,55 @@ performed locally so typing a search term never starts another network request."
     ((or :loading :validating)
      (user-error "ende model discovery is still loading"))
     (:error
-     (if (plist-get (ende-selector--provider-profile) :service)
-         (user-error "ende model discovery failed: %s"
-                     (or ende-selector--model-error "change provider or retry"))
-       (let ((model (read-string "Manual model ID: ")))
-         (when (string-blank-p model) (user-error "Supply a nonempty model ID"))
-         (ende-selector--set-models (list model) model)
-         (setq ende-selector--model-state :ready)
-         (ende-selector--set-control-context)
-         (ende-selector--remember-model)
-         (ende-selector--render))))
+     (let ((profile (ende-selector--provider-profile)))
+       (if (plist-get profile :service)
+           (user-error "ende model discovery failed: %s"
+                       (or ende-selector--model-error "change provider or retry"))
+         (let ((model (read-string "Manual model ID: ")))
+           (when (string-blank-p model) (user-error "Supply a nonempty model ID"))
+           (setq profile (ende-selector--set-models (list model) model profile)
+                 ende-selector--model-state :ready)
+           (ende-selector--set-control-context profile)
+           (ende-selector--remember-model profile)
+           (ende-selector--render profile)))))
     (_
-     (let ((models (cl-remove-if-not #'stringp ende-selector--models)))
-       (unless (or models (not (plist-get (ende-selector--provider-profile) :service)))
+     (let* ((models (ende-selector--model-candidates))
+            (profile (ende-selector--provider-profile)))
+       (unless (or models (not (plist-get profile :service)))
          (user-error "ende has no models available for this provider"))
-       (let* ((candidates (ende-selector--model-candidates))
-              (current (ende-selector--model-name))
-              (details (and (eq (plist-get (ende-selector--provider-profile) :service)
-                                'openrouter)
-                            (ende-provider-model-details
-                             (ende-selector--provider-profile))))
+       (let* ((current (ende-selector--model-name))
+              (details (and (eq (plist-get profile :service) 'openrouter)
+                            (ende-provider-model-details profile)))
+              (index-by-id (when details (make-hash-table :test #'equal)))
               (completion-extra-properties
                (when details
+                 (dolist (detail details)
+                   (let ((id (plist-get detail :id)))
+                     (unless (gethash id index-by-id)
+                       (puthash id detail index-by-id))))
                  (list :annotation-function
                        (lambda (model)
                          (ende-provider-model-price-annotation
-                          (cl-find model details :key (lambda (detail) (plist-get detail :id))
-                                   :test #'equal))))))
+                          (gethash model index-by-id))))))
               (completion-ignore-case t)
               (completion-styles '(substring))
-              (manual (and (not (plist-get (ende-selector--provider-profile) :service))
-                           (not (ende-provider-configured-models-explicit-p
-                                 (ende-selector--provider-profile)))))
-              (choice (completing-read "Model: " candidates
+              (manual (and (not (plist-get profile :service))
+                           (not (ende-provider-configured-models-explicit-p profile))))
+              (choice (completing-read "Model: " models
                                        nil (not manual) nil nil current))
+              (index (cl-position choice models :test #'equal))
               (selected-model
-               (and (or (member choice candidates) manual)
-                    (not (string-blank-p choice)) choice))
-              (index (cl-position selected-model models :test #'equal)))
+               (and (or index manual) (not (string-blank-p choice)) choice)))
          (when selected-model
            (unless index
              (setq models (append models (list selected-model)) index (1- (length models))))
            (setq ende-selector--models models ende-selector--model-index index
                  ende-selector--model-state :ready)
            (cl-incf ende-selector--model-selection-generation)
-           (ende-selector--set-control-context)
-           (ende-selector--remember-model)
-           (ende-selector--render)))))))
+           (setq profile (ende-selector--set-control-context
+                          (and (equal current selected-model) profile)))
+           (ende-selector--remember-model profile)
+           (ende-selector--render profile)))))))
 
 (defun ende-selector--effort-probe-failed (error)
   "Retain the selected effort and show probe ERROR or unavailable choices."
@@ -1236,7 +1262,7 @@ performed locally so typing a search term never starts another network request."
   (interactive)
   (let* ((profile (ende-selector--provider-profile))
          (_ (ende-selector--require-control-mapping profile :temperature))
-         (setting (ende-selector--control-setting :temperature))
+         (setting (ende-selector--control-setting :temperature profile))
          (current (plist-get setting :value))
          (action
           (completing-read
@@ -1244,10 +1270,10 @@ performed locally so typing a search term never starts another network request."
            nil t nil nil
            (if (numberp current) "Set numeric value" "Provider default"))))
     (if (equal action "Provider default")
-        (ende-selector--set-control-preference :temperature nil)
+        (ende-selector--set-control-preference :temperature nil profile)
       (ende-selector--set-control-preference
        :temperature
-       (read-number "Temperature: " (if (numberp current) current 1.0))))))
+       (read-number "Temperature: " (if (numberp current) current 1.0)) profile))))
 
 (defun ende-selector-select-thinking ()
   "Set the thinking preference for the current provider/model."
@@ -1258,7 +1284,7 @@ performed locally so typing a search term never starts another network request."
          (choices (if (plist-member descriptor :choices)
                       (plist-get descriptor :choices)
                     '(on off)))
-         (setting (ende-selector--control-setting :thinking))
+         (setting (ende-selector--control-setting :thinking profile))
          (current (plist-get setting :value))
          (labels (cons "Provider default"
                        (mapcar #'ende-selector--control-choice-label choices)))
@@ -1270,7 +1296,7 @@ performed locally so typing a search term never starts another network request."
     (ende-selector--set-control-preference
      :thinking
      (unless (equal choice "Provider default")
-       (intern choice)))))
+       (intern choice)) profile)))
 
 (defun ende-selector-reset-controls ()
   "Discard all control overrides and inherit the current profile settings."
@@ -1278,20 +1304,21 @@ performed locally so typing a search term never starts another network request."
   (setq ende-selector--control-preferences nil
         ende-selector--effort nil
         ende-selector--effort-state :none)
-  (setq ende-selector--effort
-        (plist-get (ende-selector--resolved-profile) :reasoning-effort)
-        ende-selector--effort-state
-        (if ende-selector--effort :remembered :none))
-  (when-let* ((state (ende-selector--draft-control-state)))
-    (setq state (plist-put state :preferences nil)
-          state (plist-put state :dirty
-                           (not (null (plist-get state :initial-preferences)))))
-    (puthash (ende-selector--control-key) state ende-selector--draft-controls))
-  (ende-selector--render))
+  (let ((profile (ende-selector--provider-profile)))
+    (setq ende-selector--effort (plist-get profile :reasoning-effort)
+          ende-selector--effort-state
+          (if ende-selector--effort :remembered :none))
+    (when-let* ((state (ende-selector--draft-control-state profile)))
+      (setq state (plist-put state :preferences nil)
+            state (plist-put state :dirty
+                             (not (null (plist-get state :initial-preferences)))))
+      (puthash (ende-selector--control-key profile) state ende-selector--draft-controls))
+    (ende-selector--render profile)))
 
 (defun ende-selector--choose-effort (efforts)
   "Ask for one of EFFORTS or Provider default."
-  (let* ((setting (ende-selector--control-setting :reasoning-effort))
+  (let* ((profile (ende-selector--provider-profile))
+         (setting (ende-selector--control-setting :reasoning-effort profile))
          (current (plist-get setting :value))
          (choices (cons "Provider default" efforts))
          (initial (and (or (not current) (member current efforts))
@@ -1302,56 +1329,58 @@ performed locally so typing a search term never starts another network request."
                            (and current (not (member current efforts)) current)
                            nil initial)))
     (if (equal choice "Provider default")
-        (ende-selector--set-control-preference :reasoning-effort nil)
-      (ende-selector--set-control-preference :reasoning-effort choice))
+        (ende-selector--set-control-preference :reasoning-effort nil profile)
+      (ende-selector--set-control-preference :reasoning-effort choice profile))
     (setq ende-selector--effort-state
           (if ende-selector--effort :remembered :none))
-    (ende-selector--render)))
+    (ende-selector--render profile)))
 
 (defun ende-selector-select-effort ()
   "Choose a reasoning effort supported by the current profile/model."
   (interactive)
-  (ende-selector--require-control-mapping
-   (ende-selector--provider-profile) :reasoning-effort)
-  (when (eq ende-selector--effort-state :loading)
-    (user-error "ende reasoning-effort discovery is still loading"))
-  (ende-selector--probe-efforts
-   (lambda (efforts default error)
-     (if error
-         (if (and (ende-error-p error)
-                  (eq (ende-error-kind error) 'capability))
-             (when (equal
-                    (completing-read "Reasoning effort: "
-                                     '("Provider default") nil t nil nil
-                                     "Provider default")
-                    "Provider default")
-               (ende-selector--set-control-preference
-                :reasoning-effort nil))
-           (ende-selector--effort-probe-failed error))
-       (ignore default)
-       (if (null efforts)
-           (ende-selector--effort-probe-failed
-            (ende-error-create
-             :kind 'capability
-             :message "No reasoning-effort choices are available"))
-         (ende-selector--choose-effort efforts))))))
+  (let ((profile (ende-selector--provider-profile)))
+    (ende-selector--require-control-mapping profile :reasoning-effort)
+    (when (eq ende-selector--effort-state :loading)
+      (user-error "ende reasoning-effort discovery is still loading"))
+    (ende-selector--probe-efforts
+     (lambda (efforts default error)
+       (if error
+           (if (and (ende-error-p error)
+                    (eq (ende-error-kind error) 'capability))
+               (when (equal
+                      (completing-read "Reasoning effort: "
+                                       '("Provider default") nil t nil nil
+                                       "Provider default")
+                      "Provider default")
+                 (ende-selector--set-control-preference :reasoning-effort nil))
+             (ende-selector--effort-probe-failed error))
+         (ignore default)
+         (if (null efforts)
+             (ende-selector--effort-probe-failed
+              (ende-error-create
+               :kind 'capability
+               :message "No reasoning-effort choices are available"))
+           (ende-selector--choose-effort efforts))))
+     profile)))
 
 (defun ende-selector-set-concurrency ()
   "Set the selected provider's provisional concurrency limit."
   (interactive)
-  (let* ((current (ende-selector--provider-concurrency))
+  (let* ((profile (ende-selector--provider-profile))
+         (current (plist-get profile :max-concurrency))
          (value (read-number "Max concurrent jobs: " current)))
     (unless (and (integerp value) (> value 0))
       (user-error "Provider concurrency must be a positive integer"))
     (ende-selector--set-draft-runtime :max-concurrency value)
-    (ende-selector--render)))
+    (ende-selector--render (ende-selector--provider-profile profile))))
 
 (defun ende-selector-toggle-parallel ()
   "Toggle the selected provider's provisional parallel setting."
   (interactive)
-  (let ((enabled (not (ende-selector--provider-parallel-p))))
+  (let* ((profile (ende-selector--provider-profile))
+         (enabled (not (plist-get profile :parallel))))
     (ende-selector--set-draft-runtime :parallel enabled)
-    (ende-selector--render)))
+    (ende-selector--render (ende-selector--provider-profile profile))))
 
 (defun ende-selector--review-source (function)
   "Call review FUNCTION for the selector's source buffer and close selector."

@@ -174,11 +174,13 @@ When nil, use only the response inactivity timeout."
 						    ende-model-selection--buffer-control-preferences ende-model-selection--provenance))
   (add-to-list 'savehist-additional-variables variable))
 
-(defun ende-provider-selection-provenance (profile)
-  "Return PROFILE's nonsecret credential, endpoint, API and catalog identity."
-  (mapcar (lambda (key) (cons key (ende-provider-config-copy (plist-get profile key))))
-          '(:service :api :url :auth-method :account :auth-source-host
-		     :auth-source-port :auth-source-user :models)))
+(defun ende-provider-selection-provenance (profile &optional binding-only)
+  "Return PROFILE's nonsecret credential, endpoint, API and catalog identity.
+When BINDING-ONLY is non-nil, omit the model catalog."
+  (cl-loop for key in '(:service :api :url :auth-method :account :auth-source-host
+                                :auth-source-port :auth-source-user :models)
+           unless (and binding-only (eq key :models))
+           collect (cons key (ende-provider-config-copy (plist-get profile key)))))
 
 (defun ende-model-selection--provenance-key (selection)
   "Return the stable lookup identity of SELECTION."
@@ -569,8 +571,7 @@ Nil API resolves to PROVIDER's configured default API."
                                (ende-provider-profile-for-model provider model api connection)
                              (error nil))))
               (binding (when profile
-                         (cl-remove-if (lambda (entry) (eq (car entry) :models))
-                                       (ende-provider-selection-provenance profile)))))
+                         (ende-provider-selection-provenance profile t))))
          (list provider (copy-sequence model) binding))))
 
 (defun ende-model-selection--buffer-preference-table (buffer &optional create)

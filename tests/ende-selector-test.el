@@ -893,7 +893,7 @@
                        (lambda (&rest _) "off")))
               (ende-selector-select-thinking))
             (cl-letf (((symbol-function 'ende-selector--probe-efforts)
-                       (lambda (callback)
+                       (lambda (callback &optional _profile)
                          (funcall callback '("high" "low") "low" nil)))
                       ((symbol-function 'completing-read)
                        (lambda (&rest _) "high")))
@@ -1514,7 +1514,7 @@
           (ende-test--selector-ready-state nil 'remote '("remote-model"))
           (ende-selector--set-control-context)
           (cl-letf (((symbol-function 'ende-selector--probe-efforts)
-                     (lambda (callback)
+                     (lambda (callback &optional _profile)
                        (funcall callback '("high" "low") "high" nil)))
                     ((symbol-function 'completing-read)
                      (lambda (prompt collection _predicate require-match
@@ -2113,8 +2113,8 @@
                 (setq ende-selector-connection--draft
                       '(:account "personal" :auth-method auth-source :api openai-chat-completions))
                 (cl-letf (((symbol-function 'ende-selector--render)
-                           (lambda ()
-                             (funcall render)
+                           (lambda (&optional profile)
+                             (funcall render profile)
                              (error "Injected application failure"))))
                   (should-error (ende-selector-connection-apply)))
                 (should (eq (current-buffer) draft))
