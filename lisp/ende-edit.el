@@ -218,7 +218,7 @@ When ALLOW-EMPTY is non-nil, accept an empty edits array."
             (setq edits (nconc edits parsed)))
         (ende-edit-resource-error
          (signal (car caught) (cdr caught)))
-        ((error quit)
+        (error
          (push (list :index index
                      :message (error-message-string caught)
                      :raw (aref raw-edits index))
@@ -272,7 +272,7 @@ CONTENT may also be a vector of already parsed edit objects."
             (setq edits (nconc edits parsed)))
         (ende-edit-resource-error
          (signal (car caught) (cdr caught)))
-        ((error quit)
+        (error
          (push (list :index index
                      :message (error-message-string caught)
                      :raw (aref raw-edits index))

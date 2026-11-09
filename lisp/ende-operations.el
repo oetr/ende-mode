@@ -606,7 +606,7 @@ Return pass data without settling JOB."
 					       (condition-case caught
 						   (ende--apply-anchor-edit
 						    target buffer source-start edit display)
-						 ((error quit)
+						 (error
 						  (push (list :index (plist-get edit :index)
 							      :message (error-message-string caught)
 							      :raw (plist-get edit :raw))
@@ -773,7 +773,11 @@ PREVIOUS contains failures from the preceding structured pass."
           job
           (ende--application-error failure)
           (ende--structured-annotate-result result state)))
-        ((error quit)
+        (quit
+         (unwind-protect
+             (ende-job-fail job failure)
+           (signal (car failure) (cdr failure))))
+        (error
          (ende-job-fail
           job
           (ende--application-error failure)

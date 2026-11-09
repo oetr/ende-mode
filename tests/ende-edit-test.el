@@ -38,6 +38,50 @@
     (should (equal '(4) (ende-edit--anchor-offsets "Foo foo" "foo")))
     (should (equal '(0) (ende-edit--anchor-offsets "a.b axb" "a.b")))))
 
+(ert-deftest ende-test/structured-edit-parsing-propagates-quit ()
+  (cl-letf (((symbol-function 'ende-edit--parse-anchor-edits)
+             (lambda (&rest _) (signal 'quit nil))))
+    (dolist (parser '(ende-edit-parse-insertions ende-edit-parse-replacements))
+      (should
+       (condition-case nil
+           (progn (funcall parser "{\"version\":1,\"edits\":[{}]}" "x") nil)
+         (quit t))))))
+
+(ert-deftest ende-test/structured-edit-quit-keeps-earlier-edits-and-stops ()
+  (dolist (type '(insert-anywhere write-anywhere))
+    (ende-test--reset)
+    (let* ((position (if (eq type 'write-anywhere) "replace" "after"))
+           (response
+            (format "{\"version\":1,\"edits\":[{\"anchor\":\"x\",\"position\":\"%s\",\"text\":\"!\",\"all\":true}]}"
+                    position))
+           (ende-llm-function
+            (ende-test--fake-llm (list (list :content response)) t))
+           (create-review (symbol-function 'ende--create-review-overlay))
+           (attempts 0))
+      (ende-test--with-buffer "x x x"
+        (let* ((job (ende-enqueue-operation type))
+               (target (ende-job-target job)))
+          (cl-letf (((symbol-function 'ende--create-review-overlay)
+                     (lambda (&rest args)
+                       (if (= (cl-incf attempts) 2)
+                           (signal 'quit nil)
+                         (apply create-review args)))))
+            (should
+             (condition-case nil
+                 (progn (ende-test--complete-call (car ende-test--calls)) nil)
+               (quit t))))
+          (should (equal (buffer-string)
+                         (if (eq type 'write-anywhere) "x x !" "x x x!")))
+          (should (= attempts 2))
+          (should (= (length (ende-review--overlays-in-buffer)) 1))
+          (should (= (length ende-test--calls) 1))
+          (should (equal (ende-job-error job) '(quit)))
+          (should (eq (ende-job-state job) 'failed))
+          (should-not (ende-target-applying target))
+          (should-not (ende-target-before-change-hook target))
+          (should-not (ende-job-overlay job))
+          (should-not (ende-running-jobs)))))))
+
 (ert-deftest ende-test/write-anywhere-creates-independent-reviews ()
   (ende-test--reset)
   (let* ((response
