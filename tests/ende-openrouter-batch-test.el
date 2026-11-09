@@ -432,6 +432,57 @@
     (should (equal (cadr (member "--url" command))
                    "https://openrouter.ai/api/v1/batches/batch_1"))))
 
+(ert-deftest ende-test/openrouter-batch-last-member-stops-local-work ()
+  (let* ((ende-openrouter-batch--known-groups nil)
+         (ende-openrouter-batch--groups (make-hash-table :test #'equal))
+         (calls 0)
+         (requests (cl-loop repeat 2 collect
+                            (ende-openrouter-batch--make-request
+                             :messages '(("user" . "question"))
+                             :callbacks (list :on-event (lambda (_) (cl-incf calls))
+                                              :on-done (lambda (_) (cl-incf calls))
+                                              :on-error (lambda (_) (cl-incf calls))))))
+         (buffer (generate-new-buffer " *ende-batch-cancel*"))
+         (process (make-process :name "ende-batch-cancel" :command '("cat")
+                                :buffer nil :connection-type 'pipe :noquery t))
+         (stage (list :request (list :process process :response-buffer buffer)
+                      :callback (lambda (&rest _) (cl-incf calls))))
+         (group (ende-openrouter-batch--make-group
+                 :requests requests :body "payload" :stage stage
+                 :poll-timer (run-at-time 60 nil #'ignore))))
+    (unwind-protect
+        (progn
+          (ende-openrouter-batch--register-group group)
+          (ende-openrouter-batch--cancel-request (car requests))
+          (should (process-live-p process))
+          (should (ende-openrouter-batch--group-poll-timer group))
+          (should-not (ende-openrouter-batch--group-terminal group))
+          (ende-openrouter-batch--cancel-request (cadr requests))
+          (should (ende-openrouter-batch--group-terminal group))
+          (should-not (process-live-p process))
+          (should-not (buffer-live-p buffer))
+          (should-not (ende-openrouter-batch--group-stage group))
+          (should-not (ende-openrouter-batch--group-poll-timer group))
+          (should-not (ende-openrouter-batch--group-body group))
+          (should-not ende-openrouter-batch--known-groups)
+          (should-not (plist-get stage :callback))
+          (dolist (request requests)
+            (should-not (ende-openrouter-batch--request-callbacks request))
+            (should-not (ende-openrouter-batch--request-messages request)))
+          (ende-openrouter-batch--stage-sentinel group stage process "finished")
+          (ende-openrouter-batch--submit-finished
+           group 202 "{\"id\":\"late\",\"status\":\"validating\"}" nil)
+          (ende-openrouter-batch--poll-finished
+           group 200 "{\"status\":\"in_progress\"}" nil)
+          (ende-openrouter-batch--finish-completed group nil)
+          (ende-openrouter-batch--poll group)
+          (should-not (ende-openrouter-batch--group-batch-id group))
+          (should-not (ende-openrouter-batch--group-poll-timer group))
+          (should (zerop calls)))
+      (ende-openrouter-batch-abort)
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 
 
 (ert-deftest ende-test/openrouter-batch-submits-polls-and-settles ()
