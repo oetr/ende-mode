@@ -260,6 +260,16 @@
 
 (ert-deftest ende-artifact-worker-finalizes-and-replays-wire-request ()
   :tags '(integration)
+  (let* ((text (copy-sequence "payload"))
+         (body (list (cons :input (vector (list (cons :text text))))))
+         (prepared
+          (car (ende-request--encode
+                (lambda (_messages _profile) body) nil nil nil nil
+                (list (lambda (wire) (aset text 0 ?X) wire))))))
+    (should (string-match-p "Xayload" (plist-get prepared :data)))
+    (should (equal (cdr (assq :text (aref (alist-get :input
+                                                  (plist-get prepared :full-body)) 0)))
+                   "payload")))
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
            (name (ende-artifact-store base "finalize" ende-artifact-test-png "image/png"))
