@@ -318,16 +318,19 @@ Check containment even when intermediate directories are symlinks."
                    (setq oldest path tick (plist-get entry :used)))) ende-artifact--cache)
       (remhash oldest ende-artifact--cache))))
 
+(defun ende-artifact--image-media (path)
+  "Return PATH's supported image media type, without reading its contents."
+  (or (cdr (assoc (downcase (or (file-name-extension path) ""))
+                  '(("png" . "image/png") ("jpg" . "image/jpeg")
+                    ("jpeg" . "image/jpeg") ("svg" . "image/svg+xml"))))
+      (error "Unsupported image format: %s" path)))
+
 (defun ende-artifact--validate-image (path bytes)
   "Validate image BYTES for PATH and return path-based metadata."
-  (let* ((extension (downcase (or (file-name-extension path) "")))
-         (type (cond ((equal extension "svg") 'svg)
-                     ((equal extension "png") 'png)
-                     ((member extension '("jpg" "jpeg")) 'jpeg)))
-         (media (cdr (assq type '((png . "image/png") (jpeg . "image/jpeg")
-                                  (svg . "image/svg+xml")))))
+  (let* ((media (ende-artifact--image-media path))
+         (type (cdr (assoc media '(("image/png" . png) ("image/jpeg" . jpeg)
+                                  ("image/svg+xml" . svg)))))
          dimensions)
-    (unless media (error "Unsupported image format: %s" path))
     (setq dimensions
           (if (eq type 'svg)
               (let* ((attributes (cadr (ende-artifact--svg bytes)))
@@ -354,8 +357,14 @@ Check containment even when intermediate directories are symlinks."
 (defun ende-artifact--image-entry (path &optional expected)
   "Return the current validated entry for PATH, checking EXPECTED even on hits."
   (setq path (ende-artifact--local-path path))
-  (let* ((signature (ende-artifact--file-signature path))
+  (let* ((media (ende-artifact--image-media path))
+         (signature (ende-artifact--file-signature path))
          (entry (gethash path ende-artifact--cache)))
+    (when (and expected (not (equal expected media)))
+      (error "Image %s has mismatched media type; expected %s" path expected))
+    (when (and (equal media "image/svg+xml")
+               (> (nth 1 signature) ende-artifact--svg-byte-limit))
+      (signal 'ende-artifact-validation-error '("SVG exceeds the size limit")))
     (unless (equal signature (plist-get entry :signature))
       (remhash path ende-artifact--cache)
       (let* ((bytes (ende-artifact--read-bytes path))
@@ -364,6 +373,8 @@ Check containment even when intermediate directories are symlinks."
                       (signal 'ende-artifact-validation-error
                               (list (error-message-string failure))))))
              (retain (<= (length bytes) ende-artifact--cache-payload-limit)))
+        (unless (equal signature (ende-artifact--file-signature path))
+          (error "Image changed while being read: %s" path))
         (ende-artifact--cache-room (if retain (length bytes) 0))
         (setq entry (list :signature signature :info info :used 0
                           :data (and retain bytes) :payloads nil))
@@ -684,13 +695,19 @@ Explicit references use their file link; RESOLVE-FILE enables user attachments."
               (if (or (not (plist-get reference :attachment))
                       (member extension '("png" "jpg" "jpeg" "svg")))
                   (ende-artifact--load-image path)
-                (let ((bytes (ende-artifact--read-bytes path)))
-                  (when (or (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
-                            (image-type-from-data bytes) (string-match-p (string 0) bytes))
+                (progn
+                  (when (member extension '("gif" "webp" "bmp" "tif" "tiff" "avif" "heic"))
                     (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
-                  (list :type :text :text
-                        (concat "\nAttached file contents:\n"
-                                (decode-coding-string bytes 'utf-8) "\n")))))))
+                  (let* ((path (ende-artifact--local-path path))
+                         (signature (ende-artifact--file-signature path))
+                         (bytes (ende-artifact--read-bytes path)))
+                    (when (or (image-type-from-data bytes) (string-match-p (string 0) bytes))
+                      (error "Unsupported file attachment format; use PNG, JPEG, SVG or text: %s" target))
+                    (unless (equal signature (ende-artifact--file-signature path))
+                      (error "Attachment changed while being read: %s" target))
+                    (list :type :text :text
+                          (concat "\nAttached file contents:\n"
+                                  (decode-coding-string bytes 'utf-8) "\n"))))))))
     (ende-artifact--parts text references)))
 
 (defun ende-artifact-prepare-text (text storage org-file &optional artifacts)

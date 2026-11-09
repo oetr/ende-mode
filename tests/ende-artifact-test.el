@@ -139,6 +139,26 @@
                      (funcall encode (list (list :role "assistant"
                                                  :content (ende-artifact-content text)))))))))
 
+(ert-deftest ende-artifact-preflight-and-captured-content ()
+  (ende-artifact-test-with-files
+    (let ((path (expand-file-name "input.svg" directory)))
+      (with-temp-file path (insert ende-artifact-test-svg))
+      (cl-letf (((symbol-function 'ende-artifact--read-bytes)
+                 (lambda (_) (ert-fail "Ineligible input was read"))))
+        (should-error (ende-artifact--image-entry path "image/png"))
+        (let ((ende-artifact--svg-byte-limit 1))
+          (should-error (ende-artifact--image-entry path)))
+        (with-temp-file (expand-file-name "input.gif" directory) (insert "GIF89a"))
+        (should-error (ende-artifact-content "[[file:input.gif]]" #'ende-artifact--local-path))
+        (should-error (ende-artifact--image-entry (expand-file-name "input.gif" directory))))
+      (let ((read-bytes (symbol-function 'ende-artifact--read-bytes)))
+        (cl-letf (((symbol-function 'ende-artifact--read-bytes)
+                   (lambda (file)
+                     (prog1 (funcall read-bytes file)
+                       (with-temp-file file (insert "replacement"))))))
+          (should-error (ende-artifact--image-entry path))))
+      (should-not (gethash path ende-artifact--cache)))))
+
 (ert-deftest ende-artifact-worker-requests-preserve-wire-content ()
   :tags '(integration)
   (ende-artifact-test-with-files
