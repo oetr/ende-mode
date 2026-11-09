@@ -532,6 +532,114 @@ Use COMMAND for the process, or a silent sleep process by default."
                 (ende-stream-result stream "output_tokens" nil "test")
                 :speed))))))
 
+(ert-deftest ende-test/stream-bursts-yield-in-order-and-cancel-concurrently ()
+  (let* ((count 600)
+         (streams (make-vector 3 nil))
+         (counts (make-vector 3 0))
+         (done-events (make-vector 3 0))
+         (failures (make-vector 3 nil))
+         (body (make-temp-file "ende-test-burst-"))
+         (files (list body))
+         heartbeat interleaved cancelled-count stale)
+    (unwind-protect
+        (progn
+          (with-temp-file body
+            (insert ":" (make-string (* 1024 1024) ?x) "\r\n\r\n")
+            (dotimes (n count)
+              (insert (format "data: {\"n\":%d,\n" n)
+                      "data: \"text\":\""
+                      (if (= n 0) (make-string 100000 ?x) "é世界")
+                      "\"}\r\n\r\n"))
+            (insert "data: [DONE]"))
+          (dotimes (id 3)
+            (let* ((id id)
+                   (lifecycle (ende-transport-session-create
+                               (list :on-error
+                                     (lambda (error) (aset failures id error))) nil))
+                   (stream (ende-stream-create lifecycle (ende-protocol-make-sse)))
+                   (headers (make-temp-file "ende-test-burst-headers-"))
+                   (fail (lambda (error) (ende-stream-settle stream 'failure error)))
+                   (events
+                    (lambda (events)
+                      (dolist (event events)
+                        (if (eq (plist-get event :type) :done)
+                            (cl-incf (aref done-events id))
+                          (should (= (ende-protocol-json-get
+                                      "n" (plist-get event :value))
+                                     (aref counts id)))
+                          (cl-incf (aref counts id))))))
+                   (parse-error (lambda (error _over-limit)
+                                  (funcall fail error))))
+              (aset streams id stream)
+              (push headers files)
+              (with-temp-file headers
+                (insert "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"))
+              (ende-transport-session-set-resources
+               lifecycle
+               (list
+                :headers-file headers
+                :process
+                (make-process
+                 :name "ende-test-burst" :command (list "cat" body)
+                 :connection-type 'pipe :coding 'utf-8-unix :noquery t
+                 :filter
+                 (lambda (_process chunk)
+                   (let ((before (aref counts id)))
+                     (ende-stream-filter stream (substring chunk 0 1) events fail parse-error)
+                     (ende-stream-filter stream (substring chunk 1) events fail parse-error)
+                     (should (= before (aref counts id)))))
+                 :sentinel
+                 (lambda (process event)
+                   (ende-stream-sentinel
+                    stream process event
+                    (lambda (&rest _) (funcall fail 'process-error))
+                    (lambda (headers)
+                      (should (equal headers '(200 . "text/event-stream")))
+                      (should (= (aref counts id) count))
+                      (funcall events (ende-protocol-sse-finish
+                                       (ende-stream-session-parser stream)))
+                      (ende-stream-settle stream 'success nil))
+                    (lambda (error) (funcall fail error)))))))))
+          (setq heartbeat
+                (run-at-time
+                 0 0.001
+                 (lambda ()
+                   (when (and (< 0 (aref counts 0) count)
+                              (< 0 (aref counts 1) count))
+                     (setq interleaved t))
+                   (when (and (> (aref counts 2) 0) (not cancelled-count))
+                     (let* ((stream (aref streams 2))
+                            (timer (ende-stream-session-drain-timer stream)))
+                       (should (timerp timer))
+                       (setq stale (cons (timer--function timer) (timer--args timer))
+                             cancelled-count (aref counts 2))
+                       (ende-stream-settle
+                        stream 'failure (ende-error-create :kind 'cancelled)))))))
+          (ende-test--wait-for
+           (lambda () (cl-every #'ende-stream-terminal-p (append streams nil)))
+           :description "concurrent burst drainage")
+          (should interleaved)
+          (should (equal (append counts nil) (list count count cancelled-count)))
+          (should (< 0 cancelled-count count))
+          (should (equal (append done-events nil) '(1 1 0)))
+          (should-not (aref failures 0))
+          (should-not (aref failures 1))
+          (should (eq (ende-error-kind (aref failures 2)) 'cancelled))
+          (apply (car stale) (cdr stale))
+          (should (= (aref counts 2) cancelled-count))
+          (dotimes (id 3)
+            (let ((stream (aref streams id)))
+              (should-not (ende-stream-session-input-head stream))
+              (should-not (ende-stream-session-input-tail stream))
+              (should-not (ende-stream-session-drain-timer stream))
+              (should-not (ende-stream-session-pending-terminal stream)))))
+      (when heartbeat (cancel-timer heartbeat))
+      (dotimes (id 3)
+        (when-let* ((stream (aref streams id)))
+          (ende-stream-settle stream 'failure (ende-error-create :kind 'cancelled))))
+      (dolist (file files)
+        (when (file-exists-p file) (delete-file file))))))
+
 (ert-deftest ende-test/active-callback-failure-cleans-up-once ()
   (ende-test--reset)
   (dolist (transport '(chat codex))

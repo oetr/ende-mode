@@ -78,7 +78,9 @@
   "Protocol-independent state for one SSE response stream."
   lifecycle parser received-bytes preview-parts preview-bytes
   content-parts output-parts thinking-parts usage actual-model actual-provider
-  estimated-chars (output-offset 0) generation-start finish-reason reasoning-summaries)
+  estimated-chars (output-offset 0) generation-start finish-reason reasoning-summaries
+  input-head input-tail (input-offset 0) input-closed drain-timer draining
+  event-callback error-callback filter-error-callback pending-terminal)
 
 (defun ende-stream-create (lifecycle parser)
   "Create a stream driver composed with LIFECYCLE and using PARSER."
@@ -284,13 +286,109 @@ TOKEN-KEY is the provider-specific output-token field."
    (ende-transport-session-headers-file
     (ende-stream-session-lifecycle stream))))
 
+(defconst ende-stream--drain-chars 32768
+  "Maximum new input characters parsed per stream continuation.")
+
+(defconst ende-stream--drain-events 32
+  "Maximum SSE events dispatched per stream continuation.")
+
+(defun ende-stream--release-input (stream)
+  "Release STREAM's queued input and invalidate its owned continuation."
+  (when-let* ((timer (ende-stream-session-drain-timer stream)))
+    (cancel-timer timer))
+  (setf (ende-stream-session-drain-timer stream) nil
+        (ende-stream-session-input-head stream) nil
+        (ende-stream-session-input-tail stream) nil
+        (ende-stream-session-input-offset stream) 0
+        (ende-stream-session-input-closed stream) t
+        (ende-stream-session-event-callback stream) nil
+        (ende-stream-session-error-callback stream) nil
+        (ende-stream-session-filter-error-callback stream) nil
+        (ende-stream-session-pending-terminal stream) nil)
+  (when-let* ((parser (ende-stream-session-parser stream)))
+    (setf (ende-protocol--sse-buffer-parts parser) nil
+          (ende-protocol--sse-buffer-bytes parser) 0
+          (ende-protocol--sse-data-lines parser) nil
+          (ende-protocol--sse-data-bytes parser) 0)))
+
+(defun ende-stream--schedule-drain (stream)
+  "Arrange one yielding continuation for STREAM's pending input."
+  (when (and (not (ende-stream-terminal-p stream))
+             (not (ende-stream-session-draining stream))
+             (not (ende-stream-session-drain-timer stream))
+             (or (ende-stream-session-input-head stream)
+                 (ende-stream-session-pending-terminal stream)))
+    (let (timer)
+      (setq timer
+            (run-at-time
+             0.001 nil
+             (lambda ()
+               (when (eq timer (ende-stream-session-drain-timer stream))
+                 (setf (ende-stream-session-drain-timer stream) nil)
+                 (ende-stream--drain stream)))))
+      (setf (ende-stream-session-drain-timer stream) timer))))
+
+(defun ende-stream--drain (stream)
+  "Parse and dispatch a bounded turn of STREAM's queued input."
+  (unless (ende-stream-terminal-p stream)
+    (setf (ende-stream-session-draining stream) t)
+    (unwind-protect
+        (let ((chars ende-stream--drain-chars)
+              (events ende-stream--drain-events))
+          (while (and (> chars 0) (> events 0)
+                      (ende-stream-session-input-head stream)
+                      (not (ende-stream-terminal-p stream)))
+            (let* ((entry (car (ende-stream-session-input-head stream)))
+                   (chunk (car entry))
+                   (offset (ende-stream-session-input-offset stream))
+                   (end (min (length chunk) (+ offset chars))))
+              (condition-case filter-error
+                  (let* ((read (ende-protocol-sse-read
+                                (ende-stream-session-parser stream)
+                                chunk offset end))
+                         (next (car read)))
+                    (cl-decf chars (- next offset))
+                    (setf (ende-stream-session-input-offset stream) next)
+                    (when (cdr read)
+                      (cl-decf events)
+                      (ende-stream-dispatch-events
+                       stream (list (cdr read))
+                       (ende-stream-session-event-callback stream))))
+                ((error quit)
+                 (funcall (ende-stream-session-filter-error-callback stream)
+                          filter-error (cdr entry))))
+              (when (and (not (ende-stream-terminal-p stream))
+                         (= (ende-stream-session-input-offset stream)
+                            (length chunk)))
+                (setf (ende-stream-session-input-head stream)
+                      (cdr (ende-stream-session-input-head stream))
+                      (ende-stream-session-input-offset stream) 0)
+                (unless (ende-stream-session-input-head stream)
+                  (setf (ende-stream-session-input-tail stream) nil))
+                (when (cdr entry)
+                  (funcall
+                   (ende-stream-session-error-callback stream)
+                   (ende-error-create
+                    :kind 'resource
+                    :message "response exceeds ende-max-response-bytes"))))))
+          (when (and (not (ende-stream-terminal-p stream))
+                     (not (ende-stream-session-input-head stream))
+                     (ende-stream-session-pending-terminal stream))
+            (let ((terminal (ende-stream-session-pending-terminal stream)))
+              (setf (ende-stream-session-pending-terminal stream) nil)
+              (funcall terminal))))
+      (setf (ende-stream-session-draining stream) nil)
+      (ende-stream--schedule-drain stream))))
+
 (defun ende-stream-filter
     (stream chunk event-callback error-callback filter-error-callback)
-  "Consume SSE CHUNK for STREAM.
+  "Queue accepted SSE CHUNK for STREAM without parsing in the process filter.
 EVENT-CALLBACK receives parsed events.  ERROR-CALLBACK receives a structured
 resource error; FILTER-ERROR-CALLBACK receives a parser error and whether the
-same chunk exceeded the total response limit."
-  (unless (ende-stream-terminal-p stream)
+same chunk exceeded the total response limit.  `ende-max-response-bytes' bounds
+receipt, including queued input; nil deliberately disables that bound."
+  (unless (or (ende-stream-terminal-p stream)
+              (ende-stream-session-input-closed stream))
     (let* ((received (ende-stream-session-received-bytes stream))
            (chunk-bytes (string-bytes chunk))
            (total (+ received chunk-bytes))
@@ -303,22 +401,25 @@ same chunk exceeded the total response limit."
                                                         (max 0 remaining))
                           chunk)))
       (setf (ende-stream-session-received-bytes stream) total)
-      (ende-stream-append-preview stream chunk)
-      (condition-case filter-error
-          (when (> (length processable) 0)
-            (ende-stream-dispatch-events
-             stream
-             (ende-protocol-sse-feed
-              (ende-stream-session-parser stream) processable)
-             event-callback))
-        ((error quit)
-         (funcall filter-error-callback filter-error over-limit)))
-      (when (and over-limit (not (ende-stream-terminal-p stream)))
-        (funcall
-         error-callback
-         (ende-error-create
-          :kind 'resource
-          :message "response exceeds ende-max-response-bytes"))))))
+      (when (or over-limit (> (length processable) 0))
+        (unless (ende-stream-session-event-callback stream)
+          (setf (ende-stream-session-event-callback stream) event-callback
+                (ende-stream-session-error-callback stream) error-callback
+                (ende-stream-session-filter-error-callback stream)
+                filter-error-callback)
+          (ende-transport-session-add-canceller
+           (ende-stream-lifecycle stream)
+           (apply-partially #'ende-stream--release-input stream)))
+        (ende-stream-append-preview stream processable)
+        ;; Queue raw chunk references; only the head uses `input-offset'.
+        (let ((cell (list (cons processable over-limit))))
+          (if (ende-stream-session-input-tail stream)
+              (setcdr (ende-stream-session-input-tail stream) cell)
+            (setf (ende-stream-session-input-head stream) cell))
+          (setf (ende-stream-session-input-tail stream) cell))
+        (when over-limit
+          (setf (ende-stream-session-input-closed stream) t))
+        (ende-stream--schedule-drain stream)))))
 
 (defun ende-stream-sentinel
     (stream process event process-error-callback response-callback
@@ -329,7 +430,26 @@ successful exit RESPONSE-CALLBACK receives parsed response headers.  Header
 parsing failures are sent to HEADER-ERROR-CALLBACK.  When IDLE-ERROR-FIRST is
 non-nil, a recorded idle error takes precedence over the exit status."
   (when (and (not (ende-stream-terminal-p stream))
+             (not (ende-stream-session-pending-terminal stream))
              (memq (process-status process) '(exit signal closed)))
+    (setf (ende-stream-session-input-closed stream) t)
+    (let ((terminal
+           (apply-partially #'ende-stream--finish-process
+                            stream process event process-error-callback
+                            response-callback header-error-callback
+                            idle-error-first)))
+      (if (or (ende-stream-session-input-head stream)
+              (ende-stream-session-draining stream))
+          (progn
+            (setf (ende-stream-session-pending-terminal stream) terminal)
+            (ende-stream--schedule-drain stream))
+        (funcall terminal)))))
+
+(defun ende-stream--finish-process
+    (stream process event process-error-callback response-callback
+            header-error-callback idle-error-first)
+  "Handle PROCESS EVENT after STREAM's preceding input has drained."
+  (unless (ende-stream-terminal-p stream)
     (let ((idle-error (process-get process :ende-idle-error)))
       (cond
        ((and idle-error idle-error-first)

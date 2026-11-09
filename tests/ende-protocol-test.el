@@ -176,7 +176,22 @@
                              0)))
                      "hi there"))
     (should (eq (plist-get (nth 1 events) :type) :done))
-    (should-not (ende-protocol-sse-finish parser))))
+    (should-not (ende-protocol-sse-finish parser)))
+  (dolist (size '(1 7 32768))
+    (let ((parser (ende-protocol-make-sse))
+          (chunk "data: {\"text\":\r\ndata: \"é世界\"}\r\n\r\ndata: [DONE]\r\n\r\n")
+          (position 0) events)
+      (while (< position (length chunk))
+        (let* ((end (min (length chunk) (+ position size)))
+               (read (ende-protocol-sse-read parser chunk position end)))
+          (should (< position (car read) (1+ end)))
+          (setq position (car read))
+          (when (cdr read) (push (cdr read) events))))
+      (should (equal (mapcar (lambda (event) (plist-get event :type))
+                            (reverse events)) '(:json :done)))
+      (should (equal (ende-protocol-json-get "text" (plist-get (cadr events) :value))
+                     "é世界"))
+      (should-not (ende-protocol-sse-finish parser)))))
 
 
 
@@ -227,6 +242,12 @@
 
 
 (ert-deftest ende-test/sse-parser-enforces-line-and-event-limits ()
+  (let ((ende-max-sse-event-bytes 7)
+        (parser (ende-protocol-make-sse))
+        (chunk "data: 1\r\n\r\n"))
+    (should (equal (ende-protocol-sse-read parser chunk 0 8) '(8)))
+    (should (= (plist-get (cdr (ende-protocol-sse-read parser chunk 8 (length chunk)))
+                         :value) 1)))
   (let ((ende-max-sse-event-bytes 8)
         (parser (ende-protocol-make-sse)))
     (should-error (ende-protocol-sse-feed parser "123456789")))

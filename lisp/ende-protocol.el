@@ -147,7 +147,9 @@ Thinking and content deltas are emitted through CALLBACKS."
 (defun ende-protocol--sse-pending-buffer (parser)
   "Return the unparsed SSE text accumulated in PARSER."
   (let ((parts (ende-protocol--sse-buffer-parts parser)))
-    (if parts (apply #'concat (nreverse parts)) "")))
+    (if (cdr parts)
+        (mapconcat #'identity (reverse parts) "")
+      (or (car parts) ""))))
 
 (defun ende-protocol--sse-event (parser)
   "Turn the accumulated SSE data lines in PARSER into one event."
@@ -205,42 +207,40 @@ Thinking and content deltas are emitted through CALLBACKS."
     (setq line (substring line 0 -1)))
   (ende-protocol--sse-handle-line parser line))
 
+(defun ende-protocol-sse-read (parser chunk start end)
+  "Read CHUNK from START up to END or the next event into PARSER.
+Return (OFFSET . EVENT), where OFFSET is the next unread character and EVENT
+is nil if incomplete.  Errors are signaled to the transport."
+  (let ((position start) event)
+    (while (and (< position end) (not event))
+      (let* ((newline (cl-position ?\n chunk :start position :end end))
+             (part (substring chunk position (or newline end))))
+        (unless (string-empty-p part)
+          (push part (ende-protocol--sse-buffer-parts parser))
+          (cl-incf (ende-protocol--sse-buffer-bytes parser)
+                   (string-bytes part)))
+        (setq position (if newline (1+ newline) end))
+        (if newline
+            (let ((line (ende-protocol--sse-pending-buffer parser)))
+              (setf (ende-protocol--sse-buffer-parts parser) nil
+                    (ende-protocol--sse-buffer-bytes parser) 0)
+              (setq event (ende-protocol--sse-handle-raw-line parser line)))
+          (when (and ende-max-sse-event-bytes
+                     (> (- (ende-protocol--sse-buffer-bytes parser)
+                           (if (string-suffix-p "\r" part) 1 0))
+                        ende-max-sse-event-bytes))
+            (error "SSE line exceeds ende-max-sse-event-bytes")))))
+    (cons position event)))
+
 (defun ende-protocol-sse-feed (parser chunk)
   "Feed raw SSE CHUNK into PARSER and return complete events.
 Errors are signaled so the transport can turn them into protocol failures."
-  (let ((parts (ende-protocol--sse-buffer-parts parser))
-        (events nil))
-    (when (and (stringp chunk) (> (length chunk) 0))
-      (push chunk parts))
-    (setf (ende-protocol--sse-buffer-parts parser) parts
-          (ende-protocol--sse-buffer-bytes parser)
-          (+ (or (ende-protocol--sse-buffer-bytes parser) 0)
-             (string-bytes (or chunk ""))))
-    (if (not (string-match-p "\n" (or chunk "")))
-        (when (and ende-max-sse-event-bytes
-                   (> (ende-protocol--sse-buffer-bytes parser)
-                      ende-max-sse-event-bytes))
-          (error "SSE line exceeds ende-max-sse-event-bytes"))
-      (let* ((input (apply #'concat (nreverse parts)))
-             (start 0)
-             position line)
-        (while (string-match "\n" input start)
-          (setq position (match-beginning 0))
-          (setq line (substring input start position))
-          (setq start (1+ position))
-          (let ((event (ende-protocol--sse-handle-raw-line parser line)))
-            (when event
-              (push event events))))
-        (let ((remainder (substring input start)))
-          (setf (ende-protocol--sse-buffer-parts parser)
-                (and (> (length remainder) 0) (list remainder))
-                (ende-protocol--sse-buffer-bytes parser)
-                (string-bytes remainder))
-          (when (and ende-max-sse-event-bytes
-                     (> (ende-protocol--sse-buffer-bytes parser)
-                        ende-max-sse-event-bytes))
-            (error "SSE line exceeds ende-max-sse-event-bytes"))))
-      (nreverse events))))
+  (let ((position 0) events)
+    (while (< position (length chunk))
+      (let ((read (ende-protocol-sse-read parser chunk position (length chunk))))
+        (setq position (car read))
+        (when (cdr read) (push (cdr read) events))))
+    (nreverse events)))
 
 (defun ende-protocol-sse-flush (parser)
   "Flush and return any final complete event buffered by PARSER."
