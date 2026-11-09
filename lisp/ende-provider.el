@@ -790,9 +790,9 @@ An unset buffer follows the current configured provider defaults."
                        (car ende-providers)))
          (api (plist-get selection :api))
          (connection (ende-model-selection-connection selection))
-         (configured-profile (ende-provider--compose-profile provider nil api connection))
-         (model (or (plist-get selection :model)
-                    (plist-get configured-profile :model)))
+         (base-profile (ende-provider-profile-for-model
+                        provider (plist-get selection :model) api connection))
+         (model (plist-get base-profile :model))
          (matching-selection-p
           (and (eq provider (plist-get selection :provider))
                (equal model (plist-get selection :model))))
@@ -800,9 +800,9 @@ An unset buffer follows the current configured provider defaults."
           (and matching-selection-p
                (plist-member selection :control-preferences)))
          (preferences
-          (ende-model-selection-control-preferences provider model api buffer connection))
-         (profile (ende-provider-profile-for-selection
-                   provider model preferences api connection)))
+          (ende-model-selection-control-preferences
+           provider model api buffer connection base-profile))
+         (profile (ende-provider-profile-with-control-preferences base-profile preferences)))
     (when (and matching-selection-p (plist-member selection :parallel))
       (setq profile (plist-put profile :parallel (plist-get selection :parallel))))
     (let ((provenance (gethash (ende-model-selection--provenance-key selection)
@@ -810,19 +810,19 @@ An unset buffer follows the current configured provider defaults."
       (when (and provenance (not (equal provenance (ende-provider-selection-provenance profile))))
         (user-error "Provider binding or catalog changed; select the provider and model again")))
     (when (and matching-selection-p
-               (not (ende-provider-configured-models-explicit-p
-                     configured-profile)))
-      (when-let* ((catalog (ende-provider-cached-models configured-profile))
+               (not (ende-provider-configured-models-explicit-p base-profile)))
+      (when-let* ((catalog (ende-provider-cached-models base-profile))
                   (models (plist-get catalog :models)))
         (unless (member model models)
           (user-error "Model %s is no longer available; select a model again"
                       model))))
     (unless model
-      (let* ((catalog (ende-provider-cached-models configured-profile))
+      (let* ((catalog (ende-provider-cached-models base-profile))
              (models (plist-get catalog :models)))
         (if models
             (setq model (car models)
-                  profile (ende-provider-profile-for-selection provider model preferences api connection))
+                  base-profile (ende-provider-profile-for-model provider model api connection)
+                  profile (ende-provider-profile-with-control-preferences base-profile preferences))
           (user-error "Model selection required for %s; open ende-selector-open" provider))))
     (when (and remember (stringp model))
       (ende-model-selection-save
@@ -831,7 +831,7 @@ An unset buffer follows the current configured provider defaults."
                (when selection-preferences-p
                  (list :control-preferences
                        (copy-tree preferences))))
-       buffer))
+       buffer nil base-profile))
     profile))
 
 (defun ende-provider-source-name-disclosure-p (profile)

@@ -475,7 +475,8 @@
                    '((:id "vendor/priced" :name "Friendly name"
                       :pricing (:prompt "0.000002" :completion "0.00001"
                                 :input-cache-read "0.0000002"))
-                     (:id "vendor/plain"))))
+                     (:id "vendor/plain")
+                     (:id "vendor/priced" :pricing (:prompt "0.000099")))))
                 ((symbol-function 'ende-provider-probe-models)
                  (lambda (&rest _) (ert-fail "Completion must not discover models")))
                 ((symbol-function 'completing-read)
@@ -651,7 +652,7 @@
           (ende-selector--set-control-preference :temperature 0.3)
           (ende-selector--set-draft-runtime :parallel t)
           (cl-letf (((symbol-function 'ende-model-selection-save)
-                     (lambda (selection &optional _buffer _skip)
+                     (lambda (selection &optional _buffer _skip _profile)
                        (cl-incf saves)
                        (setq saved-selection selection)
                        selection))
@@ -662,7 +663,7 @@
                     ((symbol-function 'ende-enqueue-operation)
                      (lambda (&rest _) (cl-incf dispatches)))
                     ((symbol-function 'ende-selector--dispatch)
-                     (lambda (type instruction)
+                     (lambda (type instruction &optional _profile)
                        (with-current-buffer source
                          (ende-enqueue-operation type instruction)))))
             (ende-selector-insert))
@@ -1179,6 +1180,45 @@
       (dolist (buffer (list source selector))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
+
+(ert-deftest ende-test/selector-reuses-profiles-only-within-an-event ()
+  (ende-test--with-selector-tables
+      ((ende-providers '(remote))
+       (ende-custom-providers
+        (ende-test--custom-profile
+         'remote :models '("first" "second") :thinking 'on :reasoning-effort "low"
+         :controls '((:thinking :path ("thinking") :choices (on off))
+                     (:reasoning-effort :path ("reasoning_effort") :choices ("low" "high")))))
+       (ende-model-selection-scope 'buffer)
+       (ende-model-selection--last-used nil)
+       (ende-model-selection--provider-selections (make-hash-table :test #'eq))
+       (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal))
+       (ende-model-selection--provenance (make-hash-table :test #'equal))
+       (ende-provider--runtime-settings (make-hash-table :test #'eq))
+       (resolve (symbol-function 'ende-provider-config-resolve))
+       (calls 0))
+    (with-temp-buffer
+      (let ((source (current-buffer)))
+        (with-temp-buffer
+          (ende-selector-mode)
+          (ende-test--selector-ready-state source 'remote '("first" "second"))
+          (cl-letf (((symbol-function 'ende-provider-config-resolve)
+                     (lambda (&rest args) (cl-incf calls) (apply resolve args)))
+                    ((symbol-function 'ende-selector-close) #'ignore)
+                    ((symbol-function 'ende-enqueue-operation) #'ignore))
+            (dolist (event (list #'ende-selector--set-control-context
+                                #'ende-selector--render #'ende-selector-next-model
+                                (lambda () (ende-selector--set-control-preference :temperature 0.4))
+                                #'ende-selector-reset-controls #'ende-selector--commit
+                                #'ende-selector-insert
+                                (lambda () (ende-provider-profile-for-buffer source t))))
+              (setq calls 0)
+              (funcall event)
+              (should (= calls 1)))
+            (setf (plist-get (cdar ende-custom-providers) :temperature) 0.3)
+            (ende-selector--render)
+            (should (= calls 2))
+            (should (string-match-p "Temperature:.*0.3 (profile)" (buffer-string)))))))))
 
 (ert-deftest ende-test/selector-rollback-preserves-unwritten-history ()
   (dolist (existing '(nil t))

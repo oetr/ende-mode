@@ -757,7 +757,9 @@ ignored.  Return a cancellation function."
       (let ((stale (ende-provider-stale-models profile)))
         (prog1 (if stale
                    (ende-selector--set-models (plist-get stale :models) preferred profile)
-                 profile)
+                 (if (equal (ende-selector--model-name) (plist-get profile :model))
+                     profile
+                   (ende-selector--provider-profile)))
           (setq ende-selector--model-state :error))))))
 
 (defun ende-selector--apply-model-catalog
@@ -831,7 +833,7 @@ PREFERRED is selected only when it is present in MODELS."
         (setq ende-selector--probe-cancel cancel)))
     profile))
 
-(defun ende-selector--set-provider (index &optional preferred-model)
+(defun ende-selector--set-provider (index &optional preferred-model profile)
   "Select provider at INDEX and start dynamic model discovery if needed."
   (ende-selector--cancel-usage)
   (ende-selector--cancel-probe)
@@ -854,7 +856,7 @@ PREFERRED is selected only when it is present in MODELS."
         ende-selector--model-error nil
         ende-selector--model-index 0)
   (let* ((provider (ende-selector--provider-name))
-         (profile (ende-selector--provider-profile))
+         (profile (ende-selector--provider-profile profile))
          (preferred (or preferred-model
                         (and (hash-table-p ende-selector--draft-models)
                              (gethash (ende-selector--model-key)
@@ -901,13 +903,13 @@ PREFERRED is selected only when it is present in MODELS."
   "Resolve the complete draft without authenticating."
   (unless (buffer-live-p ende-selector-connection--parent)
     (user-error "Selector is closed"))
-  (ende-provider--compose-profile
+  (ende-provider-profile-for-model
    (with-current-buffer ende-selector-connection--parent (ende-selector--provider-name))
    nil nil ende-selector-connection--draft))
 
-(defun ende-selector-connection--render ()
+(defun ende-selector-connection--render (&optional profile)
   "Render the connection draft."
-  (let* ((profile (ende-selector-connection--profile))
+  (let* ((profile (or profile (ende-selector-connection--profile)))
          (method (plist-get profile :auth-method))
          (auth (and (eq (plist-get profile :service) 'openai-codex)
                     (memq method '(chatgpt-plan-oauth codex-oauth))
@@ -935,11 +937,11 @@ PREFERRED is selected only when it is present in MODELS."
 
 (defun ende-selector-connection--set (key value)
   "Validate KEY VALUE before updating the draft."
-  (let ((draft (plist-put (copy-sequence ende-selector-connection--draft) key value)))
-    (let ((ende-selector-connection--draft draft))
-      (ende-selector-connection--profile))
+  (let* ((draft (plist-put (copy-sequence ende-selector-connection--draft) key value))
+         (profile (let ((ende-selector-connection--draft draft))
+                    (ende-selector-connection--profile))))
     (setq ende-selector-connection--draft draft)
-    (ende-selector-connection--render)))
+    (ende-selector-connection--render profile)))
 
 (defun ende-selector-connection-account ()
   "Read an account alias without acquiring credentials."
@@ -951,14 +953,15 @@ PREFERRED is selected only when it is present in MODELS."
       (ende-selector-connection--set :account
                                     (if (memq auth '(chatgpt-plan-oauth codex-oauth)) (intern alias) alias)))))
 
-(defun ende-selector-connection--choose (key prompt choices)
+(defun ende-selector-connection--choose (key prompt choices &optional profile)
   "Read a supported value for KEY using PROMPT and CHOICES.
 CHOICES contains symbols or (LABEL . VALUE) pairs."
-  (let* ((choices (mapcar (lambda (choice)
+  (let* ((profile (or profile (ende-selector-connection--profile)))
+         (choices (mapcar (lambda (choice)
                             (if (consp choice) choice (cons (symbol-name choice) choice))) choices))
          (names (mapcar #'car choices))
          (choice (completing-read prompt names nil t nil nil
-                                  (car (rassq (plist-get (ende-selector-connection--profile) key) choices))))
+                                  (car (rassq (plist-get profile key) choices))))
          (entry (assoc choice choices)))
     (unless entry (user-error "Unsupported connection choice"))
     (ende-selector-connection--set key (cdr entry))))
@@ -966,24 +969,25 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
 (defun ende-selector-connection-auth ()
   "Choose an implemented authentication method."
   (interactive)
-  (ende-selector-connection--choose
-   :auth-method "Auth: "
-   (ende-provider-config-supported-auth (ende-selector-connection--profile))))
+  (let ((profile (ende-selector-connection--profile)))
+    (ende-selector-connection--choose
+     :auth-method "Auth: " (ende-provider-config-supported-auth profile) profile)))
 
 (defun ende-selector-connection-api ()
   "Choose a configured generation API."
   (interactive)
-  (ende-selector-connection--choose
-   :api "API: "
-   (ende-provider-config-supported-apis (ende-selector-connection--profile))))
+  (let ((profile (ende-selector-connection--profile)))
+    (ende-selector-connection--choose
+     :api "API: " (ende-provider-config-supported-apis profile) profile)))
 
 (defun ende-selector-connection-transport ()
   "Choose websocket or HTTP/SSE for a supported Responses connection."
   (interactive)
-  (let ((choices (ende-selector--transport-choices (ende-selector-connection--profile))))
+  (let* ((profile (ende-selector-connection--profile))
+         (choices (ende-selector--transport-choices profile)))
     (unless (> (length choices) 1)
       (user-error "This connection has no alternate Responses transport"))
-    (ende-selector-connection--choose :transport "Transport: " choices)))
+    (ende-selector-connection--choose :transport "Transport: " choices profile)))
 
 (defun ende-selector-connection-cancel ()
   "Discard the draft and return to the selector."
@@ -1011,7 +1015,7 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
                 (when (and (eq (plist-get profile :name) (plist-get current :name))
                            (eq (plist-get profile :auth-method) (plist-get current :auth-method))
                            (equal (plist-get profile :account) (plist-get current :account)))
-                  (ende-selector-connection--render))))))
+                  (ende-selector-connection--render current))))))
         (when (and record
                    (eq (plist-get profile :name) (ende-selector--provider-name))
                    (ende-selector--binding-current-p profile))
@@ -1040,7 +1044,8 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
   (interactive)
   (let* ((profile (ende-selector-connection--profile))
          (connection (ende-model-selection-connection profile))
-         (parent ende-selector-connection--parent))
+         (parent ende-selector-connection--parent)
+         prepared-profile)
     (with-current-buffer parent
       (let* ((model (ende-selector--model-name))
              (prepared
@@ -1062,7 +1067,8 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
                     (ende-selector--usage-suspended t))
                 (condition-case err
                     (atomic-change-group
-                      (ende-selector--set-provider ende-selector--provider-index model)
+                      (setq prepared-profile
+                            (ende-selector--set-provider ende-selector--provider-index model profile))
                       (list ende-selector--models ende-selector--model-index
                             ende-selector--model-state ende-selector--model-error
                             ende-selector--model-selection-generation
@@ -1080,7 +1086,7 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
         (setq ende-selector--connection connection
               ende-selector--api (plist-get connection :api))
         (ende-selector--remember-connection-state)
-        (ende-selector--start-usage-refresh)
+        (ende-selector--start-usage-refresh prepared-profile)
         (cl-multiple-value-setq
             (ende-selector--models ende-selector--model-index
              ende-selector--model-state ende-selector--model-error
@@ -1091,7 +1097,7 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
              ende-selector--effort-cancel ende-selector--effort-probe-generation)
           prepared)))
     (with-current-buffer parent
-      (ende-selector--set-draft-controls ende-selector--control-preferences))
+      (ende-selector--set-draft-controls ende-selector--control-preferences prepared-profile))
     (ende-selector-connection-cancel)))
 
 (defvar ende-selector-connection-mode-map (make-sparse-keymap)
@@ -1401,13 +1407,14 @@ performed locally so typing a search term never starts another network request."
   (interactive)
   (ende-selector--review-source #'ende-reject-all-output))
 
-(defun ende-selector--save-selection ()
+(defun ende-selector--save-selection (&optional profile)
   "Save the current provider/model and explicit controls."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name))
         (source (or ende-selector--source-buffer (current-buffer))))
     (when (and provider (stringp model) (eq ende-selector--model-state :ready))
-      (let* ((state (ende-selector--draft-control-state))
+      (let* ((profile (or profile (ende-selector--provider-profile)))
+             (state (ende-selector--draft-control-state profile))
              (preferences (and state (plist-get state :preferences)))
              (include-preferences (and state (or preferences (plist-get state :dirty))))
              (runtime (ende-selector--draft-runtime-state))
@@ -1415,45 +1422,49 @@ performed locally so typing a search term never starts another network request."
               (ende-model-selection-save
                (append (list :provider provider :model model
                              :parallel (plist-get runtime :parallel))
-                       (ende-model-selection-connection (ende-selector--provider-profile))
+                       (ende-model-selection-connection profile)
                        (when include-preferences
                          (list :control-preferences (copy-tree preferences))))
-               source)))
+               source nil profile)))
         saved))))
 
-(defun ende-selector--validate-draft ()
-  "Validate the current provisional selection and its dirty control entries."
+(defun ende-selector--validate-draft (&optional profile)
+  "Return (PROFILE . OTHER-CONTROLS) after validating the drafts.
+OTHER-CONTROLS contains (STATE . PROFILE) pairs for dirty, noncurrent controls."
   (unless (eq ende-selector--model-state :ready)
     (user-error "No ready model available"))
   (when (eq ende-selector--effort-state :invalid)
     (user-error "Choose a supported reasoning effort or Provider default"))
-  (ende-provider-validate-controls (ende-selector--resolved-profile))
-  (when (hash-table-p ende-selector--draft-controls)
-    (maphash
-     (lambda (key state)
-       (when (and (plist-get state :dirty)
-                  (not (equal key (ende-selector--control-key))))
-         (ende-provider-validate-controls
-          (ende-provider-profile-for-selection
-           (plist-get state :provider) (plist-get state :model)
-           (plist-get state :preferences) (plist-get state :api)
-           (plist-get state :connection)))))
-     ende-selector--draft-controls))
-  (when (hash-table-p ende-selector--draft-runtime)
-    (maphash
-     (lambda (_provider state)
-       (dolist (key (plist-get state :changed))
-         (pcase key
-           (:max-concurrency
-            (unless (and (integerp (plist-get state key))
-                         (> (plist-get state key) 0))
-              (user-error "Provider concurrency must be a positive integer")))
-           (:parallel
-            (unless (memq (plist-get state key) '(nil t))
-              (user-error "Provider parallel setting must be boolean")))
-           (_ (user-error "Unsupported provider runtime setting: %s" key)))))
-     ende-selector--draft-runtime))
-  t)
+  (let* ((profile (or profile (ende-selector--provider-profile)))
+         (current-key (ende-selector--control-key profile))
+         controls)
+    (ende-provider-validate-controls (ende-selector--resolved-profile profile))
+    (when (hash-table-p ende-selector--draft-controls)
+      (maphash
+       (lambda (key state)
+         (when (and (plist-get state :dirty) (not (equal key current-key)))
+           (let ((profile (ende-provider-profile-for-selection
+                           (plist-get state :provider) (plist-get state :model)
+                           (plist-get state :preferences) (plist-get state :api)
+                           (plist-get state :connection))))
+             (ende-provider-validate-controls profile)
+             (push (cons state profile) controls))))
+       ende-selector--draft-controls))
+    (when (hash-table-p ende-selector--draft-runtime)
+      (maphash
+       (lambda (_provider state)
+         (dolist (key (plist-get state :changed))
+           (pcase key
+             (:max-concurrency
+              (unless (and (integerp (plist-get state key))
+                           (> (plist-get state key) 0))
+                (user-error "Provider concurrency must be a positive integer")))
+             (:parallel
+              (unless (memq (plist-get state key) '(nil t))
+                (user-error "Provider parallel setting must be boolean")))
+             (_ (user-error "Unsupported provider runtime setting: %s" key)))))
+       ende-selector--draft-runtime))
+    (cons profile (nreverse controls))))
 
 (defun ende-selector--commit-runtime-settings ()
   "Commit provisional concurrency settings once after validation."
@@ -1489,31 +1500,28 @@ performed locally so typing a search term never starts another network request."
        (puthash provider state ende-selector--draft-runtime))
      ende-selector--draft-runtime)))
 
-(defun ende-selector--commit ()
+(defun ende-selector--commit (&optional profile)
   "Commit validated provisional settings and the current model selection."
-  (ende-selector--validate-draft)
-  (let (runtime-changed
-        selection)
+  (let* ((validated (ende-selector--validate-draft profile))
+         (profile (car validated))
+         runtime-changed
+         selection)
     (ende-provider--call-with-selection-transaction
      (lambda ()
-       (when (hash-table-p ende-selector--draft-controls)
-         (maphash
-          (lambda (key state)
-            (when (and (plist-get state :dirty)
-                       (not (equal key (ende-selector--control-key))))
-              (ende-model-selection-save-control-preferences
-               (plist-get state :provider) (plist-get state :model)
-               (plist-get state :api) (plist-get state :preferences)
-               (or ende-selector--source-buffer (current-buffer))
-               (plist-get state :connection))))
-          ende-selector--draft-controls))
+       (dolist (entry (cdr validated))
+         (let ((state (car entry)))
+           (ende-model-selection-save-control-preferences
+            (plist-get state :provider) (plist-get state :model)
+            (plist-get state :api) (plist-get state :preferences)
+            (or ende-selector--source-buffer (current-buffer))
+            (plist-get state :connection) (cdr entry))))
        (when (hash-table-p ende-selector--draft-selections)
          (maphash
           (lambda (_provider saved)
             (ende-model-selection-save-provider
              saved (or ende-selector--source-buffer (current-buffer))))
           ende-selector--draft-selections))
-       (setq selection (ende-selector--save-selection))
+       (setq selection (ende-selector--save-selection profile))
        (unless selection (user-error "No ready model available"))
        (setq runtime-changed (ende-selector--commit-runtime-settings))
        (ende-selector--finish-draft-commit)))
@@ -1532,10 +1540,10 @@ performed locally so typing a search term never starts another network request."
                     (derived-mode-p 'org-mode))))
     (user-error "Chat compaction requires an Org buffer")))
 
-(defun ende-selector--dispatch-with-commit (type _instruction)
+(defun ende-selector--dispatch-with-commit (type _instruction &optional profile)
   "Validate and commit TYPE's selection before dispatch."
   (ende-selector--validate-dispatch type)
-  (ende-selector--commit))
+  (ende-selector--commit profile))
 
 (defun ende-selector-close ()
   "Close the selector without starting a request."
@@ -1576,10 +1584,10 @@ performed locally so typing a search term never starts another network request."
      (user-error "%s" (error-message-string error-data))))
   (ende-selector-close))
 
-(defun ende-selector--dispatch (type instruction)
-  "Dispatch TYPE and INSTRUCTION using the current selection."
+(defun ende-selector--dispatch (type instruction &optional profile)
+  "Dispatch TYPE and INSTRUCTION using the resolved PROFILE."
   (let* ((source ende-selector--source-buffer)
-         (profile (ende-selector--resolved-profile)))
+         (profile (or profile (ende-selector--resolved-profile))))
     (if (eq type 'chat)
         (if (with-current-buffer source
               (derived-mode-p 'org-mode))
@@ -1602,17 +1610,18 @@ performed locally so typing a search term never starts another network request."
 
 (defun ende-selector--run (type &optional instruction)
   "Run TYPE from the source buffer using the selected provider/model."
-  (let ((selector (current-buffer))
-        (effort (ende-provider-active-reasoning-effort
-                 (ende-selector--resolved-profile))))
+  (let* ((selector (current-buffer))
+         (profile (ende-selector--provider-profile))
+         (resolved (ende-selector--resolved-profile profile))
+         (effort (ende-provider-active-reasoning-effort resolved)))
     (condition-case validation-error
-        (ende-selector--dispatch-with-commit type instruction)
+        (ende-selector--dispatch-with-commit type instruction profile)
       ((error quit)
        (when (and (buffer-live-p selector) (eq (current-buffer) selector))
          (setq ende-selector--effort-state (if effort :invalid :error))
-         (ende-selector--render))
+         (ende-selector--render profile))
        (user-error "%s" (error-message-string validation-error))))
-    (ende-selector--dispatch type instruction)))
+    (ende-selector--dispatch type instruction resolved)))
 
 (defun ende-selector-insert ()
   "Run insert using the current selector choice."
