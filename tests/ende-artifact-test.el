@@ -253,6 +253,32 @@
       (funcall release)
       (dolist (file files) (should-not (file-exists-p file))))))
 
+(ert-deftest ende-artifact-worker-discards-cancelled-and-stale-files ()
+  :tags '(integration)
+  (dolist (scenario '(cancelled stale))
+    (let ((lifecycle (ende-transport-session-create nil #'ert-fail))
+          (run (symbol-function 'ende-worker-run))
+          paths finished)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ende-worker-run)
+                     (lambda (library function arguments bindings callback &optional register)
+                       (setq paths (list (nth 4 arguments) (nth 5 arguments)))
+                       (funcall run library function arguments bindings
+                                (lambda (value error)
+                                  (funcall callback value error)
+                                  (setq finished t)) register))))
+            (ende-request-prepare
+             lifecycle 'ende-codex #'ende-responses--request-body '(("user" . "Prepare"))
+             '(:model "fixture") nil (lambda (&rest _) (ert-fail "Published a stale result"))
+             '(ende-controls--set-path ("type") "response.create") t nil nil
+             (lambda () (not (eq scenario 'stale))))
+            (when (eq scenario 'cancelled)
+              (setf (ende-transport-session-terminal lifecycle) t)
+              (ende-transport-session-cleanup lifecycle))
+            (ende-test--wait-for (lambda () finished))
+            (dolist (path paths) (should-not (file-exists-p path))))
+        (ende-transport-session-cleanup lifecycle)))))
+
 (ert-deftest ende-artifact-round-trip-and-native-export ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
@@ -1136,7 +1162,7 @@
                     "* Topic\n:PROPERTIES:\n:ENDE_CHAT_ID: generated\n:END:\n** Question\nDraw\n")
             (goto-char (point-max))
             (cl-letf (((symbol-function 'ende-image--request)
-                       (lambda (request-arguments _profile base id callback _register)
+                       (lambda (request-arguments _profile base id callback _register &optional _current-p)
                          (should (equal (ende-tools--argument request-arguments "prompt")
                                         "Draw a box."))
                          (funcall callback
@@ -1228,7 +1254,7 @@
                   ende-image-model "another-model")
             (should-not (equal definitions (ende-tool-definitions)))
             (cl-letf (((symbol-function 'ende-image--request)
-                       (lambda (_arguments profile base id callback _register)
+                       (lambda (_arguments profile base id callback _register &optional _current-p)
                          (should (equal profile settings))
                          (funcall callback
                                   (list (ende-artifact-store base id ende-artifact-test-png "image/png")) nil))))
@@ -1251,9 +1277,11 @@
            (real-start (symbol-function 'ende-curl-start-request))
            (real-send (symbol-function 'process-send-string))
            request sent cancel parts failure (calls 0))
-      (dolist (scenario '(png jpeg unsupported cancelled))
+      (dolist (scenario '(png jpeg unsupported cancelled stale))
         (setq request nil sent nil cancel nil parts nil failure nil calls 0)
-        (let* ((bytes (pcase scenario
+        (let* ((current t)
+               (before (directory-files (ende-artifact-directory (ende-artifact-base) "generated" t)))
+               (bytes (pcase scenario
                         ('jpeg ende-artifact-test-jpeg)
                         ('unsupported "GIF89a")
                         (_ ende-artifact-test-png)))
@@ -1283,11 +1311,13 @@
             (ende-image--request
              '(:prompt "Draw a box.") (ende-image--profile) (ende-artifact-base) "generated"
              (lambda (value error) (cl-incf calls) (setq parts value failure error))
-             (lambda (function) (setq cancel function))))
+             (lambda (function) (setq cancel function))
+             (lambda () current)))
           (let ((data (json-parse-string sent)))
             (should (= (hash-table-count data) 2))
             (should (equal (gethash "model" data) "fixture-image-model"))
             (should (equal (gethash "prompt" data) "Draw a box.")))
+          (when (eq scenario 'stale) (setq current nil))
           (if (eq scenario 'cancelled) (funcall cancel)
             (with-temp-file (plist-get request :headers-file)
               (insert "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")))
@@ -1297,6 +1327,9 @@
           (should (= calls 1))
           (pcase scenario
             ('cancelled (should (string-match-p "cancelled" failure)))
+            ('stale (should (string-match-p "cancelled" failure))
+                    (should (equal before (directory-files
+                                           (ende-artifact-directory (ende-artifact-base) "generated")))))
             ('unsupported (should (string-match-p "unsupported.*PNG or JPEG" failure)))
             (_ (should-not failure)
                (should (equal (ende-content-image-data

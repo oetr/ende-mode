@@ -278,35 +278,45 @@
   (ende-content-generated-image (gethash "b64_json" image)
                                 (gethash "media_type" image)))
 
-(defun ende-image--response (body profile)
-  "Normalize image response BODY using PROFILE's API."
+(defun ende-image--response (body profile &optional consume)
+  "Normalize image response BODY using PROFILE's API, applying CONSUME."
   (let* ((adapter (ende-image--adapter (plist-get profile :image-api)))
          (name (plist-get adapter :name))
          (key (plist-get adapter :images-key))
          (images (and (hash-table-p body) (gethash key body))))
     (unless (and (or (vectorp images) (listp images)) (> (length images) 0))
       (error "%s response is missing a nonempty %s array" name key))
-    (condition-case nil
-        (mapcar (plist-get adapter :decode-image) images)
-      (error (error "%s returned unsupported or malformed image data; expected PNG or JPEG"
-                    name)))))
-
-(defun ende-image--store-response (file api directory)
-  "Decode FILE for API and store validated images in DIRECTORY."
-  (let ((body (with-temp-buffer
-                (insert-file-contents file)
-                (json-parse-buffer :object-type 'hash-table))))
     (mapcar
+     (lambda (image)
+       (let ((part (condition-case nil
+                       (funcall (plist-get adapter :decode-image) image)
+                     (error (error "%s returned unsupported or malformed image data; expected PNG or JPEG"
+                                   name)))))
+         (if consume (funcall consume part) part))) images)))
+
+(defun ende-image--store-response (file api directory &optional byte-limit)
+  "Decode FILE for API and store validated images in DIRECTORY."
+  (let* ((signature (ende-artifact--file-signature file))
+         (body (with-temp-buffer
+                 (when (and byte-limit (> (nth 1 signature) byte-limit))
+                   (error "Generated image response exceeds ende-max-response-bytes"))
+                 (let ((coding-system-for-read 'utf-8-unix))
+                   (insert-file-contents file nil 0 (and byte-limit (1+ byte-limit))))
+                 (unless (equal signature (ende-artifact--file-signature file))
+                   (error "Generated image response changed while being read"))
+                 (json-parse-buffer :object-type 'hash-table))))
+    (ende-image--response
+     body (list :image-api api)
      (lambda (part)
        (let ((name (ende-artifact-store directory "images" (plist-get part :bytes)
                                         (plist-get part :media-type))))
-         (ende-artifact-resolve directory "images" name)))
-     (ende-image--response body (list :image-api api)))))
+         (ende-artifact-resolve directory "images" name))))))
 
-(defun ende-image--request (arguments profile base id callback register)
+(defun ende-image--request (arguments profile base id callback register &optional current-p)
   "Generate from ARGUMENTS using PROFILE into BASE and ID.
 Call CALLBACK with artifact names or an error.
-REGISTER attaches cancellation to the existing tool lifecycle."
+REGISTER attaches cancellation to the existing tool lifecycle.
+CURRENT-P optionally rejects stale worker results before publication."
   (let* ((url (plist-get profile :url))
          (data (json-encode (ende-image--request-body arguments profile)))
          (lifecycle (ende-transport-session-create nil nil))
@@ -324,15 +334,19 @@ REGISTER attaches cancellation to the existing tool lifecycle."
              (funcall callback names error)))
          (import-images (images error)
            (unless settled
-             (if error (finish nil error)
-               (condition-case failure
-                   (finish
-                    (ende-artifact--call-with-transaction
-                     (lambda ()
+             (condition-case failure
+                 (cond
+                  ((and current-p (not (funcall current-p)))
+                   (finish nil "Image generation cancelled"))
+                  (error (finish nil error))
+                  (t
+                   (ende-artifact--call-with-transaction
+                    (lambda ()
+                      (finish
                        (mapcar (lambda (info)
                                  (ende-artifact-import base id (plist-get info :path) info))
-                               images))) nil)
-                 (error (finish nil (error-message-string failure)))))))
+                               images) nil)))))
+               (error (finish nil (error-message-string failure))))))
          (receive (process _event)
            (when (and (not settled) (not processing)
                       (memq (process-status process) '(exit signal)))
@@ -350,7 +364,8 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                     lifecycle
                     (ende-worker-run
                      'ende-image #'ende-image--store-response
-                     (list file (plist-get profile :image-api) directory) nil #'import-images)))
+                     (list file (plist-get profile :image-api) directory ende-max-response-bytes)
+                     nil #'import-images)))
                (error (finish nil (error-message-string failure)))))))
       (condition-case failure
           (let ((request
@@ -403,7 +418,8 @@ REGISTER attaches cancellation to the existing tool lifecycle."
                             (vconcat names))
                       nil))
                  (error (funcall callback nil "Generated image could not be validated or stored"))))))
-         ende-tools--register-cancellation-function)))))
+         ende-tools--register-cancellation-function
+         (lambda () (ende-job-execution-current-p job generation)))))))
 
 (ende-tool-register
  'generate_image
