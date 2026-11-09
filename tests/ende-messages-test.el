@@ -36,14 +36,25 @@
     (setf (ende-messages--session-stream session) (ende-stream-create lifecycle (ende-protocol-make-sse)))
     (dolist (json '("{\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":10}}}"
                     "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c\",\"name\":\"lookup\",\"input\":{}}}"
-                    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":1}\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" {\\\"x\\\":\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" 1 }\"}}"
                     "{\"type\":\"content_block_stop\",\"index\":0}"
                     "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}"
                     "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"opaque\"}}"
-                    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-value\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" λ\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"value\"}}"
                     "{\"type\":\"content_block_stop\",\"index\":1}"
+                    "{\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"A\"}}"
+                    "{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"λ\"}}"
+                    "{\"type\":\"content_block_stop\",\"index\":2}"
                     "{\"type\":\"message_stop\"}"))
-      (ende-messages--event session (ende-protocol-json-read-string json)))
+      (let ((event (ende-protocol-json-read-string json)))
+        (if (equal (gethash "type" event) "content_block_delta")
+            (cl-letf (((symbol-function 'ende-stream-text-string)
+                       (lambda (_) (ert-fail "Joined streaming fragments"))))
+              (ende-messages--event session event))
+          (ende-messages--event session event))))
     (let* ((result (ende-messages--result session))
            (call (car (plist-get result :tool-calls)))
            (body (ende-messages--request-body
@@ -54,7 +65,13 @@
                   '(:model "m" :output-tokens 100))))
       (should (= (gethash "input_tokens" (plist-get result :usage)) 10))
       (should (= (gethash "output_tokens" (plist-get result :usage)) 5))
-      (should (equal (plist-get call :arguments) "{\"x\":1}"))
+      (should (equal (plist-get call :arguments) " {\"x\": 1 }"))
+      (should-not (eq (plist-get call :arguments)
+                      (plist-get (car (ende-messages--calls session)) :arguments)))
+      (should (equal (plist-get result :content) "Aλ"))
+      (should (equal (plist-get result :thinking) "opaque λ"))
+      (should (equal (gethash "thinking" (nth 2 (plist-get result :protocol-items))) "opaque λ"))
+      (should (equal (gethash "text" (nth 3 (plist-get result :protocol-items))) "Aλ"))
       (should (= (length (alist-get :messages body)) 3))
       (should (equal (alist-get :role (car (last (alist-get :messages body)))) "user"))
       (should (alist-get :system body))

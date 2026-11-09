@@ -52,13 +52,17 @@
   "Return SESSION's blocks in protocol order."
   (mapcar #'cdr (ende-messages--ordered-entries session)))
 
-(defun ende-messages--block-call (index block)
-  "Return the normalized tool call for BLOCK at INDEX, if any."
+(defun ende-messages--block-call (index block &optional metadata-only)
+  "Return the detached tool call for BLOCK at INDEX, if any.
+Omit accumulated arguments when METADATA-ONLY is non-nil."
   (when (equal (gethash "type" block) "tool_use")
-    (list :key index :id (gethash "id" block) :name (gethash "name" block)
-          :arguments (or (and (not (gethash "ende_complete" block))
-                              (gethash "ende_arguments" block))
-                         (json-encode (gethash "input" block))))))
+    (ende-provider-config-copy
+     (append
+      (list :key index :id (gethash "id" block) :name (gethash "name" block))
+      (unless metadata-only
+        (list :arguments (if-let* ((text (gethash "ende_arguments" block)))
+                             (ende-stream-text-string text)
+                           (json-encode (gethash "input" block)))))))))
 
 (defun ende-messages--calls (session)
   "Return completed tool calls from SESSION."
@@ -68,32 +72,45 @@
            collect (ende-messages--block-call index block)))
 
 (defun ende-messages--protocol-item (block)
-  "Return provider BLOCK without local state."
-  (let ((copy (copy-hash-table block)))
-    (remhash "ende_arguments" copy)
-    (remhash "ende_complete" copy)
+  "Return detached provider BLOCK without local state."
+  (let ((copy (make-hash-table :test #'equal)))
+    (maphash (lambda (key value)
+               (unless (member key '("ende_arguments" "ende_complete"))
+                 (puthash (copy-sequence key)
+                          (if (ende-stream-text-p value)
+                              (ende-stream-text-string value)
+                            (ende-provider-config-copy value)) copy))) block)
     copy))
+
+(defun ende-messages--append-block-text (block field text)
+  "Append TEXT to BLOCK's FIELD without copying its accumulated prefix."
+  (let ((value (gethash field block)))
+    (unless (ende-stream-text-p value)
+      (setq value (ende-stream-text-append (ende-stream-text-create) value))
+      (puthash field value block))
+    (ende-stream-text-append value text)))
 
 (defun ende-messages--protocol-items (session)
   "Return SESSION's provider content blocks without local state."
   (mapcar #'ende-messages--protocol-item
           (ende-messages--ordered-blocks session)))
 
-(defun ende-messages--emit-block (session index &optional call-only)
-  "Emit SESSION's block at INDEX, or just its updated call when CALL-ONLY."
+(defun ende-messages--emit-block (session index &optional arguments-delta)
+  "Emit SESSION's block at INDEX, or only its ARGUMENTS-DELTA."
   (let* ((block (gethash index (ende-messages--session-blocks session)))
-         (type (gethash "type" block))
-         (call (ende-messages--block-call index block)))
+         (type (gethash "type" block)))
     (unless (equal type "image")
-      (apply #'ende-stream-emit-item
-             (ende-messages--session-stream session) index
-             (cond (call 'tool-call) ((equal type "text") 'text) (t 'opaque))
-             "anthropic-messages"
-             (append (unless call-only
-                       (list :item (ende-messages--protocol-item block)))
-                     (when call (list :call call))
-                     (when (equal type "text")
-                       (list :text (gethash "text" block))))))))
+      (let ((call (ende-messages--block-call index block arguments-delta))
+            (item (unless arguments-delta (ende-messages--protocol-item block))))
+        (apply #'ende-stream-emit-item
+               (ende-messages--session-stream session) index
+               (cond (call 'tool-call) ((equal type "text") 'text) (t 'opaque))
+               "anthropic-messages"
+               (append (when item (list :item item))
+                       (when call (list :call call))
+                       (when arguments-delta (list :arguments-delta arguments-delta))
+                       (when (equal type "text")
+                         (list :text (gethash "text" item)))))))))
 
 (defun ende-messages--result (session)
   "Return normalized output and protocol history for SESSION."
@@ -163,25 +180,25 @@
        (pcase (gethash "type" delta)
          ("text_delta"
           (let ((text (gethash "text" delta)))
-            (puthash "text" (concat (gethash "text" block "") text) block)
+            (ende-messages--append-block-text block "text" text)
             (ende-stream-record-delta stream :content text
                                       (apply-partially #'ende-messages--fail session) index)))
          ("thinking_delta"
           (let ((text (gethash "thinking" delta)))
-            (puthash "thinking" (concat (gethash "thinking" block "") text) block)
+            (ende-messages--append-block-text block "thinking" text)
             (ende-stream-record-delta stream :thinking text
                                       (apply-partially #'ende-messages--fail session) index)))
          ("signature_delta"
-          (puthash "signature" (concat (gethash "signature" block "")
-                                       (gethash "signature" delta)) block))
+          (ende-messages--append-block-text block "signature" (gethash "signature" delta)))
          ("input_json_delta"
-          (puthash "ende_arguments" (concat (gethash "ende_arguments" block "")
-                                            (gethash "partial_json" delta)) block)
-          (ende-messages--emit-block session index t))))
+          (let ((text (or (gethash "partial_json" delta) "")))
+            (ende-messages--append-block-text block "ende_arguments" text)
+            (ende-messages--emit-block session index text)))))
       ("content_block_stop"
        (unless block (error "Messages stop has no content block"))
        (when (equal (gethash "type" block) "tool_use")
-         (let* ((text (gethash "ende_arguments" block))
+         (let* ((text (when-let* ((parts (gethash "ende_arguments" block)))
+                        (ende-stream-text-string parts)))
                 (input (if text (ende-protocol-json-read-string text) (gethash "input" block))))
            (unless (and (hash-table-p input)
                         (stringp (gethash "id" block)) (not (string-empty-p (gethash "id" block)))
