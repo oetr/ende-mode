@@ -660,16 +660,19 @@ Completion is asynchronous and bounded by the closing timeout."
   (let ((offset 0) (length (length bytes)))
     (while (< offset length)
       (unless (ende-websocket--message-chunk message)
-        (setf (ende-websocket--message-chunk message) (make-string 16384 0)))
-      (let* ((used (ende-websocket--message-used message))
-             (count (min (- 16384 used) (- length offset))))
-        (store-substring (ende-websocket--message-chunk message) used
+        ;; Cumulative frame lengths amortize tiny fragments without a large minimum.
+        (setf (ende-websocket--message-chunk message)
+              (make-string (min 16384 (ende-websocket--message-bytes message)) 0)))
+      (let* ((chunk (ende-websocket--message-chunk message))
+             (used (ende-websocket--message-used message))
+             (count (min (- (length chunk) used) (- length offset))))
+        (store-substring chunk used
                          (if (and (= offset 0) (= count length)) bytes
                            (substring bytes offset (+ offset count))))
         (cl-incf offset count)
         (cl-incf (ende-websocket--message-used message) count)
-        (when (= (ende-websocket--message-used message) 16384)
-          (push (ende-websocket--message-chunk message) (ende-websocket--message-chunks message))
+        (when (= (ende-websocket--message-used message) (length chunk))
+          (push chunk (ende-websocket--message-chunks message))
           (setf (ende-websocket--message-chunk message) nil
                 (ende-websocket--message-used message) 0))))))
 

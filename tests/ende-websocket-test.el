@@ -138,6 +138,19 @@
     (should-error (ende-websocket-test--http (concat "GET / HTTP/1.1\r\n" line "\r\n\r\n"))
                   :type 'ende-websocket-protocol-error)))
 
+(ert-deftest ende-websocket-message-collection ()
+  (ende-websocket-test--connection connection
+    (let (messages)
+      (setf (ende-websocket--connection-callbacks connection)
+            (list :on-message (lambda (_ _type message) (push message messages))))
+      (ende-websocket--filter process (unibyte-string #x82 1 ?x 2 1 ?a))
+      (ende-websocket-test--drain connection)
+      (should (equal (ende-websocket--message-chunks
+                      (ende-websocket--connection-message connection)) '("a")))
+      (ende-websocket--filter process (unibyte-string 0 1 ?b 0 3 ?c ?d ?e #x80 2 ?f ?g))
+      (ende-websocket-test--drain connection)
+      (should (equal (nreverse messages) '("x" "abcdefg"))))))
+
 (ert-deftest ende-websocket-message-semantics ()
   (let* ((payload (fillarray (make-string 200000 0) 255))
          (wire (concat (unibyte-string #x82 127 0 0 0 0 0 3 #x0d #x40) payload)))
