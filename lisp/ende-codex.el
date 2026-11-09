@@ -1474,18 +1474,26 @@ When APPEND is non-nil, append the argument delta to the stored value."
 
 (defun ende-codex--completion-error (session)
   "Return a transport-independent terminal validation error for SESSION."
-  (unless (and (ende-codex--session-terminal-event session)
-               (not (equal (ende-stream-session-finish-reason
-                            (ende-codex--session-stream session)) "incomplete"))
-               (or (not (ende-codex--session-strict-completion session))
-                   (equal (ende-protocol-json-get
-                           "type" (ende-codex--session-terminal-event session))
-                          "response.completed")))
-    (ende-error-create
-     :kind (if (equal (ende-stream-session-finish-reason
-                      (ende-codex--session-stream session)) "incomplete")
-               'incomplete 'protocol)
-     :message "Responses generation is incomplete or missing its completion event")))
+  (let* ((event (ende-codex--session-terminal-event session))
+         (response (ende-protocol-json-get "response" event))
+         (status (ende-protocol-json-get "status" response))
+         (incomplete (equal (ende-stream-session-finish-reason
+                             (ende-codex--session-stream session)) "incomplete")))
+    (unless (and event (not incomplete)
+                 (or (not (ende-codex--session-strict-completion session))
+                     (equal (ende-protocol-json-get "type" event) "response.completed"))
+                 (or (null status) (equal status "completed"))
+                 (null (ende-protocol-json-get "error" response))
+                 (not (cl-some
+                       (lambda (entry)
+                         (let* ((item (cdr entry))
+                                (status (ende-protocol-json-get "status" item)))
+                           (and (equal (ende-protocol-json-get "type" item) "function_call")
+                                status (not (equal status "completed")))))
+                       (ende-codex--ordered-output session))))
+      (ende-error-create
+       :kind (if incomplete 'incomplete 'protocol)
+       :message "Responses generation is incomplete or has an invalid completion event"))))
 
 (defun ende-codex--complete (session)
   "Validate and settle SESSION's terminal Responses event."
