@@ -1424,8 +1424,9 @@ Multiline matches belong to their starting line; columns name its first match."
     (when coding-system (setq buffer-file-coding-system coding-system))
     (ende-tools--source-digest)))
 
-(defun ende-tools--capture-file (path)
-  "Capture PATH's bytes, decoded text, coding, identity, and mode consistently."
+(defun ende-tools--capture-file (path &optional retained-bytes)
+  "Capture PATH's bytes, decoded text, coding, identity, and mode consistently.
+RETAINED-BYTES is preparation data already held by the rest of the operation."
   (when (file-symlink-p path)
     (error "final-component symlinks are not allowed: %s" path))
   (unless (and (file-regular-p path) (file-readable-p path))
@@ -1436,7 +1437,12 @@ Multiline matches belong to their starting line; columns name its first match."
     (error "project file is larger than the tool limit: %s" path))
   (let* ((before (file-attributes path))
          (before-identity (ende-tools--file-identity before))
-         (bytes (ende-tools--literal-file-bytes path))
+         (bytes (progn
+                  (ende-tools--assert-prepared-bytes
+                   (+ (or retained-bytes 0) (file-attribute-size before)))
+                  (ende-tools--literal-file-bytes path)))
+         (_limit (ende-tools--assert-prepared-bytes
+                  (+ (or retained-bytes 0) (string-bytes bytes))))
          (decoded (ende-tools--decode-file-bytes bytes))
          (after (file-attributes path))
          (after-bytes (ende-tools--literal-file-bytes path))
@@ -1683,9 +1689,13 @@ Return canonical target and root-relative/public path details."
            ende-tools-max-mutation-operations))
   (let ((total (cl-loop for change-set in change-sets
                         sum (ende-tools--change-set-size change-set))))
-    (when (> total ende-tools-max-prepared-bytes)
-      (error "mutation batch exceeds the %d-byte prepared-data limit"
-             ende-tools-max-prepared-bytes))))
+    (ende-tools--assert-prepared-bytes total)))
+
+(defun ende-tools--assert-prepared-bytes (total)
+  "Reject TOTAL original and prepared bytes above the existing batch budget."
+  (when (> total ende-tools-max-prepared-bytes)
+    (error "mutation batch exceeds the %d-byte prepared-data limit"
+           ende-tools-max-prepared-bytes)))
 
 (defun ende-tools--assert-change-set-targets-unique (change-sets)
   "Reject duplicate canonical paths and hard-link aliases in CHANGE-SETS."
@@ -1725,9 +1735,9 @@ Return canonical target and root-relative/public path details."
   (let* ((path (ende-change-set-absolute-path change-set))
          (directory (file-name-directory path))
          (stage (make-temp-file (expand-file-name ".ende-stage-" directory))))
-    (set-file-modes stage #o600)
     (unwind-protect
         (progn
+          (set-file-modes stage #o600)
           (with-temp-buffer
             (when (eq (ende-change-set-prepared-coding-system change-set)
                       'no-conversion)
@@ -2014,14 +2024,15 @@ Return canonical target and root-relative/public path details."
         (ende-sandbox-sync-file sandbox source relative))))
   t)
 
-(defun ende-tools--sandbox-source-bytes (workspace relative)
+(defun ende-tools--sandbox-source-bytes (workspace relative retained-bytes)
   "Read regular RELATIVE from paused WORKSPACE in a worker."
   (let* ((sandbox (ende-sandbox--create :workspace workspace))
          (source (ende-sandbox--workspace-path sandbox relative))
          (size (file-attribute-size (file-attributes source))))
-    (when (> size ende-tools-max-prepared-bytes)
-      (error "sandbox source exceeds the prepared-data limit"))
-    (ende-tools--literal-file-bytes source)))
+    (ende-tools--assert-prepared-bytes (+ retained-bytes size))
+    (let ((bytes (ende-tools--literal-file-bytes source)))
+      (ende-tools--assert-prepared-bytes (+ retained-bytes (string-bytes bytes)))
+      bytes)))
 
 (defun ende-tools--call-sandbox-mutation
     (tool arguments root access-config callback)
@@ -2255,6 +2266,13 @@ Return canonical target and root-relative/public path details."
          (snapshot (ende-tools--capture-file absolute-path))
          (content (plist-get snapshot :content))
          (edits (ende-tools--normalize-anchor-edits anchor-edits content))
+         (_limit
+          (ende-tools--assert-prepared-bytes
+           (+ (string-bytes (plist-get snapshot :bytes))
+              (string-bytes content)
+              (cl-loop for edit in edits
+                       sum (- (string-bytes (plist-get edit :replacement))
+                              (string-bytes (plist-get edit :expected)))))))
          (result-content
           (with-temp-buffer
             (insert content)
@@ -2486,37 +2504,42 @@ No visiting buffer or review state is involved in this operation."
 
 (defun ende-tools--prepare-patch-change-sets (change-sets)
   "Read sources and compute every result for pre-authorized CHANGE-SETS."
-  (dolist (change-set change-sets)
-    (let ((path (ende-change-set-absolute-path change-set)))
-      (if (ende-tools--mutation-existing-p change-set)
-          (progn
-            (unless (or (file-exists-p path) (file-symlink-p path))
-              (error "patch source does not exist: %s"
-                     (ende-change-set-path change-set)))
-            (unless (file-regular-p path)
-              (error "patch operation requires a regular file: %s"
-                     (ende-change-set-path change-set)))
-            (let* ((snapshot (ende-tools--capture-file path))
-                   (buffers (ende-tools--visiting-buffers-for-path path)))
-              (when (ende-tools--modified-buffers buffers)
-                (error "unsaved visiting buffer prevents patching %s"
-                       (ende-change-set-path change-set)))
-              (when (string-match-p "\0" (plist-get snapshot :content))
-                (error "binary file cannot be patched as text: %s"
-                       (ende-change-set-path change-set)))
-              (ende-tools--set-snapshot change-set snapshot)
-              (setf (ende-change-set-visiting-buffers change-set) buffers)
-              (when (eq (ende-change-set-operation change-set) 'update)
-                (setf (ende-change-set-content change-set)
-                      (ende-patch-apply-update
-                       (plist-get snapshot :content)
-                       (ende-change-set-anchor-edits change-set))
-                      (ende-change-set-prepared-coding-system change-set)
-                      (plist-get snapshot :coding-system)))))
-        (when (or (file-exists-p path) (file-symlink-p path))
-          (error "cannot add over an existing filesystem entry: %s"
-                 (ende-change-set-path change-set))))))
   (ende-tools--assert-change-set-limits change-sets)
+  (let ((total (cl-loop for change-set in change-sets
+                        sum (ende-tools--change-set-size change-set))))
+    (dolist (change-set change-sets)
+      (let ((path (ende-change-set-absolute-path change-set))
+            (retained (- total (ende-tools--change-set-size change-set))))
+        (if (ende-tools--mutation-existing-p change-set)
+            (progn
+              (unless (or (file-exists-p path) (file-symlink-p path))
+                (error "patch source does not exist: %s"
+                       (ende-change-set-path change-set)))
+              (unless (file-regular-p path)
+                (error "patch operation requires a regular file: %s"
+                       (ende-change-set-path change-set)))
+              (let* ((snapshot (ende-tools--capture-file path retained))
+                     (buffers (ende-tools--visiting-buffers-for-path path)))
+                (when (ende-tools--modified-buffers buffers)
+                  (error "unsaved visiting buffer prevents patching %s"
+                         (ende-change-set-path change-set)))
+                (when (string-match-p "\0" (plist-get snapshot :content))
+                  (error "binary file cannot be patched as text: %s"
+                         (ende-change-set-path change-set)))
+                (ende-tools--set-snapshot change-set snapshot)
+                (setf (ende-change-set-visiting-buffers change-set) buffers)
+                (when (eq (ende-change-set-operation change-set) 'update)
+                  (setf (ende-change-set-content change-set)
+                        (ende-patch-apply-update
+                         (plist-get snapshot :content)
+                         (ende-change-set-anchor-edits change-set))
+                        (ende-change-set-prepared-coding-system change-set)
+                        (plist-get snapshot :coding-system)))))
+          (when (or (file-exists-p path) (file-symlink-p path))
+            (error "cannot add over an existing filesystem entry: %s"
+                   (ende-change-set-path change-set))))
+        (setq total (+ retained (ende-tools--change-set-size change-set)))
+        (ende-tools--assert-prepared-bytes total))))
   change-sets)
 
 (defun ende-tools--patch-result-entry (change-set)
@@ -2856,7 +2879,8 @@ process-group cancellation function with the active Ende job."
           (lambda (operation done)
             (ende-sandbox--run-worker
              operation 'ende-tools #'ende-tools--sandbox-source-bytes
-             (list (ende-sandbox-workspace sandbox) source) bindings done))
+             (list (ende-sandbox-workspace sandbox) source
+                   (ende-tools--change-set-size change-set)) bindings done))
           (lambda (bytes error)
             (if error
                 (ende-sandbox--complete-operation operation nil error)
