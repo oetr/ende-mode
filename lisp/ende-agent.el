@@ -703,12 +703,37 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
     (format "Tool disabled during %s phase" phase)))
 
 (defun ende-agent--run-tools (job calls configuration callbacks done)
-  "Run CALLS sequentially for JOB and return ordered results through DONE."
+  "Run bounded turns of sequential CALLS for JOB, returning results via DONE."
   (let ((remaining (copy-sequence calls))
         (phase (or (ende-job-request-phase job) 'work))
-        (messages nil))
+        (messages nil)
+        (draining nil)
+        (ready nil))
     (cl-labels
         ((next ()
+           (setq ready t)
+           (unless draining
+             (let ((deadline (+ (float-time) 0.02))
+                   (processed 0))
+               (setq draining t)
+               (unwind-protect
+                   (while (and ready (ende-job-current-p job)
+                               (or (zerop processed)
+                                   (and (< processed 16) (< (float-time) deadline))))
+                     (setq ready nil)
+                     (cl-incf processed)
+                     (step))
+                 (setq draining nil))
+               (when (and ready (ende-job-current-p job))
+                 (let ((generation (1+ (or (ende-job-execution-generation job) 0)))
+                       (ende--queue-suspended t))
+                   (ende-job-suspend
+                    job (lambda ()
+                          (when (ende-job-execution-current-p job generation)
+                            (next))))
+                   (ende-job-resume-queued job))
+                 (ende-process-next)))))
+         (step ()
            (let ((name (and remaining (ende-job-current-p job)
                             (ende-agent--call-name (car remaining) callbacks))))
              (when (and remaining (ende-job-current-p job))

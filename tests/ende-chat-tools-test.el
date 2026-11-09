@@ -372,6 +372,54 @@
             (should (equal (ende-job-status job) "Thinking"))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/synchronous-tools-yield-in-order-and-cancel-stale-continuations ()
+  (dolist (cancel '(nil t))
+    (ende-test--reset)
+    (let ((ende--job-handlers '((insert . ignore)))
+          (calls (cl-loop for index below 200
+                          collect (list :id (number-to-string index) :name "read_file")))
+          executed pending results)
+      (unwind-protect
+          (with-temp-buffer
+            (let ((job (ende-enqueue
+                        (ende-test--dashboard-request ende-test--dashboard-profile))))
+              (let ((ende--queue-suspended t))
+                (ende-agent--run-tools
+                 job calls nil
+                 (list :tool-name (lambda (call) (plist-get call :name))
+                       :execute-tool
+                       (lambda (call _configuration callback)
+                         (let ((id (plist-get call :id)))
+                           (push id executed)
+                           (if (equal id "199")
+                               (setq pending callback)
+                             (funcall callback id))))
+                       :tool-result-message
+                       (lambda (_job call content)
+                         (should (equal content (plist-get call :id)))
+                         content))
+                 (lambda (messages)
+                   (setq results messages)
+                   (ende-job-finish job messages))))
+              (should (< 0 (length executed) (length calls)))
+              (should (eq (ende-job-state job) 'queued))
+              (let ((resume (ende-job-resume-function job))
+                    (count (length executed)))
+                (if cancel
+                    (progn
+                      (ende--cancel-live-jobs (list job))
+                      (funcall resume)
+                      (should (= count (length executed)))
+                      (should-not results))
+                  (ende-process-next)
+                  (ende-test--wait-for (lambda () pending))
+                  (funcall pending "199")
+                  (funcall pending "duplicate")
+                  (should (equal results (mapcar (lambda (call) (plist-get call :id)) calls)))
+                  (should (equal (nreverse executed) results))
+                  (should (eq (ende-job-state job) 'completed))))))
+        (ende-test--reset)))))
+
 (ert-deftest ende-test/chat-guidance-follows-all-results-in-an-async-tool-round ()
   (ende-test--reset)
   (let* ((ende-tools--registry (copy-sequence ende-tools--registry))
