@@ -184,10 +184,12 @@ existing project directory."
     (error "project file is larger than the tool limit: %s" path))
   path)
 
-(defun ende-project-buffer-path (buffer)
-  "Return canonical visiting path for BUFFER, or nil."
+(defun ende-project-buffer-path (buffer &optional local-only)
+  "Return canonical visiting path for BUFFER, or nil.
+When LOCAL-ONLY is non-nil, skip remote filenames without resolving them."
   (when (and (buffer-live-p buffer)
-             (buffer-file-name buffer))
+             (buffer-file-name buffer)
+             (not (and local-only (file-remote-p (buffer-file-name buffer)))))
     (condition-case nil
         (file-truename (buffer-file-name buffer))
       (error nil))))
@@ -195,7 +197,7 @@ existing project directory."
 (defun ende-project-buffer-allowed-p (buffer &optional root)
   "Return non-nil when BUFFER visits an allowed file below ROOT."
   (let* ((root (or root (ende-project-root buffer)))
-         (path (ende-project-buffer-path buffer)))
+         (path (ende-project-buffer-path buffer (not (file-remote-p root)))))
     (when path
       (let ((root (ende-project-normalize-root root)))
         (and (file-in-directory-p path root)
@@ -206,7 +208,8 @@ existing project directory."
   (let ((canonical (ende-project-path path root)))
     (cl-find-if
      (lambda (buffer)
-       (let ((buffer-path (ende-project-buffer-path buffer)))
+       (let ((buffer-path (ende-project-buffer-path
+                           buffer (not (file-remote-p canonical)))))
          (and buffer-path (file-equal-p buffer-path canonical))))
      (buffer-list))))
 
