@@ -38,6 +38,8 @@
 (require 'ende-worker)
 (require 'ende-provider-config)
 
+(declare-function ende--validate-messages "ende-operations" (messages))
+
 (cl-defstruct ende-request-retained
   source owner (readers 0) debug-origin)
 
