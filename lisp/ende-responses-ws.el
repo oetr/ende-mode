@@ -450,12 +450,13 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
          (ende-responses-ws--fail request 'transport "Responses request preparation failed"))))))
 
 (defun ende-responses-ws--recover (request json)
-  "Route explicitly recoverable JSON errors through REQUEST's shared budget."
+  "Retry JSON submission rejections before REQUEST's generation starts."
   (let* ((type (ende-protocol-json-get "type" json))
          (error (or (ende-protocol-json-get "error" json)
                     (ende-protocol-json-get "error" (ende-protocol-json-get "response" json))))
          (code (ende-protocol-json-get "code" error)))
-    (when (and (member type '("error" "response.failed"))
+    (when (and (not (ende-responses-ws-request-response-id request))
+               (equal type "error")
                (member code '("previous_response_not_found" "websocket_connection_limit_reached")))
       (ende-responses-ws--retry request (if (equal code "previous_response_not_found")
                                           'missing-response 'connection-limit))

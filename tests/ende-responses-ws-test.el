@@ -225,10 +225,6 @@
       (should (gethash "previous_response_id" (cdar wires)))
       (let ((retired (car sockets)))
         (ende-responses-ws-test--event
-         retired "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-retired\"}}")
-        (ende-responses-ws-test--event
-         retired "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item-retired\",\"type\":\"message\",\"content\":[]}}")
-        (ende-responses-ws-test--event
          retired "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
         (ende-test--wait-for (lambda () (= (length wires) 3)))
         (should (= (length sockets) 2))
@@ -238,12 +234,16 @@
       (ende-responses-ws-test--complete (car sockets) "resp_recovered")
       (ende-test--wait-for (lambda () (= done 2)))
       (should-not errors)
-      ;; Accepted output is not safely replayable, even before any response.
+      ;; A rejection code cannot authorize replay after generation starts.
       (ende-llm-default messages callbacks profile)
       (ende-test--wait-for (lambda () (= (length wires) 4)))
-      (ende-websocket-abort (car sockets))
+      (ende-responses-ws-test--event
+       (car sockets) "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-started\"}}")
+      (ende-responses-ws-test--event
+       (car sockets) "{\"type\":\"error\",\"error\":{\"code\":\"previous_response_not_found\"}}")
       (ende-test--wait-for (lambda () errors))
-      (should (eq (ende-error-kind (car errors)) 'transport))
+      (should (= done 2))
+      (should (= (length wires) 4))
       (should (= (length sockets) 2))
       (should-not (gethash 1 ende-responses-ws--connections))))
   ;; Even acceptance with *no native transmission* is ambiguous: the public
