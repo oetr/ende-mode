@@ -375,8 +375,10 @@
         (cl-letf (((symbol-function 'make-network-process)
                    (lambda (&rest options)
                      (push (plist-get options :host) started)
-                     (make-pipe-process :name "websocket-opening-test" :noquery t
-                                        :coding 'binary :plist (plist-get options :plist))))
+                     (let ((process (make-pipe-process :name "websocket-opening-test"
+                                                       :noquery t :coding 'binary)))
+                       (set-process-plist process (plist-get options :plist))
+                       process)))
                   ((symbol-function 'process-send-string) #'ignore))
           (let ((first (ende-websocket-connect "ws://first.invalid/" :limits '(:pending-openings 2)))
                 (second (ende-websocket-connect "ws://second.invalid/" :limits '(:pending-openings 2))))
