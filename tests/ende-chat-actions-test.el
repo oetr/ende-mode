@@ -262,12 +262,11 @@
              "** Question\nAsk\n"
              "** Existing agent section\n"
              ":PROPERTIES:\n:ENDE_ROLE: assistant\n:END:\n"
-             "Keep this drawer.\n")
+             "Keep this drawer.\n"
+             "* Unrelated\nDo not parse this history.\n")
      (org-mode)
      (ende-test--chat-goto "** Question")
-     (let* ((document (ende-chat--build-document))
-            (question (ende-chat--headline-at-point document))
-            (target (current-buffer))
+     (let* ((target (current-buffer))
             (whole-transcript-parses 0)
             (scoped-target-parses 0)
             (parse-buffer (symbol-function 'org-element-parse-buffer)))
@@ -279,9 +278,72 @@
                           (cl-incf whole-transcript-parses)
                         (cl-incf scoped-target-parses)))
                     (apply parse-buffer arguments))))
-         (ende-chat--enqueue document question nil))
+         (ende-ask))
        (should (= whole-transcript-parses 0))
        (should (> scoped-target-parses 0))))))
+
+(ert-deftest ende-test/chat-ask-revalidates-scoped-source-and-configuration ()
+  (ende-test--reset)
+  (let ((ende--queue-suspended t)
+        (ende-llm-function (ende-test--fake-llm '(:stall) t)))
+    (ende-test--with-buffer
+     (concat (ende-test--chat-config-block
+              `((root ,temporary-file-directory) (tools project_info)
+                (resource files :type file (include "*.el"))
+                (resource internet :type url (include "https://example.com/*"))
+                (set-tool-resources search_project read_file :resources files)
+                (set-tool-resources web_fetch :resources internet)))
+             "* Unrelated\n:PROPERTIES:\n:ENDE_ROLE: assistant\n"
+             ":ENDE_VISIBILITY: hidden\n:END:\n"
+             (ende-test--chat-config-block
+              '((tools run_host_command) (restrict-host-commands :unrestricted)))
+             "* Active\n"
+             (ende-test--chat-config-block '((tools list_project_files)))
+             "** Old\nDiscarded history.\n"
+             "** Fence\n:PROPERTIES:\n:ENDE_CHAT_CONTEXT_FENCE: t\n:END:\n"
+             "Retained summary.\n"
+             "** Reasoning\n:PROPERTIES:\n:ENDE_VISIBILITY: reasoning\n:END:\n"
+             "Ancestor thought.\n*** Question\n"
+             (ende-test--chat-config-block '((tools file_info)))
+             "Original question.\n* Other\nUnrelated history.\n")
+     (org-mode)
+     (ende-test--chat-goto "*** Question")
+     (let* ((source (current-buffer))
+            (parse (symbol-function 'org-element-parse-buffer))
+            (body-parses 0)
+            (question-position (copy-marker (point) t))
+            job)
+       (cl-letf (((symbol-function 'org-element-parse-buffer)
+                  (lambda (&rest arguments)
+                    (when (and (eq source (current-buffer))
+                               (not (eq (car arguments) 'headline))
+                               (< (point-min) question-position)
+                               (> (point-max) question-position))
+                      (cl-incf body-parses))
+                    (apply parse arguments))))
+         (setq job (ende-ask)))
+       (set-marker question-position nil)
+       (should (= body-parses 0))
+       (dolist (edit '(("project_info" . "search_project")
+                       ("list_project_files" . "read_file")
+                       ("file_info" . "web_fetch")
+                       ("Original question." . "Edited question.")))
+         (goto-char (point-min))
+         (search-forward (car edit))
+         (replace-match (cdr edit) t t))
+       (setq ende--queue-suspended nil)
+       (ende-process-next)
+       (should (eq (ende-job-state job) 'running))
+       (let ((tools (plist-get (ende-job-access-policy job) :active-tools))
+             (context (ende-test--chat-context-text (cdar ende-test--prompts))))
+         (dolist (tool '(search_project read_file web_fetch))
+           (should (memq tool tools)))
+         (dolist (tool '(project_info list_project_files file_info run_host_command))
+           (should-not (memq tool tools)))
+         (dolist (text '("Edited question." "Retained summary." "Ancestor thought."))
+           (should (string-match-p (regexp-quote text) context)))
+         (should-not (string-match-p "Discarded history\\|Unrelated history\\|Original question" context)))
+       (ende-abort-queue)))))
 
 (ert-deftest ende-test/chat-completion-survives-unrelated-edit ()
   (ende-test--reset)

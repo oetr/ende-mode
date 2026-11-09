@@ -315,6 +315,38 @@ discarding superseded details. Be concise but self-contained."
   (ende-chat--build-document-from-tree
    (ende-chat--parse-complete-sections begin end)))
 
+(defun ende-chat--conversation-document (&optional outline)
+  "Parse the conversation at point, including document configuration.
+OUTLINE reads only headlines for enqueueing, without historical bodies."
+  (unless (ende-chat--org-buffer-p)
+    (user-error "Chat commands require an Org buffer"))
+  (save-excursion
+    (save-restriction
+      (widen)
+      (org-back-to-heading t)
+      (while (org-up-heading-safe))
+      (unless (= (org-outline-level) 1)
+        (user-error "Question must be under a level-one Org heading"))
+      (let* ((begin (point))
+             (end (save-excursion (org-end-of-subtree t t) (point)))
+             (tree (if outline
+                       (save-restriction
+                         (narrow-to-region begin end)
+                         (org-element-parse-buffer 'headline))
+                     (ende-chat--parse-complete-sections begin end))))
+        (unless outline
+          (goto-char (point-min))
+          (let ((preamble-end (if (re-search-forward org-outline-regexp-bol nil t)
+                                  (line-beginning-position)
+                                (point-max))))
+            (when (> preamble-end (point-min))
+              (let ((preamble (save-restriction
+                                (narrow-to-region (point-min) preamble-end)
+                                (org-element-parse-buffer 'element))))
+                (setq tree (apply #'org-element-adopt-elements
+                                  preamble (org-element-contents tree)))))))
+        (ende-chat--build-document-from-tree tree)))))
+
 (defun ende-chat--build-document-from-tree (tree)
   "Build a chat document from Org element TREE."
   (let ((headlines (org-element-map tree 'headline #'identity))
@@ -3872,7 +3904,15 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
          (save-excursion
            (save-restriction
              (widen)
-             (let* ((document (ende-chat--build-document))
+             (unless compact
+               (let ((resolved
+                      (ende-chat--resolve-question-marker
+                       buffer (plist-get instruction :question-marker) question-id)))
+                 (setq instruction (plist-put instruction :question-marker (nth 2 resolved)))
+                 (setf (ende-job-instruction job) instruction)
+                 (goto-char (org-element-property :begin (cadr resolved)))))
+             (let* ((document (if compact (ende-chat--build-document)
+                                (ende-chat--conversation-document)))
                     (question (ende-chat--find-by-property
                                document ende-chat-id-property question-id)))
                (unless question
@@ -4010,13 +4050,10 @@ COMPACT requests a context fence and archives the instruction section."
          (target nil)
          (overlay nil)
          (job nil)
-         (drawer-markers
-          (org-element-map
-           (ende-chat--document-tree document) 'property-drawer
-           (lambda (drawer)
-             (when (cl-every #'ende-chat--reserved-property-p
-                             (org-element-map drawer 'node-property #'identity))
-               (copy-marker (org-element-property :begin drawer))))))
+         (heading-markers
+          (mapcar (lambda (headline)
+                    (copy-marker (org-element-property :begin headline) t))
+                  (ende-chat--document-headlines document)))
          (committed nil))
     (unwind-protect
         (progn
@@ -4060,19 +4097,13 @@ COMPACT requests a context fence and archives the instruction section."
                                    :response-level response-level)))))))
           (setq committed t)
           (save-excursion
-            (dolist (marker drawer-markers)
-              (goto-char marker)
-              (org-fold-hide-drawer-toggle t t))
-            (ende-chat--hide-control-drawers-at-heading
-             (org-element-property :begin root))
-            (goto-char question-marker)
-            (org-back-to-heading t)
-            (ende-chat--hide-control-drawers-at-heading (point))
+            (dolist (marker heading-markers)
+              (ende-chat--hide-control-drawers-at-heading marker))
             (ende-chat--hide-control-drawers-at-heading position))
           (ende-process-next)
           (message "ende: queued %s request %d" type (ende-job-id job))
           job)
-      (mapc (lambda (marker) (set-marker marker nil)) drawer-markers)
+      (mapc (lambda (marker) (set-marker marker nil)) heading-markers)
       (unless committed
         (when overlay (ende-ui-delete-overlay overlay))
         (when target (ende-target-release target))
@@ -4085,7 +4116,7 @@ asking; reasoning context is included when the question is inside a reasoning
 subtree.  Context is serialized when the job starts.
 The progress tool `about_thinking' is always available, even without configured
 project tools.  Agent chat requires an interactive, tool-capable transport."
-  (let* ((document (ende-chat--build-document))
+  (let* ((document (ende-chat--conversation-document t))
          (question (ende-chat--headline-at-point document)))
     (ende-chat--enqueue document question profile)))
 
