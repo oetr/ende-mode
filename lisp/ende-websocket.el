@@ -755,7 +755,8 @@ Completion is asynchronous and bounded by the closing timeout."
 
 (defun ende-websocket--capacity (connection size)
   (unless (eq (ende-websocket-state connection) 'open) (error "WebSocket is not open"))
-  (when (> size (ende-websocket--limit connection :write-message-bytes))
+  (when (> size (min (ende-websocket--limit connection :write-message-bytes)
+                     (ende-websocket--limit connection :output-bytes)))
     (signal 'ende-websocket-too-large nil))
   (when (or (> (+ (ende-websocket--connection-output-bytes connection) size)
                (ende-websocket--limit connection :output-bytes))
