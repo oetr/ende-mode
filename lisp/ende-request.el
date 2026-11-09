@@ -45,7 +45,8 @@
   "Release RETAINED's source only after its owner and worker readers leave."
   (when (and (not (ende-request-retained-owner retained))
              (zerop (ende-request-retained-readers retained)))
-    (when-let* ((file (plist-get (ende-request-retained-source retained) :full-file)))
+    (when-let* ((source (ende-request-retained-source retained))
+                (file (or (plist-get source :full-file) (plist-get source :file))))
       (ende-ignore-errors #'delete-file file))
     (setf (ende-request-retained-source retained) nil
           (ende-request-retained-debug-origin retained) nil)))
@@ -109,14 +110,29 @@ Return the outgoing bytes, encoded body, and optional capture record."
                     nil full-file nil 'silent))
     (when finalization (setq data (plist-get data :data)))
     (write-region data nil file nil 'silent)
-    (list :body (list (assq :tools body))
+    (list :bytes (length data) :body (list (assq :tools body))
           :debug-preparation origin
           :debug-record record)))
+
+(defconst ende-request--worker-threshold (* 64 1024))
+
+(defun ende-request--worker-p (messages)
+  "Return non-nil when MESSAGES warrant asynchronous preparation."
+  (let ((bytes 0))
+    (cl-some
+     (lambda (message)
+       (let ((content (ende-content-body message)))
+         (if (stringp content)
+             (> (cl-incf bytes (string-bytes content)) ende-request--worker-threshold)
+           (cl-some (lambda (part)
+                      (or (eq (plist-get part :type) :image)
+                          (> (cl-incf bytes (string-bytes (or (plist-get part :text) "")))
+                             ende-request--worker-threshold))) content)))) messages)))
 
 (defun ende-request-prepare (lifecycle library builder messages profile debug callback
                                      &optional finalization file-backed retained baseline current-p)
   "Prepare MESSAGES for PROFILE and call CALLBACK with data, body and record.
-Image-bearing requests use a worker and a file owned by LIFECYCLE.
+Image-bearing and large requests use a worker and a file owned by LIFECYCLE.
 DEBUG contains transport, endpoint, and optional OAuth account continuity.
 FINALIZATION is (FUNCTION . ARGUMENTS), containing only serializable data.
 It converts the complete logical body to the actual captured wire request.
@@ -135,13 +151,9 @@ Only source descriptors and serializable finalization data enter the worker."
                            profile (car debug) (cadr debug) (nth 2 debug)
                            (memq builder '(ende-responses--request-body ende-codex--request-body))))))
          (counter (if replay (plist-get origin :counter) ende-debug--sequence-context))
-         (images (and (not retained) (cl-some (lambda (message)
-                            (let ((content (ende-content-body message)))
-                              (and (listp content)
-                                   (cl-some (lambda (part) (eq (plist-get part :type) :image)) content))))
-                          messages)))
+         (worker (and (not retained) (ende-request--worker-p messages)))
          release-baseline)
-    (if (not (or images file-backed))
+    (if (not (or worker file-backed))
         (unwind-protect
             (progn
               (setq release-baseline (ende-request-retained-read baseline))
@@ -159,7 +171,7 @@ Only source descriptors and serializable finalization data enter the worker."
                   (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
                 (funcall callback data body record))))
           (when release-baseline (funcall release-baseline)))
-      (let* (file full-file release-source
+      (let* (file wire full-file release-wire release-source
              (bindings (list (cons 'ende-debugging-enabled (and debug t))
                              (cons 'ende-debug--session-directory (plist-get preparation :directory))
                              (cons 'ende-debug--sequence (or (plist-get preparation :sequence) 0))))
@@ -170,36 +182,44 @@ Only source descriptors and serializable finalization data enter the worker."
                ;; The worker has stopped before any file protection is released.
                (unless finished
                  (setq finished t)
+                 (when release-wire (funcall release-wire))
                  (when release-source (funcall release-source))
                  (when release-baseline (funcall release-baseline))
                  (if (or (ende-transport-session-terminal lifecycle)
                          (and current-p (not (funcall current-p))))
                      (progn
-                       (ende-ignore-errors #'delete-file file)
+                       (ende-request-retained-release wire lifecycle)
+                       (unless replay (ende-request-retained-release retained lifecycle))
                        (ende-ignore-errors #'ende-debug-record-completion
                                            (plist-get result :debug-record) 'discarded nil nil nil))
                    (condition-case nil
                        (if error
-                           (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed"))
+                           (progn
+                             (ende-request-retained-release wire lifecycle)
+                             (unless replay (ende-request-retained-release retained lifecycle))
+                             (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed")))
                          (progn
                            (when (and retained debug (not replay))
                              (setf (ende-request-retained-debug-origin retained)
                                    (list :debug debug :preparation (plist-get result :debug-preparation) :counter counter)))
                            (funcall callback
                                   (if finalization
-                                      (append (list :file file :retained retained)
+                                      (append (list :file file :bytes (plist-get result :bytes)
+                                                    :wire-source wire :retained retained)
                                               (ende-request-retained-source retained))
-                                    (list :file file))
+                                    (list :file file :bytes (plist-get result :bytes) :wire-source wire))
                                   (plist-get result :body) (plist-get result :debug-record))))
                      ((error quit)
                       (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed"))))))))
           (ende-transport-session-add-canceller
            lifecycle (lambda ()
                        (when cancel (funcall cancel))
-                       (when finished (ende-ignore-errors #'delete-file file))))
+                       (when finished (ende-request-retained-release wire lifecycle))))
           (condition-case nil
               (progn
                 (setq file (make-temp-file (expand-file-name "ende-request-" (ende-curl-local-directory))))
+                (setq wire (ende-request--retain (list :file file) lifecycle)
+                      release-wire (ende-request-retained-read wire))
                 (when (and finalization (not retained))
                   (setq full-file (make-temp-file (expand-file-name "ende-request-full-" (ende-curl-local-directory)))
                         retained (ende-request--retain (list :full-file full-file) lifecycle)))

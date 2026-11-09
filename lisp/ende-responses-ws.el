@@ -329,6 +329,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   "Publish immutable DATA even if initial wire preparation was superseded."
   (if (ende-responses-ws--preparation-live-p request attempt)
       (ende-responses-ws-send-prepared request attempt generation data body record)
+    (ende-request-retained-release (plist-get data :wire-source)
+                                   (ende-responses-ws-request-lifecycle request))
     (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
     (when (ende-responses-ws--live-p request)
       (setf (ende-responses-ws-request-logical-request request) (plist-get data :retained))
@@ -380,21 +382,25 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
            (socket (ende-responses-ws-connection-socket connection)))
       (condition-case nil
           (let* ((data (ende-responses-ws-request-payload request))
-                 (bytes (if-let* ((file (plist-get data :file)))
-                            (with-temp-buffer
-                              (set-buffer-multibyte nil)
-                              (insert-file-contents-literally file)
-                              (buffer-string))
-                          (plist-get data :data))))
+                 (file (plist-get data :file))
+                 (size (ende-responses-ws--payload-size data)))
             (when (ende-responses-ws--attempt-live-p request attempt socket)
               ;; A successful offer does not prove transmission.  Never replay
               ;; after this boundary without an explicit provider rejection.
-              (if (> (length bytes) (ende-responses-ws-connection-message-limit connection))
+              (if (> size (ende-responses-ws-connection-message-limit connection))
                   ;; A larger follow-up needs a fresh bounded transport and
                   ;; full preparation, without a retired previous_response_id.
                   (ende-responses-ws--retry request 'unsent-replacement)
                 (setf (ende-responses-ws-request-delivery request) 'sending)
-                (ende-websocket-send-text-bytes socket bytes)
+                (if (not file) (ende-websocket-send-text-bytes socket (plist-get data :data))
+                  (let* ((source (plist-get data :wire-source))
+                         (release (ende-request-retained-read source)))
+                    (unwind-protect
+                        (progn
+                          (ende-websocket-send-text-file socket file release)
+                          (setq release nil)
+                          (ende-request-retained-release source (ende-responses-ws-request-lifecycle request)))
+                      (when release (funcall release)))))
                 (when (ende-responses-ws--attempt-live-p request attempt socket)
                   (setf (ende-responses-ws-request-payload request) nil
                         (ende-responses-ws-request-delivery request) 'accepted)
@@ -406,6 +412,19 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         ((error quit)
          (when (ende-responses-ws--preparation-live-p request attempt)
            (ende-responses-ws--fail request 'transport "Responses request submission failed")))))))
+
+(defun ende-responses-ws--payload-size (data)
+  "Return prepared DATA's byte count without reading its payload."
+  (or (plist-get data :bytes)
+      (if-let* ((file (plist-get data :file)))
+          (file-attribute-size (file-attributes file))
+        (length (plist-get data :data)))))
+
+(defun ende-responses-ws--release-payload (request)
+  "Release REQUEST's unaccepted wire source before retiring an attempt."
+  (ende-request-retained-release
+   (plist-get (ende-responses-ws-request-payload request) :wire-source)
+   (ende-responses-ws-request-lifecycle request)))
 
 (defun ende-responses-ws--refinalize (request)
   "Prepare a fresh wire attempt from REQUEST's unchanged logical source."
@@ -459,6 +478,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
        "Responses automatic reconnection exhausted; completed work was preserved"))
      ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement))
       (let ((connection (ende-responses-ws-request-connection request)))
+        (ende-responses-ws--release-payload request)
         (cl-incf (ende-responses-ws-request-retries request))
         (cl-incf (ende-responses-ws-request-attempt request))
         (dolist (timer (list (ende-responses-ws-request-connect-timer request)
@@ -589,9 +609,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   "Start CONNECTION through the public asynchronous WebSocket API."
   (let* ((request (ende-responses-ws-connection-active connection))
          (data (ende-responses-ws-request-payload request))
-         (size (if-let* ((file (plist-get data :file)))
-                   (file-attribute-size (file-attributes file))
-                 (length (plist-get data :data))))
+         (size (ende-responses-ws--payload-size data))
          ;; The transport's message bound covers both directions.  Keep room
          ;; for the prepared request, and enforce the event bound on receipt.
          (message-limit (max 1 size (or (ende-responses-ws-request-event-limit request)
@@ -636,7 +654,10 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
 (defun ende-responses-ws-send-prepared (request attempt generation data body record)
   "Open or reuse REQUEST's socket and send prepared DATA, BODY and RECORD."
   (if (not (ende-responses-ws--preparation-live-p request attempt))
-      (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+      (progn
+        (ende-request-retained-release (plist-get data :wire-source)
+                                       (ende-responses-ws-request-lifecycle request))
+        (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil))
     (condition-case nil
         (let ((connection (ende-responses-ws-request-connection request)))
           (setf (ende-responses-ws-request-prepared-generation request) generation
