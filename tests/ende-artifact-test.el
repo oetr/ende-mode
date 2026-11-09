@@ -452,6 +452,15 @@
           (should (equal (car data) "image/png"))
           (should (eq (image-type-from-data (cdr data)) 'png)))))))
 
+(ert-deftest ende-artifact-generated-svg-exclusions ()
+  (let* ((literal (concat "#+begin_example\n" ende-artifact-test-svg "\n#+end_example\n"
+                          "~literal\n" ende-artifact-test-svg "\nend~\n"
+                          "=literal\n" ende-artifact-test-svg "\nend=\n"))
+         (text (concat literal ende-artifact-test-svg "\n")))
+    (should (equal (ende-artifact--references text t)
+                   (list (list :part nil :begin (1+ (length literal))
+                               :end (1+ (length text)) :svg ende-artifact-test-svg))))))
+
 (ert-deftest ende-artifact-cache-reuse-and-invalidation ()
   (ende-artifact-test-with-files
     (let* ((base (ende-artifact-base))
