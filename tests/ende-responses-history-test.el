@@ -37,7 +37,8 @@
   (ende-protocol-json-read-string text))
 
 (ert-deftest ende-responses-history-ordered-tool-rounds ()
-  (let ((messages nil))
+  (let ((messages nil)
+        (ende-responses-max-output-items 2))
     (dotimes (round 3)
       (let* ((id (format "call-%d" round))
              (reasoning (ende-responses-history-test--json
@@ -48,6 +49,7 @@
         ;; Completion can repeat earlier done events and arrive out of order.
         (ende-codex--remember-output session call 1)
         (ende-codex--remember-output session reasoning 0)
+        (puthash "arguments" "{\"updated\":true}" call)
         (ende-codex--remember-output session call 1)
         (let ((history (ende-codex--protocol-items session)))
           (should (equal (json-encode (vconcat (cdr history)))
@@ -74,6 +76,28 @@
           (should (equal (ende-protocol-json-get "call_id" call)
                          (alist-get :call_id result)))
           (should (equal (alist-get :call_id result) (format "call-%d" round))))))))
+
+(ert-deftest ende-responses-history-output-item-bound ()
+  (dolist (snapshot '(nil t))
+    (let* ((ende-responses-max-output-items 1)
+           failure keys
+           (session (ende-codex--make-session
+                     :callbacks (list :on-error (lambda (error) (setq failure error))
+                                      :on-event (lambda (event)
+                                                  (when (eq (plist-get event :type) :item)
+                                                    (push (plist-get event :key) keys))))))
+           (item (ende-responses-history-test--json
+                  "{\"type\":\"message\",\"content\":[]}")))
+      (if snapshot
+          (ende-codex--handle-event
+           session (ende-responses-history-test--json
+                    "{\"type\":\"response.completed\",\"response\":{\"output\":[{},{}]}}"))
+        (ende-codex--observe-output session item 3)
+        (ende-codex--observe-output session item 7))
+      (should (eq (ende-error-kind failure) 'resource))
+      (should (equal keys (unless snapshot '(3))))
+      (should (equal (mapcar #'car (ende-codex--ordered-output session)) keys))
+      (should-not (ende-codex--session-terminal-event session)))))
 
 (ert-deftest ende-responses-history-completed-message-and-phase ()
   (let* ((output (ende-responses-history-test--json

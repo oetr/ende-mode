@@ -977,8 +977,10 @@ explicit efforts yields no choices instead of an error."
 
 (defun ende-codex--ordered-output (session)
   "Return SESSION's replay entries in output-index order."
-  (sort (copy-sequence (ende-codex--session-replay-items session))
-        (lambda (a b) (< (car a) (car b)))))
+  (let (items)
+    (when-let* ((table (ende-codex--session-replay-items session)))
+      (maphash (lambda (index item) (push (cons index item) items)) table))
+    (sort items (lambda (a b) (< (car a) (car b))))))
 
 (defun ende-codex--protocol-items (session)
   "Return provider items in SESSION's wire order."
@@ -991,7 +993,12 @@ explicit efforts yields no choices instead of an error."
              (not (equal (ende-protocol-json-get "type" item)
                          "image_generation_call")))
     (let* ((type (ende-protocol-json-get "type" item))
-           (field (pcase type ("message" "content") ("reasoning" "summary"))))
+           (field (pcase type ("message" "content") ("reasoning" "summary")))
+           (table (ende-codex--session-replay-items session))
+           (failure (ende-protocol-output-items-error
+                     (+ (if table (hash-table-count table) 0)
+                        (if (and table (gethash index table)) 0 1)))))
+      (when failure (ende-codex--fail session failure))
       (when (and (not (ende-codex--terminal-p session))
                  (or (null field)
                      (ende-stream-account-output
@@ -1001,8 +1008,10 @@ explicit efforts yields no choices instead of an error."
                                            (ende-protocol-json-get field item))
                                sum (length (ende-protocol-json-get "text" part)))
                       (apply-partially #'ende-codex--fail session) t)))
-        (setf (alist-get index (ende-codex--session-replay-items session))
-              (ende-provider-config-copy item))))))
+        (unless table
+          (setq table (make-hash-table :test #'eql))
+          (setf (ende-codex--session-replay-items session) table))
+        (puthash index (ende-provider-config-copy item) table)))))
 
 (defun ende-codex--result (session)
   "Build a normalized result plist for SESSION."
@@ -1118,7 +1127,7 @@ explicit efforts yields no choices instead of an error."
 
 (defun ende-codex--observe-output (session item index)
   "Record and emit provider ITEM at output INDEX for SESSION."
-  (when (ende-codex--remember-output session item index)
+  (when-let* ((accepted (ende-codex--remember-output session item index)))
     (let* ((type (ende-protocol-json-get "type" item))
            (call (ende-codex--collect-tool-call-item session item index))
            (text (when (equal type "message")
@@ -1131,7 +1140,7 @@ explicit efforts yields no choices instead of an error."
              (cond (call 'tool-call) ((equal type "message") 'text) (t 'opaque))
              "openai-responses"
              (append
-              (list :item (alist-get index (ende-codex--session-replay-items session)))
+              (list :item accepted)
               (when call (list :call (ende-codex--tool-call-snapshot call)))
               (when text (list :text text)))))))
 
@@ -1217,6 +1226,10 @@ When APPEND is non-nil, append the argument delta to the stored value."
             (unless (and (eq stream (ende-codex--session-stream session))
                          (not (ende-codex--terminal-p session)))
               (cl-return-from ende-codex--handle-event nil)))))
+    (when-let* ((failure (and (sequencep output)
+                             (ende-protocol-output-items-error (length output)))))
+      (ende-codex--fail session failure)
+      (cl-return-from ende-codex--handle-event nil))
     (ende-ignore-errors
      #'ende-debug-record-response (ende-codex--session-debug-record session) response
      (member type '("response.completed" "response.done")))

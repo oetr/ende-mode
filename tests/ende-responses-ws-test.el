@@ -128,6 +128,20 @@
               (apply (timer--function initial) (timer--args initial))
               (should (= (length errors) 1)))))))))
 
+(ert-deftest ende-responses-ws-output-bound-precedes-validation ()
+  (ende-responses-ws-test--with-server
+    (let ((ende-responses-max-output-items 1) failure result)
+      (ende-llm-default
+       '(("user" . "Hello"))
+       (list :on-done (lambda (value) (setq result value))
+             :on-error (lambda (value) (setq failure value)))
+       (ende-responses-ws-test--profile))
+      (ende-test--wait-for (lambda () wires))
+      (ende-responses-ws-test--complete (car sockets) nil "[{},{}]")
+      (ende-test--wait-for (lambda () (or result failure)))
+      (should-not result)
+      (should (eq (ende-error-kind failure) 'resource)))))
+
 (ert-deftest ende-responses-ws-response-event-ownership ()
   (let ((request (make-ende-responses-ws-request)))
     (cl-flet ((event (text)

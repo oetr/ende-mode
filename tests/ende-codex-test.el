@@ -122,7 +122,7 @@
       (should (= (ende-stream-session-estimated-chars stream) 2))
       (should (equal (ende-protocol-json-get
                       "text" (aref (ende-protocol-json-get
-                                    "content" (alist-get 0 (ende-codex--session-replay-items session))) 0))
+                                    "content" (gethash 0 (ende-codex--session-replay-items session))) 0))
                      "ab")))))
 
 (ert-deftest ende-codex-account-isolation-and-refresh ()

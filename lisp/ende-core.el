@@ -129,6 +129,14 @@ The default is deliberately generous.  Set it to nil to disable the breaker."
                  (integer :tag "Maximum characters"))
   :group 'ende)
 
+(defcustom ende-responses-max-output-items 1024
+  "Maximum items in a Responses output snapshot or retained replay.
+This also bounds empty items, which consume no output-character budget.
+Set it to nil to disable the breaker."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum items"))
+  :group 'ende)
+
 (defcustom ende-max-response-header-bytes (* 1 1024 1024)
   "Maximum response-header bytes parsed from curl's header output.
 
@@ -246,6 +254,7 @@ Unknown counts are nil.  Total is derived from input and output when absent."
                  (cons 'ende-max-response-bytes ende-max-response-bytes)
                  (cons 'ende-max-sse-event-bytes ende-max-sse-event-bytes)
                  (cons 'ende-max-output-chars ende-max-output-chars)
+                 (cons 'ende-responses-max-output-items ende-responses-max-output-items)
                  (cons 'ende-max-response-header-bytes
                        ende-max-response-header-bytes)
                  (cons 'ende-max-error-body-bytes

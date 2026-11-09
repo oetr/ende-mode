@@ -652,7 +652,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (unless (= (length output) (hash-table-count (ende-responses-ws-request-items-by-index request)))
           (error "Responses snapshot omits known output items"))))))
 
-(defun ende-responses-ws--message (connection socket message-type text)
+(cl-defun ende-responses-ws--message (connection socket message-type text)
   "Consume a complete decoded event from CONNECTION's current SOCKET."
   (when (and (ende-responses-ws--eligible-p connection)
              (eq socket (ende-responses-ws-connection-socket connection)))
@@ -677,6 +677,11 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                          (type (ende-protocol-json-get "type" json)))
                     (cl-incf (ende-responses-ws-request-messages request))
                     (unless (stringp type) (error "Missing Responses event type"))
+                    (when-let* ((output (ende-protocol-json-get
+                                        "output" (ende-protocol-json-get "response" json)))
+                                (failure (ende-protocol-output-items-error (length output))))
+                      (ende-responses-ws--fail request 'resource (ende-error-message failure))
+                      (cl-return-from ende-responses-ws--message nil))
                     (when (memq (intern-soft type)
                                 '(response.created response.in_progress response.completed response.done
                                   response.incomplete response.failed error response.output_text.delta

@@ -33,6 +33,14 @@
 (require 'subr-x)
 (require 'ende-core)
 
+(defun ende-protocol-output-items-error (count)
+  "Return a resource error if Responses output COUNT exceeds its limit."
+  (when (and ende-responses-max-output-items
+             (> count ende-responses-max-output-items))
+    (ende-error-create
+     :kind 'resource
+     :message "Responses output exceeds ende-responses-max-output-items")))
+
 ;;;; Reasoning parser
 
 (cl-defstruct (ende-protocol--reasoning
