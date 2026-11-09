@@ -105,6 +105,21 @@
 				(should (string= (buffer-string) "base generated\ntyped\n"))
 				(should (ende-review-overlay-p review)))))))
 
+(ert-deftest ende-test/review-overlap-boundaries-ignore-unrelated-and-empty-overlays ()
+  (with-temp-buffer
+    (insert "0123456789")
+    (ende-review-create-overlay (current-buffer) 1 3)
+    (ende-review-create-overlay (current-buffer) 3 5)
+    (ende-review-create-overlay (current-buffer) 6 6)
+    (make-overlay 1 11)
+    (narrow-to-region 1 2)
+    (dolist (case '((1 1 1) (1 3 1) (3 3 1) (3 5 1) (1 5 2)
+                    (5 5 0) (5 7 0) (6 6 0) (7 11 0) (11 11 0)))
+      (pcase-let ((`(,start ,end ,count) case))
+        (should (= (length (ende-review--overlays-overlapping
+                            (current-buffer) start end))
+                   count))))))
+
 (ert-deftest ende-test/task-cannot-start-inside-pending-review ()
   (ende-test--reset)
   (let ((ende-review-conflict-policy 'block))

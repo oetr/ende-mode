@@ -258,10 +258,15 @@ is that face's background shifted `ende-review-highlight-blend' toward FG."
 (defun ende-review--overlays-overlapping (buffer start end)
   "Return pending reviews in BUFFER intersecting START..END."
   (with-current-buffer buffer
-    (cl-remove-if-not
-     (lambda (overlay)
-       (ende-review--overlay-overlaps-p overlay start end))
-     (ende-review--overlays-in-buffer))))
+    (save-restriction
+      (widen)
+      (cl-remove-if-not
+       (lambda (overlay)
+         (and (ende-review-overlay-p overlay)
+              (ende-review--overlay-overlaps-p overlay start end)))
+       (if (= start end)
+           (overlays-at start)
+         (overlays-in start end))))))
 
 (defun ende-review-overlaps-p (buffer start end)
   "Return non-nil when START..END in BUFFER intersects pending output.
