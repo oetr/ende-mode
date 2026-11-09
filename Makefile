@@ -58,7 +58,7 @@ define INDENT_FILES
   (format "Indented %d files" (length files)))
 endef
 
-.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run format clean benchmark-search benchmark-search-quick benchmark-chat benchmark-chat-startup
+.PHONY: check check-docs check-package check-melpa lint syntax compile test test-fast test-verbose test-compiled test-run test-autobahn format clean benchmark-search benchmark-search-quick benchmark-chat benchmark-chat-startup
 
 # Explicit sequencing also keeps "make -j check" safe.
 check:
@@ -109,6 +109,10 @@ test:
 
 test-fast:
 	@$(MAKE) --no-print-directory test TEST_SELECTOR='(not (tag integration))'
+
+test-autobahn:
+	$(EMACS) -Q --batch -L lisp -l tests/ende-websocket-autobahn.el \
+		-f ende-websocket-autobahn-run
 
 test-verbose:
 	@$(MAKE) --no-print-directory clean >/dev/null
