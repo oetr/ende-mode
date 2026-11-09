@@ -33,6 +33,46 @@
 (require 'ende-protocol)
 (require 'ende-transport)
 
+(cl-defstruct (ende-stream-text (:constructor ende-stream-text-create))
+  "Append-only text, materialized only at an explicit consumption boundary."
+  parts tail (length 0))
+
+(defun ende-stream-text-append (text fragment)
+  "Append a detached FRAGMENT to TEXT without copying its existing prefix."
+  (when (and (stringp fragment) (> (length fragment) 0))
+    (let ((cell (list (copy-sequence fragment))))
+      (if (ende-stream-text-tail text)
+          (setcdr (ende-stream-text-tail text) cell)
+        (setf (ende-stream-text-parts text) cell))
+      (setf (ende-stream-text-tail text) cell)
+      (cl-incf (ende-stream-text-length text) (length fragment))))
+  text)
+
+(defun ende-stream-text-substring (text start &optional end)
+  "Return detached TEXT between START and END, without joining other text."
+  (let* ((length (ende-stream-text-length text))
+         (end (or end length))
+         (offset 0) parts)
+    (unless (<= 0 start end length)
+      (signal 'args-out-of-range (list start end length)))
+    (let ((remaining (ende-stream-text-parts text)))
+      (while (and remaining (< offset end))
+        (let* ((part (pop remaining))
+               (next (+ offset (length part))))
+          (when (> next start)
+            (push (substring part (max 0 (- start offset))
+                             (min (length part) (- end offset))) parts))
+          (setq offset next))))
+    (mapconcat #'identity (nreverse parts) "")))
+
+(defun ende-stream-text-string (text)
+  "Return a detached snapshot of TEXT."
+  (mapconcat #'identity (ende-stream-text-parts text) ""))
+
+(defun ende-stream-text-prefix (text limit)
+  "Return at most LIMIT characters of TEXT without joining its remainder."
+  (ende-stream-text-substring text 0 (min limit (ende-stream-text-length text))))
+
 (cl-defstruct (ende-stream-session
                (:constructor ende-stream--make-session))
   "Protocol-independent state for one SSE response stream."

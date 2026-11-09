@@ -32,13 +32,55 @@
 (require 'subr-x)
 (require 'ende-core)
 (require 'ende-protocol)
+(require 'ende-stream)
 
 (cl-defstruct (ende-transcript (:constructor ende-transcript-create))
   task entries tail (next-id 0) (round 0) response terminal metadata usage
   (sources (make-hash-table :test #'equal)))
 
 (cl-defstruct (ende-transcript-entry (:constructor ende-transcript--entry))
-  id kind round response-id content status data)
+  id kind round response-id text status data thinking)
+
+(defun ende-transcript-entry-content (entry)
+  "Return ENTRY's detached full text snapshot."
+  (let ((text (ende-transcript-entry-text entry)))
+    (if (ende-stream-text-p text) (ende-stream-text-string text)
+      (and text (copy-sequence text)))))
+
+(gv-define-setter ende-transcript-entry-content (value entry)
+  `(setf (ende-transcript-entry-text ,entry)
+         (let ((text ,value)) (and text (copy-sequence text)))))
+
+(defun ende-transcript-entry-length (entry)
+  "Return ENTRY's text length without materializing it."
+  (let ((text (ende-transcript-entry-text entry)))
+    (if (ende-stream-text-p text) (ende-stream-text-length text) (length text))))
+
+(defun ende-transcript-entry-substring (entry start &optional end)
+  "Return detached ENTRY text between START and END."
+  (let ((text (ende-transcript-entry-text entry)))
+    (if (ende-stream-text-p text) (ende-stream-text-substring text start end)
+      (substring (or text "") start end))))
+
+(defun ende-transcript-entry-prefix (entry limit)
+  "Return at most LIMIT characters of ENTRY without materializing its tail."
+  (ende-transcript-entry-substring entry 0 (min limit (ende-transcript-entry-length entry))))
+
+(defun ende-transcript--append-text (entry text)
+  "Append TEXT to ENTRY's authoritative fragments."
+  (unless (ende-stream-text-p (ende-transcript-entry-text entry))
+    (setf (ende-transcript-entry-text entry)
+          (ende-stream-text-append (ende-stream-text-create)
+                                   (ende-transcript-entry-text entry))))
+  (ende-stream-text-append (ende-transcript-entry-text entry) text))
+
+(defun ende-transcript--flush-thinking (entry)
+  "Publish ENTRY's aggregate reasoning at a response consumption boundary."
+  (when-let* ((thinking (ende-transcript-entry-thinking entry)))
+    (setf (ende-transcript-entry-data entry)
+          (plist-put (ende-transcript-entry-data entry) :thinking
+                     (ende-stream-text-string thinking))
+          (ende-transcript-entry-thinking entry) nil)))
 
 (defvar ende-transcript-change-functions nil
   "Presentation observers called with TRANSCRIPT, ENTRY, and CHANGE.
@@ -57,7 +99,7 @@ content change; `metadata' changes only status, headings, or attribution."
   "Allocate an unattached KIND entry in TRANSCRIPT."
   (ende-transcript--entry :id (cl-incf (ende-transcript-next-id transcript))
                           :kind kind :round (ende-transcript-round transcript)
-                          :content content :data data :status status))
+                          :text (and content (copy-sequence content)) :data data :status status))
 
 (defun ende-transcript-append (transcript kind &optional content data status)
   "Record a KIND entry in TRANSCRIPT and return it."
@@ -78,6 +120,7 @@ content change; `metadata' changes only status, headings, or attribution."
   "Retain unfinished entries in TRANSCRIPT as interrupted."
   (when-let* ((response (ende-transcript-response transcript)))
     (when (eq (ende-transcript-entry-status response) 'streaming)
+      (ende-transcript--flush-thinking response)
       (setf (ende-transcript-entry-status response) 'interrupted)
       (maphash (lambda (_key entry)
                  (when (eq (ende-transcript-entry-status entry) 'streaming)
@@ -163,8 +206,8 @@ replacing it; STATUS defaults to streaming."
       (unless entry
         (setq entry (ende-transcript-new-entry transcript kind)))
       (when (stringp text)
-        (setf (ende-transcript-entry-content entry)
-              (if append (concat (ende-transcript-entry-content entry) text) text)))
+        (if append (ende-transcript--append-text entry text)
+          (setf (ende-transcript-entry-content entry) text)))
       (setf (ende-transcript-entry-data entry)
             (ende-plist-merge (ende-transcript-entry-data entry) event)
             (ende-transcript-entry-status entry) (or status 'streaming))
@@ -243,6 +286,7 @@ one final reply; accepting the current response again does not duplicate it."
                     (ende-transcript-append transcript 'response "" '(:synthetic t) 'streaming)
                   (ende-transcript--response transcript))))
     (when (eq (ende-transcript-entry-status entry) 'streaming)
+      (ende-transcript--flush-thinking entry)
       (let ((items (if (plist-member data :items) (plist-get data :items)
                      (ende-transcript-items transcript result calls synthetic))))
         (setf (ende-transcript-entry-content entry) (or (plist-get result :content) "")
@@ -345,6 +389,7 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
      (let* ((entry (ende-transcript--response transcript))
             (result (plist-get event :result)))
        (when (eq (ende-transcript-entry-status entry) 'streaming)
+         (ende-transcript--flush-thinking entry)
          (ende-transcript-items transcript result (plist-get result :tool-calls) nil t)
          (setf (ende-transcript-entry-data entry)
                (plist-put (ende-transcript-entry-data entry) :partial-result result))
@@ -364,11 +409,13 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
             (list :type (if (eq (plist-get event :channel) :thinking) 'thinking 'text)
                   :key (or (plist-get event :item-key) (plist-get event :channel)) :text text) t)
            (if (eq (plist-get event :channel) :thinking)
-               (setf (ende-transcript-entry-data entry)
-                     (plist-put (ende-transcript-entry-data entry) :thinking
-                                (concat (plist-get (ende-transcript-entry-data entry) :thinking) text)))
-             (setf (ende-transcript-entry-content entry)
-                   (concat (ende-transcript-entry-content entry) text)))))))
+               (ende-stream-text-append
+                (or (ende-transcript-entry-thinking entry)
+                    (setf (ende-transcript-entry-thinking entry)
+                          (ende-stream-text-append
+                           (ende-stream-text-create)
+                           (plist-get (ende-transcript-entry-data entry) :thinking)))) text)
+             (ende-transcript--append-text entry text))))))
     (:item
      (let ((response (ende-transcript--response transcript))
            (observation (plist-put (copy-sequence event) :type (plist-get event :kind))))
@@ -396,9 +443,9 @@ Only an explicit outer JSON boolean `ok' determines success or failure."
        (when (plist-member event :item-key)
          (setf (ende-transcript-entry-data entry)
                (plist-put (ende-transcript-entry-data entry) :item-key (plist-get event :item-key))))
-       (setf (ende-transcript-entry-content entry)
-             (if (plist-get event :replace) (plist-get event :text)
-               (concat (ende-transcript-entry-content entry) (plist-get event :text))))
+       (if (plist-get event :replace)
+           (setf (ende-transcript-entry-content entry) (plist-get event :text))
+         (ende-transcript--append-text entry (plist-get event :text)))
        (ende-transcript-notify transcript entry (if (plist-get event :replace) 'replace 'append))))
     (:agent-activity
      (ende-transcript-append transcript 'progress (plist-get event :status)
