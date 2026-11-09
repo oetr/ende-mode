@@ -1260,18 +1260,28 @@
 (ert-deftest ende-test/synchronous-failure-backlog-is-iterative ()
   (ende-test--reset)
   (ende-test--with-buffer "base"
-			  (let ((ende--queue-suspended t)
-				(max-lisp-eval-depth 100))
-			    (dotimes (_ 500)
-			      (ende-enqueue
-			       (list 'unknown
-				     :target (ende-target-create
-					      :buffer (current-buffer) :start 1 :end 1 :cursor 1))))
-			    (setq ende--queue-suspended nil)
-			    (cl-letf (((symbol-function 'message) #'ignore))
-			      (ende-process-next))
-			    (should-not (ende-running-jobs))
-			    (should-not ende-queue))))
+    (let ((ende--queue-suspended t)
+          (max-lisp-eval-depth 100)
+          heartbeat timer)
+      (unwind-protect
+          (progn
+            (dotimes (_ 40)
+              (ende-enqueue
+               (list 'unknown
+                     :target (ende-target-create
+                              :buffer (current-buffer) :start 1 :end 1 :cursor 1))))
+            (setq ende--queue-suspended nil
+                  timer (run-at-time 0 nil
+                                     (lambda ()
+                                       (setq heartbeat (length (ende-queued-jobs))))))
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (ende-process-next)
+              (should ende-queue)
+              (ende-test--wait-for (lambda () (not ende-queue))))
+            (should (> heartbeat 0))
+            (should-not (ende-running-jobs)))
+        (when (timerp timer) (cancel-timer timer))
+        (ende-test--reset)))))
 
 
 

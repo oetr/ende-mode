@@ -403,6 +403,12 @@ When EXPECTED is non-nil, update only if it is still JOB's cancellation."
 (defvar ende--dispatching nil
   "Non-nil while the scheduler is dispatching jobs iteratively.")
 
+(defvar ende--dispatch-timer nil
+  "Coalesced continuation for a yielded scheduler turn.")
+
+(defvar ende--dispatch-generation 0
+  "Scheduler generation invalidating turns and continuations on abort.")
+
 (defvar ende--queue-suspended nil
   "Non-nil when dispatch is temporarily suspended.")
 
@@ -1251,22 +1257,40 @@ When RESULT is non-nil, retain it for history and job inspection."
         ((error quit)
          (ende-job-fail job caught)))))))
 
+(defun ende--continue-dispatch (generation)
+  "Continue scheduling if GENERATION has not been aborted."
+  (when (= generation ende--dispatch-generation)
+    (setq ende--dispatch-timer nil)
+    (ende-process-next)))
+
 (defun ende-process-next ()
-  "Process all currently admissible queued jobs."
-  (unless (or ende--dispatching ende-queue-paused)
-    (let ((ende--dispatching t))
+  "Process a bounded turn of admissible jobs, scheduling any continuation."
+  (unless (or ende--dispatching ende--dispatch-timer ende-queue-paused
+              ende--queue-suspended ende--aborting)
+    (let ((ende--dispatching t)
+          (generation ende--dispatch-generation)
+          (deadline (+ (float-time) 0.02))
+          (dispatched 0)
+          done)
       (ende--queue-maintain-fences)
-      (let ((done nil))
-        (while (and (not ende-queue-paused)
-                    (not ende--queue-suspended)
-                    (not ende--aborting)
-                    (not done))
+      (while (and (not ende-queue-paused)
+                  (not ende--queue-suspended)
+                  (not ende--aborting)
+                  (= generation ende--dispatch-generation)
+                  (not done))
+        (if (and (> dispatched 0)
+                 (or (>= dispatched 16) (>= (float-time) deadline)))
+            (setq done 'yield)
           (let ((cell (ende--next-admissible-cell)))
             (if cell
                 (let ((job (ende--queue-remove-cell cell)))
                   (ende--queue-sync-tail)
+                  (cl-incf dispatched)
                   (ende--dispatch-job job))
-              (setq done t))))))))
+              (setq done t)))))
+      (when (eq done 'yield)
+        (setq ende--dispatch-timer
+              (run-at-time 0.01 nil #'ende--continue-dispatch generation))))))
 
 ;;;; Synchronization fences
 
@@ -1473,6 +1497,10 @@ is changed, making a batch update atomic with respect to scheduler dispatch."
 (defun ende-abort-queue ()
   "Abort the active request, cancel pending jobs, and clear overlays."
   (interactive)
+  (cl-incf ende--dispatch-generation)
+  (when (timerp ende--dispatch-timer)
+    (cancel-timer ende--dispatch-timer))
+  (setq ende--dispatch-timer nil)
   (let ((was-aborting ende--aborting))
     (setq ende--aborting t)
     (unwind-protect
