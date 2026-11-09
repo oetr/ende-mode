@@ -956,12 +956,21 @@ explicit efforts yields no choices instead of an error."
 
 ;;;; Responses transport
 
+(defun ende-codex--tool-call-snapshot (call &optional metadata-only)
+  "Return detached CALL, consuming argument fragments unless METADATA-ONLY."
+  (ende-provider-config-copy
+   (append
+    (cl-loop for (key value) on call by #'cddr
+             unless (eq key :argument-text) append (list key value))
+    (unless metadata-only
+      (list :arguments (ende-stream-text-string (plist-get call :argument-text)))))))
+
 (defun ende-codex--tool-call-list (session)
   "Return collected function calls from SESSION in output order."
   (let (calls)
     (when (hash-table-p (ende-codex--session-tool-calls session))
       (maphash (lambda (index call)
-                 (push (cons index call) calls))
+                 (push (cons index (ende-codex--tool-call-snapshot call)) calls))
                (ende-codex--session-tool-calls session)))
     (mapcar #'cdr
             (sort calls (lambda (left right) (< (car left) (car right)))))))
@@ -1089,10 +1098,10 @@ explicit efforts yields no choices instead of an error."
                        (plist-get old :name))
              :namespace (or (ende-protocol-json-get "namespace" item)
                             (plist-get old :namespace))
-             :arguments (if (and (stringp arguments)
-                                 (not (string-empty-p arguments)))
-                            arguments
-                          (plist-get old :arguments)))
+             :argument-text
+             (if (and (stringp arguments) (not (string-empty-p arguments)))
+                 (ende-stream-text-append (ende-stream-text-create) arguments)
+               (or (plist-get old :argument-text) (ende-stream-text-create))))
        table))))
 
 (defun ende-codex--observe-output (session item index)
@@ -1114,7 +1123,7 @@ explicit efforts yields no choices instead of an error."
              "openai-responses"
              (append
               (list :item (alist-get index (ende-codex--session-replay-items session)))
-              (when call (list :call call))
+              (when call (list :call (ende-codex--tool-call-snapshot call)))
               (when text (list :text text)))))))
 
 (defun ende-codex--update-tool-call-arguments
@@ -1124,16 +1133,17 @@ When APPEND is non-nil, append the argument delta to the stored value."
   (let* ((table (ende-codex--session-tool-calls session))
          (call (and (hash-table-p table) (gethash output-index table))))
     (when (and call (stringp arguments))
-      (setq call
-            (plist-put (copy-sequence call) :arguments
-                       (if append
-                           (concat (or (plist-get call :arguments) "")
-                                   arguments)
-                         arguments)))
+      (setq call (plist-put call :argument-text
+                            (ende-stream-text-append
+                             (if append (plist-get call :argument-text)
+                               (ende-stream-text-create)) arguments)))
       (puthash output-index call table)
-      (ende-stream-emit-item
-       (ende-codex--session-stream session) output-index 'tool-call
-       "openai-responses" :call call :append append))))
+      (apply #'ende-stream-emit-item
+             (ende-codex--session-stream session) output-index 'tool-call
+             "openai-responses"
+             (append (list :call (ende-codex--tool-call-snapshot call append)
+                           :append append)
+                     (when append (list :arguments-delta arguments)))))))
 
 (defun ende-codex--output-items (items)
   "Return ITEMS as a list from a Responses API JSON array."

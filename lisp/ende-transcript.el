@@ -66,6 +66,12 @@
   "Return at most LIMIT characters of ENTRY without materializing its tail."
   (ende-transcript-entry-substring entry 0 (min limit (ende-transcript-entry-length entry))))
 
+(defun ende-transcript-entry-arguments (entry)
+  "Return detached tool arguments for ENTRY, materializing only on demand."
+  (or (ende-transcript-entry-content entry)
+      (let ((arguments (plist-get (plist-get (ende-transcript-entry-data entry) :call) :arguments)))
+        (and arguments (copy-sequence arguments)))))
+
 (defun ende-transcript--append-text (entry text)
   "Append TEXT to ENTRY's authoritative fragments."
   (unless (ende-stream-text-p (ende-transcript-entry-text entry))
@@ -208,6 +214,11 @@ replacing it; STATUS defaults to streaming."
       (when (stringp text)
         (if append (ende-transcript--append-text entry text)
           (setf (ende-transcript-entry-content entry) text)))
+      (when (eq kind 'tool-call)
+        (if (plist-member event :arguments-delta)
+            (ende-transcript--append-text entry (plist-get event :arguments-delta))
+          (when-let* ((arguments (plist-get (plist-get event :call) :arguments)))
+            (setf (ende-transcript-entry-content entry) arguments))))
       (setf (ende-transcript-entry-data entry)
             (ende-plist-merge (ende-transcript-entry-data entry) event)
             (ende-transcript-entry-status entry) (or status 'streaming))

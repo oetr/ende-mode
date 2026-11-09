@@ -32,6 +32,33 @@
 (require 'ende-test-helpers)
 (require 'ende-codex-auth-test)
 
+(ert-deftest ende-codex-arguments-and-summaries-use-fragments ()
+  (let* ((transcript (ende-transcript-create))
+         (session (ende-codex--make-session
+                   :callbacks (list :on-event
+                                    (lambda (event) (ende-transcript-event transcript event)))))
+         (stream (ende-codex--session-stream session)))
+    (ende-codex--observe-output
+     session (ende-protocol-json-read-string
+              "{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"read\",\"arguments\":\"\"}") 0)
+    (cl-letf (((symbol-function 'ende-stream-text-string)
+               (lambda (&rest _) (ert-fail "Materialized a streaming argument or summary"))))
+      (dolist (fragment '("{\"a\":" "1}"))
+        (ende-codex--update-tool-call-arguments session 0 fragment t)
+        (ende-codex--emit-reasoning-summary session "s" fragment)))
+    (should (equal (ende-transcript-entry-arguments
+                    (gethash '(tool-call . 0) (ende-transcript-sources transcript)))
+                   "{\"a\":1}"))
+    (let ((call (car (ende-codex--tool-call-list session))))
+      (should (equal (plist-get call :arguments) "{\"a\":1}"))
+      (aset (plist-get call :arguments) 0 ?x)
+      (should (equal (plist-get (car (ende-codex--tool-call-list session)) :arguments)
+                     "{\"a\":1}")))
+    (ende-stream-complete-reasoning-summary stream "s" "replaced")
+    (ende-codex--update-tool-call-arguments session 0 "{}")
+    (should (equal (plist-get (car (ende-codex--tool-call-list session)) :arguments) "{}"))
+    (ende-codex--cancel session)))
+
 (ert-deftest ende-codex-account-isolation-and-refresh ()
   (ende-codex-auth-test--with-store
    (let* ((personal (ende-codex-auth--register 'chatgpt-plan-oauth 'personal (ende-codex-auth-test--credentials)))

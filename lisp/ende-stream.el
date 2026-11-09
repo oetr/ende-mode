@@ -180,7 +180,9 @@ TOKEN-KEY names the provider-specific output-token field."
   (when (and (not (ende-stream-terminal-p stream))
              (stringp text) (> (length text) 0))
     (let ((summaries (ende-stream-session-reasoning-summaries stream)))
-      (puthash item (concat (gethash item summaries "") text) summaries)
+      (ende-stream-text-append
+       (or (gethash item summaries)
+           (puthash item (ende-stream-text-create) summaries)) text)
       (ende-stream-note-generation-start stream)
       (ende-stream-emit
        stream (append (list :type :reasoning-summary :item item :text text)
@@ -193,12 +195,12 @@ TOKEN-KEY names the provider-specific output-token field."
              (stringp text) (> (length text) 0))
     (let* ((summaries (ende-stream-session-reasoning-summaries stream))
            (existing (gethash item summaries)))
-      (unless (equal existing text)
+      (unless (and existing (equal (ende-stream-text-string existing) text))
         (ende-stream-emit
          stream (append (list :type :reasoning-summary :item item :text text
                               :replace t)
                         (when item-key (list :item-key item-key))))
-        (puthash item text summaries)))))
+        (puthash item (ende-stream-text-append (ende-stream-text-create) text) summaries)))))
 
 (defun ende-stream-emit-estimated-usage (stream)
   "Emit a character-based usage estimate for STREAM."
