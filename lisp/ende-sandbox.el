@@ -225,12 +225,15 @@
   "Release OPERATION and deliver VALUE and ERROR exactly once."
   (unless (ende-sandbox--operation-finished operation)
     (let ((sandbox (ende-sandbox--operation-sandbox operation))
+          (callback (ende-sandbox--operation-callback operation))
           (register (ende-sandbox--operation-register-cancellation operation)))
-      (setf (ende-sandbox--operation-finished operation) t)
+      (setf (ende-sandbox--operation-finished operation) t
+            (ende-sandbox--operation-callback operation) nil
+            (ende-sandbox--operation-register-cancellation operation) nil)
       (when (eq operation (ende-sandbox-operation sandbox))
         (setf (ende-sandbox-operation sandbox) nil))
       (when register (ignore-errors (funcall register nil)))
-      (funcall (ende-sandbox--operation-callback operation) value error))))
+      (funcall callback value error))))
 
 (defun ende-sandbox--complete-operation (operation value error)
   "Finish current OPERATION, retiring its sandbox on ERROR."
@@ -246,6 +249,8 @@ CALLBACK receives the final value and error.  Register cancellation before
 calling FUNCTION, which must eventually finish its operation."
   (when (ende-sandbox-closing sandbox)
     (error "the current job's sandbox is closing"))
+  (unless (eq sandbox (ende-sandbox-for-owner (ende-sandbox-owner sandbox)))
+    (error "the current job's sandbox was replaced"))
   (when (ende-sandbox-operation sandbox)
     (error "another operation already owns the current job's sandbox"))
   (let ((operation (ende-sandbox--operation-create
@@ -503,29 +508,30 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
     (cl-pushnew sandbox ende-sandbox--retired :test #'eq)
     (setf (ende-sandbox-closing sandbox) t
           (ende-sandbox-cleanup-pending sandbox) t)
-    (condition-case caught
-        (progn
-          (ende-sandbox--cancel-worker sandbox)
-          (ende-sandbox--cancel-process sandbox)
-          (unwind-protect
-              (when-let* ((operation (ende-sandbox-operation sandbox)))
-                (ende-sandbox--finish-operation
-                 operation nil (or error "sandbox operation cancelled")))
-            (if (ende-sandbox-container sandbox)
-                (ende-sandbox--remove-container
-                 sandbox
-                 (lambda (success)
-                   (setf (ende-sandbox-cleanup-pending sandbox) nil)
-                   (when success
-                     (ende-sandbox--dispose sandbox))))
-              (setf (ende-sandbox-cleanup-pending sandbox) nil)
-              (ende-sandbox--dispose sandbox))))
-      ((error quit)
-       (setf (ende-sandbox-cleanup-pending sandbox) nil)
-       (when-let* ((operation (ende-sandbox-operation sandbox)))
-         (ende-sandbox--finish-operation
-          operation nil (or error (error-message-string caught))))
-       (message "Ende sandbox cleanup failed: %s" (error-message-string caught))))))
+    (let ((failure
+           (condition-case caught
+               (progn
+                 (ende-sandbox--cancel-worker sandbox)
+                 (ende-sandbox--cancel-process sandbox)
+                 nil)
+             ((error quit) (error-message-string caught)))))
+      (when failure
+        (setf (ende-sandbox-cleanup-pending sandbox) nil)
+        (message "Ende sandbox cleanup failed: %s" failure))
+      (unwind-protect
+          (when-let* ((operation (ende-sandbox-operation sandbox)))
+            (ende-sandbox--finish-operation
+             operation nil (or error failure "sandbox operation cancelled")))
+        (unless failure
+          (if (ende-sandbox-container sandbox)
+              (ende-sandbox--remove-container
+               sandbox
+               (lambda (success)
+                 (setf (ende-sandbox-cleanup-pending sandbox) nil)
+                 (when success
+                   (ende-sandbox--dispose sandbox))))
+            (setf (ende-sandbox-cleanup-pending sandbox) nil)
+            (ende-sandbox--dispose sandbox)))))))
 
 (defun ende-sandbox-cleanup-owner (owner)
   "Stop OWNER's container before deleting its tmpfs workspace."
@@ -686,21 +692,21 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
      (lambda (code stdout stderr stdout-truncated stderr-truncated timed-out)
        (unless (ende-sandbox-closing sandbox)
          (if timed-out
-           (progn
-             (setf (ende-sandbox-restart-required sandbox) t)
-             (ende-sandbox--remove-container
-              sandbox
-              (lambda (removed)
-                (if removed
-                    (funcall callback
-                             (ende-sandbox--result
-                              124 stdout stderr stdout-truncated stderr-truncated)
-                             nil)
-                  (funcall callback nil "sandbox timed out and could not be stopped")))))
-         (funcall callback
-                  (ende-sandbox--result code stdout stderr
-                                        stdout-truncated stderr-truncated)
-                  nil)))))))
+             (progn
+               (setf (ende-sandbox-restart-required sandbox) t)
+               (ende-sandbox--remove-container
+                sandbox
+                (lambda (removed)
+                  (if removed
+                      (funcall callback
+                               (ende-sandbox--result
+                                124 stdout stderr stdout-truncated stderr-truncated)
+                               nil)
+                    (funcall callback nil "sandbox timed out and could not be stopped")))))
+           (funcall callback
+                    (ende-sandbox--result code stdout stderr
+                                          stdout-truncated stderr-truncated)
+                    nil)))))))
 
 (defun ende-sandbox--startup-error
     (code stdout stderr stdout-truncated stderr-truncated timed-out)

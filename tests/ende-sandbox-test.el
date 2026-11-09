@@ -851,6 +851,9 @@
           (cl-letf (((symbol-function 'ende-sandbox--ensure-container)
                      (lambda (&rest _args)
                        (ert-fail "cancelled preparation must not start a container"))))
+            (let ((ende-sandbox--by-owner (make-hash-table :test #'eql)))
+              (should-error
+               (ende-sandbox-run-command sandbox "true" "." 30 #'ignore nil)))
             (ende-sandbox-run-command
              sandbox "true" "." 30
              (lambda (result error)
@@ -976,14 +979,18 @@
                    (lambda (&rest _args)
                      (ert-fail "a cancelled startup must not execute a command"))))
           (ende-sandbox-run-command
-           sandbox "true" "." 30 (lambda (&rest _) (cl-incf calls))
+           sandbox "true" "." 30
+           (lambda (&rest _)
+             (cl-incf calls)
+             (error "terminal observer failed"))
            (lambda (function) (setq cancel function)))
           (should (functionp cancel))
           (should-error
            (ende-sandbox-run-command sandbox "true" "." 30 #'ignore nil))
-          (funcall cancel)
+          (should-error (funcall cancel))
           (should (= calls 1))
           (should (ende-sandbox-closing sandbox))
+          (should (ende-sandbox-cleanup-pending sandbox))
           (should (file-directory-p (ende-sandbox-base sandbox)))
           (funcall startup 0 "" "" nil nil nil)
           (should (= calls 1))
