@@ -559,13 +559,15 @@ SELECTION must contain a provider symbol and a nonempty model string."
                   (when preferences-present
                     (list :control-preferences preferences))))))))
 
-(defun ende-model-selection--pair-key (provider model api &optional connection)
+(defun ende-model-selection--pair-key (provider model api &optional connection profile)
   "Return the preference-history key for PROVIDER, MODEL and API, or nil.
 Nil API resolves to PROVIDER's configured default API."
   (and (symbolp provider) provider
        (stringp model) (not (string-empty-p model))
-       (let* ((profile (condition-case nil (ende-provider-profile-for-model provider model api connection)
-                         (error nil)))
+       (let* ((profile (or profile
+                           (condition-case nil
+                               (ende-provider-profile-for-model provider model api connection)
+                             (error nil))))
               (binding (when profile
                          (cl-remove-if (lambda (entry) (eq (car entry) :models))
                                        (ende-provider-selection-provenance profile)))))
@@ -583,14 +585,18 @@ Nil API resolves to PROVIDER's configured default API."
               table))))))
 
 (defun ende-model-selection--control-preference-entry
-    (provider model api &optional buffer connection)
+    (provider model api &optional buffer connection profile)
   "Return (FOUND . PREFERENCES) for PROVIDER, MODEL and API.
 Nil API resolves to PROVIDER's configured default API.  An empty preference
 plist is a found entry.  BUFFER defaults to the current buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model api connection))
-         (buffer (or buffer (current-buffer)))
-         (missing (make-symbol "missing"))
-         entry)
+  (ende-model-selection--control-preference-entry-for-pair
+   (ende-model-selection--pair-key provider model api connection profile)
+   (or buffer (current-buffer))))
+
+(defun ende-model-selection--control-preference-entry-for-pair (pair buffer)
+  "Return the found control-preference entry for PAIR and BUFFER."
+  (let ((missing (make-symbol "missing"))
+        entry)
     (when pair
       (pcase ende-model-selection-scope
         ('global
@@ -616,22 +622,27 @@ plist is a found entry.  BUFFER defaults to the current buffer."
     (when entry
       (cons t (copy-tree (cdr entry))))))
 
-(defun ende-model-selection-control-preferences (provider model api &optional buffer connection)
+(defun ende-model-selection-control-preferences
+    (provider model api &optional buffer connection profile)
   "Return remembered controls for PROVIDER, MODEL and API, or nil.
 Nil API resolves to PROVIDER's configured default API.
 BUFFER defaults to the current buffer."
   (cdr (ende-model-selection--control-preference-entry
-        provider model api buffer connection)))
+        provider model api buffer connection profile)))
 
 (defun ende-model-selection-save-control-preferences
-    (provider model api preferences &optional buffer connection)
+    (provider model api preferences &optional buffer connection profile)
   "Save explicit control PREFERENCES for PROVIDER, MODEL and API.
 Nil API resolves to PROVIDER's configured default API.
 In buffer scope save a detached copy for BUFFER and also update shared history.
 In global scope update only shared history."
-  (let* ((pair (ende-model-selection--pair-key provider model api connection))
-         (buffer (or buffer (current-buffer)))
-         (preferences
+  (ende-model-selection--save-control-preferences-for-pair
+   (ende-model-selection--pair-key provider model api connection profile)
+   preferences (or buffer (current-buffer))))
+
+(defun ende-model-selection--save-control-preferences-for-pair (pair preferences buffer)
+  "Save explicit PREFERENCES for resolved PAIR and BUFFER."
+  (let ((preferences
           (copy-tree (ende-provider--validate-control-preferences preferences))))
     (unless pair
       (error "Control preferences require a provider and model"))
@@ -647,22 +658,21 @@ In global scope update only shared history."
        (ende-model-selection--buffer-preference-table buffer t)))
     (copy-tree preferences)))
 
-(defun ende-model-selection-remember-pair (provider model api &optional buffer connection)
+(defun ende-model-selection-remember-pair
+    (provider model api &optional buffer connection profile)
   "Record PROVIDER, MODEL and API as selected and return its preferences.
 Nil API resolves to PROVIDER's configured default API.
 On first selection, snapshot the inherited settings into BUFFER's history.
 BUFFER defaults to the current buffer."
-  (let* ((pair (ende-model-selection--pair-key provider model api connection))
+  (let* ((pair (ende-model-selection--pair-key provider model api connection profile))
          (buffer (or buffer (current-buffer)))
-         (entry (ende-model-selection--control-preference-entry
-                 provider model api buffer connection))
+         (entry (ende-model-selection--control-preference-entry-for-pair pair buffer))
          (preferences (copy-tree (cdr entry))))
     (unless pair
       (error "A model selection requires a provider and model"))
     (unless entry
       (setq preferences nil))
-    (ende-model-selection-save-control-preferences
-     provider model api preferences buffer connection)
+    (ende-model-selection--save-control-preferences-for-pair pair preferences buffer)
     (copy-tree preferences)))
 
 (defun ende-model-selection-initialize-buffer (&optional buffer)
@@ -708,7 +718,7 @@ defaults remain authoritative."
       (_ (error "Invalid `ende-model-selection-scope': %s"
                 ende-model-selection-scope)))))
 
-(defun ende-model-selection-save (selection &optional buffer skip-preference-history)
+(defun ende-model-selection-save (selection &optional buffer skip-preference-history profile)
   "Save SELECTION as the most recently used choice for BUFFER.
 
 In per-buffer scope also associate it with BUFFER's name and visited file.
@@ -720,6 +730,14 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
     (unless (memq ende-model-selection-scope '(buffer global))
       (error "Invalid `ende-model-selection-scope': %s"
              ende-model-selection-scope))
+    (setq profile
+          (or profile
+              (condition-case nil
+                  (ende-provider--compose-profile
+                   (plist-get selection :provider) (plist-get selection :model)
+                   (plist-get selection :api)
+                   (ende-model-selection-connection selection))
+                (error nil))))
     (unless skip-preference-history
       (ende-model-selection-save-provider selection buffer))
     (unless skip-preference-history
@@ -728,21 +746,15 @@ When SKIP-PREFERENCE-HISTORY is non-nil, save only the active selection."
            (plist-get selection :provider) (plist-get selection :model)
            (plist-get selection :api)
            (plist-get selection :control-preferences) buffer
-           (ende-model-selection-connection selection))
+           (ende-model-selection-connection selection) profile)
         (ende-model-selection-remember-pair
          (plist-get selection :provider) (plist-get selection :model)
          (plist-get selection :api) buffer
-         (ende-model-selection-connection selection))))
-    (let ((profile (condition-case nil
-                       (ende-provider--compose-profile
-                        (plist-get selection :provider) (plist-get selection :model)
-                        (plist-get selection :api)
-                        (ende-model-selection-connection selection))
-                     (error nil))))
-      (when profile
-        (ende-provider--selection-puthash
-         (ende-model-selection--provenance-key selection)
-         (ende-provider-selection-provenance profile) ende-model-selection--provenance)))
+         (ende-model-selection-connection selection) profile)))
+    (when profile
+      (ende-provider--selection-puthash
+       (ende-model-selection--provenance-key selection)
+       (ende-provider-selection-provenance profile) ende-model-selection--provenance))
     (ende-provider--selection-set 'ende-model-selection--last-used (copy-tree selection))
     (pcase ende-model-selection-scope
       ('global nil)

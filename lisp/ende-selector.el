@@ -229,7 +229,7 @@
                                                ende-selector--connection)
             (ende-provider--compose-profile provider nil ende-selector--api
                                             ende-selector--connection)))
-         (runtime (ende-selector--draft-runtime-state)))
+         (runtime (ende-selector--draft-runtime-state profile)))
     (when runtime
       (setq profile (plist-put profile :max-concurrency
                                (plist-get runtime :max-concurrency))
@@ -267,7 +267,7 @@
         (or api ende-selector--api)
         (copy-tree (or connection ende-selector--connection))))
 
-(defun ende-selector--remember-model ()
+(defun ende-selector--remember-model (&optional profile)
   "Retain the current model as a provisional provider choice."
   (when (and (hash-table-p ende-selector--draft-models)
              (ende-selector--provider-name)
@@ -275,26 +275,27 @@
              (eq ende-selector--model-state :ready))
     (puthash (ende-selector--model-key)
              (ende-selector--model-name) ende-selector--draft-models)
-    (let* ((provider (ende-selector--provider-name))
+    (let* ((profile (or profile (ende-selector--provider-profile)))
+           (provider (ende-selector--provider-name))
            (selection
             (append (list :provider provider :model (ende-selector--model-name))
-                    (ende-model-selection-connection (ende-selector--provider-profile))
-                    (list :parallel (ende-selector--provider-parallel-p)))))
+                    (ende-model-selection-connection profile)
+                    (list :parallel (plist-get profile :parallel)))))
       (unless (hash-table-p ende-selector--draft-selections)
         (setq ende-selector--draft-selections (make-hash-table :test #'eq)))
       (puthash provider selection ende-selector--draft-selections))))
 
-(defun ende-selector--control-key ()
+(defun ende-selector--control-key (&optional profile)
   "Return the identity for provisional controls of the current model."
   (let ((provider (ende-selector--provider-name))
         (model (ende-selector--model-name)))
     (and provider model
          (ende-model-selection--pair-key
-          provider model ende-selector--api ende-selector--connection))))
+          provider model ende-selector--api ende-selector--connection profile))))
 
-(defun ende-selector--draft-control-state ()
+(defun ende-selector--draft-control-state (&optional profile)
   "Return the provisional control state for the current model."
-  (when-let* ((key (ende-selector--control-key)))
+  (when-let* ((key (ende-selector--control-key profile)))
     (unless (hash-table-p ende-selector--draft-controls)
       (setq ende-selector--draft-controls (make-hash-table :test #'equal)))
     (or (gethash key ende-selector--draft-controls)
@@ -302,8 +303,7 @@
                (model (ende-selector--model-name))
                (source (or ende-selector--source-buffer (current-buffer)))
                (preferences
-                (ende-model-selection-control-preferences
-                 provider model ende-selector--api source ende-selector--connection))
+                (cdr (ende-model-selection--control-preference-entry-for-pair key source)))
                (state
                 (list :provider provider :model model
                       :api ende-selector--api
@@ -313,27 +313,23 @@
           (puthash key state ende-selector--draft-controls)
           state))))
 
-(defun ende-selector--resolved-profile ()
+(defun ende-selector--resolved-profile (&optional profile)
   "Resolve the current provider/model with draft controls and runtime values."
-  (let ((profile (ende-provider-profile-with-control-preferences
-                  (ende-selector--provider-profile)
-                  ende-selector--control-preferences)))
-    (setq profile (plist-put profile :max-concurrency
-                             (ende-selector--provider-concurrency))
-          profile (plist-put profile :parallel
-                             (ende-selector--provider-parallel-p)))
-    profile))
+  (ende-provider-profile-with-control-preferences
+   (or profile (ende-selector--provider-profile)) ende-selector--control-preferences))
 
-(defun ende-selector--control-setting (control)
+(defun ende-selector--control-setting (control &optional profile)
   "Return CONTROL's resolved selector setting details."
   (ende-provider-control-setting
-   (ende-selector--provider-profile) ende-selector--control-preferences control))
+   (or profile (ende-selector--provider-profile)) ende-selector--control-preferences control))
 
-(defun ende-selector--set-control-preference (control value)
+(defun ende-selector--set-control-preference (control value &optional profile)
   "Draft canonical VALUE for CONTROL and refresh the current profile."
-  (unless (ende-provider-control-descriptor (ende-selector--provider-profile) control)
-    (user-error "%s is unavailable for this model" control))
-  (let* ((state (ende-selector--draft-control-state))
+  (let* ((profile (or profile (ende-selector--provider-profile)))
+         (_ (unless (ende-provider-control-descriptor profile control)
+              (user-error "%s is unavailable for this model" control)))
+         (key (ende-selector--control-key profile))
+         (state (ende-selector--draft-control-state profile))
          (preferences
           (plist-put
            (copy-tree (or ende-selector--control-preferences
@@ -346,15 +342,15 @@
           state (plist-put state :dirty
                            (not (equal preferences
                                        (plist-get state :initial-preferences)))))
-    (puthash (ende-selector--control-key) state ende-selector--draft-controls)
+    (puthash key state ende-selector--draft-controls)
     (setq ende-selector--control-preferences
           preferences
           ende-selector--effort
-          (plist-get (ende-selector--resolved-profile) :reasoning-effort))
+          (plist-get (ende-selector--resolved-profile profile) :reasoning-effort))
     (unless (equal old-effort ende-selector--effort)
       (setq ende-selector--effort-state
             (if ende-selector--effort :remembered :none)))
-    (ende-selector--render)))
+    (ende-selector--render profile)))
 
 (defun ende-selector--remembered-model (provider)
   "Return the remembered model for PROVIDER, or nil."
@@ -433,7 +429,7 @@ Report an unavailable model once for each catalog identity."
   "Return the selected provider's provisional parallel setting."
   (plist-get (ende-selector--draft-runtime-state) :parallel))
 
-(defun ende-selector--draft-runtime-state ()
+(defun ende-selector--draft-runtime-state (&optional profile)
   "Return the selected provider's provisional runtime settings."
   (let ((provider (ende-selector--provider-name)))
     (when provider
@@ -443,8 +439,9 @@ Report an unavailable model once for each catalog identity."
           (let* ((selection
                   (ende-model-selection-provider-for-buffer
                    provider (or ende-selector--source-buffer (current-buffer))))
-                 (profile (ende-provider--compose-profile
-                           provider nil ende-selector--api ende-selector--connection))
+                 (profile (or profile
+                              (ende-provider--compose-profile
+                               provider nil ende-selector--api ende-selector--connection)))
                  (concurrency (ende-provider-max-concurrency profile))
                  (parallel (if (and selection (plist-member selection :parallel))
                                (plist-get selection :parallel)
@@ -504,15 +501,15 @@ Report an unavailable model once for each catalog identity."
              (functionp
               (plist-get profile :reasoning-effort-probe-function))))))
 
-(defun ende-selector--control-value (control _profile)
-  "Render an applicable CONTROL's effective value and source."
+(defun ende-selector--control-value (control profile resolved)
+  "Render CONTROL's value from PROFILE and its effective RESOLVED controls."
   (let ((text (ende-selector--control-value-label
-               control (ende-selector--control-setting control))))
+               control (ende-selector--control-setting control profile))))
     (when (and (eq control :temperature)
-               (ende-selector--temperature-ignored-p (ende-selector--resolved-profile)))
+               (ende-selector--temperature-ignored-p resolved))
       (setq text (concat text " (no effect in thinking mode)")))
     (when (and (eq control :reasoning-effort)
-               (eq (plist-get (ende-selector--resolved-profile) :thinking) 'off))
+               (eq (plist-get resolved :thinking) 'off))
       (setq text (concat text " (inactive while thinking is off)")))
     text))
 
@@ -532,22 +529,24 @@ Report an unavailable model once for each catalog identity."
 
 (defun ende-selector--control-rows (profile)
   "Return editable control rows for PROFILE."
-  (mapconcat
-   (lambda (entry)
-     (pcase-let ((`(,control ,key ,label) entry))
-       (if (ende-selector--control-supported-p profile control)
-           (ende-selector--row key label
-            (if (eq control :reasoning-effort)
-                (pcase ende-selector--effort-state
-                  (:loading "validating...")
-                  (:invalid (format "%s (unsupported)" ende-selector--effort))
-                  (:error "lookup failed; retry")
-                  (_ (ende-selector--control-value control profile)))
-              (ende-selector--control-value control profile)))
-         "")))
-   '((:temperature "T" "Temperature:")
-     (:thinking "t" "Thinking:")
-     (:reasoning-effort "e" "Reasoning effort:")) ""))
+  (let ((resolved (ende-selector--resolved-profile profile)))
+    (mapconcat
+     (lambda (entry)
+       (pcase-let ((`(,control ,key ,label) entry))
+         (if (ende-selector--control-supported-p profile control)
+             (ende-selector--row
+              key label
+              (if (eq control :reasoning-effort)
+                  (pcase ende-selector--effort-state
+                    (:loading "validating...")
+                    (:invalid (format "%s (unsupported)" ende-selector--effort))
+                    (:error "lookup failed; retry")
+                    (_ (ende-selector--control-value control profile resolved)))
+                (ende-selector--control-value control profile resolved)))
+           "")))
+     '((:temperature "T" "Temperature:")
+       (:thinking "t" "Thinking:")
+       (:reasoning-effort "e" "Reasoning effort:")) "")))
 
 (defun ende-selector--transport-label (transport)
   "Return the user-facing label for TRANSPORT."
@@ -567,9 +566,9 @@ Report an unavailable model once for each catalog identity."
                   (error nil))
            collect (cons (ende-selector--transport-label transport) transport)))
 
-(defun ende-selector--render ()
+(defun ende-selector--render (&optional profile)
   "Render resolved selector state without changing it."
-  (let ((profile (ende-selector--provider-profile))
+  (let ((profile (or profile (ende-selector--provider-profile)))
         (inhibit-read-only t))
     (erase-buffer)
     (insert
@@ -580,8 +579,8 @@ Report an unavailable model once for each catalog identity."
      (ende-selector--row nil "Auth:" (plist-get profile :auth-method))
      (ende-selector--row nil "API:" (plist-get profile :api))
      (ende-selector--row nil "Transport:" (ende-selector--transport-label (plist-get profile :transport)))
-     (ende-selector--row "c/C" "Concurrency:" (ende-selector--provider-concurrency))
-     (ende-selector--row "P" "Parallel:" (if (ende-selector--provider-parallel-p) "on" "off"))
+     (ende-selector--row "c/C" "Concurrency:" (plist-get profile :max-concurrency))
+     (ende-selector--row "P" "Parallel:" (if (plist-get profile :parallel) "on" "off"))
      "\n"
      (ende-selector--row "C-n/C-p" "Model:" (ende-selector--model-display))
      (if ende-selector--model-error
@@ -626,27 +625,30 @@ Report an unavailable model once for each catalog identity."
     (when (functionp cancel)
       (ende-ignore-errors cancel))))
 
-(defun ende-selector--set-control-context ()
-  "Restore provisional controls for the selected provider, model and API."
-  (let ((state (ende-selector--draft-control-state)))
+(defun ende-selector--set-control-context (&optional profile)
+  "Restore provisional controls and return the selected model's PROFILE."
+  (let* ((profile (or profile (ende-selector--provider-profile)))
+         (state (ende-selector--draft-control-state profile)))
     (ende-selector--cancel-effort-probe)
     (setq ende-selector--control-preferences
           (copy-tree (and state (plist-get state :preferences))))
     (setq ende-selector--effort
-          (plist-get (ende-selector--resolved-profile) :reasoning-effort)
+          (plist-get (ende-selector--resolved-profile profile) :reasoning-effort)
           ende-selector--effort-state
-          (if ende-selector--effort :remembered :none))))
+          (if ende-selector--effort :remembered :none))
+    profile))
 
-(defun ende-selector--set-draft-controls (preferences)
+(defun ende-selector--set-draft-controls (preferences &optional profile)
   "Use PREFERENCES in the current model's provisional control entry."
   (setq ende-selector--control-preferences (copy-tree preferences))
-  (when-let* ((key (ende-selector--control-key))
-              (state (ende-selector--draft-control-state)))
-    (setq state (plist-put state :preferences (copy-tree preferences))
-          state (plist-put state :dirty
-                           (not (equal preferences
-                                       (plist-get state :initial-preferences)))))
-    (puthash key state ende-selector--draft-controls)))
+  (let ((profile (or profile (ende-selector--provider-profile))))
+    (when-let* ((key (ende-selector--control-key profile))
+                (state (ende-selector--draft-control-state profile)))
+      (setq state (plist-put state :preferences (copy-tree preferences))
+            state (plist-put state :dirty
+                             (not (equal preferences
+                                         (plist-get state :initial-preferences)))))
+      (puthash key state ende-selector--draft-controls))))
 
 (defun ende-selector--effort-error-message (error)
   "Return a useful human-readable message for effort probe ERROR."
@@ -1127,9 +1129,9 @@ CHOICES contains symbols or (LABEL . VALUE) pairs."
           (mod (+ ende-selector--model-index delta)
                (length ende-selector--models)))
     (cl-incf ende-selector--model-selection-generation)
-    (ende-selector--set-control-context)
-    (ende-selector--remember-model)
-    (ende-selector--render)))
+    (let ((profile (ende-selector--set-control-context)))
+      (ende-selector--remember-model profile)
+      (ende-selector--render profile))))
 
 (defun ende-selector-next-model ()
   "Select the next model for the current provider."
