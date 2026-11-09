@@ -375,7 +375,7 @@
   output output-tail (output-bytes 0) (output-items 0)
   controls control-tail (control-count 0) backpressured
   close-queued draining-close close-sent close-received peer-close failure eof
-  timers work-timer busy work-pending events terminal)
+  timers work-timer busy dispatching work-pending events terminal)
 
 (cl-defstruct (ende-websocket--listener (:constructor ende-websocket--listener-create))
   process limits admit callbacks connections timer (generation 0) stopped)
@@ -432,25 +432,30 @@
   (push (cons event arguments) (ende-websocket--connection-events connection)))
 
 (defun ende-websocket--dispatch (connection)
-  (let ((events (nreverse (ende-websocket--connection-events connection))))
-    (setf (ende-websocket--connection-events connection) nil)
-    (dolist (event events)
-      (when (and (not (eq (ende-websocket-state connection) 'closed))
-                 (or (not (eq (car event) :on-message))
-                     (and (eq (ende-websocket-state connection) 'open)
-                          (not (ende-websocket--connection-close-received connection)))))
-        (when-let* ((callback (plist-get (ende-websocket--connection-callbacks connection) (car event))))
-          (condition-case nil
-              (apply callback connection (cdr event))
-            ((error quit)
-             (ende-websocket--terminate connection
-                                   '(:code 1011 :reason "" :clean nil :cause application))))))))
-  (when-let* ((terminal (ende-websocket--connection-terminal connection)))
-    (setf (ende-websocket--connection-terminal connection) nil)
-    (remhash connection ende-websocket--connections)
-    (when (car terminal)
-      (condition-case nil (funcall (car terminal) connection (cdr terminal))
-        ((error quit) nil)))))
+  (unless (ende-websocket--connection-dispatching connection)
+    (setf (ende-websocket--connection-dispatching connection) t)
+    (unwind-protect
+        (progn
+          (let ((events (nreverse (ende-websocket--connection-events connection))))
+            (setf (ende-websocket--connection-events connection) nil)
+            (dolist (event events)
+              (when (and (not (eq (ende-websocket-state connection) 'closed))
+                         (or (not (eq (car event) :on-message))
+                             (and (eq (ende-websocket-state connection) 'open)
+                                  (not (ende-websocket--connection-close-received connection)))))
+                (when-let* ((callback (plist-get (ende-websocket--connection-callbacks connection) (car event))))
+                  (condition-case nil
+                      (apply callback connection (cdr event))
+                    ((error quit)
+                     (ende-websocket--terminate connection
+                                               '(:code 1011 :reason "" :clean nil :cause application))))))))
+          (when-let* ((terminal (ende-websocket--connection-terminal connection)))
+            (setf (ende-websocket--connection-terminal connection) nil)
+            (remhash connection ende-websocket--connections)
+            (when (car terminal)
+              (condition-case nil (funcall (car terminal) connection (cdr terminal))
+                ((error quit) nil)))))
+      (setf (ende-websocket--connection-dispatching connection) nil))))
 
 (defun ende-websocket--terminate (connection info)
   (unless (eq (ende-websocket-state connection) 'closed)
@@ -1038,30 +1043,31 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
       (setf (ende-websocket--connection-busy connection) t
             (ende-websocket--connection-work-pending connection) nil)
       (unwind-protect
-          (condition-case error
-              (progn
-                (when (and (eq (ende-websocket-state connection) 'connecting)
-                           (eq (ende-websocket--connection-role connection) 'client)
-                           (not (ende-websocket--connection-process connection))
-                           (not ende-websocket--opening-active)
-                           (eq connection (car ende-websocket--opening-queue)))
-                  (ende-websocket--start-client connection))
-                (when (and (eq (ende-websocket-state connection) 'connecting)
-                           (ende-websocket--connection-process connection))
-                  (ende-websocket--read-http connection))
-                (when (memq (ende-websocket-state connection) '(open closing))
-                  (unless (ende-websocket--connection-failure connection)
-                    (setq more (ende-websocket--parse-frames connection)))
-                  (ende-websocket--write connection)))
-            (ende-websocket-invalid-utf8 (ende-websocket--fail connection 'utf8))
-            (ende-websocket-too-large (ende-websocket--fail connection 'size))
-            (ende-websocket-version-error (ende-websocket--fail connection 'protocol 426))
-            (ende-websocket-protocol-error (ende-websocket--fail connection 'protocol))
-            ((error quit)
-             (ignore error)
-             (ende-websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport))))
+          (progn
+            (condition-case error
+                (progn
+                  (when (and (eq (ende-websocket-state connection) 'connecting)
+                             (eq (ende-websocket--connection-role connection) 'client)
+                             (not (ende-websocket--connection-process connection))
+                             (not ende-websocket--opening-active)
+                             (eq connection (car ende-websocket--opening-queue)))
+                    (ende-websocket--start-client connection))
+                  (when (and (eq (ende-websocket-state connection) 'connecting)
+                             (ende-websocket--connection-process connection))
+                    (ende-websocket--read-http connection))
+                  (when (memq (ende-websocket-state connection) '(open closing))
+                    (unless (ende-websocket--connection-failure connection)
+                      (setq more (ende-websocket--parse-frames connection)))
+                    (ende-websocket--write connection)))
+              (ende-websocket-invalid-utf8 (ende-websocket--fail connection 'utf8))
+              (ende-websocket-too-large (ende-websocket--fail connection 'size))
+              (ende-websocket-version-error (ende-websocket--fail connection 'protocol 426))
+              (ende-websocket-protocol-error (ende-websocket--fail connection 'protocol))
+              ((error quit)
+               (ignore error)
+               (ende-websocket--terminate connection '(:code 1006 :reason "" :clean nil :cause transport))))
+            (ende-websocket--dispatch connection))
         (setf (ende-websocket--connection-busy connection) nil))
-      (ende-websocket--dispatch connection)
       (when (and (ende-websocket--connection-eof connection) (not more)
                  (not (eq (ende-websocket-state connection) 'closed)))
         (ende-websocket--terminate

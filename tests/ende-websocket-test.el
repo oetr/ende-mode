@@ -306,6 +306,29 @@
     (should (= (with-current-buffer (ende-websocket--connection-input connection)
                  (- (point-max) (ende-websocket--connection-cursor connection))) 0))))
 
+(ert-deftest ende-websocket-callbacks-are-serialized ()
+  (dolist (action '(receive abort shutdown))
+    (ende-websocket-test--connection connection
+      (let (events)
+        (setf (ende-websocket--connection-callbacks connection)
+              (list :on-message
+                    (lambda (_ _type text)
+                      (push text events)
+                      (when (equal text "A")
+                        (pcase action
+                          ('receive (ende-websocket--filter process (unibyte-string #x81 1 ?C)))
+                          ('abort (ende-websocket-abort connection))
+                          ('shutdown (ende-websocket-shutdown)))
+                        (ende-websocket-test--drain connection)
+                        (push 'returned events)))
+                    :on-close (lambda (_ _info) (push 'closed events))))
+        (ende-websocket--filter process (unibyte-string #x81 1 ?A #x81 1 ?B))
+        (ende-websocket-test--drain connection)
+        (ende-websocket-test--drain connection)
+        (should (equal (nreverse events)
+                       (if (eq action 'receive) '("A" returned "B" "C")
+                         '("A" returned closed))))))))
+
 (defun ende-websocket-test--wait (predicate)
   (let ((deadline (+ (float-time) 5)))
     (while (and (not (funcall predicate)) (< (float-time) deadline))
