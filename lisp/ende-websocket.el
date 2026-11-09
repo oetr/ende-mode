@@ -535,7 +535,9 @@
 (defun ende-websocket--release-output (job)
   (let ((cleanup (ende-websocket--output-cleanup job)))
     (setf (ende-websocket--output-cleanup job) nil)
-    (when cleanup (ignore-errors (funcall cleanup)))))
+    (when cleanup
+      (condition-case nil (funcall cleanup)
+        ((error quit) nil)))))
 
 (defun ende-websocket--drop-output (connection)
   (let ((jobs (ende-websocket--connection-output connection)))
