@@ -589,6 +589,39 @@
      (should ende-speech-test--killed-recorder)
      (should ende-speech-test--closed))))
 
+(ert-deftest ende-speech/unsafe-events-stop-recording-and-preserve-transcript ()
+  (dolist (failure '(transcript-limit insertion-error malformed-delta))
+    (let ((ende-speech-max-transcript-bytes
+           (if (eq failure 'transcript-limit) 4 1024)))
+      (ende-speech-test--with-session
+       (lambda (session _source buffer)
+         (ende-speech-test--event session "session.created")
+         (ende-speech-test--event session "session.updated")
+         (ende-speech-test--event
+          session "conversation.item.input_audio_transcription.delta"
+          '(delta . "éé"))
+         (should (ende-speech--session-active-p session))
+         (with-current-buffer buffer
+           (delete-char -1)
+           (when (eq failure 'insertion-error)
+             (setq buffer-read-only t)))
+         (ende-speech-test--event
+          session "conversation.item.input_audio_transcription.delta"
+          (cons 'delta (if (eq failure 'malformed-delta) 42 "x")))
+         (should (eq (ende-speech--session-state session) 'terminal))
+         (should-not ende-speech--active-session)
+         (should ende-speech-test--killed-recorder)
+         (should ende-speech-test--closed)
+         (let ((sent ende-speech-test--sent))
+           (funcall (plist-get ende-speech-test--made-process :filter)
+                    'mock-recorder "late audio")
+           (ende-speech-test--event
+            session "conversation.item.input_audio_transcription.delta"
+            '(delta . "late text"))
+           (should (eq sent ende-speech-test--sent)))
+         (should (buffer-live-p buffer))
+         (should (equal (with-current-buffer buffer (buffer-string)) "é")))))))
+
 (ert-deftest ende-speech/ignored-events-do-not-intern-keys ()
   (ende-speech-test--with-session
    (lambda (session _source buffer)
@@ -596,6 +629,7 @@
        (should-not (intern-soft key))
        (ende-speech-test--event session "unknown" (cons key t))
        (should-not (intern-soft key))
+       (should (ende-speech--session-active-p session))
        (should (equal (with-current-buffer buffer (buffer-string)) ""))))))
 
 (ert-deftest ende-speech/message-type-and-connection-identity ()
@@ -711,6 +745,8 @@
   (ende-speech-test--with-session
    (lambda (session _source _speech-buffer)
      (should-not ende-speech-test--made-process)
+     (ende-speech-test--event session "input_audio_buffer.cleared")
+     (should (equal (ende-speech--session-status session) "Connecting..."))
      (ende-speech-test--event session "session.created")
      (should-not ende-speech-test--made-process)
      (should (= (length ende-speech-test--sent) 1))

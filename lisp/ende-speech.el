@@ -64,10 +64,21 @@
   :type 'integer
   :group 'ende-speech)
 
+(defcustom ende-speech-max-transcript-bytes (* 1024 1024)
+  "Maximum cumulative bytes inserted from speech in one session.
+Edits and recognition resets do not replenish this budget."
+  :type 'natnum
+  :group 'ende-speech)
+
+(defconst ende-speech--websocket-limits
+  '(:frame-bytes 65536 :message-bytes 65536 :input-bytes 131072)
+  "Speech-specific incoming WebSocket byte limits.")
+
 (cl-defstruct (ende-speech--session
                (:constructor ende-speech--make-session))
   state marker buffer source-window transcript-window websocket recorder
-  recorder-stderr clear-pending needs-separator status cleanup-timer)
+  recorder-stderr clear-pending needs-separator status cleanup-timer
+  (transcript-bytes 0))
 
 (defconst ende-speech--cleanup-timeout 3
   "Seconds to wait for capacity to queue the final audio clear.")
@@ -422,14 +433,19 @@ Try JSON first, then older pactl's normal text listing."
   (let ((buffer (ende-speech--session-buffer session)))
     (when (and (buffer-live-p buffer) (not (string-empty-p delta)))
       (with-current-buffer buffer
-        (when (and (ende-speech--session-needs-separator session)
-                   (> (point) (point-min))
-                   (eq (char-syntax (char-before)) ?w)
-                   (not (string-match-p "\\`[ \t\n\r,.!?:;]" delta)))
-          (insert " "))
-        (insert delta)
-        (setf (ende-speech--session-needs-separator session) nil)
-        (force-mode-line-update)))))
+        (let* ((separator
+                (and (ende-speech--session-needs-separator session)
+                     (> (point) (point-min))
+                     (eq (char-syntax (char-before)) ?w)
+                     (not (string-match-p "\\`[ \t\n\r,.!?:;]" delta))))
+               (bytes (+ (ende-speech--session-transcript-bytes session)
+                         (string-bytes delta) (if separator 1 0))))
+          (when (> bytes ende-speech-max-transcript-bytes)
+            (error "Transcript byte limit exceeded"))
+          (insert (if separator " " "") delta)
+          (setf (ende-speech--session-transcript-bytes session) bytes
+                (ende-speech--session-needs-separator session) nil)
+          (force-mode-line-update))))))
 
 (defun ende-speech--set-status (session status)
   "Set SESSION's status line to STATUS."
@@ -677,12 +693,15 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
               session (format "could not start microphone: %s"
                               (error-message-string err)))))))
        ((equal type "input_audio_buffer.cleared")
-        (setf (ende-speech--session-clear-pending session) nil)
-        (ende-speech--set-status session "Listening..."))
+        (when (and (eq (ende-speech--session-state session) 'listening)
+                   (ende-speech--session-clear-pending session))
+          (setf (ende-speech--session-clear-pending session) nil)
+          (ende-speech--set-status session "Listening...")))
        ((equal type "conversation.item.input_audio_transcription.delta")
         (let ((delta (ende-speech--json-get 'delta event)))
-          (when (and (not (ende-speech--session-clear-pending session))
-                     (stringp delta))
+          (unless (stringp delta)
+            (error "Invalid transcription delta"))
+          (unless (ende-speech--session-clear-pending session)
             (ende-speech--handle-delta session delta))))
        ((equal type "error")
         (let* ((error-object (ende-speech--json-get 'error event))
@@ -696,13 +715,16 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
   (when (and (ende-speech--session-active-p session)
              (eq websocket (ende-speech--session-websocket session))
              (eq type 'text))
-    (condition-case nil
+    (condition-case err
         (let* ((json-object-type 'alist)
                (json-array-type 'list)
                (json-key-type 'string)
                (event (json-read-from-string text)))
           (ende-speech--handle-event session event))
-      (error nil))))
+      ((error quit)
+       (ende-speech--fail
+        session (format "speech event processing failed: %s"
+                        (error-message-string err)))))))
 
 (defun ende-speech--server-url ()
   "Validate the speech settings and return the WebSocket endpoint URL."
@@ -739,6 +761,7 @@ REPORT, when non-nil, is shown to the user; KILL-BUFFER controls buffer killing.
         (setf (ende-speech--session-websocket session)
               (ende-websocket-connect
                (ende-speech--server-url)
+               :limits ende-speech--websocket-limits
                :on-message
                (lambda (websocket type text)
                  (ende-speech--websocket-message session websocket type text))
