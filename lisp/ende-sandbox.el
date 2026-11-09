@@ -31,11 +31,12 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ende-project)
+(require 'ende-worker)
 (declare-function ende-job-id "ende-queue" (job))
 
 (cl-defstruct (ende-sandbox (:constructor ende-sandbox--create))
   owner root base workspace hooks container image process started
-  restart-required closing cleanup-pending operation)
+  restart-required closing cleanup-pending operation worker-cancel)
 
 (cl-defstruct (ende-sandbox--operation
                (:constructor ende-sandbox--operation-create))
@@ -107,8 +108,8 @@
       (copy-file source destination nil t nil)))
   workspace)
 
-(defun ende-sandbox-create (owner root image files)
-  "Create OWNER's tmpfs snapshot from authorized FILES below ROOT."
+(defun ende-sandbox-create (owner root image)
+  "Reserve OWNER's empty tmpfs workspace below ROOT for pinned IMAGE."
   (unless (and (integerp owner) (>= owner 0))
     (error "run_sandbox_command requires an active Ende job"))
   (unless (and (stringp image)
@@ -141,15 +142,15 @@
             (make-directory hooks)
             (set-file-modes workspace #o700)
             (set-file-modes hooks #o700)
-            (ende-sandbox--copy-snapshot files root workspace)
             (setq sandbox
                   (ende-sandbox--create
                    :owner owner :root root :base base :workspace workspace
                    :hooks hooks :image image))
             (puthash owner sandbox ende-sandbox--by-owner)))
       (unless sandbox
-        (when (file-directory-p base)
-          (ende-sandbox--delete-tree base))))
+        (dolist (path (list (expand-file-name "workspace" base)
+                            (expand-file-name "hooks" base) base))
+          (when (file-directory-p path) (delete-directory path)))))
     sandbox))
 
 (defun ende-sandbox--environment ()
@@ -263,6 +264,27 @@ calling FUNCTION, which must eventually finish its operation."
       ((error quit)
        (ende-sandbox--complete-operation
         operation nil (error-message-string caught))))))
+
+(defun ende-sandbox--run-worker
+    (operation library function arguments bindings callback)
+  "Run workspace FUNCTION in a worker owned by OPERATION."
+  (when (ende-sandbox--operation-current-p operation)
+    (let ((sandbox (ende-sandbox--operation-sandbox operation)))
+      (ende-worker-run-prewarmed
+       library function arguments bindings
+       (lambda (value error)
+         (when (ende-sandbox--operation-current-p operation)
+           (funcall callback value error)))
+       (lambda (cancel)
+         (if (and cancel (not (ende-sandbox--operation-current-p operation)))
+             (funcall cancel)
+           (setf (ende-sandbox-worker-cancel sandbox) cancel)))))))
+
+(defun ende-sandbox--cancel-worker (sandbox)
+  "Stop SANDBOX's workspace writer before container and file disposal."
+  (when-let* ((cancel (ende-sandbox-worker-cancel sandbox)))
+    (funcall cancel)
+    (setf (ende-sandbox-worker-cancel sandbox) nil)))
 
 (defun ende-sandbox--quiesce (operation function callback)
   "Run async FUNCTION under OPERATION while its container is paused.
@@ -473,6 +495,7 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
         (when-let* ((operation (ende-sandbox-operation sandbox)))
           (ende-sandbox--finish-operation
            operation nil (or error "sandbox operation cancelled")))
+      (ende-sandbox--cancel-worker sandbox)
       (ende-sandbox--cancel-process sandbox)
       (if (ende-sandbox-container sandbox)
           (ende-sandbox--remove-container
@@ -732,10 +755,11 @@ When INVALIDATE is non-nil, make it unavailable to its owner immediately."
     (ende-sandbox--start-container sandbox command cwd timeout callback))))
 
 (defun ende-sandbox-run-command
-    (sandbox command cwd timeout callback register-cancellation)
+    (sandbox command cwd timeout callback register-cancellation &optional prepare)
   "Run COMMAND in SANDBOX asynchronously.
 CALLBACK receives a result and error.  REGISTER-CANCELLATION associates the
-job-scoped cancellation function supplied by Ende's tool dispatcher."
+job-scoped cancellation function supplied by Ende's tool dispatcher.
+Optional PREPARE receives an operation and continuation before first use."
   (unless (and (stringp command) (not (string-match-p (string 0) command)))
     (error "command must be a string without NUL characters"))
   (unless (and (integerp timeout) (<= 1 timeout 3600))
@@ -743,11 +767,26 @@ job-scoped cancellation function supplied by Ende's tool dispatcher."
   (ende-sandbox--operate
    sandbox callback register-cancellation
    (lambda (operation)
-     (ende-sandbox--cwd sandbox cwd)
-     (ende-sandbox--ensure-container
-      sandbox command cwd timeout
-      (lambda (result error)
-        (ende-sandbox--finish-operation operation result error))))))
+     (cl-labels
+         ((run ()
+            (when (ende-sandbox--operation-current-p operation)
+              (condition-case caught
+                  (progn
+                    (ende-sandbox--cwd sandbox cwd)
+                    (ende-sandbox--ensure-container
+                     sandbox command cwd timeout
+                     (lambda (result error)
+                       (ende-sandbox--finish-operation operation result error))))
+                ((error quit)
+                 (ende-sandbox--finish-operation
+                  operation nil (error-message-string caught)))))))
+       (if prepare
+           (funcall prepare operation
+                    (lambda (_value error)
+                      (if error
+                          (ende-sandbox--complete-operation operation nil error)
+                        (run))))
+         (run))))))
 
 (provide 'ende-sandbox)
 

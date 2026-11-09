@@ -1941,6 +1941,36 @@ Return canonical target and root-relative/public path details."
                             error)))
     result))
 
+(defun ende-tools--sandbox-worker-bindings ()
+  "Capture the current sandbox's file policy and existing prepared-data limit."
+  (mapcar (lambda (variable) (cons variable (symbol-value variable)))
+          '(ende-tools--access-config ende-project-excluded-path-patterns
+            case-fold-search ende-tools-max-prepared-bytes)))
+
+(defun ende-tools--prepare-sandbox (root workspace)
+  "Snapshot authorized project files from ROOT into WORKSPACE in a worker."
+  (ende-sandbox--copy-snapshot
+   (ende-tools--authorized-project-files 'run_sandbox_command root) root workspace)
+  t)
+
+(defun ende-tools--sync-sandbox-workspace (workspace syncs)
+  "Apply authorized file SYNCS to paused WORKSPACE in a worker."
+  (let ((sandbox (ende-sandbox--create :workspace workspace)))
+    (pcase-dolist (`(,operation ,source ,relative) syncs)
+      (if (eq operation 'delete)
+          (ende-sandbox-delete-file sandbox relative)
+        (ende-sandbox-sync-file sandbox source relative))))
+  t)
+
+(defun ende-tools--sandbox-source-bytes (workspace relative)
+  "Read regular RELATIVE from paused WORKSPACE in a worker."
+  (let* ((sandbox (ende-sandbox--create :workspace workspace))
+         (source (ende-sandbox--workspace-path sandbox relative))
+         (size (file-attribute-size (file-attributes source))))
+    (when (> size ende-tools-max-prepared-bytes)
+      (error "sandbox source exceeds the prepared-data limit"))
+    (ende-tools--literal-file-bytes source)))
+
 (defun ende-tools--call-sandbox-mutation
     (tool arguments root access-config callback)
   "Run TOOL's host transaction, then await its owned sandbox synchronization."
@@ -1974,6 +2004,7 @@ Return canonical target and root-relative/public path details."
   "Mirror committed CHANGE-SETS under OPERATION, then call CALLBACK."
   (condition-case caught
       (let ((sandbox (ende-sandbox--operation-sandbox operation))
+            (bindings (ende-tools--sandbox-worker-bindings))
             (syncs
              (delq nil
                    (mapcar
@@ -1983,21 +2014,18 @@ Return canonical target and root-relative/public path details."
                                     'run_sandbox_command
                                     (ende-change-set-absolute-path change-set)
                                     (ende-change-set-project-root change-set) t t)))
-                        (cons change-set (plist-get scope :relative))))
+                        (list (ende-change-set-operation change-set)
+                              (ende-change-set-absolute-path change-set)
+                              (plist-get scope :relative))))
                     change-sets))))
         (if (null syncs)
             (funcall callback nil nil)
           (ende-sandbox--quiesce
            operation
-           (lambda (_operation done)
-             (dolist (sync syncs)
-               (let ((change-set (car sync))
-                     (relative (cdr sync)))
-                 (if (eq (ende-change-set-operation change-set) 'delete)
-                     (ende-sandbox-delete-file sandbox relative)
-                   (ende-sandbox-sync-file
-                    sandbox (ende-change-set-absolute-path change-set) relative))))
-             (funcall done nil nil))
+           (lambda (operation done)
+             (ende-sandbox--run-worker
+              operation 'ende-tools #'ende-tools--sync-sandbox-workspace
+              (list (ende-sandbox-workspace sandbox) syncs) bindings done))
            callback)))
     ((error quit) (funcall callback nil (error-message-string caught)))))
 
@@ -2544,16 +2572,24 @@ Return trimmed plain text without text properties."
          (cwd (or (ende-tools--argument arguments "cwd") "."))
          (timeout (ende-tools--bounded-integer
                    arguments "timeout" 300 3600))
-         (sandbox (and owner (ende-sandbox-for-owner owner))))
+         (sandbox (and owner (ende-sandbox-for-owner owner)))
+         (prepare nil))
     (unless owner
       (error "run_sandbox_command requires an active Ende job"))
+    (when (string-match-p (string 0) command)
+      (error "command must be a string without NUL characters"))
     (unless sandbox
       (let ((image (plist-get ende-tools--access-config :podman-image))
-            (files (ende-tools--authorized-project-files 'run_sandbox_command root)))
-        (setq sandbox (ende-sandbox-create owner root image files))))
+            (bindings (ende-tools--sandbox-worker-bindings)))
+        (setq sandbox (ende-sandbox-create owner root image)
+              prepare
+              (lambda (operation done)
+                (ende-sandbox--run-worker
+                 operation 'ende-tools #'ende-tools--prepare-sandbox
+                 (list root (ende-sandbox-workspace sandbox)) bindings done)))))
     (ende-sandbox-run-command
      sandbox command cwd timeout callback
-     ende-tools--register-cancellation-function)))
+     ende-tools--register-cancellation-function prepare)))
 
 (defconst ende-tools--host-command-output-limit 65536
   "Maximum characters captured from each host command output stream.")
@@ -2718,7 +2754,7 @@ process-group cancellation function with the active Ende job."
          (sandbox (and owner (ende-sandbox-for-owner owner)))
          (source (ende-tools--required-string arguments "source"))
          (destination (ende-tools--required-string arguments "destination"))
-         (access-config ende-tools--access-config)
+         (bindings (ende-tools--sandbox-worker-bindings))
          (host-result nil))
     (unless (and owner sandbox (not (ende-sandbox-closing sandbox)))
       (error "copy_from_sandbox requires an active Ende job"))
@@ -2726,7 +2762,16 @@ process-group cancellation function with the active Ende job."
     (let* ((resolved (ende-tools--resolve-mutation-path destination root t))
            (path (plist-get resolved :path))
            (relative (plist-get resolved :relative))
-           (exists (or (file-exists-p path) (file-symlink-p path))))
+           (exists (or (file-exists-p path) (file-symlink-p path)))
+           (change-set
+            (ende-change-set--create
+             :operation (if exists 'edit 'create)
+             :root root :project-root root
+             :source-kind "file" :path relative
+             :absolute-path path :expected-exists (and exists t)
+             :strict-path-policy t :strict-buffer-policy t
+             :authorization-tools '(copy_from_sandbox)
+             :prepared-coding-system 'no-conversion)))
       (ende-tools--assert-path-authorized-for
        'copy_from_sandbox path root t)
       (when (and exists (not (file-regular-p path)))
@@ -2740,40 +2785,29 @@ process-group cancellation function with the active Ende job."
            (funcall callback value error)))
        ende-tools--register-cancellation-function
        (lambda (operation)
+         (when exists
+           (ende-tools--set-snapshot change-set (ende-tools--capture-file path)))
          (ende-sandbox--quiesce
           operation
-          (lambda (_operation done)
-            (let* ((source-path (ende-sandbox-source-file owner source))
-                   (size (file-attribute-size (file-attributes source-path))))
-              (when (> size ende-tools-max-prepared-bytes)
-                (error "sandbox source exceeds the prepared-data limit"))
-              (funcall done (ende-tools--literal-file-bytes source-path) nil)))
+          (lambda (operation done)
+            (ende-sandbox--run-worker
+             operation 'ende-tools #'ende-tools--sandbox-source-bytes
+             (list (ende-sandbox-workspace sandbox) source) bindings done))
           (lambda (bytes error)
             (if error
                 (ende-sandbox--complete-operation operation nil error)
               (condition-case caught
-                  (let* ((ende-tools--access-config access-config)
-                         (ende-tools--access-tool 'copy_from_sandbox)
-                         (ende-tools--defer-sandbox-sync t)
-                         (ende-tools--sandbox-change-sets nil)
-                         (change-set
-                          (ende-change-set--create
-                           :operation (if exists 'edit 'create)
-                           :root root :project-root root
-                           :source-kind "file" :path relative
-                           :absolute-path path :expected-exists (and exists t)
-                           :strict-path-policy t :strict-buffer-policy t
-                           :authorization-tools '(copy_from_sandbox)
-                           :content bytes :prepared-coding-system 'no-conversion)))
-                    (when exists
-                      (ende-tools--set-snapshot
-                       change-set (ende-tools--capture-file path)))
-                    (ende-tools--commit-change-sets (list change-set))
-                    (setq host-result (ende-tools--change-set-result change-set))
-                    (ende-tools--sync-change-sets-to-sandbox
-                     operation ende-tools--sandbox-change-sets
-                     (lambda (value sync-error)
-                       (ende-sandbox--complete-operation operation value sync-error))))
+                  (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
+                    (let ((ende-tools--access-tool 'copy_from_sandbox)
+                          (ende-tools--defer-sandbox-sync t)
+                          (ende-tools--sandbox-change-sets nil))
+                      (setf (ende-change-set-content change-set) bytes)
+                      (ende-tools--commit-change-sets (list change-set))
+                      (setq host-result (ende-tools--change-set-result change-set))
+                      (ende-tools--sync-change-sets-to-sandbox
+                       operation ende-tools--sandbox-change-sets
+                       (lambda (value sync-error)
+                         (ende-sandbox--complete-operation operation value sync-error)))))
                 ((error quit)
                  (ende-sandbox--finish-operation operation nil caught)))))))))))
 

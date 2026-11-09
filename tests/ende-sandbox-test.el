@@ -90,6 +90,22 @@
     (puthash owner sandbox ende-sandbox--by-owner)
     sandbox))
 
+(defun ende-test--sandbox-create (owner root image files)
+  "Create OWNER's snapshot from FILES and await its worker."
+  (let ((sandbox (ende-sandbox-create owner root image))
+        (done nil)
+        (failure nil))
+    (ende-sandbox-with-quiesced-workspace
+     sandbox
+     (lambda (operation callback)
+       (ende-sandbox--run-worker
+        operation 'ende-sandbox #'ende-sandbox--copy-snapshot
+        (list files root (ende-sandbox-workspace sandbox)) nil callback))
+     (lambda (_value error) (setq done t failure error)))
+    (ende-test--wait-for (lambda () done))
+    (should-not failure)
+    sandbox))
+
 (defun ende-test--sandbox-workspace-ready-p ()
   "Return non-nil when rootless Podman can create a tmpfs workspace here."
   (and (not (zerop (user-uid)))
@@ -264,10 +280,9 @@
           (with-temp-file (expand-file-name "project-file.txt" root)
             (insert "not copied\n"))
           (cl-letf (((symbol-function 'ende-sandbox-create)
-                     (lambda (job root image files)
+                     (lambda (job root image)
                        (should (= job owner))
                        (should (equal image ende-test--sandbox-pin))
-                       (should-not files)
                        (let* ((base (make-temp-file "ende-empty-workspace-" t))
                               (workspace (expand-file-name "workspace" base)))
                          (make-directory workspace)
@@ -277,8 +292,8 @@
                                 :workspace workspace))
                          (puthash job sandbox ende-sandbox--by-owner)
                          sandbox)))
-                    ((symbol-function 'ende-sandbox-run-command)
-                     (lambda (_sandbox _command _cwd _timeout callback _register)
+                    ((symbol-function 'ende-sandbox--ensure-container)
+                     (lambda (_sandbox _command _cwd _timeout callback)
                        (funcall callback '(:exit_code 0 :stdout "" :stderr "") nil))))
             (let ((result (ende-test--sandbox-call
                            "run_sandbox_command"
@@ -369,7 +384,7 @@
               (should (= (length (plist-get result :files)) 1))
               (should (eq (plist-get result :truncated) t)))
             (setq sandbox
-                  (ende-sandbox-create owner root ende-test--sandbox-pin files))
+                  (ende-test--sandbox-create owner root ende-test--sandbox-pin files))
             (should (file-in-directory-p
                      (ende-sandbox-workspace sandbox) "/dev/shm/"))
             (should (file-exists-p
@@ -412,7 +427,7 @@
                      (lambda (program)
                        (and (equal program "podman") "/usr/bin/podman"))))
             (setq sandbox
-                  (ende-sandbox-create
+                  (ende-test--sandbox-create
                    owner root ende-test--sandbox-pin (list source))))
           (let ((sandbox-file
                  (ende-test--sandbox-workspace sandbox "src/~/foo.el")))
@@ -631,9 +646,9 @@
           (setq sandbox (ende-test--sandbox-fixture owner root (list source)))
           (let ((old-base (ende-sandbox-base sandbox))
                 (ende-tools--execution-owner owner))
-            (cl-letf (((symbol-function 'ende-sandbox-sync-file)
-                       (lambda (&rest _arguments)
-                         (error "injected sandbox sync failure"))))
+            (cl-letf (((symbol-function 'ende-sandbox--run-worker)
+                       (lambda (_operation _library _function _arguments _bindings callback)
+                         (funcall callback nil "injected sandbox sync failure"))))
               (let ((edited
                      (ende-test--tool-call
                       "edit_file"
@@ -653,13 +668,12 @@
             (should-not (ende-sandbox-for-owner owner))
             (should-not (file-exists-p old-base))))
           (cl-letf (((symbol-function 'ende-sandbox-create)
-                     (lambda (new-owner new-root _image files)
+                     (lambda (new-owner new-root _image)
                        (setq fresh
                              (ende-test--sandbox-fixture
-                              new-owner new-root files))))
-                    ((symbol-function 'ende-sandbox-run-command)
-                     (lambda (new-sandbox _command _cwd _timeout callback
-                                             _register-cancellation)
+                              new-owner new-root nil))))
+                    ((symbol-function 'ende-sandbox--ensure-container)
+                     (lambda (new-sandbox _command _cwd _timeout callback)
                        (let ((text
                               (with-temp-buffer
                                 (insert-file-contents
@@ -706,8 +720,7 @@
                         "*** Update File: src/first.el\n@@\n-old\n+first updated\n"
                         "*** Update File: src/second.el\n@@\n-old\n+second updated\n"
                         "*** End Patch\n"))
-         (sync-file (symbol-function 'ende-sandbox-sync-file))
-         (workspace-path (symbol-function 'ende-sandbox--workspace-path)))
+         (run-worker (symbol-function 'ende-sandbox--run-worker)))
     (unwind-protect
         (progn
           (make-directory (file-name-directory first) t)
@@ -729,14 +742,14 @@
                           0 nil (lambda ()
                                   (setq paused (equal action "pause"))
                                   (funcall callback "" nil)))))
-                      ((symbol-function 'ende-sandbox-sync-file)
-                       (lambda (&rest arguments)
+                      ((symbol-function 'ende-sandbox--run-worker)
+                       (lambda (operation library function arguments bindings callback)
                          (should paused)
-                         (apply sync-file arguments)))
-                      ((symbol-function 'ende-sandbox--workspace-path)
-                       (lambda (&rest arguments)
-                         (should paused)
-                         (apply workspace-path arguments))))
+                         (funcall run-worker
+                                  operation library function arguments bindings
+                                  (lambda (value error)
+                                    (should paused)
+                                    (funcall callback value error))))))
               (let ((edited
                      (ende-test--tool-call
                       "apply_patch" (list (cons "patch" patch))
@@ -766,6 +779,25 @@
                                (insert-file-contents output)
                                (buffer-string))
                               "built by sandbox\n"))
+              (cl-letf (((symbol-function 'ende-sandbox--run-worker)
+                         (lambda (operation library function arguments bindings callback)
+                           (funcall run-worker
+                                    operation library function arguments bindings
+                                    (lambda (value error)
+                                      (with-temp-file output (insert "concurrent edit\n"))
+                                      (funcall callback value error))))))
+                (let ((copied
+                       (ende-test--sandbox-call
+                        "copy_from_sandbox"
+                        '(("source" . "agent.log")
+                          ("destination" . "out/generated.bin"))
+                        root configuration owner)))
+                  (should-not (plist-get copied :ok))))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents output)
+                               (buffer-string))
+                             "concurrent edit\n"))
+              (should (eq sandbox (ende-sandbox-for-owner owner)))
               (let ((accessed nil)
                     (failure nil))
                 (cl-letf (((symbol-function 'ende-sandbox--podman-action)
@@ -792,6 +824,43 @@
         (ende-sandbox--dispose sandbox))
       (ende-sandbox-cleanup-owner owner)
       (delete-directory root t))))
+
+(ert-deftest ende-test/sandbox-preparation-is-owned-and-cancellable ()
+  (dolist (immediate '(t nil))
+    (let* ((root (make-temp-file "ende-sandbox-prepare-cancel-" t))
+           (owner (cl-incf ende-test--sandbox-owner))
+           (sandbox (ende-test--sandbox-fixture owner root nil))
+           (cancel nil)
+           (prepared nil)
+           (stopped nil)
+           (calls 0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ende-sandbox--ensure-container)
+                     (lambda (&rest _args)
+                       (ert-fail "cancelled preparation must not start a container"))))
+            (ende-sandbox-run-command
+             sandbox "true" "." 30
+             (lambda (result error)
+               (cl-incf calls)
+               (should-not result)
+               (should (string-match-p "cancelled" error)))
+             (lambda (function)
+               (setq cancel function)
+               (when (and immediate function) (funcall function)))
+             (lambda (_operation done)
+               (setq prepared done)
+               (setf (ende-sandbox-worker-cancel sandbox)
+                     (lambda () (setq stopped t)))))
+            (if immediate
+                (should-not prepared)
+              (should (ende-sandbox-operation sandbox))
+              (funcall cancel)
+              (should stopped)
+              (funcall prepared t nil))
+            (should (= calls 1))
+            (should-not (ende-sandbox-for-owner owner)))
+        (ende-sandbox-cleanup-owner owner)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/sandbox-deletion-collision-invalidates-without-recursion ()
   (let* ((root (make-temp-file "ende-sandbox-delete-collision-" t))
@@ -1005,7 +1074,7 @@
         (progn
           (puthash owner sandbox ende-sandbox--by-owner)
           (cl-letf (((symbol-function 'ende-sandbox-run-command)
-                     (lambda (_sandbox _command _cwd _timeout callback _register)
+                     (lambda (_sandbox _command _cwd _timeout callback _register _prepare)
                        (funcall callback
                                 '(:exit_code 9 :process_ok nil :stdout ""
                                   :stderr "" :stdout_truncated :json-false
@@ -1119,7 +1188,7 @@
         (progn
           (ende-test--sandbox-make-project root)
           (let ((configuration (ende-test--sandbox-config root image)))
-            (setq sandbox (ende-sandbox-create owner root image nil))
+            (setq sandbox (ende-test--sandbox-create owner root image nil))
             (ende-tools--write-private-bytes
              (ende-test--sandbox-workspace sandbox "generated.bin")
              (unibyte-string 0 1 127 128 255))
@@ -1181,7 +1250,7 @@
     (unwind-protect
         (progn
           (make-directory (expand-file-name "subdir" root))
-          (setq sandbox (ende-sandbox-create
+          (setq sandbox (ende-test--sandbox-create
                          owner root ende-test--sandbox-pin nil))
           (make-directory
            (ende-test--sandbox-workspace sandbox "subdir"))
