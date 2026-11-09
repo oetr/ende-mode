@@ -1343,6 +1343,27 @@ Multiline matches belong to their starting line; columns name its first match."
 (defvar ende-tools--mutation-locks (make-hash-table :test #'equal)
   "Project roots currently locked by an Ende disk mutation.")
 
+(defvar ende-tools--mutation-reservation nil
+  "Scope reservation retained by an asynchronous sandbox operation.")
+
+(defun ende-tools--reserve-mutation-roots (roots reservation)
+  "Reserve ROOTS for RESERVATION, a cell holding its locked scopes."
+  (when (cl-some (lambda (root)
+                   (let ((owner (gethash root ende-tools--mutation-locks)))
+                     (and owner (not (eq owner reservation)))))
+                 roots)
+    (error "another Ende mutation is already committing in a target scope"))
+  (dolist (root roots)
+    (puthash root reservation ende-tools--mutation-locks)
+    (cl-pushnew root (car reservation) :test #'equal)))
+
+(defun ende-tools--release-mutation-roots (reservation)
+  "Release only the scopes still owned by RESERVATION."
+  (dolist (root (car reservation))
+    (when (eq reservation (gethash root ende-tools--mutation-locks))
+      (remhash root ende-tools--mutation-locks)))
+  (setcar reservation nil))
+
 (defun ende-tools--file-identity (attributes)
   "Return stable identity and mutable preconditions from file ATTRIBUTES."
   (list (file-attribute-file-identifier attributes)
@@ -1975,10 +1996,12 @@ Return canonical target and root-relative/public path details."
     (tool arguments root access-config callback)
   "Run TOOL's host transaction, then await its owned sandbox synchronization."
   (let ((sandbox (ende-sandbox-for-owner ende-tools--execution-owner))
+        (reservation (list nil))
         (host-result nil))
     (ende-sandbox--operate
      sandbox
      (lambda (_value error)
+       (ende-tools--release-mutation-roots reservation)
        (funcall callback
                 (if host-result
                     (if (plist-get host-result :ok)
@@ -1990,6 +2013,7 @@ Return canonical target and root-relative/public path details."
      ende-tools--register-cancellation-function
      (lambda (operation)
        (let ((ende-tools--defer-sandbox-sync t)
+             (ende-tools--mutation-reservation reservation)
              (ende-tools--sandbox-change-sets nil))
          (setq host-result
                (ende-tool-call (ende-tool-name tool) arguments root access-config))
@@ -2045,17 +2069,14 @@ Return canonical target and root-relative/public path details."
                             (list (ende-change-set-project-root change-set)
                                   (ende-change-set-root change-set)))))
                    change-sets))))
-         (locked nil)
+         (reservation (or ende-tools--mutation-reservation (list nil)))
          (ende-tools--mutation-retained-recovery nil))
     (ende-tools--assert-change-set-limits change-sets)
     (ende-tools--assert-change-set-targets-unique change-sets)
     (ende-tools--validate-change-sets change-sets)
     (dolist (change-set change-sets)
       (ende-tools--validate-elisp-change-set change-set))
-    (when (cl-some (lambda (root) (gethash root ende-tools--mutation-locks)) roots)
-      (error "another Ende mutation is already committing in a target scope"))
-    (dolist (root roots) (puthash root t ende-tools--mutation-locks))
-    (setq locked roots)
+    (ende-tools--reserve-mutation-roots roots reservation)
     (unwind-protect
         (progn
           (ende-tools--prepare-change-set-resources change-sets)
@@ -2083,8 +2104,8 @@ Return canonical target and root-relative/public path details."
       (unwind-protect
           (ende-tools--cleanup-change-set-resources
            change-sets ende-tools--mutation-retained-recovery)
-        (dolist (root locked)
-          (remhash root ende-tools--mutation-locks))))))
+        (unless ende-tools--mutation-reservation
+          (ende-tools--release-mutation-roots reservation))))))
 
 (defun ende-tools--sequence (value)
   "Return VALUE as a list when it is a JSON array or Lisp sequence."
@@ -2573,6 +2594,7 @@ Return trimmed plain text without text properties."
          (timeout (ende-tools--bounded-integer
                    arguments "timeout" 300 3600))
          (sandbox (and owner (ende-sandbox-for-owner owner)))
+         (reservation (list nil))
          (prepare nil))
     (unless owner
       (error "run_sandbox_command requires an active Ende job"))
@@ -2584,11 +2606,18 @@ Return trimmed plain text without text properties."
         (setq sandbox (ende-sandbox-create owner root image)
               prepare
               (lambda (operation done)
+                (ende-tools--reserve-mutation-roots (list root) reservation)
                 (ende-sandbox--run-worker
                  operation 'ende-tools #'ende-tools--prepare-sandbox
-                 (list root (ende-sandbox-workspace sandbox)) bindings done)))))
+                 (list root (ende-sandbox-workspace sandbox)) bindings
+                 (lambda (value error)
+                   (ende-tools--release-mutation-roots reservation)
+                   (funcall done value error)))))))
     (ende-sandbox-run-command
-     sandbox command cwd timeout callback
+     sandbox command cwd timeout
+     (lambda (value error)
+       (ende-tools--release-mutation-roots reservation)
+       (funcall callback value error))
      ende-tools--register-cancellation-function prepare)))
 
 (defconst ende-tools--host-command-output-limit 65536
@@ -2755,6 +2784,7 @@ process-group cancellation function with the active Ende job."
          (source (ende-tools--required-string arguments "source"))
          (destination (ende-tools--required-string arguments "destination"))
          (bindings (ende-tools--sandbox-worker-bindings))
+         (reservation (list nil))
          (host-result nil))
     (unless (and owner sandbox (not (ende-sandbox-closing sandbox)))
       (error "copy_from_sandbox requires an active Ende job"))
@@ -2779,6 +2809,7 @@ process-group cancellation function with the active Ende job."
       (ende-sandbox--operate
        sandbox
        (lambda (value error)
+         (ende-tools--release-mutation-roots reservation)
          (if host-result
              (funcall callback
                       (ende-tools--sandbox-sync-warning host-result error) nil)
@@ -2800,6 +2831,7 @@ process-group cancellation function with the active Ende job."
                   (cl-progv (mapcar #'car bindings) (mapcar #'cdr bindings)
                     (let ((ende-tools--access-tool 'copy_from_sandbox)
                           (ende-tools--defer-sandbox-sync t)
+                          (ende-tools--mutation-reservation reservation)
                           (ende-tools--sandbox-change-sets nil))
                       (setf (ende-change-set-content change-set) bytes)
                       (ende-tools--commit-change-sets (list change-set))
