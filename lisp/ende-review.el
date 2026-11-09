@@ -78,10 +78,29 @@ Read-only operations such as `summarize' do not use this policy."
 (defvar ende-review-change-functions nil
   "Functions called with a buffer whenever its pending reviews change.")
 
+(defvar ende-review--change-batch nil
+  "Cell holding buffers awaiting notification during a review batch.")
+
 (defun ende-review--notify-change (buffer)
   "Notify observers that pending reviews changed in BUFFER."
-  (dolist (function ende-review-change-functions)
-    (ende-ignore-errors function buffer)))
+  (if ende-review--change-batch
+      (cl-pushnew buffer (car ende-review--change-batch) :test #'eq)
+    (dolist (function ende-review-change-functions)
+      (ende-ignore-errors function buffer))))
+
+(defmacro ende-review-with-batched-changes (&rest body)
+  "Evaluate BODY, notifying observers once per changed buffer on exit.
+Nested batches share the outermost notification boundary."
+  (declare (indent 0) (debug t))
+  `(if ende-review--change-batch
+       (progn ,@body)
+     (let ((ende-review--change-batch (list nil)))
+       (unwind-protect
+           (progn ,@body)
+         (let ((buffers (car ende-review--change-batch))
+               (ende-review--change-batch nil))
+           (dolist (buffer (nreverse buffers))
+             (ende-review--notify-change buffer)))))))
 
 ;;;; Review Highlight & Color Helpers
 
@@ -386,8 +405,9 @@ buffers without an explicit local value."
   (let ((overlays (ende-review--overlays-in-target)))
     (unless overlays
       (user-error "No ende output awaiting approval here"))
-    (dolist (overlay overlays)
-      (ende-review-delete-overlay overlay))
+    (ende-review-with-batched-changes
+      (dolist (overlay overlays)
+        (ende-review-delete-overlay overlay)))
     (message "ende: approved %d generated region%s"
              (length overlays) (if (= (length overlays) 1) "" "s"))))
 
@@ -425,8 +445,9 @@ Add each rejected generated region separately to the kill ring."
                 (delete-region start end)
                 (goto-char start)
                 (insert original)))))))
-    (dolist (overlay overlays)
-      (ende-review-delete-overlay overlay))
+    (ende-review-with-batched-changes
+      (dolist (overlay overlays)
+        (ende-review-delete-overlay overlay)))
     (dolist (text (nreverse rejected-texts))
       (kill-new text))
     overlays))
@@ -451,8 +472,9 @@ Add each rejected generated region separately to the kill ring."
                       (ende-review--overlays-in-buffer))))
       (unless overlays
         (user-error "No ende output awaiting approval in this buffer"))
-      (dolist (overlay overlays)
-        (ende-review-delete-overlay overlay))
+      (ende-review-with-batched-changes
+        (dolist (overlay overlays)
+          (ende-review-delete-overlay overlay)))
       (message "ende: approved all %d generated regions" (length overlays)))))
 
 (defun ende-reject-all-output (&optional buffer)

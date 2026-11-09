@@ -611,10 +611,11 @@ Return pass data without settling JOB."
 							      :message (error-message-string caught)
 							      :raw (plist-get edit :raw))
 							application-failures))))))))
-        (if ende-structured-edit-move-point
-            (funcall apply-edits)
-          (save-excursion
-            (funcall apply-edits)))))
+        (ende-review-with-batched-changes
+          (if ende-structured-edit-move-point
+              (funcall apply-edits)
+            (save-excursion
+              (funcall apply-edits))))))
     (setq failures (append failures (nreverse application-failures)))
     (list :source source
           :requested (+ (length edits) (length failures))

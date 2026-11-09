@@ -130,7 +130,10 @@
 
 (ert-deftest ende-test/write-anywhere-supports-occurrence-and-all-anchors ()
   (ende-test--reset)
-  (let* ((response
+  (let* ((notifications 0)
+         (ende-review-change-functions
+          (cons (lambda (_) (cl-incf notifications)) ende-review-change-functions))
+         (response
           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"replace\",\"all\":true,\"text\":\"ONE\"}]}" )
          (ende-llm-function
           (ende-test--fake-llm (list (list :content response)))))
@@ -138,6 +141,7 @@
 			    (let ((job (ende-write-anywhere)))
 			      (should (eq (ende-job-state job) 'completed))
 			      (should (string= (buffer-string) "ONE\nONE"))
+			      (should (= notifications 1))
 			      (should (= (length (ende-review--overlays-in-buffer)) 2))))))
 
 (ert-deftest ende-test/write-anywhere-retains-all-skipped-edits-on-failure ()
@@ -327,7 +331,10 @@
 
 (ert-deftest ende-test/insert-anywhere-supports-occurrence-and-all-anchors ()
   (ende-test--reset)
-  (let* ((response
+  (let* ((notifications 0)
+         (ende-review-change-functions
+          (cons (lambda (_) (cl-incf notifications)) ende-review-change-functions))
+         (response
           "{\"version\":1,\"edits\":[{\"anchor\":\"one\",\"position\":\"before\",\"occurrence\":1,\"text\":\"A\"},{\"anchor\":\"one\",\"position\":\"after\",\"all\":true,\"text\":\"B\"}]}" )
          (ende-llm-function
           (ende-test--fake-llm (list (list :content response)))))
@@ -335,6 +342,7 @@
 			    (let ((job (ende-insert-anywhere)))
 			      (should (eq (ende-job-state job) 'completed))
 			      (should (string= (buffer-string) "AoneB\noneB"))
+			      (should (= notifications 1))
 			      (should (= (length (ende-review--overlays-in-buffer)) 3))))))
 
 (ert-deftest ende-test/structured-edit-normalized-expansion-is-bounded ()

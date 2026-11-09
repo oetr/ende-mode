@@ -275,17 +275,47 @@
 			    (should (eq (get-text-property 1 'ende-test-property) 'original))
 			    (should-not (ende-review--overlays-in-buffer)))))
 
+(ert-deftest ende-test/review-notifications-batch-nest-and-unwind ()
+  (with-temp-buffer
+    (insert "ab")
+    (let ((first (current-buffer)))
+      (with-temp-buffer
+        (insert "cd")
+        (let* ((second (current-buffer))
+               (notifications nil)
+               (ende-review-change-functions
+                (cons (lambda (buffer) (push buffer notifications))
+                      ende-review-change-functions)))
+          (should
+           (condition-case nil
+               (ende-review-with-batched-changes
+                 (ende-review-create-overlay first 1 2)
+                 (ende-review-with-batched-changes
+                   (ende-review-create-overlay first 2 3)
+                   (ende-review-create-overlay second 1 2))
+                 (should-not notifications)
+                 (signal 'quit nil))
+             (quit t)))
+          (should (equal notifications (list second first)))
+          (ende-review-delete-overlay (car (ende-review--overlays-in-buffer)))
+          (should (equal notifications (list second second first))))))))
+
 (ert-deftest ende-test/mass-review-actions-cover-the-whole-buffer ()
   (ende-test--reset)
-  (let ((kill-ring nil)
-        (kill-ring-yank-pointer nil))
+  (let* ((notifications 0)
+         (ende-review-change-functions
+          (cons (lambda (_) (cl-incf notifications)) ende-review-change-functions))
+         (kill-ring nil)
+         (kill-ring-yank-pointer nil))
     (ende-test--with-buffer "XY"
 			    (let ((first (ende-review-create-overlay
 					  (current-buffer) 1 2 nil nil "A"))
 				  (second (ende-review-create-overlay
 					   (current-buffer) 2 3 nil nil "B")))
 			      (should (= (length (ende-review--overlays-in-buffer)) 2))
+			      (should (= notifications 2))
 			      (ende-reject-all-output)
+			      (should (= notifications 3))
 			      (should (string= (buffer-string) "AB"))
 			      (should (equal kill-ring '("X" "Y")))
 			      (should-not (ende-review--overlays-in-buffer))
@@ -295,7 +325,9 @@
 			       (current-buffer) 1 2 nil nil "A")
 			      (ende-review-create-overlay
 			       (current-buffer) 2 3 nil nil "B")
+			      (should (= notifications 5))
 			      (ende-approve-all-output)
+			      (should (= notifications 6))
 			      (should-not (ende-review--overlays-in-buffer))))))
 
 (ert-deftest ende-test/narrowing-does-not-affect-review-discovery ()
