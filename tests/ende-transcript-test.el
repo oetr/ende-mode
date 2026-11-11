@@ -50,7 +50,20 @@
           (should (eq (ende-transcript-entry-status entry) 'complete))
           (should (equal (ende-transcript-entry-content entry) observed))
           (should-error (ende-transcript-record-capabilities job "second snapshot"))
-          (should (= (length (ende-transcript-entries (ende-job-transcript job))) 1)))
+          (should (= (length (ende-transcript-entries (ende-job-transcript job))) 1))
+          (let ((viewer (ende-work-buffer-open job)))
+            (unwind-protect
+                (with-current-buffer viewer
+                  (ende-work-buffer--render-pending)
+                  (goto-char (point-min))
+                  (should (search-forward "Agent: Capabilities" nil t))
+                  (should (equal (ende-work-buffer--raw-payload entry) observed))
+                  (org-back-to-heading t)
+                  (org-fold-show-subtree)
+                  (ende-work-buffer--update
+                   (lambda () (ende-work-buffer--entry entry 'replace)))
+                  (should (string-match-p (regexp-quote observed) (buffer-string))))
+              (kill-buffer viewer))))
       (delete-directory directory t))))
 
 (ert-deftest ende-transcript-fragments-are-consumed-explicitly ()
