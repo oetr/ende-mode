@@ -188,7 +188,7 @@
      (when (and phase
                 (or activity (null (overlay-get ov 'reasoning-paragraph))))
        (propertize
-        (concat phase (if activity (concat " — " activity) "") "\n")
+        (concat phase (if activity (concat "\n" activity) "") "\n")
         'face 'font-lock-keyword-face)))))
 
 (defun ende-ui--activity-paragraph (status)

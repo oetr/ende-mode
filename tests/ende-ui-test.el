@@ -149,7 +149,7 @@
              (tokens (string-match "Tokens:" plain))
              (cached (string-match "Cached:" plain))
              (output (string-match "Output:" plain))
-             (phase (string-match "Thinking — Inspecting event models" plain))
+             (phase (string-match "Thinking\nInspecting event models" plain))
              (activity (string-match "Provider summaries arrive" plain))
              (focus (string-match "Focus: Latest provider summary" plain)))
         (should (and header tokens cached output phase activity focus))
