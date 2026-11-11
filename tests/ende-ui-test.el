@@ -145,7 +145,7 @@
              :text "Latest provider summary"))
       (let* ((display (overlay-get overlay 'after-string))
              (plain (substring-no-properties display))
-             (header (string-match "Provider Model balanced" plain))
+             (header (string-match "Provider Model balanced[^\n]*t/s" plain))
              (tokens (string-match "Tokens:" plain))
              (cached (string-match "Cached:" plain))
              (output (string-match "Output:" plain))
@@ -253,7 +253,7 @@
        job '(:type :usage :tokens 25 :speed 5.0 :estimated t))
       (let ((plain (ende-test--overlay-label overlay)))
         (should (string-match-p
-                 "Tokens: 120 - 5.0 t/s" plain))
+                 "^Tokens: 120$" plain))
         (should (string-match-p "Cached: 40" plain))
         (should (string-match-p "Output: ~25" plain)))
       (ende-ui-delete-overlay overlay))))

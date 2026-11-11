@@ -172,17 +172,13 @@
          (phase (ende-ui--display-label status)))
     (concat
      (propertize
-      (concat (mapconcat #'identity
-                         (delq nil (list client model effort)) " ")
-              "\n")
+      (mapconcat #'identity (delq nil (list client model effort)) " ")
       'face 'ende-badge-face)
-     (when (or input (and (numberp speed) (> speed 0)))
-       (propertize
-        (format "Tokens: %s%s\n"
-                (or input "–")
-                (if (and (numberp speed) (> speed 0))
-                    (format " - %.1f t/s" speed) ""))
-        'face 'shadow))
+     (when (and (numberp speed) (> speed 0))
+       (propertize (format " - %.1f t/s" speed) 'face 'shadow))
+     "\n"
+     (when input
+       (propertize (format "Tokens: %s\n" input) 'face 'shadow))
      (when cached
        (propertize (format "Cached: %s\n" cached) 'face 'shadow))
      (when output
