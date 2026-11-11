@@ -40,6 +40,16 @@
   "Return MESSAGE's string or ordered content parts."
   (if (stringp (car-safe message)) (cdr message) (plist-get message :content)))
 
+(defun ende-content-capabilities (text)
+  "Return a host-typed capability snapshot containing TEXT."
+  (list :role "system" :host-kind 'capabilities :content text))
+
+(defun ende-content-capabilities-p (message)
+  "Return non-nil when MESSAGE is a host-typed capability snapshot."
+  (and (consp message) (not (stringp (car message)))
+       (equal (plist-get message :role) "system")
+       (eq (plist-get message :host-kind) 'capabilities)))
+
 (defun ende-content-concat (contents)
   "Concatenate CONTENTS without changing part order."
   (if (cl-every #'stringp contents) (mapconcat #'identity contents "")
