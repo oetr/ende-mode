@@ -1715,62 +1715,88 @@
                                   (ende-content-body (car (last messages))))))))))
 
 (ert-deftest ende-test/chat-sibling-configuration-remains-history-only ()
-  (let ((root (make-temp-file "ende-config-sibling-" t))
-        (clear-block "#+begin_ende\n(clear-tools)\n#+end_ende\n"))
-    (ende-test--reset)
-    (unwind-protect
-        (let ((ende-llm-function
-               (ende-test--fake-llm '("First response." "Second response."))))
-          (with-temp-buffer
-            (org-mode)
-            (insert
-             (ende-test--chat-config-block
-              `((root ,root)
-                (resource project (include "*.el"))
-                (tools read_file)
-                (set-tool-resources read_file :resources project)))
-             "\n* Conversation\n** First\n"
-             clear-block
-             "Temporary access change.\n** Second\nUse the document permissions.\n")
-            (ende-test--chat-goto "** First")
-            (should (eq (ende-job-state (ende-ask)) 'completed))
-            (ende-test--chat-goto "** Second")
-            (should (eq (ende-job-state (ende-ask)) 'completed))
-            (let* ((document (ende-chat--build-document))
-                   (first (ende-test--chat-config-at document "First"))
-                   (second (ende-test--chat-config-at document "Second"))
-                   (first-call (car ende-test--calls))
-                   (second-call (cadr ende-test--calls))
-                   (first-definitions
-                    (plist-get (plist-get first-call :options) :tool-definitions))
-                   (second-definitions
-                    (plist-get (plist-get second-call :options) :tool-definitions))
-                   (second-messages (plist-get second-call :messages)))
-              (should-not (memq 'read_file (plist-get first :active-tools)))
-              (should (memq 'read_file (plist-get second :active-tools)))
-              (should (equal (cdr (assq 'read_file
-                                        (plist-get second :tool-resources)))
-                             '(project)))
-              (should (equal (json-encode first-definitions) (json-encode second-definitions)))
-              (should (equal (json-encode first-definitions)
-                             (json-encode (ende-tool-definitions))))
-              (should-not
-               (cl-some
-                (lambda (message)
-                  (string-match-p (regexp-quote clear-block)
-                                  (ende-content-readable (ende-content-body message))))
-                second-messages))
-              (let* ((first-messages (plist-get first-call :messages))
-                     (snapshots (cl-remove-if-not #'ende-content-capabilities-p second-messages))
-                     (old (ende-content-body (car snapshots)))
-                     (current (ende-content-body (cadr snapshots))))
-                (should (equal first-messages (cl-subseq second-messages 0 (length first-messages))))
-                (should (= (length snapshots) 2))
-                (should (equal old (ende-chat-config-capabilities (list :access-policy first))))
-                (should (equal current (ende-chat-config-capabilities (list :access-policy second))))
-                (should-not (equal old current))))))
+  (dolist (first-result '("First response." :error))
+    (let ((root (make-temp-file "ende-config-sibling-" t))
+          (clear-block (ende-test--chat-config-block
+                        '((clear-tools) (tools run_host_command)
+                          (restrict-host-commands (:prefix-args "make" "test"))))))
       (ende-test--reset)
-      (delete-directory root t))))
+      (unwind-protect
+          (let ((ende-llm-function
+                 (ende-test--fake-llm (list first-result "Second response."))))
+            (with-temp-buffer
+              (org-mode)
+              (insert
+               (ende-test--chat-config-block
+                `((root ,root)
+                  (resource project (include "*.el"))
+                  (tools read_file run_host_command)
+                  (restrict-host-commands "git")
+                  (set-tool-resources read_file :resources project)))
+               "\n* Conversation\n** First\n"
+               clear-block
+               "Temporary access change.\n** Second\nUse the document permissions.\n")
+              (ende-test--chat-goto "** First")
+              (let ((job (ende-ask)))
+                (ende-test--wait-for (lambda () (ende-job-terminal-p job)))
+                (should (eq (ende-job-state job)
+                            (if (eq first-result :error) 'failed 'completed))))
+              (ende-test--chat-goto "** Second")
+              (let ((job (ende-ask)))
+                (ende-test--wait-for (lambda () (ende-job-terminal-p job)))
+                (should (eq (ende-job-state job) 'completed)))
+              (let* ((document (ende-chat--build-document))
+                     (first (ende-test--chat-config-at document "First"))
+                     (second (ende-test--chat-config-at document "Second"))
+                     (first-call (car ende-test--calls))
+                     (second-call (cadr ende-test--calls))
+                     (first-definitions
+                      (plist-get (plist-get first-call :options) :tool-definitions))
+                     (second-definitions
+                      (plist-get (plist-get second-call :options) :tool-definitions))
+                     (second-messages (plist-get second-call :messages)))
+                (should-not (memq 'read_file (plist-get first :active-tools)))
+                (should (memq 'read_file (plist-get second :active-tools)))
+                (should (equal (cdr (assq 'read_file
+                                          (plist-get second :tool-resources)))
+                               '(project)))
+                (should (equal (json-encode first-definitions) (json-encode second-definitions)))
+                (should (equal (json-encode first-definitions)
+                               (json-encode (ende-tool-definitions))))
+                (should-not
+                 (cl-some
+                  (lambda (message)
+                    (string-match-p (regexp-quote clear-block)
+                                    (ende-content-readable (ende-content-body message))))
+                  second-messages))
+                (let* ((first-messages (plist-get first-call :messages))
+                       (snapshots (cl-remove-if-not #'ende-content-capabilities-p second-messages))
+                       (old (ende-content-body (car snapshots)))
+                       (current (ende-content-body (cadr snapshots))))
+                  (should (equal first-messages (cl-subseq second-messages 0 (length first-messages))))
+                  (dolist (spec '((ende-llm--request-body . :messages)
+                                  (ende-responses--request-body . :input)
+                                  (ende-codex--request-body . :input)
+                                  (ende-messages--request-body . :messages)))
+                    (ert-info ((format "%s after %s" (car spec) first-result))
+                      (let* ((first-profile (list :model "test" :output-tokens 100
+                                                  :tool-definitions first-definitions))
+                             (second-profile (list :model "test" :output-tokens 100
+                                                   :tool-definitions second-definitions))
+                             (before (funcall (car spec) first-messages first-profile))
+                             (after (funcall (car spec) second-messages second-profile))
+                             (prefix (alist-get (cdr spec) before)))
+                        (should (equal prefix
+                                       (cl-subseq (alist-get (cdr spec) after) 0 (length prefix))))
+                        (should (equal (alist-get :system before) (alist-get :system after)))
+                        (should (equal (json-encode (alist-get :tools before))
+                                       (json-encode (alist-get :tools after)))))))
+                  (should (= (length snapshots) 2))
+                  (should (equal old (ende-chat-config-capabilities (list :access-policy first))))
+                  (should (equal current (ende-chat-config-capabilities (list :access-policy second))))
+                  (should-not (equal old current))))))
+        (ende-test--reset)
+        (delete-directory root t)))))
 
 (ert-deftest ende-test/chat-compaction-keeps-its-stable-system-prompt ()
   (ende-test--reset)
