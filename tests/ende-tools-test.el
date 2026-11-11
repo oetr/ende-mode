@@ -249,7 +249,10 @@
       (dolist (phrase '("directly on the host" "bypassing the"
                         "private development workspace"
                         "only when host execution is specifically required"
-                        "edit_file" "create_file" "delete_file" "apply_patch"))
+                        "edit_file" "create_file" "delete_file" "apply_patch"
+                        "program is only the executable" "args excludes the executable"
+                        "literal arguments" "no implicit shell"
+                        "latest capability snapshot" "Examples are not permissions"))
         (should (string-match-p (regexp-quote phrase) host-description))))
     (let* ((schema (ende-test--public-tool-schema definitions "file_info"))
            (path (gethash "path" (gethash "properties" schema)))
@@ -448,7 +451,7 @@
                                   nil))))
               (ende-tools-call-async
                (list :id "async" :name "run_host_command"
-                     :arguments "{\"command\":\"exit 9\"}")
+                     :arguments "{\"command\":{\"program\":\"sh\",\"args\":[\"-c\",\"exit 9\"]}}")
                async-config
                (lambda (response) (setq async-response response done t))))
             (should done)
@@ -591,7 +594,9 @@
                                    "host commands:\\|host-command policy:"
                                    (ende-chat-config-capabilities environment)))
                       (let ((call (ende-test--host-command-call
-                                   '(("command" . "true")) configuration)))
+                                   (ende-protocol-json-read-string
+                                    "{\"command\":{\"program\":\"true\",\"args\":[]}}")
+                                   configuration)))
                         (should-not (plist-get call :ok))
                         (should (string-match-p "tool is not active"
                                                 (plist-get call :error))))))))
@@ -648,112 +653,58 @@
                             (plist-get configuration :tool-resources))))
       (delete-directory root t))))
 
-(ert-deftest ende-test/host-command-schema-and-restricted-argv-execution ()
-  (let* ((root (make-temp-file "ende-host-argv-" t))
-         (configuration
-          (ende-test--tool-access-config
-           root '((tools run_host_command)
-                  (restrict-host-commands "printf"
-                                          (:fixed-args "true")
-                                          (:fixed-args "make" "test")
-                                          (:fixed-args "true" "foo")))))
-         (definitions (ende-tool-definitions configuration))
-         (schema (ende-test--public-tool-schema definitions "run_host_command"))
-         (command-schema
-          (ende-protocol-json-get
-           "command" (ende-protocol-json-get "properties" schema)))
-         (branches (ende-protocol-json-get "oneOf" command-schema))
-         (fixed (ende-protocol-json-get
-                 "const"
-                 (ende-protocol-json-get
-                  "args"
-                  (ende-protocol-json-get
-                   "properties" (aref branches 1)))))
-         (fixed-argv (ende-protocol-json-get
-                      "const"
-                      (ende-protocol-json-get
-                       "args"
-                       (ende-protocol-json-get
-                        "properties" (aref branches 2)))))
-         (unrestricted-schema
-          (ende-test--public-tool-schema (ende-tool-definitions)
-                                         "run_host_command")))
-    (unwind-protect
-        (progn
-          (should (equal fixed []))
-          (should (equal fixed-argv ["test"]))
-          (should (equal (ende-protocol-json-get
-                          "enum"
-                          (ende-protocol-json-get
-                           "program"
-                           (ende-protocol-json-get
-                            "properties" (aref branches 0))))
-                         ["printf"]))
-          (should (equal (ende-protocol-json-get
-                          "type"
-                          (ende-protocol-json-get
-                           "command" (ende-protocol-json-get "properties" unrestricted-schema)))
-                         "string"))
-          (should (equal (json-encode unrestricted-schema)
-                         (json-encode
-                          (ende-test--public-tool-schema
-                           (ende-tool-definitions) "run_host_command"))))
+(ert-deftest ende-test/host-command-schema-is-stable-across-policies ()
+  (ende-test--with-project (root)
+    (let* ((schema (ende-test--public-tool-schema
+                    (ende-tool-definitions) "run_host_command"))
+           (properties (gethash "properties" schema))
+           (command (gethash "command" properties)))
+      (should (equal (gethash "type" schema) "object"))
+      (should (equal (gethash "required" schema) ["command"]))
+      (should (eq (gethash "additionalProperties" schema) :false))
+      (should (equal
+               (let ((json-false :false)) (json-encode command))
+               (json-encode
+                '(:type "object"
+                  :properties (:program (:type "string" :minLength 1)
+                               :args (:type "array" :items (:type "string")))
+                  :required ["program" "args"] :additionalProperties :json-false))))
+      (should (= (gethash "minLength" (gethash "cwd" properties)) 1))
+      (should (= (gethash "minimum" (gethash "timeout" properties)) 1))
+      (should (= (gethash "maximum" (gethash "timeout" properties)) 3600))
+      (dolist (rules '((:unrestricted)
+                       ("git")
+                       ((:fixed-args "make" "test"))
+                       ((:prefix-args "make" "test"))
+                       ("git" (:fixed-args "true")
+                        (:prefix-args "make" "test"))))
+        (let ((configuration
+               (ende-test--tool-access-config
+                root `((tools run_host_command)
+                       (restrict-host-commands ,@rules)))))
           (should (equal
+                   (json-encode schema)
                    (json-encode
-                    (ende-test--public-tool-schema definitions "read_file"))
-                   (json-encode
-                    (ende-test--public-tool-schema (ende-tool-definitions)
-                                                   "read_file"))))
-          (let* ((literals '("|" ";" "&&" "||" ">" "$(x)" "`x`"))
-                 (command (make-hash-table :test #'equal))
-                 (_ (puthash "program" "printf" command))
-                 (_ (puthash "args" (vconcat (cons "%s\\n" literals)) command))
-                 (call (ende-test--host-command-call
-                        (list (cons "command" command)) configuration)))
+                    (ende-test--public-tool-schema
+                     (ende-tool-definitions configuration) "run_host_command")))))))))
+
+(ert-deftest ende-test/host-command-argv-is-literal-under-all-policies ()
+  :tags '(integration)
+  (ende-test--with-project (root)
+    (let ((literals '("|" ";" "&&" "||" ">" "$(x)" "`x`" "a b" "")))
+      (dolist (rules '((:unrestricted) ("printf")))
+        (let* ((configuration
+                (ende-test--tool-access-config
+                 root `((tools run_host_command)
+                        (restrict-host-commands ,@rules))))
+               (command (make-hash-table :test #'equal)))
+          (puthash "program" "printf" command)
+          (puthash "args" (vconcat (cons "%s\\n" literals)) command)
+          (let ((call (ende-test--host-command-call
+                       (list (cons "command" command)) configuration)))
             (should (plist-get call :ok))
             (should (equal (plist-get (plist-get call :result) :stdout)
-                           (concat (mapconcat #'identity literals "\n") "\n"))))
-          (dolist (argv '(("python" "script.py")
-                          ("true" "extra")
-                          ("true" "bar")))
-            (let* ((command (make-hash-table :test #'equal))
-                   (_ (puthash "program" (car argv) command))
-                   (_ (puthash "args" (vconcat (cdr argv)) command))
-                   (call (ende-test--host-command-call
-                          (list (cons "command" command)) configuration)))
-              (should-not (plist-get call :ok))))
-          (let ((command (make-hash-table :test #'equal)))
-            (puthash "program" "true" command)
-            (puthash "args" ["foo"] command)
-            (should
-             (plist-get
-              (ende-test--host-command-call
-               (list (cons "command" command)) configuration)
-              :ok)))
-          (let ((missing-args (make-hash-table :test #'equal)))
-            (puthash "program" "printf" missing-args)
-            (should-not
-             (plist-get
-              (ende-test--host-command-call
-               (list (cons "command" missing-args)) configuration)
-              :ok)))
-          (let* ((changed
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands "printf" "true"))))
-                 (changed-schema
-                  (ende-test--public-tool-schema
-                   (ende-tool-definitions changed) "run_host_command")))
-            (should-not (equal schema changed-schema)))
-          (let ((command (make-hash-table :test #'equal)))
-            (puthash "program" "true" command)
-            (puthash "args" [] command)
-            (should
-             (plist-get
-              (ende-test--host-command-call
-               (list (cons "command" command)) configuration)
-              :ok))))
-      (delete-directory root t))))
+                           (concat (mapconcat #'identity literals "\n") "\n")))))))))
 
 (ert-deftest ende-test/host-command-absolute-paths-match-exactly ()
   (let* ((root (make-temp-file "ende host " t))
@@ -786,144 +737,81 @@
                   :ok))))))
       (delete-directory root t))))
 
-(ert-deftest ende-test/host-command-prefix-restrictions-use-argv-boundaries ()
-  (let* ((root (make-temp-file "ende-host-prefix-" t))
-         (configuration
-          (ende-test--tool-access-config
-           root '((tools run_host_command)
-                  (restrict-host-commands
-                   (:prefix-args "printf" "%s" "prefix")
-                   (:prefix-args "true" "allowed")))))
-         (schema
-          (ende-test--public-tool-schema
-           (ende-tool-definitions configuration) "run_host_command"))
-         (branches
-          (ende-protocol-json-get
-           "anyOf"
-           (ende-protocol-json-get
-            "command" (ende-protocol-json-get "properties" schema))))
-         (printf-branch
-          (cl-find-if
-           (lambda (branch)
-             (equal (ende-protocol-json-get
-                     "const"
-                     (ende-protocol-json-get
-                      "program" (ende-protocol-json-get "properties" branch)))
-                    "printf"))
-           (append branches nil)))
-         (printf-args
-          (ende-protocol-json-get
-           "args" (ende-protocol-json-get "properties" printf-branch))))
-    (unwind-protect
-        (progn
-          (should (equal (ende-protocol-json-get "minItems" printf-args) 2))
-          (should (string-match-p
-                   (regexp-quote "(\"%s\" \"prefix\")")
-                   (ende-protocol-json-get "description" printf-args)))
-          (dolist (argv '(("printf" "%s" "prefix")
-                          ("printf" "%s" "prefix" "tail")
-                          ("printf" "%s" "prefix" "one" "two")))
-            (let* ((command (make-hash-table :test #'equal))
-                   (_ (puthash "program" (car argv) command))
-                   (_ (puthash "args" (vconcat (cdr argv)) command))
-                   (call (ende-test--host-command-call
-                          (list (cons "command" command)) configuration)))
-              (should (plist-get call :ok))))
-          (dolist (argv '(("printf" "%s" "other")
-                          ("printf" "other" "%s" "prefix")
-                          ("true" "not-allowed")))
-            (let* ((command (make-hash-table :test #'equal))
-                   (_ (puthash "program" (car argv) command))
-                   (_ (puthash "args" (vconcat (cdr argv)) command))
-                   (call (ende-test--host-command-call
-                          (list (cons "command" command)) configuration)))
-              (should-not (plist-get call :ok))))
-          (let* ((longer
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           (:prefix-args "true" "allowed" "longer")))))
-                 (command (make-hash-table :test #'equal)))
-            (puthash "program" "true" command)
-            (puthash "args" ["allowed" "longer" "tail"] command)
-            (should (plist-get
-                     (ende-test--host-command-call
-                      (list (cons "command" command)) longer)
-                     :ok)))
-          (let* ((open
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands "printf"))))
-                 (with-redundant-rules
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           "printf"
-                           (:prefix-args "printf" "%s")
-                           (:prefix-args "printf" "%s" "longer")))))
-                 (open-schema
-                  (ende-test--public-tool-schema
-                   (ende-tool-definitions open) "run_host_command"))
-                 (redundant-schema
-                  (ende-test--public-tool-schema
-                   (ende-tool-definitions with-redundant-rules)
-                   "run_host_command")))
-            (should (equal (json-encode open-schema)
-                           (json-encode redundant-schema))))
-          (let* ((short
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           (:prefix-args "printf" "%s")))))
-                 (with-longer
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           (:prefix-args "printf" "%s")
-                           (:prefix-args "printf" "%s" "longer")))))
-                 (short-schema
-                  (ende-test--public-tool-schema
-                   (ende-tool-definitions short) "run_host_command"))
-                 (longer-schema
-                  (ende-test--public-tool-schema
-                   (ende-tool-definitions with-longer) "run_host_command")))
-            (should (equal (json-encode short-schema)
-                           (json-encode longer-schema))))
-          (let* ((subsumed
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           (:prefix-args "true" "allowed")
-                           (:fixed-args "true" "allowed")))))
-                 (command (make-hash-table :test #'equal)))
-            (puthash "program" "true" command)
-            (puthash "args" ["allowed" "anything"] command)
-            (should (plist-get
-                     (ende-test--host-command-call
-                      (list (cons "command" command)) subsumed)
-                     :ok)))
-          (let* ((fixed
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands
-                           (:fixed-args "true" "only")))))
-                 (open
-                  (ende-test--tool-access-config
-                   root '((tools run_host_command)
-                          (restrict-host-commands "true"))))
-                 (command (make-hash-table :test #'equal)))
-            (puthash "program" "true" command)
-            (puthash "args" ["only"] command)
-            (should (plist-get
-                     (ende-test--host-command-call
-                      (list (cons "command" command)) fixed)
-                     :ok))
-            (puthash "args" ["arbitrary" "args"] command)
-            (should (plist-get
-                     (ende-test--host-command-call
-                      (list (cons "command" command)) open)
-                     :ok))))
-      (delete-directory root t))))
+(ert-deftest ende-test/host-command-authorization-uses-argv-boundaries ()
+  (ende-test--with-project (root)
+    (let ((restricted
+           (ende-test--tool-access-config
+            root '((tools run_host_command)
+                   (restrict-host-commands
+                    "git" (:fixed-args "true") (:fixed-args "emacs" "--version")
+                    (:prefix-args "make" "test"))))))
+      (dolist (case '((("git" "status" ";" "a b" "") t)
+                      (("true") t)
+                      (("true" "extra") nil)
+                      (("emacs" "--version") t)
+                      (("emacs" "--version" "extra") nil)
+                      (("make" "test") t)
+                      (("make" "test" "-k") t)
+                      (("make") nil)
+                      (("make" "testing") nil)
+                      (("make" "test -k") nil)
+                      (("make" "-k" "test") nil)
+                      (("other" "test") nil)))
+        (let ((command (make-hash-table :test #'equal))
+              (argv (car case))
+              (allowed (cadr case))
+              started)
+          (puthash "program" (car argv) command)
+          (puthash "args" (vconcat (cdr argv)) command)
+          (cl-letf (((symbol-function 'ende-tools--run-host-command-process)
+                     (lambda (actual cwd timeout callback _register)
+                       (setq started t)
+                       (should (equal actual argv))
+                       (should (equal cwd (file-name-as-directory root)))
+                       (should (= timeout 300))
+                       (funcall callback '(:exit_code 0) nil))))
+            (let ((call (ende-test--host-command-call
+                         (list (cons "command" command)) restricted)))
+              (should (eq (plist-get call :ok) allowed))
+              (unless allowed
+                (should (string-match-p "not allowed" (plist-get call :error))))))
+          (should (eq started allowed)))))))
+
+(ert-deftest ende-test/host-command-validates-argv-before-starting ()
+  (ende-test--with-project (root)
+    (dolist (rules '((:unrestricted) ("true")))
+      (let ((configuration
+             (ende-test--tool-access-config
+              root `((tools run_host_command)
+                     (restrict-host-commands ,@rules))))
+            started)
+        (cl-letf (((symbol-function 'ende-tools--run-host-command-process)
+                   (lambda (&rest _)
+                     (setq started t)
+                     (error "invalid command reached runner"))))
+          (dolist (json '("{\"command\":\"true\"}"
+                          "{\"command\":[\"true\"]}"
+                          "{\"command\":{\"args\":[]}}"
+                          "{\"command\":{\"program\":1,\"args\":[]}}"
+                          "{\"command\":{\"program\":\"\",\"args\":[]}}"
+                          "{\"command\":{\"program\":\"true\"}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":\"extra\"}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[1]}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[],\"extra\":1}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"extra\":1}"
+                          "{\"command\":{\"program\":\"true\\u0000\",\"args\":[]}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[\"\\u0000\"]}}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"cwd\":\"\"}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"cwd\":\"missing\"}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"cwd\":\"/ssh:host:/tmp\"}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"cwd\":\"\\u0000\"}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"timeout\":0}"
+                          "{\"command\":{\"program\":\"true\",\"args\":[]},\"timeout\":3601}"))
+            (should-not
+             (plist-get (ende-test--host-command-call
+                         (ende-protocol-json-read-string json) configuration)
+                        :ok))))
+        (should-not started)))))
 
 (ert-deftest ende-test/project-fixture-cleans-up-after-abnormal-exit ()
   (let (owned-root owned-buffer unrelated-buffer unrelated-path)
@@ -1074,8 +962,8 @@
           (make-directory cwd)
           (setq call
                 (ende-test--host-command-call
-                 '(("command" . "printf 'out:%s\\n' \"$PWD\"; printf 'err\\n' >&2; exit 7")
-                   ("cwd" . "work"))
+                 (ende-protocol-json-read-string
+                  "{\"command\":{\"program\":\"sh\",\"args\":[\"-c\",\"printf 'out:%s\\\\n' \\\"$PWD\\\"; printf 'err\\\\n' >&2; exit 7\"]},\"cwd\":\"work\"}")
                  configuration))
           (should (plist-get call :ok))
           (let ((result (plist-get call :result)))
@@ -1088,7 +976,9 @@
             (should (eq (plist-get result :stderr_truncated) :json-false)))
           (setq call
                 (ende-test--host-command-call
-                 '(("command" . "printf '%070000d' 0")) configuration))
+                 (ende-protocol-json-read-string
+                  "{\"command\":{\"program\":\"printf\",\"args\":[\"%070000d\",\"0\"]}}")
+                 configuration))
           (should (plist-get call :ok))
           (let ((result (plist-get call :result)))
             (should (= (plist-get result :exit_code) 0))
@@ -1111,12 +1001,17 @@
           (let ((done nil)
                 (calls 0)
                 (call-result nil)
+                (command (make-hash-table :test #'equal))
                 (ende-tools--register-cancellation-function
                  (lambda (function) (setq cancel-function function))))
+            (puthash "program" "sh" command)
+            (puthash "args"
+                     (vector "-c" (format "sleep 30 & echo $! > %s; wait"
+                                          (shell-quote-argument cancel-file)))
+                     command)
             (ende-tool-call-async
              "run_host_command"
-             `(("command" . ,(format "sleep 30 & echo $! > %s; wait"
-                                      (shell-quote-argument cancel-file))))
+             (list (cons "command" command))
              nil configuration
              (lambda (value)
                (setq calls (1+ calls) call-result value done t)))
@@ -1138,13 +1033,17 @@
           (let ((done nil)
                 (calls 0)
                 (call-result nil)
+                (command (make-hash-table :test #'equal))
                 (ende-tools--register-cancellation-function
                  (lambda (function) (setq timeout-cancel function))))
+            (puthash "program" "sh" command)
+            (puthash "args"
+                     (vector "-c" (format "sleep 30 & echo $! > %s; wait"
+                                          (shell-quote-argument timeout-file)))
+                     command)
             (ende-tool-call-async
              "run_host_command"
-             `(("command" . ,(format "sleep 30 & echo $! > %s; wait"
-                                      (shell-quote-argument timeout-file)))
-               ("timeout" . 1))
+             (list (cons "command" command) (cons "timeout" 1))
              nil configuration
              (lambda (value)
                (setq calls (1+ calls) call-result value done t)))
