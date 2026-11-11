@@ -76,7 +76,7 @@
     (should (equal environment original))
     (should-not (string-match-p "\n" snapshot))
     (should (equal (assq 'grants self)
-                   '(grants ((file_info read_file) source) ((web_fetch) docs))))
+                   '(grants ((file_info read_file) (source)) ((web_fetch) (docs)))))
     (should (equal (mapcar #'car (cdr (assq 'resources self))) '(docs source)))
     (should (equal (assq 'source (cdr (assq 'resources self)))
                    '(source (type file) (root policy-root)

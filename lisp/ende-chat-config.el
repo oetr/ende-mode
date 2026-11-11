@@ -217,20 +217,6 @@ PARENT identifies the importing form, if any."
         (buffer-substring-no-properties begin end)
       "")))
 
-(defun ende-chat-config-document-block-source (tree)
-  "Return the document-level Ende block source in parsed Org TREE, or nil."
-  (let ((blocks (gethash tree (ende-chat-config--local-blocks tree))))
-    (when blocks
-      (when (cdr blocks)
-        (ende-chat-config--error "only one config block is allowed per Org node"))
-      ;; Org's :end includes following blank lines, not part of the block.
-      (let* ((block (car blocks))
-             (end (- (org-element-property :end block)
-                     (or (org-element-property :post-blank block) 0))))
-        (buffer-substring-no-properties
-         (org-element-property :begin block)
-         end)))))
-
 (defun ende-chat-config--block-forms (block &optional file parent)
   "Read configuration BLOCK in FILE, imported by PARENT if non-nil."
   (let* ((file (or file buffer-file-name (buffer-name)))
@@ -976,7 +962,7 @@ Copy only group and resource definitions from VISIBLE."
           `((root ,(plist-get policy :root))))
       (grants ,@(ende-chat-config--capability-set
                  (mapcar (lambda (group)
-                           (cons (ende-chat-config--capability-set (cdr group))
+                           (list (ende-chat-config--capability-set (cdr group))
                                  (car group)))
                          groups)))
       (resources ,@(mapcar (lambda (name)
