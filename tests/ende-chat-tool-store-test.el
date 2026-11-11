@@ -118,47 +118,43 @@
                               :target (ende-target-create :buffer (current-buffer) :start (point-min)
                                                           :end (point-max) :review-policy 'ignore)
                               :instruction (list :request-id "r" :question-id "q" :response-level 2
-                                                 :tool-store-file ende-tool-store-file)))
-         (capabilities (if (fboundp 'ende-content-capabilities)
-                           (symbol-function 'ende-content-capabilities)
-                         (lambda (text) (list :role "system" :host-kind 'capabilities :content text)))))
+                                                 :tool-store-file ende-tool-store-file))))
     (unwind-protect
-        (cl-letf (((symbol-function 'ende-content-capabilities) capabilities))
-          (let* ((entry (ende-transcript-record-capabilities job text))
-                 (id (plist-get (ende-transcript-entry-data entry) :item-id))
-                 (rendered (ende-chat--render-transcript job)))
-            (cl-letf (((symbol-function 'ende-tool-store--save-protocol-item)
-                       (lambda (&rest _) (ert-fail "Rendering must not store")))
-                      ((symbol-function 'ende-chat-config-capabilities)
-                       (lambda (&rest _) (ert-fail "Replay must not regenerate"))))
-              (ende-chat--checkpoint-transcript job)
-              (should (equal rendered (cadr (ende-chat--read-recovery-file
-                                              (plist-get (ende-job-instruction job) :recovery-file)))))
-              (should-not (string-match-p "Exact snapshot" rendered))
-              (cl-labels
-                  ((replay (source)
-                     (with-temp-buffer
-                       (org-mode)
-                       (insert "* Question\n:PROPERTIES:\n:ENDE_CHAT_ID: q\n:END:\n" source)
-                       (let* ((document (ende-chat--build-document))
-                              (work (ende-chat--request-work-section document "r")))
-                         (ende-chat--validate-generated-work-section document work)
-                         (ende-chat--protocol-work-messages document work)))))
-                (should (equal (replay rendered) (list (funcall capabilities text))))
-                (dolist (edit '(("ENDE_PROTOCOL_PROVIDER: ende" . "ENDE_PROTOCOL_PROVIDER: openai-responses")
-                                ("ENDE_PROTOCOL_ITEM_KIND: capabilities" . "ENDE_PROTOCOL_ITEM_KIND: opaque-reasoning")
-                                ("ENDE_CHAT_REPLY_TO: q" . "ENDE_CHAT_REPLY_TO: other")
-                                ("Agent: Capabilities" . "Agent: Opaque BS")
-                                ("ENDE_PROTOCOL_ITEM_ID:" . "ENDE_ROLE: system\n:ENDE_PROTOCOL_ITEM_ID:")))
-                  (should-error (replay (string-replace (car edit) (cdr edit) rendered))))
-                (should-error (replay (concat rendered "Injected body\n")))
-                (should-error
-                 (replay (string-replace "*** Agent: Capabilities"
-                                         "*** Earlier child\n*** Agent: Capabilities" rendered)))
-                (ende-tool-store--call-with-database
-                 t (lambda (database)
-                     (sqlite-execute database "DELETE FROM protocol_items WHERE id = ?" (vector id))))
-                (should-error (replay rendered))))))
+        (let* ((entry (ende-transcript-record-capabilities job text))
+               (id (plist-get (ende-transcript-entry-data entry) :item-id))
+               (rendered (ende-chat--render-transcript job)))
+          (cl-letf (((symbol-function 'ende-tool-store--save-protocol-item)
+                     (lambda (&rest _) (ert-fail "Rendering must not store")))
+                    ((symbol-function 'ende-chat-config-capabilities)
+                     (lambda (&rest _) (ert-fail "Replay must not regenerate"))))
+            (ende-chat--checkpoint-transcript job)
+            (should (equal rendered (cadr (ende-chat--read-recovery-file
+                                          (plist-get (ende-job-instruction job) :recovery-file)))))
+            (should-not (string-match-p "Exact snapshot" rendered))
+            (cl-labels
+                ((replay (source)
+                   (with-temp-buffer
+                     (org-mode)
+                     (insert "* Question\n:PROPERTIES:\n:ENDE_CHAT_ID: q\n:END:\n" source)
+                     (let* ((document (ende-chat--build-document))
+                            (work (ende-chat--request-work-section document "r")))
+                       (ende-chat--validate-generated-work-section document work)
+                       (ende-chat--protocol-work-messages document work)))))
+              (should (equal (replay rendered) (list (ende-content-capabilities text))))
+              (dolist (edit '(("ENDE_PROTOCOL_PROVIDER: ende" . "ENDE_PROTOCOL_PROVIDER: openai-responses")
+                              ("ENDE_PROTOCOL_ITEM_KIND: capabilities" . "ENDE_PROTOCOL_ITEM_KIND: opaque-reasoning")
+                              ("ENDE_CHAT_REPLY_TO: q" . "ENDE_CHAT_REPLY_TO: other")
+                              ("Agent: Capabilities" . "Agent: Opaque")
+                              ("ENDE_PROTOCOL_ITEM_ID:" . "ENDE_ROLE: system\n:ENDE_PROTOCOL_ITEM_ID:")))
+                (should-error (replay (string-replace (car edit) (cdr edit) rendered))))
+              (should-error (replay (concat rendered "Injected body\n")))
+              (should-error
+               (replay (string-replace "*** Agent: Capabilities"
+                                       "*** Earlier child\n*** Agent: Capabilities" rendered)))
+              (ende-tool-store--call-with-database
+               t (lambda (database)
+                   (sqlite-execute database "DELETE FROM protocol_items WHERE id = ?" (vector id))))
+              (should-error (replay rendered)))))
       (delete-directory directory t))))
 
 (defun ende-test--stored-tool-history (entries &optional normalized)
