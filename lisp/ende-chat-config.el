@@ -930,108 +930,102 @@ Copy only group and resource definitions from VISIBLE."
       (error
        (error "%s (in agent-config %s)" (error-message-string failure) name)))))
 
-(defun ende-chat-config--capability-policy-lines (label policy)
-  "Return deterministic capability lines for LABEL and normalized POLICY."
-  (let ((tools (sort (mapcar #'symbol-name
-                            (copy-sequence (plist-get policy :active-tools)))
-                     #'string<))
-        (resources (sort (copy-sequence (plist-get policy :tool-resources))
-                         (lambda (left right)
-                           (string< (symbol-name (car left))
-                                    (symbol-name (car right))))))
-        (lines nil))
-    (push (format "%s direct tools: %s" label
-                  (if tools (mapconcat #'identity tools ", ") "none"))
-          lines)
-    (when (plist-get policy :root)
-      (push (format "%s root: %s" label (plist-get policy :root)) lines))
-    (when (plist-get policy :provider)
-      (push (format "%s provider: %s" label (plist-get policy :provider))
-            lines))
-    (when (plist-get policy :model)
-      (push (format "%s model: %s" label (plist-get policy :model)) lines))
-    (dolist (grant resources)
-      (let* ((names (sort (delete-dups (copy-sequence (cdr grant)))
-                          (lambda (left right)
-                            (string< (symbol-name left) (symbol-name right)))))
-             (resource-lines
-              (mapcar
-               (lambda (name)
-                 (let ((resource (ende-chat-config--lookup
-                                  name (plist-get policy :resources))))
-                   (format "%s resource %s: %s root=%s include=%s exclude=%s%s"
-                           label name (plist-get resource :type)
-                           (or (plist-get resource :root) "project root")
-                           (mapconcat #'identity
-                                      (plist-get resource :include) ", ")
-                           (if (plist-get resource :exclude)
-                               (mapconcat #'identity
-                                          (plist-get resource :exclude) ", ")
-                             "none")
-                           (if (plist-get resource :allow-private-addresses)
-                               " private-addresses=yes" ""))))
-               names)))
-        (setq lines
-              (nconc (nreverse resource-lines)
-                     (cons (format "%s grants for %s: %s" label (car grant)
-                                   (mapconcat #'symbol-name names ", "))
-                           lines)))))
-    (when (plist-get policy :root)
-      (push (format "%s project root: %s" label (plist-get policy :root))
-            lines))
-    (when (memq 'run_host_command (plist-get policy :active-tools))
-      (let ((command-policy (plist-get policy :host-command-policy)))
-        (when (and (listp command-policy)
-                   (plist-get command-policy :restricted))
-          (push (format "%s host commands: open=%s fixed=%s prefix=%s" label
-                        (or (mapconcat #'identity
-                                       (plist-get command-policy :open) ", ")
-                            "none")
-                        (or (mapconcat
-                             (lambda (argv) (mapconcat #'identity argv " "))
-                             (plist-get command-policy :fixed) "; ")
-                            "none")
-                        (or (mapconcat
-                             (lambda (argv) (mapconcat #'identity argv " "))
-                             (plist-get command-policy :prefix) "; ")
-                            "none"))
-                lines))))
-    (when (memq 'run_host_command (plist-get policy :active-tools))
-      (push (format "%s host-command policy: %s" label
-                    (plist-get policy :host-command-policy)) lines))
-    (when (memq 'run_sandbox_command (plist-get policy :active-tools))
-      (push (format "%s sandbox image: %s" label
-                    (or (plist-get policy :podman-image) "missing")) lines))
-    (nreverse lines)))
+(defun ende-chat-config--capability-set (values)
+  "Return a sorted, duplicate-free copy of capability VALUES."
+  (sort (delete-dups (copy-sequence values))
+        (lambda (left right)
+          (string< (prin1-to-string left) (prin1-to-string right)))))
+
+(defun ende-chat-config--capability-resource (name policy)
+  "Return whitelisted data for resource NAME in normalized POLICY."
+  (let* ((resource (ende-chat-config--lookup
+                    name (plist-get policy :resources)))
+         (type (plist-get resource :type))
+         (root (plist-get resource :root)))
+    `(,name
+      (type ,type)
+      ,@(when (eq type 'file)
+          `((root ,(if (or (null root)
+                           (equal root (plist-get policy :root)))
+                       'policy-root
+                     root))))
+      (include ,@(ende-chat-config--capability-set
+                  (plist-get resource :include)))
+      (exclude ,@(ende-chat-config--capability-set
+                  (plist-get resource :exclude)))
+      ,@(when (eq type 'url)
+          `((allow-private-addresses
+             ,(plist-get resource :allow-private-addresses)))))))
+
+(defun ende-chat-config--capability-policy (policy selected)
+  "Return whitelisted capability data for POLICY with SELECTED child config."
+  (let ((tools (ende-chat-config--capability-set
+                (plist-get policy :active-tools)))
+        (commands (plist-get policy :host-command-policy))
+        groups referenced)
+    (dolist (grant (plist-get policy :tool-resources))
+      (when (memq (car grant) tools)
+        (let* ((names (ende-chat-config--capability-set (cdr grant)))
+               (group (assoc names groups)))
+          (if group
+              (push (car grant) (cdr group))
+            (push (list names (car grant)) groups))
+          (setq referenced (append names referenced)))))
+    `((tools ,@tools)
+      ,@(when (plist-get policy :root)
+          `((root ,(plist-get policy :root))))
+      (grants ,@(ende-chat-config--capability-set
+                 (mapcar (lambda (group)
+                           (cons (ende-chat-config--capability-set (cdr group))
+                                 (car group)))
+                         groups)))
+      (resources ,@(mapcar (lambda (name)
+                             (ende-chat-config--capability-resource name policy))
+                           (ende-chat-config--capability-set referenced)))
+      ,@(when (memq 'run_host_command tools)
+          (list
+           (if (and (listp commands) (plist-get commands :restricted))
+               `(host-commands allowlist
+                               (open ,@(ende-chat-config--capability-set
+                                        (plist-get commands :open)))
+                               (fixed ,@(ende-chat-config--capability-set
+                                         (plist-get commands :fixed)))
+                               (prefix ,@(ende-chat-config--capability-set
+                                          (plist-get commands :prefix))))
+             '(host-commands unrestricted))))
+      ,@(when (memq 'run_sandbox_command tools)
+          `((sandbox-image ,(plist-get policy :podman-image))))
+      ,@(when (plist-get policy :provider)
+          `((provider ,(plist-get policy :provider))))
+      ,@(when (plist-get policy :model)
+          `((model ,(plist-get policy :model))))
+      ,@(when (memq 'spawn_agent tools)
+          `((spawn-agent-config ,selected))))))
 
 (defun ende-chat-config-capabilities (environment)
   "Format canonical model-visible capabilities in frozen ENVIRONMENT."
-  (let* ((policy (plist-get environment :access-policy))
+  (let* ((print-length nil)
+         (print-level nil)
+         (print-escape-newlines t)
+         (policy (plist-get environment :access-policy))
          (registry (plist-get environment :registry))
          (selected (plist-get environment :spawn-agent-config))
-         (direct (ende-chat-config--capability-policy-lines "You" policy))
-         (delegated
-          (cl-loop for (name . named-policy) in registry
-                   append
-                   (append
-                    (list (format "agent-config %s:" name))
-                    (ende-chat-config--capability-policy-lines
-                     (format "  %s" name) named-policy)
-                    (list (format "  spawn-agent-config: %s"
-                                  (or (plist-get named-policy
-                                                 :spawn-agent-config)
-                                      "none")))))))
-    (mapconcat #'identity
-               (append (list "Direct capabilities:") direct
-                       (list "Capabilities available through configured delegation:")
-                       delegated
-                       (when selected
-                         (list (format "Selected child policy: %s" selected)))
-                       (when (memq 'spawn_agent (plist-get policy :active-tools))
-                         (list (concat "Children may run concurrently. Writes are "
-                                       "not coordinated; avoid assigning overlapping "
-                                       "mutations unless that is intentional."))))
-               "\n")))
+         (next (and (memq 'spawn_agent (plist-get policy :active-tools)) selected))
+         visited agents)
+    (while (and next (not (memq next visited)))
+      (push next visited)
+      (let* ((child (ende-chat-config--lookup next registry))
+             (selected-child (plist-get child :spawn-agent-config)))
+        (when child
+          (push (cons next (ende-chat-config--capability-policy
+                            child selected-child))
+                agents))
+        (setq next (and (memq 'spawn_agent (plist-get child :active-tools))
+                        selected-child))))
+    (prin1-to-string
+     `(capabilities
+       (self ,@(ende-chat-config--capability-policy policy selected))
+       (agents ,@(ende-chat-config--capability-set agents))))))
 
 (defun ende-chat-config--agent-registry (definitions visible)
   "Normalize agent DEFINITIONS using definitions from VISIBLE."

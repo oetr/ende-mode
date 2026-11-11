@@ -34,6 +34,141 @@
 (require 'cl-lib)
 (require 'ende-chat-test-helpers)
 
+(defun ende-test--capability-environment ()
+  "Return a fresh policy fixture with active and inactive permissions."
+  (copy-tree
+   '(:access-policy
+     (:root "/project/" :provider configured :model "line\nmodel"
+      :podman-image "sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      :active-tools (run_sandbox_command web_fetch read_file file_info
+                    about_thinking run_host_command)
+      :tool-resources ((read_file source) (web_fetch docs)
+                       (file_info source) (edit_file unused))
+      :resources ((source :type file :root "/project/"
+                          :include ("src/**" "*.el")
+                          :exclude ("tmp/**" ".ende/**"))
+                  (docs :type url :include ("https://example.com/**")
+                        :exclude nil :allow-private-addresses nil)
+                  (unused :type file :include ("secret/**")))
+      :host-command-policy
+      (:restricted t :open ("git" "emacs")
+       :fixed (("make" "test") ("make" "check"))
+       :prefix (("npm" "run") ("cargo" "test")))))))
+
+(ert-deftest ende-test/capability-snapshot-is-canonical-without-mutation ()
+  (let* ((environment (ende-test--capability-environment))
+         (original (copy-tree environment))
+         (equivalent (copy-tree environment))
+         (policy (plist-get equivalent :access-policy))
+         (commands (plist-get policy :host-command-policy))
+         (source (cdr (assq 'source (plist-get policy :resources))))
+         (snapshot (ende-chat-config-capabilities environment))
+         (self (cdr (assq 'self (cdr (read snapshot))))))
+    (dolist (field '(:active-tools :tool-resources :resources))
+      (setf (plist-get policy field) (reverse (plist-get policy field))))
+    (dolist (field '(:open :fixed :prefix))
+      (setf (plist-get commands field) (reverse (plist-get commands field))))
+    (setf (plist-get source :root) nil
+          (plist-get source :include) '("*.el" "src/**" "*.el")
+          (plist-get source :exclude) '(".ende/**" "tmp/**"))
+    (let ((print-length 1) (print-level 1) (print-escape-newlines nil))
+      (should (equal snapshot (ende-chat-config-capabilities equivalent))))
+    (should (equal environment original))
+    (should-not (string-match-p "\n" snapshot))
+    (should (equal (assq 'grants self)
+                   '(grants ((file_info read_file) source) ((web_fetch) docs))))
+    (should (equal (mapcar #'car (cdr (assq 'resources self))) '(docs source)))
+    (should (equal (assq 'source (cdr (assq 'resources self)))
+                   '(source (type file) (root policy-root)
+                            (include "*.el" "src/**") (exclude ".ende/**" "tmp/**"))))
+    (should (= (ende-test--count-matches (regexp-quote "/project/") snapshot) 1))
+    (should (equal (assq 'host-commands self)
+                   '(host-commands allowlist (open "emacs" "git")
+                                   (fixed ("make" "check") ("make" "test"))
+                                   (prefix ("cargo" "test") ("npm" "run")))))))
+
+(ert-deftest ende-test/capability-snapshot-changes-with-effective-permissions ()
+  (let* ((environment (ende-test--capability-environment))
+         (snapshot (ende-chat-config-capabilities environment)))
+    (dolist (change '((:active-tools (about_thinking))
+                      (:tool-resources nil)
+                      (:resources ((source :type file :include ("changed/**"))))
+                      (:host-command-policy :unrestricted)
+                      (:host-command-policy (:restricted t))
+                      (:host-command-policy (:restricted t :fixed (("make" "other"))))
+                      (:host-command-policy (:restricted t :prefix (("make" "test"))))
+                      (:podman-image "another-image")
+                      (:provider other) (:model "other") (:root "/other/")))
+      (let ((changed (copy-tree environment)))
+        (setf (plist-get (plist-get changed :access-policy) (car change))
+              (cadr change))
+        (should-not (equal snapshot (ende-chat-config-capabilities changed)))))
+    (let ((policy (plist-get environment :access-policy)))
+      (setf (plist-get policy :tool-resources) nil
+            (plist-get policy :host-command-policy) '(:restricted t))
+      (let* ((empty (ende-chat-config-capabilities environment))
+             (self (cdr (assq 'self (cdr (read empty))))))
+        (should (equal (assq 'grants self) '(grants)))
+        (should (equal (assq 'host-commands self)
+                       '(host-commands allowlist (open) (fixed) (prefix))))
+        (setf (plist-get policy :tool-resources) '((read_file)))
+        (should-not (equal empty (ende-chat-config-capabilities environment)))))))
+
+(ert-deftest ende-test/capability-snapshot-keeps-reachable-child-scopes-distinct ()
+  (let* ((environment (ende-test--capability-environment))
+         (policy (plist-get environment :access-policy))
+         (worker '(:root "/child/" :active-tools (read_file spawn_agent)
+                   :spawn-agent-config reviewer :tool-resources ((read_file source))
+                   :resources ((source :type file :include ("child/**")))))
+         (reviewer '(:active-tools (spawn_agent) :spawn-agent-config worker)))
+    (push 'spawn_agent (plist-get policy :active-tools))
+    (setf (plist-get environment :spawn-agent-config) 'worker
+          (plist-get environment :registry)
+          (list (cons 'worker (copy-tree worker))
+                (cons 'unused (copy-tree policy))
+                (cons 'reviewer reviewer)))
+    (let* ((snapshot (ende-chat-config-capabilities environment))
+           (data (cdr (read snapshot)))
+           (agents (cdr (assq 'agents data))))
+      (should (equal (mapcar #'car agents) '(reviewer worker)))
+      (should (equal (assq 'source (cdr (assq 'resources (cdr (assq 'worker agents)))))
+                     '(source (type file) (root policy-root)
+                              (include "child/**") (exclude))))
+      (should (equal (assq 'source (cdr (assq 'resources (cdr (assq 'self data)))))
+                     '(source (type file) (root policy-root)
+                              (include "*.el" "src/**") (exclude ".ende/**" "tmp/**"))))
+      (setf (plist-get environment :registry)
+            (reverse (plist-get environment :registry)))
+      (should (equal snapshot (ende-chat-config-capabilities environment))))
+    (setf (plist-get (cdr (assq 'worker (plist-get environment :registry)))
+                     :active-tools)
+          '(read_file))
+    (should (equal (mapcar #'car (cdr (assq 'agents
+                                          (cdr (read (ende-chat-config-capabilities
+                                                      environment))))))
+                   '(worker)))
+    (setf (plist-get policy :active-tools) '(about_thinking))
+    (should (equal (assq 'agents (cdr (read (ende-chat-config-capabilities environment))))
+                   '(agents)))))
+
+(ert-deftest ende-test/capability-snapshot-excludes-runtime-profiles-and-metadata ()
+  (let* ((environment (ende-test--capability-environment))
+         (policy (plist-get environment :access-policy)))
+    (push 'spawn_agent (plist-get policy :active-tools))
+    (setf (plist-get environment :spawn-agent-config) 'worker
+          (plist-get environment :registry) (list (cons 'worker (copy-tree policy))))
+    (let ((snapshot (ende-chat-config-capabilities environment)))
+      (dolist (target (list environment policy
+                            (cdr (assq 'worker (plist-get environment :registry)))
+                            (plist-get policy :host-command-policy)
+                            (cdr (assq 'source (plist-get policy :resources)))))
+        (setf (plist-get target :inference-profile)
+              '(:provider runtime :model "runtime-model" :api-key "secret")
+              (plist-get target :metadata) '(:credentials "secret")
+              (plist-get target :include-regexps) '("secret")))
+      (should (equal snapshot (ende-chat-config-capabilities environment)))
+      (should-not (string-match-p "runtime\\|secret" snapshot)))))
+
 (ert-deftest ende-test/chat-config-imports-compose-like-inline-forms ()
   (let* ((root (make-temp-file "ende-config-imports-" t))
          (default-directory (file-name-as-directory root))
@@ -167,15 +302,9 @@
             (should (eq (plist-get (cdr (assq 'B registry)) :spawn-agent-config)
                         'A))
             (let ((presentation
-                   (ende-chat-config-capabilities environment)))
-              (should (string-match-p "Direct capabilities:" presentation))
-              (should (string-match-p
-                       "Capabilities available through configured delegation:"
-                       presentation))
-              (should (string-match-p "agent-config A:" presentation))
-              (should (string-match-p "agent-config B:" presentation))
-              (should (string-match-p "spawn-agent-config: A" presentation))
-              (should (string-match-p "spawn-agent-config: B" presentation)))))
+                   (read (ende-chat-config-capabilities environment))))
+              (should (eq (car presentation) 'capabilities))
+              (should (equal (assq 'agents (cdr presentation)) '(agents))))))
       (delete-directory root-a t)
       (delete-directory root-b t))))
 
@@ -328,6 +457,7 @@
         (ende-custom-providers ende-test--custom-providers))
     (with-temp-buffer
       (insert (concat "#+begin_ende\n"
+                      "(tools spawn_agent)\n"
                       "(agent-config worker (provider remote) (model \"child-model\"))\n"
                       "(spawn-agent-config worker)\n"
                       "#+end_ende\n* Topic\n** Question\n"))
@@ -342,8 +472,10 @@
              (presentation (ende-chat-config-capabilities environment)))
         (should (eq (plist-get worker :provider) 'remote))
         (should (equal (plist-get worker :model) "child-model"))
-        (should (string-match-p "worker provider: remote" presentation))
-        (should (string-match-p "worker model: child-model" presentation))))))
+        (let ((shown (cdr (assq 'worker
+                                (cdr (assq 'agents (cdr (read presentation))))))))
+          (should (equal (assq 'provider shown) '(provider remote)))
+          (should (equal (assq 'model shown) '(model "child-model"))))))))
 
 (ert-deftest ende-test/agent-config-nearer-definition-replaces-and-sibling-is-hidden ()
   (let ((root-a (make-temp-file "ende-agent-a-" t))
@@ -1558,7 +1690,7 @@
         (should (eq (ende-job-state job) 'completed))
         (let ((system (cdr (assoc "system" messages))))
           (should (string-prefix-p ende-chat--system system))
-          (should (string-match-p "Direct capabilities:" system))
+          (should (string-match-p (regexp-quote "(capabilities (self") system))
           (should (string-match-p "about_thinking" system)))))))
 
 (ert-deftest ende-test/chat-sibling-configuration-remains-history-only ()
