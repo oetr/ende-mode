@@ -248,7 +248,8 @@
     (ende-test--with-buffer "base"
 			    (goto-char (point-max))
 			    (dotimes (_ 103)
-			      (ende-insert-at-cursor)
+			      (let ((job (ende-insert-at-cursor)))
+                                (ende-test--wait-for (lambda () (not (ende-job-live-p job)))))
 			      (ende-review-delete-overlay
 			       (cl-find-if #'ende-review-overlay-p
 					   (overlays-in (point-min) (point-max)))))

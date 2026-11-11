@@ -1983,7 +1983,8 @@
              (job (ende-ask)))
         (org-demote-subtree)
         (let ((ende--queue-suspended nil))
-          (ende-process-next))
+          (ende-process-next)
+          (ende-test--wait-for (lambda () (not (ende-job-live-p job)))))
         (should (eq (ende-job-state job) 'failed))
         (should (= (length ende-test--calls) 1))))))
 

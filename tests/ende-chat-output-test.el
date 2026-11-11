@@ -220,6 +220,8 @@
      (ende-test--chat-goto "** Follow-up")
      (let* ((job (ende-ask))
             (policy (ende-job-access-policy job)))
+       (ende-test--wait-for (lambda () (not (ende-job-live-p job))))
+       (setq policy (ende-job-access-policy job))
        (should (eq (ende-job-state job) 'completed))
        (should (= (length ende-test--calls) 2))
        (should-not (memq 'run_host_command (plist-get policy :active-tools)))
