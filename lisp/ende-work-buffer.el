@@ -357,6 +357,13 @@ so a directive completed by a later chunk can still be escaped in place."
      (and response (gethash (ende-transcript-entry-id response) ende-work-buffer--metadata))
      (ende-org--property "ENDE_CHAT_REQUEST_ID"
                          (plist-get (ende-job-instruction ende-work-buffer--job) :request-id))
+     (when (eq kind 'capabilities)
+       (concat (ende-org--property "ENDE_CHAT_REPLY_TO"
+                                  (plist-get (ende-job-instruction ende-work-buffer--job) :question-id))
+               (ende-org--property "ENDE_PROTOCOL_PROVIDER" "ende")
+               (ende-org--property "ENDE_PROTOCOL_ITEM_KIND" "capabilities")
+               (ende-org--property "ENDE_PROTOCOL_ITEM_ID"
+                                  (plist-get (ende-transcript-entry-data entry) :item-id))))
      (when (eq kind 'response)
        (ende-org--property "ENDE_CHAT_RESPONSE_ID" (ende-transcript-entry-id entry)))
      (when (memq kind '(response tool-result))
@@ -408,6 +415,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
          (cond ((eq (ende-transcript-entry-status entry) 'interrupted) "Agent: Interrupted reply")
                (final "Agent: Final reply") (t "Agent: Reply"))))
       ((or 'tool-call 'tool-result) (ende-work-buffer--tool-title entry section))
+      ('capabilities "Agent: Capabilities")
       ('opaque "Agent: Opaque BS")
       ('thinking "Agent: Reasoning")
       ('summary (ende-work-buffer--summary-title (ende-transcript-entry-prefix entry 180)))
@@ -454,7 +462,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
                section entry (ende-work-buffer--section-stale section)))))
          ((not (or (eq kind 'response) (and (not new) (eq change 'metadata))))
           (ende-work-buffer--render-body section entry (if new 'replace change))))
-        (when (and new (memq kind '(tool-call tool-result opaque thinking summary progress)))
+        (when (and new (memq kind '(capabilities tool-call tool-result opaque thinking summary progress)))
           (save-excursion
             (goto-char (ende-work-buffer--section-start section))
             (org-fold-hide-subtree)))))))
@@ -476,7 +484,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
 (defun ende-work-buffer--detail-p (section)
   "Return whether SECTION owns an expensive, deferrable payload."
   (when-let* ((entry (ende-work-buffer--section-entry section)))
-    (memq (ende-transcript-entry-kind entry) '(tool-call tool-result opaque))))
+    (memq (ende-transcript-entry-kind entry) '(capabilities tool-call tool-result opaque))))
 
 (defun ende-work-buffer--queue-exposed (section)
   "Queue SECTION's deferred body only if it is exposed and stale."
