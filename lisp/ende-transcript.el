@@ -34,6 +34,11 @@
 (require 'ende-protocol)
 (require 'ende-stream)
 
+(declare-function ende-job-instruction "ende-queue" (job))
+(declare-function ende-job-ensure-transcript "ende-queue" (job))
+(declare-function ende-tool-store-save-capabilities "ende-tool-store"
+                  (request-id question-id text &optional filename))
+
 (cl-defstruct (ende-transcript (:constructor ende-transcript-create))
   task entries tail (next-id 0) (round 0) response terminal metadata usage
   (sources (make-hash-table :test #'equal)))
@@ -124,6 +129,22 @@ content change; `metadata' changes only status, headings, or attribution."
     (setf (ende-transcript-tail transcript) cell)
     (ende-transcript-notify transcript entry 'replace)
     entry))
+
+(defun ende-transcript-record-capabilities (job text &optional request-id question-id)
+  "Durably record JOB's exact capability TEXT as its first transcript entry.
+REQUEST-ID and QUESTION-ID default to JOB's instruction properties.  Storage
+uses its :tool-store-file.  Return the completed entry with its :item-id;
+callers own any chat recovery checkpoint and provider dispatch."
+  (require 'ende-tool-store)
+  (let* ((instruction (ende-job-instruction job))
+         (transcript (ende-job-ensure-transcript job)))
+    (when (ende-transcript-entries transcript)
+      (error "Capabilities must be recorded before other transcript entries"))
+    (let ((id (ende-tool-store-save-capabilities
+               (or request-id (plist-get instruction :request-id))
+               (or question-id (plist-get instruction :question-id)) text
+               (plist-get instruction :tool-store-file))))
+      (ende-transcript-append transcript 'capabilities text (list :item-id id) 'complete))))
 
 (defun ende-transcript--interrupt-response (transcript)
   "Retain unfinished entries in TRANSCRIPT as interrupted."

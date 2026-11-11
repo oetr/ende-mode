@@ -32,6 +32,27 @@
 (require 'sqlite)
 (require 'ende-tool-store)
 
+(ert-deftest ende-test/tool-store-capabilities-are-exact-host-records ()
+  (let* ((directory (make-temp-file "ende-capabilities-" t))
+         (ende-tool-store-file (expand-file-name "store.sqlite3" directory))
+         (text "(capabilities\n  (tools \"read_file\"))\nλ exact\n"))
+    (unwind-protect
+        (let ((id (ende-tool-store-save-capabilities "request" "question" text)))
+          (should (equal text (ende-tool-store-load-capabilities id "request" "question")))
+          (should-error (ende-tool-store-load-opaque id))
+          (should-error (ende-tool-store-save-opaque "ende" "capabilities" (make-hash-table)))
+          (should-error (ende-tool-store-load-capabilities id "other" "question"))
+          (should-error (ende-tool-store-load-capabilities id "request" "other"))
+          (should-error (ende-tool-store-load-capabilities "absent" "request" "question"))
+          (dolist (mutation '("UPDATE protocol_items SET provider = 'openai-responses'"
+                              "UPDATE protocol_items SET provider = 'ende', kind = 'opaque-reasoning'"
+                              "UPDATE protocol_items SET kind = 'capabilities', payload = '{}'"
+                              "UPDATE protocol_items SET payload = 'not JSON'"))
+            (ende-tool-store--call-with-database
+             t (lambda (database) (sqlite-execute database mutation)))
+            (should-error (ende-tool-store-load-capabilities id "request" "question"))))
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/tool-store-replay-owns-one-lazy-connection ()
   (let* ((directory (make-temp-file "ende-tool-store-replay-" t))
          (ende-tool-store-file (expand-file-name "store.sqlite3" directory))

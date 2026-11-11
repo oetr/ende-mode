@@ -394,6 +394,10 @@ returned plist, and provider call IDs are checked when both records exist."
                (not (string-match-p "[[:cntrl:]]" kind))
                (hash-table-p item))
     (error "Invalid opaque protocol item"))
+  (ende-tool-store--save-protocol-item provider kind item filename))
+
+(defun ende-tool-store--save-protocol-item (provider kind item &optional filename)
+  "Store validated protocol ITEM owned by PROVIDER with KIND in FILENAME."
   (let ((id (ende-tool-store--new-execution-id))
         (payload (decode-coding-string (json-serialize item) 'utf-8-unix)))
     (ende-tool-store--call-with-database
@@ -406,11 +410,11 @@ returned plist, and provider call IDs are checked when both records exist."
      filename)
     id))
 
-(defun ende-tool-store-load-opaque (id &optional provider kind filename)
-  "Load opaque ID from FILENAME, checking optional PROVIDER and KIND.
+(defun ende-tool-store--load-protocol-item (id &optional filename)
+  "Load protocol ID's owner, kind and JSON object from FILENAME.
 Return nil if the database or item is missing."
   (unless (and (stringp id) (not (string-empty-p id)))
-    (error "Invalid opaque protocol item identity"))
+    (error "Invalid protocol item identity"))
   (let ((record
          (ende-tool-store--call-with-database
           nil
@@ -424,20 +428,61 @@ Return nil if the database or item is missing."
       (let ((stored-provider (nth 0 record))
             (stored-kind (nth 1 record))
             (payload (nth 2 record)))
-        (unless (and (or (null provider) (equal provider stored-provider))
-                     (or (null kind) (equal kind stored-kind)))
-          (error "Opaque protocol item metadata does not match item %s" id))
         (let ((item
                (condition-case error-data
                    (json-parse-string payload :object-type 'hash-table
                                       :array-type 'array
                                       :null-object nil :false-object json-false)
                  (error
-                  (error "Malformed opaque protocol item %s: %s"
+                  (error "Malformed protocol item %s: %s"
                          id (error-message-string error-data))))))
           (unless (hash-table-p item)
-            (error "Malformed opaque protocol item %s" id))
-          item)))))
+            (error "Malformed protocol item %s" id))
+          (list :provider stored-provider :kind stored-kind :item item))))))
+
+(defun ende-tool-store-load-opaque (id &optional provider kind filename)
+  "Load opaque ID from FILENAME, checking optional PROVIDER and KIND.
+Host-owned records are never provider opaque items.  Return nil if absent."
+  (when-let* ((record (ende-tool-store--load-protocol-item id filename)))
+    (unless (and (member (plist-get record :provider)
+                         '("openai-responses" "anthropic-messages"))
+                 (or (null provider) (equal provider (plist-get record :provider)))
+                 (or (null kind) (equal kind (plist-get record :kind))))
+      (error "Opaque protocol item metadata does not match item %s" id))
+    (plist-get record :item)))
+
+(defun ende-tool-store--validate-capabilities (item request-id question-id)
+  "Validate host capability ITEM against REQUEST-ID and QUESTION-ID."
+  (unless (and (hash-table-p item) (= (hash-table-count item) 3)
+               (cl-every (lambda (id)
+                           (and (stringp id) (not (string-empty-p id))
+                                (not (string-match-p "[[:cntrl:]]" id))))
+                         (list request-id question-id))
+               (equal (gethash "request_id" item) request-id)
+               (equal (gethash "question_id" item) question-id)
+               (stringp (gethash "text" item)))
+    (error "Malformed or mismatched host capability record"))
+  item)
+
+(defun ende-tool-store-save-capabilities (request-id question-id text &optional filename)
+  "Store exact capability TEXT for REQUEST-ID and QUESTION-ID in FILENAME.
+Return the immutable host protocol item's identity."
+  (let ((item (make-hash-table :test #'equal)))
+    (puthash "request_id" request-id item)
+    (puthash "question_id" question-id item)
+    (puthash "text" text item)
+    (ende-tool-store--validate-capabilities item request-id question-id)
+    (ende-tool-store--save-protocol-item "ende" "capabilities" item filename)))
+
+(defun ende-tool-store-load-capabilities (id request-id question-id &optional filename)
+  "Return exact capability text for ID, REQUEST-ID and QUESTION-ID in FILENAME.
+Missing, mismatched or corrupt host records are replay errors."
+  (let ((record (ende-tool-store--load-protocol-item id filename)))
+    (unless (and record (equal (plist-get record :provider) "ende")
+                 (equal (plist-get record :kind) "capabilities"))
+      (error "Missing or mismatched host capability item %s" id))
+    (gethash "text" (ende-tool-store--validate-capabilities
+                     (plist-get record :item) request-id question-id))))
 
 (defun ende-tool-store--footprint ()
   "Return the configured filename and existing database files with sizes."

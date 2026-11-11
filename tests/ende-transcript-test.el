@@ -32,6 +32,27 @@
 (require 'ende-transcript)
 (require 'ende-chat-test-helpers)
 
+(ert-deftest ende-transcript-capabilities-persist-before-observation ()
+  (let* ((directory (make-temp-file "ende-transcript-capabilities-" t))
+         (file (expand-file-name "store.sqlite3" directory))
+         (job (ende--make-job :instruction
+                              (list :request-id "r" :question-id "q" :tool-store-file file)))
+         observed
+         (ende-transcript-change-functions
+          (list (lambda (_transcript entry _change)
+                  (setq observed
+                        (ende-tool-store-load-capabilities
+                         (plist-get (ende-transcript-entry-data entry) :item-id) "r" "q" file))))))
+    (unwind-protect
+        (let ((entry (ende-transcript-record-capabilities job "exact snapshot\n")))
+          (should (equal observed "exact snapshot\n"))
+          (should (eq (ende-transcript-entry-kind entry) 'capabilities))
+          (should (eq (ende-transcript-entry-status entry) 'complete))
+          (should (equal (ende-transcript-entry-content entry) observed))
+          (should-error (ende-transcript-record-capabilities job "second snapshot"))
+          (should (= (length (ende-transcript-entries (ende-job-transcript job))) 1)))
+      (delete-directory directory t))))
+
 (ert-deftest ende-transcript-fragments-are-consumed-explicitly ()
   (let ((transcript (ende-transcript-create))
         (ende-transcript-change-functions nil))
