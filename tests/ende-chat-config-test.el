@@ -1254,7 +1254,9 @@
                       (should-not (plist-get denied :ok))
                       (should (string-match-p "not active"
                                               (plist-get denied :error)))))
-                  (should (eq (ende-job-state (ende-ask)) 'completed))
+                  (let ((job (ende-ask)))
+                    (ende-test--wait-for (lambda () (ende-job-terminal-p job)) :timeout 2)
+                    (should (eq (ende-job-state job) 'completed)))
                   (let* ((options (plist-get (car (last ende-test--calls)) :options))
                          (definitions (plist-get options :tool-definitions))
                          (names (ende-test--tool-definition-names definitions)))
@@ -1641,7 +1643,35 @@
       (ende-test--reset)
       (delete-directory root t))))
 
-(ert-deftest ende-test/chat-system-prompt-preserves-document-config-source ()
+(ert-deftest ende-test/chat-capability-preview-excludes-only-operative-config ()
+  (ende-test--reset)
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+begin_ende\n(tools about_thinking) ; DOCUMENT_CONFIG\n#+end_ende\n"
+            "* Topic\n#+begin_ende\n(tools about_thinking) ; ROOT_CONFIG\n#+end_ende\n"
+            "** Question\n#+begin_ende\n(tools about_thinking) ; LOCAL_CONFIG\n#+end_ende\n"
+            "Ask.\n#+begin_quote\n#+begin_ende\nQUOTED_EXAMPLE\n#+end_ende\n#+end_quote\n"
+            "#+begin_src org\n#+begin_ende\nSOURCE_EXAMPLE\n#+end_ende\n#+end_src\n")
+    (ende-test--chat-goto "** Question")
+    (let ((before (buffer-string))
+          (next-id ende-tool-store--next-id))
+      (cl-letf (((symbol-function 'ende-tool-store-save-capabilities)
+                 (lambda (&rest _) (ert-fail "Preview must not persist"))))
+        (let* ((document (ende-chat--build-document))
+               (messages (ende-chat--preview-messages document))
+               (snapshot (car (last messages)))
+               (text (ende-chat--render-context messages)))
+          (should (equal (cdar messages) ende-chat--system))
+          (should (ende-content-capabilities-p snapshot))
+          (should (= (length (cl-remove-if-not #'ende-content-capabilities-p messages)) 1))
+          (should-not (string-match-p "DOCUMENT_CONFIG\\|ROOT_CONFIG\\|LOCAL_CONFIG" text))
+          (should (string-match-p "QUOTED_EXAMPLE" text))
+          (should (string-match-p "SOURCE_EXAMPLE" text))))
+      (should (equal before (buffer-string)))
+      (should (= next-id ende-tool-store--next-id))
+      (should-not (file-exists-p ende-tool-store-file)))))
+
+(ert-deftest ende-test/chat-system-prompt-excludes-document-config-source ()
   (ende-test--reset)
   (let* ((configuration
           (concat "#+begin_ende\n"
@@ -1660,20 +1690,10 @@
               (cl-find-if (lambda (message) (equal (car message) "user"))
                           messages)))
         (should (eq (ende-job-state job) 'completed))
-        (should (string-prefix-p ende-chat--system system))
-        (should (equal (substring system 0
-                                   (+ (length ende-chat--system)
-                                      (length "\n\nDocument-level Ende configuration:\n")
-                                      (length configuration)))
-                       (concat ende-chat--system
-                               "\n\nDocument-level Ende configuration:\n"
-                               configuration)))
-        (should (string-match-p "Configured capabilities:" system))
-        (should (string-match-p (regexp-quote "#+begin_ende") system))
-        (should (string-match-p (regexp-quote "#+end_ende") system))
-        (should (= (ende-test--count-matches
-                    (regexp-quote configuration) system)
-                   1))
+        (should (equal ende-chat--system system))
+        (should-not (string-match-p (regexp-quote configuration) system))
+        (should (= (length (cl-remove-if-not #'ende-content-capabilities-p messages)) 1))
+        (should (ende-content-capabilities-p (car (last messages))))
         (should first-user)
         (should-not (string-match-p (regexp-quote configuration)
                                     (cdr first-user)))))))
@@ -1689,9 +1709,10 @@
              (messages (plist-get (car ende-test--calls) :messages)))
         (should (eq (ende-job-state job) 'completed))
         (let ((system (cdr (assoc "system" messages))))
-          (should (string-prefix-p ende-chat--system system))
-          (should (string-match-p (regexp-quote "(capabilities (self") system))
-          (should (string-match-p "about_thinking" system)))))))
+          (should (equal ende-chat--system system))
+          (should (ende-content-capabilities-p (car (last messages))))
+          (should (string-match-p (regexp-quote "(capabilities (self")
+                                  (ende-content-body (car (last messages))))))))))
 
 (ert-deftest ende-test/chat-sibling-configuration-remains-history-only ()
   (let ((root (make-temp-file "ende-config-sibling-" t))
@@ -1733,13 +1754,21 @@
               (should (equal (json-encode first-definitions) (json-encode second-definitions)))
               (should (equal (json-encode first-definitions)
                              (json-encode (ende-tool-definitions))))
-              (should
+              (should-not
                (cl-some
                 (lambda (message)
-                  (and (equal (car message) "user")
-                       (string-match-p (regexp-quote clear-block)
-                                       (cdr message))))
-                second-messages)))))
+                  (string-match-p (regexp-quote clear-block)
+                                  (ende-content-readable (ende-content-body message))))
+                second-messages))
+              (let* ((first-messages (plist-get first-call :messages))
+                     (snapshots (cl-remove-if-not #'ende-content-capabilities-p second-messages))
+                     (old (ende-content-body (car snapshots)))
+                     (current (ende-content-body (cadr snapshots))))
+                (should (equal first-messages (cl-subseq second-messages 0 (length first-messages))))
+                (should (= (length snapshots) 2))
+                (should (equal old (ende-chat-config-capabilities (list :access-policy first))))
+                (should (equal current (ende-chat-config-capabilities (list :access-policy second))))
+                (should-not (equal old current))))))
       (ende-test--reset)
       (delete-directory root t))))
 

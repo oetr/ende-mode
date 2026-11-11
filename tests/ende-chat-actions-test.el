@@ -1723,8 +1723,10 @@
     (ende-test--with-buffer "* Root\n** Question\nAsk again\n"
 			    (org-mode)
 			    (ende-test--chat-goto "** Question")
-			    (ende-ask)
-			    (ende-ask)
+                            (let ((first (ende-ask)) (second (ende-ask)))
+                              (ende-test--wait-for
+                               (lambda () (and (ende-job-terminal-p first)
+                                               (ende-job-terminal-p second))) :timeout 2))
 			    (should (= (ende-test--chat-response-count) 2))
 			    (should (= (length (ende-test--chat-reasoning-headlines)) 2))
 			    (should (equal (org-entry-get nil ende-chat-role-property)
@@ -1910,7 +1912,7 @@
                       (cdr message)
                     ""))
                 messages "\n"))
-              (final-message (car (last messages))))
+              (final-message (cl-find "user" (reverse messages) :key #'ende-content-role :test #'equal)))
          (should (eq (ende-job-state job) 'completed))
          (should (equal (ende-chat--property document question :role)
                         "user"))

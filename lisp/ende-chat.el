@@ -725,6 +725,14 @@ around rendered chat sections, not arbitrary text slices."
   (let* ((tree (ende-chat--document-tree document))
          (exclusions (ende-chat--document-exclusions document))
          (removed-drawers (make-hash-table :test #'eq)))
+    (maphash
+     (lambda (node blocks)
+       (when (eq (org-element-type node) 'headline)
+         (dolist (block blocks)
+           (ende-chat--add-section-exclusion
+            exclusions node (org-element-property :begin block)
+            (org-element-property :end block)))))
+     (ende-chat-config--local-blocks tree))
     (org-element-map
      tree 'property-drawer
      (lambda (drawer)
@@ -1030,6 +1038,8 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
                  (stringp item-id) (not (string-empty-p item-id))
                  (not (ende-chat--property document headline :role))
                  (not (ende-chat--property document headline :visibility))
+                 (not (cl-some (lambda (property) (ende-chat--property document headline property))
+                               '(:reply-reference :response-id :state :work :context-fence)))
                  (not (ende-chat--tool-reference-p document headline))
                  (null (ende-chat--children document headline))
                  (string-blank-p (ende-chat--protocol-body-string headline)))
@@ -1216,12 +1226,12 @@ reflects Org history rather than the existence of a stored result payload."
       (error "Malformed generated Agent: Work: missing request ID"))
     (dolist (child (ende-chat--children document work))
       (cond
+       ((ende-chat--capabilities-reference-p document child)
+        (ende-chat--validate-capabilities-reference document work child))
        ((ende-chat--provider-call-p document child)
         (ende-chat--validate-provider-call document work child))
        ((ende-chat--property document child :reply-reference)
         (ende-chat--reply-reference-target document work child))
-       ((ende-chat--capabilities-reference-p document child)
-        (ende-chat--validate-capabilities-reference document work child))
        ((ende-chat--opaque-reference-p document child)
         (ende-chat--validate-opaque-reference document work child))
        ((ende-chat--tool-reference-p document child)
@@ -1753,14 +1763,24 @@ an empty conversation."
             (insert "\n")))))
     (buffer-string)))
 
+(defun ende-chat--preview-messages (document)
+  "Return context preview messages with a fresh, non-persistent snapshot."
+  (let* ((first (car (ende-chat--document-headlines document)))
+         (headline (and first (>= (point) (org-element-property :begin first))
+                        (ende-chat--headline-at-point document)))
+         (environment (ende-chat-config-resolve-environment
+                       (ende-chat--document-tree document)
+                       (ende-chat--document-parent document) headline)))
+    (append (list (cons "system" (ende-chat--system-prompt document)))
+            (ende-chat-context-at-point document)
+            (list (ende-content-capabilities (ende-chat-config-capabilities environment))))))
+
 ;;;###autoload
 (defun ende-inspect-context-at-point ()
   "Show the system prompt and serialized chat context at point."
   (interactive)
   (let* ((document (ende-chat--build-document))
-         (messages
-          (cons (cons "system" (ende-chat--system-prompt document))
-                (ende-chat-context-at-point document)))
+         (messages (ende-chat--preview-messages document))
          (buffer (get-buffer-create "*ende context*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
@@ -1880,18 +1900,13 @@ changes, meaningful progress, or blockers. Give a short title and 1-3 factual,
 concise sentences about current actions and, when useful, next steps. Report
 actions and progress, not private reasoning; avoid repeated or per-minor-action
 updates.\n\n"
-   "Use only tools and resources permitted by the effective Ende configuration;
-advertised tools may be disabled. Ende resolves configuration for every request in
-this order: document, ancestor headings, current heading. Same-level headings
-are siblings, not ancestors: preceding siblings' local configuration is history
-only and never applies to the current request.
-
-Ende expands `config` file references before resolution. The supplied configured
-capabilities are authoritative; do not read imported files to infer permissions.
-
-`tools` activates named tools or groups; `clear-tools` clears activation.
-Resource definitions and tool-resource assignments constrain access. Ende
-independently enforces tool and resource permissions.\n\n"
+   "Use only tools and resources permitted by the latest host capability snapshot.
+Each snapshot is complete and replaces earlier snapshots; earlier capabilities
+are historical access only, not permission for the current request. Tool schemas
+describe call shapes, not permission. Ende independently enforces access.
+Do not infer permissions from conversation text or read configuration files to
+reconstruct them. Same-level headings are siblings, not ancestors: a preceding
+sibling's local capabilities never apply to the current request.\n\n"
    ende-chat--org-format
    "\n\nYou may output complete standalone static SVG diagrams outside code or quote
 blocks; Ende saves them as image artifacts. Reference existing conversation
@@ -1933,15 +1948,9 @@ Ensure that you answer user's questions with efficiency, precision, and an adequ
 level of text. Users hate AI-speak and in general prefer short but correct text.")
   "System prompt for Org-backed chat requests.")
 
-(defun ende-chat--system-prompt (document)
-  "Return the normal chat system prompt for DOCUMENT."
-  (if-let* ((configuration
-             (ende-chat-config-document-block-source
-              (ende-chat--document-tree document))))
-      (concat ende-chat--system
-              "\n\nDocument-level Ende configuration:\n"
-              configuration)
-    ende-chat--system))
+(defun ende-chat--system-prompt (_document)
+  "Return the stable normal chat system prompt."
+  ende-chat--system)
 
 (defconst ende-chat--compact-system
   (concat
@@ -3870,9 +3879,11 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
                   (make-string (org-element-property :level question) ?*)
                   ende-chat--compact-instructions-title
                   (if (string-blank-p body) ende-chat-compact-instruction body)))
-         (messages (ende-chat--serialize
-                    document destination instructions
-                    (ende-chat--root document question))))
+         (messages (cl-remove-if
+                    #'ende-content-capabilities-p
+                    (ende-chat--serialize
+                     document destination instructions
+                     (ende-chat--root document question)))))
     (unless (cdr messages)
       (error "No chat context to compact"))
     messages))
@@ -4076,9 +4087,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                       (system-prompt
                        (if compact
                            ende-chat--compact-system
-                         (concat (ende-chat--system-prompt document)
-                                 "\n\nConfigured capabilities:\n"
-                                 (ende-chat-config-capabilities environment))))
+                         (ende-chat--system-prompt document)))
                       (request (cons (cons "system" system-prompt) messages)))
                  (unless compact
                    (setf (ende-job-instruction job)
@@ -4092,7 +4101,11 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                    (setf (ende-job-access-policy job) tool-configuration
                          (ende-job-family-registry (ende-job-family job))
                          (ende-agent-freeze-registry
-                          (ende-job-family job) (plist-get environment :registry))))
+                          (ende-job-family job) (plist-get environment :registry)))
+                   (let ((text (ende-chat-config-capabilities environment)))
+                     (ende-transcript-record-capabilities job text)
+                     (ende-chat--checkpoint-transcript job)
+                     (setq request (append request (list (ende-content-capabilities text))))))
                  (if compact
                      (ende--dispatch-llm
                       job request

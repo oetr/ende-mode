@@ -457,10 +457,10 @@
        (should (string-match-p "reasoning source" with))
        (should (string-match-p "Answer" with))
        (should-not (string-match-p "ENDE_CHAT_REASONING_FOR" with))
-       (should (equal (mapcar #'car without-messages)
-                      '("user" "user" "assistant" "user")))
-       (should (equal (mapcar #'car with-messages)
-                      '("user" "user" "assistant" "assistant" "user")))))))
+       (should (equal (mapcar #'ende-content-role without-messages)
+                      '("user" "user" "system" "assistant" "user")))
+       (should (equal (mapcar #'ende-content-role with-messages)
+                      '("user" "user" "system" "assistant" "assistant" "user")))))))
 
 
 
