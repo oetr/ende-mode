@@ -114,9 +114,14 @@
                    (third (caddr ordered))
                    (title-request (car first))
                    (work-request (car second)))
-              (should (equal (cdr (car (last title-request)))
-                             ende-agent--title-control))
-              (should (equal (butlast title-request) work-request))
+              (should (equal (car (last title-request 2))
+                             (cons "system" ende-agent--title-control)))
+              (let* ((snapshot (car (last title-request)))
+                     (capabilities (read (ende-content-body snapshot))))
+                (should (ende-content-capabilities-p snapshot))
+                (should (equal (alist-get 'tools (alist-get 'self (cdr capabilities)))
+                               '(generate_title))))
+              (should (equal (butlast title-request 2) work-request))
               (should (string-match-p "Inspect the queue."
                                       (ende-test--chat-context-text work-request)))
               (should (member "generate_title"
@@ -200,7 +205,9 @@
                    (first (car ordered))
                    (retry (cadr ordered))
                    (work (caddr ordered)))
-              (should (equal (butlast first) work))
+              (should (equal (butlast first 2) work))
+              (should (equal (cl-find-if #'ende-content-capabilities-p retry :from-end t)
+                             (car (last first))))
               (should (string-match-p "Do not use this as the answer"
                                       (ende-test--chat-context-text retry)))
               (should (string-match-p "Title correction"

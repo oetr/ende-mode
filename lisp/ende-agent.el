@@ -631,14 +631,11 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                                      (1+ rounds) base-messages)))))))))))
 
 (defconst ende-agent--title-control
-  (concat "Ende temporary title phase. Call generate_title exactly once for the "
-          "original task. Do not perform the task yet. Only generate_title may "
-          "execute, including instead of about_thinking.\n\n"
-          "#+begin_ende\n"
-          "(clear-tools)\n"
-          "(tools generate_title)\n"
-          "#+end_ende\n")
-  "Temporary instruction appended to the title request.")
+  "Ende temporary title phase. Call generate_title exactly once for the original
+task. Do not perform the task or report progress. The ordinary requirement to call
+about_thinking is suspended during this phase. Only generate_title is authorized
+by the following host capability snapshot."
+  "Temporary system instruction appended to the title request.")
 
 (defun ende-agent--accept-title (job title generation)
   "Accept TITLE for JOB in GENERATION at most once."
@@ -679,7 +676,7 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                       (append prefix tool-messages
                               (list
                                (cons "user"
-                                     "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title-only override is still in force.")))))
+                                     "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title phase remains active.")))))
                  (ende--validate-messages next)
                  (ende-agent--send
                   job next configuration callbacks rounds base-messages))))))
@@ -863,7 +860,10 @@ Chat persistence and guidance stay in those callbacks."
                  (ende-job-title-attempts job) 0)
            (setq messages
                  (append base-messages
-                         (list (cons "user" ende-agent--title-control)))))))
+                         (list (cons "system" ende-agent--title-control)
+                               (ende-content-capabilities
+                                (ende-chat-config-capabilities
+                                 '(:access-policy (:active-tools (generate_title)))))))))))
       (when (cl-intersection '(project_info search_project list_project_files)
                              (plist-get configuration :active-tools))
         (ende-worker-prewarm))
