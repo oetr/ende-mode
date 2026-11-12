@@ -1763,17 +1763,26 @@ an empty conversation."
             (insert "\n")))))
     (buffer-string)))
 
+(defun ende-chat--capability-update (messages environment)
+  "Return a host snapshot when ENVIRONMENT differs from MESSAGES' latest one."
+  (let ((text (ende-chat-config-capabilities environment))
+        (previous (cl-find-if #'ende-content-capabilities-p messages :from-end t)))
+    (unless (equal text (and previous (ende-content-body previous)))
+      (ende-content-capabilities text))))
+
 (defun ende-chat--preview-messages (document)
-  "Return context preview messages with a fresh, non-persistent snapshot."
+  "Return context preview messages with current, non-persistent capabilities."
   (let* ((first (car (ende-chat--document-headlines document)))
          (headline (and first (>= (point) (org-element-property :begin first))
                         (ende-chat--headline-at-point document)))
          (environment (ende-chat-config-resolve-environment
                        (ende-chat--document-tree document)
-                       (ende-chat--document-parent document) headline)))
-    (append (list (cons "system" (ende-chat--system-prompt document)))
-            (ende-chat-context-at-point document)
-            (list (ende-content-capabilities (ende-chat-config-capabilities environment))))))
+                       (ende-chat--document-parent document) headline))
+         (messages (cons (cons "system" (ende-chat--system-prompt document))
+                         (ende-chat-context-at-point document))))
+    (if-let* ((snapshot (ende-chat--capability-update messages environment)))
+        (append messages (list snapshot))
+      messages)))
 
 ;;;###autoload
 (defun ende-inspect-context-at-point ()
@@ -4104,10 +4113,10 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                          (ende-job-family-registry (ende-job-family job))
                          (ende-agent-freeze-registry
                           (ende-job-family job) (plist-get environment :registry)))
-                   (let ((text (ende-chat-config-capabilities environment)))
-                     (ende-transcript-record-capabilities job text)
+                   (when-let* ((snapshot (ende-chat--capability-update request environment)))
+                     (ende-transcript-record-capabilities job (ende-content-body snapshot))
                      (ende-chat--checkpoint-transcript job)
-                     (setq request (append request (list (ende-content-capabilities text))))))
+                     (setq request (append request (list snapshot)))))
                  (if compact
                      (ende--dispatch-llm
                       job request
