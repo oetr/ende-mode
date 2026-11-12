@@ -805,6 +805,7 @@
      (ende-test--chat-goto "** Question")
      (setq root (ende-ask (ende-test--request-profile profile)))
      (ende-test--complete-call (nth 0 ende-test--calls))
+     (ende-test--wait-for (lambda () (= (length ende-test--calls) 3)))
      (setq children (copy-sequence (ende-job-children root))
            child-buffers (mapcar #'ende-job-owned-buffer children))
      (should (eq (ende-job-state root) 'suspended))
