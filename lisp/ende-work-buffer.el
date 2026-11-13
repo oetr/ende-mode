@@ -56,6 +56,7 @@
 (defvar-local ende-work-buffer--fontifier nil)
 (defvar-local ende-work-buffer--stream-buffer nil)
 (defvar-local ende-work-buffer--stream-owner nil)
+(defvar-local ende-work-buffer--stream-round nil)
 (defvar-local ende-work-buffer--job nil)
 (defvar-local ende-work-buffer--transcript nil)
 (defvar-local ende-work-buffer--sections nil)
@@ -659,6 +660,16 @@ so a directive completed by a later chunk can still be escaped in place."
 
 (add-hook 'ende-transcript-change-functions #'ende-work-buffer--transcript-change)
 
+(defun ende-work-buffer--release-section (section)
+  "Release SECTION's buffer positions."
+  (dolist (marker (list (ende-work-buffer--section-start section)
+                       (ende-work-buffer--section-body-start section)
+                       (ende-work-buffer--section-body-end section)
+                       (ende-work-buffer--section-payload-start section)
+                       (ende-work-buffer--section-payload-end section)
+                       (ende-work-buffer--section-prefix-marker section)))
+    (set-marker marker nil)))
+
 (defun ende-work-buffer--detach ()
   "Detach this disposable viewer without changing job execution."
   (when (buffer-live-p ende-work-buffer--stream-buffer)
@@ -671,14 +682,7 @@ so a directive completed by a later chunk can still be escaped in place."
   (when (timerp ende-work-buffer--refresh-timer)
     (cancel-timer ende-work-buffer--refresh-timer))
   (when ende-work-buffer--sections
-    (maphash (lambda (_ section)
-               (dolist (marker (list (ende-work-buffer--section-start section)
-                                     (ende-work-buffer--section-body-start section)
-                                     (ende-work-buffer--section-body-end section)
-                                     (ende-work-buffer--section-payload-start section)
-                                     (ende-work-buffer--section-payload-end section)
-                                     (ende-work-buffer--section-prefix-marker section)))
-                 (set-marker marker nil)))
+    (maphash (lambda (_ section) (ende-work-buffer--release-section section))
              ende-work-buffer--sections))
   (with-silent-modifications
     (remove-text-properties (point-min) (point-max)
@@ -758,20 +762,29 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
 (define-key ende-work-stream-mode-map (kbd "r") #'ende-work-buffer-inspect-raw)
 (define-key ende-work-stream-mode-map (kbd "s") #'ende-work-buffer-toggle-stream)
 
+(defun ende-work-buffer--stream-output-p (entry)
+  "Whether ENTRY contains displayable raw output, regardless of completion."
+  (and (memq (ende-transcript-entry-kind entry) '(text thinking summary tool-call tool-result))
+       (or (> (ende-transcript-entry-length entry) 0)
+           (and (eq (ende-transcript-entry-kind entry) 'tool-call)
+                (let ((arguments (plist-get (plist-get (ende-transcript-entry-data entry) :call)
+                                           :arguments)))
+                  (and (stringp arguments) (not (string-empty-p arguments))))))))
+
 (defun ende-work-buffer--stream-entry (entry change)
   "Update raw ENTRY by CHANGE in the live pane, appending only new text."
   (let* ((id (ende-transcript-entry-id entry))
          (section (gethash id ende-work-buffer--sections))
          (kind (ende-transcript-entry-kind entry))
-         (active (and (ende-work-buffer--streaming-p entry)
-                      (memq kind '(text thinking summary tool-call)))))
-    (cond
-     (active
+         (output (or section (ende-work-buffer--stream-output-p entry))))
+    (when output
       (let* ((new (not section))
              (title (concat (ende-work-buffer--one-line
-                             (if (eq kind 'tool-call)
-                                 (concat "> " (or (plist-get (plist-get (ende-transcript-entry-data entry)
-                                                                         :call) :name) "tool"))
+                             (if (memq kind '(tool-call tool-result))
+                                 (concat (if (eq kind 'tool-call) "> " "")
+                                         (or (plist-get (plist-get (ende-transcript-entry-data entry)
+                                                                  :call) :name) "tool")
+                                         (if (eq kind 'tool-result) " -->" ""))
                                (pcase kind ('text "Reply") ('thinking "Reasoning") (_ "Summary"))))
                             "\n")))
         (setq section (ende-work-buffer--ensure-section id entry))
@@ -803,25 +816,37 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               (goto-char (ende-work-buffer--section-body-start section))
               (ende-work-buffer--insert section raw)
               (setf (ende-work-buffer--section-rendered-length section) (length raw))
-              (cl-incf (ende-work-buffer--section-revision section)))))))
-     (section
-      (delete-region (ende-work-buffer--section-start section)
-                     (ende-work-buffer--section-body-end section))
-      (set-marker (ende-work-buffer--section-start section) nil)
-      (remhash id ende-work-buffer--sections)))))
+              (cl-incf (ende-work-buffer--section-revision section)))))))))
 
 (defun ende-work-buffer--stream-refresh (entries &optional changes)
-  "Project ENTRIES into the visible live pane, using incremental CHANGES."
+  "Show the latest output in ENTRIES, applying incremental CHANGES when supplied."
   (when (and (buffer-live-p ende-work-buffer--stream-buffer)
              (get-buffer-window ende-work-buffer--stream-buffer 'visible))
     (with-current-buffer ende-work-buffer--stream-buffer
-      (ende-work-buffer--update
-       (lambda ()
-         (dolist (entry entries)
-           (ende-work-buffer--stream-entry entry (if changes (gethash entry changes 'metadata) 'replace)))
-         (setq header-line-format
-               (if (zerop (hash-table-count ende-work-buffer--sections))
-                   "Live stream · waiting for output" "Live stream · raw incoming text")))))))
+      (let ((round ende-work-buffer--stream-round))
+        (dolist (entry entries)
+          (when (ende-work-buffer--stream-output-p entry)
+            (setq round (max (or round 0) (ende-transcript-entry-round entry)))))
+        (ende-work-buffer--update
+         (lambda ()
+           (unless (equal round ende-work-buffer--stream-round)
+             (maphash (lambda (_ section) (ende-work-buffer--release-section section))
+                      ende-work-buffer--sections)
+             (clrhash ende-work-buffer--sections)
+             (erase-buffer)
+             (setq ende-work-buffer--stream-round round))
+           (dolist (entry entries)
+             (when (and round (= (ende-transcript-entry-round entry) round))
+               (ende-work-buffer--stream-entry entry (if changes (gethash entry changes 'metadata) 'replace))))
+           (let (streaming)
+             (maphash (lambda (_ section)
+                        (when (ende-work-buffer--streaming-p (ende-work-buffer--section-entry section))
+                          (setq streaming t)))
+                      ende-work-buffer--sections)
+             (setq header-line-format
+                   (cond (streaming "Live stream · receiving output")
+                         ((> (hash-table-count ende-work-buffer--sections) 0) "Live stream · latest output")
+                         (t "Live stream · waiting for output"))))))))))
 
 (defun ende-work-buffer--stream-window-change (window)
   "Catch up when WINDOW exposes an existing live pane."
