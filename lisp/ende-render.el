@@ -31,6 +31,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ende-protocol)
+(require 'ende-patch)
 
 (defface ende-render-request-face '((t :inherit font-lock-keyword-face))
   "Tool request headings." :group 'ende)
@@ -44,6 +45,22 @@
   "Context and line numbers." :group 'ende)
 
 (defconst ende-render--missing (make-symbol "missing"))
+
+(defconst ende-render--tools
+  '(("project_info" project "file_count")
+    ("list_project_files" files "files") ("file_info" metadata "line_count")
+    ("list_project_buffers" buffers "buffers")
+    ("read_file" read "content") ("read_buffer" read "content")
+    ("search_project" search "files")
+    ("edit_file" edit "status") ("create_file" create "status")
+    ("delete_file" delete "status") ("copy_from_sandbox" copy "status")
+    ("apply_patch" patch "files")
+    ("run_host_command" command "exit_code") ("run_sandbox_command" command "exit_code")
+    ("web_fetch" web "status") ("generate_image" image "artifacts")
+    ("spawn_agent" agent nil) ("about_thinking" activity "accepted")
+    ("generate_title" title "accepted"))
+  "Static (NAME FAMILY RESULT-FIELD) table, not an execution registry.
+RESULT-FIELD gates specialization; unfamiliar results remain readable.")
 
 (defun ende-render--decode (content)
   "Decode complete JSON CONTENT once, retaining non-JSON text verbatim."
@@ -173,6 +190,22 @@
   "Format count N of NOUN."
   (format "%d %s%s" n noun (if (= n 1) "" "s")))
 
+(defun ende-render--source-summary (source &optional kind)
+  "Compactly describe SOURCE's path and sizes, with optional source KIND.
+Only buffer listings include live buffer identity and modification state."
+  (mapconcat
+   #'identity
+   (delq nil
+         (append
+          (list (ende-render--get source "path") kind
+                (when (equal kind "buffer") (ende-render--get source "buffer_id"))
+                (when (and (equal kind "buffer") (eq (ende-render--get source "buffer_modified") t))
+                  "modified"))
+          (cl-loop for (key . noun) in '(("line_count" . "line") ("byte_count" . "byte"))
+                   when (ende-render--has source key)
+                   collect (ende-render--count (ende-render--get source key) noun))))
+   " · "))
+
 (defun ende-render--marked (text face)
   "Copy TEXT and mark it with semantic FACE for the host fontifier."
   (propertize (copy-sequence text) 'ende-render-face face))
@@ -240,57 +273,77 @@
 (defun ende-render--request (name args)
   "Format the decoded request ARGS for static tool NAME."
   (let ((target (ende-render--target args)) summary body)
-    (pcase name
-      ("project_info" (setq summary "Inspect project"))
-      ("list_project_files"
-       (setq summary (concat "List files " (or (ende-render--get args "glob") ""))
+    (pcase (cadr (assoc name ende-render--tools))
+      ((or 'project 'buffers) (setq summary ""))
+      ('files
+       (setq summary (or (ende-render--get args "glob") "")
              body (ende-render--fields args '("glob" "max_results" "include_metadata"))))
-      ("file_info" (setq summary (concat "Inspect file " target)))
-      ("list_project_buffers" (setq summary "List project buffers"))
-      ((or "read_file" "read_buffer")
-       (setq summary (format "Read %s %s" (if (equal name "read_file") "file" "buffer") target)
-             body (ende-render--fields args '("start_line" "line_count"))))
-      ("search_project"
-       (setq summary (concat "Search files " (or (ende-render--get args "glob") ""))
-             body (ende-render--fields args '("query" "patterns" "regexp" "glob"
-                                              "max_results" "context_before" "context_after"))))
-      ("edit_file"
+      ('metadata (setq summary target))
+      ('read
+       (let ((start (ende-render--get args "start_line" 1))
+             (count (ende-render--get args "line_count")))
+         (setq summary (concat target " · "
+                               (if count (format "lines %d–%d" start (+ start count -1))
+                                 (format "from line %d" start)))
+               body (ende-render--fields args '("start_line" "line_count")))))
+      ('search
+       (let* ((selector (cl-find-if (lambda (key) (ende-render--has args key))
+                                    '("query" "patterns" "regexp")))
+              (value (ende-render--get args selector)))
+         (unless selector (error "Missing search selector"))
+         (setq summary (concat selector " "
+                               (if (equal selector "patterns")
+                                   (mapconcat #'prin1-to-string (ende-render--items value) ", ")
+                                 (prin1-to-string value))
+                               (when (ende-render--has args "glob")
+                                 (concat " · " (ende-render--get args "glob"))))
+               body (ende-render--fields args '("query" "patterns" "regexp" "glob"
+                                                "max_results" "context_before" "context_after")))))
+      ('edit
        (let ((edits (ende-render--items (ende-render--get args "edits"))))
-         (setq summary (format "Edit %s · %s proposed" target
+         (setq summary (format "%s · %s proposed" target
                                (ende-render--count (length edits) "anchor edit"))
                body (mapconcat #'ende-render--edit-preview edits "\n\n"))))
-      ("create_file"
-       (setq summary (concat "Create file " target)
-             body (ende-render--diff-lines (ende-render--get args "content")
-                                           "+ " 'ende-render-success-face)))
-      ("delete_file"
-       (setq summary (concat "Delete file " target)
+      ('create
+       (let ((content (ende-render--get args "content")))
+         (setq summary (format "%s · %s" target
+                               (ende-render--count (string-bytes content) "byte"))
+               body (ende-render--diff-lines content "+ " 'ende-render-success-face))))
+      ('delete
+       (setq summary target
              body (ende-render--fields args '("expected_digest"))))
-      ("apply_patch"
-       (setq summary "Apply file patch"
-             body (ende-render--patch-preview (ende-render--get args "patch"))))
-      ("copy_from_sandbox"
-       (setq summary (concat "Copy to " target)
+      ('patch
+       (let* ((patch (ende-render--get args "patch"))
+              (paths (cl-loop for line in (ende-patch--lines patch)
+                              for header = (ende-patch--operation-header line)
+                              when header collect (cdr header))))
+         (setq summary (mapconcat #'identity (delete-dups paths) ", ")
+               body (ende-render--patch-preview patch))))
+      ('copy
+       (setq summary (concat (ende-render--get args "source") " → " target)
              body (ende-render--fields args '("source" "destination"))))
-      ((or "run_host_command" "run_sandbox_command")
+      ('command
        (let ((command (ende-render--command name args)))
-         (setq summary (format "Run in %s · %s"
-                               (if (equal name "run_host_command") "host" "sandbox") command)
-               body (ende-render--join command (ende-render--fields args '("cwd" "timeout"))))))
-      ("web_fetch"
-       (setq summary (concat "Fetch " (ende-render--get args "url"))
+         (setq summary command
+               body (ende-render--fields args '("cwd" "timeout")))))
+      ('web
+       (setq summary (ende-render--get args "url")
              body (ende-render--fields args '("url" "max_chars"))))
-      ("generate_image"
-       (setq summary "Generate image"
+      ('image
+       (setq summary (concat (ende-render--get args "prompt")
+                             (let ((width (ende-render--get args "width"))
+                                   (height (ende-render--get args "height")))
+                               (cond ((and width height) (format " · %s×%s" width height))
+                                     (width (format " · width %s" width))
+                                     (height (format " · height %s" height)))))
              body (ende-render--readable args)))
-      ("spawn_agent"
-       (setq summary (concat "Delegate · " (ende-render--get args "title"))
+      ('agent
+       (setq summary (ende-render--get args "title")
              body (ende-render--get args "task")))
-      ("about_thinking"
+      ('activity
        (setq summary (ende-render--get args "title") body (ende-render--get args "status")))
-      ("generate_title"
-       (setq summary (concat "Set title · " (ende-render--get args "title"))))
-      (_ (setq summary (concat "Request · " name) body (ende-render--readable args))))
+      ('title (setq summary (ende-render--get args "title")))
+      (_ (setq summary "Request" body (ende-render--readable args))))
     (ende-render--presentation summary body)))
 
 (defun ende-render-tool-request (name arguments)
@@ -301,8 +354,8 @@
       (condition-case nil
           (if (ende-render--object-p args)
               (ende-render--request name args)
-            (ende-render--presentation (concat "Request · " name) (ende-render--readable args)))
-        (error (ende-render--presentation (format "Request · %s" name)
+            (ende-render--presentation "Request" (ende-render--readable args)))
+        (error (ende-render--presentation "Request"
                                          (ende-render--readable args)))))))
 
 (defun ende-render--read-result (name result args)
@@ -310,13 +363,14 @@
   (let* ((start (ende-render--get result "start_line"))
          (end (ende-render--get result "end_line"))
          (empty (< end start))
-         (truncated (eq (ende-render--get result "truncated") t)))
+         (excerpt (or (eq (ende-render--get result "truncated") t)
+                      (> start 1))))
     (ende-render--presentation
      (format "%s %s · %s%s"
-             (if (equal name "read_file") "File" "Buffer")
+             (if (equal name "read_file") "Disk" "Buffer")
              (ende-render--target result args)
              (if empty "empty" (format "lines %d–%d" start end))
-             (if truncated " · partial" ""))
+             (if excerpt " · excerpt" ""))
      (ende-render--join
       (ende-render--fields result '("source_kind" "start_line" "end_line" "total_lines"))
       (if empty "(empty source)"
@@ -360,8 +414,10 @@
                      "Patch applied · " "Patch result · ")
                  (ende-render--count (length files) "file"))
          (mapconcat (lambda (file)
-                      (ende-render--fields file '("operation" "path" "status")))
-                    files "\n\n")))
+                      (format "%s · %s · %s" (ende-render--get file "path")
+                              (ende-render--get file "operation")
+                              (ende-render--get file "status")))
+                    files "\n")))
     (let* ((applied (equal (ende-render--get result "status") "applied"))
            (action (if applied
                        (pcase name ("edit_file" "Edited") ("create_file" "Created")
@@ -373,85 +429,88 @@
                    (concat " · " (ende-render--count (ende-render--get result "edit_count") "edit")) ""))
        (ende-render--fields result '("operation" "path" "status" "edit_count"))))))
 
-(defun ende-render--command-result (name result args)
-  "Present the process outcome in RESULT for NAME and ARGS."
+(defun ende-render--command-result (result)
+  "Present the process outcome in RESULT, with useful output first."
   (let ((failed (or (ende-render--false-p (ende-render--get result "process_ok"))
                     (and (numberp (ende-render--get result "exit_code"))
                          (/= (ende-render--get result "exit_code") 0))))
         (truncated (or (eq (ende-render--get result "stdout_truncated") t)
                        (eq (ende-render--get result "stderr_truncated") t))))
     (ende-render--presentation
-     (concat (if (equal name "run_host_command") "Host command" "Sandbox command")
-             (when (ende-render--has args "command")
-               (concat " · " (ende-render--command name args)))
-             (if (ende-render--has result "exit_code")
-                 (format " · exit %s" (ende-render--get result "exit_code")) " · response returned")
+     (concat (if (numberp (ende-render--get result "exit_code"))
+                 (format "exit %s" (ende-render--get result "exit_code")) "Response returned")
              (if failed " · failed" "") (if truncated " · output truncated" ""))
-     (ende-render--join
-      (when (ende-render--has args "command") (ende-render--command name args))
-      (ende-render--fields args '("cwd" "timeout"))
-      (ende-render--fields result '("exit_code" "process_ok"))
-      (when (ende-render--has result "stdout")
-        (concat "stdout" (if (eq (ende-render--get result "stdout_truncated") t) " (truncated)" "")
-                ":\n" (ende-render--get result "stdout")))
-      (when (ende-render--has result "stderr")
-        (concat "stderr" (if (eq (ende-render--get result "stderr_truncated") t) " (truncated)" "")
-                ":\n" (ende-render--get result "stderr"))))
+     (mapconcat
+      (lambda (key)
+        (concat key (when (eq (ende-render--get result (concat key "_truncated")) t)
+                      " (truncated)")
+                ":\n" (ende-render--get result key)))
+      (cl-remove-if-not
+       (lambda (key)
+         (let ((text (ende-render--get result key)))
+           (and (stringp text) (not (string-empty-p text)))))
+       (if failed '("stderr" "stdout") '("stdout" "stderr")))
+      "\n\n")
      (cond (failed 'error) (truncated 'warning)
            ((eq (ende-render--get result "process_ok") t) 'success) (t 'neutral)))))
 
 (defun ende-render--response (name result args)
   "Format decoded RESULT for static tool NAME with optional ARGS."
-  (pcase name
-    ("project_info"
+  (let ((field (caddr (assoc name ende-render--tools))))
+    (when (and field (not (ende-render--has result field)))
+      (error "Unfamiliar result shape")))
+  (pcase (cadr (assoc name ende-render--tools))
+    ('project
      (ende-render--presentation
-      (format "Project %s · %s" (or (ende-render--get result "name") "")
-              (ende-render--count (ende-render--get result "file_count") "file"))
-      (ende-render--fields result '("root" "file_count"))))
-    ((or "list_project_files" "list_project_buffers")
+      (format "%s · %s · %s" (or (ende-render--get result "name") "")
+              (ende-render--count (ende-render--get result "file_count") "file")
+              (ende-render--count (ende-render--get result "buffer_count") "buffer"))
+      (ende-render--fields result '("root"))))
+    ((or 'files 'buffers)
      (let* ((buffers (equal name "list_project_buffers"))
             (items (ende-render--items (ende-render--get result (if buffers "buffers" "files")))))
        (ende-render--presentation
         (concat (ende-render--count (length items) (if buffers "buffer" "file")) " returned"
                 (if (eq (ende-render--get result "truncated") t) " · truncated" ""))
         (mapconcat (lambda (item)
-                     (ende-render--fields item '("path" "name" "buffer_id" "line_count" "byte_count")))
-                   items "\n\n"))))
-    ("file_info"
+                     (ende-render--source-summary item (when buffers "buffer")))
+                   items "\n"))))
+    ('metadata
      (ende-render--presentation
-      (concat "File " (ende-render--target result args))
-      (ende-render--fields result '("path" "line_count" "byte_count" "disk_mtime" "digest"))))
-    ((or "read_file" "read_buffer") (ende-render--read-result name result args))
-    ("search_project" (ende-render--search-result result))
-    ((or "edit_file" "create_file" "delete_file" "copy_from_sandbox" "apply_patch")
+      (ende-render--source-summary result "disk")
+      (ende-render--fields result '("disk_mtime"))))
+    ('read (ende-render--read-result name result args))
+    ('search (ende-render--search-result result))
+    ((or 'edit 'create 'delete 'copy 'patch)
      (ende-render--mutation-result name result args))
-    ((or "run_host_command" "run_sandbox_command") (ende-render--command-result name result args))
-    ("web_fetch"
+    ('command (ende-render--command-result result))
+    ('web
      (let ((status (ende-render--get result "status")))
        (ende-render--presentation
-        (format "Fetched %s · HTTP %s%s" (ende-render--get result "final_url") status
-                (if (eq (ende-render--get result "truncated") t) " · truncated" ""))
+        (format "HTTP %s%s · %s" status
+                (if (eq (ende-render--get result "truncated") t) " · truncated" "")
+                (ende-render--get result "final_url"))
         (ende-render--join
          (ende-render--fields result '("requested_url" "final_url" "status" "content_type"))
          (ende-render--get result "content"))
         (when (and (numberp status) (>= status 400)) 'error))))
-    ("generate_image"
+    ('image
      (let ((artifacts (ende-render--items (ende-render--get result "artifacts"))))
        (ende-render--presentation
         (concat (ende-render--count (length artifacts) "image artifact") " returned")
         (ende-render--join (ende-render--fields args '("caption"))
                            (mapconcat #'identity artifacts "\n")))))
-    ("spawn_agent"
+    ('agent
      (ende-render--presentation
       (concat "Agent response returned"
               (when (ende-render--has args "title") (concat " · " (ende-render--get args "title"))))
       (ende-render--readable result)))
-    ((or "about_thinking" "generate_title")
+    ((or 'activity 'title)
      (if (eq (ende-render--get result "accepted") t)
          (ende-render--presentation
           (if (equal name "about_thinking") "Activity accepted" "Title accepted") "")
-       (ende-render--presentation (concat name " · response returned") (ende-render--readable result))))
-    (_ (ende-render--presentation (concat name " · response returned") (ende-render--readable result)))))
+       (ende-render--presentation "Response returned" (ende-render--readable result))))
+    (_ (ende-render--presentation "Response returned" (ende-render--readable result)))))
 
 (defun ende-render--response-envelope (name value args)
   "Present decoded VALUE and its outcome for NAME, using request ARGS."
@@ -468,7 +527,7 @@
                (cond
                 (failed
                  (ende-render--presentation
-                  (concat name " · failed"
+                  (concat "Failed"
                           (when recovery
                             (if (cl-some (lambda (entry)
                                            (or (equal (ende-render--get entry "status") "recovery_needed")
@@ -480,13 +539,14 @@
                    (when recovery (concat "Recovery:\n" (ende-render--readable recovery)))) 'error))
                 ((or (ende-render--object-p result) (equal name "spawn_agent"))
                  (ende-render--response name result args))
-                (t (ende-render--presentation (concat name " · response returned")
+                (t (ende-render--presentation "Response returned"
                                               (ende-render--readable result))))))
           (when (and (eq (plist-get presentation :state) 'neutral)
                      (not (equal name "spawn_agent"))
                      envelope (eq (ende-render--get value "ok") t))
             (setq presentation (plist-put presentation :state 'success)))
           (when (and (eq (plist-get presentation :state) 'success)
+                     (not (eq (cadr (assoc name ende-render--tools)) 'read))
                      (eq (ende-render--get result "truncated") t))
             (setq presentation (plist-put presentation :state 'warning)))
           (when (and (stringp warning) (not (string-empty-p warning)))
@@ -496,9 +556,12 @@
                    (ende-render--join (plist-get presentation :body) warning)
                    (if failed 'error 'warning))))
           presentation)
-      (error (ende-render--presentation (format "%s · response returned" name)
+      (error (ende-render--presentation "Response returned"
                                          (ende-render--readable value)
-                                         (if failed 'error 'neutral))))))
+                                         (cond (failed 'error)
+                                               ((and envelope (eq (ende-render--get value "ok") t)
+                                                     (not (equal name "spawn_agent"))) 'success)
+                                               (t 'neutral)))))))
 
 (defun ende-render-tool-response (name content &optional arguments)
   "Present tool NAME's CONTENT, optionally using request ARGUMENTS as context."
@@ -508,16 +571,18 @@
           (name (if (symbolp name) (symbol-name name) name)))
       (condition-case nil
           (ende-render--response-envelope name value args)
-        (error (ende-render--presentation (format "%s · response returned" name)
+        (error (ende-render--presentation "Response returned"
                                          (ende-render--readable value)))))))
 
 (defun ende-render-reply (content)
-  "Present only a complete JSON object with string title and text in CONTENT.
+  "Present only a complete JSON object with exactly title and text in CONTENT.
+Both fields must be strings.
 Return nil for prose, fenced JSON, incomplete JSON, and other shapes."
   (save-match-data
     (when (stringp content)
       (let ((value (ende-render--decode content)))
         (when (and (hash-table-p value)
+                   (= (hash-table-count value) 2)
                    (stringp (gethash "title" value))
                    (stringp (gethash "text" value)))
           (ende-render--presentation (gethash "title" value) (gethash "text" value)
