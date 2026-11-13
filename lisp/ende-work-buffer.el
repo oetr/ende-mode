@@ -99,7 +99,9 @@ Use TAB to fold, r to inspect original data, and s to toggle live streaming."
 (defun ende-work-buffer--fontify-region (start end &optional loudly)
   "Fontify START to END normally, then restore generated presentation spans.
 LOUDLY is passed to the buffer's original fontifier."
-  (prog1 (funcall ende-work-buffer--fontifier start end loudly)
+  (let ((bounds (funcall ende-work-buffer--fontifier start end loudly)))
+    (when (eq (car-safe bounds) 'jit-lock-bounds)
+      (setq start (min start (cadr bounds)) end (max end (cddr bounds))))
     (with-silent-modifications
       (while (< start end)
         (let ((next (min (next-single-property-change start 'ende-render-face nil end)
@@ -108,7 +110,8 @@ LOUDLY is passed to the buffer's original fontifier."
           (when (get-text-property start 'ende-work-buffer-hidden)
             (put-text-property start next 'invisible 'ende-work-buffer-hidden))
           (when face (add-face-text-property start next face))
-          (setq start next))))))
+          (setq start next))))
+    bounds))
 
 (defun ende-work-buffer--hidden (text)
   "Mark generated TEXT as invisible without an ellipsis."
