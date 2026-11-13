@@ -52,6 +52,7 @@
 (defvar ende-work-buffer--presentations (make-hash-table :test #'eq :weakness 'key)
   "Disposable presentations retained while their transcripts are reachable.")
 (defvar-local ende-work-buffer--render-cache nil)
+(defvar-local ende-work-buffer--restoring nil)
 (defvar-local ende-work-buffer--fontifier nil)
 (defvar-local ende-work-buffer--stream-buffer nil)
 (defvar-local ende-work-buffer--stream-owner nil)
@@ -70,7 +71,8 @@
 (defvar-local ende-work-buffer--rendering nil)
 
 (define-minor-mode ende-work-buffer-mode
-  "Inspect a job transcript with ordinary, read-only Org navigation."
+  "Inspect a job transcript with ordinary, read-only Org navigation.
+Use TAB to fold, r to inspect original data, and s to toggle live streaming."
   :lighter " Work"
   :keymap (let ((map (make-sparse-keymap)))
             (define-key map (kbd "q") #'ende-work-buffer-quit)
@@ -126,12 +128,17 @@ LOUDLY is passed to the buffer's original fontifier."
          (cached (gethash id ende-work-buffer--render-cache)))
     (if (and (eq change 'metadata) (equal signature (car cached)))
         (nth 2 cached)
-      (let ((raw (ende-work-buffer--raw-payload entry)))
-        (if (and (equal signature (car cached)) (equal raw (nth 1 cached)))
-            (nth 2 cached)
+      (let ((raw (unless (and ende-work-buffer--restoring (not cached))
+                   (ende-work-buffer--raw-payload entry))))
+        (cond
+         ((and (equal signature (car cached)) (equal raw (nth 1 cached))) (nth 2 cached))
+         (ende-work-buffer--restoring
+          (list :summary "preparing view" :body "" :folded (not (eq kind 'text)) :pending t))
+         (t
           (let ((presentation
                  (cond
-                  ((eq status 'streaming) (list :summary "streaming" :body "" :state 'neutral :folded t))
+                  ((and (null raw) (memq kind '(tool-call tool-result)))
+                   '(:summary "payload unavailable" :body "" :state neutral :folded t))
                   ((eq kind 'tool-call) (ende-render-tool-request name raw))
                   ((eq kind 'tool-result) (ende-render-tool-response name raw arguments))
                   ((eq kind 'text)
@@ -146,7 +153,7 @@ LOUDLY is passed to the buffer's original fontifier."
                            :folded nil)))
                   (t (list :body (or raw "") :folded t)))))
             (puthash id (list signature raw presentation) ende-work-buffer--render-cache)
-            presentation))))))
+            presentation)))))))
 
 (defun ende-work-buffer--payload-text (payload)
   "Return a textual representation of original semantic PAYLOAD."
@@ -455,23 +462,6 @@ so a directive completed by a later chunk can still be escaped in place."
                           " — " (ende-transcript-entry-prefix entry 180))))
       ('status (format "Status: %s" (ende-transcript-entry-status entry))))))
 
-(defun ende-work-buffer--display-text (entry)
-  "Return ENTRY's current readable body, only when it will be rendered."
-  (let ((kind (ende-transcript-entry-kind entry))
-        (data (ende-transcript-entry-data entry)))
-    (pcase kind
-      ((or 'tool-call 'tool-result 'opaque)
-       (let ((raw (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry))))
-         (if (and (eq kind 'tool-call) (not (eq (ende-transcript-entry-status entry) 'complete)))
-             raw
-           (ende-render-readable raw))))
-      ('text (let ((content (ende-transcript-entry-content entry)))
-               (if (and (plist-get data :normalized) (string-blank-p (or content "")))
-                   (or (plist-get (plist-get data :normalized) :content) content "")
-                 content)))
-      ('status (ende-work-buffer--payload-text (plist-get data :error)))
-      (_ (or (ende-transcript-entry-content entry) "")))))
-
 (defun ende-work-buffer--entry (entry change)
   "Render ENTRY's CHANGE in its first-observation position."
   (let* ((id (ende-transcript-entry-id entry))
@@ -487,6 +477,8 @@ so a directive completed by a later chunk can still be escaped in place."
                     ((memq kind '(tool-call tool-result text thinking summary progress))
                      (ende-work-buffer--presentation entry change)))))
         (setf (ende-work-buffer--section-presentation section) presentation)
+        (when (plist-get presentation :pending)
+          (ende-work-buffer--queue-change entry 'replace))
         (ende-work-buffer--update-heading section entry)
         (ende-work-buffer--style-heading section entry)
         (cond
@@ -501,27 +493,22 @@ so a directive completed by a later chunk can still be escaped in place."
                   (ende-work-buffer--merge-change
                    (ende-work-buffer--section-stale section) (if new 'replace change)))
             (unless (or new (ende-work-buffer--folded-p section))
-              (ende-work-buffer--render-body
-               section entry (ende-work-buffer--section-stale section)))))
+              (ende-work-buffer--render-body section entry))))
          ((not (or (eq kind 'response) (and (not new) (eq change 'metadata))))
-          (ende-work-buffer--render-body section entry (if new 'replace change))))
+          (ende-work-buffer--render-body section entry)))
         (when (and new (or (plist-get presentation :folded)
                           (memq kind '(capabilities opaque thinking summary progress))))
           (save-excursion
             (goto-char (ende-work-buffer--section-start section))
             (org-fold-hide-subtree)))))))
 
-(defun ende-work-buffer--render-body (section entry change)
-  "Materialize ENTRY's CHANGE in SECTION, retaining just the displayed body."
-  (if (and (ende-work-buffer--section-materialized section) (eq change 'append))
-      (ende-work-buffer--append-example
-       section
-       (let ((start (ende-work-buffer--section-rendered-length section)))
-         (if (and (memq (ende-transcript-entry-kind entry) '(text thinking summary progress))
-                  (not (plist-get (ende-transcript-entry-data entry) :normalized)))
-             (ende-transcript-entry-substring entry start)
-           (substring (ende-work-buffer--display-text entry) start))))
-    (ende-work-buffer--replace-example section (ende-work-buffer--display-text entry)))
+(defun ende-work-buffer--render-body (section entry)
+  "Materialize ENTRY's auxiliary payload in SECTION on demand."
+  (let ((raw (ende-work-buffer--raw-payload entry)))
+    (ende-work-buffer--replace-example
+     section (if (eq (ende-transcript-entry-kind entry) 'opaque)
+                 (ende-render-readable raw)
+               (ende-work-buffer--payload-text raw))))
   (setf (ende-work-buffer--section-materialized section) t
         (ende-work-buffer--section-stale section) nil))
 
@@ -617,7 +604,8 @@ so a directive completed by a later chunk can still be escaped in place."
            (maphash (lambda (entry _)
                       (unless (or (eq entry response) (gethash entry pending))
                         (ende-work-buffer--entry entry 'metadata)))
-                    entries)))))))
+                    entries)))))
+    (setq ende-work-buffer--restoring nil)))
 
 (defun ende-work-buffer--refresh (buffer)
   "Refresh BUFFER if it is still a displayed viewer; dispose on failure."
@@ -712,6 +700,7 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
         (unwind-protect
             (with-current-buffer buffer
               (org-mode)
+              (setq-local truncate-lines nil)
               ;; Cache invalidation otherwise rescans long streamed lines.
               (setq-local org-element-use-cache nil)
               (setq ende-work-buffer--job job ende-work-buffer--transcript transcript
@@ -725,7 +714,8 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
                     ende-work-buffer--metadata (make-hash-table :test #'eql)
                     ende-work-buffer--dependents (make-hash-table :test #'eq)
                     ende-work-buffer--pending (make-hash-table :test #'eq)
-                    ende-work-buffer--task 'unrendered)
+                    ende-work-buffer--task 'unrendered
+                    ende-work-buffer--restoring (> (hash-table-count ende-work-buffer--render-cache) 0))
               (when-let* ((root (plist-get (ende-job-access-policy job) :root)))
                 (setq-local default-directory (file-name-as-directory root)))
               (buffer-disable-undo)
