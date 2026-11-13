@@ -33,7 +33,7 @@
 (require 'ende-protocol)
 (require 'ende-patch)
 
-(defface ende-render-request-face '((t :inherit font-lock-keyword-face))
+(defface ende-render-request-face '((t :inherit font-lock-function-name-face))
   "Tool request headings." :group 'ende)
 (defface ende-render-success-face '((t :inherit success))
   "Successful outcomes and added lines." :group 'ende)
@@ -223,7 +223,7 @@ Only buffer listings include live buffer identity and modification state."
   "Number source TEXT beginning at START."
   (mapconcat (lambda (line)
                (prog1 (concat (ende-render--marked
-                               (format "%4d │ " start) 'ende-render-subdued-face)
+                               (format "%4d  " start) 'ende-render-subdued-face)
                               line)
                  (cl-incf start)))
              (ende-render--lines text) "\n"))
@@ -398,7 +398,7 @@ Only buffer listings include live buffer identity and modification state."
            (lambda (match)
              (ende-render--join
               (concat (ende-render--marked
-                       (format "%s:%s │ " (ende-render--get match "line")
+                       (format "%s:%s  " (ende-render--get match "line")
                                (ende-render--get match "column")) 'ende-render-subdued-face)
                       (ende-render--get match "match"))
               (when (ende-render--has match "context")
@@ -523,6 +523,9 @@ Only buffer listings include live buffer identity and modification state."
          (failed (and envelope
                       (or (ende-render--false-p (ende-render--get value "ok"))
                           (ende-render--has value "error"))))
+         (error-value (ende-render--get value "error"))
+         (reason (if (stringp error-value) error-value
+                   (ende-render--get error-value "message")))
          (recovery (ende-render--get value "recovery"))
          (warning (ende-render--get result "sandbox_warning")))
     (condition-case nil
@@ -536,7 +539,8 @@ Only buffer listings include live buffer identity and modification state."
                                            (or (equal (ende-render--get entry "status") "recovery_needed")
                                                (ende-render--get entry "recovery_file")))
                                          (ende-render--items recovery))
-                                " · recovery needed" " · recovery reported")))
+                                " · recovery needed" " · recovery reported"))
+                          (when (stringp reason) (concat " · " reason)))
                   (ende-render--join
                    (ende-render--readable (ende-render--get value "error"))
                    (when recovery (concat "Recovery:\n" (ende-render--readable recovery)))) 'error))
@@ -555,11 +559,11 @@ Only buffer listings include live buffer identity and modification state."
           (when (and (stringp warning) (not (string-empty-p warning)))
             (setq presentation
                   (ende-render--presentation
-                   (concat (plist-get presentation :summary) " · sandbox sync failed")
+                   (concat "sandbox sync failed · " (plist-get presentation :summary))
                    (ende-render--join (plist-get presentation :body) warning)
                    (if failed 'error 'warning))))
           presentation)
-      (error (ende-render--presentation "Response returned"
+      (error (ende-render--presentation (if failed "Failed" "Response returned")
                                          (ende-render--readable value)
                                          (cond (failed 'error)
                                                ((and envelope (eq (ende-render--get value "ok") t)
