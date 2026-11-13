@@ -74,11 +74,7 @@
   "Inspect a job transcript with ordinary, read-only Org navigation.
 Use TAB to fold, r to inspect original data, and s to toggle live streaming."
   :lighter " Work"
-  :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "q") #'ende-work-buffer-quit)
-            (define-key map (kbd "r") #'ende-work-buffer-inspect-raw)
-            (define-key map (kbd "s") #'ende-work-buffer-toggle-stream)
-            map)
+  :keymap (make-sparse-keymap)
   (when ende-work-buffer-mode
     (add-to-invisibility-spec 'ende-work-buffer-hidden)
     (unless (eq font-lock-fontify-region-function #'ende-work-buffer--fontify-region)
@@ -86,6 +82,10 @@ Use TAB to fold, r to inspect original data, and s to toggle live streaming."
       (setq-local font-lock-fontify-region-function #'ende-work-buffer--fontify-region))
     (font-lock-mode 1))
   (read-only-mode (if ende-work-buffer-mode 1 -1)))
+
+(define-key ende-work-buffer-mode-map (kbd "q") #'ende-work-buffer-quit)
+(define-key ende-work-buffer-mode-map (kbd "r") #'ende-work-buffer-inspect-raw)
+(define-key ende-work-buffer-mode-map (kbd "s") #'ende-work-buffer-toggle-stream)
 
 (defun ende-work-buffer--one-line (value)
   "Make VALUE safe for a host-owned heading."
