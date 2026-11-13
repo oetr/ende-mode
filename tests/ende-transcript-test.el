@@ -259,12 +259,13 @@
                  (secure-hash 'sha256 (current-buffer)))))
        (run (inspect)
          (ende-test--reset)
-         (let ((ende-tool-store--next-id 0)
-               (ende-llm-function
-                (ende-test--fake-llm
-                 (list (response 1) (response 2)
-                       '(:content "Final answer" :duration-ms 300 :reported-model "model-final")) t))
-               viewer)
+         (let* ((ende-tool-store--next-id 0)
+                (reply "{\"title\":\"Outcome\",\"text\":\"Original reply\"}")
+                (ende-llm-function
+                 (ende-test--fake-llm
+                  (list (response 1) (response 2)
+                        (list :content reply :duration-ms 300 :reported-model "model-final")) t))
+                viewer raw-buffer)
            (unwind-protect
                (cl-letf (((symbol-function 'ende-chat--new-id)
                           (lambda (prefix)
@@ -309,12 +310,39 @@
                      (should (= (length ende-test--calls) 3))
                      (should (equal (durations) '(5 5 100 200 300)))
                      (when inspect
-                       (set-window-buffer (selected-window) viewer)
-                       (with-current-buffer viewer
-                         (when (timerp ende-work-buffer--refresh-timer)
-                           (cancel-timer ende-work-buffer--refresh-timer)))
-                       (ende-work-buffer--refresh viewer)
-                       (should (equal (durations) (with-current-buffer viewer (durations)))))
+                       (let ((before (state job))
+                             (entry (cl-find 'text (reverse (ende-transcript-entries
+                                                            (ende-job-transcript job)))
+                                             :key #'ende-transcript-entry-kind)))
+                         (dotimes (pass 2)
+                           (when (= pass 1)
+                             (kill-buffer viewer)
+                             (setq viewer (ende-work-buffer-open job)))
+                           (set-window-buffer (selected-window) viewer)
+                           ;; Drain both cache restoration and newly uncached entries.
+                           (dotimes (_ 2)
+                             (with-current-buffer viewer
+                               (when (timerp ende-work-buffer--refresh-timer)
+                                 (cancel-timer ende-work-buffer--refresh-timer)))
+                             (ende-work-buffer--refresh viewer))
+                           (should (equal (durations) (with-current-buffer viewer (durations))))
+                           (with-current-buffer viewer
+                             (let ((section (gethash (ende-transcript-entry-id entry)
+                                                     ende-work-buffer--sections)))
+                               (should (equal (buffer-substring-no-properties
+                                               (ende-work-buffer--section-payload-start section)
+                                               (ende-work-buffer--section-payload-end section))
+                                              "Outcome\n\nOriginal reply"))
+                               (goto-char (ende-work-buffer--section-start section))
+                               (org-fold-hide-subtree)
+                               (should (ende-work-buffer--folded-p section))
+                               (call-interactively (key-binding (kbd "TAB")))
+                               (should-not (ende-work-buffer--folded-p section))
+                               (setq raw-buffer (call-interactively (key-binding (kbd "r"))))))
+                           (with-current-buffer raw-buffer
+                             (should (equal (buffer-string) reply)))
+                           (should (equal (ende-transcript-entry-content entry) reply)))
+                         (should (equal before (state job)))))
                      (let ((entries (ende-transcript-entries (ende-job-transcript job))))
                        (should (equal (mapcar #'ende-transcript-entry-content
                                               (cl-remove-if-not
@@ -326,15 +354,25 @@
                        (cl-letf (((symbol-function 'ende-artifact-prepare-text)
                                   (lambda (&rest _) (ert-fail "Rendering prepared artifacts"))))
                          (setq rendered (ende-chat--render-transcript job))
-                         (should (equal rendered (ende-chat--render-transcript job))))
+                         (should (equal rendered (ende-chat--render-transcript job)))
+                         (should (string-search reply rendered)))
                        (should (equal before (state job))))
-                     (list (prin1-to-string
-                            (mapcar (lambda (call)
-                                      (list (plist-get call :messages)
-                                            (plist-get (plist-get call :options) :tool-definitions)))
-                                    ende-test--calls))
-                           (buffer-string)))))
-             (when (buffer-live-p viewer) (kill-buffer viewer))
+                     (let ((persisted (buffer-string)))
+                       (should (string-search reply persisted))
+                       (goto-char (point-max))
+                       (insert "** Next\nContinue.\n")
+                       (ende-test--chat-goto "** Next")
+                       (let ((messages (ende-chat-context-at-point)))
+                         (should (string-search reply (ende-test--chat-context-text messages)))
+                         (list (prin1-to-string
+                                (mapcar (lambda (call)
+                                          (list (plist-get call :messages)
+                                                (plist-get (plist-get call :options) :tool-definitions)))
+                                        ende-test--calls))
+                               persisted
+                               (json-encode (vconcat (ende-codex--request-messages messages)))))))))
+             (dolist (buffer (list viewer raw-buffer))
+               (when (buffer-live-p buffer) (kill-buffer buffer)))
              (ende-test--reset)))))
     ;; Identities are deterministic at creation, not normalized after the fact.
     (save-window-excursion
@@ -362,7 +400,8 @@
     (ende-test--with-buffer "* Chat\n** Question\nInvestigate.\n"
       (org-mode)
       (ende-test--chat-goto "** Question")
-      (should (eq (ende-job-state (ende-ask)) 'completed))
+      (let ((job (ende-ask)))
+        (ende-test--wait-for (lambda () (eq (ende-job-state job) 'completed))))
       (goto-char (point-min))
       (search-forward "Final answer")
       (replace-match "Edited answer")
