@@ -44,6 +44,9 @@
 (defface ende-render-subdued-face '((t :inherit shadow))
   "Context and line numbers." :group 'ende)
 
+(defconst ende-render-generation (make-symbol "presentation")
+  "Identity of the currently loaded presentation definitions.")
+
 (defconst ende-render--missing (make-symbol "missing"))
 
 (defconst ende-render--tools

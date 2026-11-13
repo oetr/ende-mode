@@ -34,6 +34,7 @@
 (require 'subr-x)
 (require 'ende-org)
 (require 'ende-provider)
+(require 'ende-render)
 (require 'ende-queue)
 (require 'ende-transcript)
 (require 'ende-tool-store)
@@ -44,10 +45,14 @@
                (:constructor ende-work-buffer--make-section))
   entry response start body-start body-end heading
   payload-start payload-end rendered-length prefix-state prefix-marker
-  (revision 0) summary-source summary materialized stale)
+  (revision 0) presentation materialized stale)
 
 (defvar ende-work-buffer--viewers (make-hash-table :test #'eq)
   "Transcripts with live, disposable viewers.")
+(defvar ende-work-buffer--presentations (make-hash-table :test #'eq :weakness 'key)
+  "Disposable presentations retained while their transcripts are reachable.")
+(defvar-local ende-work-buffer--render-cache nil)
+(defvar-local ende-work-buffer--fontifier nil)
 (defvar-local ende-work-buffer--job nil)
 (defvar-local ende-work-buffer--transcript nil)
 (defvar-local ende-work-buffer--sections nil)
@@ -69,7 +74,12 @@
             (define-key map (kbd "q") #'ende-work-buffer-quit)
             (define-key map (kbd "r") #'ende-work-buffer-inspect-raw)
             map)
-  (when ende-work-buffer-mode (font-lock-mode 1))
+  (when ende-work-buffer-mode
+    (add-to-invisibility-spec 'ende-work-buffer-hidden)
+    (unless (eq font-lock-fontify-region-function #'ende-work-buffer--fontify-region)
+      (setq-local ende-work-buffer--fontifier font-lock-fontify-region-function)
+      (setq-local font-lock-fontify-region-function #'ende-work-buffer--fontify-region))
+    (font-lock-mode 1))
   (read-only-mode (if ende-work-buffer-mode 1 -1)))
 
 (defun ende-work-buffer--one-line (value)
@@ -81,43 +91,59 @@
   (let ((text (or text "")))
     (substring text 0 (min 180 (length text)))))
 
-(defun ende-work-buffer--json-value (value &optional depth)
-  "Render decoded JSON VALUE readably at DEPTH, retaining literal escapes.
-Only actual newlines in decoded string values become display newlines."
-  (let* ((depth (or depth 0))
-         (indent (make-string (* 2 depth) ?\s))
-         (next-indent (concat indent "  ")))
-    (cond
-     ((stringp value) (concat "\"" value "\""))
-     ((hash-table-p value)
-      (let (fields)
-        (maphash (lambda (key item)
-                   (push (concat next-indent (json-serialize key) ": "
-                                 (ende-work-buffer--json-value item (1+ depth)))
-                         fields)) value)
-        (if fields
-            (concat "{\n" (string-join (nreverse fields) ",\n") "\n" indent "}")
-          "{}")))
-     ((vectorp value)
-      (if (= (length value) 0) "[]"
-        (concat "[\n"
-                (mapconcat (lambda (item)
-                             (concat next-indent
-                                     (ende-work-buffer--json-value item (1+ depth))))
-                           value ",\n")
-                "\n" indent "]")))
-     ((eq value :null) "null")
-     ((eq value :false) "false")
-     ((eq value t) "true")
-     (t (json-serialize value)))))
+(defun ende-work-buffer--fontify-region (start end &optional loudly)
+  "Fontify START to END normally, then restore generated presentation spans.
+LOUDLY is passed to the buffer's original fontifier."
+  (prog1 (funcall ende-work-buffer--fontifier start end loudly)
+    (with-silent-modifications
+      (while (< start end)
+        (let ((next (min (next-single-property-change start 'ende-render-face nil end)
+                         (next-single-property-change start 'ende-work-buffer-hidden nil end)))
+              (face (get-text-property start 'ende-render-face)))
+          (when (get-text-property start 'ende-work-buffer-hidden)
+            (put-text-property start next 'invisible 'ende-work-buffer-hidden))
+          (when face (add-face-text-property start next face))
+          (setq start next))))))
 
-(defun ende-work-buffer--readable-json (text)
-  "Decode JSON TEXT structurally for display, or return non-JSON unchanged."
-  (condition-case nil
-      (ende-work-buffer--json-value
-       (json-parse-string text :object-type 'hash-table :array-type 'array
-                          :null-object :null :false-object :false))
-    (error text)))
+(defun ende-work-buffer--hidden (text)
+  "Mark generated TEXT as invisible without an ellipsis."
+  (propertize text 'ende-work-buffer-hidden t 'invisible 'ende-work-buffer-hidden))
+
+(defun ende-work-buffer--presentation (entry change)
+  "Return ENTRY's cached presentation, invalidating only for relevant CHANGE."
+  (let* ((data (ende-transcript-entry-data entry))
+         (kind (ende-transcript-entry-kind entry))
+         (call (plist-get data :call))
+         (name (or (plist-get call :name) "tool"))
+         (status (ende-transcript-entry-status entry))
+         (arguments (and (eq kind 'tool-result) (plist-get call :arguments)))
+         (signature (list ende-render-generation kind name status arguments
+                          (plist-get data :normalized)))
+         (id (ende-transcript-entry-id entry))
+         (cached (gethash id ende-work-buffer--render-cache)))
+    (if (and (eq change 'metadata) (equal signature (car cached)))
+        (nth 2 cached)
+      (let ((raw (ende-work-buffer--raw-payload entry)))
+        (if (and (equal signature (car cached)) (equal raw (nth 1 cached)))
+            (nth 2 cached)
+          (let ((presentation
+                 (cond
+                  ((eq status 'streaming) (list :summary "streaming" :body "" :state 'neutral :folded t))
+                  ((eq kind 'tool-call) (ende-render-tool-request name raw))
+                  ((eq kind 'tool-result) (ende-render-tool-response name raw arguments))
+                  ((eq kind 'text)
+                   (let* ((content (if (and (string-blank-p (or raw ""))
+                                            (plist-get data :normalized))
+                                       (or (plist-get (plist-get data :normalized) :content) raw "")
+                                     raw))
+                          (reply (and (eq status 'complete) (ende-render-reply content))))
+                     (list :body (if reply
+                                     (concat (plist-get reply :summary) "\n\n" (plist-get reply :body))
+                                   (ende-render-readable content))
+                           :folded nil)))
+                  (t (list :body (or raw "") :folded t)))))
+            (puthash id (list signature raw presentation) ende-work-buffer--render-cache)
+            presentation))))))
 
 (defun ende-work-buffer--payload-text (payload)
   "Return a textual representation of original semantic PAYLOAD."
@@ -214,7 +240,7 @@ so a directive completed by a later chunk can still be escaped in place."
               (and (eq state 'hash) (eq character ?+)))
           (save-excursion
             (goto-char prefix)
-            (ende-work-buffer--insert section ","))
+            (ende-work-buffer--insert section (ende-work-buffer--hidden ",")))
           (setq state 'text))
          ((and (memq state '(indent commas)) (eq character ?#))
           (setq state 'hash))
@@ -234,11 +260,11 @@ so a directive completed by a later chunk can still be escaped in place."
         (begin (marker-position (ende-work-buffer--section-body-start section))))
     (delete-region begin (ende-work-buffer--section-body-end section))
     (goto-char begin)
-    (ende-work-buffer--insert section "#+begin_example\n")
+    (ende-work-buffer--insert section (ende-work-buffer--hidden "#+begin_example\n"))
     (set-marker (ende-work-buffer--section-payload-start section) (point))
     (set-marker (ende-work-buffer--section-prefix-marker section) (point))
     (let ((payload (point)))
-      (ende-work-buffer--insert section "#+end_example\n\n")
+      (ende-work-buffer--insert section (concat (ende-work-buffer--hidden "#+end_example\n") "\n"))
       (set-marker (ende-work-buffer--section-payload-end section) payload))
     (set-marker (ende-work-buffer--section-body-start section) begin)
     (set-marker (ende-work-buffer--section-body-end section) (point))
@@ -374,27 +400,29 @@ so a directive completed by a later chunk can still be escaped in place."
                (ende-org--property "ENDE_TOOL_KIND" (if (eq kind 'tool-call) "call" "result")))))))
 
 (defun ende-work-buffer--tool-title (entry section)
-  "Return a bounded tool heading for ENTRY, caching SECTION's summary.
-Incomplete arguments need no parsing; completed arguments use a raw excerpt."
+  "Return the host-owned tool heading for ENTRY and SECTION."
   (let* ((call (plist-get (ende-transcript-entry-data entry) :call))
-         (streaming (eq (ende-transcript-entry-status entry) 'streaming))
-         (arguments (unless streaming
-                      (if (and (eq (ende-transcript-entry-kind entry) 'tool-call)
-                               (> (ende-transcript-entry-length entry) 0))
-                          (ende-transcript-entry-prefix entry 180)
-                        (ende-work-buffer--bounded (plist-get call :arguments))))))
-    (when (and (not streaming)
-               (not (equal arguments (ende-work-buffer--section-summary-source section))))
-      (setf (ende-work-buffer--section-summary-source section) arguments
-            (ende-work-buffer--section-summary section)
-            (string-trim (ende-work-buffer--one-line arguments))))
-    (ende-org--truncate-heading
-     (concat (when (eq (ende-transcript-entry-kind entry) 'tool-call) "--> ")
-             (ende-work-buffer--bounded (or (plist-get call :name) "tool"))
-             (if streaming " (streaming)"
-               (when-let* ((summary (ende-work-buffer--section-summary section))
-                           ((not (string-empty-p summary))))
-                 (concat ": " summary)))) 1)))
+         (request (eq (ende-transcript-entry-kind entry) 'tool-call))
+         (summary (plist-get (ende-work-buffer--section-presentation section) :summary)))
+    (concat (if request "> " "  ") (or (plist-get call :name) "tool")
+            (unless (string-empty-p (or summary ""))
+              (concat (if request " " " --> ") summary)))))
+
+(defun ende-work-buffer--style-heading (section entry)
+  "Refresh SECTION's semantic heading face even when its text is unchanged."
+  (let* ((start (marker-position (ende-work-buffer--section-start section)))
+         (end (save-excursion (goto-char start) (line-end-position)))
+         (kind (ende-transcript-entry-kind entry))
+         (state (plist-get (ende-work-buffer--section-presentation section) :state))
+         (face (if (eq kind 'tool-call) 'ende-render-request-face
+                 (pcase state
+                   ('success 'ende-render-success-face)
+                   ('warning 'ende-render-warning-face)
+                   ('error 'ende-render-error-face)))))
+    (remove-text-properties start end '(ende-render-face nil))
+    (put-text-property start (1+ start) 'ende-render-face 'ende-render-subdued-face)
+    (when face (put-text-property (+ start 2) end 'ende-render-face face))
+    (font-lock-flush start end)))
 
 (defun ende-work-buffer--summary-title (text)
   "Return a prominent Org heading for summary TEXT."
@@ -433,7 +461,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
        (let ((raw (ende-work-buffer--payload-text (ende-work-buffer--raw-payload entry))))
          (if (and (eq kind 'tool-call) (not (eq (ende-transcript-entry-status entry) 'complete)))
              raw
-           (ende-work-buffer--readable-json raw))))
+           (ende-render-readable raw))))
       ('text (let ((content (ende-transcript-entry-content entry)))
                (if (and (plist-get data :normalized) (string-blank-p (or content "")))
                    (or (plist-get (plist-get data :normalized) :content) content "")
@@ -445,14 +473,26 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
   "Render ENTRY's CHANGE in its first-observation position."
   (let* ((id (ende-transcript-entry-id entry))
          (new (not (gethash id ende-work-buffer--sections)))
-         (kind (ende-transcript-entry-kind entry)))
+         (kind (ende-transcript-entry-kind entry))
+         (streaming (eq (ende-transcript-entry-status entry) 'streaming)))
     (unless (and (eq kind 'response) (plist-get (ende-transcript-entry-data entry) :synthetic))
-      (let ((section (ende-work-buffer--ensure-section id entry)))
+      (let* ((section (ende-work-buffer--ensure-section id entry))
+             (previous (ende-work-buffer--section-presentation section))
+             (presentation
+              (cond ((and streaming (memq kind '(tool-call text thinking summary)))
+                     (list :summary "streaming" :body "" :folded (not (eq kind 'text))))
+                    ((memq kind '(tool-call tool-result text thinking summary progress))
+                     (ende-work-buffer--presentation entry change)))))
+        (setf (ende-work-buffer--section-presentation section) presentation)
         (ende-work-buffer--update-heading section entry)
+        (ende-work-buffer--style-heading section entry)
         (cond
+         (presentation
+          (when (or new (not (equal presentation previous)))
+            (ende-work-buffer--replace-example section (plist-get presentation :body))
+            (setf (ende-work-buffer--section-materialized section) t)))
          ((ende-work-buffer--detail-p section)
-          (when new
-            (ende-work-buffer--replace-example section "Expand to read payload."))
+          (when new (ende-work-buffer--replace-example section "Expand to read payload."))
           (unless (and (not new) (eq change 'metadata))
             (setf (ende-work-buffer--section-stale section)
                   (ende-work-buffer--merge-change
@@ -462,7 +502,8 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
                section entry (ende-work-buffer--section-stale section)))))
          ((not (or (eq kind 'response) (and (not new) (eq change 'metadata))))
           (ende-work-buffer--render-body section entry (if new 'replace change))))
-        (when (and new (memq kind '(capabilities tool-call tool-result opaque thinking summary progress)))
+        (when (and new (or (plist-get presentation :folded)
+                          (memq kind '(capabilities opaque thinking summary progress))))
           (save-excursion
             (goto-char (ende-work-buffer--section-start section))
             (org-fold-hide-subtree)))))))
@@ -484,7 +525,7 @@ Incomplete arguments need no parsing; completed arguments use a raw excerpt."
 (defun ende-work-buffer--detail-p (section)
   "Return whether SECTION owns an expensive, deferrable payload."
   (when-let* ((entry (ende-work-buffer--section-entry section)))
-    (memq (ende-transcript-entry-kind entry) '(capabilities tool-call tool-result opaque))))
+    (memq (ende-transcript-entry-kind entry) '(capabilities opaque))))
 
 (defun ende-work-buffer--queue-exposed (section)
   "Queue SECTION's deferred body only if it is exposed and stale."
@@ -662,6 +703,10 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
               ;; Cache invalidation otherwise rescans long streamed lines.
               (setq-local org-element-use-cache nil)
               (setq ende-work-buffer--job job ende-work-buffer--transcript transcript
+                    ende-work-buffer--render-cache
+                    (or (gethash transcript ende-work-buffer--presentations)
+                        (puthash transcript (make-hash-table :test #'eql)
+                                 ende-work-buffer--presentations))
                     ende-work-buffer--sections (make-hash-table :test #'eql)
                     ende-work-buffer--responses (make-hash-table :test #'eql)
                     ende-work-buffer--rounds (make-hash-table :test #'eql)
