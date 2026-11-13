@@ -387,6 +387,15 @@ so a directive completed by a later chunk can still be escaped in place."
       (gethash (ende-transcript-entry-response-id entry) ende-work-buffer--responses)
       (gethash (ende-transcript-entry-round entry) ende-work-buffer--rounds)))
 
+(defun ende-work-buffer--streaming-p (entry)
+  "Whether ENTRY is still receiving output from its owning response."
+  (or (eq (ende-transcript-entry-status entry) 'streaming)
+      (and (eq (ende-transcript-entry-kind entry) 'summary)
+           (null (ende-transcript-entry-status entry))
+           (with-current-buffer (or ende-work-buffer--stream-owner (current-buffer))
+             (when-let* ((response (ende-work-buffer--response-for entry)))
+               (eq (ende-transcript-entry-status response) 'streaming))))))
+
 (defun ende-work-buffer--properties (entry)
   "Return available provenance and tool identity properties for ENTRY."
   (let* ((response (ende-work-buffer--response-for entry))
@@ -459,7 +468,9 @@ so a directive completed by a later chunk can still be escaped in place."
       ('capabilities "Agent: Capabilities")
       ('opaque "Agent: Opaque BS")
       ('thinking "Agent: Reasoning")
-      ('summary (ende-work-buffer--summary-title (ende-transcript-entry-prefix entry 180)))
+      ('summary (if (ende-work-buffer--streaming-p entry)
+                    "Agent: Reasoning summary · streaming"
+                  (ende-work-buffer--summary-title (ende-transcript-entry-prefix entry 180))))
       ('progress (ende-work-buffer--summary-title
                   (concat (ende-work-buffer--bounded (plist-get data :title))
                           " — " (ende-transcript-entry-prefix entry 180))))
@@ -470,7 +481,7 @@ so a directive completed by a later chunk can still be escaped in place."
   (let* ((id (ende-transcript-entry-id entry))
          (new (not (gethash id ende-work-buffer--sections)))
          (kind (ende-transcript-entry-kind entry))
-         (streaming (eq (ende-transcript-entry-status entry) 'streaming)))
+         (streaming (ende-work-buffer--streaming-p entry)))
     (unless (and (eq kind 'response) (plist-get (ende-transcript-entry-data entry) :synthetic))
       (let* ((section (ende-work-buffer--ensure-section id entry))
              (previous (ende-work-buffer--section-presentation section))
@@ -584,10 +595,9 @@ so a directive completed by a later chunk can still be escaped in place."
   "Consume a snapshot, leaving notifications during rendering pending."
   (let ((pending ende-work-buffer--pending)
         (order (nreverse ende-work-buffer--pending-order))
-        responses)
+        responses dependents)
     (setq ende-work-buffer--pending (make-hash-table :test #'eq)
           ende-work-buffer--pending-order nil)
-    (ende-work-buffer--stream-refresh order pending)
     ;; Index response metadata before any dependent headings are constructed.
     (dolist (entry order)
       (when (eq (ende-transcript-entry-kind entry) 'response)
@@ -606,8 +616,10 @@ so a directive completed by a later chunk can still be escaped in place."
          (when-let* ((entries (gethash response ende-work-buffer--dependents)))
            (maphash (lambda (entry _)
                       (unless (or (eq entry response) (gethash entry pending))
+                        (push entry dependents)
                         (ende-work-buffer--entry entry 'metadata)))
                     entries)))))
+    (ende-work-buffer--stream-refresh (append order dependents) pending)
     (setq ende-work-buffer--restoring nil)))
 
 (defun ende-work-buffer--refresh (buffer)
@@ -751,7 +763,7 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
   (let* ((id (ende-transcript-entry-id entry))
          (section (gethash id ende-work-buffer--sections))
          (kind (ende-transcript-entry-kind entry))
-         (active (and (eq (ende-transcript-entry-status entry) 'streaming)
+         (active (and (ende-work-buffer--streaming-p entry)
                       (memq kind '(text thinking summary tool-call)))))
     (cond
      (active
@@ -806,7 +818,7 @@ it, execute work, prepare artifacts, or allocate transcript or execution IDs."
       (ende-work-buffer--update
        (lambda ()
          (dolist (entry entries)
-           (ende-work-buffer--stream-entry entry (if changes (gethash entry changes) 'replace)))
+           (ende-work-buffer--stream-entry entry (if changes (gethash entry changes 'metadata) 'replace)))
          (setq header-line-format
                (if (zerop (hash-table-count ende-work-buffer--sections))
                    "Live stream · waiting for output" "Live stream · raw incoming text")))))))
