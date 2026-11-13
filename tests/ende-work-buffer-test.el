@@ -389,6 +389,7 @@
                 (should buffer-read-only)
                 (should (string-search "first\n* plain" (buffer-string)))
                 (should (string-search "Live reasoning" (buffer-string)))
+                (should (< (window-start (get-buffer-window live)) (point-max)))
                 (goto-char (point-max))
                 (set-window-point (get-buffer-window live) (point)))
               (let ((before (buffer-string))
@@ -409,6 +410,7 @@
                 (with-current-buffer live
                   (should (string-search "* plain appended" (buffer-string)))
                   (should (string-search "Live reasoning grows" (buffer-string)))
+                  (should (< (window-start (get-buffer-window live)) (point-max)))
                   (should (= (window-point (get-buffer-window live)) (point-max)))))
               (ende-transcript-accept transcript '(:content "first\n* plain appended") nil nil t)
               (ende-test-work--refresh buffer)
@@ -439,6 +441,7 @@
               (ende-test-work--refresh buffer)
               (with-current-buffer live
                 (should (string-search "next reply" (buffer-string)))
+                (should (< (window-start (get-buffer-window live)) (point-max)))
                 (should-not (string-search "plain appended" (buffer-string)))
                 (should-not (string-search "tool output" (buffer-string)))))
             (kill-buffer buffer)

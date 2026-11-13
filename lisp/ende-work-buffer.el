@@ -167,12 +167,12 @@ LOUDLY is passed to the buffer's original fontifier."
         ((null payload) "")
         (t (pp-to-string payload))))
 
-(defun ende-work-buffer--remember-position (position)
-  "Remember POSITION relative to its section, or as an ordinary marker."
+(defun ende-work-buffer--remember-position (position &optional follow)
+  "Remember POSITION relative to its section, following insertions if FOLLOW."
   (let* ((section (get-text-property position 'ende-work-buffer-section))
          (body (and section
                     (>= position (ende-work-buffer--section-body-start section)))))
-    (list (= position (point-max)) (copy-marker position t) section body
+    (list (and follow (= position (point-max))) (copy-marker position follow) section body
           (and section
                (- position (if body (ende-work-buffer--section-body-start section)
                              (ende-work-buffer--section-start section))))
@@ -199,11 +199,11 @@ LOUDLY is passed to the buffer's original fontifier."
 
 (defun ende-work-buffer--update (function)
   "Apply presentation FUNCTION without moving readers or rebuilding the buffer."
-  (let ((position (ende-work-buffer--remember-position (point)))
+  (let ((position (ende-work-buffer--remember-position (point) t))
         (windows (mapcar
                   (lambda (window)
                     (list window
-                          (ende-work-buffer--remember-position (window-point window))
+                          (ende-work-buffer--remember-position (window-point window) t)
                           (ende-work-buffer--remember-position (window-start window))))
                   (get-buffer-window-list (current-buffer) nil t)))
         (inhibit-read-only t))
