@@ -183,6 +183,50 @@
                     (should (eq (ende-job-state job) 'running))))))
           (dolist (item buffers) (when (buffer-live-p item) (kill-buffer item))))))))
 
+(ert-deftest ende-test/work-live-updates-preserve-folds ()
+  (save-window-excursion
+    (let* ((job (ende--make-job :id 804 :instruction '(:task "Observe folds" :request-id "r")))
+           (transcript (ende-job-ensure-transcript job)) buffer)
+      (unwind-protect
+          (progn
+            (ende-transcript-begin-response transcript)
+            (ende-transcript-event transcript '(:type :delta :channel :content :text "Reply"))
+            (ende-transcript-event transcript '(:type :reasoning-summary :item "plan" :text "Summary"))
+            (setq buffer (ende-work-buffer-open job))
+            (set-window-buffer (selected-window) buffer)
+            (ende-test-work--refresh buffer)
+            (with-current-buffer buffer
+              (run-hooks 'post-command-hook)
+              (let* ((entries (ende-transcript-entries transcript))
+                     (text (cl-find 'text entries :key #'ende-transcript-entry-kind)))
+                (cl-labels
+                    ((folds ()
+                       (mapcar
+                        (lambda (entry)
+                          (let ((section (ende-test-work--section entry)))
+                            (goto-char (ende-work-buffer--section-start section))
+                            (forward-line)
+                            (list (and (ende-work-buffer--folded-p section) t)
+                                  (and (org-fold-folded-p (line-end-position) 'drawer) t))))
+                        entries)))
+                  (goto-char (ende-work-buffer--section-start (ende-test-work--section text)))
+                  (forward-line)
+                  (call-interactively #'org-cycle)
+                  (org-fold-hide-sublevels 1)
+                  (let ((expected (folds)))
+                    (ende-transcript-event transcript
+                                           '(:type :metadata :metadata (:source :response :model "updated")))
+                    (ende-test-work--refresh buffer)
+                    (run-hooks 'post-command-hook)
+                    (should (equal (folds) expected))
+                    (ende-transcript-accept transcript '(:content "Completed reply") nil nil t)
+                    (ende-test-work--refresh buffer)
+                    (run-hooks 'post-command-hook)
+                    (should (equal (folds) expected))
+                    (org-fold-show-all '(headings))
+                    (should (equal (mapcar #'cadr (folds)) (mapcar #'cadr expected))))))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest ende-test/work-cached-history-and-inert-payloads ()
   ;; Chunk boundaries must not change Org escaping, including after replacement.
   (dolist (chunks (list '("first\n#" "+end_example\n" "* forged\n" " ," ",#" "+begin_src\n")

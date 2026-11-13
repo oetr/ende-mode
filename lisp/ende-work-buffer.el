@@ -210,7 +210,8 @@ LOUDLY is passed to the buffer's original fontifier."
     (unwind-protect
         (save-restriction
           (widen)
-          (funcall function)
+          (org-fold-core-ignore-fragility-checks
+            (funcall function))
           (set-buffer-modified-p nil))
       (goto-char (ende-work-buffer--restore-position position))
       (dolist (state windows)
