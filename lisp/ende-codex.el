@@ -90,7 +90,8 @@ The :callbacks argument initializes the composed transport lifecycle."
             (ende-provider-config-copy (ende-codex--session-profile session))))
     (let ((lifecycle
            (ende-transport-session-create
-            callbacks (apply-partially #'ende-codex--fail session))))
+            callbacks (apply-partially #'ende-codex--fail session)
+            (ende-codex--session-profile session))))
       (setf (ende-codex--session-stream session)
             (ende-stream-create lifecycle (ende-protocol-make-sse)))
       session)))
@@ -1054,6 +1055,8 @@ explicit efforts yields no choices instead of an error."
   (unless (ende-codex--terminal-p session)
     (ende-transport-session-duration (ende-codex--lifecycle session))
     (when-let* ((request (ende-codex--session-ws-request session)))
+      (setf (ende-transport-session-diagnostic-details (ende-codex--lifecycle session))
+            (ende-responses-ws--details request))
       (ende-responses-ws-finish
        request outcome
        (ende-protocol-json-get "id" (ende-protocol-json-get "response" (ende-codex--session-terminal-event session)))
@@ -1823,8 +1826,7 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
    (ende-codex--lifecycle session) 'ende-codex #'ende-codex--request-body
    messages (ende-codex--session-profile session)
    (list "openai-responses" (ende-codex--validated-generation-url (ende-codex--session-profile session))
-         (when (and ende-debugging-enabled ende-debug--session-directory
-                    (ende-codex-auth--text-p (plist-get auth :registration-id)))
+         (when (ende-codex-auth--text-p (plist-get auth :registration-id))
            (let ((print-length nil) (print-level nil))
              (secure-hash 'sha256 (prin1-to-string (ende-codex--account-binding-state auth))))))
      (apply-partially #'ende-codex--start-prepared session auth))))
@@ -1905,7 +1907,7 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
           (if identity
               (ende-transport-session-add-canceller
                (ende-codex--lifecycle session)
-               (ende-codex--resolve-auth ready (ende-codex--session-profile session)))
+               (ende-codex--resolve-inference-auth session ready))
             (funcall ready nil)))))))
 
 (defun ende-codex--start-websocket (session messages auth)
@@ -1933,6 +1935,23 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
        request
        (if auth #'ende-codex--request-body #'ende-responses--request-body)
        messages))))
+
+(defun ende-codex--resolve-inference-auth (session callback)
+  "Resolve SESSION's inference credentials and call CALLBACK as before.
+Keep diagnostic timing and identity local to this authentication attempt."
+  (let* ((lifecycle (ende-codex--lifecycle session))
+         (context (ende-transport-session-diagnostics lifecycle))
+         (started (and context (float-time))))
+    (ende-diagnostics-record 'auth-started context)
+    (ende-codex--resolve-auth
+     (lambda (auth)
+       (when (and (not (ende-transport-session-terminal lifecycle))
+                  (eq context (ende-transport-session-diagnostics lifecycle))
+                  (not (ende-error-p auth)))
+         (ende-diagnostics-record 'auth-ready context
+                                  :elapsed (and started (max 0 (- (float-time) started)))))
+       (funcall callback auth))
+     (ende-codex--session-profile session))))
 
 (defun ende-codex--auth-ready (session messages auth)
   "Start generation for SESSION when AUTH is valid, or fail it."
@@ -1972,9 +1991,8 @@ Return a cancellation function.  ChatGPT-plan OAuth is deliberately refused."
                profile (ende-codex--profile-auth profile)))
             (ende-transport-session-add-canceller
              (ende-codex--lifecycle session)
-             (ende-codex--resolve-auth
-              (apply-partially #'ende-codex--auth-ready session messages)
-              profile))))
+             (ende-codex--resolve-inference-auth
+              session (apply-partially #'ende-codex--auth-ready session messages)))))
       ((error quit)
        (ende-codex--fail
         session

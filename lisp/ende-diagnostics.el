@@ -49,6 +49,8 @@
     (:attempt natnum "try") (:sequence natnum "capture")
     (:count natnum "count") (:bytes natnum "bytes") (:messages natnum "msgs")
     (:retries natnum "retries") (:http-status natnum "http")
+    (:retry-limit natnum "retry-limit") (:timeout-limit number "timeout")
+    (:byte-limit natnum "byte-limit") (:event-limit natnum "event-limit")
     (:close-code natnum "close") (:input-tokens natnum "in")
     (:output-tokens natnum "out") (:cached-tokens natnum "cached")
     (:elapsed number "seconds") (:connection-age number "age")
@@ -59,13 +61,14 @@
     (:delivery (unsent sending accepted) "delivery")
     (:cause (abort application close policy protocol size timeout transport utf8) "cause")
     (:deadline (handshake assembly close request idle connect) "deadline")
+    (:reason (connect-timeout missing-response connection-limit unsent-replacement) "reason")
     (:last-event (response.created response.in_progress response.completed
                   response.done response.incomplete response.failed error
                   response.output_text.delta response.output_item.added
                   response.output_item.done response.reasoning_summary_text.delta
                   response.function_call_arguments.delta
                   response.function_call_arguments.done) "last")
-    (:error-kind (auth timeout provider protocol limit callback transport internal
+    (:error-kind (auth timeout provider http incomplete protocol resource limit callback transport internal startup
                   cancelled skipped scheduler ownership target validation tool) "error"))
   "Accepted field keys, types, and short display labels.")
 
@@ -159,22 +162,29 @@ Return non-nil if retained; observer failures never propagate."
             t))
       ((error quit) nil))))
 
-(defun ende-diagnostics-fail (context structured-error)
+(defun ende-diagnostics-fail (context structured-error &optional fields event)
   "Record scalar classification of STRUCTURED-ERROR for CONTEXT.
+FIELDS supplies a lifecycle snapshot; EVENT optionally refines classification.
 Exception messages and unrecognized detail fields are never retained."
   (when (and ende-diagnostics-enabled (ende-error-p structured-error))
     (condition-case nil
         (let* ((kind (ende-error-kind structured-error))
-               (event (or (alist-get kind '((auth . auth-failed) (timeout . timeout)
+               (details (ende-error-details structured-error))
+               (fields (append (and (listp details) details) fields))
+               (event (or event
+                          (and (memq (plist-get fields :deadline)
+                                     '(handshake assembly close request idle connect))
+                               'timeout)
+                          (alist-get kind '((auth . auth-failed) (timeout . timeout)
                                             (provider . provider-failed)
+                                            (http . provider-failed) (incomplete . provider-failed)
                                             (protocol . protocol-invalid)
-                                            (limit . limit-exceeded)
+                                            (limit . limit-exceeded) (resource . limit-exceeded)
                                             (callback . callback-failed)
                                             (transport . transport-failed)))
-                          'internal-failed))
-               (details (ende-error-details structured-error)))
+                          'internal-failed)))
           (apply #'ende-diagnostics-record event context :error-kind kind
-                 (and (listp details) details)))
+                 fields))
       ((error quit) nil))))
 
 (defun ende-diagnostics-events (&optional job)

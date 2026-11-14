@@ -381,7 +381,7 @@ enforces tool authorization and security."
 (defun ende-messages-default (messages callbacks profile)
   "Send MESSAGES with CALLBACKS using resolved PROFILE."
   (let* ((session (ende-messages--allocate :profile profile :blocks (make-hash-table :test #'eql)))
-         (lifecycle (ende-transport-session-create callbacks (apply-partially #'ende-messages--fail session))))
+         (lifecycle (ende-transport-session-create callbacks (apply-partially #'ende-messages--fail session) profile)))
     (setf (ende-messages--session-stream session) (ende-stream-create lifecycle (ende-protocol-make-sse)))
     (condition-case failure
         (progn

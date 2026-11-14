@@ -31,19 +31,43 @@
 (require 'cl-lib)
 (require 'ende-core)
 (require 'ende-protocol)
+(require 'ende-diagnostics)
 
 (cl-defstruct (ende-transport-session
                (:constructor ende-transport--make-session))
   "Shared lifecycle state for one asynchronous transport request."
   callbacks callback-error-handler process process-buffer stderr-buffer
   stderr-process headers-file config-file terminal auxiliary-cancellers
-  started-at duration-ms)
+  started-at duration-ms diagnostics diagnostic-details diagnostic-failure response-seen)
 
-(defun ende-transport-session-create (callbacks callback-error-handler)
-  "Create a transport session for CALLBACKS and CALLBACK-ERROR-HANDLER."
+(defun ende-transport-session-create (callbacks callback-error-handler &optional profile)
+  "Create a session for CALLBACKS and CALLBACK-ERROR-HANDLER.
+Freeze numeric correlation from optional PROFILE, without retaining it."
   (ende-transport--make-session
    :callbacks callbacks
-   :callback-error-handler callback-error-handler))
+   :callback-error-handler callback-error-handler
+   :diagnostics (ende-diagnostics-context-create (plist-get profile :job-id) t)))
+
+(defun ende-transport-session-next-attempt (session)
+  "Advance SESSION's diagnostic attempt without changing logical identity."
+  (when-let* ((context (ende-transport-session-diagnostics session)))
+    (setq context (copy-ende-diagnostics-context context))
+    (cl-incf (ende-diagnostics-context-attempt context))
+    (setf (ende-diagnostics-context-connection context) nil
+          (ende-transport-session-diagnostics session) context))
+  (setf (ende-transport-session-response-seen session) nil
+        (ende-transport-session-diagnostic-details session) nil
+        (ende-transport-session-diagnostic-failure session) nil))
+
+(defun ende-transport-session-first-response (session &rest fields)
+  "Record the first response milestone for SESSION's attempt with FIELDS."
+  (unless (ende-transport-session-response-seen session)
+    (setf (ende-transport-session-response-seen session) t)
+    (apply #'ende-diagnostics-record 'response-first
+           (ende-transport-session-diagnostics session)
+           :elapsed (when-let* ((start (ende-transport-session-started-at session)))
+                      (max 0 (- (float-time) start)))
+           fields)))
 
 (defun ende-transport-session-start (session &optional started-at)
   "Start a fresh request interval for SESSION."
@@ -145,6 +169,15 @@
       (when partial-result
         (setq partial-result (plist-put (copy-sequence partial-result) :duration-ms duration))))
     (setf (ende-transport-session-terminal session) outcome)
+    (let ((context (ende-transport-session-diagnostics session))
+          (fields (append
+                   (ende-transport-session-diagnostic-details session)
+                   (list :elapsed (when-let* ((duration (ende-transport-session-duration-ms session)))
+                                    (/ duration 1000.0))))))
+      (if (eq outcome 'success)
+          (apply #'ende-diagnostics-record 'response-done context fields)
+        (ende-diagnostics-fail context value fields
+                               (ende-transport-session-diagnostic-failure session))))
     (let ((process (ende-transport-session-process session)))
       (when (processp process)
         (process-put process :ende-settled t)

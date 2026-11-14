@@ -165,9 +165,11 @@ BASELINE protects the predecessor source while finalization reads it.
 CURRENT-P optionally checks that an asynchronous result still owns its attempt.
 Only source descriptors and serializable finalization data enter the worker."
   (let* ((replay (and retained t))
+         (context (ende-transport-session-diagnostics lifecycle))
+         (started (and context (float-time)))
          (origin (and retained (ende-request-retained-debug-origin retained)))
          (debug (if replay (plist-get origin :debug)
-                  (when (and ende-debugging-enabled ende-debug--session-directory) debug)))
+                  (when (and (ende-debug-consume-content-request) ende-debug--session-directory) debug)))
          (preparation (when debug
                         (if replay (ende-debug-prepare-retry origin)
                           (ende-debug-prepare-request
@@ -176,6 +178,9 @@ Only source descriptors and serializable finalization data enter the worker."
          (counter (if replay (plist-get origin :counter) ende-debug--sequence-context))
          (worker (or file-backed (ende-request--worker-p (list messages finalization))))
          release-baseline)
+    (ende-diagnostics-record 'prep-started context
+                             :transport (if worker 'worker
+                                          (if (eq (plist-get profile :transport) 'websocket) 'websocket 'http)))
     (if (not worker)
         (unwind-protect
             (progn
@@ -192,6 +197,9 @@ Only source descriptors and serializable finalization data enter the worker."
               (if (or (ende-transport-session-terminal lifecycle)
                       (and current-p (not (funcall current-p))))
                   (ende-ignore-errors #'ende-debug-record-completion record 'discarded nil nil nil)
+                (ende-diagnostics-record 'prep-ready context
+                                         :bytes (length (if finalization (plist-get data :data) data))
+                                         :elapsed (and started (max 0 (- (float-time) started))))
                 (funcall callback data body record))))
           (when release-baseline (funcall release-baseline)))
       (let* (file wire full-file release-wire release-source
@@ -226,6 +234,9 @@ Only source descriptors and serializable finalization data enter the worker."
                            (when (and retained debug (not replay))
                              (setf (ende-request-retained-debug-origin retained)
                                    (list :debug debug :preparation (plist-get result :debug-preparation) :counter counter)))
+                           (ende-diagnostics-record 'prep-ready context :transport 'worker
+                                                    :bytes (plist-get result :bytes)
+                                                    :elapsed (and started (max 0 (- (float-time) started))))
                            (funcall callback
                                   (if finalization
                                       (append (list :file file :bytes (plist-get result :bytes)

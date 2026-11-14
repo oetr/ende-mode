@@ -79,7 +79,8 @@ The :callbacks argument initializes the composed transport lifecycle."
                           append (list key value)))))
     (let ((lifecycle
            (ende-transport-session-create
-            callbacks (apply-partially #'ende-llm--fail session))))
+            callbacks (apply-partially #'ende-llm--fail session)
+            (ende-llm--session-profile session))))
       (setf (ende-llm--session-stream session)
             (ende-stream-create lifecycle (ende-protocol-make-sse)))
       session)))

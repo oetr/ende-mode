@@ -303,6 +303,8 @@ TOKEN-KEY is the provider-specific output-token field."
 (defun ende-stream-dispatch-events (stream events callback)
   "Pass parsed SSE EVENTS to CALLBACK while STREAM remains active."
   (unless (ende-stream-terminal-p stream)
+    (when events
+      (ende-transport-session-first-response (ende-stream-lifecycle stream) :transport 'http))
     (funcall callback events)))
 
 (defun ende-stream-response-headers (stream)
@@ -509,6 +511,9 @@ types, or nil to skip validation."
 
 (defun ende-stream-settle (stream outcome value &optional partial-result)
   "Settle STREAM's lifecycle once with OUTCOME, VALUE, and PARTIAL-RESULT."
+  (unless (ende-transport-session-diagnostic-details (ende-stream-lifecycle stream))
+    (setf (ende-transport-session-diagnostic-details (ende-stream-lifecycle stream))
+          (list :transport 'http :bytes (ende-stream-session-received-bytes stream))))
   (ende-transport-session-settle
    (ende-stream-session-lifecycle stream) outcome value partial-result))
 
