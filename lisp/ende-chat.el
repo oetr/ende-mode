@@ -2275,9 +2275,11 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
               (set-file-modes temporary #o600)
               (rename-file temporary file t)
               (set-file-modes file #o600)
-              (setf (ende-job-instruction job)
-                    (plist-put (ende-job-instruction job)
-                               :recovery-current t)))
+              (prog1
+                  (setf (ende-job-instruction job)
+                        (plist-put (ende-job-instruction job)
+                                   :recovery-current t))
+                (ende-job-emit-event job '(:type :work-checkpoint))))
           (when (file-exists-p temporary)
             (delete-file temporary)))))))
 
@@ -2425,6 +2427,9 @@ LEVEL sets the heading depth; COMPACT selects the context-fence title."
            (materialized (plist-get instruction :transcript-materialized)))
       (when (and materialized file (file-exists-p file))
         (ignore-errors (delete-file file)))
+      (when (and (plist-get instruction :recovery-current)
+                 file (file-exists-p file))
+        (ende-job-emit-event job '(:type :work-retained)))
       (when materialized
         (setq instruction
               (plist-put
@@ -2830,22 +2835,28 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
 
 (defun ende-chat--commit-transcript (job transcript &optional allow-edited)
   "Commit rendered TRANSCRIPT at JOB's validated pending request."
-  (if (string-match-p (concat "\\`\\*+ " (regexp-quote ende-chat--work-title) "[ \n]") transcript)
-      (ende-chat--commit-work-transcript job transcript allow-edited)
-    (let ((information (ende-chat--persist-ordinary-reply job transcript allow-edited))
-          (buffer (ende-target-buffer (ende-job-target job))))
-      (unwind-protect
-          (progn
-            (ende-chat--finish-request job information)
-            (with-current-buffer buffer
-              (ende-chat--hide-reasoning-section-at-marker (plist-get information :reasoning))
-              (when (bound-and-true-p ende-mode)
-                (ende-artifact-refresh (plist-get information :section-start)
-                                       (plist-get information :section-end))))
-            (setf (ende-job-instruction job)
-                  (plist-put (ende-job-instruction job) :transcript-materialized t))
-            t)
-        (ende-chat--release-insertion-info information)))))
+  (condition-case failure
+      (prog1
+          (if (string-match-p (concat "\\`\\*+ " (regexp-quote ende-chat--work-title) "[ \n]") transcript)
+              (ende-chat--commit-work-transcript job transcript allow-edited)
+            (let ((information (ende-chat--persist-ordinary-reply job transcript allow-edited))
+                  (buffer (ende-target-buffer (ende-job-target job))))
+              (unwind-protect
+                  (progn
+                    (ende-chat--finish-request job information)
+                    (with-current-buffer buffer
+                      (ende-chat--hide-reasoning-section-at-marker (plist-get information :reasoning))
+                      (when (bound-and-true-p ende-mode)
+                        (ende-artifact-refresh (plist-get information :section-start)
+                                               (plist-get information :section-end))))
+                    (setf (ende-job-instruction job)
+                          (plist-put (ende-job-instruction job) :transcript-materialized t))
+                    t)
+                (ende-chat--release-insertion-info information))))
+        (ende-job-emit-event job '(:type :chat-saved)))
+    ((error quit)
+     (ende-job-emit-event job '(:type :chat-save-failed))
+     (signal (car failure) (cdr failure)))))
 
 (defun ende-chat--commit-work-transcript
     (job transcript &optional allow-edited)

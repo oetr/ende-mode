@@ -47,7 +47,8 @@
 (defconst ende-diagnostics--fields
   '((:parent natnum "parent") (:connection natnum "conn")
     (:attempt natnum "try") (:sequence natnum "capture")
-    (:count natnum "count") (:bytes natnum "bytes") (:messages natnum "msgs")
+    (:count natnum "count") (:call natnum "call") (:tools natnum "tools")
+    (:bytes natnum "bytes") (:messages natnum "msgs")
     (:retries natnum "retries") (:http-status natnum "http")
     (:retry-limit natnum "retry-limit") (:timeout-limit number "timeout")
     (:byte-limit natnum "byte-limit") (:event-limit natnum "event-limit")
@@ -69,7 +70,7 @@
                   response.function_call_arguments.delta
                   response.function_call_arguments.done) "last")
     (:error-kind (auth timeout provider http incomplete protocol resource limit callback transport internal startup
-                  cancelled skipped scheduler ownership target validation tool) "error"))
+                  cancelled skipped scheduler ownership target validation tool application) "error"))
   "Accepted field keys, types, and short display labels.")
 
 (cl-defstruct (ende-diagnostics-context
@@ -83,6 +84,7 @@
 (defvar ende-diagnostics--ring nil)
 (defvar ende-diagnostics--request 0)
 (defvar ende-diagnostics--connection 0)
+(defvar ende-diagnostics--call 0)
 (defvar ende-diagnostics-failure-functions nil
   "Functions called with the session ID after an error event is recorded.")
 
@@ -92,6 +94,7 @@
         ende-diagnostics-dropped 0
         ende-diagnostics--request 0
         ende-diagnostics--connection 0
+        ende-diagnostics--call 0
         ende-diagnostics-session (1+ ende-diagnostics-session)
         ende-diagnostics-enabled t)
   ende-diagnostics-session)
@@ -113,6 +116,10 @@ Return nil when recording is disabled.  Never retain a job object."
 (defun ende-diagnostics-next-connection ()
   "Reserve a local numeric connection ID, or nil when disabled."
   (when ende-diagnostics-enabled (cl-incf ende-diagnostics--connection)))
+
+(defun ende-diagnostics-next-call ()
+  "Reserve a local numeric tool call ID, or nil when disabled."
+  (when ende-diagnostics-enabled (cl-incf ende-diagnostics--call)))
 
 (defun ende-diagnostics--scalar (value type)
   "Return a detached valid VALUE of TYPE, or nil."

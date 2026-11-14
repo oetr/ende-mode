@@ -32,6 +32,7 @@
 (require 'cl-lib)
 (require 'ende)
 (require 'ende-test-helpers)
+(require 'ende-chat-test-helpers)
 
 (defun ende-debug-test--read-bytes (path)
   "Return literal bytes stored in PATH."
@@ -268,6 +269,127 @@
       (ende-diagnostics-stop)
       (should-not (ende-diagnostics-record 'timeout context)))))
 
+(ert-deftest ende-test/diagnostics-tool-and-saved-work-lifecycle ()
+  (let* ((directory (make-temp-file "ende-diagnostic-work-" t))
+         (user-emacs-directory directory)
+         (ende-diagnostics-enabled nil)
+         (ende-diagnostics--ring nil)
+         (ende-diagnostics-session 0)
+         (ende-diagnostics-dropped 0)
+         (ende-diagnostics--call 0)
+         (ende-diagnostics-failure-functions (list (lambda (_) (error "Observer failed"))))
+         (calls '((:id "PRIVATE-provider-1" :name "about_thinking"
+                      :arguments "{\"title\":\"PRIVATE-progress\",\"status\":\"PRIVATE-status\"}")
+                  (:id "PRIVATE-provider-2" :name "about_thinking" :arguments "{}")
+                  (:id "PRIVATE-provider-3" :name "about_thinking" :arguments "[]")
+                  (:id "PRIVATE-provider-4" :name "search_project"
+                      :arguments "{\"query\":\"PRIVATE\"}")
+                  (:id "PRIVATE-provider-5" :name "search_project"
+                      :arguments "{\"regexp\":\"[\"}"))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "PRIVATE-file.el" directory)
+            (insert "PRIVATE-result\n"))
+          (dolist (outcome '(completed failed retained cancelled restarted disabled))
+            (ert-info (outcome)
+              (ende-test--reset)
+              (ende-diagnostics-start)
+              (when (eq outcome 'disabled) (ende-diagnostics-stop))
+              (let ((ende-llm-function
+                     (ende-test--fake-llm (list (list :tool-calls calls) "PRIVATE-answer") t)))
+                (with-temp-buffer
+                  (org-mode)
+                  (insert (ende-test--chat-config-block
+                           `((root ,directory) (tools search_project)
+                             (resource project (include "*.el"))
+                             (set-tool-resources search_project :resources project)))
+                          "* Question\nPRIVATE-question\n")
+                  (ende-test--chat-goto "* Question")
+                  (let* ((job (ende-ask))
+                         (id (ende-job-id job))
+                         (request-id (plist-get (ende-job-instruction job) :request-id)))
+                    (ende-test--complete-call (car ende-test--calls))
+                    (if (memq outcome '(cancelled restarted))
+                        (let ((cancel (ende-job-cancel-function job)))
+                          (should (functionp cancel))
+                          (should (= (length ende-test--calls) 1))
+                          (when (eq outcome 'restarted) (ende-diagnostics-start))
+                          (ende-queue-cancel-ids (list id))
+                          (let ((events (ende-diagnostics-events)))
+                            (funcall cancel)
+                            (should (equal events (ende-diagnostics-events)))))
+                      (ende-test--wait-for (lambda () (= (length ende-test--calls) 2)))
+                      (should (string-match-p
+                               "PRIVATE-result"
+                               (prin1-to-string (plist-get (cadr ende-test--calls) :messages))))
+                      (if (memq outcome '(failed retained))
+                          (progn
+                            (when (eq outcome 'retained)
+                              (let* ((document (ende-chat--build-document))
+                                     (pending (ende-chat--request-state-headline
+                                               document request-id "pending")))
+                                (delete-region (org-element-property :begin pending)
+                                               (org-element-property :end pending)))
+                              (let ((failure (should-error
+                                              (ende-chat--commit-transcript
+                                               job (ende-chat--render-transcript job)))))
+                                (should (string-match-p "destination" (error-message-string failure)))))
+                            (ende-job-fail job (ende-error-create :kind 'provider :message "PRIVATE-error")))
+                        (ende-test--complete-call (cadr ende-test--calls))))
+                    (should (eq (ende-job-state job)
+                                (pcase outcome
+                                  ((or 'cancelled 'restarted) 'cancelled)
+                                  ((or 'failed 'retained) 'failed)
+                                  (_ 'completed))))
+                    (should-not (ende-job-diagnostics-context job))
+                    (if (memq outcome '(restarted disabled))
+                        (should-not (ende-diagnostics-events))
+                      (let* ((events (ende-diagnostics-events id))
+                             (kinds (mapcar (lambda (event) (plist-get event :kind)) events))
+                             (starts (cl-remove-if-not
+                                      (lambda (event) (eq (plist-get event :kind) 'tool-started)) events))
+                             (terminal (car (last (cl-remove-if-not
+                                                  (lambda (event)
+                                                    (memq (plist-get event :kind)
+                                                          '(job-done job-failed job-cancelled))) events)))))
+                        (should (= (length starts) (if (eq outcome 'cancelled) 4 5)))
+                        (should (= (length (delete-dups (mapcar (lambda (event) (plist-get event :call)) starts)))
+                                   (length starts)))
+                        (dolist (start starts)
+                          (let ((ends (cl-remove-if-not
+                                       (lambda (event)
+                                         (and (eql (plist-get event :call) (plist-get start :call))
+                                              (memq (plist-get event :kind)
+                                                    '(tool-done tool-failed tool-cancelled)))) events)))
+                            (should (= (length ends) 1))
+                            (should (equal (plist-get start :tool) (plist-get (car ends) :tool)))
+                            (should (numberp (plist-get (car ends) :elapsed)))))
+                        (should (= (cl-count 'tool-failed kinds) (if (eq outcome 'cancelled) 2 3)))
+                        (should (= (cl-count 'tool-cancelled kinds) (if (eq outcome 'cancelled) 1 0)))
+                        (should (memq 'work-checkpoint kinds))
+                        (should (= (plist-get terminal :tools) (length starts)))
+                        (should (numberp (plist-get terminal :elapsed)))
+                        (should-not (memq 'provider-failed kinds))
+                        (if (eq outcome 'retained)
+                            (progn
+                              (should-not (memq 'chat-saved kinds))
+                              (should (memq 'chat-save-failed kinds))
+                              (should (= (cl-count 'work-retained kinds) 1))
+                              (should (file-exists-p (plist-get (ende-job-instruction job) :recovery-file))))
+                          (should (= (cl-count 'chat-saved kinds) 1))
+                          (should-not (memq 'chat-save-failed kinds))
+                          (should-not (memq 'work-retained kinds))
+                          (should-not (plist-get (ende-job-instruction job) :recovery-file)))
+                        (when (eq outcome 'failed)
+                          (should (eq (plist-get terminal :error-kind) 'provider))
+                          (should (ende-chat--request-state-headline
+                                   (ende-chat--build-document) request-id "failed")))
+                        (should-not (string-match-p
+                                     "PRIVATE\\|destination"
+                                     (json-encode (ende-diagnostics-snapshot))))))))))))
+      (ende-test--reset)
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/diagnostics-view-and-private-snapshot ()
   (let* ((root (make-temp-file "ende-diagnostics-" t))
          (user-emacs-directory (file-name-as-directory root))
@@ -279,7 +401,6 @@
          (ende-debug--next-content nil)
          (ende-debug--save-timer nil)
          (ende-debug-snapshot-limit 1)
-         (ende-debug-ui--jobs (make-hash-table :test #'eq :weakness 'key))
          (ende-debug-ui--buffer nil)
          (ende-debugging-enabled nil))
     (unwind-protect

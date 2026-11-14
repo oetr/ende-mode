@@ -36,6 +36,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'ende-core)
+(require 'ende-diagnostics)
 (require 'ende-edit)
 (require 'ende-file)
 (require 'ende-project)
@@ -126,6 +127,9 @@
 
 (defvar ende-tools--execution-owner nil
   "Ende job ID currently dispatching a tool call.")
+
+(defvar ende-tools--diagnostics-context nil
+  "Frozen diagnostic context of the job dispatching a tool call.")
 
 (defvar ende-tools--defer-sandbox-sync nil)
 (defvar ende-tools--sandbox-change-sets nil)
@@ -349,22 +353,44 @@ Pass its JSON-encoded result to CALLBACK, synchronously when possible."
                  (stringp name) (not (string-empty-p name))
                  (stringp arguments))
       (error "Malformed provider tool call: %S" call))
-    (let ((parsed
-           (condition-case caught
-               (json-parse-string arguments :object-type 'hash-table)
-             (error
-              (list :invalid-arguments (error-message-string caught))))))
-      (if (hash-table-p parsed)
-          (ende-tool-call-async
-           name parsed (plist-get configuration :root) configuration
-           (lambda (result)
+    (let* ((context ende-tools--diagnostics-context)
+           (call-id (and context (ende-ignore-errors #'ende-diagnostics-next-call)))
+           (started (and call-id (float-time)))
+           (register ende-tools--register-cancellation-function))
+      (cl-labels
+          ((record (kind)
+             (when context
+               (let ((frozen context))
+                 (setq context nil)
+                 (ende-ignore-errors #'ende-diagnostics-record kind frozen
+                                     :tool name :call call-id
+                                     :elapsed (and started (- (float-time) started))))))
+           (deliver (result)
+             (record (if (plist-get result :ok) 'tool-done 'tool-failed))
              (funcall callback (ende-tools--json-encode-tool-result result))))
-        (funcall
-         callback
-         (ende-tools--json-encode-tool-result
-          (list :ok nil :tool name
-                :error (format "tool arguments are not a JSON object: %s"
-                               (plist-get parsed :invalid-arguments)))))))))
+        (ende-ignore-errors #'ende-diagnostics-record 'tool-started context
+                            :tool name :call call-id)
+        (let ((ende-tools--register-cancellation-function
+               (if (and context (functionp register))
+                   (lambda (cancel)
+                     (funcall register
+                              (when cancel
+                                (lambda ()
+                                  (record 'tool-cancelled)
+                                  (funcall cancel)))))
+                 register))
+              (parsed
+               (condition-case caught
+                   (json-parse-string arguments :object-type 'hash-table)
+                 (error
+                  (list :invalid-arguments (error-message-string caught))))))
+          (if (hash-table-p parsed)
+              (ende-tool-call-async
+               name parsed (plist-get configuration :root) configuration #'deliver)
+            (deliver
+             (list :ok nil :tool name
+                   :error (format "tool arguments are not a JSON object: %s"
+                                  (plist-get parsed :invalid-arguments))))))))))
 
 (defun ende-tool--failure-result (tool caught)
   (if (eq (car-safe caught) 'ende-tool-mutation-failure)

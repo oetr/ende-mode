@@ -544,6 +544,7 @@ scheduler when asynchronous children have settled."
         job (list :type :tool-call-count
                   :count (1+ (or (ende-job-tool-call-count job) 0))))
        (let ((ende-tools--execution-owner (ende-job-id job))
+             (ende-tools--diagnostics-context (ende-job-diagnostics-context job))
              (ende-tools--request-phase 'work)
              (ende-tools--report-activity-function
               (lambda (title status)
@@ -781,6 +782,7 @@ by the following host capability snapshot."
                         (completed nil)
                         (ende-tools--request-phase phase)
                         (ende-tools--execution-owner (ende-job-id job))
+                        (ende-tools--diagnostics-context (ende-job-diagnostics-context job))
                         (ende-tools--generate-title-function
                          (lambda (title)
                            (ende-agent--accept-title job title generation)))

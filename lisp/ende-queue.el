@@ -54,7 +54,7 @@
 (cl-defstruct (ende-job (:constructor ende--make-job))
   "A queued LLM operation and its asynchronous lifecycle state."
   id type state cancel-function overlay target profile inference-template instruction
-  metadata metadata-rank result error structured-state
+  metadata metadata-rank result error structured-state diagnostics-context
   enqueued-at started-at finished-at dispatch-order status latest-user
   last-usage reasoning-summary-item reasoning-summary-text
   tool-call-count activity-title activity-status activity-updated-at
@@ -1138,6 +1138,7 @@ scheduler callbacks are permitted to observe the child."
         (dolist (job jobs)
           (ende--job-terminal-event
            job (ende-job-state job) (ende-job-result job) (ende-job-error job))
+          (setf (ende-job-diagnostics-context job) nil)
           (ende--job-release-owned-buffer job)
           (cl-pushnew (ende-job-family job) ende--settled-families :test #'eq))
         (ende-queue-emit-event (list :type state))
