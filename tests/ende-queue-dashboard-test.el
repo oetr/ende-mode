@@ -470,7 +470,7 @@
                 (with-current-buffer dashboard
                   (should (eq (key-binding (kbd "i")) #'ende-queue-ui-inject-guidance))
                   (should (memq (key-binding (kbd "v")) '(nil undefined)))
-                  (should (memq (key-binding (kbd "d")) '(nil undefined))))
+                  (should (eq (key-binding (kbd "d")) #'ende-queue-ui-diagnostics)))
                 (dolist (observer '(ende-chat--release-recovery ende-chat--job-event
                                      ende-queue-ui--job-event))
                   (should (= (cl-count observer ende-job-event-functions) 1)))

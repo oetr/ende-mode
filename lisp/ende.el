@@ -72,6 +72,7 @@
 (require 'ende-speech)
 (require 'ende-selector)
 (require 'ende-queue-ui)
+(require 'ende-debug-ui)
 
 ;;;; Keymap and Minor Mode
 
@@ -445,6 +446,7 @@
   (ende-worker-shutdown)
   (ende-work-buffer-shutdown)
   (ende-abort-queue)
+  (ende-debugging-off)
   (clrhash ende-agent--project-caches)
   (ende-websocket-shutdown)
   (when-let* ((selector (get-buffer ende-selector-buffer-name)))

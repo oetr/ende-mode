@@ -34,6 +34,7 @@
 (require 'subr-x)
 (require 'url-parse)
 (require 'ende-core)
+(require 'ende-diagnostics)
 (require 'ende-content)
 (require 'ende-protocol)
 (require 'ende-credentials)
@@ -48,7 +49,18 @@ server-managed conversation."
   :group 'ende)
 
 (defvar ende-debugging-enabled nil
-  "Non-nil when new streaming LLM requests should be recorded.")
+  "Non-nil while a selected request's raw content is being captured.")
+
+(defvar ende-debug--next-content nil)
+(defvar ende-debug--save-timer nil)
+(defvar ende-debug--saving nil)
+
+(defcustom ende-debug-snapshot-limit 8
+  "Maximum automatic metadata snapshots retained on disk.
+Only diagnostics-owned files are pruned; content captures are untouched."
+  :type 'natnum :group 'ende)
+
+(defconst ende-debug--snapshot-name "diagnostics-v1.json")
 
 (defvar ende-debug--session-directory nil
   "Directory holding the latest Ende debugging session.")
@@ -97,24 +109,129 @@ server-managed conversation."
     (set-file-modes path #o700)
     path))
 
+(defun ende-debug--cancel-save ()
+  "Cancel a pending automatic snapshot."
+  (when (timerp ende-debug--save-timer) (cancel-timer ende-debug--save-timer))
+  (setq ende-debug--save-timer nil))
+
+(defun ende-debug--schedule-save (session)
+  "Coalesce failure snapshots for SESSION without retaining error objects."
+  (when (and (not ende-debug--saving) ende-diagnostics-enabled
+             (eql session ende-diagnostics-session)
+             ende-debug--session-directory (not ende-debug--save-timer))
+    (setq ende-debug--save-timer
+          (run-at-time 0.25 nil #'ende-debug--save-callback session))))
+
+(defun ende-debug--save-callback (session)
+  "Save only if SESSION is still the active recorder."
+  (setq ende-debug--save-timer nil)
+  (when (and ende-diagnostics-enabled (eql session ende-diagnostics-session))
+    (ende-debug-save-diagnostics)))
+
+(add-hook 'ende-diagnostics-failure-functions #'ende-debug--schedule-save)
+
+(defun ende-debug--prune-snapshots ()
+  "Prune only owned regular metadata snapshots in local session directories."
+  (when (file-remote-p (expand-file-name user-emacs-directory))
+    (error "Local snapshots only"))
+  (let (files)
+    (dolist (directory (directory-files user-emacs-directory t "^ende-debug-[0-9]"))
+      (let ((file (expand-file-name ende-debug--snapshot-name directory)))
+        (when (and (file-directory-p directory) (not (file-symlink-p directory))
+                   (file-regular-p file) (not (file-symlink-p file)))
+          (push file files))))
+    (setq files (sort files (lambda (a b)
+                             (time-less-p (file-attribute-modification-time (file-attributes b))
+                                          (file-attribute-modification-time (file-attributes a))))))
+    (let ((pruned 0))
+      (dolist (file (nthcdr (max 1 ende-debug-snapshot-limit) files))
+        (delete-file file)
+        (cl-incf pruned)
+        (let ((directory (file-name-directory file)))
+          (unless (directory-files directory nil directory-files-no-dot-files-regexp)
+            (delete-directory directory))))
+      (when (> pruned 0)
+        (ende-diagnostics-record 'captures-pruned (ende-diagnostics-context-create nil)
+                                 :count pruned)))))
+
+(defun ende-debug-save-diagnostics (&optional file job)
+  "Save a bounded metadata snapshot to local FILE, optionally for JOB.
+Without FILE, update this session's private snapshot and apply retention.
+Return its path on success.  Failures are classified, never propagated."
+  (interactive)
+  (when (and ende-diagnostics--ring (or file ende-debug--session-directory))
+    (let ((ende-debug--saving t)
+          temporary)
+      (unwind-protect
+          (condition-case nil
+              (let* ((path (expand-file-name
+                            (or file (expand-file-name ende-debug--snapshot-name
+                                                       ende-debug--session-directory))))
+                     (json-false :false))
+                (when (file-remote-p path) (error "Local snapshots only"))
+                (setq temporary
+                      (ende-debug--with-file-modes
+                       #o600 (lambda () (make-temp-file
+                                        (expand-file-name ".ende-diagnostics-"
+                                                          (file-name-directory path))))))
+                (ende-debug--write-file temporary
+                                        (concat (json-encode (ende-diagnostics-snapshot job)) "\n"))
+                (rename-file temporary path t)
+                (setq temporary nil)
+                (unless file (ende-debug--prune-snapshots))
+                path)
+            ((error quit)
+             (ende-diagnostics-record 'debug-failed (ende-diagnostics-context-create job))
+             nil))
+        (when temporary (ignore-errors (delete-file temporary)))))))
+
 ;;;###autoload
 (defun ende-debugging-on ()
-  "Enable recording of subsequent LLM requests in a new private session."
+  "Start bounded local metadata diagnostics, without capturing request bodies."
   (interactive)
+  (when (file-remote-p (expand-file-name user-emacs-directory))
+    (user-error "Diagnostics must stay local"))
+  (when ende-diagnostics-enabled (ende-debugging-off))
+  (ende-debug--cancel-save)
   (setq ende-debug--session-directory (ende-debug--new-session-directory)
         ende-debug--sequence 0
+        ende-debug--sequence-context nil
         ende-debug--baselines (make-hash-table :test #'equal)
-        ende-debugging-enabled t)
-  (message "ende debugging enabled; recordings: %s"
-           ende-debug--session-directory))
+        ende-debugging-enabled nil
+        ende-debug--next-content nil)
+  (ende-diagnostics-start)
+  (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil))
+  (message "ende metadata diagnostics enabled; M-x ende-debug-open to inspect"))
 
 ;;;###autoload
 (defun ende-debugging-off ()
-  "Disable recording of new LLM requests."
+  "Save and stop metadata diagnostics and disarm content capture."
   (interactive)
-  (setq ende-debugging-enabled nil)
-  (message "ende debugging disabled; existing recordings remain in %s"
-           (or ende-debug--session-directory "(no debugging session)")))
+  (setq ende-debugging-enabled nil ende-debug--next-content nil)
+  (ende-debug--cancel-save)
+  (when ende-diagnostics-enabled
+    (ende-diagnostics-record 'debug-off (ende-diagnostics-context-create nil))
+    (ende-debug-save-diagnostics)
+    (ende-diagnostics-stop))
+  (when (called-interactively-p 'interactive) (message "ende diagnostics stopped")))
+
+;;;###autoload
+(defun ende-debug-capture-next-request ()
+  "Explicitly capture content of the next logical request, including retries.
+Content is private but may contain prompts, source text, and reasoning data."
+  (interactive)
+  (unless ende-diagnostics-enabled (user-error "Enable diagnostics first"))
+  (setq ende-debug--next-content t)
+  (ende-diagnostics-record 'content-enabled (ende-diagnostics-context-create nil))
+  (message "ende: next request content capture armed"))
+
+(defun ende-debug-consume-content-request ()
+  "Return whether to capture this logical request and consume a pending choice.
+Call once in the main process before preparation, never once per retry."
+  (or ende-debugging-enabled
+      (when (and ende-diagnostics-enabled ende-debug--next-content)
+        (setq ende-debug--next-content nil)
+        t)))
 
 (defun ende-debug--safe-endpoint (endpoint)
   "Return a credential-free endpoint identification for ENDPOINT."

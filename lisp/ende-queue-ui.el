@@ -34,6 +34,7 @@
 (require 'ende-queue-source)
 (require 'ende-history)
 (require 'ende-work-buffer)
+(require 'ende-debug-ui)
 
 (defface ende-queue-ui-heading-face
   '((t :inherit font-lock-keyword-face))
@@ -386,6 +387,11 @@
     (with-current-buffer buffer (ende-work-buffer--schedule-refresh))
     buffer))
 
+(defun ende-queue-ui-diagnostics ()
+  "Open local metadata diagnostics for the selected retained job."
+  (interactive)
+  (ende-debug-open (ende-job-id (ende-queue-ui--current-job))))
+
 (defun ende-queue-ui-next-entry (&optional direction)
   "Move DIRECTION through visible job rows."
   (let* ((positions (ende-queue-ui--entry-positions))
@@ -403,7 +409,7 @@
   "Show available dashboard commands."
   (interactive)
   (with-help-window "*ende-queue help*"
-    (princ "TAB Fold descendants   n/p Next/previous job   j/RET Visit source\nw Inspect work   P/R Pause/resume   c Change eligible queued policy\nk/K Cancel selected/all live work   m/u Mark/unmark live jobs\ni Inject guidance   M-<up/down> Reorder queued roots   g Refresh   q Quit\n")))
+    (princ "TAB Fold descendants   n/p Next/previous job   j/RET Visit source\nw Inspect work   d Diagnostics   P/R Pause/resume   c Change eligible queued policy\nk/K Cancel selected/all live work   m/u Mark/unmark live jobs\ni Inject guidance   M-<up/down> Reorder queued roots   g Refresh   q Quit\n")))
 (defun ende-queue-ui-quit ()
   "Quit without cancelling jobs or clearing retained history."
   (interactive) (quit-window))
@@ -416,6 +422,7 @@
                          ("TAB" . ende-queue-ui-toggle-entry) ("q" . ende-queue-ui-quit)
                          ("j" . ende-queue-ui-visit-source) ("RET" . ende-queue-ui-visit-source)
                          ("w" . ende-queue-ui-visit-agent-work) ("i" . ende-queue-ui-inject-guidance)
+                         ("d" . ende-queue-ui-diagnostics)
                          ("P" . ende-queue-pause) ("R" . ende-queue-resume)
                          ("k" . ende-queue-ui-cancel) ("K" . ende-queue-ui-cancel-all)
                          ("c" . ende-queue-ui-change-policy) ("m" . ende-queue-ui-mark)
