@@ -576,7 +576,8 @@ The message whose callback is currently running is not included."
       (ende-websocket--cancel-deadline connection 'message)
       (ende-websocket--deadline
        connection 'close (ende-websocket--limit connection :closing-timeout)
-       (lambda (c) (ende-websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout)))))
+       (lambda (c) (ende-websocket--terminate
+                    c '(:code 1006 :reason "" :clean nil :cause timeout :deadline close)))))
     (when (or first pending)
       (if (and drain (ende-websocket--connection-output connection))
           (setf (ende-websocket--connection-draining-close connection) payload)
@@ -613,11 +614,12 @@ Completion is asynchronous and bounded by the closing timeout."
         ((error quit) nil)))
     (ende-websocket--terminate connection info)))
 
-(defun ende-websocket--fail (connection cause &optional status)
+(defun ende-websocket--fail (connection cause &optional status deadline)
   (unless (or (eq (ende-websocket-state connection) 'closed)
               (ende-websocket--connection-failure connection))
     (let* ((code (pcase cause ('utf8 1007) ('size 1009) ('policy 1008) (_ 1002)))
            (info (list :code code :reason "" :clean nil :cause cause)))
+      (when deadline (setq info (plist-put info :deadline deadline)))
       (if (eq (ende-websocket-state connection) 'connecting)
           (if (eq (ende-websocket--connection-role connection) 'server)
               (ende-websocket--reject connection (or status (if (eq cause 'size) 431 400)) info)
@@ -663,7 +665,7 @@ Completion is asynchronous and bounded by the closing timeout."
         (setf (ende-websocket--connection-message connection) message)
         (when (eq (ende-websocket-state connection) 'open)
           (ende-websocket--deadline connection 'message (ende-websocket--limit connection :message-timeout)
-                               (lambda (c) (ende-websocket--fail c 'policy)))))
+                               (lambda (c) (ende-websocket--fail c 'policy nil 'assembly)))))
       (cl-incf (ende-websocket--message-fragments message))
       (cl-incf (ende-websocket--message-bytes message) (ende-websocket--frame-length frame))
       (when (or (> (ende-websocket--message-fragments message) (ende-websocket--limit connection :fragment-count))
@@ -1125,7 +1127,8 @@ Signal `ende-websocket-backpressure' without queue mutation when full."
     (puthash connection t ende-websocket--connections)
     (ende-websocket--deadline
      connection 'handshake (ende-websocket--limit connection :handshake-timeout)
-     (lambda (c) (ende-websocket--terminate c '(:code 1006 :reason "" :clean nil :cause timeout))))
+     (lambda (c) (ende-websocket--terminate
+                  c '(:code 1006 :reason "" :clean nil :cause timeout :deadline handshake))))
     connection))
 
 (defun ende-websocket--callbacks (on-open on-message on-close on-writable)

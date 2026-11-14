@@ -666,5 +666,70 @@
             (should-not errors))
         (delete-directory directory t)))))
 
+(ert-deftest ende-responses-ws-failure-diagnostics-survive-cleanup ()
+  :tags '(integration)
+  (dolist (failure '(assembly peer-close))
+    (ende-responses-ws-test--with-server
+      (let (errors)
+        (ende-llm-default '(("user" . "Interrupted"))
+                          (list :on-error (lambda (error) (push error errors)))
+                          (ende-responses-ws-test--profile 1))
+        (ende-test--wait-for (lambda () wires))
+        (ende-responses-ws-test--event
+         (car sockets) "{\"type\":\"error\",\"error\":{\"code\":\"websocket_connection_limit_reached\"}}")
+        (ende-test--wait-for (lambda () (= (length wires) 2)))
+        (let* ((connection (gethash 1 ende-responses-ws--connections))
+               (request (ende-responses-ws-connection-active connection))
+               (socket (car clients)))
+          (if (eq failure 'assembly)
+              (progn
+                (ende-websocket--filter (ende-websocket--connection-process socket)
+                                        (unibyte-string #x81 2 ?{))
+                (ende-websocket--run socket)
+                (let ((timer (cdr (assq 'message (ende-websocket--connection-timers socket)))))
+                  (should timer)
+                  (cancel-timer timer)
+                  (apply (timer--function timer) (timer--args timer))))
+            (ende-websocket-close (car sockets) 1008 "private close reason"))
+          (ende-test--wait-for (lambda () errors))
+          (should (= (length errors) 1))
+          (should (equal (ende-error-message (car errors))
+                         "Responses delivery interrupted; request was not replayed"))
+          (should (= (length wires) 2))
+          (should (= (length clients) 2))
+          (should-not (gethash 1 ende-responses-ws--connections))
+          (should-not (ende-responses-ws-request-connection request))
+          (should-not (ende-responses-ws-connection-close-info connection))
+          (let* ((details (ende-error-details (car errors)))
+                 (diagnostics (ende-debug--transport-details details)))
+            (should (equal (mapcar (lambda (key) (plist-get details key))
+                                  '(:delivery :retries :close-code :cause :clean :deadline))
+                           (if (eq failure 'assembly)
+                               '(accepted 1 1008 policy nil assembly)
+                             '(accepted 1 1008 close t nil))))
+            (should (equal (alist-get "delivery" diagnostics nil nil #'equal) 'accepted))
+            (should (= (alist-get "retries" diagnostics nil nil #'equal) 1))
+            (should-not (plist-member details :reason))
+            (should-not (string-match-p "private close reason\\|fixture-api-key"
+                                        (prin1-to-string (list details diagnostics))))))))))
+
+(ert-deftest ende-responses-ws-debug-diagnostics-are-typed ()
+  (should
+   (equal
+    (ende-debug--transport-details
+     '(:transport-phase generation :delivery accepted :reused t :connection-age 1.5
+       :messages 2 :bytes 30 :last-event error :http-status 101 :close-code 1008
+       :retries 1 :cause policy :clean nil :deadline assembly :reason "private"
+       :headers ("Authorization: private") :payload "private"))
+    `(("transport_phase" . generation) ("delivery" . accepted) ("reused" . t)
+      ("connection_age" . 1.5) ("messages" . 2) ("bytes" . 30) ("last_event" . error)
+      ("http_status" . 101) ("close_code" . 1008) ("retries" . 1) ("cause" . policy)
+      ("clean" . ,json-false) ("deadline" . assembly))))
+  (should-not
+   (ende-debug--transport-details
+    '(:transport-phase private :delivery sent :reused "private" :connection-age -1
+      :messages 1.5 :bytes "private" :last-event private :http-status 101.5 :close-code -1
+      :retries "private" :cause private :clean "private" :deadline private))))
+
 (provide 'ende-responses-ws-test)
 ;;; ende-responses-ws-test.el ends here

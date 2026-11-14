@@ -46,7 +46,7 @@
   owner identity socket active chain closed closing key url headers properties
   header-limit output-limit
   (completed-ids (make-hash-table :test #'equal))
-  (generation 1) (phase 'disconnected) created close-code)
+  (generation 1) (phase 'disconnected) created close-info)
 
 (cl-defstruct ende-responses-ws-chain
   response-id logical-request output)
@@ -100,7 +100,7 @@
           (ende-responses-ws-connection-phase connection) 'disconnected
           (ende-responses-ws-connection-closing connection) nil
           (ende-responses-ws-connection-created connection) nil
-          (ende-responses-ws-connection-close-code connection) nil)
+          (ende-responses-ws-connection-close-info connection) nil)
     ;; Cancellation and replacement must not drain an accepted request.
     (when socket (ende-websocket-abort socket))))
 
@@ -171,26 +171,28 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
   "Return allowlisted diagnostics for REQUEST, never dependency error data."
   (let* ((connection (ende-responses-ws-request-connection request))
          (phase (ende-responses-ws-connection-phase connection)))
-    (list :transport-phase (if (eq phase 'connecting) phase
-                             (pcase (ende-responses-ws-request-delivery request)
-                               ('sending 'sending) ('accepted 'generation) (_ 'preparing)))
-          :delivery (ende-responses-ws-request-delivery request)
-          :reused (and (ende-responses-ws-request-reused request) t)
-          :connection-age (when-let* ((created (ende-responses-ws-connection-created connection)))
-                            (max 0 (- (float-time) created)))
-          :close-code (ende-responses-ws-connection-close-code connection)
-          :messages (ende-responses-ws-request-messages request)
-          :retries (ende-responses-ws-request-retries request)
-          :bytes (ende-responses-ws-request-received-bytes request)
-          :last-event (ende-responses-ws-request-last-event request))))
+    (append
+     (list :transport-phase (if (eq phase 'connecting) phase
+                              (pcase (ende-responses-ws-request-delivery request)
+                                ('sending 'sending) ('accepted 'generation) (_ 'preparing)))
+           :delivery (ende-responses-ws-request-delivery request)
+           :reused (and (ende-responses-ws-request-reused request) t)
+           :connection-age (when-let* ((created (ende-responses-ws-connection-created connection)))
+                             (max 0 (- (float-time) created)))
+           :messages (ende-responses-ws-request-messages request)
+           :retries (ende-responses-ws-request-retries request)
+           :bytes (ende-responses-ws-request-received-bytes request)
+           :last-event (ende-responses-ws-request-last-event request))
+     (copy-sequence (ende-responses-ws-connection-close-info connection)))))
 
-(defun ende-responses-ws--fail (request kind message)
-  "Fail live REQUEST once with safe KIND and MESSAGE."
+(defun ende-responses-ws--fail (request kind message &optional deadline)
+  "Fail live REQUEST with safe KIND, MESSAGE and optional DEADLINE subtype."
   (when (ende-responses-ws--live-p request)
-    (funcall (ende-transport-session-callback-error-handler
-              (ende-responses-ws-request-lifecycle request))
-             (ende-error-create :kind kind :message message
-                                :details (ende-responses-ws--details request)))))
+    (let ((details (ende-responses-ws--details request)))
+      (when deadline (setq details (plist-put details :deadline deadline)))
+      (funcall (ende-transport-session-callback-error-handler
+                (ende-responses-ws-request-lifecycle request))
+               (ende-error-create :kind kind :message message :details details)))))
 
 (defun ende-responses-ws-close-owner (owner)
   "Cancel and close the connection belonging to OWNER, if any."
@@ -269,7 +271,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (setf (ende-responses-ws-request-deadline request) (+ (float-time) timeout)
               (ende-responses-ws-request-deadline-timer request)
               (run-at-time timeout nil #'ende-responses-ws--fail
-                           request 'timeout "Responses request deadline exceeded")))
+                           request 'timeout "Responses request deadline exceeded" 'request)))
       (when (ende-responses-ws--live-p request) request))))
 
 (defun ende-responses-ws--settings (body)
@@ -386,7 +388,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
             (setf (ende-responses-ws-request-idle-timer request)
                   (run-at-time remaining nil #'ende-responses-ws--attempt-timeout
                                request attempt 'idle))
-          (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded"))))))
+          (ende-responses-ws--fail request 'timeout "Responses response-idle deadline exceeded" 'idle))))))
 
 (defun ende-responses-ws--attempt-live-p (request attempt socket)
   "Return whether ATTEMPT still owns REQUEST's accepted SOCKET."
@@ -498,12 +500,13 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   (when (ende-responses-ws--live-p request)
     (cond
      ((ende-responses-ws--deadline-expired-p request)
-      (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded"))
+      (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded" 'request))
      ((>= (ende-responses-ws-request-retries request)
           (ende-responses-ws-request-retry-limit request))
       (ende-responses-ws--fail
        request 'transport
-       "Responses automatic reconnection exhausted; completed work was preserved"))
+       "Responses automatic reconnection exhausted; completed work was preserved"
+       (when (eq reason 'connect-timeout) 'connect)))
      ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement))
       (let ((connection (ende-responses-ws-request-connection request)))
         (ende-responses-ws--release-payload request)
@@ -538,7 +541,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
              (eq (ende-responses-ws-connection-phase
                   (ende-responses-ws-request-connection request)) 'authenticating))
     (if (ende-responses-ws--deadline-expired-p request)
-        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded")
+        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded" 'request)
       (let ((connection (ende-responses-ws-request-connection request)))
         (dolist (header headers)
           (unless (ende-curl--valid-header-p header) (error "Invalid WebSocket header")))
@@ -555,7 +558,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                   (ende-responses-ws-request-connection request)) 'backoff))
     (setf (ende-responses-ws-request-retry-timer request) nil)
     (if (ende-responses-ws--deadline-expired-p request)
-        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded")
+        (ende-responses-ws--fail request 'timeout "Responses request deadline exceeded" 'request)
       (setf (ende-responses-ws-connection-phase
              (ende-responses-ws-request-connection request)) 'preparing)
       (when (ende-responses-ws-request-logical-request request)
@@ -720,7 +723,9 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   (when (and (not (ende-responses-ws-connection-closed connection))
              (eq socket (ende-responses-ws-connection-socket connection)))
     (setf (ende-responses-ws-connection-closing connection) t
-          (ende-responses-ws-connection-close-code connection) (plist-get info :code))
+          (ende-responses-ws-connection-close-info connection)
+          (list :close-code (plist-get info :code) :cause (plist-get info :cause)
+                :clean (plist-get info :clean) :deadline (plist-get info :deadline)))
     (let ((request (ende-responses-ws-connection-active connection))
           (cause (plist-get info :cause))
           (code (plist-get info :code)))

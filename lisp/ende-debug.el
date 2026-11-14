@@ -377,21 +377,25 @@ Never capture raw output or opaque reasoning.  Completion writes this record."
   "Return only safe, typed transport diagnostics from DETAILS."
   (let (result)
     (dolist (key '(:transport-phase :delivery :reused :connection-age
-                   :messages :bytes :last-event :http-status :close-code))
+                   :messages :bytes :last-event :http-status :close-code
+                   :retries :cause :clean :deadline))
       (let ((value (plist-get details key)))
         (when (pcase key
                 (:transport-phase (memq value '(connecting upgrading preparing sending generation)))
-                (:delivery (memq value '(unsent sending sent)))
-                (:reused (plist-member details key))
+                (:delivery (memq value '(unsent sending accepted)))
+                ((or :reused :clean) (and (plist-member details key) (booleanp value)))
+                (:cause (memq value '(abort application close policy protocol size timeout transport utf8)))
+                (:deadline (memq value '(handshake assembly close request idle connect)))
+                (:connection-age (and (numberp value) (>= value 0)))
                 (:last-event (memq value '(response.created response.in_progress response.completed
                                           response.done response.incomplete response.failed error
                                           response.output_text.delta response.output_item.added
                                           response.output_item.done response.reasoning_summary_text.delta
                                           response.function_call_arguments.delta
                                           response.function_call_arguments.done)))
-                (_ (and (numberp value) (>= value 0))))
+                (_ (natnump value)))
           (push (cons (replace-regexp-in-string "-" "_" (substring (symbol-name key) 1))
-                      (if (eq key :reused) (if value t json-false) value)) result))))
+                      (if (memq key '(:reused :clean)) (if value t json-false) value)) result))))
     (nreverse result)))
 
 (defun ende-debug-record-completion (record outcome usage http-status value)
