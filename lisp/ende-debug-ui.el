@@ -124,7 +124,10 @@
   "Refresh the current metadata view without changing the retained events."
   (interactive)
   (let ((inhibit-read-only t)
-        (position (point)))
+        (position (point))
+        (selected (get-text-property (line-beginning-position) 'ende-debug-event))
+        (column (current-column))
+        selected-position)
     (erase-buffer)
     (insert (format "SESSION %d   %s   %s   JOB %s\n"
                     ende-diagnostics-session
@@ -154,17 +157,19 @@
                           (propertize (format "%-19s" (upcase (replace-regexp-in-string "-" " " (symbol-name kind))))
                                       'face face)
                           (ende-debug-ui--details event)))
+          (when (equal event selected)
+            (setq selected-position start))
+          (when (equal event ende-debug-ui--detail-event)
+            (let ((fields event))
+              (while fields
+                (let ((key (pop fields)) (value (pop fields)))
+                  (unless (memq key '(:time :level :kind))
+                    (insert (format "    │ %-18s %s\n"
+                                    (propertize (upcase (substring (symbol-name key) 1)) 'face 'shadow)
+                                    (ende-debug-ui--value key value))))))))
           (add-text-properties start (point) (list 'ende-debug-event event)))))
-    (when ende-debug-ui--detail-event
-      (insert "\n" (propertize "FIELDS\n" 'face 'bold))
-      (let ((fields ende-debug-ui--detail-event))
-        (while fields
-          (let ((key (pop fields)) (value (pop fields)))
-            (unless (memq key '(:time :level :kind))
-              (insert (format "%-18s %s\n"
-                              (upcase (substring (symbol-name key) 1))
-                              (ende-debug-ui--value key value))))))))
-    (goto-char (min position (point-max)))))
+    (goto-char (or selected-position (min position (point-max))))
+    (when selected-position (move-to-column column))))
 
 (defun ende-debug-ui-toggle-timeline ()
   "Toggle expanded start/detail events without altering recording."
