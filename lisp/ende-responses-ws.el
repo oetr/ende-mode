@@ -218,6 +218,9 @@ replay-normalized OUTPUT commit a successful continuation before callbacks."
            :reused (and (ende-responses-ws-request-reused request) t)
            :connection-age (when-let* ((created (ende-responses-ws-connection-created connection)))
                              (max 0 (- (float-time) created)))
+           :last-data-age (when-let* ((socket (ende-responses-ws-connection-socket connection))
+                                     (received (ende-websocket-last-data-time socket)))
+                            (max 0 (- (float-time) received)))
            :messages (ende-responses-ws-request-messages request)
            :retries (ende-responses-ws-request-retries request)
            :retry-limit (ende-responses-ws-request-retry-limit request)
@@ -465,7 +468,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 ;; A successful offer does not prove transmission.  Never replay
                 ;; after this boundary without an explicit provider rejection.
                 (setf (ende-responses-ws-request-delivery request) 'sending)
-                (ende-responses-ws--record 'request-offered request)
+                (ende-responses-ws--record 'request-offered request
+                                          :bytes (ende-responses-ws--payload-size data))
                 (ende-websocket-set-receive-budget
                  socket (when-let* ((limit (ende-responses-ws-request-byte-limit request)))
                           (max 0 (- limit (ende-responses-ws-request-received-bytes request)))))
@@ -481,7 +485,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                 (when (ende-responses-ws--attempt-live-p request attempt socket)
                   (setf (ende-responses-ws-request-payload request) nil
                         (ende-responses-ws-request-delivery request) 'accepted)
-                  (ende-responses-ws--record 'request-accepted request)
+                  (ende-responses-ws--record 'request-accepted request :scope 'local-queue)
                   (ende-responses-ws--idle request)))))
         (ende-websocket-backpressure
          ;; Rejected atomically: retain the offer until ON-WRITABLE.

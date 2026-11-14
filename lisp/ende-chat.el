@@ -2853,7 +2853,8 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
                           (plist-put (ende-job-instruction job) :transcript-materialized t))
                     t)
                 (ende-chat--release-insertion-info information))))
-        (ende-job-emit-event job '(:type :chat-saved)))
+        (ende-job-emit-event job (list :type :chat-saved
+                                       :state (if (eq allow-edited 'snapshot) 'failed 'complete))))
     ((error quit)
      (ende-job-emit-event job '(:type :chat-save-failed))
      (signal (car failure) (cdr failure)))))

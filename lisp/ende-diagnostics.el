@@ -26,21 +26,21 @@
     (capture-saved . outcome) (capture-dropped . warning)
     (content-enabled . warning) (bundle-saved . outcome)
     (captures-pruned . outcome) (debug-failed . error)
-    (job-queued . detail) (job-started . detail) (job-waiting . outcome)
+    (job-queued . detail) (job-started . detail) (job-waiting . detail)
     (job-resumed . detail) (job-done . outcome) (job-failed . error)
-    (job-cancelled . warning) (job-skipped . warning) (agent-spawned . outcome)
+    (job-cancelled . warning) (job-skipped . warning) (agent-spawned . detail)
     (auth-started . detail) (auth-ready . detail)
     (prep-started . detail) (prep-ready . detail)
     (ws-connecting . detail) (ws-open . detail) (ws-reused . detail)
-    (ws-closed . outcome) (ws-interrupted . warning)
+    (ws-closed . detail) (ws-interrupted . warning)
     (request-offered . detail) (request-accepted . detail)
-    (request-blocked . warning) (request-writable . detail)
-    (response-first . detail) (response-done . outcome)
+    (request-blocked . warning) (request-writable . detail) (request-cancelled . detail)
+    (response-first . detail) (response-done . detail)
     (retry-scheduled . warning) (replay-refused . warning)
     (retries-exhausted . error) (timeout . error) (auth-failed . error)
     (provider-failed . error) (protocol-invalid . error) (limit-exceeded . error)
     (callback-failed . error) (transport-failed . error) (internal-failed . error)
-    (tool-started . detail) (tool-done . outcome) (tool-failed . error)
+    (tool-started . detail) (tool-done . detail) (tool-failed . error)
     (tool-cancelled . warning) (work-checkpoint . detail)
     (chat-saved . outcome) (chat-save-failed . error) (work-retained . warning)))
 
@@ -52,11 +52,15 @@
     (:retries natnum "retries") (:http-status natnum "http")
     (:retry-limit natnum "retry-limit") (:timeout-limit number "timeout")
     (:byte-limit natnum "byte-limit") (:event-limit natnum "event-limit")
-    (:close-code natnum "close") (:input-tokens natnum "in")
+    (:close-code natnum "code") (:input-tokens natnum "in")
     (:output-tokens natnum "out") (:cached-tokens natnum "cached")
-    (:elapsed number "seconds") (:connection-age number "age")
+    (:elapsed number "elapsed") (:connection-age number "age")
+    (:last-data-age number "last-data")
     (:delay number "delay") (:reused boolean "reused") (:clean boolean "clean")
     (:tool identifier "tool")
+    (:mode (metadata) "mode") (:scope (next-request local-queue) "scope")
+    (:content (excluded) "content") (:operation (write request completion) "operation")
+    (:state (complete failed) "state")
     (:transport (http websocket worker) "via")
     (:transport-phase (connecting upgrading preparing sending generation) "phase")
     (:delivery (unsent sending accepted) "delivery")
@@ -70,7 +74,7 @@
                   response.function_call_arguments.delta
                   response.function_call_arguments.done) "last")
     (:error-kind (auth timeout provider http incomplete protocol resource limit callback transport internal startup
-                  cancelled skipped scheduler ownership target validation tool application) "error"))
+                  cancelled skipped scheduler ownership target validation tool application) "kind"))
   "Accepted field keys, types, and short display labels.")
 
 (cl-defstruct (ende-diagnostics-context
@@ -182,7 +186,8 @@ Exception messages and unrecognized detail fields are never retained."
                           (and (memq (plist-get fields :deadline)
                                      '(handshake assembly close request idle connect))
                                'timeout)
-                          (alist-get kind '((auth . auth-failed) (timeout . timeout)
+                          (alist-get kind '((cancelled . request-cancelled)
+                                            (auth . auth-failed) (timeout . timeout)
                                             (provider . provider-failed)
                                             (http . provider-failed) (incomplete . provider-failed)
                                             (protocol . protocol-invalid)
@@ -203,7 +208,7 @@ Exception messages and unrecognized detail fields are never retained."
 
 (defun ende-diagnostics-snapshot (&optional job)
   "Return a metadata-only JSON-ready snapshot, optionally filtered by JOB."
-  (list :version 1 :emacs-version emacs-version
+  (list :version 1 :emacs-version emacs-version :ende-version ende-client-version
         :session ende-diagnostics-session :dropped ende-diagnostics-dropped
         :events (vconcat (ende-diagnostics-events job))))
 

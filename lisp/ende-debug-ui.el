@@ -42,6 +42,7 @@
           (when (and context kind)
             (apply #'ende-diagnostics-record kind context
                    :parent (and parent (ende-job-id parent))
+                   :state (plist-get event :state)
                    (when (eq type :settled)
                      (list :error-kind (if (ende-error-p (ende-job-error job))
                                            (ende-error-kind (ende-job-error job))
@@ -57,14 +58,66 @@
 
 (add-hook 'ende-job-event-functions #'ende-debug-ui--job-event)
 
+(defun ende-debug-ui--appearance (event)
+  "Return EVENT's distinct mark and theme face."
+  (let ((kind (plist-get event :kind)))
+    (cond
+     ((memq kind '(job-cancelled tool-cancelled request-cancelled debug-off)) '("■" shadow))
+     ((eq kind 'retry-scheduled) '("↻" warning))
+     ((eq (plist-get event :level) 'error) '("✗" error))
+     ((eq (plist-get event :level) 'warning) '("!" warning))
+     ((memq kind '(debug-on job-started job-resumed agent-spawned auth-started
+                    prep-started ws-connecting request-offered request-writable tool-started))
+      '("▶" font-lock-function-name-face))
+     ((memq kind '(capture-saved bundle-saved captures-pruned job-done auth-ready
+                    prep-ready ws-open response-done tool-done work-checkpoint chat-saved))
+      '("✓" success))
+     (t '("·" shadow)))))
+
+(defun ende-debug-ui--brief-keys (kind)
+  "Return the few fields worth scanning on KIND's row."
+  (pcase kind
+    ('ws-connecting '(:connection :timeout-limit))
+    ((or 'ws-open 'ws-reused) '(:connection :connection-age))
+    ((or 'ws-closed 'ws-interrupted) '(:connection :close-code :cause))
+    ('replay-refused '(:delivery))
+    ('retry-scheduled '(:delay :reason :retry-limit))
+    ('retries-exhausted '(:retries :retry-limit))
+    ('timeout '(:deadline :timeout-limit :elapsed))
+    ('limit-exceeded '(:bytes :byte-limit :event-limit))
+    ('response-first '(:last-event :elapsed))
+    ('response-done '(:elapsed :messages :bytes))
+    ('request-accepted '(:scope))
+    ((or 'tool-started 'tool-done 'tool-failed 'tool-cancelled) '(:tool :call :elapsed))
+    ((or 'job-done 'job-failed 'job-cancelled 'job-skipped) '(:error-kind :elapsed :tools))
+    ((or 'job-queued 'agent-spawned) '(:parent))
+    ('debug-on '(:mode))
+    ('content-enabled '(:scope))
+    ('bundle-saved '(:content))
+    ('debug-failed '(:operation))
+    ('chat-saved '(:state))
+    (_ '(:error-kind :bytes :elapsed :count))))
+
+(defun ende-debug-ui--value (key value)
+  "Format typed VALUE of KEY without serialized Lisp or long decimals."
+  (let ((type (cadr (assq key ende-diagnostics--fields))))
+    (cond
+     ((eq type 'boolean) (if (eq value t) "yes" "no"))
+     ((eq type 'number)
+      (cond ((>= value 1) (format "%.3gs" value))
+            ((>= value 0.001) (format "%.3gms" (* value 1000)))
+            ((> value 0) (format "%.3gµs" (* value 1000000)))
+            (t "0s")))
+     (t (format "%s" value)))))
+
 (defun ende-debug-ui--details (event)
-  "Format only typed metadata fields of EVENT."
+  "Format EVENT's primary fields; all fields remain available on RET."
   (mapconcat
    #'identity
-   (cl-loop for spec in ende-diagnostics--fields
-            for key = (car spec)
+   (cl-loop for key in (ende-debug-ui--brief-keys (plist-get event :kind))
             when (plist-member event key)
-            collect (format "%s=%s" (nth 2 spec) (plist-get event key)))
+            collect (format "%s=%s" (nth 2 (assq key ende-diagnostics--fields))
+                            (ende-debug-ui--value key (plist-get event key))))
    " "))
 
 (defun ende-debug-ui-refresh ()
@@ -73,35 +126,44 @@
   (let ((inhibit-read-only t)
         (position (point)))
     (erase-buffer)
-    (insert (format "Ende diagnostics · session %d · %s · %s · %d retained · %d overwritten\n"
+    (insert (format "SESSION %d   %s   %s   JOB %s\n"
                     ende-diagnostics-session
-                    (if ende-diagnostics-enabled "recording" "stopped")
-                    (if ende-debug-ui--expanded "timeline" "summary")
-                    (if ende-diagnostics--ring (ring-length ende-diagnostics--ring) 0)
-                    ende-diagnostics-dropped))
-    (insert (format "Scope: %s   TAB timeline  RET fields  g refresh  e export  a all jobs  q quit\n\n"
-                    (if ende-debug-ui--job (format "job %d" ende-debug-ui--job) "all jobs")))
-    (insert (propertize (format "%-12s %-4s %8s %8s %-22s %s\n"
-                                "TIME" "MARK" "JOB" "REQUEST" "EVENT" "DETAILS")
-                        'face 'bold))
+                    (if ende-diagnostics-enabled "RECORDING" "STOPPED")
+                    (if ende-debug-ui--expanded "TIMELINE" "SUMMARY")
+                    (or ende-debug-ui--job "ALL")))
+    (insert (propertize "TAB timeline   RET fields   g refresh   e export   a all jobs   q quit\n"
+                        'face 'shadow))
+    (when (> ende-diagnostics-dropped 0)
+      (insert (propertize (format "! CAPTURE DROPPED   events=%d\n" ende-diagnostics-dropped)
+                          'face 'warning)))
+    (insert "\n" (propertize (format "%-12s  %s  %4s  %7s  %-19s %s\n"
+                                        "TIME" " " "JOB" "REQ/TRY" "EVENT" "DETAILS")
+                                'face 'bold))
     (dolist (event (ende-diagnostics-events ende-debug-ui--job))
-      (let* ((level (plist-get event :level))
-             (mark (pcase level ('error "x") ('warning "!") ('outcome "+") (_ ".")))
-             (face (pcase level ('error 'error) ('warning 'warning)
-                          ('outcome 'success) (_ 'shadow))))
-        (when (or ende-debug-ui--expanded (not (eq level 'detail)))
-          (let ((start (point)))
-            (insert (format "%s %-4s %8s %8s %-22s %s\n"
-                            (format-time-string "%H:%M:%S.%3N" (plist-get event :time))
-                            mark (or (plist-get event :job) "-")
-                            (or (plist-get event :request) "-") (plist-get event :kind)
-                            (ende-debug-ui--details event)))
-            (add-text-properties start (point) (list 'ende-debug-event event 'face face))))))
+      (when (or ende-debug-ui--expanded (not (eq (plist-get event :level) 'detail)))
+        (pcase-let* ((`(,mark ,face) (ende-debug-ui--appearance event))
+                     (kind (plist-get event :kind))
+                     (request (plist-get event :request))
+                     (start (point)))
+          (insert (format "%s  %s  %4s  %7s  %s %s\n"
+                          (propertize (format-time-string "%H:%M:%S.%3N" (plist-get event :time))
+                                      'face 'shadow)
+                          (propertize mark 'face face)
+                          (or (plist-get event :job) "—")
+                          (if request (format "%s/%s" request (plist-get event :attempt)) "—")
+                          (propertize (format "%-19s" (upcase (replace-regexp-in-string "-" " " (symbol-name kind))))
+                                      'face face)
+                          (ende-debug-ui--details event)))
+          (add-text-properties start (point) (list 'ende-debug-event event)))))
     (when ende-debug-ui--detail-event
-      (insert "\nSelected event fields\n")
+      (insert "\n" (propertize "FIELDS\n" 'face 'bold))
       (let ((fields ende-debug-ui--detail-event))
         (while fields
-          (insert (format "%-20s %s\n" (pop fields) (pop fields))))))
+          (let ((key (pop fields)) (value (pop fields)))
+            (unless (memq key '(:time :level :kind))
+              (insert (format "%-18s %s\n"
+                              (upcase (substring (symbol-name key) 1))
+                              (ende-debug-ui--value key value))))))))
     (goto-char (min position (point-max)))))
 
 (defun ende-debug-ui-toggle-timeline ()
@@ -136,9 +198,10 @@ Both summary and timeline export all retained events for the selected scope."
     (user-error "Export cancelled"))
   (let ((saved (ende-debug-save-diagnostics file ende-debug-ui--job)))
     (unless saved (user-error "Could not save diagnostic metadata"))
-    (ende-diagnostics-record 'bundle-saved (ende-diagnostics-context-create ende-debug-ui--job))
+    (ende-diagnostics-record 'bundle-saved (ende-diagnostics-context-create ende-debug-ui--job)
+                             :content 'excluded)
     (ende-debug-ui-refresh)
-    (message "Saved local metadata: %s" saved)
+    (message "✓ BUNDLE SAVED  %s" saved)
     saved))
 
 (defvar ende-debug-ui-mode-map)

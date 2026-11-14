@@ -134,15 +134,19 @@ Only diagnostics-owned files are pruned; content captures are untouched."
   "Prune only owned regular metadata snapshots in local session directories."
   (when (file-remote-p (expand-file-name user-emacs-directory))
     (error "Local snapshots only"))
-  (let (files)
+  (let ((current (expand-file-name ende-debug--snapshot-name ende-debug--session-directory))
+        files)
     (dolist (directory (directory-files user-emacs-directory t "^ende-debug-[0-9]"))
       (let ((file (expand-file-name ende-debug--snapshot-name directory)))
         (when (and (file-directory-p directory) (not (file-symlink-p directory))
                    (file-regular-p file) (not (file-symlink-p file)))
           (push file files))))
     (setq files (sort files (lambda (a b)
-                             (time-less-p (file-attribute-modification-time (file-attributes b))
-                                          (file-attribute-modification-time (file-attributes a))))))
+                             (cond ((equal a current) t)
+                                   ((equal b current) nil)
+                                   (t (time-less-p
+                                       (file-attribute-modification-time (file-attributes b))
+                                       (file-attribute-modification-time (file-attributes a))))))))
     (let ((pruned 0))
       (dolist (file (nthcdr (max 1 ende-debug-snapshot-limit) files))
         (delete-file file)
@@ -179,9 +183,13 @@ Return its path on success.  Failures are classified, never propagated."
                 (rename-file temporary path t)
                 (setq temporary nil)
                 (unless file (ende-debug--prune-snapshots))
+                (unless file
+                  (ende-diagnostics-record 'capture-saved (ende-diagnostics-context-create job)
+                                           :count (ring-length ende-diagnostics--ring)))
                 path)
             ((error quit)
-             (ende-diagnostics-record 'debug-failed (ende-diagnostics-context-create job))
+             (ende-diagnostics-record 'debug-failed (ende-diagnostics-context-create job)
+                                      :operation 'write)
              nil))
         (when temporary (ignore-errors (delete-file temporary)))))))
 
@@ -200,8 +208,8 @@ Return its path on success.  Failures are classified, never propagated."
         ende-debugging-enabled nil
         ende-debug--next-content nil)
   (ende-diagnostics-start)
-  (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil))
-  (message "ende metadata diagnostics enabled; M-x ende-debug-open to inspect"))
+  (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil) :mode 'metadata)
+  (message "▶ DEBUG ON  mode=metadata  M-x ende-debug-open"))
 
 ;;;###autoload
 (defun ende-debugging-off ()
@@ -213,7 +221,7 @@ Return its path on success.  Failures are classified, never propagated."
     (ende-diagnostics-record 'debug-off (ende-diagnostics-context-create nil))
     (ende-debug-save-diagnostics)
     (ende-diagnostics-stop))
-  (when (called-interactively-p 'interactive) (message "ende diagnostics stopped")))
+  (when (called-interactively-p 'interactive) (message "■ DEBUG OFF")))
 
 ;;;###autoload
 (defun ende-debug-capture-next-request ()
@@ -222,8 +230,8 @@ Content is private but may contain prompts, source text, and reasoning data."
   (interactive)
   (unless ende-diagnostics-enabled (user-error "Enable diagnostics first"))
   (setq ende-debug--next-content t)
-  (ende-diagnostics-record 'content-enabled (ende-diagnostics-context-create nil))
-  (message "ende: next request content capture armed"))
+  (ende-diagnostics-record 'content-enabled (ende-diagnostics-context-create nil) :scope 'next-request)
+  (message "! CONTENT ENABLED  scope=next-request"))
 
 (defun ende-debug-consume-content-request ()
   "Return whether to capture this logical request and consume a pending choice.
@@ -568,8 +576,7 @@ errors are reported but never propagated into transport completion."
           (ende-debug--advance-baseline record outcome)
           (ende-debug--write-meta record))
        ((error quit)
-        (message "ende debugging: could not record completion: %s"
-                (error-message-string failure))))))
+        (message "✗ DEBUG FAILED  operation=completion condition=%s" (car failure))))))
 
 (defun ende-debug-record-request
     (serialized-body request-body messages profile transport endpoint &optional preparation)
@@ -650,8 +657,7 @@ disabled."
           (ende-debug--write-meta record)
           record)
       ((error quit)
-       (message "ende debugging: could not record request: %s"
-                (error-message-string failure))
+       (message "✗ DEBUG FAILED  operation=request condition=%s" (car failure))
        nil))))
 
 (defun ende-debug--latest-session-directory ()
