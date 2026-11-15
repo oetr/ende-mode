@@ -679,10 +679,12 @@ Return a cancellation function that only removes this callback."
           (name (ende-protocol-json-get "display_name" entry)))
       (when (and (stringp slug) (not (string-empty-p slug)))
         (let ((options (ende-codex--catalog-efforts entry)))
-          (list :id slug
-                :name (and (stringp name) (not (string-empty-p name)) name)
-                :efforts (plist-get options :efforts)
-                :default (plist-get options :default)))))))
+          (append
+           (list :id slug
+                 :name (and (stringp name) (not (string-empty-p name)) name)
+                 :efforts (plist-get options :efforts)
+                 :default (plist-get options :default))
+           (ende-protocol-model-limits entry)))))))
 
 (defun ende-codex--parse-catalog (text method)
   "Decode a recognized model catalog schema for METHOD from TEXT."
@@ -696,7 +698,9 @@ Return a cancellation function that only removes this callback."
                           (and (hash-table-p entry)
                                (ende-codex-auth--text-p (gethash "id" entry)))) data)
         (error "Public model catalog data is missing valid model IDs"))
-      (mapcar (lambda (entry) (list :id (gethash "id" entry)))
+      (mapcar (lambda (entry)
+                (append (list :id (gethash "id" entry))
+                        (ende-protocol-model-limits entry)))
               (append data nil)))
      ;; Some ChatGPT-plan catalog responses use the documented slug/visibility
      ;; shape even when reached through the public models URL. Accept it only

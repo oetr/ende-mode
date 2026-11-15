@@ -155,8 +155,9 @@
       (ende-codex-cancel-login))))
 
 (ert-deftest ende-codex-dual-recognized-catalogs ()
-  (should (equal (ende-codex--parse-catalog "{\"data\":[{\"id\":\"model\"}]}" 'chatgpt-plan-oauth)
-                 '((:id "model"))))
+  (should (equal (ende-codex--parse-catalog
+                  "{\"data\":[{\"id\":\"model\",\"context_window\":272000}]}" 'chatgpt-plan-oauth)
+                 '((:id "model" :context-window 272000))))
   (should (equal (plist-get (car (ende-codex--parse-catalog
                                 "{\"models\":[{\"slug\":\"model\",\"visibility\":\"list\"}]}" 'codex-oauth)) :id) "model"))
   (dolist (method '(chatgpt-plan-oauth codex-oauth))

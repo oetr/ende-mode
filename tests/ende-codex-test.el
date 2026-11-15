@@ -225,6 +225,9 @@
                                 (list (cons 'slug "model-a")
                                       (cons 'display_name "Model A")
                                       (cons 'visibility "list")
+                                      (cons 'context_window 272000)
+                                      (cons 'max_input_tokens 260000)
+                                      (cons 'max_output_tokens 32000)
                                       (cons 'default_reasoning_level "high")
                                       (cons 'supported_reasoning_levels
                                             (vector (list (cons 'effort "low"))
@@ -236,6 +239,10 @@
          (catalog (ende-provider--catalog-from-models entries)))
     (should (equal (plist-get catalog :models) (list "model-a")))
     (should (equal (plist-get (car (plist-get catalog :details)) :name) "Model A"))
+    (dolist (field '((:context-window . 272000)
+                     (:max-input-tokens . 260000)
+                     (:max-output-tokens . 32000)))
+      (should (= (plist-get (car (plist-get catalog :details)) (car field)) (cdr field))))
     (should (equal (plist-get (car entries) :efforts) (list "low" "high")))
     (should (equal (plist-get (car entries) :default) "high"))))
 

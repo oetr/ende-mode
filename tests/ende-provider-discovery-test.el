@@ -71,14 +71,15 @@
             (ende-protocol-json-read-string
              (concat
               "{\"object\":\"list\",\"data\":["
-              "{\"id\":\"llama3\",\"name\":\"Llama 3\","
+              "{\"id\":\"llama3\",\"name\":\"Llama 3\",\"context_length\":200000,"
+              "\"top_provider\":{\"context_length\":100000,\"max_completion_tokens\":10000},"
               "\"owned_by\":\"llama.cpp\",\"pricing\":{"
               "\"prompt\":\"0.000003\",\"completion\":\"0.000015\","
               "\"input_cache_read\":\"0.000001\","
               "\"input_cache_write\":\"0.000004\","
               "\"input_cache_write_1h\":\"0.000005\","
               "\"internal_reasoning\":\"0\"}},"
-              "{\"id\":\"llama4\"}]}"))))))
+              "{\"id\":\"llama4\",\"max_input_tokens\":200000,\"max_tokens\":64000}]}"))))))
     (should (string= (ende-provider-models-url profile)
                      "http://localhost:8080/v1/models"))
     (should (eq (plist-get metadata :source) :discovery))
@@ -86,6 +87,12 @@
     (let ((detail (car (plist-get metadata :model-details))))
       (should (string= (plist-get detail :id) "llama3"))
       (should (string= (plist-get detail :name) "Llama 3"))
+      (should (= (plist-get detail :context-window) 100000))
+      (should (= (plist-get detail :max-output-tokens) 10000))
+      (let ((input-only (cadr (plist-get metadata :model-details))))
+        (should (= (plist-get input-only :max-input-tokens) 200000))
+        (should (= (plist-get input-only :max-output-tokens) 64000))
+        (should-not (plist-get input-only :context-window)))
       (should (equal (plist-get detail :pricing)
                      '(:prompt "0.000003"
 			       :completion "0.000015"
@@ -95,7 +102,18 @@
 			       :input-cache-write-1h "0.000005"))))
     (should (string= (plist-get metadata :model) "llama3"))
     (should (string= (plist-get metadata :owner) "llama.cpp"))
-    (should (string= (plist-get metadata :client) "llama.cpp"))))
+    (should (string= (plist-get metadata :client) "llama.cpp")))
+  (dolist (value '(nil 0 -1 1.5 "200000" t))
+    (let* ((entry (make-hash-table :test #'equal))
+           (payload (make-hash-table :test #'equal)))
+      (puthash "id" "deepseek-flash" entry)
+      (dolist (key '("context_length" "context_window" "max_input_tokens"
+                     "max_output_tokens" "max_completion_tokens" "max_tokens"))
+        (puthash key value entry))
+      (puthash "data" (vector entry) payload)
+      (let ((detail (car (plist-get (ende-provider--catalog-from-payload payload) :details))))
+        (dolist (key '(:context-window :max-input-tokens :max-output-tokens))
+          (should-not (plist-member detail key)))))))
 
 
 (ert-deftest ende-test/provider-model-catalog-validation ()

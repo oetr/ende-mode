@@ -1041,13 +1041,14 @@ selection without starting another model-list request."
     result))
 
 (defun ende-provider--model-detail (entry)
-  "Return display metadata for model ENTRY, or nil without a valid ID."
+  "Return normalized metadata for model ENTRY, or nil without a valid ID."
   (let ((id (ende-protocol-json-get "id" entry))
         (name (ende-protocol-json-get "name" entry)))
     (when (ende-provider--valid-model-id-p id)
-      (list :id id
-            :name (ende-provider--display-label name)
-            :pricing (ende-provider--model-pricing entry)))))
+      (append (list :id id
+                    :name (ende-provider--display-label name)
+                    :pricing (ende-provider--model-pricing entry))
+              (ende-protocol-model-limits entry)))))
 
 (defun ende-provider--prune-cache (cache)
   "Remove expired and excess entries from CACHE."

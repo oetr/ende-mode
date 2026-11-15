@@ -288,6 +288,24 @@ Errors are signaled so the transport can turn them into protocol failures."
   (and (hash-table-p object)
        (gethash key object)))
 
+(defun ende-protocol-model-limits (entry)
+  "Return positive token limits advertised by model catalog ENTRY.
+Normalize context, input, and output limits without inferring model capacity."
+  (let ((sources (list entry (ende-protocol-json-get "top_provider" entry)))
+        limits)
+    (dolist (field '((:context-window "context_length" "context_window")
+                     (:max-input-tokens "max_input_tokens")
+                     (:max-output-tokens "max_output_tokens" "max_completion_tokens" "max_tokens")))
+      (let (values)
+        (dolist (source sources)
+          (dolist (key (cdr field))
+            (let ((value (ende-protocol-json-get key source)))
+              (when (and (integerp value) (> value 0))
+                (push value values)))))
+        (when values
+          (setq limits (plist-put limits (car field) (apply #'min values))))))
+    limits))
+
 (defun ende-protocol-json-equal-p (left right)
   "Compare parsed JSON LEFT and RIGHT, ignoring only object-key order.
 Arrays retain their order; false and null remain distinct."
