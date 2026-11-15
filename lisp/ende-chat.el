@@ -497,6 +497,9 @@ OUTLINE reads only headlines for enqueueing, without historical bodies."
       (setq current (ende-chat--parent document current)))
     hidden))
 
+(defvar ende-chat--continuation-task nil
+  "Selected task ID whose continuations do not inherit reasoning visibility.")
+
 (defun ende-chat--effective-visibility (document headline)
   "Return HEADLINE's effective visibility.
 
@@ -507,7 +510,11 @@ subtree, so a normal descendant can deliberately leave a reasoning section."
     (let ((current headline)
           (visibility nil))
       (while (and current (null visibility))
-        (setq visibility (ende-chat--property document current :visibility)
+        (setq visibility (or (ende-chat--property document current :visibility)
+                             (and ende-chat--continuation-task
+                                  (equal (ende-chat--property document current :reply-to)
+                                         ende-chat--continuation-task)
+                                  "normal"))
               current (ende-chat--parent document current)))
       (intern (or visibility "normal")))))
 
@@ -1786,6 +1793,7 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                                     :null-object nil :false-object nil))
          (before (plist-get sources :before-task))
          (task (ende-chat--context-source document fence :id (plist-get sources :task) before))
+         (ende-chat--continuation-task (plist-get sources :task))
          (cap-id (plist-get sources :cap))
          (work-id (plist-get sources :work))
          (response (plist-get sources :response))
@@ -1823,8 +1831,7 @@ FOLLOWING permits only FENCE's immediately following sibling task."
     (append
      (ende-chat--fence-summary-messages document fence)
      (unless before
-       (list (ende-chat--message 'user (ende-chat--content
-                                      document task (ende-chat--current-text document task)))))
+       (ende-chat--selected-task-messages document task))
      (when cap (list (ende-chat--protocol-capabilities-message
                      document (ende-chat--work-ancestor document cap) cap)))
      (when work (ende-chat--tool-batch-messages document work response)))))
@@ -1876,22 +1883,40 @@ Pass its document and pending destination.  Never checkpoint or edit the source.
                                  projected (plist-get (ende-job-instruction job) :request-id) "pending")))
               (funcall function projected destination))))))))
 
+(defun ende-chat--selected-task-messages (document task)
+  "Read TASK and its reasoning ancestry with the original selection rules."
+  (let ((ende-chat-context-policy 'current-section-only))
+    (ende-chat--serialize document task)))
+
 (defun ende-chat--pending-context (job document pending)
-  "Read JOB's effective input before PENDING using the normal Org reader."
-  (if (not (eq ende-chat-context-policy 'current-section-only))
-      (ende-chat--context-prefix document pending)
-    (let* ((instruction (ende-job-instruction job))
-           (task (ende-chat--context-source document pending :id (plist-get instruction :question-id)))
-           (root (ende-chat--root document task))
-           (fence (cl-find-if
-                   (lambda (node)
-                     (and (ende-chat--context-fence-p document node)
-                          (< (org-element-property :begin node) (org-element-property :begin pending))))
-                   (ende-chat--request-headlines document (plist-get instruction :request-id)) :from-end t))
-           (start (org-element-property :begin (or fence task))))
-      (ende-tool-store-call-with-replay
-       (lambda () (ende-chat--section-messages document root start
-                                               (org-element-property :begin pending)))))))
+  "Read JOB's selected task and completed input before PENDING."
+  (unless (memq ende-chat-context-policy '(root-prefix current-section-only))
+    (error "Invalid ende-chat-context-policy: %s" ende-chat-context-policy))
+  (let* ((instruction (ende-job-instruction job))
+         (ende-chat--continuation-task (plist-get instruction :question-id))
+         (task (ende-chat--context-source document pending :id ende-chat--continuation-task))
+         (root (ende-chat--root document task))
+         (ancestors (ende-chat--reasoning-ancestors document task))
+         (selected (ende-chat--current-headlines document task nil ancestors))
+         (current-only (eq ende-chat-context-policy 'current-section-only))
+         (fence (and current-only
+                     (cl-find-if
+                      (lambda (node)
+                        (and (ende-chat--context-fence-p document node)
+                             (< (org-element-property :begin node) (org-element-property :begin pending))))
+                      (ende-chat--request-headlines document (plist-get instruction :request-id)) :from-end t)))
+         (start (if current-only
+                    (org-element-property :begin (or fence (car ancestors) task))
+                  (ende-chat--context-start document root pending))))
+    (ende-tool-store-call-with-replay
+     (lambda ()
+       (ende-chat--section-messages
+        document root start (org-element-property :begin pending)
+        (lambda (node)
+          (or (memq node ancestors) (memq node selected)
+              (and (or (not current-only)
+                       (>= (org-element-property :begin node) (org-element-property :begin task)))
+                   (ende-chat--eligible-p document node)))))))))
 
 (defun ende-chat--context-stamp (job)
   "Return a cheap invalidation stamp for JOB's effective context."
@@ -1915,6 +1940,7 @@ The snapshot is valid only for this running job, generation and source input."
    job
    (lambda (document pending)
      (let* ((question-id (plist-get (ende-job-instruction job) :question-id))
+            (ende-chat--continuation-task question-id)
             (task (ende-chat--context-source document pending :id question-id))
             (system (car messages))
             (context (ende-chat--pending-context job document pending))
@@ -1959,15 +1985,15 @@ The snapshot is valid only for this running job, generation and source input."
          (error "Current capabilities have no retained source"))
        (let* ((canonical (ende-chat--context-with-metadata job (cons system context)))
               (retained (ende-chat--context-with-metadata
-                         job (append (list system (ende-chat--message
-                                                  'user (ende-chat--content
-                                                         document task (ende-chat--current-text document task))))
+                         job (append (list system)
+                                     (ende-chat--selected-task-messages document task)
                                      (when caps (list caps))))))
          (list :job job :generation (or (ende-job-execution-generation job) 0)
                :messages canonical :retained retained :recent recent :sources sources
                :level (plist-get (ende-job-instruction job) :response-level)
                :before-task
                (and (not recent)
+                    (not (ende-chat--reasoning-ancestors document task))
                     (eq (ende-chat--parent document task) (ende-chat--parent document pending))
                     (cl-every (lambda (entry) (eq (ende-transcript-entry-kind entry) 'capabilities))
                               (ende-transcript-entries (ende-job-transcript job)))
@@ -2009,18 +2035,22 @@ shortened.  SUMMARY remains assistant content, not system instructions."
     (append (list (car retained)) summary-messages (cdr retained)
             (when include-recent (plist-get snapshot :recent)))))
 
+(defun ende-chat--validate-compaction (job snapshot)
+  "Reject SNAPSHOT if JOB's generation or canonical source identity changed."
+  (unless (and (eq job (plist-get snapshot :job))
+               (ende-job-execution-current-p job (plist-get snapshot :generation)))
+    (error "Stale chat compaction generation"))
+  (let ((current (ende-chat-compaction-context job (plist-get snapshot :messages))))
+    (unless (ende-chat--context-equal-p (plist-get snapshot :identity) (plist-get current :identity))
+      (error "Chat compaction sources changed"))))
+
 (defun ende-chat-apply-compaction (job snapshot summary include-recent)
   "Validate SNAPSHOT, persist SUMMARY's fence and return its replacement input.
 Reject stale source input, execution generations and cancelled jobs before any
 write.  INCLUDE-RECENT selects the whole optional batch, never part of it."
-  (unless (and (eq job (plist-get snapshot :job))
-               (ende-job-execution-current-p job (plist-get snapshot :generation)))
-    (error "Stale chat compaction generation"))
-  (let* ((current (ende-chat-compaction-context job (plist-get snapshot :messages)))
-         (candidate (ende-chat-compaction-messages snapshot summary include-recent))
-         (sources (copy-sequence (plist-get snapshot :sources))))
-    (unless (ende-chat--context-equal-p (plist-get snapshot :identity) (plist-get current :identity))
-      (error "Chat compaction sources changed"))
+  (ende-chat--validate-compaction job snapshot)
+  (let ((candidate (ende-chat-compaction-messages snapshot summary include-recent))
+        (sources (copy-sequence (plist-get snapshot :sources))))
     (unless include-recent
       (setq sources (list :task (plist-get sources :task) :cap (plist-get sources :cap))))
     (when (plist-get snapshot :before-task)
@@ -4636,6 +4666,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
           (setq automatic t)
           (ende-chat--refresh-work-context job input))
         :compaction-context #'ende-chat-compaction-context
+        :validate-compaction #'ende-chat--validate-compaction
         :compaction-messages #'ende-chat-compaction-messages
         :apply-compaction #'ende-chat-apply-compaction
         :tool-calls #'ende-agent--tool-call-list

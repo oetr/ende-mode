@@ -567,8 +567,11 @@ Adapters own persistence; the runner never changes history on failure."
             job
             (lambda ()
               (current)
-              (when (and refresh (not (eq messages (funcall refresh job messages))))
-                (error "Compaction context changed while summarizing"))
+              (if-let* ((validate (and snapshot (plist-get callbacks :validate-compaction))))
+                  (funcall validate job snapshot)
+                (when (and refresh
+                           (not (ende-protocol-json-equal-p messages (funcall refresh job messages))))
+                  (error "Compaction context changed while summarizing")))
               (let ((reason (format "Automatic compaction: input about %d tokens; trigger %d; capacity %s: %s"
                                     size (plist-get budget :trigger) (or capacity "unknown")
                                     (ende-error-display-message failure))))
@@ -584,9 +587,15 @@ Adapters own persistence; the runner never changes history on failure."
               (current)
               (let* ((candidate (funcall (plist-get callbacks :compaction-messages)
                                          snapshot summary include-recent))
-                     (candidate-size (ende-compact-size state candidate definitions)))
+                     (candidate-size (ende-compact-size state candidate definitions))
+                     (ceiling (or capacity (plist-get budget :trigger))))
+                (when (and include-recent (> candidate-size ceiling))
+                  (setq include-recent nil
+                        candidate (funcall (plist-get callbacks :compaction-messages)
+                                           snapshot summary nil)
+                        candidate-size (ende-compact-size state candidate definitions)))
                 (if (or (not (< candidate-size raw-size))
-                        (> candidate-size (or capacity (plist-get budget :trigger))))
+                        (> candidate-size ceiling))
                     (failed (format "Replacement needs about %d tokens; no useful fitting reduction"
                                     candidate-size))
                   (ende--validate-messages candidate)

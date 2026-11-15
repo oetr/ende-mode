@@ -380,19 +380,26 @@
           (should (eq (ende-job-state job) 'running)))))))
 
 (ert-deftest ende-compact-work-gate-failure-and-observation ()
-  (dolist (mode '(reduce fail unknown oversized stale cancel))
+  (dolist (mode '(reduce fail identical-refresh changed-refresh unknown oversized stale cancel generation drop-recent))
     (let* ((messages (list '("system" . "Root") '("user" . "Task")
-                           (cons "assistant" (make-string 6000 ?x))))
+                           (cons "assistant" (make-string (if (eq mode 'drop-recent) 12000 6000) ?x))))
            (profile (list :api 'anthropic-messages :model "work"
-                          :context-window (unless (eq mode 'unknown) 10000)))
-           (job (ende--make-job :id 7 :state 'running :type 'agent :profile profile))
+                          :context-window (unless (eq mode 'unknown)
+                                            (if (eq mode 'drop-recent) 3000 10000))))
+           (job (ende--make-job :id 7 :state 'running :type 'agent :profile profile :execution-generation 0))
            (ende--active-jobs (list job))
            (state (ende-compact-state-create :policy '(:tokens 1000)))
+           (live messages)
+           recent-selections
            (callbacks (list :compaction-context
                             (lambda (owner input)
                               (ende-agent--compaction-context owner input (cadr messages)))
-                            :compaction-messages #'ende-agent--compaction-messages
-                            :apply-compaction #'ende-agent--apply-compaction))
+                            :compaction-messages
+                            (lambda (snapshot summary include-recent)
+                              (push include-recent recent-selections)
+                              (ende-agent--compaction-messages snapshot summary include-recent))
+                            :apply-compaction #'ende-agent--apply-compaction
+                            :refresh-context (lambda (_owner _input) live)))
            pending sent warnings)
       (should (= (ende-compact-size state messages nil) (ende-compact-estimate messages nil)))
       (ende-compact-observe state profile messages
@@ -403,6 +410,12 @@
                    (+ 1000 (- (ende-compact-estimate grown nil) (ende-compact-estimate messages nil))))))
       (should (= (ende-compact-work-size state (plist-put (copy-sequence profile) :model "other") messages)
                  (ende-compact-estimate messages nil)))
+      (when (eq mode 'drop-recent)
+        (setq messages
+              (append messages
+                      (list '(:role "assistant" :content "" :tool-calls ((:id "one" :name "read_file" :arguments "{}")))
+                            (list :role "tool" :tool-call-id "one" :content (make-string 900 ?r))))
+              live messages))
       (cl-letf (((symbol-function 'ende-compact-summarize)
                  (lambda (_job input _budget done failed &optional _instructions)
                    (should (eq input messages))
@@ -413,17 +426,28 @@
         (should pending)
         (pcase mode
           ('stale (setf (ende-job-profile job) '(:model "changed")))
-          ('cancel (setf (ende-job-state job) 'cancelled)))
-        (if (memq mode '(fail unknown))
+          ('cancel (setf (ende-job-state job) 'cancelled))
+          ('generation (cl-incf (ende-job-execution-generation job)))
+          ('identical-refresh (setq live (copy-tree messages)))
+          ('changed-refresh (setq live (append messages '(("user" . "Changed task"))))))
+        (if (memq mode '(fail identical-refresh changed-refresh unknown stale cancel generation))
             (funcall (cadr pending) "Summary unavailable")
-          (funcall (car pending) (if (eq mode 'oversized) (make-string 40000 ?s) "Useful summary")))
+          (funcall (car pending) (pcase mode
+                                  ('oversized (make-string 40000 ?s))
+                                  ('drop-recent (make-string 8000 ?s))
+                                  (_ "Useful summary"))))
         (cond
-         ((eq mode 'reduce)
+         ((memq mode '(reduce drop-recent))
           (should (= (length sent) 1))
-          (should (equal (cadr (car sent)) '("assistant" . "Useful summary")))
+          (when (eq mode 'drop-recent)
+            (should (equal (reverse recent-selections) '(t nil))))
+          (should (equal (cadr (car sent))
+                         (cons "assistant" (if (eq mode 'drop-recent) (make-string 8000 ?s) "Useful summary"))))
+          (should-not (cl-find "tool" (car sent) :key #'ende-content-role :test #'equal))
           (should (= (length (ende-transcript-entries (ende-job-transcript job))) 1)))
-         ((memq mode '(fail oversized))
-          (should (equal sent (list messages)))
+         ((memq mode '(fail identical-refresh oversized))
+          (should (= (length sent) 1))
+          (should (eq (car sent) messages))
           (should warnings)
           (should-not (ende-job-transcript job)))
          (t (should-not sent)))))))
