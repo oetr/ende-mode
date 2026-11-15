@@ -371,9 +371,39 @@ DEFINITIONS.  Even a single giant tool result can span several fragments."
         (setq start low)))
     (nreverse chunks)))
 
+(defun ende-compact--controls (instructions target)
+  "Return private summary INSTRUCTIONS and empty capabilities for TARGET."
+  (list
+   (cons "user"
+         (format (concat "%s\n\n%s\n\nAim for at most %d tokens total; "
+                         "for fragments, be proportionately shorter. "
+                         "Reduce the source at least by half. Do not call any tools.")
+                 ende-chat--compact-system
+                 (or instructions ende-chat-compact-instruction) target))
+   (ende-content-capabilities
+    (ende-chat-config-capabilities '(:access-policy (:active-tools nil))))))
+
+(defun ende-compact-manual-budget (profile messages instructions)
+  "Budget a manual summary of MESSAGES with PROFILE and INSTRUCTIONS.
+Manual requests do not depend on automatic enablement or trigger validation.
+Use known input capacity and output reserves, otherwise a configured fallback
+or the current request estimate.  Provider size failures remain bounded by the
+runner; an unknown model never implies an arbitrary default context window."
+  (let* ((definitions (plist-get profile :tool-definitions))
+         (target (max 1 (floor (* 60 (ende-compact-estimate messages definitions)) 100)))
+         (estimate (ende-compact--request-size
+                    (append messages (ende-compact--controls instructions target)) definitions))
+         (capacity (plist-get (ende-compact-budget profile (list :tokens estimate)) :capacity))
+         (ceiling (or capacity
+                      (ende-compact--positive (plist-get ende-auto-compact :fallback-tokens))
+                      estimate)))
+    (list :capacity capacity :trigger ceiling :target (min target (floor (* 60 ceiling) 100)))))
+
 (defun ende-compact-summarize (job messages budget on-done on-error &optional instructions)
   "Asynchronously summarize MESSAGES for JOB without editing history.
-Call ON-DONE with a nonblank summary string, or ON-ERROR with a failure.
+Call ON-DONE with a nonblank summary string and private final-request metadata,
+or ON-ERROR with a failure.  Metadata retains usage, reasoning and provenance
+for manual persistence; it is not sent through JOB's event stream.
 BUDGET has :capacity (optional input ceiling), :trigger (fallback ceiling)
 and :target (desired TOTAL summary allowance, after caller-retained overhead).
 INSTRUCTIONS defaults to `ende-chat-compact-instruction'.  Preserve the resolved
@@ -390,7 +420,7 @@ generation silently discards continuations, including late provider callbacks."
   (let ((generation (or (ende-job-execution-generation job) 0))
         (profile (ende-provider-config-copy (ende-job-profile job)))
         (llm-function ende-llm-function)
-        (requests 0) (passes 0) settled pending draining
+        (requests 0) (passes 0) settled pending draining result-data
         definitions limit target root history controls original-size)
     (cl-labels
         ((live () (and (not settled) (ende-job-execution-current-p job generation)))
@@ -420,7 +450,7 @@ generation silently discards continuations, including late provider callbacks."
              (error "Compaction did not reduce the history"))
            (when (live)
              (setq settled t)
-             (funcall on-done summary)))
+             (funcall on-done summary result-data)))
          (send (request accept &optional initial)
            (when (>= requests ende-compact--max-requests)
              (error "Compaction exhausted its bounded request allowance"))
@@ -429,11 +459,22 @@ generation silently discards continuations, including late provider callbacks."
            (status (list :type :status :status
                          (format "Summarizing context (request %d)" requests)))
            (when (live)
-             (let ((callbacks
+             (let* (metadata usage
+                    (callbacks
                     (ende--llm-callbacks
                      job
                      (lambda (result)
-                       (enqueue (lambda () (funcall accept (ende-compact--summary result)))))
+                       (enqueue
+                        (lambda ()
+                          (let ((summary (ende-compact--summary result)))
+                            (setq result-data
+                                  (ende-plist-merge
+                                   (ende-plist-merge metadata (when usage (list :usage usage)))
+                                   (unless (stringp result)
+                                     (cl-loop for key in '(:thinking :usage :model :provider :duration-ms)
+                                              when (plist-member result key)
+                                              append (list key (plist-get result key))))))
+                            (funcall accept summary)))))
                      (lambda (failure)
                        (enqueue
                         (lambda ()
@@ -444,7 +485,12 @@ generation silently discards continuations, including late provider callbacks."
                                                               request definitions))) 4))
                                 (chunk-pass (ende-compact--source history)))
                             (fail failure)))))
-                     #'status))
+                     (lambda (event)
+                       (pcase (plist-get event :type)
+                         (:metadata (setq metadata (ende-plist-merge
+                                                    metadata (plist-get event :metadata))))
+                         (:usage (setq usage (plist-get event :usage))))
+                       (status event))))
                    (ende-tools--request-phase 'compact))
                (condition-case caught
                    (funcall llm-function request callbacks profile)
@@ -487,16 +533,7 @@ generation silently discards continuations, including late provider callbacks."
                          (and (equal (ende-content-role message) "system")
                               (not (ende-content-capabilities-p message)))) messages)
                  history (cl-remove-if (lambda (message) (memq message root)) messages)
-                 controls
-                 (list
-                  (cons "user"
-                        (format (concat "%s\n\n%s\n\nAim for at most %d tokens total; "
-                                        "for fragments, be proportionately shorter. "
-                                        "Reduce the source at least by half. Do not call any tools.")
-                                ende-chat--compact-system
-                                (or instructions ende-chat-compact-instruction) target))
-                  (ende-content-capabilities
-                   (ende-chat-config-capabilities '(:access-policy (:active-tools nil)))))
+                 controls (ende-compact--controls instructions target)
                  original-size (ende-compact-estimate history nil))
            (let ((request (append messages controls)))
              (if (<= (ende-compact--request-size request definitions) limit)
@@ -580,7 +617,7 @@ Adapters own persistence; the runner never changes history on failure."
                       (display-warning 'ende reason)
                       (funcall send messages))
                   (error "%s" reason))))))
-         (accept (summary)
+         (accept (summary &optional _metadata)
            (ende--call-with-job-error
             job
             (lambda ()

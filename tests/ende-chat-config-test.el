@@ -1802,19 +1802,49 @@
   (ende-test--reset)
   (let* ((configuration
           (ende-test--chat-config-block '((tools about_thinking))))
-         (ende-llm-function (ende-test--fake-llm '("Summary."))))
+         (ende-auto-compact nil)
+         (ende-agent-auto-compact nil)
+         (ende-llm-function (ende-test--fake-llm '("Earlier answer." "Summary.") t)))
     (with-temp-buffer
       (org-mode)
       (insert configuration "\n* Conversation\n** Earlier\nFacts.\n"
-              "** Summary\nKeep the key facts.\n")
-      (ende-test--chat-goto "** Summary")
-      (let* ((job (ende-compact))
-             (messages (plist-get (car ende-test--calls) :messages))
-             (system (cdr (assoc "system" messages))))
-        (should (eq (ende-job-state job) 'completed))
-        (should (equal system ende-chat--compact-system))
-        (should-not (string-match-p "Document-level Ende configuration:" system))
-        (should-not (string-match-p (regexp-quote configuration) system))))))
+              "** Summary\nKeep the key facts.\n** Next\nContinue.\n")
+      (ende-test--chat-goto "** Earlier")
+      (let ((work (ende-ask)))
+        (ende-test--complete-call (car ende-test--calls))
+        (should (eq (ende-job-state work) 'completed))
+        (ende-test--chat-goto "** Summary")
+        (let* ((job (ende-compact (ende-job-profile work)))
+               (before (car ende-test--calls))
+               (call (cadr ende-test--calls))
+               (messages (plist-get call :messages))
+               (prefix (plist-get before :messages))
+               (options (plist-get call :options))
+               (snapshots (cl-remove-if-not #'ende-content-capabilities-p messages)))
+          (should (eq (ende-job-state job) 'running))
+          (should (equal prefix (cl-subseq messages 0 (length prefix))))
+          (should (ende-protocol-json-equal-p
+                   (plist-get options :tool-definitions)
+                   (plist-get (plist-get before :options) :tool-definitions)))
+          (should (ende-protocol-json-equal-p
+                   (plist-put (copy-sequence options) :request-phase 'work)
+                   (plist-put (copy-sequence (ende-job-profile job)) :request-phase 'work)))
+          (should (= (length snapshots) 2))
+          (should (equal (car (last messages))
+                         (ende-content-capabilities
+                          (ende-chat-config-capabilities '(:access-policy (:active-tools nil))))))
+          (should (string-match-p "Keep the key facts"
+                                  (ende-content-body (car (last messages 2)))))
+          (should-not (string-match-p "Keep the key facts"
+                                      (ende-test--chat-context-text (butlast messages 2))))
+          (let ((document (ende-chat--build-document)))
+            (should-not (cl-some (lambda (headline) (ende-chat--context-fence-p document headline))
+                                (ende-chat--document-headlines document))))
+          (ende-test--complete-call call)
+          (should (eq (ende-job-state job) 'completed))
+          (ende-test--chat-goto "** Next")
+          (should-not (string-match-p "Keep the key facts"
+                                      (ende-test--chat-context-text (ende-chat-context-at-point)))))))))
 
 (provide 'ende-chat-config-test)
 

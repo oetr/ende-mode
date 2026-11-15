@@ -1867,9 +1867,11 @@
              (body (nth 1 input))
              (late-note (nth 2 input))
              (ende-chat-compact-instruction "Keep the essentials.")
+             (ende-auto-compact nil)
+             (ende-agent-auto-compact nil)
              (ende-llm-function
               (ende-test--fake-llm
-               '((:content "* Facts\nSummary"
+               '((:content "* Facts\nSummary" :reported-model "compact-model"
 			   :thinking "Plan"
                    :usage (:input_tokens 17 :output_tokens 9
                            :input_tokens_details (:cached_tokens 4)))) t)))
@@ -1883,7 +1885,7 @@
 					  (make-string level ?*) " Next\nContinue\n")
 				  (goto-char start)
 				  (let* ((job (ende-compact (ende-test--request-profile
-                                                          '(:name local :model "compact-model"))))
+                                                          '(:name local :model "requested-model"))))
 					 (question-id (plist-get (ende-job-instruction job) :question-id))
 					 (call (car ende-test--calls))
 					 (messages (plist-get call :messages)))
@@ -1891,12 +1893,12 @@
 				    (should (string-match-p
 					     (regexp-quote (if (string-empty-p body)
 							       ende-chat-compact-instruction body))
-					     (cdar (last messages))))
+					     (ende-content-body (car (last messages 2)))))
 				    (should-not (string-match-p "ENDE_CHAT_TITLE" (cdar messages)))
 				    (when (and (not (string-empty-p title))
 					       (string-empty-p body))
 				      (should-not (string-match-p (regexp-quote title)
-								  (cdar (last messages)))))
+								  (ende-content-body (car (last messages 2))))))
 				    (when late-note
 				      (org-end-of-meta-data t)
 				      (insert late-note "\n"))
@@ -2040,7 +2042,7 @@
 	       (should
                 (equal (ende-test--chat-context-headings
                         (butlast (cdr (plist-get (nth 4 ende-test--calls)
-                                                 :messages))))
+                                                 :messages)) 2))
 		       '("Agent: Context Fence")))
 	       (ende-test--complete-call (nth 4 ende-test--calls))
 	       (should (eq (ende-job-state third) 'completed)))))))
@@ -2060,14 +2062,15 @@
 
 
 (ert-deftest ende-test/chat-compaction-failures-leave-history-usable ()
-  (dolist (outcome '(:error :empty :title-only :cancelled :deleted))
+  (dolist (outcome '(:error :empty :incomplete :tools :cancelled :deleted))
     (ende-test--reset)
     (let ((ende-llm-function
            (ende-test--fake-llm
             (list (pcase outcome
                     (:error :error)
                     (:empty "")
-                    (:title-only "")
+                    (:incomplete '(:content "Partial summary" :finish-reason "length"))
+                    (:tools '(:content "Unsafe summary" :tool-calls ((:name "about_thinking"))))
                     (_ "Summary"))) t)))
       (ende-test--with-buffer
        "* Topic\nOriginal history\n** Instructions\nKeep decisions\n** Next\nAsk\n"

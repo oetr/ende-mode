@@ -488,7 +488,10 @@
           (ende-test--chat-goto "** Compact")
           (let ((job (ende-compact profile)))
             (should (eq (ende-job-state job) 'running))
-            (should-not (plist-get (plist-get (car ende-test--calls) :options) :tool-definitions))
+            (should (plist-get (plist-get (car ende-test--calls) :options) :tool-definitions))
+            (should (equal (car (last (plist-get (car ende-test--calls) :messages)))
+                           (ende-content-capabilities
+                            (ende-chat-config-capabilities '(:access-policy (:active-tools nil))))))
             (ende-test--complete-call (car ende-test--calls))
             (should (eq (ende-job-state job) 'completed)))))
     (ende-test--reset)))

@@ -199,6 +199,25 @@
       (setcdr cycle cycle)
       (should (< (ende-compact-estimate cycle nil) 17000)))))
 
+(ert-deftest ende-compact-manual-budget-without-automatic-trigger ()
+  (let* ((messages (list '("system" . "Stable") (cons "user" (make-string 3000 ?x))))
+         (ende-auto-compact nil)
+         (unknown (ende-compact-manual-budget nil messages "Keep facts"))
+         (known (ende-compact-manual-budget
+                 '(:context-window 5000 :output-tokens 1000) messages "Keep facts")))
+    (should-not (plist-get unknown :capacity))
+    (should (= (plist-get unknown :trigger)
+               (ende-compact--request-size
+                (append messages (ende-compact--controls "Keep facts" (plist-get unknown :target))) nil)))
+    (should (= (plist-get known :capacity) 4000))
+    (let ((ende-auto-compact '(:tokens 1)))
+      (should (equal known (ende-compact-manual-budget
+                            '(:context-window 5000 :output-tokens 1000) messages "Keep facts"))))
+    (let ((ende-auto-compact '(:percent nil :fallback-tokens 2000)))
+      (should (= (plist-get (ende-compact-manual-budget nil messages "Keep facts") :trigger) 2000))
+      (should (equal known (ende-compact-manual-budget
+                            '(:context-window 5000 :output-tokens 1000) messages "Keep facts"))))))
+
 (ert-deftest ende-compact-summary-preserves-prefix-and-host-gate ()
   (let* ((profile '(:model "test" :output-tokens 200 :job-id 7
                    :codex-session-id "session" :request-phase work
@@ -222,7 +241,7 @@
             (setq request input sent-profile options)
             (funcall (plist-get callbacks :on-done) '(:content "Useful summary" :finish-reason "stop")))))
     (ende-compact-summarize job messages '(:capacity 10000 :target 300)
-                            (lambda (value) (setq summary value))
+                            (lambda (value &optional _metadata) (setq summary value))
                             (lambda (value) (setq failure value)))
     (should (equal summary "Useful summary"))
     (should-not failure)
@@ -288,7 +307,7 @@
                                               (ende-content-body (cadr input))
                                             "Facts retained from history.")))))))
         (ende-compact-summarize job messages (list :trigger ceiling :target 30)
-                                (lambda (value) (setq summary value))
+                                (lambda (value &optional _metadata) (setq summary value))
                                 (lambda (value) (setq failure value)))
         (should (equal messages original))
         (should (eq (ende-job-state job) 'running))
@@ -342,7 +361,7 @@
         (ende-compact-summarize
          job (list '("system" . "Root") (cons "user" (make-string 3000 ?x)))
          (list :trigger (if (eq outcome 'chunk-cancel) 1500 10000) :target 10)
-         (lambda (value) (push value done)) (lambda (value) (push value errors)))
+         (lambda (value &optional _metadata) (push value done)) (lambda (value) (push value errors)))
         (when (eq outcome 'chunk-cancel)
           (funcall (plist-get callbacks :on-done) '(:content "First fragment summary")))
         (dolist (event '((:type :delta :channel :content :text "Private summary")

@@ -78,8 +78,12 @@
             (should-not (and (ende-job-transcript job)
                              (cl-find 'capabilities (ende-transcript-entries (ende-job-transcript job))
                                       :key #'ende-transcript-entry-kind))))
-          (should-not (cl-some #'ende-content-capabilities-p
-                               (plist-get (car (last ende-test--calls)) :messages))))
+          (let* ((messages (plist-get (car (last ende-test--calls)) :messages))
+                 (snapshots (cl-remove-if-not #'ende-content-capabilities-p messages)))
+            (should (> (length snapshots) 1))
+            (should (equal (car (last messages))
+                           (ende-content-capabilities
+                            (ende-chat-config-capabilities '(:access-policy (:active-tools nil))))))))
       (ende-test--reset)
       (delete-directory directory t))))
 

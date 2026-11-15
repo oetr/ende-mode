@@ -4573,21 +4573,35 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
         (error "Compaction source fence is no longer eligible"))
     (unless (equal (ende-chat--property document question :visibility) "hidden")
       (error "Compaction instructions are no longer hidden")))
-  (let* ((body (if source-fence ""
-                 (ende-chat--instruction-body document question)))
-         (instructions
-          (format "%s %s\n%s"
-                  (make-string (org-element-property :level question) ?*)
-                  ende-chat--compact-instructions-title
-                  (if (string-blank-p body) ende-chat-compact-instruction body)))
-         (messages (cl-remove-if
-                    #'ende-content-capabilities-p
-                    (ende-chat--serialize
-                     document destination instructions
-                     (ende-chat--root document question)))))
-    (unless (cdr messages)
+  (let ((messages (ende-chat--serialize
+                   document destination "" (ende-chat--root document question))))
+    (unless messages
       (error "No chat context to compact"))
     messages))
+
+(defun ende-chat--compact-instructions (document question source-fence)
+  "Return manual instructions at QUESTION in DOCUMENT.
+SOURCE-FENCE uses the default, never the earlier summary as instructions."
+  (let ((body (if source-fence "" (ende-chat--instruction-body document question))))
+    (format "%s %s\n%s"
+            (make-string (org-element-property :level question) ?*)
+            ende-chat--compact-instructions-title
+            (if (string-blank-p body) ende-chat-compact-instruction body))))
+
+(defun ende-chat--summarize (job request configuration instructions)
+  "Run manual compaction for JOB using REQUEST, CONFIGURATION and INSTRUCTIONS."
+  (setf (ende-job-profile job)
+        (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
+                   (ende-tool-definitions configuration (ende-job-parent job)))
+        (ende-job-access-policy job) '(:active-tools nil)
+        (ende-job-request-phase job) 'compact)
+  (let ((messages (ende-operations--add-source-metadata job request)))
+    (ende-compact-summarize
+     job messages (ende-compact-manual-budget (ende-job-profile job) messages instructions)
+     (lambda (summary metadata)
+       (ende-chat--apply-compact-result job (plist-put (copy-sequence metadata) :content summary)))
+     (lambda (failure) (ende-job-fail job failure))
+     instructions)))
 
 (defun ende-chat--consume-user-guidance (job &optional assistant-result)
   "Consume JOB's pending guidance as a stored synthetic tool exchange.
@@ -4808,10 +4822,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                                (plist-get instruction :request-id))
                               (plist-get instruction :source-fence))
                            (ende-chat--serialize document question))))
-                      (system-prompt
-                       (if compact
-                           ende-chat--compact-system
-                         (ende-chat--system-prompt document)))
+                      (system-prompt (ende-chat--system-prompt document))
                       (request (cons (cons "system" system-prompt) messages)))
                  (unless compact
                    (setf (ende-job-instruction job)
@@ -4825,15 +4836,17 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                    (setf (ende-job-access-policy job) tool-configuration
                          (ende-job-family-registry (ende-job-family job))
                          (ende-agent-freeze-registry
-                          (ende-job-family job) (plist-get environment :registry)))
-                   (when-let* ((snapshot (ende-chat--capability-update request environment)))
+                          (ende-job-family job) (plist-get environment :registry))))
+                 (when-let* ((snapshot (ende-chat--capability-update request environment)))
+                   (unless compact
                      (ende-transcript-record-capabilities job (ende-content-body snapshot))
-                     (ende-chat--checkpoint-transcript job)
-                     (setq request (append request (list snapshot)))))
+                     (ende-chat--checkpoint-transcript job))
+                   (setq request (append request (list snapshot))))
                  (if compact
-                     (ende--dispatch-llm
-                      job request
-                      (lambda (result) (ende-chat--apply-result job result)))
+                     (ende-chat--summarize
+                      job request tool-configuration
+                      (ende-chat--compact-instructions
+                       document question (plist-get instruction :source-fence)))
                    (ende-chat--dispatch-with-tools
                     job request tool-configuration)))))))))))
 
