@@ -371,6 +371,8 @@
               (ende-debug-ui-refresh)
               (should buffer-read-only)
               (should truncate-lines)
+              (should (string-match-p "REQUEST OFFERED" (buffer-string)))
+              (ende-debug-ui-toggle-timeline)
               (should-not (string-match-p "REQUEST OFFERED" (buffer-string)))
               (let* ((events (ende-diagnostics-events))
                      (summary (ende-debug-ui-export (expand-file-name "summary.json" root))))

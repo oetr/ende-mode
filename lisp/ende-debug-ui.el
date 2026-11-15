@@ -16,7 +16,7 @@
 (defvar ende-debug-ui--buffer nil)
 (defvar-local ende-debug-ui--owned-buffer nil)
 (defvar-local ende-debug-ui--job nil)
-(defvar-local ende-debug-ui--expanded nil)
+(defvar-local ende-debug-ui--expanded t)
 (defvar-local ende-debug-ui--detail-event nil)
 
 (defun ende-debug-ui--job-event (job event)
@@ -221,7 +221,7 @@ Both summary and timeline export all retained events for the selected scope."
         map))
 
 (define-derived-mode ende-debug-ui-mode special-mode "Ende diagnostics"
-  "Inspect bounded local metadata, never request content."
+  "Inspect local metadata, never request content."
   (setq-local truncate-lines t)
   (buffer-disable-undo)
   (setq ende-debug-ui--buffer (current-buffer)))
