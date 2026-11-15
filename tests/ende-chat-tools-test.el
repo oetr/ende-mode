@@ -34,11 +34,13 @@
 (require 'ende-chat-test-helpers)
 
 (ert-deftest ende-test/chat-and-agents-share-guidance-after-reload ()
-  (let ((ende-agent--implementation-guidance "")
+  (let ((ende-agent--tool-guidance "")
+        (ende-agent--implementation-guidance "")
         (ende-agent--delegation-guidance "")
         (ende-agent--system-prompt "")
         (ende-chat--system ""))
     (ende-reload)
+    (should-not (string-empty-p ende-agent--tool-guidance))
     (should-not (string-empty-p ende-agent--implementation-guidance))
     (should-not (string-empty-p ende-agent--delegation-guidance))
     (with-temp-buffer
@@ -46,7 +48,8 @@
       (dolist (prompt (list (ende-chat--system-prompt
                             (ende-chat--build-document))
                            ende-agent--system-prompt))
-        (dolist (guidance (list ende-agent--implementation-guidance
+        (dolist (guidance (list ende-agent--tool-guidance
+                               ende-agent--implementation-guidance
                                ende-agent--delegation-guidance))
           (should (string-match-p (regexp-quote guidance) prompt)))))))
 
