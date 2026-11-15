@@ -468,6 +468,7 @@ so a directive completed by a later chunk can still be escaped in place."
                (final "Agent: Final reply") (t "Agent: Reply"))))
       ((or 'tool-call 'tool-result) (ende-work-buffer--tool-title entry section))
       ('capabilities "Agent: Capabilities")
+      ('context-fence "Agent: Context Fence")
       ('opaque "Agent: Opaque BS")
       ('thinking "Agent: Reasoning")
       ('summary (if (ende-work-buffer--streaming-p entry)

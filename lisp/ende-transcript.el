@@ -159,6 +159,13 @@ callers own any chat recovery checkpoint and provider dispatch."
                (ende-transcript-sources transcript))
       (ende-transcript-notify transcript response 'metadata))))
 
+(defun ende-transcript-record-context-fence (transcript summary)
+  "Append a completed context fence containing SUMMARY to TRANSCRIPT.
+This is a history boundary, not a provider reasoning summary."
+  (unless (and (stringp summary) (not (string-blank-p summary)))
+    (error "A context fence needs a nonblank summary"))
+  (ende-transcript-append transcript 'context-fence summary nil 'complete))
+
 (defun ende-transcript-begin-response (transcript)
   "Start a provider response boundary in TRANSCRIPT."
   (ende-transcript--interrupt-response transcript)

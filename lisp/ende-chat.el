@@ -170,6 +170,12 @@ assistant role of its enclosing section."
 (defconst ende-chat-state-property "ENDE_CHAT_STATE"
   "Org property storing the state of an unfinished chat reply.")
 
+(defconst ende-chat-materialized-through-property "ENDE_CHAT_MATERIALIZED_THROUGH"
+  "Completed transcript entry count committed before a pending reply.")
+
+(defconst ende-chat-transcript-start-property "ENDE_CHAT_TRANSCRIPT_START")
+(defconst ende-chat-transcript-end-property "ENDE_CHAT_TRANSCRIPT_END")
+
 (defconst ende-chat-context-fence-property "ENDE_CHAT_CONTEXT_FENCE"
   "Local Org property whose value t marks a completed context summary.")
 
@@ -227,6 +233,9 @@ assistant role of its enclosing section."
         (cons ende-chat-content-synthetic-newline-property :content-synthetic-newline)
         (cons ende-chat-reasoning-for-property :reasoning-for)
         (cons ende-chat-state-property :state)
+        (cons ende-chat-materialized-through-property :materialized-through)
+        (cons ende-chat-transcript-start-property :transcript-start)
+        (cons ende-chat-transcript-end-property :transcript-end)
         (cons ende-chat-context-fence-property :context-fence))
   "Org properties parsed into the per-document property plists.")
 
@@ -1303,6 +1312,21 @@ SELECTED-WORK-P, when supplied, limits references to selected segments."
                (org-element-property :raw-value child))))))
   work)
 
+(defun ende-chat--validate-request-fence (document fence anchor)
+  "Validate a generated sibling FENCE in ANCHOR's request scope."
+  (unless (and (ende-chat--context-fence-p document fence)
+               (equal (org-element-property :raw-value fence) ende-chat--context-fence-title)
+               (equal (ende-chat--property document fence :role) "assistant")
+               (stringp (ende-chat--property document fence :id))
+               (not (string-empty-p (ende-chat--property document fence :id)))
+               (null (ende-chat--property document fence :state))
+               (eq (ende-chat--parent document fence) (ende-chat--parent document anchor))
+               (= (org-element-property :level fence) (org-element-property :level anchor))
+               (equal (ende-chat--property document fence :reply-to)
+                      (ende-chat--property document anchor :reply-to)))
+    (error "Malformed generated request context fence"))
+  fence)
+
 (defun ende-chat--validate-generated-work-section (document work)
   "Validate the complete request containing WORK, including sibling segments."
   (let* ((request-id (ende-chat--property document work :request-id))
@@ -1338,12 +1362,20 @@ SELECTED-WORK-P, when supplied, limits references to selected segments."
                    (ende-chat--assistant-protocol-p document headline)
                    (equal (org-element-property :raw-value headline)
                           "Agent: Reply")))
+             (fence (ende-chat--property document headline :context-fence))
              (valid (or (memq headline works)
+                        fence
                         final-reply
                         (memq parent works))))
         (unless valid
           (error "Malformed generated protocol section outside Agent: Work: %s"
                  (org-element-property :raw-value headline)))
+        (when fence
+          (ende-chat--validate-request-fence document headline work)
+          (let ((id (ende-chat--property document headline :id)))
+            (when (member id ids)
+              (error "Malformed generated request: duplicate fence ID"))
+            (push id ids)))
         (when final-reply
           (push headline replies))))
     (when (> (length replies) 1)
@@ -2085,15 +2117,17 @@ COMPACT selects the context-fence title."
             (ende-chat--response-property ende-chat-state-property "pending")
             ":END:\n\n")))
 
-(defun ende-chat--work-text (level question-id request-id)
-  "Return a pending generated Agent: Work container at LEVEL."
+(defun ende-chat--work-text (level question-id request-id &optional properties)
+  "Return a generated Agent: Work container at LEVEL.
+PROPERTIES identifies a completed segment; otherwise render a pending Work."
   (concat (make-string level ?*) " " ende-chat--work-title
           " :ignore:noexport:\n"
           ":PROPERTIES:\n"
           (ende-chat--response-property ende-chat-work-property "t")
           (ende-chat--response-property ende-chat-reply-to-property question-id)
           (ende-chat--response-property ende-chat-request-id-property request-id)
-          (ende-chat--response-property ende-chat-state-property "pending")
+          (or properties
+              (ende-chat--response-property ende-chat-state-property "pending"))
           ":END:\n\n"))
 
 (defun ende-chat--reply-sibling-p (document headline question-id)
@@ -2746,6 +2780,13 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
                   (error "Chat response destination was edited or moved"))
                 (list document headline)))))))))
 
+(defun ende-chat--materialized-through (document headline)
+  "Read HEADLINE's durable materialization frontier in DOCUMENT."
+  (let ((value (ende-chat--property document headline :materialized-through)))
+    (when (and value (not (string-match-p "\\`[0-9]+\\'" value)))
+      (error "Malformed chat materialization frontier"))
+    (if value (string-to-number value) 0)))
+
 (defun ende-chat--validate-pending-placeholder (job document headline)
   "Validate that HEADLINE is JOB's exact safe pending destination in DOCUMENT."
   (let* ((instruction (ende-job-instruction job))
@@ -2757,6 +2798,7 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
              (equal (ende-chat--property document candidate :request-id)
                     request-id))
            (ende-chat--document-headlines document)))
+         (frontier (ende-chat--materialized-through document headline))
          (question (ende-chat--find-by-property
                     document ende-chat-id-property question-id))
          (compact (eq (ende-job-type job) 'chat-compact))
@@ -2771,8 +2813,9 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
          (text (ende-chat--section-text document headline))
          (newline (string-match "\n" text)))
     (unless (and question
-                 (= (length request-headlines) 1)
-                 (eq headline (car request-headlines))
+                 (or (and (= (length request-headlines) 1)
+                          (eq headline (car request-headlines)))
+                     (and (not compact) (> frontier 0)))
                  (eq headline
                      (ende-chat--request-state-headline
                       document request-id "pending"))
@@ -2792,9 +2835,25 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
                  (null (ende-chat--property document headline :work))
                  (equal (ende-chat--property document headline :role) "assistant")
                  (equal (ende-chat--property document headline :visibility) "hidden")
+                 (null (ende-chat--children document headline))
                  newline
                  (string-blank-p (substring text (1+ newline))))
       (error "Chat response destination was edited or moved"))
+    (when (> frontier 0)
+      (let ((works (ende-chat--request-work-sections document request-id)))
+        (when works
+          (ende-chat--validate-generated-work-section document (car works)))
+        (dolist (section request-headlines)
+          (unless (eq section headline)
+            (unless (and (< (org-element-property :begin question)
+                            (org-element-property :begin section))
+                         (< (org-element-property :begin section)
+                            (org-element-property :begin headline))
+                         (or (memq section works)
+                             (memq (ende-chat--parent document section) works)
+                             (and (ende-chat--property document section :context-fence)
+                                  (ende-chat--validate-request-fence document section headline))))
+              (error "Malformed materialized chat request prefix"))))))
     headline))
 
 (defun ende-chat--failure-text (error)
@@ -2803,6 +2862,102 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
       (format "Ende chat request failed: %s\n"
               (ende-error-display-message error))
     "Ende chat request was cancelled or skipped.\n"))
+
+(defun ende-chat--append-transcript (job transcript through)
+  "Insert only JOB's uncommitted TRANSCRIPT prefix through entry count THROUGH.
+Keep the pending Reply and advance its frontier in the same transaction."
+  (let ((buffer (ende-target-buffer (ende-job-target job))))
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (atomic-change-group
+            (pcase-let* ((`(,document ,pending)
+                          (ende-chat--resolve-request-destination job 'snapshot))
+                         (frontier (ende-chat--materialized-through document pending))
+                         (suffix (ende-chat--transcript-suffix job transcript frontier))
+                         (marker (copy-marker (org-element-property :begin pending) t))
+                         (old (ende-chat--property document pending :materialized-through))
+                         (committed nil))
+              (unwind-protect
+                  (progn
+                    (unless (>= through frontier)
+                      (error "Transcript is older than its materialization frontier"))
+                    (goto-char marker)
+                    (insert suffix)
+                    (goto-char marker)
+                    ;; Undoing a fence removes its text, not the committed frontier.
+                    (let ((buffer-undo-list t))
+                      (org-entry-put nil ende-chat-materialized-through-property
+                                     (number-to-string through)))
+                    (let* ((updated (ende-chat--build-document))
+                           (reply (ende-chat--request-state-headline
+                                   updated (plist-get (ende-job-instruction job) :request-id)
+                                   "pending")))
+                      (ende-chat--validate-pending-placeholder job updated reply))
+                    (set-marker (ende-target-cursor-marker (ende-job-target job)) marker)
+                    (setq committed t))
+                (unless committed
+                  (goto-char marker)
+                  (let ((buffer-undo-list t))
+                    (if old (org-entry-put nil ende-chat-materialized-through-property old)
+                      (org-entry-delete nil ende-chat-materialized-through-property))))
+                (set-marker marker nil)))))))))
+
+(defun ende-chat--materialize-work (job)
+  "Append JOB's completed work without replacing any materialized sections.
+Return its committed entry count.  Do not materialize an active response."
+  (let* ((transcript (ende-job-transcript job))
+         (entries (and transcript (ende-transcript-entries transcript)))
+         (last (car (last entries)))
+         (results (cl-loop for entry in entries
+                           when (eq (ende-transcript-entry-kind entry) 'tool-result)
+                           collect (plist-get (ende-transcript-entry-data entry) :call))))
+    (when (cl-some (lambda (entry)
+                     (and (eq (ende-transcript-entry-kind entry) 'response)
+                          (or (not (eq (ende-transcript-entry-status entry) 'complete))
+                              (plist-get (ende-transcript-entry-data entry) :final)
+                              (cl-some (lambda (call) (not (memq call results)))
+                                       (plist-get (ende-transcript-entry-data entry) :calls)))))
+                   entries)
+      (error "Cannot checkpoint an active exchange or final response"))
+    (when last
+      (let ((old (plist-get (ende-transcript-entry-data last) :chat-segment-end))
+            committed)
+        (unwind-protect
+            (progn
+              (setf (plist-get (ende-transcript-entry-data last) :chat-segment-end) t)
+              (ende-chat--append-transcript job (ende-chat--render-transcript job t) (length entries))
+              (setq committed t))
+          (unless committed
+            (setf (plist-get (ende-transcript-entry-data last) :chat-segment-end) old)))))
+    (length entries)))
+
+(defun ende-chat--insert-context-fence (job summary)
+  "Append a durable SUMMARY fence after JOB's completed work.
+Work materialization and fence insertion have separate undo boundaries.
+This writer does not choose or replace the provider's live context."
+  (unless (and (stringp summary) (not (string-blank-p summary)))
+    (error "A context fence needs a nonblank summary"))
+  (ende-chat--materialize-work job)
+  (with-current-buffer (ende-target-buffer (ende-job-target job))
+    (undo-boundary))
+  (let* ((transcript (ende-job-transcript job))
+         (tail (ende-transcript-tail transcript))
+         (next-id (ende-transcript-next-id transcript))
+         (entry (ende-transcript-record-context-fence transcript summary))
+         committed)
+    (unwind-protect
+        (progn
+          (ende-chat--append-transcript
+           job (ende-chat--render-transcript job t) (length (ende-transcript-entries transcript)))
+          (setq committed t)
+          (ende-chat--checkpoint-transcript job)
+          entry)
+      (unless committed
+        (if tail (setcdr tail nil) (setf (ende-transcript-entries transcript) nil))
+        (setf (ende-transcript-tail transcript) tail
+              (ende-transcript-next-id transcript) next-id)))))
 
 (defun ende-chat--transcript-final-reply-p (job transcript)
   "Return non-nil when TRANSCRIPT contains JOB's final sibling reply."
@@ -2820,11 +2975,54 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
               (null (ende-chat--work-ancestor document headline))))
        (ende-chat--document-headlines document)))))
 
+(defun ende-chat--transcript-suffix (job transcript frontier)
+  "Return only TRANSCRIPT's sections after JOB's durable FRONTIER.
+Reject a snapshot that cannot be split exactly at the committed boundary."
+  (if (zerop frontier) transcript
+    (with-temp-buffer
+      (org-mode)
+      (insert transcript)
+      (let* ((document (ende-chat--build-document))
+             (level (plist-get (ende-job-instruction job) :response-level))
+             (request-id (plist-get (ende-job-instruction job) :request-id))
+             sections)
+        (dolist (section (ende-chat--document-headlines document))
+          (when (= (org-element-property :level section) level)
+            (let ((start (ende-chat--property document section :transcript-start))
+                  (end (ende-chat--property document section :transcript-end)))
+              (if (and (equal (org-element-property :raw-value section) "Agent: Reply")
+                       (equal (ende-chat--property document section :state) "failed")
+                       (equal (ende-chat--property document section :request-id) request-id))
+                  (push section sections)
+                (unless (and start end
+                             (string-match-p "\\`[0-9]+\\'" start)
+                             (string-match-p "\\`[0-9]+\\'" end)
+                             (<= 1 (string-to-number start) (string-to-number end)))
+                  (error "Recovery section has no valid transcript boundary"))
+                (when (> (string-to-number end) frontier)
+                  (when (<= (string-to-number start) frontier)
+                    (error "Recovery snapshot crosses the committed transcript boundary"))
+                  (push section sections))))))
+        (mapconcat (lambda (section)
+                     (buffer-substring-no-properties
+                      (org-element-property :begin section)
+                      (org-element-property :end section)))
+                   (nreverse sections) "")))))
+
 (defun ende-chat--commit-transcript (job transcript &optional allow-edited)
   "Commit rendered TRANSCRIPT at JOB's validated pending request."
   (condition-case failure
-      (prog1
-          (if (string-match-p (concat "\\`\\*+ " (regexp-quote ende-chat--work-title) "[ \n]") transcript)
+      (let* ((pending (ende-chat--resolve-request-destination job allow-edited))
+             (document (car pending))
+             (headline (cadr pending))
+             (frontier (and headline (ende-chat--materialized-through document headline)))
+             (transcript (if frontier (ende-chat--transcript-suffix job transcript frontier) transcript)))
+        (when (and frontier (> frontier 0))
+          (setq document (car (ende-chat--resolve-request-destination job 'snapshot))))
+        (prog1
+          (if (or (ende-chat--request-work-sections
+                   document (plist-get (ende-job-instruction job) :request-id))
+                  (string-match-p (concat "\\`\\*+ " (regexp-quote ende-chat--work-title) "[ \n]") transcript))
               (ende-chat--commit-work-transcript job transcript allow-edited)
             (let ((information (ende-chat--persist-ordinary-reply job transcript allow-edited))
                   (buffer (ende-target-buffer (ende-job-target job))))
@@ -2841,7 +3039,7 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
                     t)
                 (ende-chat--release-insertion-info information))))
         (ende-job-emit-event job (list :type :chat-saved
-                                       :state (if (eq allow-edited 'snapshot) 'failed 'complete))))
+                                       :state (if (eq allow-edited 'snapshot) 'failed 'complete)))))
     ((error quit)
      (ende-job-emit-event job '(:type :chat-save-failed))
      (signal (car failure) (cdr failure)))))
@@ -2872,6 +3070,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 		  (let* ((pending-pair
 			  (ende-chat--resolve-request-destination job allow-edited))
 			 (pending (cadr pending-pair))
+			 (frontier (and pending (ende-chat--materialized-through (car pending-pair) pending)))
 			 (begin (and pending (org-element-property :begin pending)))
 			 (end (and pending (org-element-property :end pending)))
 			 (old-start (and begin (copy-marker begin t)))
@@ -2885,11 +3084,11 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 			  (insert transcript)
 			  (setq inserted-end (copy-marker (point) t))
 			  (delete-region old-start old-end)
-			  (let* ((document
-				  (ende-chat--build-document-in-region
-				   inserted-start inserted-end))
-				 (headlines
-				  (ende-chat--document-headlines document))
+			  (let* ((document (if (> frontier 0)
+                                                  (ende-chat--build-document)
+                                                (ende-chat--build-document-in-region
+                                                 inserted-start inserted-end)))
+				 (headlines (ende-chat--request-headlines document request-id))
 				 (work-headlines
 				  (cl-remove-if-not
 				   (lambda (headline)
@@ -2898,21 +3097,23 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 				   headlines))
 				 (work
 				  (car (ende-chat--request-work-sections document request-id))))
-                            (unless (and (= (length work-headlines) 1)
+                            (unless (and (>= (length work-headlines) 1)
 					 work
 					 (eq work (car work-headlines))
 					 (equal (ende-chat--property
 						 document work :reply-to)
 						question-id)
-					 (equal (ende-chat--property
-						 document work :state)
-						"pending"))
+					 (member (ende-chat--property document work :state)
+                                                 '(nil "pending")))
                               (error "Malformed rendered Agent: Work"))
-                            (goto-char (org-element-property :begin work))
-                            (org-entry-delete nil ende-chat-state-property)
-                            (let* ((updated
-                                    (ende-chat--build-document-in-region
-                                     inserted-start inserted-end))
+                            (dolist (section (reverse work-headlines))
+                              (when (equal (ende-chat--property document section :state) "pending")
+                                (goto-char (org-element-property :begin section))
+                                (org-entry-delete nil ende-chat-state-property)))
+                            (let* ((updated (if (> frontier 0)
+                                                (ende-chat--build-document)
+                                              (ende-chat--build-document-in-region
+                                               inserted-start inserted-end)))
 				   (updated-headlines
                                     (ende-chat--document-headlines updated))
 				   (updated-work
@@ -3470,28 +3671,88 @@ Keep it while another queued compaction still refers to its durable identity."
                 (cons key rendered)))
         rendered))))
 
-(defun ende-chat--render-transcript (job)
-  "Serialize JOB's completed records without reading a viewer or storing data."
+(defun ende-chat--transcript-range-properties (start end)
+  "Render the inclusive transcript entry range START..END."
+  (concat (ende-chat--response-property ende-chat-transcript-start-property start)
+          (ende-chat--response-property ende-chat-transcript-end-property end)))
+
+(defun ende-chat--annotate-transcript-section (text properties)
+  "Add PROPERTIES to a rendered section TEXT."
+  (when text
+    (let ((position (string-match ":PROPERTIES:\n" text)))
+      (unless position (error "Rendered transcript section has no properties"))
+      (concat (substring text 0 (match-end 0))
+              properties
+              (substring text (match-end 0))))))
+
+(defun ende-chat--render-transcript (job &optional completed)
+  "Serialize JOB's records into stable Work segments and sibling fences.
+Materialization boundaries remain in the full recovery snapshot; the pending
+reply's durable frontier determines which suffix may still be inserted.
+COMPLETED omits the snapshot's pending Work marker for live materialization."
   (when-let* ((transcript (ende-job-transcript job)))
     (let* ((instruction (ende-job-instruction job))
            (level (plist-get instruction :response-level))
            (question-id (plist-get instruction :question-id))
            (request-id (plist-get instruction :request-id))
-           work reply reasoning)
-      (dolist (entry (ende-transcript-entries transcript))
-        (when (and (eq (ende-transcript-entry-kind entry) 'capabilities)
-                   (not (eq entry (car (ende-transcript-entries transcript)))))
-          (error "Capabilities must be the first transcript entry"))
-        (when (memq (ende-transcript-entry-kind entry) '(capabilities summary progress tool-result response))
-          (let ((rendered (ende-chat--render-entry job entry)))
-            (when-let* ((text (plist-get rendered :work)))
-              (unless (string-empty-p text) (push text work)))
-            (when (plist-get rendered :reply)
-              (setq reply (plist-get rendered :reply)
-                    reasoning (plist-get rendered :reasoning))))))
-      (when (or work reply)
-        (concat (when work (ende-chat--work-text level question-id request-id))
-                (apply #'concat (nreverse work)) reasoning reply)))))
+           (index 0) (start 1)
+           work reply reasoning sections last-work final-reply)
+      (cl-labels
+          ((flush (end)
+             (when work
+               (push (concat
+                      (ende-chat--work-text
+                       level question-id request-id
+                       (concat
+                        (ende-chat--response-property
+                         ende-chat-id-property (format "%s-work-%d" request-id start))
+                        (ende-chat--transcript-range-properties start end)))
+                      (apply #'concat (nreverse work))) sections)
+               (setq last-work sections))
+             (when reasoning
+               (push (ende-chat--annotate-transcript-section
+                      reasoning (ende-chat--transcript-range-properties start end)) sections))
+             (when reply
+               (setq final-reply t)
+               (push (ende-chat--annotate-transcript-section
+                      reply (ende-chat--transcript-range-properties start end)) sections))
+             (setq work nil reply nil reasoning nil start (1+ end))))
+        (dolist (entry (ende-transcript-entries transcript))
+          (cl-incf index)
+          (let ((kind (ende-transcript-entry-kind entry)))
+            (when (and (eq kind 'capabilities) (/= index 1))
+              (error "Capabilities must be the first transcript entry"))
+            (if (eq kind 'context-fence)
+                (progn
+                  (flush (1- index))
+                  (let ((normalized (ende-chat--normalize-response
+                                     (ende-transcript-entry-content entry) level)))
+                    (push (ende-chat--assistant-text
+                           level question-id request-id
+                           (concat
+                            (ende-chat--response-property
+                             ende-chat-id-property
+                             (format "%s-fence-%d" request-id (ende-transcript-entry-id entry)))
+                            (ende-chat--transcript-range-properties index index)
+                            (ende-chat--normalized-response-properties normalized))
+                           normalized t) sections))
+                  (setq start (1+ index)))
+              (when (memq kind '(capabilities summary progress tool-result response))
+                (let ((rendered (ende-chat--render-entry job entry)))
+                  (when-let* ((text (plist-get rendered :work)))
+                    (unless (string-empty-p text) (push text work)))
+                  (when (plist-get rendered :reply)
+                    (setq reply (plist-get rendered :reply)
+                          reasoning (plist-get rendered :reasoning)))))))
+          (when (plist-get (ende-transcript-entry-data entry) :chat-segment-end)
+            (flush index)))
+        (flush index))
+      (when (and last-work (not final-reply) (not completed))
+        (setcar last-work
+                (ende-chat--annotate-transcript-section
+                 (car last-work)
+                 (ende-chat--response-property ende-chat-state-property "pending"))))
+      (when sections (apply #'concat (nreverse sections))))))
 
 (defun ende-chat--response-map-positions (positions edits &optional reverse)
   "Map source POSITIONS through EDITS, or backwards when REVERSE is non-nil.
