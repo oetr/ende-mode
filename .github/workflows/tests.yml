@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches-ignore:
+      - main
+    tags-ignore:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ERT tests (Emacs 30.1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PACKAGE_USER_DIR: ${{ runner.temp }}/ende-test-elpa
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Emacs
+        uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
+        with:
+          version: '30.1'
+
+      - name: Run tests
+        run: make test TEST_VERBOSE=1
