@@ -1880,10 +1880,28 @@ Pass its document and pending destination.  Never checkpoint or edit the source.
                                  projected (plist-get (ende-job-instruction job) :request-id) "pending")))
               (funcall function projected destination))))))))
 
+(defun ende-chat--pending-context (job document pending)
+  "Read JOB's effective input before PENDING using the normal Org reader."
+  (if (not (eq ende-chat-context-policy 'current-section-only))
+      (ende-chat--context-prefix document pending)
+    (let* ((instruction (ende-job-instruction job))
+           (task (ende-chat--context-source document pending :id (plist-get instruction :question-id)))
+           (root (ende-chat--root document task))
+           (fence (cl-find-if
+                   (lambda (node)
+                     (and (ende-chat--context-fence-p document node)
+                          (< (org-element-property :begin node) (org-element-property :begin pending))))
+                   (ende-chat--request-headlines document (plist-get instruction :request-id)) :from-end t))
+           (start (org-element-property :begin (or fence task))))
+      (ende-tool-store-call-with-replay
+       (lambda () (ende-chat--section-messages document root start
+                                               (org-element-property :begin pending)))))))
+
 (defun ende-chat--context-stamp (job)
   "Return a cheap invalidation stamp for JOB's effective context."
   (list (with-current-buffer (ende-target-buffer (ende-job-target job))
-          (buffer-chars-modified-tick))
+          (list (buffer-chars-modified-tick) ende-chat-context-policy
+                ende-chat-include-reasoning ende-chat-replay-opaque-reasoning))
         (length (ende-transcript-entries (ende-job-transcript job)))
         (ende-job-execution-generation job)))
 
@@ -1902,7 +1920,7 @@ The snapshot is valid only for this running job, generation and source input."
      (let* ((question-id (plist-get (ende-job-instruction job) :question-id))
             (task (ende-chat--context-source document pending :id question-id))
             (system (car messages))
-            (context (ende-chat--context-prefix document pending))
+            (context (ende-chat--pending-context job document pending))
             (caps (cl-find-if #'ende-content-capabilities-p context :from-end t))
             (live-caps (cl-find-if #'ende-content-capabilities-p messages :from-end t))
             (root (ende-chat--root document pending))
@@ -1911,21 +1929,26 @@ The snapshot is valid only for this running job, generation and source input."
             recent)
        (when (and live-caps (not (equal live-caps caps)))
          (error "Authoritative capabilities do not match chat sources"))
-       (dolist (node (ende-chat--document-headlines document))
+       (dolist (node (reverse (ende-chat--document-headlines document)))
          (when (and (< (org-element-property :begin node) end)
                     (eq (ende-chat--root document node) root))
            (cond
-            ((ende-chat--capabilities-reference-p document node)
+            ((and (not (plist-get sources :cap))
+                  (ende-chat--eligible-p document node)
+                  (ende-chat--capabilities-reference-p document node))
              (when (equal caps (ende-chat--protocol-capabilities-message
                                document (ende-chat--work-ancestor document node) node))
                (setq sources (plist-put sources :cap
                                         (ende-chat--property document node :protocol-item-id)))))
-            ((and (ende-chat--tool-call-protocol-p document node)
+            ((and (not recent) (ende-chat--tool-call-protocol-p document node)
                   (ende-chat--eligible-p document node))
              (let* ((work (ende-chat--work-ancestor document node))
                     (id (ende-chat--property document work :id))
                     (response (ende-chat--property document node :response-id))
-                    (batch (and id (ende-chat--tool-batch-messages document work response))))
+                    (batch (and id
+                                (condition-case nil
+                                    (ende-chat--tool-batch-messages document work response)
+                                  (error nil)))))
                (when (and batch (cl-search batch context :test #'ende-chat--context-equal-p))
                  (setq recent batch
                        sources (plist-put sources :work id)
@@ -2017,7 +2040,7 @@ write.  INCLUDE-RECENT selects the whole optional batch, never part of it."
               (destination (ende-chat--request-state-headline
                             updated (plist-get (ende-job-instruction job) :request-id) "pending"))
               (projected (ende-chat--context-with-metadata
-                          job (cons (car candidate) (ende-chat--context-prefix updated destination)))))
+                          job (cons (car candidate) (ende-chat--pending-context job updated destination)))))
          (unless (ende-chat--context-equal-p candidate projected)
            (error "Compaction candidate disagrees with its source projection")))))
     (ende-chat--insert-context-fence job summary sources)
@@ -2037,7 +2060,7 @@ resurrects deleted fences; normal serialization decides their eligibility."
              (ende-chat--context-projection
               job (lambda (document pending)
                     (ende-chat--context-with-metadata
-                     job (cons (car messages) (ende-chat--context-prefix document pending)))))))
+                     job (cons (car messages) (ende-chat--pending-context job document pending)))))))
         (setf (plist-get (ende-job-instruction job) :context-stamp) stamp)
         effective))))
 
