@@ -121,7 +121,10 @@
                 (should (ende-content-capabilities-p snapshot))
                 (should (equal (alist-get 'tools (alist-get 'self (cdr capabilities)))
                                '(generate_title))))
-              (should (equal (butlast title-request 2) work-request))
+              (should (= (length title-request) 3))
+              (should (<= (length (ende-content-body (car title-request))) 1200))
+              (should (string-match-p "Inspect the queue."
+                                      (ende-content-body (car title-request))))
               (should (string-match-p "Inspect the queue."
                                       (ende-test--chat-context-text work-request)))
               (should (member "generate_title"
@@ -205,7 +208,9 @@
                    (first (car ordered))
                    (retry (cadr ordered))
                    (work (caddr ordered)))
-              (should (equal (butlast first 2) work))
+              (should (= (length first) 3))
+              (should (string-match-p "Do the real task."
+                                      (ende-content-body (car first))))
               (should (equal (cl-find-if #'ende-content-capabilities-p retry :from-end t)
                              (car (last first))))
               (should (string-match-p "Do not use this as the answer"

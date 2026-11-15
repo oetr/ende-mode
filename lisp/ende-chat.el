@@ -1711,11 +1711,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
 
 (defun ende-chat--context-equal-p (left right)
   "Compare canonical message trees, including native JSON objects."
-  (if (consp left)
-      (and (consp right)
-           (ende-chat--context-equal-p (car left) (car right))
-           (ende-chat--context-equal-p (cdr left) (cdr right)))
-    (ende-protocol-json-equal-p left right)))
+  (ende-protocol-json-equal-p left right))
 
 (defun ende-chat--context-source (document fence property value &optional following)
   "Resolve one in-scope PROPERTY VALUE preceding FENCE.
@@ -1902,7 +1898,8 @@ Pass its document and pending destination.  Never checkpoint or edit the source.
   (list (with-current-buffer (ende-target-buffer (ende-job-target job))
           (list (buffer-chars-modified-tick) ende-chat-context-policy
                 ende-chat-include-reasoning ende-chat-replay-opaque-reasoning))
-        (length (ende-transcript-entries (ende-job-transcript job)))
+        (when-let* ((entry (car (ende-transcript-tail (ende-job-transcript job)))))
+          (ende-transcript-entry-id entry))
         (ende-job-execution-generation job)))
 
 (defun ende-chat-compaction-context (job messages)
@@ -2063,6 +2060,16 @@ resurrects deleted fences; normal serialization decides their eligibility."
                      job (cons (car messages) (ende-chat--pending-context job document pending)))))))
         (setf (plist-get (ende-job-instruction job) :context-stamp) stamp)
         effective))))
+
+(defun ende-chat--refresh-work-context (job messages)
+  "Refresh edited Org input, retaining the exact live prefix otherwise."
+  (let* ((stamp (ende-chat--context-stamp job))
+         (previous (plist-get (ende-job-instruction job) :context-stamp)))
+    (if (or (null previous) (equal (car stamp) (car previous)))
+        (progn
+          (setf (plist-get (ende-job-instruction job) :context-stamp) stamp)
+          messages)
+      (ende-chat-refresh-context job messages))))
 
 (defun ende-chat--context-prefix (document section &optional root)
   "Read SECTION's preceding context according to the configured policy.
@@ -4556,40 +4563,43 @@ SOURCE-FENCE means QUESTION is an earlier summary, not instructions."
   "Consume JOB's pending guidance as a stored synthetic tool exchange.
 ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
   (when (ende-job-pending-guidance-p job)
-    (let* ((instruction (ende-job-instruction job))
-           (level (1+ (plist-get instruction :response-level)))
-           (prepared (ende-chat--prepare-response job (or assistant-result '(:content "")) level))
-           (guidance (ende-job-take-pending-guidance job))
-           (calls
-            (mapcar (lambda (_text)
-                      (ende-chat--prepare-tool-call
-                       (list :id (ende-chat--new-id "user-guidance")
-                             :name "user_guidance" :arguments "{}")
-                       (plist-get instruction :tool-store-file)))
-                    guidance))
-           (normalized-calls
-            (mapcar (lambda (call)
-                      (list :id (ende-tools-call-value call :id)
-                            :name (ende-tools-call-value call :name)
-                            :arguments (ende-tools-call-value call :arguments)))
-                    calls))
-           (assistant
-            (list :role "assistant" :content (plist-get prepared :parts)
-                  :tool-calls normalized-calls
-                  :protocol-items (plist-get assistant-result :protocol-items)))
-           (messages (list assistant)))
-      (ende-chat--record-response job (or assistant-result '(:content "")) calls
-                                  prepared nil (null assistant-result))
-      (dolist (entry (cl-mapcar #'cons calls guidance))
-        (let* ((call (car entry))
-               (text (cdr entry))
-               (id (ende-tools-call-value call :id)))
-          (ende-chat--record-tool-result job call text)
-          (setq messages
-                (nconc messages
-                       (list (list :role "tool" :tool-call-id id
-                                   :content text))))))
-      messages)))
+    (ende-chat--record-user-guidance job (ende-job-take-pending-guidance job) assistant-result)))
+
+(defun ende-chat--record-user-guidance (job guidance &optional assistant-result)
+  "Record GUIDANCE and optional ASSISTANT-RESULT as a complete exchange."
+  (let* ((instruction (ende-job-instruction job))
+         (level (1+ (plist-get instruction :response-level)))
+         (prepared (ende-chat--prepare-response job (or assistant-result '(:content "")) level))
+         (calls
+          (mapcar (lambda (_text)
+                    (ende-chat--prepare-tool-call
+                     (list :id (ende-chat--new-id "user-guidance")
+                           :name "user_guidance" :arguments "{}")
+                     (plist-get instruction :tool-store-file)))
+                  guidance))
+         (normalized-calls
+          (mapcar (lambda (call)
+                    (list :id (ende-tools-call-value call :id)
+                          :name (ende-tools-call-value call :name)
+                          :arguments (ende-tools-call-value call :arguments)))
+                  calls))
+         (assistant
+          (list :role "assistant" :content (plist-get prepared :parts)
+                :tool-calls normalized-calls
+                :protocol-items (plist-get assistant-result :protocol-items)))
+         (messages (list assistant)))
+    (ende-chat--record-response job (or assistant-result '(:content "")) calls
+                                prepared nil (null assistant-result))
+    (dolist (entry (cl-mapcar #'cons calls guidance))
+      (let* ((call (car entry))
+             (text (cdr entry))
+             (id (ende-tools-call-value call :id)))
+        (ende-chat--record-tool-result job call text)
+        (setq messages
+              (nconc messages
+                     (list (list :role "tool" :tool-call-id id
+                                 :content text))))))
+    messages))
 
 (defun ende-chat--artifact-repair-messages (result failure)
   "Return rejected RESULT as text followed by artifact validation FAILURE."
@@ -4614,13 +4624,20 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
   (setf (plist-get (ende-job-instruction job) :context-source-metadata)
         (ende-operations--source-metadata-block job))
   (let ((maximum ende-chat-max-tool-rounds)
-        prepared retried)
+        prepared retried automatic)
     (unless (and (integerp maximum) (> maximum 0))
       (error "ende-chat-max-tool-rounds must be a positive integer"))
     (let ((ende-agent-max-tool-rounds maximum))
       (ende-agent-run
        job messages configuration
        (list
+        :refresh-context
+        (lambda (job input)
+          (setq automatic t)
+          (ende-chat--refresh-work-context job input))
+        :compaction-context #'ende-chat-compaction-context
+        :compaction-messages #'ende-chat-compaction-messages
+        :apply-compaction #'ende-chat-apply-compaction
         :tool-calls #'ende-agent--tool-call-list
         :tool-name (lambda (call) (ende-tools-call-value call :name))
         :execute-tool #'ende-tools-call-async
@@ -4671,6 +4688,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                         (setf (ende-job-instruction job)
                               (plist-put (ende-job-instruction job) :reply-artifacts
                                          (append (plist-get (ende-job-instruction job) :reply-artifacts) pending)))
+                        (when automatic
+                          (ende-chat--record-response job '(:content "") nil prepared nil t))
                         (list (list :role "assistant" :content (plist-get prepared :parts)))))
                     (ende-chat--consume-user-guidance job))))
         :before-final
@@ -4690,7 +4709,15 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
              (ende--handle-llm-event
               job '(:type :status :status "Correcting artifact"))
              (append messages
-                     (ende-chat--artifact-repair-messages result failure)
+                     (let ((repair (ende-chat--artifact-repair-messages result failure)))
+                       (if automatic
+                           (ende-chat--record-user-guidance
+                            job (list (ende-content-body (cadr repair)))
+                            (list :content
+                                  (concat "Rejected response (literal text):\n#+begin_example\n"
+                                          (org-escape-code-in-string (ende-content-body (car repair)))
+                                          "\n#+end_example\n")))
+                         repair))
                      (ende-chat--consume-user-guidance job)))))
         :on-final (lambda (job result _messages)
                     (ende-chat--apply-result job result prepared)))))))

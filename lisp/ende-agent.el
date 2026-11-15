@@ -36,6 +36,7 @@
 (require 'ende-work-buffer)
 (require 'ende-target)
 (require 'ende-provider)
+(require 'ende-compact)
 (require 'subr-x)
 
 (declare-function ende-chat-config-capabilities "ende-chat-config" (environment))
@@ -564,24 +565,42 @@ scheduler when asynchronous children have settled."
 
 (defun ende-agent--send
     (job messages configuration callbacks rounds base-messages)
-  "Send MESSAGES for JOB under CONFIGURATION using loop CALLBACKS.
+  "Check pending MESSAGES for JOB, then send using loop CALLBACKS.
 BASE-MESSAGES is the immutable context preceding any title-phase prompt."
   (setf (ende-job-profile job)
         (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
                    (ende-tool-definitions
                     configuration (ende-job-parent job))))
+  (let ((state (plist-get callbacks :compaction-state)))
+    (if (and state (not (eq (ende-job-request-phase job) 'title)))
+        (ende-compact-before-send
+         job messages state callbacks
+         (lambda (input)
+           (ende-agent--send-work job input configuration callbacks rounds base-messages)))
+      (ende-agent--send-work job messages configuration callbacks rounds base-messages))))
+
+(defun ende-agent--send-work
+    (job messages configuration callbacks rounds base-messages)
+  "Actually send MESSAGES once, without reentering the compaction gate."
   (unless (eq (ende-job-request-phase job) 'title)
     (ende-transcript-begin-response (ende-job-ensure-transcript job)))
-  (ende--dispatch-llm
-   job messages
-   (lambda (result)
-     (when (ende-job-current-p job)
-       (ende--call-with-job-error
-        job
-        (lambda ()
-          (ende-agent--handle-result
-           job result messages configuration callbacks rounds base-messages)))))
-   nil nil t))
+  (let* ((state (and (not (eq (ende-job-request-phase job) 'title))
+                     (plist-get callbacks :compaction-state)))
+         (profile (when state (ende-provider-config-copy (ende-job-profile job)))))
+    (ende--dispatch-llm
+     job messages
+     (lambda (result)
+       (when (ende-job-current-p job)
+         (ende--call-with-job-error
+          job
+          (lambda ()
+            (when state
+              (ende-compact-observe state profile messages
+                                    (or (plist-get result :usage)
+                                        (ende-transcript-usage (ende-job-transcript job)))))
+            (ende-agent--handle-result
+             job result messages configuration callbacks rounds base-messages)))))
+     nil nil t)))
 
 (defun ende-agent--handle-result
     (job result messages configuration callbacks rounds base-messages)
@@ -596,10 +615,8 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                                               job result messages)
                         :finish)))
             (if (and (listp next) (not (eq next :finish)))
-                (progn
-                  (ende--validate-messages next)
-                  (ende-agent--send
-                   job next configuration callbacks rounds base-messages))
+                (ende-agent--send
+                 job next configuration callbacks rounds base-messages)
               (ende-agent--invoke callbacks :on-final job result messages)))
         (let ((definitions (plist-get (ende-job-profile job) :tool-definitions))
               (maximum ende-agent-max-tool-rounds))
@@ -627,7 +644,6 @@ BASE-MESSAGES is the immutable context preceding any title-phase prompt."
                          (or (ende-agent--invoke callbacks :after-tool-round
                                                  job next-messages)
                              next-messages)))
-                   (ende--validate-messages next-messages)
                    (ende-agent--send job next-messages configuration callbacks
                                      (1+ rounds) base-messages)))))))))))
 
@@ -669,7 +685,6 @@ by the following host capability snapshot."
                      (>= (ende-job-title-attempts job) 2))
                  (progn
                    (setf (ende-job-request-phase job) 'work)
-                   (ende--validate-messages base-messages)
                    (ende-agent--send
                     job base-messages configuration callbacks rounds
                     base-messages))
@@ -678,7 +693,6 @@ by the following host capability snapshot."
                               (list
                                (cons "user"
                                      "Title correction: call generate_title exactly once with a valid plain title. Do not perform the actual task. The title phase remains active.")))))
-                 (ende--validate-messages next)
                  (ende-agent--send
                   job next configuration callbacks rounds base-messages))))))
       (if calls
@@ -825,6 +839,56 @@ by the following host capability snapshot."
                      (next))))))))
       (next))))
 
+(defun ende-agent--compaction-context (job messages task)
+  "Snapshot child JOB's MESSAGES, protecting its initially captured TASK."
+  (let ((systems (cl-remove-if-not
+                  (lambda (message)
+                    (and (equal (ende-content-role message) "system")
+                         (not (ende-content-capabilities-p message)))) messages))
+        (caps (cl-find-if #'ende-content-capabilities-p messages :from-end t))
+        (tail messages) recent)
+    (while tail
+      (let* ((assistant (pop tail))
+             (calls (and (equal (ende-content-role assistant) "assistant")
+                         (plist-get assistant :tool-calls)))
+             (results tail)
+             (ids (mapcar (lambda (call) (ende-tools-call-value call :id)) calls))
+             batch)
+        (when calls
+          (while (and results (equal (ende-content-role (car results)) "tool"))
+            (push (pop results) batch))
+          (when (and (= (length ids) (length batch))
+                     (= (length ids) (length (delete-dups (copy-sequence ids))))
+                     (null (cl-set-exclusive-or
+                            ids (mapcar (lambda (message) (plist-get message :tool-call-id)) batch)
+                            :test #'equal)))
+            (setq recent (cons assistant (nreverse batch)))))))
+    (list :job job :generation (or (ende-job-execution-generation job) 0)
+          :messages messages :retained (append systems (list task) (when caps (list caps)))
+          :recent recent)))
+
+(defun ende-agent--compaction-messages (snapshot summary include-recent)
+  "Build child SNAPSHOT's replacement with assistant SUMMARY."
+  (unless (and (stringp summary) (not (string-blank-p summary)))
+    (error "Compaction returned no summary text"))
+  (let* ((retained (plist-get snapshot :retained))
+         (systems (cl-remove-if-not
+                   (lambda (message)
+                     (and (equal (ende-content-role message) "system")
+                          (not (ende-content-capabilities-p message)))) retained)))
+    (append systems (list (cons "assistant" summary))
+            (cl-remove-if (lambda (message) (memq message systems)) retained)
+            (when include-recent (plist-get snapshot :recent)))))
+
+(defun ende-agent--apply-compaction (job snapshot summary include-recent)
+  "Persist child JOB's validated SUMMARY fence, retaining its original transcript."
+  (unless (and (eq job (plist-get snapshot :job))
+               (ende-job-execution-current-p job (plist-get snapshot :generation)))
+    (error "Stale child compaction"))
+  (let ((candidate (ende-agent--compaction-messages snapshot summary include-recent)))
+    (ende-transcript-record-context-fence (ende-job-ensure-transcript job) summary)
+    candidate))
+
 (defun ende-agent-run (job messages configuration callbacks)
   "Run the reusable request and tool loop for JOB.
 
@@ -834,6 +898,7 @@ optional :before-final and :after-tool-round message transforms.
 Chat persistence and guidance stay in those callbacks."
   (let* ((image-profile (when (memq 'generate_image (plist-get configuration :active-tools))
                           (ende-image--profile)))
+         (policy (ende-compact-policy (ende-job-type job)))
          (definitions (ende-tool-definitions configuration (ende-job-parent job)))
          (profile (ende-plist-merge (copy-tree (ende-job-profile job))
                                     (list :tool-definitions definitions
@@ -841,7 +906,9 @@ Chat persistence and guidance stay in those callbacks."
     (let ((transcript (ende-job-ensure-transcript job)))
       (setf (ende-transcript-task transcript)
             (or (plist-get (ende-job-instruction job) :task)
-                (ende-operations--latest-user-message messages))))
+                (ende-operations--latest-user-message messages)))
+      (when (eq (ende-job-type job) 'agent)
+        (setf (ende-transcript-initial-messages transcript) messages)))
     (when (and definitions
                (or (not (memq 'about_thinking
                               (plist-get configuration :active-tools)))
@@ -854,18 +921,33 @@ Chat persistence and guidance stay in those callbacks."
                          messages
                        (ende-operations--add-source-metadata job messages)))
            (base-messages messages))
+      (when policy
+        (let* ((task (cl-find "user" messages :key #'ende-content-role :test #'equal))
+               (state (ende-compact-state-create :policy policy)))
+          (setq callbacks (plist-put (copy-sequence callbacks) :compaction-state state))
+          (when (eq (ende-job-type job) 'agent)
+            (setq callbacks
+                  (ende-plist-merge
+                   callbacks
+                   (list :compaction-context
+                         (lambda (child input) (ende-agent--compaction-context child input task))
+                         :compaction-messages #'ende-agent--compaction-messages
+                         :apply-compaction #'ende-agent--apply-compaction)))))
+        (setq messages (or (ende-agent--invoke callbacks :refresh-context job messages) messages)
+              base-messages messages))
       (when (null (ende-job-request-phase job))
         (pcase (ende-job-type job)
           ('agent (setf (ende-job-request-phase job) 'work))
           ('chat
            (setf (ende-job-request-phase job) 'title
                  (ende-job-title-attempts job) 0)
-           (setq messages
-                 (append base-messages
-                         (list (cons "system" ende-agent--title-control)
-                               (ende-content-capabilities
-                                (ende-chat-config-capabilities
-                                 '(:access-policy (:active-tools (generate_title)))))))))))
+           (let ((task (or (ende-transcript-task (ende-job-transcript job)) "")))
+             (setq messages
+                   (list (cons "user" (substring-no-properties task 0 (min 1200 (length task))))
+                         (cons "system" ende-agent--title-control)
+                         (ende-content-capabilities
+                          (ende-chat-config-capabilities
+                           '(:access-policy (:active-tools (generate_title)))))))))))
       (when (cl-intersection '(project_info search_project list_project_files)
                              (plist-get configuration :active-tools))
         (ende-worker-prewarm))

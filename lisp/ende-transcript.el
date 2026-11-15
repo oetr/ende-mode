@@ -41,7 +41,7 @@
 
 (cl-defstruct (ende-transcript (:constructor ende-transcript-create))
   task entries tail (next-id 0) (round 0) response terminal metadata usage
-  (sources (make-hash-table :test #'equal)))
+  (sources (make-hash-table :test #'equal)) initial-messages)
 
 (cl-defstruct (ende-transcript-entry (:constructor ende-transcript--entry))
   id kind round response-id text status data thinking)

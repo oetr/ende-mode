@@ -478,6 +478,9 @@ generation silently discards continuations, including late provider callbacks."
                  target (plist-get budget :target))
            (unless (and (ende-compact--positive limit) (ende-compact--positive target))
              (error "Compaction size: input ceiling and summary target must be positive integers"))
+           (when (ende-compact--positive ende-max-request-chars)
+             (setq limit (min limit (+ 256 (ende-compact-estimate nil definitions)
+                                      (floor ende-max-request-chars 3)))))
            (setq profile (plist-put profile :request-phase 'compact)
                  root (cl-remove-if-not
                        (lambda (message)
@@ -500,6 +503,121 @@ generation silently discards continuations, including late provider callbacks."
                  (send request #'finish t)
                (chunk-pass (ende-compact--source history))))))
       (enqueue #'start))))
+
+(cl-defstruct (ende-compact-state (:constructor ende-compact-state-create))
+  policy observation
+  (sizes (make-hash-table :test #'eq :weakness 'key))
+  definitions definitions-size)
+
+(defun ende-compact-size (state messages definitions)
+  "Estimate MESSAGES and DEFINITIONS, reusing STATE's immutable message sizes."
+  (unless (and (ende-compact-state-definitions-size state)
+               (ende-protocol-json-equal-p definitions (ende-compact-state-definitions state)))
+    (setf (ende-compact-state-definitions state) definitions
+          (ende-compact-state-definitions-size state)
+          (ende-compact-estimate nil definitions)))
+  (+ (ende-compact-state-definitions-size state) (if messages 4 0)
+     (cl-loop for message in messages
+              sum (or (gethash message (ende-compact-state-sizes state))
+                      (puthash message (- (ende-compact-estimate (list message) nil) 20)
+                               (ende-compact-state-sizes state))))))
+
+(defun ende-compact-observe (state profile messages usage)
+  "Save the latest work request's USAGE and immutable input in STATE."
+  (setf (ende-compact-state-observation state)
+        (when-let* ((tokens (ende-compact-input-tokens usage (plist-get profile :api))))
+          (list :profile (ende-provider-config-copy profile) :messages messages
+                :tokens tokens :size (ende-compact-size
+                                     state messages (plist-get profile :tool-definitions))))))
+
+(defun ende-compact-work-size (state profile messages)
+  "Estimate pending MESSAGES using a compatible work observation in STATE."
+  (let* ((size (ende-compact-size state messages (plist-get profile :tool-definitions)))
+         (observation (ende-compact-state-observation state))
+         (prefix (plist-get observation :messages))
+         (tail messages))
+    (if (and observation (ende-protocol-json-equal-p profile (plist-get observation :profile))
+             (cl-loop for message in prefix
+                      always (and tail (eq message (pop tail)))))
+        (+ (plist-get observation :tokens) (max 0 (- size (plist-get observation :size))))
+      (setf (ende-compact-state-observation state) nil)
+      size)))
+
+(defun ende-compact-before-send (job messages state callbacks send)
+  "Gate one pending work send with STATE and context CALLBACKS.
+SEND accepts the validated replacement or original input, without rechecking.
+Adapters own persistence; the runner never changes history on failure."
+  (let* ((refresh (plist-get callbacks :refresh-context))
+         (messages (if refresh (funcall refresh job messages) messages))
+         (profile (ende-provider-config-copy (ende-job-profile job)))
+         (definitions (plist-get profile :tool-definitions))
+         (budget (ende-compact-budget profile (ende-compact-state-policy state)))
+         (size (ende-compact-work-size state profile messages))
+         (raw-size (ende-compact-size state messages definitions))
+         (capacity (plist-get budget :capacity))
+         (generation (or (ende-job-execution-generation job) 0))
+         snapshot include-recent allowance)
+    (cl-labels
+        ((current ()
+           (unless (and (ende-job-execution-current-p job generation)
+                        (ende-protocol-json-equal-p profile (ende-job-profile job)))
+             (error "Compaction request changed while summarizing")))
+         (failed (failure)
+           (ende--call-with-job-error
+            job
+            (lambda ()
+              (current)
+              (when (and refresh (not (eq messages (funcall refresh job messages))))
+                (error "Compaction context changed while summarizing"))
+              (let ((reason (format "Automatic compaction: input about %d tokens; trigger %d; capacity %s: %s"
+                                    size (plist-get budget :trigger) (or capacity "unknown")
+                                    (ende-error-display-message failure))))
+                (if (and capacity (<= size capacity))
+                    (progn
+                      (display-warning 'ende reason)
+                      (funcall send messages))
+                  (error "%s" reason))))))
+         (accept (summary)
+           (ende--call-with-job-error
+            job
+            (lambda ()
+              (current)
+              (let* ((candidate (funcall (plist-get callbacks :compaction-messages)
+                                         snapshot summary include-recent))
+                     (candidate-size (ende-compact-size state candidate definitions)))
+                (if (or (not (< candidate-size raw-size))
+                        (> candidate-size (or capacity (plist-get budget :trigger))))
+                    (failed (format "Replacement needs about %d tokens; no useful fitting reduction"
+                                    candidate-size))
+                  (ende--validate-messages candidate)
+                  ;; Persistence errors, including stale sources, must never fall back.
+                  (let ((applied (funcall (plist-get callbacks :apply-compaction)
+                                          job snapshot summary include-recent)))
+                    (unless (ende-protocol-json-equal-p candidate applied)
+                      (error "Compaction adapter changed its validated candidate"))
+                    (setf (ende-compact-state-observation state) nil)
+                    (funcall send applied))))))))
+      (if (< size (plist-get budget :trigger))
+          (funcall send messages)
+        (let ((failure
+               (condition-case caught
+                   (progn
+                     (setq snapshot (funcall (plist-get callbacks :compaction-context) job messages))
+                     (let* ((retained (plist-get snapshot :retained))
+                            (recent (plist-get snapshot :recent))
+                            (fixed (ende-compact-size state retained definitions))
+                            (with-recent (ende-compact-size state (append retained recent) definitions))
+                            (target (plist-get budget :target)))
+                       (when (>= (+ fixed 64) (or capacity (plist-get budget :trigger)))
+                         (error "Protected task, system and schemas need about %d tokens" fixed))
+                       (setq include-recent (and recent (<= (+ with-recent 64) target))
+                             allowance (max 1 (- target (if include-recent with-recent fixed)))))
+                     nil)
+                 (error caught))))
+          (if failure (failed failure)
+            (ende-compact-summarize
+             job messages (plist-put (copy-sequence budget) :target allowance)
+             #'accept #'failed)))))))
 
 (provide 'ende-compact)
 ;;; ende-compact.el ends here

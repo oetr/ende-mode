@@ -7,6 +7,7 @@
 
 (require 'ert)
 (require 'ende-compact)
+(require 'ende-test-helpers)
 
 (ert-deftest ende-compact-policies-and-budgets ()
   (let ((ende-auto-compact nil)
@@ -253,7 +254,7 @@
       (should-not (plist-get (ende-tool-call 'about_thinking '(:title "No" :status "No")) :ok)))))
 
 (ert-deftest ende-compact-summary-bounded-chunks-and-context-fallback ()
-  (dolist (mode '(oversized context-rejection fixed-overhead no-reduction))
+  (dolist (mode '(oversized character-limit context-rejection fixed-overhead no-reduction))
     (ert-info ((symbol-name mode))
       (let* ((root (cons "system" (if (eq mode 'fixed-overhead) (make-string 9000 ?s) "Stable root")))
              (messages (list root
@@ -268,7 +269,8 @@
                         (((:type . "function") (:function . ((:name . "read_file")))))))
              (job (ende--make-job :state 'running :profile profile))
              (ende--active-jobs (list job))
-             (ceiling (if (eq mode 'context-rejection) 30000 2400))
+             (ceiling (if (memq mode '(character-limit context-rejection)) 30000 2400))
+             (ende-max-request-chars (when (eq mode 'character-limit) 6000))
              (count 0) requests summary failure
              (ende-llm-function
               (lambda (input callbacks &optional options)
@@ -376,6 +378,101 @@
          (t (should-not done) (should (= (length errors) 1))))
         (unless (memq outcome '(cancel chunk-cancel))
           (should (eq (ende-job-state job) 'running)))))))
+
+(ert-deftest ende-compact-work-gate-failure-and-observation ()
+  (dolist (mode '(reduce fail unknown oversized stale cancel))
+    (let* ((messages (list '("system" . "Root") '("user" . "Task")
+                           (cons "assistant" (make-string 6000 ?x))))
+           (profile (list :api 'anthropic-messages :model "work"
+                          :context-window (unless (eq mode 'unknown) 10000)))
+           (job (ende--make-job :id 7 :state 'running :type 'agent :profile profile))
+           (ende--active-jobs (list job))
+           (state (ende-compact-state-create :policy '(:tokens 1000)))
+           (callbacks (list :compaction-context
+                            (lambda (owner input)
+                              (ende-agent--compaction-context owner input (cadr messages)))
+                            :compaction-messages #'ende-agent--compaction-messages
+                            :apply-compaction #'ende-agent--apply-compaction))
+           pending sent warnings)
+      (should (= (ende-compact-size state messages nil) (ende-compact-estimate messages nil)))
+      (ende-compact-observe state profile messages
+                            '(:input_tokens 10 :cache_read_input_tokens 900 :cache_creation_input_tokens 90))
+      (should (= (ende-compact-work-size state profile messages) 1000))
+      (let ((grown (append messages '(("assistant" . "More work")))))
+        (should (= (ende-compact-work-size state profile grown)
+                   (+ 1000 (- (ende-compact-estimate grown nil) (ende-compact-estimate messages nil))))))
+      (should (= (ende-compact-work-size state (plist-put (copy-sequence profile) :model "other") messages)
+                 (ende-compact-estimate messages nil)))
+      (cl-letf (((symbol-function 'ende-compact-summarize)
+                 (lambda (_job input _budget done failed &optional _instructions)
+                   (should (eq input messages))
+                   (setq pending (list done failed))))
+                ((symbol-function 'display-warning)
+                 (lambda (&rest args) (push args warnings))))
+        (ende-compact-before-send job messages state callbacks (lambda (input) (push input sent)))
+        (should pending)
+        (pcase mode
+          ('stale (setf (ende-job-profile job) '(:model "changed")))
+          ('cancel (setf (ende-job-state job) 'cancelled)))
+        (if (memq mode '(fail unknown))
+            (funcall (cadr pending) "Summary unavailable")
+          (funcall (car pending) (if (eq mode 'oversized) (make-string 40000 ?s) "Useful summary")))
+        (cond
+         ((eq mode 'reduce)
+          (should (= (length sent) 1))
+          (should (equal (cadr (car sent)) '("assistant" . "Useful summary")))
+          (should (= (length (ende-transcript-entries (ende-job-transcript job))) 1)))
+         ((memq mode '(fail oversized))
+          (should (equal sent (list messages)))
+          (should warnings)
+          (should-not (ende-job-transcript job)))
+         (t (should-not sent)))))))
+
+(ert-deftest ende-compact-child-initial-and-tool-continuations ()
+  (dolist (nested '(nil t))
+    (let* ((ende-auto-compact nil)
+           (ende-agent-auto-compact '(:tokens 1000))
+           (messages (list '("system" . "System") '("user" . "Verbatim task")
+                           (cons "assistant" (make-string 6000 ?x))))
+           (job (ende--make-job :id 7 :type 'agent :state 'running :request-phase 'work
+                               :parent (when nested (ende--make-job :type 'agent))
+                               :profile '(:api openai-chat-completions :model "test" :context-window 20000)))
+           (ende--active-jobs (list job))
+           (ende-agent-max-tool-rounds 1)
+           ende-llm-function
+           (ende-test--calls nil)
+           (ende-test--fake-responses nil)
+           (executed 0) final)
+      (setq ende-llm-function
+            (ende-test--fake-llm
+             '("Initial summary"
+               (:usage (:prompt_tokens 100) :tool-calls
+                ((:id "one" :name "about_thinking" :arguments "{}")
+                 (:id "two" :name "about_thinking" :arguments "{}")))
+               "Tool summary" "Done") t))
+      (ende-agent-run
+       job messages '(:active-tools (about_thinking))
+       (list :omit-source-metadata t :tool-calls #'ende-agent--tool-call-list
+             :tool-name (lambda (call) (plist-get call :name))
+             :execute-tool (lambda (_call _configuration done)
+                             (cl-incf executed) (funcall done (make-string 6000 ?r)))
+             :assistant-message #'ende-agent--assistant-message
+             :tool-result-message #'ende-agent--tool-result-message
+             :on-final (lambda (_job result _messages) (setq final result))))
+      (dotimes (index 4)
+        (ende-test--wait-for (lambda () (> (length ende-test--calls) index)))
+        (ende-test--complete-call (nth index ende-test--calls)))
+      (should (equal (plist-get final :content) "Done"))
+      (should (= executed 2))
+      (should (equal (mapcar (lambda (call) (plist-get (plist-get call :options) :request-phase))
+                            ende-test--calls) '(compact work compact work)))
+      (should (eq (ende-transcript-initial-messages (ende-job-transcript job)) messages))
+      (should (equal (ende-transcript-task (ende-job-transcript job)) "Verbatim task"))
+      (should (= (ende-transcript-round (ende-job-transcript job)) 2))
+      (should (= (cl-count 'context-fence (ende-transcript-entries (ende-job-transcript job))
+                          :key #'ende-transcript-entry-kind) 2))
+      (should (= (cl-count 'tool-result (ende-transcript-entries (ende-job-transcript job))
+                          :key #'ende-transcript-entry-kind) 2)))))
 
 (provide 'ende-compact-test)
 ;;; ende-compact-test.el ends here

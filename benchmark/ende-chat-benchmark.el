@@ -375,15 +375,10 @@ Return fixture dimensions before any job or timing is started."
            (cl-incf history)
            (setq position (match-end 0)))
          (unless (and (string-match-p "BENCHMARK_STARTUP_QUESTION" text)
-                      (= history (pcase scenario
-                                   ((or 'unrelated-roots 'context-fence) 0)
-                                   ('folded-hidden (/ (1+ size) 2))
-                                   (_ size)))
-                      (= calls (plist-get fixture :tool-pairs))
+                      (= history 0)
+                      (= calls 0)
                       (= results calls)
-                      (not (string-match-p "UNRELATED_HISTORY" text))
-                      (or (not (eq scenario 'context-fence))
-                          (string-match-p "FENCE_SUMMARY" text)))
+                      (not (string-match-p "UNRELATED_HISTORY\\|FENCE_SUMMARY" text)))
            (error "Unexpected startup benchmark prompt for %s/%d" scenario size)))
        (list :fixture fixture :elapsed elapsed :gc-count gc-count
              :gc-seconds gc-seconds :dispatches dispatches

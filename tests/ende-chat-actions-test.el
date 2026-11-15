@@ -1524,6 +1524,70 @@
         (ende-test--reset)
         (delete-directory directory t)))))
 
+(ert-deftest ende-test/chat-auto-compaction-lifecycle ()
+  (ende-test--reset)
+  (let* ((directory (make-temp-file "ende-auto-context-" t))
+         (user-emacs-directory directory)
+         (ende-auto-compact '(:tokens 10000))
+         (ende-agent-auto-compact nil)
+         (ende-test--title-prelude t)
+         (ende-chat-max-tool-rounds 1)
+         (rejected (concat (make-string 12000 ?r)
+                           "\n<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>\n"))
+         (ende-llm-function
+          (ende-test--fake-llm
+           (list '(:content "Title attempt" :usage (:prompt_tokens 999999))
+                 "Title retry" "Initial summary"
+                 '(:usage (:prompt_tokens 100) :tool-calls
+                   ((:id "one" :name "about_thinking" :arguments "{}")
+                    (:id "two" :name "about_thinking" :arguments "{}")))
+                 "Regenerated summary"
+                 (list :content rejected :usage '(:prompt_tokens 10000))
+                 "Repair summary" "Final answer") t)))
+    (unwind-protect
+        (ende-test--with-buffer
+         (concat "* Root\nOld history " (make-string 30000 ?h)
+                 "\n** Question\nOriginal task\n")
+         (org-mode)
+         (setq buffer-file-name (expand-file-name "chat.org" directory))
+         (ende-test--chat-goto "** Question")
+         (cl-letf (((symbol-function 'ende-tools-call-async)
+                    (lambda (_call _configuration done) (funcall done (make-string 18000 ?t)))))
+           (let ((job (ende-ask (ende-test--request-profile
+                                 '(:name remote :model "fixture" :context-window 60000)))))
+             (dotimes (index 8)
+               (ende-test--wait-for (lambda () (> (length ende-test--calls) index)))
+               (let* ((call (nth index ende-test--calls))
+                      (input (plist-get call :messages)))
+                 (pcase index
+                   (0 (should (= (length input) 3))
+                      (should-not (string-match-p "Old history" (prin1-to-string input))))
+                   (2 (should (string-match-p "Old history" (prin1-to-string input))))
+                   (3
+                    (should (string-match-p "Initial summary" (buffer-string)))
+                    (let* ((document (ende-chat--build-document))
+                           (fence (cl-find-if (lambda (node) (ende-chat--context-fence-p document node))
+                                             (ende-chat--document-headlines document))))
+                      (delete-region (org-element-property :begin fence) (org-element-property :end fence))))
+                   (4 (should (string-match-p "Old history" (prin1-to-string input))))
+                   (6
+                    (should (string-match-p "Ende rejected an artifact" (prin1-to-string input)))
+                    (should (string-match-p "Rejected response" (prin1-to-string input)))
+                    (should (string-match-p "Original task" (prin1-to-string input))))))
+               (ende-test--complete-call (nth index ende-test--calls)))
+             (ende-test--wait-for (lambda () (eq (ende-job-state job) 'completed)))
+             (should (equal (mapcar (lambda (call) (plist-get (plist-get call :options) :request-phase))
+                                   ende-test--calls)
+                            '(title title compact work compact work compact work)))
+             (should (= (ende-transcript-round (ende-job-transcript job)) 3))
+             (should (= (cl-count 'context-fence (ende-transcript-entries (ende-job-transcript job))
+                                 :key #'ende-transcript-entry-kind) 3))
+             (should (string-match-p "Old history" (buffer-string)))
+             (should (string-match-p "Final answer" (buffer-string)))
+             (should-not (string-match-p "Initial summary" (buffer-string))))))
+      (ende-test--reset)
+      (delete-directory directory t))))
+
 (ert-deftest ende-test/chat-compaction-rejects-stale-input-not-unrelated-edits ()
   (ende-test--reset)
   (let* ((directory (make-temp-file "ende-chat-stale-context-" t))

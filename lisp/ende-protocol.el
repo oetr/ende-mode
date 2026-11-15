@@ -307,9 +307,13 @@ Normalize context, input, and output limits without inferring model capacity."
     limits))
 
 (defun ende-protocol-json-equal-p (left right)
-  "Compare parsed JSON LEFT and RIGHT, ignoring only object-key order.
+  "Compare JSON trees LEFT and RIGHT, ignoring only object-key order.
 Arrays retain their order; false and null remain distinct."
   (cond
+   ((consp left)
+    (and (consp right)
+         (ende-protocol-json-equal-p (car left) (car right))
+         (ende-protocol-json-equal-p (cdr left) (cdr right))))
    ((hash-table-p left)
     (and (hash-table-p right) (= (hash-table-count left) (hash-table-count right))
          (cl-loop for key being the hash-keys of left using (hash-values value)
