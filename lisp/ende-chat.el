@@ -179,6 +179,9 @@ assistant role of its enclosing section."
 (defconst ende-chat-context-fence-property "ENDE_CHAT_CONTEXT_FENCE"
   "Local Org property whose value t marks a completed context summary.")
 
+(defconst ende-chat-context-sources-property "ENDE_CHAT_CONTEXT_SOURCES"
+  "Validated source identities retained by a generated context fence.")
+
 (defconst ende-chat-model-property "ENDE_MODEL"
   "Org property storing the model used for a chat response.")
 
@@ -236,7 +239,8 @@ assistant role of its enclosing section."
         (cons ende-chat-materialized-through-property :materialized-through)
         (cons ende-chat-transcript-start-property :transcript-start)
         (cons ende-chat-transcript-end-property :transcript-end)
-        (cons ende-chat-context-fence-property :context-fence))
+        (cons ende-chat-context-fence-property :context-fence)
+        (cons ende-chat-context-sources-property :context-sources))
   "Org properties parsed into the per-document property plists.")
 
 (defconst ende-chat--reserved-properties
@@ -896,6 +900,11 @@ SELECTED-HEADLINES supplies an already selected current section."
                     (ende-chat--referenced-reply-p
                      document headline (lambda (work) (memq work selected-work))))
                (flush))
+              ((and selected (ende-chat--property document headline :context-sources))
+               (flush)
+               (setq messages
+                     (append (reverse (ende-chat--retained-fence-messages document headline))
+                             messages)))
               ((and selected
                     (ende-chat--work-section-p document headline))
                (let ((tool-messages
@@ -1571,20 +1580,20 @@ COMPLETE means TEXT reaches the generated wrapper's end."
         :tool-call-id (plist-get execution :provider-call-id)
         :content (plist-get execution :content)))
 
-(defun ende-chat--protocol-work-messages (document work)
-  "Reconstruct WORK's current provider events in document order."
+(defun ende-chat--protocol-work-messages (document work &optional children)
+  "Reconstruct WORK's provider events, optionally bounded to CHILDREN."
   (ende-tool-store-call-with-replay
-   (lambda () (ende-chat--read-work-messages document work))))
+   (lambda () (ende-chat--read-work-messages document work children))))
 
-(defun ende-chat--read-work-messages (document work)
-  "Read WORK's provider events within the current replay scope."
+(defun ende-chat--read-work-messages (document work &optional selected)
+  "Read WORK's provider events, optionally bounded to SELECTED children."
   (ende-chat--validate-work-contents document work)
   (let* ((children (mapcar
                     (lambda (child)
                       (if (ende-chat--property document child :reply-reference)
                           (ende-chat--reply-reference-target document work child)
                         child))
-                    (ende-chat--children document work)))
+                    (or selected (ende-chat--children document work))))
          (messages nil)
          (assistant nil)
          (pending-calls nil)
@@ -1699,6 +1708,288 @@ COMPLETE means TEXT reaches the generated wrapper's end."
               (ende-chat--message 'assistant (plist-get assistant :content)))
             messages))
     (nreverse messages)))
+
+(defun ende-chat--context-equal-p (left right)
+  "Compare canonical message trees, including native JSON objects."
+  (if (consp left)
+      (and (consp right)
+           (ende-chat--context-equal-p (car left) (car right))
+           (ende-chat--context-equal-p (cdr left) (cdr right)))
+    (ende-protocol-json-equal-p left right)))
+
+(defun ende-chat--context-source (document fence property value)
+  "Resolve one preceding, in-scope PROPERTY VALUE for FENCE."
+  (let* ((matches (cl-remove-if-not
+                   (lambda (node) (equal (ende-chat--property document node property) value))
+                   (ende-chat--document-headlines document)))
+         (source (car matches)))
+    (unless (and (stringp value) (not (string-empty-p value))
+                 (= (length matches) 1)
+                 (< (org-element-property :begin source) (org-element-property :begin fence))
+                 (eq (ende-chat--root document source) (ende-chat--root document fence)))
+      (error "Missing, ambiguous or out-of-scope context source: %s" value))
+    source))
+
+(defun ende-chat--tool-batch-children (document work response)
+  "Select RESPONSE's entire assistant/tool batch under WORK, or signal."
+  (let* ((children (ende-chat--children document work))
+         (group (cl-remove-if-not
+                 (lambda (node) (equal (ende-chat--property document node :response-id) response))
+                 children))
+         (calls (cl-remove-if-not
+                 (lambda (node) (ende-chat--tool-call-protocol-p document node)) group))
+         (ids (mapcar (lambda (node) (ende-chat--property document node :tool-execution-id)) calls))
+         (results (cl-remove-if-not
+                   (lambda (node)
+                     (and (ende-chat--tool-result-protocol-p document node)
+                          (member (ende-chat--property document node :tool-execution-id) ids)))
+                   children)))
+    (unless (and (stringp response) calls
+                 (= (length ids) (length (delete-dups (copy-sequence ids))))
+                 (= (length calls) (length results))
+                 (cl-every
+                  (lambda (id)
+                    (= 1 (cl-count id results :test #'equal
+                                   :key (lambda (node)
+                                          (ende-chat--property document node :tool-execution-id)))))
+                  ids)
+                 (cl-every (lambda (node) (ende-chat--eligible-p document node))
+                           (append calls results)))
+      (error "Incomplete retained tool batch"))
+    (cl-remove-if-not (lambda (node) (or (memq node group) (memq node results))) children)))
+
+(defun ende-chat--tool-batch-messages (document work response)
+  "Replay one complete RESPONSE from WORK using the canonical reader."
+  (let* ((children (ende-chat--tool-batch-children document work response))
+         (ende-chat--expired-history-in-request nil)
+         (messages (ende-chat--protocol-work-messages document work children)))
+    (when ende-chat--expired-history-in-request
+      (error "Retained tool batch payloads have expired"))
+    messages))
+
+(defun ende-chat--fence-summary-messages (document fence)
+  "Read FENCE's editable summary without resolving its retained sources."
+  (let* ((properties (ende-chat--document-properties document))
+         (original (gethash fence properties)))
+    (unwind-protect
+        (progn
+          (puthash fence (plist-put (copy-sequence original) :context-sources nil) properties)
+          (ende-chat--section-messages document fence
+                                       (org-element-property :begin fence)
+                                       (org-element-property :end fence)))
+      (puthash fence original properties))))
+
+(defun ende-chat--retained-fence-messages (document fence)
+  "Read FENCE's summary and validated task, capability and tool references."
+  (let* ((sources (json-parse-string (ende-chat--property document fence :context-sources)
+                                    :object-type 'plist :array-type 'list
+                                    :null-object nil :false-object nil))
+         (task (ende-chat--context-source document fence :id (plist-get sources :task)))
+         (cap-id (plist-get sources :cap))
+         (work-id (plist-get sources :work))
+         (response (plist-get sources :response))
+         (executions (plist-get sources :executions))
+         (cap (and cap-id (ende-chat--context-source document fence :protocol-item-id cap-id)))
+         (work (and work-id (ende-chat--context-source document fence :id work-id))))
+    (unless (and (ende-chat--context-fence-p document fence)
+                 (equal (ende-chat--property document fence :role) "assistant")
+                 (equal (ende-chat--property document fence :reply-to) (plist-get sources :task))
+                 (eq (ende-chat--effective-role document task) 'user)
+                 (ende-chat--askable-p document task)
+                 (cl-loop for (key _value) on sources by #'cddr
+                          always (memq key '(:task :cap :work :response :executions)))
+                 (eq (not work) (not response))
+                 (eq (not work) (not executions)))
+      (error "Malformed retained context sources"))
+    (when cap
+      (unless (ende-chat--capabilities-reference-p document cap)
+        (error "Retained capability source is not host metadata")))
+    (when work
+      (unless (and (ende-chat--work-section-p document work)
+                   (equal executions
+                          (cl-loop for node in (ende-chat--tool-batch-children document work response)
+                                   when (ende-chat--tool-call-protocol-p document node)
+                                   collect (ende-chat--property document node :tool-execution-id))))
+        (error "Retained tool execution identities changed")))
+    (append
+     (ende-chat--fence-summary-messages document fence)
+     (list (ende-chat--message 'user (ende-chat--content
+                                    document task (ende-chat--current-text document task))))
+     (when cap (list (ende-chat--protocol-capabilities-message
+                     document (ende-chat--work-ancestor document cap) cap)))
+     (when work (ende-chat--tool-batch-messages document work response)))))
+
+(defun ende-chat--context-with-metadata (job messages)
+  "Add JOB's original source metadata once to canonical MESSAGES."
+  (let ((block (plist-get (ende-job-instruction job) :context-source-metadata))
+        added)
+    (mapcar (lambda (message)
+              (if (and block (not added) (equal (ende-content-role message) "user"))
+                  (progn
+                    (setq added t)
+                    (ende-chat--message 'user
+                                        (ende-content-concat (list block (ende-content-body message)))))
+                message))
+            messages)))
+
+(defun ende-chat--context-projection (job function)
+  "Call FUNCTION in a temporary Org projection of JOB's completed input.
+Pass its document and pending destination.  Never checkpoint or edit the source."
+  (ende-chat--completed-entries job)
+  (with-current-buffer (ende-target-buffer (ende-job-target job))
+    (save-restriction
+      (widen)
+      (pcase-let* ((`(,document ,pending) (ende-chat--resolve-request-destination job 'snapshot))
+                   (frontier (ende-chat--materialized-through document pending))
+                   (suffix (ende-chat--transcript-suffix
+                            job (or (ende-chat--render-transcript job t) "") frontier))
+                   (position (org-element-property :begin pending))
+                   (text (buffer-substring-no-properties (point-min) (point-max)))
+                   (file buffer-file-name)
+                   (directory default-directory)
+                   (store (ende-tool-store--filename))
+                   (policy ende-chat-context-policy)
+                   (reasoning ende-chat-include-reasoning)
+                   (opaque ende-chat-replay-opaque-reasoning))
+        (with-temp-buffer
+          (org-mode)
+          (setq buffer-file-name file default-directory directory)
+          (setq-local ende-tool-store--local-file store)
+          (let ((ende-chat-context-policy policy)
+                (ende-chat-include-reasoning reasoning)
+                (ende-chat-replay-opaque-reasoning opaque))
+            (insert text)
+            (goto-char position)
+            (insert suffix)
+            (let* ((projected (ende-chat--build-document))
+                   (destination (ende-chat--request-state-headline
+                                 projected (plist-get (ende-job-instruction job) :request-id) "pending")))
+              (funcall function projected destination))))))))
+
+(defun ende-chat--context-stamp (job)
+  "Return a cheap invalidation stamp for JOB's effective context."
+  (list (with-current-buffer (ende-target-buffer (ende-job-target job))
+          (buffer-chars-modified-tick))
+        (length (ende-transcript-entries (ende-job-transcript job)))
+        (ende-job-execution-generation job)))
+
+(defun ende-chat-compaction-context (job messages)
+  "Snapshot JOB's canonical input for explicit compaction, without checkpointing.
+Return :messages, :retained (system, full original task, current capabilities),
+:recent (latest complete tool batch or nil), and opaque identity/source fields.
+MESSAGES supplies the stable system prompt and authoritative capability check.
+The snapshot is valid only for this running job, generation and source input."
+  (unless (and (eq (ende-job-type job) 'chat) (ende-job-current-p job)
+               (equal (ende-content-role (car messages)) "system"))
+    (error "Compaction requires a running chat and its system prompt"))
+  (ende-chat--context-projection
+   job
+   (lambda (document pending)
+     (let* ((question-id (plist-get (ende-job-instruction job) :question-id))
+            (task (ende-chat--context-source document pending :id question-id))
+            (system (car messages))
+            (context (ende-chat--context-prefix document pending))
+            (caps (cl-find-if #'ende-content-capabilities-p context :from-end t))
+            (live-caps (cl-find-if #'ende-content-capabilities-p messages :from-end t))
+            (root (ende-chat--root document pending))
+            (end (org-element-property :begin pending))
+            (sources (list :task question-id))
+            recent)
+       (when (and live-caps (not (equal live-caps caps)))
+         (error "Authoritative capabilities do not match chat sources"))
+       (dolist (node (ende-chat--document-headlines document))
+         (when (and (< (org-element-property :begin node) end)
+                    (eq (ende-chat--root document node) root))
+           (cond
+            ((ende-chat--capabilities-reference-p document node)
+             (when (equal caps (ende-chat--protocol-capabilities-message
+                               document (ende-chat--work-ancestor document node) node))
+               (setq sources (plist-put sources :cap
+                                        (ende-chat--property document node :protocol-item-id)))))
+            ((and (ende-chat--tool-call-protocol-p document node)
+                  (ende-chat--eligible-p document node))
+             (let* ((work (ende-chat--work-ancestor document node))
+                    (id (ende-chat--property document work :id))
+                    (response (ende-chat--property document node :response-id))
+                    (batch (and id (ende-chat--tool-batch-messages document work response))))
+               (when (and batch (cl-search batch context :test #'ende-chat--context-equal-p))
+                 (setq recent batch
+                       sources (plist-put sources :work id)
+                       sources (plist-put sources :response response)
+                       sources (plist-put sources :executions
+                                          (vconcat
+                                           (cl-loop for child in (ende-chat--tool-batch-children document work response)
+                                                    when (ende-chat--tool-call-protocol-p document child)
+                                                    collect (ende-chat--property document child :tool-execution-id)))))))))))
+       (when (and caps (not (plist-get sources :cap)))
+         (error "Current capabilities have no retained source"))
+       (let* ((canonical (ende-chat--context-with-metadata job (cons system context)))
+              (retained (ende-chat--context-with-metadata
+                         job (append (list system (ende-chat--message
+                                                  'user (ende-chat--content
+                                                         document task (ende-chat--current-text document task))))
+                                     (when caps (list caps))))))
+         (list :job job :generation (or (ende-job-execution-generation job) 0)
+               :messages canonical :retained retained :recent recent :sources sources
+               :level (plist-get (ende-job-instruction job) :response-level)
+               :identity (list canonical retained sources)
+               :stamp (ende-chat--context-stamp job)))))))
+
+(defun ende-chat-compaction-messages (snapshot summary include-recent)
+  "Return SNAPSHOT's complete prospective input with SUMMARY, without effects.
+INCLUDE-RECENT retains the entire optional tool batch; essential input is never
+shortened.  SUMMARY remains assistant content, not system instructions."
+  (unless (and (stringp summary) (not (string-blank-p summary)))
+    (error "A context fence needs a nonblank summary"))
+  (let* ((retained (plist-get snapshot :retained))
+         (level (plist-get snapshot :level))
+         (normalized (ende-chat--normalize-response summary level))
+         (summary-messages
+          (with-temp-buffer
+            (org-mode)
+            (insert (ende-chat--assistant-text level "task" "request"
+                                               (ende-chat--normalized-response-properties normalized)
+                                               normalized t))
+            (let* ((document (ende-chat--build-document))
+                   (fence (car (ende-chat--document-headlines document))))
+              (ende-chat--fence-summary-messages document fence)))))
+    (append (list (car retained)) summary-messages (cdr retained)
+            (when include-recent (plist-get snapshot :recent)))))
+
+(defun ende-chat-apply-compaction (job snapshot summary include-recent)
+  "Validate SNAPSHOT, persist SUMMARY's fence and return its replacement input.
+Reject stale source input, execution generations and cancelled jobs before any
+write.  INCLUDE-RECENT selects the whole optional batch, never part of it."
+  (unless (and (eq job (plist-get snapshot :job))
+               (ende-job-execution-current-p job (plist-get snapshot :generation)))
+    (error "Stale chat compaction generation"))
+  (let* ((current (ende-chat-compaction-context job (plist-get snapshot :messages)))
+         (candidate (ende-chat-compaction-messages snapshot summary include-recent))
+         (sources (copy-sequence (plist-get snapshot :sources))))
+    (unless (ende-chat--context-equal-p (plist-get snapshot :identity) (plist-get current :identity))
+      (error "Chat compaction sources changed"))
+    (unless include-recent
+      (setq sources (list :task (plist-get sources :task) :cap (plist-get sources :cap))))
+    (ende-chat--insert-context-fence job summary sources)
+    (let ((effective (ende-chat-refresh-context job candidate)))
+      (unless (ende-chat--context-equal-p candidate effective)
+        (error "Compacted input disagrees with durable context"))
+      candidate)))
+
+(defun ende-chat-refresh-context (job messages)
+  "Return effective live input after source edits, including uncommitted work.
+An unchanged context returns MESSAGES itself.  This never checkpoints work or
+resurrects deleted fences; normal serialization decides their eligibility."
+  (let* ((stamp (ende-chat--context-stamp job))
+         (instruction (ende-job-instruction job)))
+    (if (equal stamp (plist-get instruction :context-stamp)) messages
+      (let ((effective
+             (ende-chat--context-projection
+              job (lambda (document pending)
+                    (ende-chat--context-with-metadata
+                     job (cons (car messages) (ende-chat--context-prefix document pending)))))))
+        (setf (plist-get (ende-job-instruction job) :context-stamp) stamp)
+        effective))))
 
 (defun ende-chat--context-prefix (document section &optional root)
   "Read SECTION's preceding context according to the configured policy.
@@ -2904,12 +3195,10 @@ Keep the pending Reply and advance its frontier in the same transaction."
                       (org-entry-delete nil ende-chat-materialized-through-property))))
                 (set-marker marker nil)))))))))
 
-(defun ende-chat--materialize-work (job)
-  "Append JOB's completed work without replacing any materialized sections.
-Return its committed entry count.  Do not materialize an active response."
+(defun ende-chat--completed-entries (job)
+  "Return JOB's entries, rejecting incomplete exchanges and final responses."
   (let* ((transcript (ende-job-transcript job))
          (entries (and transcript (ende-transcript-entries transcript)))
-         (last (car (last entries)))
          (results (cl-loop for entry in entries
                            when (eq (ende-transcript-entry-kind entry) 'tool-result)
                            collect (plist-get (ende-transcript-entry-data entry) :call))))
@@ -2921,6 +3210,13 @@ Return its committed entry count.  Do not materialize an active response."
                                        (plist-get (ende-transcript-entry-data entry) :calls)))))
                    entries)
       (error "Cannot checkpoint an active exchange or final response"))
+    entries))
+
+(defun ende-chat--materialize-work (job)
+  "Append JOB's completed work without replacing any materialized sections.
+Return its committed entry count.  Do not materialize an active response."
+  (let* ((entries (ende-chat--completed-entries job))
+         (last (car (last entries))))
     (when last
       (let ((old (plist-get (ende-transcript-entry-data last) :chat-segment-end))
             committed)
@@ -2933,10 +3229,11 @@ Return its committed entry count.  Do not materialize an active response."
             (setf (plist-get (ende-transcript-entry-data last) :chat-segment-end) old)))))
     (length entries)))
 
-(defun ende-chat--insert-context-fence (job summary)
+(defun ende-chat--insert-context-fence (job summary &optional sources)
   "Append a durable SUMMARY fence after JOB's completed work.
 Work materialization and fence insertion have separate undo boundaries.
-This writer does not choose or replace the provider's live context."
+SOURCES optionally records retained source identities.  This writer does
+not choose or replace the provider's live context."
   (unless (and (stringp summary) (not (string-blank-p summary)))
     (error "A context fence needs a nonblank summary"))
   (ende-chat--materialize-work job)
@@ -2949,6 +3246,8 @@ This writer does not choose or replace the provider's live context."
          committed)
     (unwind-protect
         (progn
+          (when sources
+            (setf (plist-get (ende-transcript-entry-data entry) :context-sources) sources))
           (ende-chat--append-transcript
            job (ende-chat--render-transcript job t) (length (ende-transcript-entries transcript)))
           (setq committed t)
@@ -3734,6 +4033,10 @@ COMPLETED omits the snapshot's pending Work marker for live materialization."
                              ende-chat-id-property
                              (format "%s-fence-%d" request-id (ende-transcript-entry-id entry)))
                             (ende-chat--transcript-range-properties index index)
+                            (when-let* ((sources (plist-get (ende-transcript-entry-data entry)
+                                                           :context-sources)))
+                              (ende-chat--response-property
+                               ende-chat-context-sources-property (json-encode sources)))
                             (ende-chat--normalized-response-properties normalized))
                            normalized t) sections))
                   (setq start (1+ index)))
@@ -4218,6 +4521,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 
 (defun ende-chat--dispatch-with-tools (job messages configuration)
   "Dispatch JOB MESSAGES with frozen CONFIGURATION through the shared loop."
+  (setf (plist-get (ende-job-instruction job) :context-source-metadata)
+        (ende-operations--source-metadata-block job))
   (let ((maximum ende-chat-max-tool-rounds)
         prepared retried)
     (unless (and (integerp maximum) (> maximum 0))
