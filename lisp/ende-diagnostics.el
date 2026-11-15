@@ -1,4 +1,4 @@
-;;; ende-diagnostics.el --- Bounded local diagnostic events -*- lexical-binding: t; -*-
+;;; ende-diagnostics.el --- Local diagnostic events -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Peter Samarin
 ;; SPDX-License-Identifier: AGPL-3.0-only
@@ -14,9 +14,11 @@
 (require 'json)
 (require 'ende-core)
 
-(defcustom ende-diagnostics-event-limit 512
-  "Maximum retained diagnostic events, applied when starting a session."
-  :type 'natnum :group 'ende)
+(defcustom ende-diagnostics-event-limit nil
+  "Maximum retained diagnostic events, or nil to keep all.
+Applied when starting a session."
+  :type '(choice (const :tag "Unlimited" nil) natnum)
+  :group 'ende)
 
 (defconst ende-diagnostics-field-limit 64
   "Maximum retained string field length.")
@@ -86,6 +88,7 @@
 (defvar ende-diagnostics-session 0)
 (defvar ende-diagnostics-dropped 0)
 (defvar ende-diagnostics--ring nil)
+(defvar ende-diagnostics--event-limit nil)
 (defvar ende-diagnostics--request 0)
 (defvar ende-diagnostics--connection 0)
 (defvar ende-diagnostics--call 0)
@@ -94,7 +97,8 @@
 
 (defun ende-diagnostics-start ()
   "Start an empty metadata session and return its numeric identity."
-  (setq ende-diagnostics--ring (make-ring (max 1 ende-diagnostics-event-limit))
+  (setq ende-diagnostics--event-limit ende-diagnostics-event-limit
+        ende-diagnostics--ring (make-ring (max 1 (or ende-diagnostics--event-limit 64)))
         ende-diagnostics-dropped 0
         ende-diagnostics--request 0
         ende-diagnostics--connection 0
@@ -104,7 +108,7 @@
   ende-diagnostics-session)
 
 (defun ende-diagnostics-stop ()
-  "Disable recording, retaining the bounded store for inspection."
+  "Disable recording, retaining events for inspection."
   (setq ende-diagnostics-enabled nil))
 
 (defun ende-diagnostics-context-create (job &optional request-p)
@@ -165,7 +169,9 @@ Return non-nil if retained; observer failures never propagate."
                   (setq event (plist-put event (car spec) value)))))
             (when (= (ring-length ende-diagnostics--ring)
                      (ring-size ende-diagnostics--ring))
-              (cl-incf ende-diagnostics-dropped))
+              (if ende-diagnostics--event-limit
+                  (cl-incf ende-diagnostics-dropped)
+                (ring-resize ende-diagnostics--ring (* 2 (ring-size ende-diagnostics--ring)))))
             (ring-insert ende-diagnostics--ring event)
             (when (eq level 'error)
               (dolist (function ende-diagnostics-failure-functions)

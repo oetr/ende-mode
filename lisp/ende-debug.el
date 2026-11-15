@@ -159,7 +159,7 @@ Only diagnostics-owned files are pruned; content captures are untouched."
                                  :count pruned)))))
 
 (defun ende-debug-save-diagnostics (&optional file job)
-  "Save a bounded metadata snapshot to local FILE, optionally for JOB.
+  "Save retained metadata to local FILE, optionally for JOB.
 Without FILE, update this session's private snapshot and apply retention.
 Return its path on success.  Failures are classified, never propagated."
   (interactive)
@@ -195,7 +195,7 @@ Return its path on success.  Failures are classified, never propagated."
 
 ;;;###autoload
 (defun ende-debugging-on ()
-  "Start bounded local metadata diagnostics, without capturing request bodies."
+  "Start local metadata diagnostics, without capturing request bodies."
   (interactive)
   (when (file-remote-p (expand-file-name user-emacs-directory))
     (user-error "Diagnostics must stay local"))
