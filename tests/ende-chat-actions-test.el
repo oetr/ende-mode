@@ -140,7 +140,7 @@
          (let* ((job (ende-ask))
                 (request-id (plist-get (ende-job-instruction job) :request-id))
                 (document (ende-chat--build-document))
-                (work (ende-chat--request-work-section document request-id))
+                (work (car (ende-chat--request-work-sections document request-id)))
                 (opaque (cl-find-if
                          (lambda (headline)
                            (ende-chat--opaque-reference-p document headline))
@@ -635,7 +635,7 @@
        (should (string-match-p "Added during the asynchronous tool round"
                                (buffer-string)))
        (let* ((document (ende-chat--build-document))
-              (work (ende-chat--request-work-section document request-id))
+              (work (car (ende-chat--request-work-sections document request-id)))
               (children (ende-chat--children document work))
               (call-node (cl-find-if
                           (lambda (node)
@@ -893,7 +893,7 @@
            (let* ((document (ende-chat--build-document))
                   (reply (ende-chat--request-state-headline
                           document request-id "failed"))
-                  (work (ende-chat--request-work-section document request-id)))
+                  (work (car (ende-chat--request-work-sections document request-id))))
              (should reply)
              (let ((summary
                     (cl-find-if
@@ -1078,7 +1078,7 @@
        (should (eq (ende-job-state job) 'completed))
        (ende-test--chat-goto "** Followup")
        (let* ((document (ende-chat--build-document))
-              (work (ende-chat--request-work-section document request-id))
+              (work (car (ende-chat--request-work-sections document request-id)))
               (reply (cl-find-if
                       (lambda (headline)
                         (and (equal (org-element-property :raw-value headline)
@@ -1130,7 +1130,7 @@
                     (equal (org-element-property :raw-value headline)
                            "Agent: Reply"))
                   (ende-chat--document-headlines document)))
-          (work (ende-chat--request-work-section document "fixture-request"))
+          (work (car (ende-chat--request-work-sections document "fixture-request")))
           (summary (car (ende-chat--children document work))))
      (should (eq (ende-chat--parent document summary) work))
      (should (string-match-p "Done"

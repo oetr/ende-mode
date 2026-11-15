@@ -348,7 +348,7 @@
             (ende-test--complete-call (nth 2 ende-test--calls))
             (should (eq (ende-job-state job) 'completed))
             (let* ((document (ende-chat--build-document))
-                   (work (ende-chat--request-work-section document request-id))
+                   (work (car (ende-chat--request-work-sections document request-id)))
                    (reply
                     (cl-find-if
                      (lambda (headline)

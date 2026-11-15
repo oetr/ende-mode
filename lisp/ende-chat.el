@@ -427,10 +427,15 @@ OUTLINE reads only headlines for enqueueing, without historical bodies."
                 (ende-chat--property document node :tool-kind))
         (setq owner node))
       (setq node (ende-chat--parent document node)))
-    (if (and owner (ende-chat--referenced-reply-p document owner))
-        (ende-chat--request-work-section
-         document (ende-chat--property document owner :request-id))
-      owner)))
+    (or (and owner
+             (ende-chat--referenced-reply-p
+              document owner
+              (lambda (work)
+                (and (ende-chat--eligible-p document work)
+                     (>= (org-element-property :begin work)
+                         (ende-chat--context-start
+                          document (ende-chat--root document owner) owner))))))
+        owner)))
 
 (defun ende-chat--check-question-section (document question)
   "Reject questions inside generated agent sections."
@@ -835,6 +840,7 @@ SELECTED-HEADLINES supplies an already selected current section."
         (message-owner nil)
         (message-role nil)
         (presentation-owner nil)
+        (selected-work nil)
         (fragment-end nil))
     (cl-labels
         ((flush ()
@@ -878,13 +884,15 @@ SELECTED-HEADLINES supplies an already selected current section."
                (flush))
              (cond
               ((and selected (not ende-chat--reading-reply-reference)
-                    (ende-chat--referenced-reply-p document headline))
+                    (ende-chat--referenced-reply-p
+                     document headline (lambda (work) (memq work selected-work))))
                (flush))
               ((and selected
                     (ende-chat--work-section-p document headline))
                (let ((tool-messages
                       (ende-chat--protocol-work-messages document headline)))
                  (flush)
+                 (push headline selected-work)
                  (setq messages
                        (append (reverse tool-messages) messages))))
               ((and selected (ende-chat--capabilities-reference-p document headline))
@@ -1096,17 +1104,11 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
          (equal (org-element-property :raw-value headline)
                 ende-chat--work-title))))
 
-(defun ende-chat--request-work-section (document request-id)
-  "Return REQUEST-ID's unique generated Agent: Work section, or nil."
-  (let ((matches
-         (cl-remove-if-not
-          (lambda (headline)
-            (ende-chat--work-section-p document headline))
-          (ende-chat--request-headlines document request-id))))
-    (when (> (length matches) 1)
-      (error "Multiple generated Agent: Work sections for request %s"
-             request-id))
-    (car matches)))
+(defun ende-chat--request-work-sections (document request-id)
+  "Return REQUEST-ID's generated Agent: Work segments in document order."
+  (cl-remove-if-not
+   (lambda (headline) (ende-chat--work-section-p document headline))
+   (ende-chat--request-headlines document request-id)))
 
 (defun ende-chat--newest-tool-execution-in-history
     (document request-id include-name-p)
@@ -1114,9 +1116,10 @@ INSTRUCTIONS and INCLUDE-REASONING have the same meanings as in
 INCLUDE-NAME-P, when non-nil, selects candidates by their Org tool name.
 The returned semantic execution includes :result-reference-present-p, which
 reflects Org history rather than the existence of a stored result payload."
-  (let ((work (ende-chat--request-work-section document request-id)))
-    (when work
-      (let* ((children (ende-chat--children document work))
+  (let ((works (reverse (ende-chat--request-work-sections document request-id)))
+        selected)
+    (while (and works (not selected))
+      (let* ((children (ende-chat--children document (pop works)))
              (results (cl-remove-if-not
                        (lambda (headline)
                          (ende-chat--tool-result-protocol-p document headline))
@@ -1125,8 +1128,7 @@ reflects Org history rather than the existence of a stored result payload."
                      (cl-remove-if-not
                       (lambda (headline)
                         (ende-chat--tool-call-protocol-p document headline))
-                      children)))
-             selected)
+                      children))))
         (while (and calls (not selected))
           (let* ((call (pop calls))
                  (name (ende-chat--property document call :tool-name)))
@@ -1145,8 +1147,8 @@ reflects Org history rather than the existence of a stored result payload."
                 (setq selected (plist-put execution :history-name name))
                 (setq selected
                       (plist-put selected :result-reference-present-p
-                                 (and result-reference t)))))))
-        selected))))
+                                 (and result-reference t)))))))))
+    selected))
 
 (defun ende-chat--work-ancestor (document headline)
   "Return HEADLINE's generated Agent: Work ancestor, if any."
@@ -1155,21 +1157,26 @@ reflects Org history rather than the existence of a stored result payload."
       (setq parent (ende-chat--parent document parent)))
     parent))
 
-(defun ende-chat--referenced-reply-p (document headline)
-  "Return whether HEADLINE is replayed at a position inside its Work section."
+(defun ende-chat--referenced-reply-p (document headline &optional selected-work-p)
+  "Return the Work segment that references sibling reply HEADLINE, if any.
+SELECTED-WORK-P, when supplied, limits references to selected segments."
   (and (equal (org-element-property :raw-value headline) "Agent: Reply")
        (not (ende-chat--work-ancestor document headline))
-       (when-let* ((work (ende-chat--request-work-section
-                         document (ende-chat--property document headline :request-id))))
-         (cl-some (lambda (child) (ende-chat--property document child :reply-reference))
-                  (ende-chat--children document work)))))
+       (cl-find-if
+        (lambda (work)
+          (and (or (null selected-work-p) (funcall selected-work-p work))
+               (cl-some (lambda (child)
+                          (ende-chat--property document child :reply-reference))
+                        (ende-chat--children document work))))
+        (ende-chat--request-work-sections
+         document (ende-chat--property document headline :request-id)))))
 
 (defun ende-chat--reply-reference-target (document work reference)
   "Validate REFERENCE and resolve its editable sibling reply under WORK."
   (let* ((request-id (ende-chat--property document work :request-id))
          (references (cl-remove-if-not
-                      (lambda (child) (ende-chat--property document child :reply-reference))
-                      (ende-chat--children document work)))
+                      (lambda (node) (ende-chat--property document node :reply-reference))
+                      (ende-chat--request-headlines document request-id)))
          (replies (cl-remove-if-not
                    (lambda (headline)
                      (and (equal (org-element-property :raw-value headline) "Agent: Reply")
@@ -1178,11 +1185,17 @@ reflects Org history rather than the existence of a stored result payload."
          (reply (car replies)))
     (unless (and (= (length references) 1) (= (length replies) 1)
                  (eq reference (car references))
+                 (eq (ende-chat--parent document reference) work)
+                 (= (org-element-property :level reference)
+                    (1+ (org-element-property :level work)))
                  (equal (ende-chat--property document reference :reply-reference) "t")
                  (equal (ende-chat--property document reference :request-id) request-id)
                  (equal (ende-chat--property document reference :response-id)
                         (ende-chat--property document reply :response-id))
                  (eq (ende-chat--parent document reply) (ende-chat--parent document work))
+                 (= (org-element-property :level reply) (org-element-property :level work))
+                 (equal (ende-chat--property document reply :reply-to)
+                        (ende-chat--property document work :reply-to))
                  (not (ende-chat--children document reference))
                  (string-blank-p (ende-chat--protocol-body-string reference)))
       (error "Malformed generated final reply reference"))
@@ -1232,17 +1245,16 @@ reflects Org history rather than the existence of a stored result payload."
           (error "Malformed generated Agent: Work: child request ID mismatch"))))))
   work)
 
-(defun ende-chat--validate-generated-work-section (document work)
-  "Validate WORK's complete generated request structure."
+(defun ende-chat--validate-work-segment (document work)
+  "Validate WORK's generated container and allowed direct children."
   (ende-chat--validate-work-contents document work)
   (let* ((request-id (ende-chat--property document work :request-id))
          (state (ende-chat--property document work :state))
-         (children (ende-chat--children document work))
-         (sections (ende-chat--request-headlines document request-id))
-         (replies nil))
-    (unless (eq work (ende-chat--request-work-section document request-id))
-      (error "Malformed generated Agent: Work for request %s is not unique"
-             request-id))
+         (children (ende-chat--children document work)))
+    (unless (and (ende-chat--work-section-p document work)
+                 (stringp (ende-chat--property document work :reply-to))
+                 (not (string-empty-p (ende-chat--property document work :reply-to))))
+      (error "Malformed generated Agent: Work identity"))
     (when (or (ende-chat--property document work :role)
               (ende-chat--property document work :visibility))
       (error "Malformed generated Agent: Work: %s cannot have role %S or visibility %S"
@@ -1256,6 +1268,9 @@ reflects Org history rather than the existence of a stored result payload."
       (when (and newline (not (string-blank-p (substring text (1+ newline)))))
         (error "Malformed generated Agent: Work: container body must be empty")))
     (dolist (child children)
+      (unless (= (org-element-property :level child)
+                 (1+ (org-element-property :level work)))
+        (error "Malformed generated Agent: Work: child level mismatch"))
       (unless (equal (ende-chat--property document child :request-id) request-id)
         (unless (equal (ende-chat--property document child :visibility)
                        "reasoning_summary")
@@ -1275,8 +1290,7 @@ reflects Org history rather than the existence of a stored result payload."
              (equal (org-element-property :raw-value child) "Agent: Reply"))
         (unless (equal (ende-chat--property document child :role) "assistant")
           (error "Malformed generated assistant protocol role"))
-        (ende-chat--protocol-body-string child)
-        (push child replies))
+        (ende-chat--protocol-body-string child))
        ((ende-chat--capabilities-reference-p document child)
         (ende-chat--validate-capabilities-reference document work child))
        ((ende-chat--opaque-reference-p document child)
@@ -1286,55 +1300,69 @@ reflects Org history rather than the existence of a stored result payload."
             (ende-chat--tool-result-protocol-p document child)))
        (t
         (error "Malformed generated Agent: Work: unexpected child %s"
-               (org-element-property :raw-value child)))))
+               (org-element-property :raw-value child))))))
+  work)
+
+(defun ende-chat--validate-generated-work-section (document work)
+  "Validate the complete request containing WORK, including sibling segments."
+  (let* ((request-id (ende-chat--property document work :request-id))
+         (works (ende-chat--request-work-sections document request-id))
+         (sections (ende-chat--request-headlines document request-id))
+         (last-work (car (last works)))
+         (state (ende-chat--property document last-work :state))
+         ids replies)
+    (unless (memq work works)
+      (error "Malformed generated Agent: Work for request %s" request-id))
+    (dolist (segment works)
+      (ende-chat--validate-work-segment document segment)
+      (unless (and (eq (ende-chat--parent document segment)
+                       (ende-chat--parent document work))
+                   (= (org-element-property :level segment)
+                      (org-element-property :level work))
+                   (equal (ende-chat--property document segment :reply-to)
+                          (ende-chat--property document work :reply-to)))
+        (error "Malformed generated Agent: Work: inconsistent segments"))
+      (when (cdr works)
+        (let ((id (ende-chat--property document segment :id)))
+          (unless (and (stringp id) (not (string-empty-p id))
+                       (not (member id ids)))
+            (error "Malformed generated Agent: Work: missing or duplicate segment ID"))
+          (push id ids))
+        (when (and (not (eq segment last-work))
+                   (ende-chat--property document segment :state))
+          (error "Malformed generated Agent: Work: unfinished earlier segment"))))
     (dolist (headline sections)
       (let* ((parent (ende-chat--parent document headline))
-             (within-work
-              (eq (ende-chat--work-ancestor document headline) work))
              (final-reply
-              (and (not within-work)
+              (and (null (ende-chat--work-ancestor document headline))
                    (ende-chat--assistant-protocol-p document headline)
                    (equal (org-element-property :raw-value headline)
                           "Agent: Reply")))
-             (direct-work-child
-              (and (eq parent work)
-                   (or (and (ende-chat--assistant-protocol-p
-                             document headline)
-                            (equal (org-element-property :raw-value headline)
-                                   "Agent: Reply"))
-                       (ende-chat--tool-call-protocol-p document headline)
-                       (ende-chat--tool-result-protocol-p document headline)
-                       (ende-chat--provider-call-p document headline)
-                       (ende-chat--opaque-reference-p document headline)
-                       (ende-chat--property document headline :reply-reference)
-                       (equal (ende-chat--property document headline :visibility)
-                              "reasoning_summary"))))
-             (valid (or (eq headline work)
+             (valid (or (memq headline works)
                         final-reply
-                        (and within-work direct-work-child))))
+                        (memq parent works))))
         (unless valid
           (error "Malformed generated protocol section outside Agent: Work: %s"
                  (org-element-property :raw-value headline)))
         (when final-reply
           (push headline replies))))
-    (let ((final-replies
-           (cl-remove-if-not
-            (lambda (headline)
-              (null (ende-chat--work-ancestor document headline)))
-            replies)))
-      (dolist (reply final-replies)
-        (unless (and (eq (ende-chat--parent document work)
-                         (ende-chat--parent document reply))
-                     (= (org-element-property :level work)
-                        (org-element-property :level reply))
-                     (> (org-element-property :begin reply)
-                        (org-element-property :begin work)))
-          (error "Malformed generated Agent: Work: final reply must follow its container")))
-      (if (member state '("pending" "failed"))
-          (when final-replies
-            (error "Malformed generated Agent: Work: unfinished request has a final reply"))
-        (unless final-replies
-          (error "Malformed generated Agent: Work: completed request has no final reply"))))
+    (when (> (length replies) 1)
+      (error "Malformed generated Agent: Work: multiple final replies"))
+    (dolist (reply replies)
+      (unless (and (eq (ende-chat--parent document work)
+                       (ende-chat--parent document reply))
+                   (= (org-element-property :level work)
+                      (org-element-property :level reply))
+                   (equal (ende-chat--property document reply :reply-to)
+                          (ende-chat--property document work :reply-to))
+                   (> (org-element-property :begin reply)
+                      (org-element-property :begin last-work)))
+        (error "Malformed generated Agent: Work: final reply must follow its container")))
+    (if (member state '("pending" "failed"))
+        (when replies
+          (error "Malformed generated Agent: Work: unfinished request has a final reply"))
+      (unless replies
+        (error "Malformed generated Agent: Work: completed request has no final reply")))
     work))
 
 (defun ende-chat--protocol-body-start (headline)
@@ -1491,8 +1519,7 @@ COMPLETE means TEXT reaches the generated wrapper's end."
 
 (defun ende-chat--protocol-opaque-message (document headline)
   "Reconstruct opaque ITEM represented by HEADLINE, or omit it if missing."
-  (let* ((request-id (ende-chat--property document headline :request-id))
-         (work (ende-chat--request-work-section document request-id))
+  (let* ((work (ende-chat--work-ancestor document headline))
          (provider (ende-chat--property document headline :protocol-provider))
          (kind (ende-chat--property document headline :protocol-item-kind))
          (item-id (ende-chat--property document headline :protocol-item-id)))
@@ -2870,7 +2897,7 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
                                             ende-chat--work-title))
 				   headlines))
 				 (work
-				  (ende-chat--request-work-section document request-id)))
+				  (car (ende-chat--request-work-sections document request-id))))
                             (unless (and (= (length work-headlines) 1)
 					 work
 					 (eq work (car work-headlines))
@@ -2889,8 +2916,8 @@ When ALLOW-EDITED is `snapshot', resolve and validate the durable pending ID."
 				   (updated-headlines
                                     (ende-chat--document-headlines updated))
 				   (updated-work
-                                    (ende-chat--request-work-section
-                                     updated request-id))
+                                    (car (ende-chat--request-work-sections
+                                          updated request-id)))
 				   (replies
                                     (cl-remove-if-not
                                      (lambda (headline)

@@ -126,7 +126,7 @@
                      (org-mode)
                      (insert "* Question\n:PROPERTIES:\n:ENDE_CHAT_ID: q\n:END:\n" source)
                      (let* ((document (ende-chat--build-document))
-                            (work (ende-chat--request-work-section document "r")))
+                            (work (car (ende-chat--request-work-sections document "r"))))
                        (ende-chat--validate-generated-work-section document work)
                        (ende-chat--protocol-work-messages document work)))))
               (should (equal (replay rendered) (list (ende-content-capabilities text))))
@@ -1214,11 +1214,124 @@
                             (plist-get (nth 2 ende-test--calls) :messages)))))
       (ende-test--reset))))
 
+(defun ende-test--check-work-segment-lifecycle (request-id)
+  "Split REQUEST-ID's two tool rounds and check reversible fenced replay."
+  (let* ((file (ende-tool-store--filename))
+         (document (ende-chat--build-document))
+         (work (car (ende-chat--request-work-sections document request-id)))
+         (question-id (ende-chat--property document work :reply-to))
+         (second-call (nth 2 (ende-test--tool-headlines document 'call)))
+         (response-id (ende-chat--property document second-call :response-id))
+         (second-response
+          (cl-find response-id (ende-chat--children document work)
+                   :key (lambda (node) (ende-chat--property document node :response-id))
+                   :test #'equal))
+         (fence "** Agent: Context Fence\n:PROPERTIES:\n:ENDE_CHAT_CONTEXT_FENCE: t\n:ENDE_ROLE: assistant\n:END:\n\nSummary.\n\n"))
+    (cl-labels
+        ((context ()
+           (ende-test--chat-goto "** Follow-up")
+           (ende-chat-context-at-point))
+         (wire (messages) (json-encode (vconcat (ende-codex--request-messages messages))))
+         (validate ()
+           (let* ((doc (ende-chat--build-document))
+                  (segments (ende-chat--request-work-sections doc request-id)))
+             (should (= (length segments) 2))
+             (dolist (segment segments)
+               (ende-chat--validate-generated-work-section doc segment))
+             (should (equal (mapcar (lambda (segment) (ende-chat--property doc segment :id))
+                                   segments)
+                            '("segment-1" "segment-2")))))
+         (reload-context ()
+           (let ((source (buffer-string))
+                 (expected (wire (context))))
+             (with-temp-buffer
+               (org-mode)
+               (setq-local ende-tool-store--local-file file)
+               (insert source)
+               (validate)
+               (should (equal (wire (context)) expected))))))
+      (let ((original (wire (context))))
+        (goto-char (org-element-property :begin second-response))
+        (insert (ende-chat--work-text 2 question-id request-id))
+        (setq document (ende-chat--build-document))
+        (cl-loop for segment in (reverse (ende-chat--request-work-sections document request-id))
+                 for id in '("segment-2" "segment-1")
+                 do (goto-char (org-element-property :begin segment))
+                 (org-entry-delete nil ende-chat-state-property)
+                 (org-entry-put nil ende-chat-id-property id))
+        (validate)
+        (should (equal (wire (context)) original))
+        (setq document (ende-chat--build-document))
+        (let* ((segments (ende-chat--request-work-sections document request-id))
+               (second (cadr segments))
+               (events (ende-chat--protocol-work-messages document second))
+               (newest (ende-chat--newest-tool-execution-in-history document request-id nil)))
+          (should (equal (plist-get newest :provider-call-id) "call_4"))
+          (should (plist-get newest :result-reference-present-p))
+          (ende-test--chat-goto "** Agent: Reply")
+          (should (eq (ende-chat--generated-section-owner
+                       document (ende-chat--headline-at-point document))
+                      second))
+          (goto-char (org-element-property :begin second))
+          (insert fence)
+          ;; The fence selects only the second, independently closed multicall round.
+          (should (equal (wire (cdr (butlast (context)))) (wire events))))
+        (reload-context)
+        (ende-test--chat-goto "** Agent: Context Fence")
+        (delete-region (point) (+ (point) (length fence)))
+        (validate)
+        (should (equal (wire (context)) original))
+        (reload-context)
+        ;; A fence after Work excludes its reference, not the editable final reply.
+        (ende-test--chat-goto "** Agent: Reply")
+        (insert fence)
+        (should (equal (cdr (butlast (context))) '(("assistant" . "Final answer."))))
+        (ende-test--chat-goto "** Agent: Reply")
+        (should (equal (cdr (ende-chat-context-at-point)) '(("assistant" . "Final answer."))))
+        (reload-context)
+        (ende-test--chat-goto "** Agent: Context Fence")
+        (delete-region (point) (+ (point) (length fence)))
+        (let ((source (buffer-string)))
+          (dolist (mutation '(missing-id duplicate-id question-id request-id parent level
+                              child duplicate-segment duplicate-reply duplicate-reference))
+            (with-temp-buffer
+              (org-mode)
+              (insert source)
+              (let* ((doc (ende-chat--build-document))
+                     (second (cadr (ende-chat--request-work-sections doc request-id))))
+                (goto-char (org-element-property :begin second))
+                (pcase mutation
+                  ('missing-id (org-entry-delete nil ende-chat-id-property))
+                  ('duplicate-id (org-entry-put nil ende-chat-id-property "segment-1"))
+                  ('question-id (org-entry-put nil ende-chat-reply-to-property "other"))
+                  ('request-id (org-entry-put nil ende-chat-request-id-property "other"))
+                  ('parent (insert "* Other root\n"))
+                  ('level (org-demote-subtree))
+                  ('child (goto-char (org-element-property :end second))
+                          (insert "*** Unexpected\n"))
+                  ((or 'duplicate-segment 'duplicate-reply 'duplicate-reference)
+                   (let ((node
+                          (pcase mutation
+                            ('duplicate-segment second)
+                            ('duplicate-reply
+                             (ende-test--chat-goto "** Agent: Reply")
+                             (ende-chat--headline-at-point doc))
+                            ('duplicate-reference
+                             (cl-find-if (lambda (child) (ende-chat--property doc child :reply-reference))
+                                         (ende-chat--children doc second))))))
+                     (goto-char (org-element-property :begin node))
+                     (insert (buffer-substring-no-properties
+                              (point) (org-element-property :end node)))))))
+              (let ((doc (ende-chat--build-document)))
+                (should-error
+                 (ende-chat--validate-generated-work-section
+                  doc (car (ende-chat--request-work-sections doc request-id))))))))))))
+
 (ert-deftest ende-test/chat-roundtrips-provider-calls-between-turns ()
   (ende-test--reset)
   (let* ((ende-tools--registry (copy-sequence ende-tools--registry))
          (items
-          (cl-loop for n from 1 to 2
+          (cl-loop for n from 1 to 4
                    collect
                    (ende-protocol-json-read-string
                     (json-encode
@@ -1232,6 +1345,8 @@
                      "{\"type\":\"reasoning\",\"encrypted_content\":\"exact-ciphertext\",\"summary\":[]}"))
          (text (ende-protocol-json-read-string
                 "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking both.\"}]}"))
+         (final-text (ende-protocol-json-read-string
+                      "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Final answer.\"}]}"))
          (calls (mapcar (lambda (item)
                           (list :id (gethash "call_id" item)
                                 :name (gethash "name" item)
@@ -1239,10 +1354,14 @@
                         items))
          (ende-llm-function
           (ende-test--fake-llm
-           (list (list :content "Checking both." :tool-calls calls
+           (list (list :content "Checking both." :tool-calls (cl-subseq calls 0 2)
                        :protocol-items (cons 'openai-responses
-                                             (append (list reasoning text) items)))
-                 "Final answer.") t))
+                                             (append (list reasoning text) (cl-subseq items 0 2))))
+                 (list :content "Checking both." :tool-calls (nthcdr 2 calls)
+                       :protocol-items (cons 'openai-responses
+                                             (append (list reasoning text) (nthcdr 2 items))))
+                 (list :content "Final answer."
+                       :protocol-items (list 'openai-responses final-text reasoning))) t))
          (effects 0))
     (ende-test--register-store-boundary-tool
      (lambda (_arguments _root) (format "result-%d" (cl-incf effects))))
@@ -1255,9 +1374,10 @@
           (let ((job (ende-ask)))
             (ende-test--complete-call (car ende-test--calls))
             (ende-test--complete-call (cadr ende-test--calls))
+            (ende-test--complete-call (nth 2 ende-test--calls))
             (should (eq (ende-job-state job) 'completed)))
           (let ((live (ende-codex--request-messages
-                       (plist-get (cadr ende-test--calls) :messages)))
+                       (plist-get (nth 2 ende-test--calls) :messages)))
                 prefixes)
             (dolist (replay '(t nil))
               (let ((ende-chat-replay-opaque-reasoning replay))
@@ -1284,7 +1404,11 @@
                      (wire (ende-protocol-json-read-string (json-encode (vconcat restored)))))
                 (should (equal (json-encode (vconcat (butlast input))) (pop prefixes)))
                 (should (equal (json-serialize wire :null-object nil)
-                               (json-serialize (vconcat (append (when replay (list reasoning)) items))
+                               (json-serialize (vconcat (append (when replay (list reasoning))
+                                                                (cl-subseq items 0 2)
+                                                                (when replay (list reasoning))
+                                                                (nthcdr 2 items)
+                                                                (when replay (list reasoning))))
                                                :null-object nil)))
                 (should (equal
                          (cl-remove-if-not (lambda (item) (alist-get :type item))
@@ -1296,7 +1420,12 @@
                            (and (not (hash-table-p item))
                                 (equal (alist-get :content item)
                                        '(((:type . "output_text") (:text . "Checking both."))))))
-                         input))))))
+                         input)))))
+          (let* ((document (ende-chat--build-document))
+                 (work (cl-find-if (lambda (node) (ende-chat--work-section-p document node))
+                                   (ende-chat--document-headlines document))))
+            (ende-test--check-work-segment-lifecycle
+             (ende-chat--property document work :request-id))))
       (ende-test--reset))))
 
 (ert-deftest ende-test/chat-rebuilds-mixed-protocol-events-from-org ()
@@ -1357,7 +1486,7 @@
               (org-back-to-heading t)
               (org-entry-delete nil ende-chat-state-property))
             (let* ((document (ende-chat--build-document))
-                   (work (ende-chat--request-work-section document request-id))
+                   (work (car (ende-chat--request-work-sections document request-id)))
                    (call-headlines (ende-test--tool-headlines document 'call))
                    (result-headlines (ende-test--tool-headlines document 'result))
                    (execution
@@ -1451,7 +1580,7 @@
                 (delete-region (org-element-property :begin anthropic-item)
                                (org-element-property :end anthropic-item))))
             (let* ((document (ende-chat--build-document))
-                   (work (ende-chat--request-work-section document request-id))
+                   (work (car (ende-chat--request-work-sections document request-id)))
                    (ende-chat-replay-opaque-reasoning nil)
                    (events (ende-chat--protocol-work-messages document work)))
               (should-not (cl-some (lambda (message)
