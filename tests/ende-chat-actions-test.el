@@ -1579,6 +1579,7 @@
          (should (eq (ende-job-state ask) 'queued))
          (ende-test--complete-call (nth 0 ende-test--calls))
          (should (eq (ende-job-state first) 'completed))
+         (ende-test--wait-for (lambda () (>= (length ende-test--calls) 2)))
          (should (eq (ende-job-state ask) 'running))
          (let ((prompt (ende-test--chat-context-text
                         (plist-get (nth 1 ende-test--calls) :messages))))
@@ -1592,6 +1593,7 @@
            (org-end-of-meta-data t)
            (insert "Latest detail\n")
            (ende-test--complete-call (nth 1 ende-test--calls))
+           (ende-test--wait-for (lambda () (>= (length ende-test--calls) 3)))
            (should (eq (ende-job-state second) 'running))
            (let ((prompt (ende-test--chat-context-text
                           (plist-get (nth 2 ende-test--calls) :messages))))
@@ -1603,6 +1605,7 @@
            (let ((final (ende-ask)))
              (should (eq (ende-job-state final) 'queued))
              (ende-test--complete-call (nth 2 ende-test--calls))
+             (ende-test--wait-for (lambda () (>= (length ende-test--calls) 4)))
              (let ((prompt (ende-test--chat-context-text
                             (plist-get (nth 3 ende-test--calls) :messages))))
 	       (should (string-match-p "Second summary" prompt))
@@ -1619,6 +1622,7 @@
                           (plist-get (ende-job-instruction second) :request-id))))
              (goto-char (org-element-property :begin fence))
              (let ((third (ende-compact)))
+               (ende-test--wait-for (lambda () (>= (length ende-test--calls) 5)))
 	       (should
                 (equal (ende-test--chat-context-headings
                         (butlast (cdr (plist-get (nth 4 ende-test--calls)
