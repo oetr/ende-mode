@@ -161,9 +161,10 @@
 
 (defun ende-tools-phase-allows-p (name phase)
   "Return whether tool NAME may execute during host PHASE."
-  (if (eq phase 'title)
-      (equal (format "%s" name) "generate_title")
-    (not (equal (format "%s" name) "generate_title"))))
+  (pcase phase
+    ('compact nil)
+    ('title (equal (format "%s" name) "generate_title"))
+    (_ (not (equal (format "%s" name) "generate_title")))))
 
 (defvar ende-tools--register-cancellation-function nil
   "Optional function used to attach and detach an active tool cancellation.")

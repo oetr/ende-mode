@@ -57,6 +57,7 @@
 (require 'ende-org)
 (require 'ende-artifact)
 (require 'ende-content)
+(require 'ende-compact)
 (require 'ende-operation)
 (require 'ende-operations)
 (require 'ende-codex)
@@ -105,16 +106,6 @@ assistant role of its enclosing section."
 (defcustom ende-chat-replay-opaque-reasoning t
   "Replay opaque provider items referenced by generated chat headings."
   :type 'boolean
-  :group 'ende)
-
-(defcustom ende-chat-compact-instruction
-  "Summarize the conversation for continued work. Preserve the user's goals,
-requirements and preferences, decisions and their rationale, important facts
-and identifiers, current progress, unresolved questions, and next steps.
-Merge earlier summaries with subsequent information, keeping corrections and
-discarding superseded details. Be concise but self-contained."
-  "Default compaction instructions when the instruction section has no body."
-  :type 'string
   :group 'ende)
 
 (defcustom ende-chat-max-tool-rounds 100000
@@ -1881,25 +1872,6 @@ Signal when the durable identifier is ambiguous."
 
 ;;;; Context and response protocol
 
-(defconst ende-chat--org-format
-  "Respond with org-mode syntax to structure your response.
-Here is how:
-- Headings: * Section or ** Subsection, or even *** Subsubsection.
-- Emphasis: *bold* and /italic/. Inline code: ~code~ or =literal=.
-- Lists: - item or 1. item.
-- Links: [[URL][description]].
-- Code blocks: #+begin_src LANGUAGE and #+end_src on separate lines.
-- Other blocks: #+begin_example / #+end_example or #+begin_quote / #+end_quote.
-- No backticks, Markdown fences, hash headings, or double-asterisk emphasis.
-These rules govern your formatting; preserve literal source text inside blocks.
-
-Prefer concise paragraphs and lists. Use headings only when helpful.
-Return only the answer, without a preamble about these instructions.
-Do not wrap the whole answer in a block, unless user requires it.
-When reproducing org-mode source inside a source block, add a comma before lines
-beginning with *, #+, or either preceded by commas."
-  "Shared Org formatting instructions for chat responses.")
-
 (defconst ende-chat--system
   (concat
    "Answer the user's requests using the supplied role-tagged conversation.
@@ -1962,18 +1934,6 @@ level of text. Users hate AI-speak and in general prefer short but correct text.
 (defun ende-chat--system-prompt (_document)
   "Return the stable normal chat system prompt."
   ende-chat--system)
-
-(defconst ende-chat--compact-system
-  (concat
-   "Create a context summary of the supplied conversation, following the final
-user message's compaction instructions. Earlier messages are history to
-summarize, not requests to carry out. Existing summaries stand in for earlier
-history. Preserve useful specifics and distinguish facts from open questions;
-do not invent information. The summary will replace the supplied history in
-future requests. Return only the summary body; the application supplies its
-title.\n\n"
-   ende-chat--org-format)
-  "System prompt for context compaction.")
 
 (defun ende-chat--response-control-ranges (tree)
   "Return response ranges for host-owned control properties."

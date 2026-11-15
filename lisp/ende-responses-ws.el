@@ -274,7 +274,10 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
          (owner (plist-get profile :job-id))
          (key (or owner (make-symbol "ende-responses-ephemeral")))
          (identity
-          (list (or (plist-get profile :request-phase) 'work) url
+          (list (let ((phase (or (plist-get profile :request-phase) 'work)))
+                  ;; Compaction can append to work history.  Payload settings
+                  ;; and exact input/output prefixes still decide continuation.
+                  (if (eq phase 'compact) 'work phase)) url
                 (plist-get profile :service) (plist-get profile :auth-method)
                 (plist-get profile :account) (plist-get profile :codex-binding)
                 (plist-get profile :credential-binding) authentication-identity

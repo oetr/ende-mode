@@ -252,17 +252,24 @@
         (setq messages (append messages
                                (list (list :role "assistant" :protocol-items (plist-get result :protocol-items))
                                      (list :tool-call-id "call_1" :content "result"))))
+        ;; Appending a summary task shares the work connection and still needs
+        ;; an exact original input/output prefix to use previous_response_id.
+        (setq profile (plist-put profile :request-phase 'compact)
+              messages (append messages
+                               (list '("user" . "Summarize history")
+                                     (ende-content-capabilities "(capabilities (self (tools)) (agents))"))))
         (submit)
         (ende-test--wait-for (lambda () (= (length wires) 2)))
         (should (= (length sockets) 1))
         (let* ((wire (cdar wires)) (input (gethash "input" wire)))
           (should (equal (gethash "previous_response_id" wire) "resp_1"))
-          (should (= (length input) 1))
+          (should (= (length input) 3))
           (should (equal (gethash "type" (aref input 0)) "function_call_output")))
         (ende-responses-ws-test--complete (car sockets) "resp_2")
         (ende-test--wait-for (lambda () (= done 2)))
         ;; Compaction invalidates continuation, not the owned connection.
-        (setq messages '(("user" . "Compacted history")))
+        (setq messages '(("user" . "Compacted history"))
+              profile (plist-put profile :request-phase 'work))
         (submit)
         (ende-test--wait-for (lambda () (= (length wires) 3)))
         (should-not (gethash "previous_response_id" (cdar wires)))

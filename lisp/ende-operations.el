@@ -167,8 +167,9 @@ result is applied."
       (funcall function)
     ((error quit) (ende-job-fail job caught))))
 
-(defun ende--llm-callbacks (job &optional on-done on-error)
-  "Return standardized LLM callback plist for JOB's current execution."
+(defun ende--llm-callbacks (job &optional on-done on-error on-event)
+  "Return standardized LLM callback plist for JOB's current execution.
+ON-EVENT, when supplied, replaces ordinary job event routing."
   (let ((generation (or (ende-job-execution-generation job) 0))
         (settled nil)
         cancellation)
@@ -179,8 +180,10 @@ result is applied."
                    (ende-job-cancellation-set
                     job cancel-function generation)))
      :on-event (lambda (event)
-                 (unless settled
-                   (ende--handle-llm-event job event generation)))
+                 (when (and (not settled)
+                            (ende-job-execution-current-p job generation))
+                   (if on-event (funcall on-event event)
+                     (ende--handle-llm-event job event generation))))
      :on-done (lambda (result)
                 (when (and (not settled)
                            (ende-job-execution-current-p job generation))
