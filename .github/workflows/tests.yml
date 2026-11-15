@@ -22,8 +22,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      PACKAGE_USER_DIR: ${{ runner.temp }}/ende-test-elpa
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,4 +34,6 @@ jobs:
           version: '30.1'
 
       - name: Run tests
+        env:
+          PACKAGE_USER_DIR: ${{ runner.temp }}/ende-test-elpa
         run: make test TEST_VERBOSE=1
