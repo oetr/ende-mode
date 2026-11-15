@@ -24,7 +24,7 @@
 
 ;;; Commentary:
 
-;; Pure policy, capacity, and request-size estimates for future compaction.
+;; Pure policy, capacity, and request-size estimates for compaction.
 
 ;;; Code:
 
@@ -34,8 +34,8 @@
 (defcustom ende-auto-compact nil
   "Chat compaction policy, or nil to disable automatic compaction.
 Use (:tokens N) or (:percent P :fallback-tokens N).  N is a positive
-integer; P is greater than zero and at most 100.  The fallback applies
-when model capacity is unknown.  This option does not yet dispatch work."
+integer; P is strictly between zero and 100.  The fallback applies
+when model capacity is unknown."
   :type '(choice (const :tag "Disabled" nil)
                  (plist :tag "Policy" :options (:tokens :percent :fallback-tokens)))
   :group 'ende)
@@ -63,7 +63,7 @@ Accept the same forms; nil disables automatic agent compaction."
                           always (memq key '(:percent :fallback-tokens)))
                  (ende-provider-config--finite-p (plist-get policy :percent))
                  (< 0 (plist-get policy :percent))
-                 (<= (plist-get policy :percent) 100)
+                 (< (plist-get policy :percent) 100)
                  (ende-compact--positive (plist-get policy :fallback-tokens))))
       (error "Compaction policy: use (:tokens N) or (:percent P :fallback-tokens N)")))
   (copy-sequence policy))
@@ -80,9 +80,12 @@ Only chat and agent jobs have policies; other job types return nil."
   "Return :trigger, :capacity and :target for resolved PROFILE and POLICY.
 Nil POLICY disables budgeting.  Explicit profile limits precede the
 selected model's unexpired cached metadata; no discovery is started.
+An explicit :context-window overrides all cached size limits.
 Capacity is the usable input ceiling, or nil when unknown.  A context
 window reserves the actual requested :output-tokens, not the model's
 :max-output-tokens.  A separate input limit also caps usable capacity.
+Anthropic input-only limits reserve :output-tokens too, since input and
+output share context; input and output maxima are never added together.
 Codex does not enforce :output-tokens: reserve 20% of known capacity as
 conservative headroom instead, not as a guaranteed output allowance.
 A percentage uses the full context window (or input-only limit), capped
@@ -90,12 +93,13 @@ at usable capacity.  Unknown capacity uses :fallback-tokens.  Absolute
 triggers are also capped.  Target is floor(60% of trigger); exhausted
 capacity yields zero.  These are estimates, not context-fit guarantees."
   (when (ende-compact--validate-policy policy)
-    (let* ((model (plist-get profile :model))
-           (detail (and model
+    (let* ((explicit-window (ende-compact--positive (plist-get profile :context-window)))
+           (model (plist-get profile :model))
+           (detail (and (not explicit-window) model
                         (cl-find model (ende-provider-model-details profile)
                                  :key (lambda (item) (plist-get item :id))
                                  :test #'equal)))
-           (window (or (ende-compact--positive (plist-get profile :context-window))
+           (window (or explicit-window
                        (ende-compact--positive (plist-get detail :context-window))))
            (input (or (ende-compact--positive (plist-get profile :max-input-tokens))
                       (ende-compact--positive (plist-get detail :max-input-tokens))))
@@ -105,7 +109,9 @@ capacity yields zero.  These are estimates, not context-fit guarantees."
                         (if basis (ceiling basis 5) 0)
                       (or (ende-compact--positive (plist-get profile :output-tokens)) 0)))
            (capacity (cond (window (max 0 (- window reserve)))
-                           (input (if codex (max 0 (- input reserve)) input))))
+                           (input (if (or codex (eq (plist-get profile :api) 'anthropic-messages))
+                                      (max 0 (- input reserve))
+                                    input))))
            (trigger (or (plist-get policy :tokens)
                         (and basis (floor (* basis (plist-get policy :percent)) 100))
                         (plist-get policy :fallback-tokens))))
