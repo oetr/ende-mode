@@ -48,6 +48,7 @@
 (ert-deftest ende-test/dashboard-renders-both-sections-and-descendant-folds ()
   (ende-test--dashboard-reset)
   (let ((ende--queue-suspended t) (ende--job-handlers '((insert . ignore)))
+        (ende--next-job-id 98)
         root child grandchild finished dashboard)
     (unwind-protect
         (with-temp-buffer
@@ -72,7 +73,7 @@
                 (ende-job-enqueued-at finished) 10
                 (ende-job-started-at finished) 20
                 (ende-job-finished-at finished) 68)
-          (should (equal (mapcar (lambda (job) (nth 3 (ende-queue-ui--cells job 256)))
+          (should (equal (mapcar (lambda (job) (nth 4 (ende-queue-ui--cells job 256)))
                                 (list root child grandchild))
                          '("–" "0" "100,200")))
           (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 256)))
@@ -87,9 +88,16 @@
                 (should (string-match-p "└─ ▼ Child task" text))
                 (should (string-match-p "   └─ Grandchild task" text))
                 (should-not (string-match-p "Provider:\\|Activity:\\|Model:" text)))
-              (let ((positions (ende-queue-ui--entry-positions)) widths)
+              (goto-char (point-min))
+              (re-search-forward "^Origin +ID\\b")
+              (should (looking-at " +Policy\\b"))
+              (let ((id-column (current-column))
+                    (positions (ende-queue-ui--entry-positions)) widths)
                 (dolist (position positions)
                   (goto-char position)
+                  (let ((id (number-to-string (ende-job-id (ende-queue-ui--current-job)))))
+                    (move-to-column (- id-column (length id)))
+                    (should (looking-at (concat (regexp-quote id) "  "))))
                   (search-forward (ende-job-title (ende-queue-ui--current-job)))
                   (push (- (current-column)
                            (string-width (ende-job-title (ende-queue-ui--current-job)))) widths))
@@ -235,7 +243,7 @@
           (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
             (let ((job (ende-enqueue
                         (ende-test--dashboard-request ende-test--dashboard-profile))))
-              (cl-labels ((elapsed () (nth 4 (ende-queue-ui--cells job clock))))
+              (cl-labels ((elapsed () (nth 5 (ende-queue-ui--cells job clock))))
                 (setq clock 50)
                 (should (eq (ende-job-state job) 'queued))
                 (should (equal (elapsed) "40s"))

@@ -158,12 +158,13 @@
     (_ (or (ende-job-status job) "Thinking"))))
 
 (defun ende-queue-ui--cells (job now)
-  "Return JOB's first five cells using a common render time NOW."
+  "Return JOB's column cells using a common render time NOW."
   (let* ((family (ende-job-family job))
          (buffer (ende-job-family-origin family)))
     (when (buffer-live-p buffer)
       (setf (ende-job-family-origin-name family) (buffer-name buffer)))
     (list (if (ende-job-parent job) "" (or (ende-job-family-origin-name family) ""))
+          (number-to-string (ende-job-id job))
           (ende-queue-ui--policy job) (ende-queue-ui--job-status job)
           (if-let* ((input (plist-get (ende--usage-token-counts (ende-job-last-usage job)) :input)))
               (ende-history--format-token-count input)
@@ -183,7 +184,8 @@
   (let ((index -1))
     (mapconcat (lambda (cell)
                  (cl-incf index)
-                 (ende-queue-ui--fit cell (nth index widths) (>= index 3)))
+                 (ende-queue-ui--fit cell (nth index widths)
+                                     (or (= index 1) (>= index 4))))
                cells "  ")))
 
 (defun ende-queue-ui--expanded-p (job)
@@ -229,7 +231,7 @@
            (roots (append active finished))
            (children (make-hash-table :test #'eql))
            (cells (make-hash-table :test #'eql))
-           (headers '("Origin" "Policy" "Status" "Context" "Elapsed"))
+           (headers '("Origin" "ID" "Policy" "Status" "Context" "Elapsed"))
            (widths (mapcar #'string-width headers))
            (now (float-time)))
       (maphash (lambda (id _value)
@@ -242,7 +244,7 @@
             (setq widths (cl-mapcar #'max widths (mapcar #'string-width values))))
           (when-let* ((parent (ende-job-parent job)))
             (push job (gethash (ende-job-id parent) children)))))
-      (setf (nth 2 widths) ende-queue-ui--status-width)
+      (setf (nth 3 widths) ende-queue-ui--status-width)
       (maphash (lambda (id jobs)
                  (puthash id (sort jobs (lambda (a b)
                                          (ende--schedule-path-before-p
