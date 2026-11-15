@@ -1717,15 +1717,19 @@ COMPLETE means TEXT reaches the generated wrapper's end."
            (ende-chat--context-equal-p (cdr left) (cdr right)))
     (ende-protocol-json-equal-p left right)))
 
-(defun ende-chat--context-source (document fence property value)
-  "Resolve one preceding, in-scope PROPERTY VALUE for FENCE."
+(defun ende-chat--context-source (document fence property value &optional following)
+  "Resolve one in-scope PROPERTY VALUE preceding FENCE.
+FOLLOWING permits only FENCE's immediately following sibling task."
   (let* ((matches (cl-remove-if-not
                    (lambda (node) (equal (ende-chat--property document node property) value))
                    (ende-chat--document-headlines document)))
          (source (car matches)))
     (unless (and (stringp value) (not (string-empty-p value))
                  (= (length matches) 1)
-                 (< (org-element-property :begin source) (org-element-property :begin fence))
+                 (if following
+                     (eq source (cadr (memq fence (ende-chat--children
+                                                  document (ende-chat--parent document fence)))))
+                   (< (org-element-property :begin source) (org-element-property :begin fence)))
                  (eq (ende-chat--root document source) (ende-chat--root document fence)))
       (error "Missing, ambiguous or out-of-scope context source: %s" value))
     source))
@@ -1784,7 +1788,8 @@ COMPLETE means TEXT reaches the generated wrapper's end."
   (let* ((sources (json-parse-string (ende-chat--property document fence :context-sources)
                                     :object-type 'plist :array-type 'list
                                     :null-object nil :false-object nil))
-         (task (ende-chat--context-source document fence :id (plist-get sources :task)))
+         (before (plist-get sources :before-task))
+         (task (ende-chat--context-source document fence :id (plist-get sources :task) before))
          (cap-id (plist-get sources :cap))
          (work-id (plist-get sources :work))
          (response (plist-get sources :response))
@@ -1797,7 +1802,8 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                  (eq (ende-chat--effective-role document task) 'user)
                  (ende-chat--askable-p document task)
                  (cl-loop for (key _value) on sources by #'cddr
-                          always (memq key '(:task :cap :work :response :executions)))
+                          always (memq key '(:task :cap :work :response :executions :before-task)))
+                 (or (not before) (and (eq before t) (not cap-id) (not work-id)))
                  (eq (not work) (not response))
                  (eq (not work) (not executions)))
       (error "Malformed retained context sources"))
@@ -1813,8 +1819,9 @@ COMPLETE means TEXT reaches the generated wrapper's end."
         (error "Retained tool execution identities changed")))
     (append
      (ende-chat--fence-summary-messages document fence)
-     (list (ende-chat--message 'user (ende-chat--content
-                                    document task (ende-chat--current-text document task))))
+     (unless before
+       (list (ende-chat--message 'user (ende-chat--content
+                                      document task (ende-chat--current-text document task)))))
      (when cap (list (ende-chat--protocol-capabilities-message
                      document (ende-chat--work-ancestor document cap) cap)))
      (when work (ende-chat--tool-batch-messages document work response)))))
@@ -1932,6 +1939,17 @@ The snapshot is valid only for this running job, generation and source input."
          (list :job job :generation (or (ende-job-execution-generation job) 0)
                :messages canonical :retained retained :recent recent :sources sources
                :level (plist-get (ende-job-instruction job) :response-level)
+               :before-task
+               (and (not recent)
+                    (eq (ende-chat--parent document task) (ende-chat--parent document pending))
+                    (cl-every (lambda (entry) (eq (ende-transcript-entry-kind entry) 'capabilities))
+                              (ende-transcript-entries (ende-job-transcript job)))
+                    (or (not caps)
+                        (equal (ende-chat--property document
+                                                   (ende-chat--context-source document pending :protocol-item-id
+                                                                              (plist-get sources :cap))
+                                                   :request-id)
+                               (plist-get (ende-job-instruction job) :request-id))))
                :identity (list canonical retained sources)
                :stamp (ende-chat--context-stamp job)))))))
 
@@ -1970,6 +1988,8 @@ write.  INCLUDE-RECENT selects the whole optional batch, never part of it."
       (error "Chat compaction sources changed"))
     (unless include-recent
       (setq sources (list :task (plist-get sources :task) :cap (plist-get sources :cap))))
+    (when (plist-get snapshot :before-task)
+      (setq sources (list :task (plist-get sources :task) :before-task t)))
     (ende-chat--insert-context-fence job summary sources)
     (let ((effective (ende-chat-refresh-context job candidate)))
       (unless (ende-chat--context-equal-p candidate effective)
@@ -3078,6 +3098,15 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
       (error "Malformed chat materialization frontier"))
     (if value (string-to-number value) 0)))
 
+(defun ende-chat--initial-fence-p (document fence question)
+  "Return whether FENCE retains QUESTION naturally as its following sibling."
+  (when-let* ((text (ende-chat--property document fence :context-sources))
+              (sources (json-parse-string text :object-type 'plist))
+              ((eq (plist-get sources :before-task) t)))
+    (and (ende-chat--context-fence-p document fence)
+         (eq question (ende-chat--context-source document fence :id
+                                                 (plist-get sources :task) t)))))
+
 (defun ende-chat--validate-pending-placeholder (job document headline)
   "Validate that HEADLINE is JOB's exact safe pending destination in DOCUMENT."
   (let* ((instruction (ende-job-instruction job))
@@ -3136,8 +3165,9 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
           (ende-chat--validate-generated-work-section document (car works)))
         (dolist (section request-headlines)
           (unless (eq section headline)
-            (unless (and (< (org-element-property :begin question)
-                            (org-element-property :begin section))
+            (unless (and (or (< (org-element-property :begin question)
+                                (org-element-property :begin section))
+                             (ende-chat--initial-fence-p document section question))
                          (< (org-element-property :begin section)
                             (org-element-property :begin headline))
                          (or (memq section works)
@@ -3154,9 +3184,10 @@ ALLOW-EDITED selects durable-ID lookup; `snapshot' also validates its structure.
               (ende-error-display-message error))
     "Ende chat request was cancelled or skipped.\n"))
 
-(defun ende-chat--append-transcript (job transcript through)
-  "Insert only JOB's uncommitted TRANSCRIPT prefix through entry count THROUGH.
-Keep the pending Reply and advance its frontier in the same transaction."
+(defun ende-chat--append-transcript (job transcript through &optional before-task)
+  "Insert JOB's uncommitted TRANSCRIPT through entry count THROUGH.
+BEFORE-TASK places an initial fence before the question, not the pending Reply.
+Advance the pending frontier in the same transaction."
   (let ((buffer (ende-target-buffer (ende-job-target job))))
     (with-current-buffer buffer
       (save-excursion
@@ -3174,7 +3205,12 @@ Keep the pending Reply and advance its frontier in the same transaction."
                   (progn
                     (unless (>= through frontier)
                       (error "Transcript is older than its materialization frontier"))
-                    (goto-char marker)
+                    (goto-char (if before-task
+                                   (org-element-property
+                                    :begin (ende-chat--find-by-property
+                                            document ende-chat-id-property
+                                            (plist-get (ende-job-instruction job) :question-id)))
+                                 marker))
                     (insert suffix)
                     (goto-char marker)
                     ;; Undoing a fence removes its text, not the committed frontier.
@@ -3249,7 +3285,8 @@ not choose or replace the provider's live context."
           (when sources
             (setf (plist-get (ende-transcript-entry-data entry) :context-sources) sources))
           (ende-chat--append-transcript
-           job (ende-chat--render-transcript job t) (length (ende-transcript-entries transcript)))
+           job (ende-chat--render-transcript job t) (length (ende-transcript-entries transcript))
+           (plist-get sources :before-task))
           (setq committed t)
           (ende-chat--checkpoint-transcript job)
           entry)

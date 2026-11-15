@@ -1520,7 +1520,15 @@
              (setq snapshot (ende-chat-compaction-context job input))
              (goto-char (point-max))
              (insert "Unrelated edit\n")
+             (should (plist-get snapshot :before-task))
              (should (ende-chat-apply-compaction job snapshot "Current summary" nil))
+             (let* ((document (ende-chat--build-document))
+                    (question (ende-chat--find-by-property
+                               document ende-chat-id-property
+                               (plist-get (ende-job-instruction job) :question-id)))
+                    (fence (cl-find-if (lambda (node) (ende-chat--context-fence-p document node))
+                                       (ende-chat--document-headlines document))))
+               (should (< (org-element-property :begin fence) (org-element-property :begin question))))
              (setq snapshot (ende-chat-compaction-context job input))
              (ende-job-fail job "Cancelled test")
              (should-error (ende-chat-apply-compaction job snapshot "After cancellation" nil)))))
