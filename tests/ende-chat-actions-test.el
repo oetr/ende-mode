@@ -1446,6 +1446,11 @@
                     (without (ende-chat-compaction-messages snapshot "Useful summary" nil)))
                (should (equal before (buffer-string)))
                (should (= (cl-count-if #'ende-content-capabilities-p candidate) 1))
+               (should (equal (car candidate) (car input)))
+               (with-temp-buffer
+                 (insert (prin1-to-string candidate))
+                 (goto-char (point-min))
+                 (should (= (count-matches "Source metadata:") 1)))
                (should (= (cl-count-if (lambda (m) (equal (ende-content-role m) "user")) candidate) 1))
                (should (string-match-p "The complete original task" (prin1-to-string candidate)))
                (should-not (string-match-p "Repair prompt\\|Earlier work" (prin1-to-string candidate)))
@@ -1457,6 +1462,17 @@
                                                     (ende-codex--request-messages (plist-get snapshot :recent)))))
                               (json-encode (ende-protocol-json-for-request (vconcat items)))))
                (should (equal candidate (ende-chat-apply-compaction job snapshot "Useful summary" include-recent)))
+               (let ((viewer (ende-work-buffer-open job)))
+                 (unwind-protect
+                     (save-window-excursion
+                       (set-window-buffer (selected-window) viewer)
+                       (ende-work-buffer--refresh viewer)
+                       (with-current-buffer viewer
+                         (goto-char (point-min))
+                         (search-forward "Agent: Context Fence")
+                         (search-forward "Useful summary")
+                         (should-not (org-invisible-p))))
+                   (kill-buffer viewer)))
                (cl-letf (((symbol-function 'ende-chat--context-projection)
                           (lambda (&rest _) (ert-fail "Unchanged context was reparsed"))))
                  (should (eq candidate (ende-chat-refresh-context job candidate))))
@@ -1470,7 +1486,13 @@
                           (pending (ende-chat--request-state-headline document request-id "pending")))
                      (should (ende-chat--context-equal-p candidate
                                     (ende-chat--context-with-metadata
-                                     job (cons (car input) (ende-chat--context-prefix document pending))))))))
+                                     job (cons (car input) (ende-chat--context-prefix document pending)))))
+                     (goto-char (point-max))
+                     (insert "* Duplicate source\n:PROPERTIES:\n:ENDE_CHAT_ID: "
+                             (plist-get (ende-job-instruction job) :question-id) "\n:END:\n")
+                     (setq document (ende-chat--build-document)
+                           pending (ende-chat--request-state-headline document request-id "pending"))
+                     (should-error (ende-chat--context-prefix document pending)))))
                (goto-char (point-min))
                (search-forward "Useful summary")
                (replace-match "Edited summary" t t)

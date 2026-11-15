@@ -1808,8 +1808,15 @@ FOLLOWING permits only FENCE's immediately following sibling task."
                  (eq (not work) (not executions)))
       (error "Malformed retained context sources"))
     (when cap
-      (unless (ende-chat--capabilities-reference-p document cap)
-        (error "Retained capability source is not host metadata")))
+      (unless (eq cap (cl-find-if
+                       (lambda (node)
+                         (and (< (org-element-property :begin node)
+                                 (org-element-property :begin fence))
+                              (eq (ende-chat--root document node) (ende-chat--root document fence))
+                              (ende-chat--eligible-p document node)
+                              (ende-chat--capabilities-reference-p document node)))
+                       (ende-chat--document-headlines document) :from-end t))
+        (error "Retained capability source is not the current host snapshot")))
     (when work
       (unless (and (ende-chat--work-section-p document work)
                    (equal executions
@@ -1953,21 +1960,29 @@ The snapshot is valid only for this running job, generation and source input."
                :identity (list canonical retained sources)
                :stamp (ende-chat--context-stamp job)))))))
 
+(defun ende-chat--compaction-fence-text (snapshot summary &optional sources)
+  "Render SNAPSHOT's prospective SUMMARY fence, optionally with SOURCES."
+  (unless (and (stringp summary) (not (string-blank-p summary)))
+    (error "A context fence needs a nonblank summary"))
+  (let* ((level (plist-get snapshot :level))
+         (normalized (ende-chat--normalize-response summary level))
+         (instruction (ende-job-instruction (plist-get snapshot :job))))
+    (ende-chat--assistant-text
+     level (plist-get instruction :question-id) (plist-get instruction :request-id)
+     (concat (ende-chat--normalized-response-properties normalized)
+             (when sources
+               (ende-chat--response-property ende-chat-context-sources-property (json-encode sources))))
+     normalized t)))
+
 (defun ende-chat-compaction-messages (snapshot summary include-recent)
   "Return SNAPSHOT's complete prospective input with SUMMARY, without effects.
 INCLUDE-RECENT retains the entire optional tool batch; essential input is never
 shortened.  SUMMARY remains assistant content, not system instructions."
-  (unless (and (stringp summary) (not (string-blank-p summary)))
-    (error "A context fence needs a nonblank summary"))
   (let* ((retained (plist-get snapshot :retained))
-         (level (plist-get snapshot :level))
-         (normalized (ende-chat--normalize-response summary level))
          (summary-messages
           (with-temp-buffer
             (org-mode)
-            (insert (ende-chat--assistant-text level "task" "request"
-                                               (ende-chat--normalized-response-properties normalized)
-                                               normalized t))
+            (insert (ende-chat--compaction-fence-text snapshot summary))
             (let* ((document (ende-chat--build-document))
                    (fence (car (ende-chat--document-headlines document))))
               (ende-chat--fence-summary-messages document fence)))))
@@ -1990,6 +2005,21 @@ write.  INCLUDE-RECENT selects the whole optional batch, never part of it."
       (setq sources (list :task (plist-get sources :task) :cap (plist-get sources :cap))))
     (when (plist-get snapshot :before-task)
       (setq sources (list :task (plist-get sources :task) :before-task t)))
+    (ende-chat--context-projection
+     job
+     (lambda (document pending)
+       (goto-char (org-element-property
+                   :begin (if (plist-get sources :before-task)
+                              (ende-chat--context-source document pending :id (plist-get sources :task))
+                            pending)))
+       (insert (ende-chat--compaction-fence-text snapshot summary sources))
+       (let* ((updated (ende-chat--build-document))
+              (destination (ende-chat--request-state-headline
+                            updated (plist-get (ende-job-instruction job) :request-id) "pending"))
+              (projected (ende-chat--context-with-metadata
+                          job (cons (car candidate) (ende-chat--context-prefix updated destination)))))
+         (unless (ende-chat--context-equal-p candidate projected)
+           (error "Compaction candidate disagrees with its source projection")))))
     (ende-chat--insert-context-fence job summary sources)
     (let ((effective (ende-chat-refresh-context job candidate)))
       (unless (ende-chat--context-equal-p candidate effective)
