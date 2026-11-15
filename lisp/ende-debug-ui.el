@@ -80,7 +80,6 @@
     ('ws-connecting '(:connection :timeout-limit))
     ((or 'ws-open 'ws-reused) '(:connection :connection-age))
     ((or 'ws-closed 'ws-interrupted) '(:connection :close-code :cause))
-    ('replay-refused '(:delivery))
     ('retry-scheduled '(:delay :reason :retry-limit))
     ('retries-exhausted '(:retries :retry-limit))
     ('timeout '(:deadline :timeout-limit :elapsed))

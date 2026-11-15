@@ -38,7 +38,7 @@ Applied when starting a session."
     (request-offered . detail) (request-accepted . detail)
     (request-blocked . warning) (request-writable . detail) (request-cancelled . detail)
     (response-first . detail) (response-done . detail)
-    (retry-scheduled . warning) (replay-refused . warning)
+    (retry-scheduled . warning)
     (retries-exhausted . error) (timeout . error) (auth-failed . error)
     (provider-failed . error) (protocol-invalid . error) (limit-exceeded . error)
     (callback-failed . error) (transport-failed . error) (internal-failed . error)
@@ -68,7 +68,7 @@ Applied when starting a session."
     (:delivery (unsent sending accepted) "delivery")
     (:cause (abort application close policy protocol size timeout transport utf8) "cause")
     (:deadline (handshake assembly close request idle connect) "deadline")
-    (:reason (connect-timeout missing-response connection-limit unsent-replacement) "reason")
+    (:reason (connect-timeout missing-response connection-limit unsent-replacement connection-lost) "reason")
     (:last-event (response.created response.in_progress response.completed
                   response.done response.incomplete response.failed error
                   response.output_text.delta response.output_item.added

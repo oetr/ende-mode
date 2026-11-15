@@ -411,24 +411,44 @@
         (should (eq (plist-get (car failures) :delivery) 'accepted))
         (should (> (plist-get (car failures) :bytes) 0))
         (should (= (plist-get (car failures) :messages) 2)))))
-  ;; Even acceptance with *no native transmission* is ambiguous: the public
-  ;; API deliberately has no delivery acknowledgement for queued messages.
   (ende-responses-ws-test--with-server
-    (let (accepted errors)
-      (cl-letf (((symbol-function 'ende-websocket-send-text-bytes)
-                 (lambda (_socket _bytes) (setq accepted t))))
-        (ende-llm-default '(("user" . "Accepted, not transmitted"))
-                          (list :on-error (lambda (error) (push error errors)))
-                          (ende-responses-ws-test--profile 1))
-        (ende-test--wait-for (lambda () accepted))
-        (should-not wires)
-        (ende-websocket-abort (car sockets))
-        (ende-test--wait-for (lambda () errors))
-        (should (eq (ende-error-kind (car errors)) 'transport))
-        (should (= (length clients) 1))
-        (should-not (gethash 1 ende-responses-ws--connections)))))
-  ;; A rejected offer, unlike an accepted one, can safely use fresh auth and
-  ;; a replacement connection after loss.  Retry counters remain request-wide.
+    (let ((messages '(("user" . "Summarize the findings")
+                      (:role "assistant" :tool-calls
+                             ((:id "read" :name "read_file" :arguments "{}")))
+                      (:role "tool" :tool-call-id "read" :content "Recorded findings")))
+          results errors)
+      (ende-llm-default messages
+                        (list :on-done (lambda (result) (push result results))
+                              :on-error (lambda (error) (push error errors)))
+                        (ende-responses-ws-test--profile 1))
+      (ende-test--wait-for (lambda () wires))
+      (let ((input (cdar wires))
+            (request (ende-responses-ws-connection-active (gethash 1 ende-responses-ws--connections))))
+        (dolist (event
+                 '("{\"type\":\"response.created\",\"response\":{\"id\":\"interrupted\"}}"
+                   "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"text\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}"
+                   "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"text\",\"delta\":\"Unfinished\"}"
+                   "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"call\",\"type\":\"function_call\",\"call_id\":\"pending\",\"name\":\"read_file\",\"arguments\":\"\"}}"
+                   "{\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"call\",\"delta\":\"{\"}"))
+          (ende-responses-ws-test--event (car sockets) event))
+        (ende-test--wait-for (lambda () (or errors (= (ende-responses-ws-request-messages request) 5))))
+        (should-not errors)
+        (should-not results)
+        (ende-websocket-close (car sockets) 1012 "Service Restart")
+        (ende-test--wait-for (lambda () (or errors (= (length wires) 2))))
+        (should-not errors)
+        (should (ende-protocol-json-equal-p input (cdar wires)))
+        (dolist (event
+                 '("{\"type\":\"response.created\",\"response\":{\"id\":\"replacement\"}}"
+                   "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"answer\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}"
+                   "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"answer\",\"delta\":\"Finished\"}"
+                   "{\"type\":\"response.completed\",\"response\":{\"id\":\"replacement\",\"output\":[{\"id\":\"answer\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Finished\"}]}]}}"))
+          (ende-responses-ws-test--event (car sockets) event))
+        (ende-test--wait-for (lambda () (or errors results)))
+        (should-not errors)
+        (should (= (length results) 1))
+        (should (equal (plist-get (car results) :content) "Finished"))
+        (should-not (plist-get (car results) :tool-calls)))))
   (ende-responses-ws-test--with-server
     (let ((send (symbol-function 'ende-websocket-send-text-bytes)) blocked errors)
       (cl-letf (((symbol-function 'ende-websocket-send-text-bytes)
@@ -576,11 +596,9 @@
                         (list :on-error (lambda (error) (push error errors)))
                         (ende-responses-ws-test--profile 1))
       (ende-test--wait-for (lambda () wires))
-      (ende-responses-ws-test--event
-       (car sockets) "{\"type\":\"error\",\"error\":{\"code\":\"websocket_connection_limit_reached\"}}")
+      (ende-websocket-close (car sockets) 1012 "Service Restart")
       (ende-test--wait-for (lambda () (= (length wires) 2)))
-      (ende-responses-ws-test--event
-       (car sockets) "{\"type\":\"error\",\"error\":{\"code\":\"websocket_connection_limit_reached\"}}")
+      (ende-websocket-abort (car sockets))
       (ende-test--wait-for (lambda () errors))
       (should (= (length clients) 2))
       (should (= (plist-get (ende-error-details (car errors)) :retries) 1))))
@@ -793,8 +811,7 @@
             (ende-websocket-close (car sockets) 1008 "private close reason"))
           (ende-test--wait-for (lambda () errors))
           (should (= (length errors) 1))
-          (should (equal (ende-error-message (car errors))
-                         "Responses delivery interrupted; request was not replayed"))
+          (should (eq (ende-error-kind (car errors)) 'transport))
           (should (= (length wires) 2))
           (should (= (length clients) 2))
           (should-not (gethash 1 ende-responses-ws--connections))

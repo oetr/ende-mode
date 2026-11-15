@@ -455,7 +455,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
                  (ende-responses-ws-connection-generation connection))))))
 
 (defun ende-responses-ws--send (request)
-  "Offer REQUEST once; queue acceptance is an ambiguous delivery boundary."
+  "Offer REQUEST once per attempt, retaining it under backpressure."
   (when (and (ende-responses-ws--live-p request)
              (eq (ende-responses-ws-request-delivery request) 'unsent)
              (ende-responses-ws-request-payload request))
@@ -468,8 +468,6 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
             (when (ende-responses-ws--attempt-live-p request attempt socket)
               (if (ende-websocket-receive-pending-p socket)
                   (ende-responses-ws--retry request 'unsent-replacement)
-                ;; A successful offer does not prove transmission.  Never replay
-                ;; after this boundary without an explicit provider rejection.
                 (setf (ende-responses-ws-request-delivery request) 'sending)
                 (ende-responses-ws--record 'request-offered request
                                           :bytes (ende-responses-ws--payload-size data))
@@ -566,7 +564,7 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
        request 'transport
        "Responses automatic reconnection exhausted; completed work was preserved"
        (when (eq reason 'connect-timeout) 'connect)))
-     ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement))
+     ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement connection-lost))
       (let ((connection (ende-responses-ws-request-connection request)))
         (unless (ende-responses-ws-connection-close-info connection)
           (ende-responses-ws--record 'ws-interrupted request :reason reason
@@ -816,12 +814,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
         (ende-responses-ws--fail request 'resource "Responses transport limit exceeded"))
        ((memq cause '(protocol utf8 application))
         (ende-responses-ws--fail request 'protocol "Invalid Responses WebSocket event"))
-       ((not (eq (ende-responses-ws-request-delivery request) 'unsent))
-        (ende-responses-ws--record 'replay-refused request)
-        (ende-responses-ws--fail
-         request 'transport "Responses delivery interrupted; request was not replayed"))
        ((or (null code) (memq code '(1000 1001 1006 1011 1012 1013 1014)))
-        (ende-responses-ws--retry request 'unsent-replacement))
+        (ende-responses-ws--retry request 'connection-lost))
        (t (ende-responses-ws--fail request 'transport "Responses connection rejected"))))))
 
 (defun ende-responses-ws--connect (connection)
