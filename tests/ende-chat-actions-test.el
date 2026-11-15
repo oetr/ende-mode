@@ -725,60 +725,62 @@
      (should-not (ende-queue-family-markers)))))
 
 (ert-deftest ende-test/chat-batches-sibling-agents-and-stores-results-in-call-order ()
-  (ende-test--reset)
-  (let* ((spawn-call (lambda (id task)
-                       (list :id id :name "spawn_agent"
-                             :arguments (json-encode `((title . ,id) (task . ,task))))))
-         (first-call (funcall spawn-call "sibling-a" "task A"))
-         (second-call (funcall spawn-call "sibling-b" "task B"))
-         (ende-llm-function
-          (ende-test--fake-llm
-           (list (list :tool-calls (list first-call second-call))
-                 "Sibling A final."
-                 "Sibling B final."
-                 "Root batch answer.") t))
-         (profile '(:name remote :model "fixture" :parallel t
-			  :max-concurrency 2))
-         root children)
-    (ende-test--with-buffer
-     (concat (ende-test--chat-config-block
-              '((tools about_thinking spawn_agent)
-                (agent-config worker (tools about_thinking))
-                (spawn-agent-config worker)))
-             "* Conversation\n** Question\nDelegate both checks.\n")
-     (org-mode)
-     (ende-test--chat-goto "** Question")
-     (setq root (ende-ask (ende-test--request-profile profile)))
-     (ende-test--complete-call (nth 0 ende-test--calls))
-     (setq children (copy-sequence (ende-job-children root)))
-     (should (= (length children) 2))
-     (should (equal (mapcar #'ende-job-schedule-path children) '((1) (2))))
-     (should (eq (ende-job-state root) 'suspended))
-     (should (= (length ende-test--calls) 3))
-     (ende-test--complete-call (nth 2 ende-test--calls))
-     (should (eq (ende-job-state root) 'suspended))
-     (should (= (length ende-test--calls) 3))
-     (ende-test--complete-call (nth 1 ende-test--calls))
-     (should (= (length ende-test--calls) 4))
-     (let* ((messages (ende-test--chat-protocol-messages
-                       (plist-get (nth 3 ende-test--calls) :messages)))
-            (results (cl-remove-if-not
-                      (lambda (message)
-                        (equal (plist-get message :role) "tool"))
-                      messages)))
-       (should (equal (mapcar (lambda (message)
-                                (plist-get message :tool-call-id))
-                              results)
-                      '("sibling-a" "sibling-b")))
-       (should (string-match-p "Sibling A final"
-                               (plist-get (car results) :content)))
-       (should (string-match-p "Sibling B final"
-                               (plist-get (cadr results) :content))))
-     (ende-test--complete-call (nth 3 ende-test--calls))
-     (should (eq (ende-job-state root) 'completed))
-     (should (string-match-p "Root batch answer" (buffer-string)))
-     (should-not (string-match-p "Sibling A final" (buffer-string)))
-     (should-not (string-match-p "Sibling B final" (buffer-string))))))
+  (dolist (parallel '(nil t))
+    (ende-test--reset)
+    (let* ((spawn-call (lambda (id task)
+                         (list :id id :name "spawn_agent"
+                               :arguments (json-encode `((title . ,id) (task . ,task))))))
+           (first-call (funcall spawn-call "sibling-a" "task A"))
+           (second-call (funcall spawn-call "sibling-b" "task B"))
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list (list :tool-calls (list first-call second-call))
+                   "Sibling A final."
+                   "Sibling B final."
+                   "Root batch answer.") t))
+           (profile (list :name 'remote :model "fixture" :parallel parallel
+                          :max-concurrency 2))
+           root children)
+      (ende-test--with-buffer
+       (concat (ende-test--chat-config-block
+                '((tools about_thinking spawn_agent)
+                  (agent-config worker (tools about_thinking))
+                  (spawn-agent-config worker)))
+               "* Conversation\n** Question\nDelegate both checks.\n")
+       (org-mode)
+       (ende-test--chat-goto "** Question")
+       (setq root (ende-ask (ende-test--request-profile profile)))
+       (ende-test--complete-call (nth 0 ende-test--calls))
+       (setq children (copy-sequence (ende-job-children root)))
+       (should (equal (mapcar #'ende-job-state children)
+                      (if parallel '(running running) '(running queued))))
+       (should (equal (mapcar #'ende-job-schedule-path children) '((1) (2))))
+       (should (eq (ende-job-state root) 'suspended))
+       (should (= (length ende-test--calls) (if parallel 3 2)))
+       (ende-test--complete-call (nth (if parallel 2 1) ende-test--calls))
+       (should (eq (ende-job-state root) 'suspended))
+       (should (= (length ende-test--calls) 3))
+       (ende-test--complete-call (nth (if parallel 1 2) ende-test--calls))
+       (should (= (length ende-test--calls) 4))
+       (let* ((messages (ende-test--chat-protocol-messages
+                         (plist-get (nth 3 ende-test--calls) :messages)))
+              (results (cl-remove-if-not
+                        (lambda (message)
+                          (equal (plist-get message :role) "tool"))
+                        messages)))
+         (should (equal (mapcar (lambda (message)
+                                  (plist-get message :tool-call-id))
+                                results)
+                        '("sibling-a" "sibling-b")))
+         (should (string-match-p "Sibling A final"
+                                 (plist-get (car results) :content)))
+         (should (string-match-p "Sibling B final"
+                                 (plist-get (cadr results) :content))))
+       (ende-test--complete-call (nth 3 ende-test--calls))
+       (should (eq (ende-job-state root) 'completed))
+       (should (string-match-p "Root batch answer" (buffer-string)))
+       (should-not (string-match-p "Sibling A final" (buffer-string)))
+       (should-not (string-match-p "Sibling B final" (buffer-string)))))))
 
 (ert-deftest ende-test/chat-cancelling-suspended-batch-invalidates-late-children ()
   (ende-test--reset)

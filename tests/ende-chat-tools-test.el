@@ -185,6 +185,9 @@
                    (list :tool-calls
                          (list (list :id "call-project"
                                      :name "project_info" :arguments "{}")
+                               (list :id "call-denied"
+                                     :name "delete_file"
+                                     :arguments "{\"path\":\"main.el\"}")
                                (list :id "call-search"
                                      :name "search_project"
                                      :arguments "{\"query\":\"classified\"}")))
@@ -216,12 +219,22 @@
                "(resource project (include \"private/**\")" t t)
               (ende-test--complete-call (car ende-test--calls))
               (ende-test--wait-for (lambda () (= (length ende-test--calls) 2)))
-              (should (= (ende-job-tool-call-count job) 2))
+              (should (= (ende-job-tool-call-count job) 3))
+              (let* ((messages (ende-test--chat-protocol-messages
+                                (plist-get (nth 1 ende-test--calls) :messages)))
+                     (denied (cl-find "call-denied" messages :test #'equal
+                                      :key (lambda (message)
+                                             (plist-get message :tool-call-id))))
+                     (reply (json-parse-string (plist-get denied :content)
+                                               :object-type 'hash-table
+                                               :false-object nil)))
+                (should-not (gethash "ok" reply))
+                (should (file-exists-p public)))
               (ende-test--complete-call (nth 1 ende-test--calls))
               (ende-test--wait-for (lambda () (= (length ende-test--calls) 3)))
-              (should (= (ende-job-tool-call-count job) 3))
+              (should (= (ende-job-tool-call-count job) 4))
               (ende-test--complete-call (nth 2 ende-test--calls))
-              (should (= (ende-job-tool-call-count job) 3))
+              (should (= (ende-job-tool-call-count job) 4))
               (should (string-match-p "Search complete" (buffer-string)))
               (should (= (length ende-test--calls) 3))
               (let* ((tool-reply
