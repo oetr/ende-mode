@@ -291,7 +291,9 @@
        (let ((second-job (ende-ask)))
          (setq ende--queue-suspended nil)
          (ende-process-next)
-         (should (= (length ende-test--calls) 2))
+         ;; Dispatch can yield to a timer when the scheduler budget expires.
+         (ende-test--wait-for (lambda () (= (length ende-test--calls) 2))
+                              :description "first two chat requests dispatched")
          ;; The lower reply finishes while the earlier request is still open.
          (ende-test--complete-call (nth 1 ende-test--calls))
          (should (eq (ende-job-state second-job) 'completed))
@@ -326,7 +328,8 @@
          ;; A fresh request below the repaired response must remain usable.
          (ende-test--chat-goto "** Third question")
          (let ((third-job (ende-ask)))
-           (should (= (length ende-test--calls) 3))
+           (ende-test--wait-for (lambda () (= (length ende-test--calls) 3))
+                                :description "third chat request dispatched")
            (ende-test--complete-call (nth 2 ende-test--calls))
            (should (eq (ende-job-state third-job) 'completed)))
          (ende-test--chat-goto "** Later section")

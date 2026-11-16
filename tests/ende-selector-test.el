@@ -2223,26 +2223,28 @@
         (ende-model-selection--last-used nil)
         (ende-model-selection--provider-selections (make-hash-table :test #'eq))
         (ende-model-selection--buffer-provider-selections (make-hash-table :test #'equal)))
-    (with-temp-buffer
-      (ende-selector-mode)
-      (setq ende-selector--providers '(openai-codex))
-      (ende-selector--set-provider 0)
-      (should
-       (string-prefix-p
-        (concat "n/p      - Provider:          OpenAI Codex - https://chatgpt.com/backend-api/codex/responses\n"
-                "A        - Account:           default\n"
-                "           Auth:              codex-oauth\n"
-                "           API:               openai-responses\n"
-                "           Transport:         HTTP/SSE\n"
-                "c/C      - Concurrency:       4\n"
-                "P        - Parallel:          off\n\n"
-                "C-n/C-p  - Model:             gpt-6.1-sol\n"
-                "e        - Reasoning effort:  Provider default (omitted)\n\n"
-                "Quota: loading...\n\n")
-        (buffer-string)))
-      (should-not (string-match-p "Service\\|Catalog\\|not mapped\\|explicitly" (buffer-string)))
-      (setq ende-selector--providers '(my-local-provider))
-      (should (equal (ende-selector--display-provider) "my-local-provider")))))
+    (cl-letf (((symbol-function 'ende-codex-probe-usage)
+               (lambda (_profile _callback) #'ignore)))
+      (with-temp-buffer
+        (ende-selector-mode)
+        (setq ende-selector--providers '(openai-codex))
+        (ende-selector--set-provider 0)
+        (should
+         (string-prefix-p
+          (concat "n/p      - Provider:          OpenAI Codex - https://chatgpt.com/backend-api/codex/responses\n"
+                  "A        - Account:           default\n"
+                  "           Auth:              codex-oauth\n"
+                  "           API:               openai-responses\n"
+                  "           Transport:         HTTP/SSE\n"
+                  "c/C      - Concurrency:       4\n"
+                  "P        - Parallel:          off\n\n"
+                  "C-n/C-p  - Model:             gpt-6.1-sol\n"
+                  "e        - Reasoning effort:  Provider default (omitted)\n\n"
+                  "Quota: loading...\n\n")
+          (buffer-string)))
+        (should-not (string-match-p "Service\\|Catalog\\|not mapped\\|explicitly" (buffer-string)))
+        (setq ende-selector--providers '(my-local-provider))
+        (should (equal (ende-selector--display-provider) "my-local-provider"))))))
 
 (ert-deftest ende-test/selector-quota-is-visible-only-for-codex-oauth ()
   (let ((ende-providers '(openai-codex openrouter))

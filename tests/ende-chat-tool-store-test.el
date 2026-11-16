@@ -1568,6 +1568,10 @@
                    (siblings (ende-chat--children document (ende-chat--parent document response-item))))
               (goto-char (org-element-property :begin response-item))
               (org-back-to-heading t)
+              ;; Org 9.7.11 can retain stale subtree endpoints after the edit
+              ;; above, inserting the moved heading inside a property drawer.
+              ;; Isolate this replay test from that Org cache bug.
+              (org-element-cache-reset)
               (org-move-subtree-down (- (cl-position following-item siblings) (cl-position response-item siblings))))
             (let* ((document (ende-chat--build-document))
                    (opaque (cl-remove-if-not
@@ -1580,6 +1584,23 @@
                                       opaque)))
               (should (equal providers
                              '("anthropic-messages" "openai-responses")))
+              (let* ((work (car (ende-chat--request-work-sections document request-id)))
+                     (events (ende-chat--protocol-work-messages document work))
+                     (opaque-messages
+                      (cl-remove-if-not
+                       (lambda (message)
+                         (ende-test--message-property-p message :protocol-opaque))
+                       events)))
+                (should (equal (mapcar (lambda (message)
+                                        (plist-get message :protocol-provider))
+                                      opaque-messages)
+                               providers))
+                (should (equal (gethash "signature"
+                                        (plist-get (car opaque-messages) :protocol-opaque))
+                               "signed-value"))
+                (should (equal (gethash "encrypted_content"
+                                        (plist-get (cadr opaque-messages) :protocol-opaque))
+                               "reasoning-secret")))
               (let ((anthropic-item (car opaque)))
                 (delete-region (org-element-property :begin anthropic-item)
                                (org-element-property :end anthropic-item))))

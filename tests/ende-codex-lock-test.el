@@ -61,7 +61,7 @@
         (progn
           (setq process
                 (ende-codex-lock-test--start
-                 `(let ((db (sqlite-open ,mutex nil t)))
+                 `(let ((db (sqlite-open ,mutex)))
                     (sqlite-execute db "BEGIN IMMEDIATE")
                     (princ "held\n")
                     (read)

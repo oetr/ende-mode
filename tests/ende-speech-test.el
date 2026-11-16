@@ -53,6 +53,13 @@
         (speech-buffer nil)
         (websocket 'mock-websocket)
         (recorder 'mock-recorder)
+        (live-window-p
+         (let ((original (symbol-function 'window-live-p)))
+           (lambda (window)
+             (if (memq window (list ende-speech-test--source-window
+                                    ende-speech-test--transcript-window))
+                 (not (memq window ende-speech-test--deleted-windows))
+               (funcall original window)))))
         (ende-speech-server "127.0.0.1")
         (ende-speech-port 8081)
         (ende-speech-api-path "/speech-test")
@@ -98,11 +105,7 @@
                       ((symbol-function 'set-window-buffer)
                        (lambda (window target &rest _)
                          (puthash window target ende-speech-test--window-buffers)))
-                      ((symbol-function 'window-live-p)
-                       (lambda (window)
-                         (and (memq window (list ende-speech-test--source-window
-                                                 ende-speech-test--transcript-window))
-                              (not (memq window ende-speech-test--deleted-windows)))))
+                      ((symbol-function 'window-live-p) live-window-p)
                       ((symbol-function 'window-dedicated-p) #'ignore)
                       ((symbol-function 'delete-window)
                        (lambda (window &rest _)
@@ -126,12 +129,7 @@
                       ((symbol-function 'ende-websocket-send-binary)
                        (lambda (_ws bytes)
                          (push bytes ende-speech-test--sent)))
-                      ((symbol-function 'window-live-p)
-                       (lambda (window)
-                         (and (memq window
-                                    (list ende-speech-test--source-window
-                                          ende-speech-test--transcript-window))
-                              (not (memq window ende-speech-test--deleted-windows)))))
+                      ((symbol-function 'window-live-p) live-window-p)
                       ((symbol-function 'window-buffer)
                        (lambda (window &rest _)
                          (gethash window ende-speech-test--window-buffers)))
@@ -170,6 +168,17 @@
   (funcall (plist-get (cdr ende-speech-test--open-args) :on-message)
            (ende-speech--session-websocket session) 'text
            (json-encode (append `((type . ,type)) data))))
+
+(ert-deftest ende-speech/session-fixture-preserves-window-liveness ()
+  (let ((real-window (selected-window)))
+    (ende-speech-test--with-session
+     (lambda (_session _source _buffer)
+       (should (window-live-p real-window))
+       (should (window-live-p ende-speech-test--source-window))
+       (should (window-live-p ende-speech-test--transcript-window))
+       (push ende-speech-test--transcript-window ende-speech-test--deleted-windows)
+       (should-not (window-live-p ende-speech-test--transcript-window))
+       (should-not (window-live-p 'not-a-window))))))
 
 (ert-deftest ende-speech/reload-discovers-modules-and-loads-source-files ()
   (let ((directory (make-temp-file "ende-reload-test" t))

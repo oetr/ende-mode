@@ -1272,7 +1272,12 @@
   (ende-test--reset)
   (ende-test--with-buffer "base"
     (let ((ende--queue-suspended t)
-          (max-lisp-eval-depth 100)
+          ;; Allow Emacs/ERT overhead; measure dispatch nesting explicitly.
+          (max-lisp-eval-depth 1000)
+          (dispatch (symbol-function 'ende--dispatch-job))
+          (dispatch-count 0)
+          (dispatch-depth 0)
+          (max-dispatch-depth 0)
           heartbeat timer)
       (unwind-protect
           (progn
@@ -1285,10 +1290,21 @@
                   timer (run-at-time 0 nil
                                      (lambda ()
                                        (setq heartbeat (length (ende-queued-jobs))))))
-            (cl-letf (((symbol-function 'message) #'ignore))
+            (cl-letf (((symbol-function 'message) #'ignore)
+                      ((symbol-function 'ende--dispatch-job)
+                       (lambda (job)
+                         (cl-incf dispatch-count)
+                         (cl-incf dispatch-depth)
+                         (setq max-dispatch-depth
+                               (max max-dispatch-depth dispatch-depth))
+                         (unwind-protect
+                             (funcall dispatch job)
+                           (cl-decf dispatch-depth)))))
               (ende-process-next)
               (should ende-queue)
               (ende-test--wait-for (lambda () (not ende-queue))))
+            (should (= dispatch-count 40))
+            (should (= max-dispatch-depth 1))
             (should (> heartbeat 0))
             (should-not (ende-running-jobs)))
         (when (timerp timer) (cancel-timer timer))

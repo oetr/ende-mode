@@ -80,7 +80,7 @@
         (progn
           (set-default-file-modes #o600)
           (let ((inhibit-quit t))
-            (setq db (sqlite-open file nil t)))
+            (setq db (sqlite-open file)))
           (ende-lock--check-files file t)
           (setq complete t)
           db)
