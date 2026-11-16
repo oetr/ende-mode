@@ -20,6 +20,10 @@
  "emacs"
  (:prefix-args "make" "check")
  (:prefix-args "make" "test")
+ ;; gh
+ (:prefix-args "gh" "pr" "create")
+ (:prefix-args "gh" "pr" "view")
+ (:prefix-args "gh" "run" "view")
  )
 
 (tools spawn_agent)
@@ -36,6 +40,11 @@
 	       "emacs"
 	       (:prefix-args "make" "check")
 	       (:prefix-args "make" "test")
+	       ;; gh
+	       (:prefix-args "gh" "pr" "create")
+	       (:prefix-args "gh" "pr" "view")
+	       (:prefix-args "gh" "pr" "merge")
+	       (:prefix-args "gh" "run" "view")
 	       )
 
 	      (resource internet :type url (include "*"))
@@ -54,9 +63,9 @@
 ;;   (include "*")
 ;;   (include "http://*/**"))
 
-;;(podman-image "localhost/ende-dev@sha256:1c646a001698c828cccd934fc1369c650d9f93890a5dd6d62c85009e87e09c9a")
-;;(set-tool-resources run_sandbox_command :resources project)
-;;(tools run_sandbox_command)
+(podman-image "localhost/ende-dev@sha256:1c646a001698c828cccd934fc1369c650d9f93890a5dd6d62c85009e87e09c9a")
+(set-tool-resources run_sandbox_command :resources project)
+(tools run_sandbox_command)
 
-;;(resource sandbox-out (include "sandbox-copy/**"))
-;;(set-tool-resources copy_from_sandbox :resources sandbox-out)
+(resource sandbox-out (include "sandbox-copy/**"))
+(set-tool-resources copy_from_sandbox :resources sandbox-out)
