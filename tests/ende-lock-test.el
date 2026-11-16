@@ -41,7 +41,7 @@
         (progn
           (setq process
                 (ende-lock-test--start
-                 `(let ((db (sqlite-open ,file nil t)))
+                 `(let ((db (sqlite-open ,file)))
                    (sqlite-execute db "BEGIN IMMEDIATE")
                    (princ "held\n")
                    (read)
