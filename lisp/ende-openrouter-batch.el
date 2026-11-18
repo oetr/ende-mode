@@ -42,6 +42,7 @@
 (require 'ende-protocol)
 (require 'ende-provider)
 (require 'ende-request)
+(require 'ende-llm)
 
 ;;;; User options
 
@@ -196,6 +197,7 @@
           (plist-get profile :auth-source-port)
           (plist-get profile :credential-binding)
           (plist-get profile :model)
+          (ende-provider-config-chat-system-layout profile)
           (plist-get profile :output-tokens)
           (plist-get profile :parameters)
           (plist-get profile :request-timeout)
@@ -405,17 +407,9 @@
 
 (defun ende-openrouter-batch--request-body (messages profile custom-id)
   "Build one OpenRouter Batch request for MESSAGES and PROFILE."
-  (let ((body
-         `((:messages . ,(mapcar
-                          (lambda (message)
-                            (when (plist-get message :tool-calls)
-                              (error "Batch image context cannot contain tool calls"))
-                            (let ((role (ende-content-role message)))
-                              (list (cons :role role)
-                                    (cons :content
-                                          (ende-content-provider-content
-                                           role (ende-content-body message) 'chat profile)))))
-                          (ende-content-provider-messages messages))))))
+  (when (cl-some (lambda (message) (plist-get message :tool-calls)) messages)
+    (error "Batch image context cannot contain tool calls"))
+  (let ((body (list (cons :messages (ende-llm--request-messages messages profile)))))
     (setq body (ende-controls-encode body (plist-get profile :controls) profile))
     (when (plist-get profile :output-tokens)
       (setq body (append body (list (cons :max_tokens (plist-get profile :output-tokens))))))

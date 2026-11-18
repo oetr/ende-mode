@@ -43,9 +43,9 @@
 (require 'ende-request)
 (require 'ende-provider)
 (require 'ende-messages)
-(require 'ende-openrouter-batch)
 (require 'ende-codex)
 
+(autoload 'ende-openrouter-batch-default "ende-openrouter-batch")
 (declare-function ende-tool-store-load-reasoning "ende-tool-store" (id request-id response-id filename))
 (declare-function ende-tool-store-call-with-replay "ende-tool-store" (function &optional filename))
 
@@ -617,8 +617,24 @@ The :callbacks argument initializes the composed transport lifecycle."
               (when call-id
                 (list (cons :tool_call_id call-id)))))))
 
+(defun ende-llm--leading-system-messages (messages)
+  "Collect instructions at the start, leaving capability updates in place."
+  (let (instructions turns)
+    (dolist (message messages)
+      (cond ((ende-content-capabilities-p message)
+             (push (cons "user" (ende-content-labeled-capabilities message)) turns))
+            ((member (ende-content-role message) '("system" "developer"))
+             (let ((text (ende-content-body message)))
+               (unless (stringp text) (error "Leading instructions must be text"))
+               (push text instructions)))
+            (t (push message turns))))
+    (push ende-content-capabilities-guidance instructions)
+    (cons (cons "system" (string-join (nreverse instructions) "\n\n")) (nreverse turns))))
+
 (defun ende-llm--request-messages (messages profile)
   "Project MESSAGES onto the Chat Completions history supported by PROFILE."
+  (when (eq (ende-provider-config-chat-system-layout profile) 'leading-only)
+    (setq messages (ende-llm--leading-system-messages messages)))
   (cl-flet ((encode ()
               (cl-loop for message in (ende-content-provider-messages messages t)
                        for row = (ende-llm--message-json message profile)

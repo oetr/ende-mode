@@ -87,7 +87,7 @@ manually entered model.  :model-settings refines shared model defaults."
 
 (defconst ende-provider-config--model-fields
   '(:context-window :max-output-tokens :output-tokens :temperature
-		    :thinking :reasoning-effort :parameters))
+                    :thinking :reasoning-effort :parameters :chat-system-layout))
 
 (defconst ende-provider-config--common-fields
   (append '(:display-name :api :models :model-settings :request-timeout
@@ -109,6 +109,13 @@ manually entered model.  :model-settings refines shared model defaults."
   "Require a nonempty string VALUE for FIELD."
   (unless (and (stringp value) (not (string-blank-p value)))
     (error "%s: supply a nonempty string" field)))
+
+(defun ende-provider-config-chat-system-layout (profile)
+  "Return the Chat Completions instruction layout for PROFILE."
+  (let ((layout (or (plist-get profile :chat-system-layout) 'native)))
+    (unless (memq layout '(native leading-only))
+      (error ":chat-system-layout: choose native or leading-only"))
+    layout))
 
 (defun ende-provider-config--positive (value field &optional real)
   "Validate optional positive VALUE for FIELD; permit finite REAL values."
@@ -150,6 +157,7 @@ manually entered model.  :model-settings refines shared model defaults."
       (unless (assq value ende-provider-config--apis)
         (error ":api: choose openai-chat-completions, openai-responses, or anthropic-messages")))
      (:models (ende-provider-config--models value))
+     (:chat-system-layout (ende-provider-config-chat-system-layout settings))
      (:parameters (ende-provider-config-parameters value))
      ((or :temperature :thinking :reasoning-effort)
       (ende-controls--validate-canonical-value key value context)
