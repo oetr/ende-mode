@@ -535,6 +535,7 @@ errors are reported but never propagated into transport completion."
                (error-details (and (ende-error-p value)
                                    (listp (ende-error-details value))
                                    (ende-error-details value)))
+               (error-status (plist-get error-details :status))
                (state (cond
                        ((eq outcome 'success) "success")
                        ((eq outcome 'discarded) "discarded")
@@ -545,6 +546,8 @@ errors are reported but never propagated into transport completion."
                 `(("outcome" . ,state)
                   ("error_kind" . ,(and error-kind (symbol-name error-kind)))
                   ("http_status" . ,http-status)
+                  ("error_status" . ,(and (integerp error-status)
+                                          (<= 100 error-status 599) error-status))
                   ("error_code" . ,(when (stringp (plist-get error-details :code))
                                        (ende-debug--redact (plist-get error-details :code))))
                   ("error_param" . ,(when (stringp (plist-get error-details :param))

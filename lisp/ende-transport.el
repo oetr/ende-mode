@@ -216,30 +216,37 @@ Freeze numeric correlation from optional PROFILE, without retaining it."
 
 (defun ende-transport-safe-error-text (text)
   "Prevent private provider payloads from entering error messages."
-  (when (and (stringp text)
-             (let ((case-fold-search t))
-               (string-match-p
-                "encrypted_content\\|prompt_cache_key\\|session[-_]id\\|authorization\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token"
-                text)))
-    (setq text "Provider error contained private replay or cache data (payload redacted)"))
-  (if (and (stringp text)
-           (let ((case-fold-search t))
-             (string-match-p "data:image/\\|b64_json\\|image_generation_call" text)))
-      "Provider error contained image data (payload redacted)"
-    text))
+  (let ((case-fold-search t))
+    (cond
+     ((not (stringp text)) text)
+     ((string-match-p
+       "encrypted_content\\|prompt_cache_key\\|session[-_]id\\|authorization[\"[:space:]]*[:=]\\|\\bbearer[[:space:]]+\\|\\(?:access\\|refresh\\|id\\)[-_]token"
+       text)
+      "Provider error contained private replay or cache data (payload redacted)")
+     ((string-match-p "data:image/\\|b64_json\\|image_generation_call" text)
+      "Provider error contained image data (payload redacted)")
+     (t
+      (replace-regexp-in-string
+       (rx word-start "api" (any " _-") "key" (optional " provided")
+           (* (any "\"' ")) (any ":=") (* (any "\"' "))
+           (group (+ (not (any "\"' \t\r\n,;")))))
+       "[redacted]" (replace-regexp-in-string
+                     (rx word-start "sk-" (+ (any alnum "_*-"))) "[redacted]" text t t)
+       t t 1)))))
+
+(defun ende-transport-error-message (payload)
+  "Return the bounded, safe explanation from a parsed provider error PAYLOAD."
+  (let ((error (ende-protocol-json-get "error" payload)))
+    (cl-loop for text in (list (ende-protocol-json-get "message" error)
+                               (ende-protocol-json-get "detail" error) error
+                               (ende-protocol-json-get "message" payload)
+                               (ende-protocol-json-get "detail" payload) payload)
+             when (stringp text)
+             thereis (ende-bounded-single-line (ende-transport-safe-error-text text) 1000 t))))
 
 (defun ende-transport-error-detail (preview)
   "Return a useful provider error detail parsed from PREVIEW, or nil."
-  (condition-case nil
-      (let* ((preview (ende-transport-safe-error-text preview))
-             (payload (ende-protocol-json-read-string preview))
-             (error-payload (ende-protocol-json-get "error" payload)))
-        (or (ende-protocol-json-get "message" error-payload)
-            (ende-protocol-json-get "detail" error-payload)
-            (ende-protocol-json-get "message" payload)
-            (ende-protocol-json-get "detail" payload)
-            (and (stringp error-payload) error-payload)))
-    (error nil)))
+  (ende-transport-error-message (ignore-errors (ende-protocol-json-read-string preview))))
 
 (provide 'ende-transport)
 

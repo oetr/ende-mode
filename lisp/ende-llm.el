@@ -410,8 +410,8 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--http-error-detail (session)
   "Return a provider error detail parsed from SESSION's response preview."
-  (ende-transport-error-detail
-   (ende-stream-preview-text (ende-llm--session-stream session))))
+  (ende-transport-error-message
+   (ende-stream-preview-json (ende-llm--session-stream session))))
 
 (defun ende-llm--result (session)
   "Build the normalized result plist for SESSION."

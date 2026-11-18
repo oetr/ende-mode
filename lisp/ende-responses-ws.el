@@ -537,8 +537,9 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
     (when (and (not (ende-responses-ws-request-response-id request))
                (equal type "error")
                (member code '("previous_response_not_found" "websocket_connection_limit_reached")))
-      (ende-responses-ws--retry request (if (equal code "previous_response_not_found")
-                                          'missing-response 'connection-limit))
+      (ende-responses-ws--retry
+       request (if (equal code "previous_response_not_found")
+                   'missing-response 'connection-limit) error)
       t)))
 
 (defun ende-responses-ws--deadline-expired-p (request)
@@ -550,8 +551,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
   "Return bounded jittered exponential backoff for RETRY, starting at one."
   (min 4 (* (expt 2 (min 2 (1- retry))) (+ 0.8 (/ (random 401) 1000.0)))))
 
-(defun ende-responses-ws--retry (request reason)
-  "Retire REQUEST's attempt and recover from structured transient REASON."
+(defun ende-responses-ws--retry (request reason &optional rejection)
+  "Retry REQUEST for REASON, reporting provider REJECTION if retries run out."
   (when (ende-responses-ws--live-p request)
     (cond
      ((ende-responses-ws--deadline-expired-p request)
@@ -562,7 +563,8 @@ ON-RETRY resets protocol state and supplies fresh validated handshake headers."
             'retries-exhausted)
       (ende-responses-ws--fail
        request 'transport
-       "Responses automatic reconnection exhausted; completed work was preserved"
+       (or (ende-transport-error-message rejection)
+           "Responses automatic reconnection exhausted; completed work was preserved")
        (when (eq reason 'connect-timeout) 'connect)))
      ((memq reason '(connect-timeout missing-response connection-limit unsent-replacement connection-lost))
       (let ((connection (ende-responses-ws-request-connection request)))

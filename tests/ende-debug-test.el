@@ -794,37 +794,44 @@
         (should received)
         (should-not (string-match-p secret (prin1-to-string received)))))))
 
-(ert-deftest ende-debug-provider-errors-are-allowlisted ()
-  (dolist (code (append '("invalid_api_key" "fixture-api-key" ["fixture-api-key"] nil)
-                       (mapcar #'car ende-codex--error-hints)))
-    (dolist (source '("error" "response.failed" http))
-      (let* ((payload `((error . ((code . ,code) (message . "Invalid API key: fixture-api-key")
-                                  (type . "fixture-api-key") (param . "fixture-api-key")
-                                  (details . (("fixture-api-key" . ["fixture-api-key"])))))
-                        (request_id . "fixture-api-key")))
-             (record (list :started (float-time) :metadata nil))
-             events failure
-             (session (ende-codex--make-session
-                       :debug-record record
-                       :callbacks (list :on-error (lambda (value) (setq failure value))
-                                        :on-event (lambda (event) (push event events))))))
-        (cl-letf (((symbol-function 'ende-debug--write-meta) #'ignore)
-                  ((symbol-function 'ende-stream-preview-text)
-                   (lambda (_) (json-encode payload))))
-          (if (eq source 'http)
-              (ende-codex--fail session (ende-codex--http-error session 401))
-            (ende-codex--handle-event
-             session (ende-protocol-json-read-string
-                      (json-encode
-                       (cons (cons 'type source)
-                             (if (equal source "response.failed")
-                                 (list (cons 'response payload)) payload)))))))
-        (should (eq (ende-error-kind failure) (if (eq source 'http) 'http 'provider)))
-        (should-not (string-match-p "fixture-api-key" (prin1-to-string (list failure events record))))
-        (let ((hint (assoc code ende-codex--error-hints)))
-          (should (equal (plist-get (ende-error-details failure) :code) (car hint)))
-          (should (string-suffix-p (or (cdr hint) "OpenAI Responses request failed")
-                                  (ende-error-message failure))))))))
+(ert-deftest ende-debug-provider-errors-preserve-explanations-not-secrets ()
+  (dolist (code '("invalid_json_schema" "new_provider_error"))
+    (dolist (source '("error" "response.failed" "response.completed" http))
+      (dolist (text '("Invalid schema for function 'edit_file': unsupported keyword."
+                      "Invalid API key: fixture-secret"))
+        (let* ((param "tools[0].tools[9].parameters")
+               (payload `((error . ((code . ,code) (param . ,param) (message . ,text)))
+                          (request_id . "fixture-secret")))
+               (record (list :started (float-time) :metadata nil))
+               failure
+               (session (ende-codex--make-session
+                         :debug-record record
+                         :callbacks (list :on-error (lambda (value) (setq failure value))))))
+          (cl-letf (((symbol-function 'ende-debug--write-meta) #'ignore))
+            (if (eq source 'http)
+                (progn
+                  (ende-stream-append-preview (ende-codex--session-stream session)
+                                              (json-encode payload))
+                  (ende-codex--fail session (ende-codex--http-error session 400)))
+              (ende-codex--handle-event
+               session (ende-protocol-json-read-string
+                        (json-encode
+                         (append `((type . ,source) (status_code . 400))
+                                 (if (equal source "error") payload
+                                   (list (cons 'response payload)))))))
+              (when (equal source "response.completed")
+                (ende-codex--complete session))))
+          (should failure)
+          (should (string-match-p
+                   (regexp-quote (if (string-prefix-p "Invalid schema" text) text "Invalid API key:"))
+                   (ende-error-display-message failure)))
+          (should-not (string-match-p "fixture-secret" (prin1-to-string (list failure record))))
+          (should-not (string-match-p (regexp-quote text) (prin1-to-string record)))
+          (unless (equal source "response.completed")
+            (should (equal (plist-get (ende-error-details failure) :param) param))
+            (should (= (plist-get (ende-error-details failure) :status) 400))
+            (should (= (cdr (assoc "error_status" (cdr (assoc "completion" (plist-get record :metadata)))))
+                       400))))))))
 
 (ert-deftest ende-debug-structural-fingerprints-represent-json-values ()
   (let ((fingerprint (lambda (item)

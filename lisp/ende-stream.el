@@ -295,10 +295,11 @@ TOKEN-KEY is the provider-specific output-token field."
       (setf (ende-stream-session-preview-bytes stream)
             (+ used (string-bytes prefix))))))
 
-(defun ende-stream-preview-text (stream)
-  "Return STREAM's bounded response preview."
-  (ende-transport-safe-error-text
-   (mapconcat #'identity (reverse (ende-stream-session-preview-parts stream)) "")))
+(defun ende-stream-preview-json (stream)
+  "Parse STREAM's bounded response preview, or return nil if it isn't JSON."
+  (ignore-errors
+    (ende-protocol-json-read-string
+     (mapconcat #'identity (reverse (ende-stream-session-preview-parts stream)) ""))))
 
 (defun ende-stream-dispatch-events (stream events callback)
   "Pass parsed SSE EVENTS to CALLBACK while STREAM remains active."

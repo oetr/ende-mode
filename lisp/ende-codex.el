@@ -1364,10 +1364,14 @@ When APPEND is non-nil, append the argument delta to the stored value."
      ((member type '("response.failed" "error"))
       (let ((error (or (ende-protocol-json-get "error" response)
                        (ende-protocol-json-get "error" json) json)))
-        (ende-codex--fail session (ende-codex--provider-error 'provider error)))))))
+        (ende-codex--fail
+         session (ende-codex--provider-error
+                  'provider error (or (ende-protocol-json-get "status_code" json)
+                                      (ende-protocol-json-get "status" json)))))))))
 
 (defconst ende-codex--error-hints
   '(("invalid_api_key" . "API key is invalid; check the selected connection's credentials")
+    ("invalid_json_schema" . "Invalid JSON schema")
     ("unsupported_parameter" . "A request parameter is not supported")
     ("subscription_sharing_user_not_eligible" .
      "ChatGPT-plan use is unavailable for this account")
@@ -1385,20 +1389,32 @@ When APPEND is non-nil, append the argument delta to the stored value."
      "ChatGPT authorization context is invalid; connect through the connection selector"))
   "Known Responses error codes and their safe descriptions.")
 
+(defun ende-codex--error-param (param)
+  "Return PARAM if it names a recognized request field or tool schema."
+  (let ((case-fold-search nil))
+    (when (and (stringp param)
+               (or (member param '("model" "input" "instructions" "tools" "tool_choice"
+                                   "max_output_tokens" "reasoning" "text"
+                                   "prompt_cache_options" "prompt_cache_options.comparison_response_id"))
+                   (string-match-p (rx string-start "tools[" (repeat 1 6 digit) "]"
+                                       (optional ".tools[" (repeat 1 6 digit) "]")
+                                       ".parameters" string-end)
+                                   param)))
+      param)))
+
 (defun ende-codex--provider-error (kind error &optional status)
-  "Build a public error of KIND from untrusted ERROR and HTTP STATUS."
+  "Build a public error of KIND from untrusted ERROR and optional STATUS."
   (let* ((hint (assoc (ende-protocol-json-get "code" error) ende-codex--error-hints))
-         (message (or (cdr hint) "OpenAI Responses request failed"))
-         (param (car (member (ende-protocol-json-get "param" error)
-                             '("model" "input" "instructions" "tools" "tool_choice"
-                               "max_output_tokens" "reasoning" "text"
-                               "prompt_cache_options" "prompt_cache_options.comparison_response_id"))))
+         (param (ende-codex--error-param (ende-protocol-json-get "param" error)))
          (status (and (integerp status) (<= 100 status 599) status)))
     (ende-error-create
      :kind kind
-     :message (if (eq kind 'http)
-                  (format "HTTP status %s: %s" (or status "unknown") message)
-                message)
+     :message (concat (cond ((eq kind 'http) (format "HTTP status %s: " (or status "unknown")))
+                            (status (format "Status %d: " status)))
+                      (when hint (concat (car hint) " "))
+                      (when param (format "[%s] " param))
+                      (or (ende-transport-error-message error)
+                          (cdr hint) "OpenAI Responses request failed"))
      :details (append (when hint (list :code (car hint)))
                       (when param (list :param param))
                       (when status (list :status status))))))
@@ -1410,10 +1426,7 @@ When APPEND is non-nil, append the argument delta to the stored value."
                          (car (ende-stream-response-headers
                                (ende-codex--session-stream session)))
                        (error nil))))
-         (payload (condition-case nil
-                      (ende-protocol-json-read-string
-                       (ende-stream-preview-text (ende-codex--session-stream session)))
-                    (error nil))))
+         (payload (ende-stream-preview-json (ende-codex--session-stream session))))
     (ende-codex--provider-error
      'http (or (ende-protocol-json-get "error" payload) payload) status)))
 
@@ -1476,7 +1489,10 @@ When APPEND is non-nil, append the argument delta to the stored value."
                        (ende-codex--ordered-output session))))
       (ende-error-create
        :kind (if incomplete 'incomplete 'protocol)
-       :message "Responses generation is incomplete or has an invalid completion event"))))
+       :message (or (ende-transport-error-message (ende-protocol-json-get "error" response))
+                    (ende-transport-error-message
+                     (ende-protocol-json-get "reason" (ende-protocol-json-get "incomplete_details" response)))
+                    "Responses generation is incomplete or has an invalid completion event")))))
 
 (defun ende-codex--complete (session)
   "Validate and settle SESSION's terminal Responses event."
