@@ -4587,7 +4587,8 @@ SOURCE-FENCE uses the default, never the earlier summary as instructions."
   "Run manual compaction for JOB using REQUEST, CONFIGURATION and INSTRUCTIONS."
   (setf (ende-job-profile job)
         (plist-put (copy-sequence (ende-job-profile job)) :tool-definitions
-                   (ende-tool-definitions configuration (ende-job-parent job)))
+                   (ende-tool-definitions configuration (ende-job-parent job)
+                                          (plist-get (ende-job-profile job) :api)))
         (ende-job-access-policy job) '(:active-tools nil)
         (ende-job-request-phase job) 'compact)
   (let ((messages (ende-operations--add-source-metadata job request)))

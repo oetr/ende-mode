@@ -101,7 +101,7 @@
   "Return generation properties supported by ADAPTER."
   (append ende-image--common-properties (plist-get adapter :properties)))
 
-(defun ende-image--schema (_configuration)
+(defun ende-image--schema (_configuration _api)
   "Return the selected image API's tool schema."
   `((:type . "object")
     (:properties . ,(append (ende-image--request-properties (ende-image--adapter))

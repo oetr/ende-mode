@@ -180,8 +180,8 @@ Return non-nil if the originating agent job still accepts reports.")
   "Register tool NAME with DESCRIPTION, PARAMETERS, and HANDLER.
 
 PARAMETERS is a JSON schema or a function receiving the resolved access config
-and returning a schema.  HANDLER receives arguments and a canonical project
-root.  NAME is exposed to model transports as a string.  Pass
+and provider API and returning a schema.  HANDLER receives arguments and a
+canonical project root.  NAME is exposed to model transports as a string.  Pass
 `:write' as READ-ONLY for a local-file-mutating tool.  RESOURCE-POLICY keeps
 the historic `:no-resource' registration form; OPTIONS may specify
 `:resource-kind' (`file', `url', or `none'), `:requires-resources',
@@ -243,8 +243,8 @@ Do not modify CONFIGURED.  Resource-free tools are not implicitly activated."
            (cl-loop for (name . tool) in ende-tools--registry
                     when (ende-tool-always-available tool) collect name))))
 
-(defun ende-tool-definitions (&optional access-config omit-internal)
-  "Return registered tool definitions, resolving schemas with ACCESS-CONFIG.
+(defun ende-tool-definitions (&optional access-config omit-internal api)
+  "Return registered tool definitions for ACCESS-CONFIG and provider API.
 Omit host-only tools when OMIT-INTERNAL is non-nil."
   (cl-loop for (_ . tool) in ende-tools--registry
            unless (and omit-internal (ende-tool-internal-only tool))
@@ -256,7 +256,7 @@ Omit host-only tools when OMIT-INTERNAL is non-nil."
                              (cons :parameters
                                    (let ((parameters (ende-tool-parameters tool)))
                                      (if (functionp parameters)
-                                         (funcall parameters access-config)
+                                         (funcall parameters access-config api)
                                        parameters))))))))
 
 (defun ende-tool--call-root (tool root access-config)
@@ -1285,6 +1285,28 @@ Multiline matches belong to their starting line; columns name its first match."
          (regexp-opt patterns)))
       ("regexp"
        (ende-tools--required-string arguments "regexp")))))
+
+(defun ende-tools--search-arguments (arguments)
+  "Copy nested Responses selectors into flat search ARGUMENTS for execution."
+  (if (not (member "selector" (mapcar #'ende-tools--property-name
+                                     (ende-tools--object-keys arguments))))
+      arguments
+    (let* ((options '("glob" "context_before" "context_after" "max_results"))
+           (forms '("query" "patterns" "regexp"))
+           (selector (ende-tools--argument arguments "selector")))
+      (ende-tools--assert-properties arguments (cons "selector" options) "search_project")
+      (ende-tools--assert-properties selector forms "search selector")
+      (let ((copy (ende-tools--json-object selector forms)))
+        (dolist (name options)
+          (let ((value (ende-tools--argument arguments name)))
+            (unless (memq value '(nil :null))
+              (puthash name value copy))))
+        copy))))
+
+(defun ende-tools--search-project-async (arguments root callback)
+  "Search ROOT using provider ARGUMENTS and return results through CALLBACK."
+  (ende-tools--run-project-tool
+   #'ende-tools--search-project (ende-tools--search-arguments arguments) root callback))
 
 (defun ende-tools--search-project (arguments root)
   "Search allowed project files on disk with an Emacs regexp."
@@ -3065,6 +3087,79 @@ process-group cancellation function with the active Ende job."
    (cons :required '("path" "edits"))
    (cons :additionalProperties :json-false)))
 
+(defun ende-tools--schema-object (properties)
+  "Return a closed object schema requiring all PROPERTIES."
+  `((:type . "object")
+    (:properties . ,properties)
+    (:required . ,(vconcat (mapcar (lambda (entry) (ende-tools--property-name (car entry)))
+                                  properties)))
+    (:additionalProperties . :json-false)))
+
+(defun ende-tools--schema-choice (properties alternatives)
+  "Return nested anyOf branches selecting ALTERNATIVES from PROPERTIES."
+  (list (cons :anyOf
+              (vconcat
+               (mapcar (lambda (names)
+                         (ende-tools--schema-object
+                          (mapcar (lambda (name) (assq name properties)) names)))
+                       alternatives)))))
+
+(defun ende-tools--edit-file-parameters (_configuration api)
+  "Return the edit schema for API."
+  (if (not (eq api 'openai-responses))
+      ende-tools--edit-file-schema
+    (let* ((schema (copy-tree ende-tools--edit-file-schema))
+           (properties (copy-tree (alist-get :properties ende-tools--edit-item-schema)))
+           (all (assq-delete-all :const (alist-get :all properties))))
+      (setf (alist-get :enum all) [t]
+            (alist-get :all properties) all
+            (alist-get :items (alist-get :edits (alist-get :properties schema)))
+            (ende-tools--schema-choice
+             properties '((:anchor :position :text)
+                          (:occurrence :anchor :position :text)
+                          (:all :anchor :position :text))))
+      schema)))
+
+(defconst ende-tools--search-project-schema
+  `((:type . "object")
+    (:properties
+     . ((:query . ((:type . "string") (:minLength . 1)
+                   (:description . "Literal string to search for.")))
+        (:patterns . ((:type . "array") (:minItems . 1)
+                      (:items . ((:type . "string") (:minLength . 1)))
+                      (:description . "Literal strings to search for with OR semantics.")))
+        (:regexp . ((:type . "string") (:minLength . 1)
+                    (:description . "Explicit Emacs regular expression for advanced searches (not PCRE).")))
+        (:glob . ((:type . "string") (:minLength . 1)))
+        (:context_before . ((:type . "integer") (:minimum . 0)
+                            (:maximum . ,ende-tools-max-search-context-lines)
+                            (:description . "Defaults to 0.")))
+        (:context_after . ((:type . "integer") (:minimum . 0)
+                           (:maximum . ,ende-tools-max-search-context-lines)
+                           (:description . "Defaults to 0.")))
+        (:max_results . ((:type . "integer") (:minimum . 1)
+                         (:maximum . ,ende-tools-max-search-results)
+                         (:description . "Defaults to 30.")))))
+    (:oneOf
+     . [((:required . ["query"]))
+        ((:required . ["patterns"]))
+        ((:required . ["regexp"]))])
+    (:additionalProperties . :json-false)))
+
+(defun ende-tools--search-project-parameters (_configuration api)
+  "Return the search schema for API."
+  (if (not (eq api 'openai-responses))
+      ende-tools--search-project-schema
+    (let* ((properties (alist-get :properties ende-tools--search-project-schema))
+           (options (copy-tree (cl-remove-if
+                                (lambda (entry) (memq (car entry) '(:query :patterns :regexp)))
+                                properties))))
+      (dolist (entry options)
+        (setf (alist-get :type (cdr entry)) (vector (alist-get :type (cdr entry)) "null")))
+      (ende-tools--schema-object
+       (cons (cons :selector (ende-tools--schema-choice properties '((:query) (:patterns) (:regexp))))
+             options)))))
+
 (setq ende-tools--registry nil)
 
 (ende-tool-register
@@ -3165,37 +3260,14 @@ process-group cancellation function with the active Ende job."
 (ende-tool-register
  'search_project
  "Search allowed project files on disk. Exactly one search selector is required: query, patterns, or regexp (which uses Emacs regular-expression syntax, not PCRE). Each source line appears once, grouped by file; max_results counts lines and column identifies the first match. Multiline matches belong to their starting line. Use context_before and context_after for extra context, or read_file for more source."
- `((:type . "object")
-   (:properties
-    . ((:query . ((:type . "string") (:minLength . 1)
-                  (:description . "Literal string to search for.")))
-       (:patterns . ((:type . "array") (:minItems . 1)
-                     (:items . ((:type . "string") (:minLength . 1)))
-                     (:description . "Literal strings to search for with OR semantics.")))
-       (:regexp . ((:type . "string") (:minLength . 1)
-                   (:description . "Explicit Emacs regular expression for advanced searches (not PCRE).")))
-       (:glob . ((:type . "string") (:minLength . 1)))
-       (:context_before . ((:type . "integer") (:minimum . 0)
-                           (:maximum . ,ende-tools-max-search-context-lines)
-                           (:description . "Defaults to 0.")))
-       (:context_after . ((:type . "integer") (:minimum . 0)
-                          (:maximum . ,ende-tools-max-search-context-lines)
-                          (:description . "Defaults to 0.")))
-       (:max_results . ((:type . "integer") (:minimum . 1)
-                        (:maximum . ,ende-tools-max-search-results)
-                        (:description . "Defaults to 30.")))))
-   (:oneOf
-    . [((:required . ["query"]))
-       ((:required . ["patterns"]))
-       ((:required . ["regexp"]))])
-   (:additionalProperties . :json-false))
- (apply-partially #'ende-tools--run-project-tool #'ende-tools--search-project)
+ #'ende-tools--search-project-parameters
+ #'ende-tools--search-project-async
  nil nil '(:async t))
 
 (ende-tool-register
  'edit_file
  "Apply exact-anchor edits directly to an authorized disk file without changing visiting buffers."
- ende-tools--edit-file-schema
+ #'ende-tools--edit-file-parameters
  #'ende-tools--edit-file :write)
 
 (ende-tool-register
