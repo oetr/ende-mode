@@ -606,16 +606,23 @@ The :callbacks argument initializes the composed transport lifecycle."
               (when call-id
                 (list (cons :tool_call_id call-id)))))))
 
+(defun ende-llm--request-messages (messages profile)
+  "Project MESSAGES onto the Chat Completions history supported by PROFILE."
+  (cl-loop for message in (ende-content-provider-messages messages t)
+           for row = (ende-llm--message-json message profile)
+           when (or (not (equal (alist-get :role row) "assistant"))
+                    (length> (alist-get :content row) 0)
+                    (alist-get :tool_calls row)
+                    (alist-get :reasoning_content row))
+           collect row))
+
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."
   (let* ((stream-usage (if (plist-member profile :stream-usage)
                            (plist-get profile :stream-usage)
                          t))
          (body `((:model . ,(plist-get profile :model))
-                 (:messages . ,(mapcar
-                                (lambda (message)
-                                  (ende-llm--message-json message profile))
-                                (ende-content-provider-messages messages)))
+                 (:messages . ,(ende-llm--request-messages messages profile))
                  (:stream . t)
                  ,@(when stream-usage
                      '((:stream_options . ((:include_usage . t))))))))

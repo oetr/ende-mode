@@ -1512,6 +1512,9 @@
               (should (= (length result-headlines) 1))
               (should (plist-get execution :request-present-p))
               (should (plist-get execution :result-present-p))
+              (should (equal (ende-llm--request-body request nil)
+                             (ende-llm--request-body
+                              (seq-remove (lambda (item) (memq item opaque)) request) nil)))
               (should (equal (mapcar (lambda (message)
                                        (cond
                                         ((ende-test--message-property-p message :protocol-opaque) 'opaque)

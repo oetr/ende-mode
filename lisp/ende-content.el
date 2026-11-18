@@ -135,10 +135,10 @@ Return MESSAGES itself when no sources need resolution."
                                          (format "Image from the preceding assistant response (part %d):"
                                                  (cl-incf index))) part))))))
 
-(defun ende-content-provider-messages (messages)
+(defun ende-content-provider-messages (messages &optional portable-only)
   "Place assistant images in explicitly identified, valid user input positions.
-The original role and order stay intact internally.  Tool calls remain after
-all their assistant content and before the corresponding results."
+Keep native protocol items intact unless PORTABLE-ONLY is non-nil.
+Tool calls remain after their assistant content and before their results."
   (cl-mapcan
    (lambda (message)
      (let ((role (ende-content-role message))
@@ -147,7 +147,7 @@ all their assistant content and before the corresponding results."
                   (cl-some (lambda (part) (eq (plist-get part :type) :source)) content))
          (error "Attachment sources must be resolved before provider encoding"))
        (if (or (not (equal role "assistant")) (null content) (stringp content)
-               (and (not (stringp (car-safe message)))
+               (and (not portable-only) (not (stringp (car-safe message)))
                     (or (plist-get message :protocol-items)
                         (plist-get message :protocol-opaque))))
            (list message)
