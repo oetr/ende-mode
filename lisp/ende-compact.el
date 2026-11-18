@@ -324,15 +324,14 @@ not represented as inspected content or giant base64 strings."
           (body (ende-content-body message))
           (when structured
             (concat
-             (when (plist-get message :reasoning-content)
-               (concat "\nReasoning: " (text (plist-get message :reasoning-content))))
              (mapconcat
               (lambda (call)
                 (format "\nTool call %s (%s), arguments: %s\n"
                         (plist-get call :name) (plist-get call :id)
                         (text (plist-get call :arguments))))
               (plist-get message :tool-calls) "")
-             (when (or (plist-get message :protocol-items)
+             (when (or (plist-get message :reasoning-content) (plist-get message :reasoning-ref)
+                       (plist-get message :protocol-items)
                        (plist-get message :protocol-opaque))
                "\n[Provider replay data omitted; readable content is above]\n"))))))
      messages "\n")))

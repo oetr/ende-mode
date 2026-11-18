@@ -46,6 +46,9 @@
 (require 'ende-openrouter-batch)
 (require 'ende-codex)
 
+(declare-function ende-tool-store-load-reasoning "ende-tool-store" (id request-id response-id filename))
+(declare-function ende-tool-store-call-with-replay "ende-tool-store" (function &optional filename))
+
 ;;;; Hookable LLM caller
 
 (defvar ende-llm-function #'ende-llm-default
@@ -581,25 +584,33 @@ The :callbacks argument initializes the composed transport lifecycle."
     (:function . ((:name . ,(plist-get call :name))
                   (:arguments . ,(plist-get call :arguments))))))
 
+(defun ende-llm--replays-reasoning-p (profile)
+  "Return non-nil when PROFILE requests native reasoning history."
+  (and (eq (plist-get profile :reasoning-history-field) 'reasoning_content)
+       (not (eq (plist-get profile :thinking) 'off))
+       (not (equal (plist-get profile :reasoning-effort) "none"))
+       (plist-get profile :tool-definitions)))
+
 (defun ende-llm--message-json (message &optional profile)
   "Encode internal MESSAGE for a Chat Completions request under PROFILE."
   (if (and (consp message) (stringp (car message)))
       `((:role . ,(car message))
         (:content . ,(ende-content-provider-content (car message) (cdr message) 'chat profile)))
-    (let ((role (plist-get message :role))
-          (content (plist-get message :content))
-          (calls (plist-get message :tool-calls))
-          (call-id (plist-get message :tool-call-id)))
+    (let* ((role (plist-get message :role))
+           (content (plist-get message :content))
+           (calls (plist-get message :tool-calls))
+           (call-id (plist-get message :tool-call-id))
+           (reasoning
+            (when (and (equal role "assistant") (ende-llm--replays-reasoning-p profile))
+              (if-let* ((ref (plist-get message :reasoning-ref)))
+                  (progn
+                    (require 'ende-tool-store)
+                    (or (and (consp ref) (ignore-errors (apply #'ende-tool-store-load-reasoning ref)))
+                        (signal 'ende-request-history-unavailable nil)))
+                (plist-get message :reasoning-content)))))
       (append (list (cons :role role)
-                          (cons :content (ende-content-provider-content role content 'chat profile)))
-              (when (and profile
-                         (eq (plist-get profile :reasoning-history-field)
-                             'reasoning_content)
-                         (plist-get profile :tool-definitions)
-                         (equal role "assistant")
-                         (stringp (plist-get message :reasoning-content)))
-                (list (cons :reasoning_content
-                            (plist-get message :reasoning-content))))
+                    (cons :content (ende-content-provider-content role content 'chat profile)))
+              (when (stringp reasoning) (list (cons :reasoning_content reasoning)))
               (when calls
                 (list (cons :tool_calls
                             (mapcar #'ende-llm--tool-call-json calls))))
@@ -608,13 +619,19 @@ The :callbacks argument initializes the composed transport lifecycle."
 
 (defun ende-llm--request-messages (messages profile)
   "Project MESSAGES onto the Chat Completions history supported by PROFILE."
-  (cl-loop for message in (ende-content-provider-messages messages t)
-           for row = (ende-llm--message-json message profile)
-           when (or (not (equal (alist-get :role row) "assistant"))
-                    (length> (alist-get :content row) 0)
-                    (alist-get :tool_calls row)
-                    (alist-get :reasoning_content row))
-           collect row))
+  (cl-flet ((encode ()
+              (cl-loop for message in (ende-content-provider-messages messages t)
+                       for row = (ende-llm--message-json message profile)
+                       when (or (not (equal (alist-get :role row) "assistant"))
+                                (length> (alist-get :content row) 0)
+                                (alist-get :tool_calls row) (alist-get :reasoning_content row))
+                       collect row)))
+    (if-let* ((ref (and (ende-llm--replays-reasoning-p profile)
+                        (cl-some (lambda (message) (plist-get message :reasoning-ref)) messages)))
+              ((consp ref)))
+        (progn (require 'ende-tool-store)
+               (ende-tool-store-call-with-replay #'encode (nth 3 ref)))
+      (encode))))
 
 (defun ende-llm--request-body (messages profile)
   "Return the JSON request object for MESSAGES and PROFILE."

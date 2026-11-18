@@ -175,9 +175,9 @@ Ende directory has its existing permissions changed."
              (error "Cannot initialize or validate tool payload database %s: %s. Check the file or set `ende-tool-store-file' to a fresh database"
                     filename (error-message-string error-data)))))))))
 
-(defun ende-tool-store-call-with-replay (function)
-  "Call FUNCTION with a lazily opened database owned only by this replay."
-  (let ((filename (expand-file-name (ende-tool-store--filename))))
+(defun ende-tool-store-call-with-replay (function &optional filename)
+  "Call FUNCTION with one lazy replay connection to FILENAME or the chat store."
+  (let ((filename (expand-file-name (or filename (ende-tool-store--filename)))))
     (if (equal filename (car ende-tool-store--replay))
         (funcall function)
       (let ((ende-tool-store--replay (list filename nil nil)))
@@ -450,6 +450,26 @@ Host-owned records are never provider opaque items.  Return nil if absent."
                  (or (null kind) (equal kind (plist-get record :kind))))
       (error "Opaque protocol item metadata does not match item %s" id))
     (plist-get record :item)))
+
+(defun ende-tool-store-save-reasoning (request-id response-id text filename)
+  "Store DeepSeek's exact TEXT for REQUEST-ID and RESPONSE-ID in FILENAME."
+  (unless (and (stringp request-id) (not (string-empty-p request-id))
+               (stringp response-id) (not (string-empty-p response-id)) (stringp text))
+    (error "Invalid native reasoning record"))
+  (ende-tool-store--save-protocol-item
+   "deepseek" "reasoning_content"
+   (list :request_id request-id :response_id response-id :reasoning_content text) filename))
+
+(defun ende-tool-store-load-reasoning (id request-id response-id filename)
+  "Read reasoning ID in FILENAME if its owner, REQUEST-ID and RESPONSE-ID match."
+  (when-let* ((record (ende-tool-store--load-protocol-item id filename))
+              ((equal (plist-get record :provider) "deepseek"))
+              ((equal (plist-get record :kind) "reasoning_content"))
+              (item (plist-get record :item))
+              ((and (stringp request-id) (equal request-id (gethash "request_id" item))))
+              ((and (stringp response-id) (equal response-id (gethash "response_id" item))))
+              (text (gethash "reasoning_content" item)) ((stringp text)))
+    text))
 
 (defun ende-tool-store--validate-capabilities (item request-id question-id)
   "Validate host capability ITEM against REQUEST-ID and QUESTION-ID."

@@ -40,6 +40,9 @@
 
 (declare-function ende--validate-messages "ende-operations" (messages))
 
+(define-error 'ende-request-history-unavailable
+  "Native reasoning history unavailable: restore the chat store and enable replay, or start a fresh context with a visible handoff")
+
 (cl-defstruct ende-request-retained
   source owner (readers 0) debug-origin)
 
@@ -109,17 +112,18 @@ Return the outgoing bytes, encoded body, and optional capture record."
 (defun ende-request--write (library builder messages profile file full-file debug preparation finalization replay)
   "Build and write a request to FILE; return payload-free diagnostics."
   (require library)
-  (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization replay))
-               (origin (and finalization (plist-get data :debug-preparation)))
-               (coding-system-for-write 'no-conversion))
-    (when (and finalization full-file)
-      (write-region (encode-coding-string (ende-worker--print (plist-get data :full-body)) 'utf-8)
-                    nil full-file nil 'silent))
-    (when finalization (setq data (plist-get data :data)))
-    (write-region data nil file nil 'silent)
-    (list :bytes (length data) :body (list (assq :tools body))
-          :debug-preparation origin
-          :debug-record record)))
+  (condition-case nil
+      (pcase-let* ((`(,data ,body ,record) (ende-request--encode builder messages profile debug preparation finalization replay))
+                   (origin (and finalization (plist-get data :debug-preparation)))
+                   (coding-system-for-write 'no-conversion))
+        (when (and finalization full-file)
+          (write-region (encode-coding-string (ende-worker--print (plist-get data :full-body)) 'utf-8)
+                        nil full-file nil 'silent))
+        (when finalization (setq data (plist-get data :data)))
+        (write-region data nil file nil 'silent)
+        (list :bytes (length data) :body (list (assq :tools body))
+              :debug-preparation origin :debug-record record))
+    (ende-request-history-unavailable '(:history-unavailable t))))
 
 (defconst ende-request--worker-threshold (* 64 1024))
 
@@ -225,11 +229,14 @@ Only source descriptors and serializable finalization data enter the worker."
                        (ende-ignore-errors #'ende-debug-record-completion
                                            (plist-get result :debug-record) 'discarded nil nil nil))
                    (condition-case nil
-                       (if error
+                       (if (or error (plist-get result :history-unavailable))
                            (progn
                              (ende-request-retained-release wire lifecycle)
                              (unless replay (ende-request-retained-release retained lifecycle))
-                             (funcall failed (ende-error-create :kind 'startup :message "Request preparation failed")))
+                             (funcall failed (ende-error-create
+                                              :kind 'startup :message
+                                              (if error "Request preparation failed"
+                                                (error-message-string '(ende-request-history-unavailable))))))
                          (progn
                            (when (and retained debug (not replay))
                              (setf (ende-request-retained-debug-origin retained)

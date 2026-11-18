@@ -141,6 +141,7 @@ assistant role of its enclosing section."
   "Org property storing the request identity for a reply.")
 
 (defconst ende-chat-response-id-property "ENDE_CHAT_RESPONSE_ID")
+(defconst ende-chat-reasoning-id-property "ENDE_CHAT_REASONING_ID")
 (defconst ende-chat-reply-reference-property "ENDE_CHAT_REPLY_REFERENCE")
 
 (defconst ende-chat-tool-execution-id-property "ENDE_TOOL_EXECUTION_ID"
@@ -225,6 +226,7 @@ assistant role of its enclosing section."
         (cons ende-chat-reply-to-property :reply-to)
         (cons ende-chat-request-id-property :request-id)
         (cons ende-chat-response-id-property :response-id)
+        (cons ende-chat-reasoning-id-property :reasoning-id)
         (cons ende-org-duration-property :duration-ms)
         (cons ende-chat-reply-reference-property :reply-reference)
         (cons ende-chat-work-property :work)
@@ -860,6 +862,7 @@ SELECTED-HEADLINES supplies an already selected current section."
         (message-owner nil)
         (message-role nil)
         (presentation-owner nil)
+        (first-section nil)
         (selected-work nil)
         (fragment-end nil))
     (cl-labels
@@ -871,12 +874,14 @@ SELECTED-HEADLINES supplies an already selected current section."
                          (ende-chat--protocol-assistant-message
                           document presentation-owner text
                           (= fragment-end
-                             (org-element-property :end presentation-owner)))
+                             (org-element-property :end presentation-owner))
+                          (not (eq first-section presentation-owner)))
                        (ende-chat--message
                         message-role
                         (ende-chat--content document message-owner text
                                             message-role)))))
-               (unless (ende-content-empty-p (ende-content-body message))
+               (when (or (plist-get message :reasoning-ref)
+                         (not (ende-content-empty-p (ende-content-body message))))
                  (push message messages)))
              (setq parts nil
                    message-owner nil
@@ -936,6 +941,7 @@ SELECTED-HEADLINES supplies an already selected current section."
                    (flush)
                    (setq message-owner next-owner
                          message-role next-role
+                         first-section headline
                          presentation-owner next-presentation))
                  (let ((text (ende-chat--section-text document headline)))
                    (when assistant
@@ -1543,10 +1549,19 @@ Decoded text is never sent back to artifact discovery."
           :synthetic-newline (equal "t" (ende-chat--local-property
                                          headline ende-chat-content-synthetic-newline-property)))))
 
+(defun ende-chat--reasoning-reference (document headline)
+  "Return HEADLINE's (ITEM REQUEST RESPONSE FILE) reference or `disabled'."
+  (when-let* ((id (ende-chat--property document headline :reasoning-id)))
+    (if ende-chat-replay-opaque-reasoning
+        (list id (ende-chat--property document headline :request-id)
+              (ende-chat--property document headline :response-id) (ende-tool-store--filename))
+      'disabled)))
+
 (defun ende-chat--protocol-assistant-message
-    (document headline &optional text complete)
+    (document headline &optional text complete continuation)
   "Restore HEADLINE's assistant TEXT, or its body when TEXT is nil.
-COMPLETE means TEXT reaches the generated wrapper's end."
+COMPLETE means TEXT reaches the wrapper's end.  A CONTINUATION after an
+edited role boundary does not own a second copy of its native reasoning."
   (let ((request-id (ende-chat--property document headline :request-id))
         (role (ende-chat--property document headline :role)))
     (unless (and (equal role "assistant")
@@ -1561,9 +1576,11 @@ COMPLETE means TEXT reaches the generated wrapper's end."
           (setq text (substring text 0 -2)))
         (unless complete
           (setq transform (plist-put transform :synthetic-end nil))))
-      (let* ((content (ende-chat--restore-response-parts
-                       (ende-chat--content document headline text 'assistant) transform)))
-        (ende-chat--message 'assistant content)))))
+      (let ((content (ende-chat--restore-response-parts
+                      (ende-chat--content document headline text 'assistant) transform)))
+        (if-let* ((ref (and (not continuation) (ende-chat--reasoning-reference document headline))))
+            (list :role "assistant" :content content :reasoning-ref ref)
+          (ende-chat--message 'assistant content))))))
 
 (defun ende-chat--protocol-opaque-message (document headline)
   "Reconstruct opaque ITEM represented by HEADLINE, or omit it if missing."
@@ -1605,7 +1622,8 @@ COMPLETE means TEXT reaches the generated wrapper's end."
          (assistant nil)
          (pending-calls nil)
          (response-id nil)
-         (executions (make-hash-table :test #'equal)))
+         (executions (make-hash-table :test #'equal))
+         (flush (lambda () (when assistant (push assistant messages) (setq assistant nil)))))
     (dolist (child children)
       (when (ende-chat--eligible-p document child)
         (when-let* ((id (ende-chat--property document child :response-id)))
@@ -1633,49 +1651,36 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                          (plist-get execution :result-present-p))
                     (puthash execution-id execution executions)
                   (setq ende-chat--expired-history-in-request t)))))))))
+    (setq response-id nil)
     (dolist (child children)
       (when (ende-chat--eligible-p document child)
+        (when-let* ((id (ende-chat--property document child :response-id))
+                    ((not (equal id response-id))))
+          (funcall flush)
+          (setq response-id id))
         (cond
          ((equal (ende-chat--property document child :visibility)
                  "reasoning_summary"))
          ((ende-chat--capabilities-reference-p document child)
           (push (ende-chat--protocol-capabilities-message document work child) messages))
          ((ende-chat--opaque-reference-p document child)
-          (when assistant
-            (push (if (plist-get assistant :tool-calls) assistant
-                    (ende-chat--message 'assistant
-                                        (plist-get assistant :content)))
-                  messages)
-            (setq assistant nil))
+          (funcall flush)
           (let ((event (ende-chat--protocol-opaque-message document child)))
             (when event (push event messages))))
          ((ende-chat--assistant-protocol-p document child)
-          (when assistant
-            (push (if (plist-get assistant :tool-calls) assistant
-                    (ende-chat--message 'assistant
-                                        (plist-get assistant :content)))
-                  messages)
-            (setq assistant nil))
+          (funcall flush)
           (dolist (message
                    (let ((ende-chat--reading-reply-reference t))
                      (ende-chat--section-messages
                       document child (org-element-property :begin child)
                       (org-element-property :end child))))
             (if (equal (ende-content-role message) "assistant")
-                (if assistant
-                    (setf (plist-get assistant :content)
-                          (ende-content-concat
-                           (list (plist-get assistant :content)
-                                 (ende-content-body message))))
-                  (setq assistant
-                        (list :role "assistant"
-                              :content (ende-content-body message))))
-              (when assistant
-                (push (if (plist-get assistant :tool-calls) assistant
-                        (ende-chat--message 'assistant
-                                            (plist-get assistant :content)))
-                      messages)
-                (setq assistant nil))
+                (if (not assistant) (setq assistant message)
+                  (let ((content (ende-content-concat (list (ende-content-body assistant)
+                                                            (ende-content-body message)))))
+                    (setq assistant (if (stringp (car assistant)) (ende-chat--message 'assistant content)
+                                      (plist-put assistant :content content)))))
+              (funcall flush)
               (push message messages))))
          ((ende-chat--tool-call-protocol-p document child)
           (when-let* ((execution
@@ -1683,37 +1688,26 @@ COMPLETE means TEXT reaches the generated wrapper's end."
                                  document child :tool-execution-id) executions)))
             (let ((call (ende-chat--protocol-tool-call
                          document work child execution)))
-              (unless assistant
-                (setq assistant (list :role "assistant" :content "")))
+              (when (or (not assistant) (stringp (car assistant)))
+                (setq assistant (list :role "assistant" :content (or (ende-content-body assistant) ""))))
+              (when-let* ((ref (ende-chat--reasoning-reference document child)))
+                (setf (plist-get assistant :reasoning-ref) ref))
               (setf (plist-get assistant :tool-calls)
                     (append (plist-get assistant :tool-calls) (list call))))))
          ((ende-chat--tool-result-protocol-p document child)
           (when-let* ((execution
                        (gethash (ende-chat--property
                                  document child :tool-execution-id) executions)))
-            (when assistant
-              (push (if (plist-get assistant :tool-calls) assistant
-                      (ende-chat--message 'assistant
-                                          (plist-get assistant :content)))
-                    messages)
-              (setq assistant nil))
+            (funcall flush)
             (push (ende-chat--protocol-tool-result-message execution) messages)))
          (t
           (dolist (message
                    (ende-chat--section-messages
                     document child (org-element-property :begin child)
                     (org-element-property :end child)))
-            (when assistant
-              (push (if (plist-get assistant :tool-calls) assistant
-                      (ende-chat--message 'assistant
-                                          (plist-get assistant :content)))
-                    messages)
-              (setq assistant nil))
+            (funcall flush)
             (push message messages))))))
-    (when assistant
-      (push (if (plist-get assistant :tool-calls) assistant
-              (ende-chat--message 'assistant (plist-get assistant :content)))
-            messages))
+    (funcall flush)
     (nreverse messages)))
 
 (defun ende-chat--context-equal-p (left right)
@@ -3915,6 +3909,12 @@ Keep it while another queued compaction still refers to its durable identity."
         (ende-chat--set-headline-title
          question ende-chat--compact-instructions-title))))))
 
+(defun ende-chat--native-reasoning (job result)
+  "Return RESULT's replayable native string, never its display reasoning."
+  (let ((text (plist-get result :reasoning-content)))
+    (and (eq (plist-get (ende-job-profile job) :reasoning-history-field) 'reasoning_content)
+         (stringp text) text)))
+
 (defun ende-chat--record-response (job result calls &optional prepared final synthetic)
   "Accept JOB's RESULT with prepared CALLS and response transformations."
   (let* ((transcript (ende-job-ensure-transcript job))
@@ -3928,10 +3928,12 @@ Keep it while another queued compaction still refers to its durable identity."
              (items (ende-transcript-items transcript result calls synthetic))
              (fragments (or (plist-get prepared :fragments)
                             (list (plist-get prepared :normalized))))
+             (native (unless synthetic (ende-chat--native-reasoning job result)))
              (thinking (plist-get result :thinking)))
         (when (and (not (cl-find 'text items :key #'ende-transcript-entry-kind))
-                   (not (string-blank-p
-                         (plist-get (plist-get prepared :normalized) :content))))
+                   (or (and native (not calls))
+                       (not (string-blank-p
+                             (plist-get (plist-get prepared :normalized) :content)))))
           (setq items (append items (list (ende-transcript-append
                                           transcript 'text "" nil 'complete)))))
         (dolist (item items)
@@ -3949,6 +3951,12 @@ Keep it while another queued compaction still refers to its durable identity."
             (ende-transcript-accept
              transcript result calls
              (list :items items :prepared prepared :synthetic synthetic
+                   :reasoning-id (when native
+                                   (ende-tool-store-save-reasoning
+                                    (plist-get instruction :request-id)
+                                    (number-to-string (ende-transcript-entry-id
+                                                       (ende-transcript-response transcript)))
+                                    native (plist-get instruction :tool-store-file)))
                    :metadata (ende-chat--response-metadata job result)
                    :thinking (and (stringp thinking) (not (string-blank-p thinking))
                                   (ende-chat--normalize-response thinking level))) final)
@@ -3970,6 +3978,9 @@ Keep it while another queued compaction still refers to its durable identity."
          (properties (concat (ende-org--metadata-properties (plist-get data :metadata))
                              (ende-chat--response-property ende-chat-response-id-property
                                                            (ende-transcript-entry-id entry))))
+         (assistant-properties
+          (concat properties (when-let* ((id (plist-get data :reasoning-id)))
+                               (ende-chat--response-property ende-chat-reasoning-id-property id))))
          (items (plist-get data :items))
          (final (plist-get data :final))
          (last-text (and final (cl-find 'text (reverse items) :key #'ende-transcript-entry-kind)))
@@ -3983,7 +3994,9 @@ Keep it while another queued compaction still refers to its durable identity."
                   (text (ende-chat--assistant-text
                          (if (eq item last-text) level (1+ level))
                          question-id request-id
-                         (concat properties (ende-chat--normalized-response-properties normalized))
+                         ;; Calls own a tool turn's reasoning, even when the text is edited into several roles.
+                         (concat (if (plist-get data :calls) properties assistant-properties)
+                                 (ende-chat--normalized-response-properties normalized))
                          normalized)))
              (if (eq item last-text)
                  (progn
@@ -3996,7 +4009,7 @@ Keep it while another queued compaction still refers to its durable identity."
                (push text work))))
           ('tool-call
            (push (ende-chat--tool-call-text
-                  (1+ level) request-id (plist-get item-data :call) properties) work))
+                  (1+ level) request-id (plist-get item-data :call) assistant-properties) work))
           ('opaque
            (push (ende-chat--opaque-protocol-text
                   (1+ level) request-id item-data properties) work)))))
@@ -4541,7 +4554,8 @@ FINAL includes retained tool images and trims compaction output."
                                (ende-chat--prepare-response
                                 job result (plist-get (ende-job-instruction job) :response-level) t)))
                  (transcript (ende-job-ensure-transcript job)))
-            (when (string-blank-p (plist-get (plist-get prepared :normalized) :content))
+            (when (and (string-blank-p (plist-get (plist-get prepared :normalized) :content))
+                       (string-empty-p (or (ende-chat--native-reasoning job result) "")))
               (error "Chat completion was empty"))
             (ende-chat--record-response job result nil prepared t)
             (ende-transcript-finish transcript 'completed)
@@ -4626,6 +4640,7 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
          (assistant
           (list :role "assistant" :content (plist-get prepared :parts)
                 :tool-calls normalized-calls
+                :reasoning-content (plist-get assistant-result :reasoning-content)
                 :protocol-items (plist-get assistant-result :protocol-items)))
          (messages (list assistant)))
     (ende-chat--record-response job (or assistant-result '(:content "")) calls
@@ -4644,7 +4659,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
 (defun ende-chat--artifact-repair-messages (result failure)
   "Return rejected RESULT as text followed by artifact validation FAILURE."
   (list
-   (list :role "assistant" :content
+   (list :role "assistant" :reasoning-content (plist-get result :reasoning-content)
+         :content
          (if-let* ((parts (plist-get result :output-parts)))
              (mapconcat (lambda (part)
                           (if (eq (plist-get part :type) :text)
@@ -4754,7 +4770,8 @@ ASSISTANT-RESULT, when non-nil, is preserved as the content of its turn."
                        (if automatic
                            (ende-chat--record-user-guidance
                             job (list (ende-content-body (cadr repair)))
-                            (list :content
+                            (list :reasoning-content (plist-get result :reasoning-content)
+                                  :content
                                   (concat "Rejected response (literal text):\n#+begin_example\n"
                                           (org-escape-code-in-string (ende-content-body (car repair)))
                                           "\n#+end_example\n")))

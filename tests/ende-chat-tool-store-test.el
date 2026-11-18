@@ -1432,6 +1432,54 @@
              (ende-chat--property document work :request-id))))
       (ende-test--reset))))
 
+(ert-deftest ende-test/chat-reopens-native-assistant-history ()
+  (ende-test--reset)
+  (ende-test--with-project (root)
+    (let* ((file (expand-file-name "chat.org" root))
+           (ende-builtin-provider-settings '((deepseek :models ("deepseek-flash"))))
+           (profile (ende-provider-profile 'deepseek))
+           (call-reasoning " Call λ.\nDo not normalize. ")
+           (final-reasoning " Final λ.\nA different response. ")
+           (call '(:id "step" :name "about_thinking"
+                   :arguments "{\"title\":\"Checking\",\"status\":\"Inspecting\"}"))
+           (ende-llm-function
+            (ende-test--fake-llm
+             (list (list :reasoning-content call-reasoning :tool-calls (list call))
+                   (list :reasoning-content final-reasoning :thinking "Display only"
+                         :content "Done."))))
+           live messages)
+      (unwind-protect
+          (progn
+            (with-current-buffer (find-file-noselect file)
+              (insert "#+ENDE_TOOL_STORE_FILE: history.sqlite3\n* Topic\n** Question\nInspect.\n")
+              (ende-mode 1)
+              (ende-test--chat-goto "** Question")
+              (let ((job (ende-ask profile)))
+                (ende-test--wait-for (lambda () (ende-job-terminal-p job)))
+                (should (eq (ende-job-state job) 'completed)))
+              (let ((continuation (cadr ende-test--calls)))
+                (setq profile (plist-get continuation :options)
+                      live (last (ende-llm--request-messages
+                                  (plist-get continuation :messages) profile) 2)))
+              (goto-char (point-max))
+              (insert "** Follow-up\nWhat next?\n")
+              (save-buffer)
+              (kill-buffer))
+            (with-current-buffer (find-file-noselect file)
+              (ende-mode 1)
+              (ende-test--chat-goto "** Follow-up")
+              (setq messages (ende-chat-context-at-point))
+              (dolist (native (list call-reasoning final-reasoning))
+                (should-not (string-search native (buffer-string)))))
+            (let ((tail (last (ende-llm--request-messages messages profile) 4)))
+              (should (equal (cl-subseq tail 0 2) live))
+              (should (equal (mapcar (lambda (row) (alist-get :reasoning_content row)) tail)
+                             (list call-reasoning nil final-reasoning nil))))
+            (should-not (cl-some (lambda (row) (assq :reasoning_content row))
+                                 (ende-llm--request-messages
+                                  messages '(:tool-definitions (lookup))))))
+        (ende-test--reset)))))
+
 (ert-deftest ende-test/chat-rebuilds-mixed-protocol-events-from-org ()
   (let* ((directory (make-temp-file "ende-chat-events-" t))
          (file (expand-file-name "payloads.sqlite3" directory)))
