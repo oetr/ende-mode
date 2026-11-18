@@ -91,7 +91,6 @@
     ((or 'job-done 'job-failed 'job-cancelled 'job-skipped) '(:error-kind :elapsed :tools))
     ((or 'job-queued 'agent-spawned) '(:parent))
     ((or 'debug-on 'bundle-saved) '(:content))
-    ('content-enabled '(:scope))
     ('debug-failed '(:operation))
     ('chat-saved '(:state))
     (_ '(:error-kind :bytes :elapsed :count))))

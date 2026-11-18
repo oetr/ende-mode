@@ -339,7 +339,6 @@
          (ende-diagnostics-session 0)
          (ende-diagnostics-dropped 0)
          (ende-debug--session-directory nil)
-         (ende-debug--next-content nil)
          (ende-debug--save-timer nil)
          (ende-debug-snapshot-limit 1)
          (ende-debug-ui--buffer nil)

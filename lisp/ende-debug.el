@@ -51,7 +51,6 @@ server-managed conversation."
 (defvar ende-debugging-enabled nil
   "Non-nil to capture request content.")
 
-(defvar ende-debug--next-content nil)
 (defvar ende-debug--save-timer nil)
 (defvar ende-debug--saving nil)
 
@@ -205,41 +204,22 @@ Return its path on success.  Failures are classified, never propagated."
         ende-debug--sequence 0
         ende-debug--sequence-context nil
         ende-debug--baselines (make-hash-table :test #'equal)
-        ende-debugging-enabled t
-        ende-debug--next-content nil)
+        ende-debugging-enabled t)
   (ende-diagnostics-start)
   (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil) :content 'enabled)
   (message "▶ DEBUG ON  capturing request content  M-x ende-debug-open or M-x ende-debug-cache-report"))
 
 ;;;###autoload
 (defun ende-debugging-off ()
-  "Save and stop metadata diagnostics and disarm content capture."
+  "Stop capturing new requests and save the diagnostic timeline."
   (interactive)
-  (setq ende-debugging-enabled nil ende-debug--next-content nil)
+  (setq ende-debugging-enabled nil)
   (ende-debug--cancel-save)
   (when ende-diagnostics-enabled
     (ende-diagnostics-record 'debug-off (ende-diagnostics-context-create nil))
     (ende-debug-save-diagnostics)
     (ende-diagnostics-stop))
   (when (called-interactively-p 'interactive) (message "■ DEBUG OFF")))
-
-;;;###autoload
-(defun ende-debug-capture-next-request ()
-  "Explicitly capture content of the next logical request, including retries.
-Content is private but may contain prompts, source text, and reasoning data."
-  (interactive)
-  (unless ende-diagnostics-enabled (user-error "Enable diagnostics first"))
-  (setq ende-debug--next-content t)
-  (ende-diagnostics-record 'content-enabled (ende-diagnostics-context-create nil) :scope 'next-request)
-  (message "! CONTENT ENABLED  scope=next-request"))
-
-(defun ende-debug-consume-content-request ()
-  "Return whether to capture this logical request and consume a pending choice.
-Call once in the main process before preparation, never once per retry."
-  (or ende-debugging-enabled
-      (when (and ende-diagnostics-enabled ende-debug--next-content)
-        (setq ende-debug--next-content nil)
-        t)))
 
 (defun ende-debug--safe-endpoint (endpoint)
   "Return a credential-free endpoint identification for ENDPOINT."

@@ -26,7 +26,7 @@ Applied when starting a session."
 (defconst ende-diagnostics--catalog
   '((debug-on . outcome) (debug-off . outcome)
     (capture-saved . outcome) (capture-dropped . warning)
-    (content-enabled . warning) (bundle-saved . outcome)
+    (bundle-saved . outcome)
     (captures-pruned . outcome) (debug-failed . error)
     (job-queued . detail) (job-started . detail) (job-waiting . detail)
     (job-resumed . detail) (job-done . outcome) (job-failed . error)
@@ -60,7 +60,7 @@ Applied when starting a session."
     (:last-data-age number "last-data")
     (:delay number "delay") (:reused boolean "reused") (:clean boolean "clean")
     (:tool identifier "tool")
-    (:scope (next-request local-queue) "scope")
+    (:scope (local-queue) "scope")
     (:content (enabled excluded) "content") (:operation (write request completion) "operation")
     (:state (complete failed) "state")
     (:transport (http websocket worker) "via")

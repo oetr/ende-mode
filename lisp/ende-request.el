@@ -169,7 +169,7 @@ Only source descriptors and serializable finalization data enter the worker."
          (started (and context (float-time)))
          (origin (and retained (ende-request-retained-debug-origin retained)))
          (debug (if replay (plist-get origin :debug)
-                  (when (and (ende-debug-consume-content-request) ende-debug--session-directory) debug)))
+                  (and ende-debugging-enabled ende-debug--session-directory debug)))
          (preparation (when debug
                         (if replay (ende-debug-prepare-retry origin)
                           (ende-debug-prepare-request
