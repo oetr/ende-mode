@@ -218,11 +218,12 @@
           (ende-debugging-on)
           (let ((directory ende-debug--session-directory))
             (should ende-diagnostics-enabled)
-            (should-not ende-debugging-enabled)
+            (should ende-debugging-enabled)
             (should (file-directory-p directory))
             (should (string-prefix-p user-emacs-directory directory))
             (should (= (logand (file-modes directory) #o777) #o700))
             (ende-debugging-off)
+            (should-not ende-diagnostics-enabled)
             (should-not ende-debugging-enabled)
             (should (= (default-file-modes) original-file-modes))
             (should (file-directory-p directory))))
@@ -346,9 +347,6 @@
     (unwind-protect
         (progn
           (ende-debugging-on)
-          (ende-debug-capture-next-request)
-          (should (ende-debug-consume-content-request))
-          (should-not (ende-debug-consume-content-request))
           (let* ((parent (ende--make-job :id 20))
                  (job (ende--make-job :id 21 :parent parent))
                  (context (ende-diagnostics-context-create 21 t))

@@ -49,7 +49,7 @@ server-managed conversation."
   :group 'ende)
 
 (defvar ende-debugging-enabled nil
-  "Non-nil while a selected request's raw content is being captured.")
+  "Non-nil to capture request content.")
 
 (defvar ende-debug--next-content nil)
 (defvar ende-debug--save-timer nil)
@@ -195,7 +195,7 @@ Return its path on success.  Failures are classified, never propagated."
 
 ;;;###autoload
 (defun ende-debugging-on ()
-  "Start local metadata diagnostics, without capturing request bodies."
+  "Start local diagnostics and save request content in a new private session."
   (interactive)
   (when (file-remote-p (expand-file-name user-emacs-directory))
     (user-error "Diagnostics must stay local"))
@@ -205,11 +205,11 @@ Return its path on success.  Failures are classified, never propagated."
         ende-debug--sequence 0
         ende-debug--sequence-context nil
         ende-debug--baselines (make-hash-table :test #'equal)
-        ende-debugging-enabled nil
+        ende-debugging-enabled t
         ende-debug--next-content nil)
   (ende-diagnostics-start)
-  (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil) :mode 'metadata)
-  (message "▶ DEBUG ON  mode=metadata  M-x ende-debug-open"))
+  (ende-diagnostics-record 'debug-on (ende-diagnostics-context-create nil) :content 'enabled)
+  (message "▶ DEBUG ON  capturing request content  M-x ende-debug-open or M-x ende-debug-cache-report"))
 
 ;;;###autoload
 (defun ende-debugging-off ()
