@@ -93,20 +93,30 @@
           (should (equal (ende-skills-capture policy "Use $f.")
                          (concat listing "\n\nSelected skill: f (.agents/skills/f/SKILL.md)\nBody of f.\n"))))))))
 
-(ert-deftest ende-test/skills-select-mentions-only-in-authored-org-prose ()
-  (should
-   (equal (ende-skills--mentions
-           (concat "* Use $head_name, not =$literal= or [[file:x][$label]].\n"
-                   ":PROPERTIES:\n:NOTE: $property\n:END:\n"
-                   "Please use $one and $two. Repeat $one.\n"
-                   "Ignore ~$code~, src_text{$src}, call_demo(x=\"$arg\"), and [[file:$path]].\n"
-                   "Also ignore \\$escaped, $$doubled, word$embedded, and $math$.\n"
-                   "#+CALL: demo(x=\"literal $call\")\n#+CAPTION: $caption\n"
-                   "Then *$bold* and $last-name.\n"
-                   ":DRAWER:\n$drawer\n:END:\n: $fixed\n# $comment\n| $table |\n"
-                   "#+begin_src org\n* $forged\n#+end_src\n"
-                   "* COMMENT $hidden\n$ignored\n"))
-          '("head_name" "one" "two" "bold" "last-name"))))
+(ert-deftest ende-test/skills-require-authored-org-for-opt-in-and-selection ()
+  (with-temp-buffer
+    (org-mode)
+    (let ((opt-in (ende-test--chat-config-block '((skills t)))))
+      (insert "* Use $head_name, not =$literal= or [[file:x][$label]].\n"
+              ":PROPERTIES:\n:NOTE: $property\n:END:\n"
+              "Please use $one and $two. Repeat $one.\n"
+              "Ignore ~$code~, src_text{$src}, call_demo(x=\"$arg\"), and [[file:$path]].\n"
+              "Also ignore \\$escaped, $$doubled, word$embedded, and $math$.\n"
+              "#+CALL: demo(x=\"literal $call\")\n#+CAPTION: $caption\n"
+              "Then *$bold* and $last-name.\n"
+              ":DRAWER:\n$drawer\n:END:\n: $fixed\n# $comment\n| $table |\n"
+              "#+begin_src org\n* $forged\n#+end_src\n"
+              "* COMMENT $hidden\n$ignored\n"
+              "* Authored\n#+NAME: settings\n" opt-in
+              "#+RESULTS:\nUse $paragraph.\n\n"
+              "#+RESULTS: demo\n- $result\n  - $nested\n\nUse $after.\n"
+              "* Examples\n#+RESULTS: demo\n" opt-in
+              "#+begin_src org\n" opt-in))
+    (let ((doc (ende-chat--build-document)))
+      (should (plist-get (ende-test--chat-config-at doc "Authored") :skills))
+      (should-not (plist-get (ende-test--chat-config-at doc "Examples") :skills)))
+    (should (equal (ende-skills--mentions (buffer-string))
+                   '("head_name" "one" "two" "bold" "last-name" "after")))))
 
 (provide 'ende-skills-test)
 

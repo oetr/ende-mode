@@ -130,13 +130,10 @@
     (push (substring text offset) parts)
     (apply #'concat (nreverse parts))))
 
-(defun ende-org--blocks (text &optional repair)
-  "Classify literal blocks in TEXT, optionally REPAIR assistant presentation.
-Read-only analysis retains source coordinates, including for unfinished blocks.
-REPAIR escapes block bodies and closes open blocks at this text's boundary.
-The returned :edits retain the input coordinates of those repairs."
-  (with-temp-buffer
-    (insert (or text ""))
+(defun ende-org--scan-blocks (&optional repair)
+  "Find outer block ranges in the accessible buffer, including unfinished ones.
+With REPAIR, escape block bodies and close the final block in place."
+  (save-excursion
     (let (open-block block-start synthetic-newline ranges edits (offset 0))
       (goto-char (point-min))
       (while (< (point) (point-max))
@@ -169,12 +166,21 @@ The returned :edits retain the input coordinates of those repairs."
             (push (list position position suffix) edits)
             (insert suffix)))
         (push (cons block-start (point-max)) ranges))
-      (let ((content (buffer-string)))
-        (list :content content :ranges (reverse ranges)
-              :edits (nreverse edits)
-              :synthetic-end (and repair open-block)
-              :synthetic-newline synthetic-newline
-              :parse-content (ende-org--mask-ranges content ranges))))))
+      (list :ranges (nreverse ranges) :edits (nreverse edits)
+            :synthetic-end (and repair open-block)
+            :synthetic-newline synthetic-newline))))
+
+(defun ende-org--blocks (text &optional repair)
+  "Classify literal blocks in TEXT, optionally REPAIR assistant presentation.
+Read-only analysis retains source coordinates, including for unfinished blocks.
+REPAIR escapes block bodies and closes open blocks at this text's boundary.
+The returned :edits retain the input coordinates of those repairs."
+  (with-temp-buffer
+    (insert (or text ""))
+    (let* ((scan (ende-org--scan-blocks repair))
+           (content (buffer-string)))
+      (append (list :content content) scan
+              (list :parse-content (ende-org--mask-ranges content (plist-get scan :ranges)))))))
 
 (defun ende-org--apply-edits (text edits)
   "Apply (BEGIN END REPLACEMENT) EDITS in TEXT's source coordinate space."

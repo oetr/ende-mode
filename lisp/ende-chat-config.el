@@ -32,6 +32,7 @@
 (require 'cl-lib)
 (require 'org-element)
 (require 'subr-x)
+(require 'ende-org)
 (require 'ende-project)
 (require 'ende-url)
 (require 'ende-tools)
@@ -194,19 +195,28 @@ PARENT identifies the importing form, if any."
   value)
 
 (defun ende-chat-config--local-blocks (tree)
-  "Map Org nodes in TREE to their direct `ende' configuration blocks."
-  (let ((blocks (make-hash-table :test #'eq)))
+  "Map Org nodes in TREE to their direct, authored `ende' config blocks."
+  (let ((blocks (make-hash-table :test #'eq))
+        (candidates (make-hash-table :test #'eql))
+        end)
     (org-element-map tree 'special-block
-		     (lambda (block)
-		       (let* ((section (org-element-property :parent block))
-			      (node (and (eq (org-element-type section) 'section)
-					 (org-element-property :parent section))))
-			 (when (and node
-				    (memq (org-element-type node) '(org-data headline))
-				    (string= (downcase (or (org-element-property :type block) ""))
-					     "ende"))
-			   (puthash node (cons block (gethash node blocks)) blocks))))
-		     nil nil nil)
+      (lambda (block)
+        (let* ((section (org-element-parent block))
+               (node (and (eq (org-element-type section) 'section)
+                          (org-element-parent section))))
+          (when (and node (memq (org-element-type node) '(org-data headline))
+                     (string= (downcase (org-element-property :type block)) "ende")
+                     (not (org-element-property :results block)))
+            (puthash (org-element-post-affiliated block) (cons node block) candidates)
+            (setq end (org-element-end block))))))
+    ;; Org can expose complete special blocks inside an unfinished literal.
+    ;; Only the actual opening lines of outer blocks are eligible.
+    (when end
+      (org-with-wide-buffer
+       (narrow-to-region (point-min) end)
+       (dolist (range (plist-get (ende-org--scan-blocks) :ranges))
+         (when-let* ((entry (gethash (car range) candidates)))
+           (push (cdr entry) (gethash (car entry) blocks))))))
     blocks))
 
 (defun ende-chat-config--block-source (block)

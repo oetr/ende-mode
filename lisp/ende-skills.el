@@ -248,14 +248,15 @@ Return nil if access, path, limits, or current metadata no longer match."
                    (setq begin (org-element-end object)))
                  nil nil markup)
                (scan begin end)))
-          (org-element-map (org-element-parse-buffer) '(paragraph headline)
+          (org-element-map (org-element-parse-buffer) org-element-all-elements
             (lambda (node)
               (cond
+               ((or (org-element-property :results node) (org-element-property :commentedp node))
+                (throw :org-element-skip nil))
                ((eq (org-element-type node) 'paragraph)
                 (prose (org-element-contents-begin node) (org-element-contents-end node)
                        (org-element-contents node)))
-               ((org-element-property :commentedp node) (throw :org-element-skip nil))
-               (t
+               ((eq (org-element-type node) 'headline)
                 (goto-char (org-element-begin node))
                 (when (and (looking-at org-complex-heading-regexp) (match-beginning 4))
                   (prose (match-beginning 4) (match-end 4) (org-element-property :title node))))))
