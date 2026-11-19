@@ -29,7 +29,9 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'org-element)
 (require 'subr-x)
+(require 'ende-org)
 (require 'ende-project)
 (require 'ende-tools)
 
@@ -193,6 +195,53 @@ Return nil if access, path, limits, or current metadata no longer match."
     (pcase (split-string path "/")
       (`(".agents" "skills" ,directory "SKILL.md")
        (ende-skills--load contexts directory entry)))))
+
+(defun ende-skills--mentions (text)
+  "Return distinct skill names mentioned in authored Org prose in TEXT."
+  (when (string-search "$" text)
+    (with-temp-buffer
+      (delay-mode-hooks (org-mode))
+      (insert (plist-get (ende-org--blocks text) :parse-content))
+      (goto-char (point-min))
+      (let ((case-fold-search nil) names)
+        (while (re-search-forward "\\$\\([A-Za-z0-9][A-Za-z0-9_-]*\\)" nil t)
+          (let ((name (match-string-no-properties 1))
+                (start (match-beginning 0)))
+            (when (save-excursion
+                    (goto-char start)
+                    (and (not (memq (char-before) '(?\\ ?$)))
+                         (not (memq (char-syntax (or (char-before) ?\s)) '(?w ?_)))
+                         (not (org-element-lineage
+                               (org-element-context)
+                               '(code verbatim link inline-src-block fixed-width drawer
+                                 property-drawer keyword comment) t))))
+              (push name names))))
+        (delete-dups (nreverse names))))))
+
+(defun ende-skills-capture (policy text)
+  "Return this turn's catalog and explicitly selected instructions for TEXT.
+TEXT is current user-authored Org, before resolving attachments."
+  (when-let* ((catalog (ende-skills-catalog policy)))
+    (let ((mentions (ende-skills--mentions text)) selected (bytes 0))
+      (dolist (entry catalog)
+        (when (member (plist-get entry :name) mentions)
+          (let ((body (or (ende-skills-read entry policy)
+                          (user-error "Selected skill is no longer readable: %s"
+                                      (plist-get entry :name)))))
+            (cl-incf bytes (string-bytes body))
+            (when (> bytes ende-skills--file-bytes)
+              (user-error "Selected skill instructions exceed %d bytes" ende-skills--file-bytes))
+            (push (format "\n\nSelected skill: %s (%s)\n%s"
+                          (plist-get entry :name) (plist-get entry :path) body) selected))))
+      (concat "[Ende project skills for this request only]\n"
+              "Use a skill when the request matches its description. Read its SKILL.md "
+              "with read_file, continuing to the end, unless its instructions are included below. "
+              "Skills do not grant permissions.\n"
+              (mapconcat (lambda (entry)
+                           (format "- %s: %s (%s)" (plist-get entry :name)
+                                   (plist-get entry :description) (plist-get entry :path)))
+                         catalog "\n")
+              (apply #'concat (nreverse selected))))))
 
 (provide 'ende-skills)
 
